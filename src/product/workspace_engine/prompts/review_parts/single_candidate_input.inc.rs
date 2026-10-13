@@ -69,6 +69,46 @@ impl WorkspaceEngine {
                     .to_string(),
             );
         }
+
+        // SG3a.1（plan §0.6.2）：同代结构报告 join——Some payload 对 live
+        // Design/member/options/baseline 事实复算同 context digest/rule，
+        // missing/漂移即旧 context 拒发（不用另一个报告补「合法」；
+        // store 已在 get 时核过 source/IR/compiler/report_digest 绑定）。
+        // None 是旧记录参考形态（可展示/参考，不冒新合法授权），
+        // 不注入三可信 section，保持既有输入面零变化。
+        if let Some(structure) = report_record.structure_report.as_ref() {
+            let source_ref_binding = self
+                .session
+                .work_item_plan_source_revision_ref
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    "single-candidate review structure context missing: durable work_item_plan_source_revision_ref is required to verify the same-generation structure report"
+                        .to_string()
+                })?;
+            let live_context = self
+                .build_single_candidate_structure_context(&ir_record.ir, source_ref_binding, ir_ref)
+                .map_err(|error| {
+                    format!("single-candidate review structure context unavailable: {error}")
+                })?;
+            if structure.context_digest.trim().is_empty() {
+                return Err(format!(
+                    "single-candidate review structure context missing: payload (report_ref {report_ref}) carries no context_digest; a launch without same-generation structure evidence is refused"
+                ));
+            }
+            if structure.rule_version != live_context.rule_version {
+                return Err(format!(
+                    "single-candidate review structure rule stale: payload {} != current {}; refs must be re-frozen by a new legal candidate round",
+                    structure.rule_version, live_context.rule_version
+                ));
+            }
+            if structure.context_digest != live_context.context_digest {
+                return Err(format!(
+                    "single-candidate review structure context stale: payload context_digest {} != current context_digest {}; another report cannot re-authorize these refs",
+                    structure.context_digest, live_context.context_digest
+                ));
+            }
+        }
         let contract_candidates = ir_record
             .ir
             .items
@@ -151,6 +191,52 @@ impl WorkspaceEngine {
                 "mechanical_report_ref": report_ref,
             }),
         )?;
+
+        // SG3a.1 三可信 section（plan §0.6.2）：只序列化同一 record 的 Some
+        // 结构 payload——实际来源边/仓序/target、身份绑定与修复审计。
+        // 不新增 LLM 拓扑计算权威（reviewer 不重算图）；None 旧记录跳过。
+        if let Some(structure) = &report_record.structure_report {
+            let source_ref_identity = self
+                .session
+                .work_item_plan_source_revision_ref
+                .clone()
+                .unwrap_or_default();
+            append_review_context_section(
+                &mut prompt,
+                "Deterministic Structure Report",
+                &json!({
+                    "effective_edges": structure.effective_edges,
+                    "cycle_witness": structure.cycle_witness,
+                    "findings": structure.findings,
+                    "structurally_valid": structure.structurally_valid,
+                    "protected_predicates": structure.protected_predicates,
+                }),
+            )?;
+            append_review_context_section(
+                &mut prompt,
+                "Structure Context Identity",
+                &json!({
+                    "source_revision_ref": source_ref_identity,
+                    "plan_candidate_ir_ref": ir_ref,
+                    "mechanical_report_ref": report_ref,
+                    "source_hash": structure.source_hash,
+                    "context_digest": structure.context_digest,
+                    "rule_version": structure.rule_version,
+                    "report_digest": structure.report_digest,
+                }),
+            )?;
+            append_review_context_section(
+                &mut prompt,
+                "Structural Repair Audit",
+                &json!({
+                    "instruction_refs": structure.instruction_refs,
+                    "repair_audit_refs": structure.repair_audit_refs,
+                }),
+            )?;
+            prompt.push_str(
+                "结构修复审计说明：初轮合法候选无修复指令与审计引用（初轮无修复明确空，不伪模型许可）。\n",
+            );
+        }
         prompt.push_str(
             "\n审核边界：只审核 Plan Review Context 中的权威 canonical contract、依赖拓扑、跨 WorkItem 契约供需与机械校验摘要；不得把 session markdown 或 lifecycle legacy DTO 当作候选事实来源。\n\
              能力覆盖机械规则：当任一 coverage entry 的 `missing_capabilities` 非空时，必须返回 `severity=must_fix`、`category=contract_gap` 的 finding，并按现有 scope 约定提供 `class_hint=repairable`；`evidence` 必须明确指出具体 `from -> to` edge、`contract_id` 与缺失 capability，不得以 `pass` 或 advisory 掩盖该缺口。\n",

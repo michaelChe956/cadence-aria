@@ -455,3 +455,360 @@ fn single_candidate_review_prompt_injects_previous_round_finding_identities() {
         "prompt must teach explicit repeated marking for recurring fingerprints"
     );
 }
+
+// ===================== SG3a.1：实际 SC reviewer 输入的同代结构报告 =====================
+
+mod sg3a1_structure_input {
+    use super::*;
+    use crate::product::planning_failure::{
+        PersistedEffectivePlanningEdge, PersistedPlanningStructureReport,
+        PersistedPlanningStructureSpan, PlanningEdgeSource, PlanningFailureSet,
+    };
+    use crate::product::work_item_plan_source_store::persisted_structure_report_digest;
+
+    /// 构造「current refs → Some 结构报告」的 SingleCandidate 会话：source/IR
+    /// 走真实 store 落盘，payload 的 context_digest/rule/compiler 身份取自
+    /// `build_single_candidate_structure_context` 对 live 事实的单源重算，
+    /// effective_edges 携一条两来源边（canonical_input + change_order）。
+    /// `mutate_payload` 供旧 context/缺证变体改写身份后再封口。
+    fn sg3a1_sealed_session(
+        tag: &str,
+        mutate_payload: impl FnOnce(&mut PersistedPlanningStructureReport),
+    ) -> (
+        tempfile::TempDir,
+        crate::product::lifecycle_store::LifecycleStore,
+        crate::product::workspace_engine::WorkspaceEngine,
+        String,
+    ) {
+        let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+            super::super::super::make_work_item_plan_engine_with_draft_candidate(&format!(
+                "sg3a1_{tag}"
+            ));
+        let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+        let source = format!("# sg3a1 single candidate structure source {tag}\n");
+        let mut source_revision = SourceRevisionRecord {
+            id: format!("source-sg3a1-{tag}"),
+            source: source.clone(),
+            source_revision_hash: source_hash(&source),
+            content_hash: String::new(),
+        };
+        source_revision.content_hash = source_revision.content_hash().expect("source content hash");
+        let source_ref = source_store
+            .put_source_revision("project_0001", "issue_0001", &plan_id, &source_revision)
+            .expect("persist source revision");
+
+        let contract_a = crate::product::work_item_contract::canonical_contract_fixture("wi-a");
+        let mut contract_b = crate::product::work_item_contract::canonical_contract_fixture("wi-b");
+        contract_b.depends_on = vec!["wi-a".to_string()];
+        let ir = PlanCandidateIr {
+            source_revision_hash: source_revision.source_revision_hash.clone(),
+            compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+            items: vec![
+                PlanCandidateItemIr {
+                    target_repository_id: "repository_0001".to_string(),
+                    contract: contract_a,
+                    verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                        checks: Vec::new(),
+                    },
+                    trusted_commands: Vec::new(),
+                },
+                PlanCandidateItemIr {
+                    target_repository_id: "repository_0001".to_string(),
+                    contract: contract_b,
+                    verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                        checks: Vec::new(),
+                    },
+                    trusted_commands: Vec::new(),
+                },
+            ],
+        };
+        let mut ir_record = PlanCandidateIrRecord {
+            id: format!("ir-sg3a1-{tag}"),
+            source_revision_id: source_revision.id.clone(),
+            ir,
+            content_hash: String::new(),
+        };
+        ir_record.content_hash = ir_record.content_hash().expect("IR content hash");
+        let ir_ref = source_store
+            .put_plan_candidate_ir("project_0001", "issue_0001", &plan_id, &ir_record)
+            .expect("persist compiled IR");
+
+        let context = engine
+            .build_single_candidate_structure_context(&ir_record.ir, &source_ref, &ir_ref)
+            .expect("live structure context");
+        let mut payload = PersistedPlanningStructureReport {
+            source_revision_id: source_revision.id.clone(),
+            source_hash: source_revision.source_revision_hash.clone(),
+            ir_id: ir_record.id.clone(),
+            compiler_version: ir_record.ir.compiler_version.clone(),
+            rule_version: context.rule_version.clone(),
+            context_digest: context.context_digest.clone(),
+            effective_edges: vec![PersistedEffectivePlanningEdge {
+                from: "wi-a".to_string(),
+                to: "wi-b".to_string(),
+                sources: vec![
+                    PlanningEdgeSource::CanonicalInput,
+                    PlanningEdgeSource::ChangeOrder,
+                ],
+                contract_refs: vec!["contract.levels-api".to_string()],
+                spans: vec![PersistedPlanningStructureSpan {
+                    field: "input_contracts[0]".to_string(),
+                    line: 96,
+                }],
+                order_indices: vec![0, 1],
+            }],
+            cycle_witness: Vec::new(),
+            findings: PlanningFailureSet::default(),
+            structurally_valid: true,
+            protected_predicates: vec![
+                "effective_graph_acyclic".to_string(),
+                "canonical_inputs_preserved".to_string(),
+                "acceptance_criteria_preserved".to_string(),
+                "change_order_unchanged".to_string(),
+            ],
+            instruction_refs: Vec::new(),
+            repair_audit_refs: Vec::new(),
+            report_digest: String::new(),
+        };
+        mutate_payload(&mut payload);
+        payload.report_digest =
+            persisted_structure_report_digest(&payload).expect("seal structure report digest");
+
+        let mut report = PlanCandidateMechanicalReportRecord {
+            id: format!("report-sg3a1-{tag}"),
+            source_revision_id: source_revision.id.clone(),
+            ir_id: ir_record.id.clone(),
+            report: PlanCandidateMechanicalReport {
+                source_revision_hash: ir_record.ir.source_revision_hash.clone(),
+                compiler_version: ir_record.ir.compiler_version.clone(),
+                findings: Vec::new(),
+            },
+            structure_report: Some(payload),
+            content_hash: String::new(),
+        };
+        report.content_hash = report.content_hash().expect("report content hash");
+        let report_ref = source_store
+            .put_mechanical_report("project_0001", "issue_0001", &plan_id, &report)
+            .expect("persist mechanical report with structure payload");
+
+        let mut record = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load session");
+        record.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+        record.work_item_plan_source_revision_ref = Some(source_ref);
+        record.plan_candidate_ir_ref = Some(ir_ref);
+        record.mechanical_report_ref = Some(report_ref.clone());
+        write_json(
+            &lifecycle
+                .app_paths()
+                .issue_root(&record.project_id, &record.issue_id)
+                .join("workspace-sessions")
+                .join(format!("{}.json", record.id)),
+            &record,
+        )
+        .expect("persist session refs");
+        engine.session =
+            crate::product::workspace_engine::types::WorkspaceSession::from_record(record);
+        engine.session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+            markdown: "compiled markdown is not authoritative".to_string(),
+            diff: None,
+        });
+        (_tmp, lifecycle, engine, report_ref)
+    }
+
+    /// SG3a.1（plan Step1：`sg_03a_1_reviewer_consumes_same_generation_structure_report`）：
+    /// 实际 builder 读取同一 mechanical report record 的 Some 结构报告，注入
+    /// 三可信 section——两来源边、context/report identity、初轮空修复审计；
+    /// IR/canonical/原 review 合同仍在，builder 前后 review 状态零变化。
+    #[test]
+    fn sg_03a_1_reviewer_consumes_same_generation_structure_report() {
+        let (_tmp, _lifecycle, mut engine, report_ref) =
+            sg3a1_sealed_session("same_generation", |_| {});
+        let rounds_before = engine.session.review_rounds;
+        let history_before = engine.session.run_history.clone();
+        let scope_before = engine.session.review_invocation_scope.clone();
+
+        let input = engine
+            .build_work_item_plan_review_input()
+            .expect("same-generation structure report must be consumed");
+
+        // Deterministic Structure Report：两来源边 + 来源/契约/仓序索引。
+        assert!(
+            input.prompt.contains("### Deterministic Structure Report"),
+            "missing structure section: {}",
+            &input.prompt[input.prompt.len().saturating_sub(400)..]
+        );
+        assert!(input.prompt.contains("\"from\": \"wi-a\""));
+        assert!(input.prompt.contains("\"to\": \"wi-b\""));
+        assert!(
+            input.prompt.contains("canonical_input"),
+            "canonical input source must be visible"
+        );
+        assert!(
+            input.prompt.contains("change_order"),
+            "change order source must be visible on the same edge"
+        );
+        assert!(input.prompt.contains("contract.levels-api"));
+        assert!(input.prompt.contains("\"order_indices\""));
+        assert!(input.prompt.contains("input_contracts[0]"));
+        assert!(input.prompt.contains("effective_graph_acyclic"));
+
+        // Structure Context Identity：refs/hash/digest/rule 全部可见。
+        assert!(input.prompt.contains("### Structure Context Identity"));
+        let source_ref = engine
+            .session
+            .work_item_plan_source_revision_ref
+            .clone()
+            .expect("source ref");
+        let ir_ref = engine
+            .session
+            .plan_candidate_ir_ref
+            .clone()
+            .expect("ir ref");
+        assert!(input.prompt.contains(&source_ref));
+        assert!(input.prompt.contains(&ir_ref));
+        assert!(input.prompt.contains(&report_ref));
+        let record_payload_digest = {
+            let source_store = WorkItemPlanSourceStore::new(_lifecycle.app_paths());
+            let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+                project_id: engine.session.project_id.clone(),
+                issue_id: engine.session.issue_id.clone(),
+                plan_id: engine.session.entity_id.clone(),
+            };
+            source_store
+                .get_mechanical_report(&scope, &report_ref)
+                .expect("reload record")
+                .structure_report
+                .expect("payload")
+                .report_digest
+        };
+        assert!(
+            input.prompt.contains(&record_payload_digest),
+            "report_digest identity must be visible"
+        );
+        assert!(
+            input.prompt.contains(
+                crate::product::workspace_engine::plan_projection::PLANNING_STRUCTURE_RULE_VERSION
+            ),
+            "rule version identity must be visible"
+        );
+        // source_hash 身份可见（payload 冻结的候选 source 摘要）。
+        assert!(input.prompt.contains("source_hash"));
+        assert!(input.prompt.contains("context_digest"));
+        assert!(input.prompt.contains("report_digest"));
+
+        // Structural Repair Audit：初轮无修复明确空，不伪模型许可。
+        assert!(input.prompt.contains("### Structural Repair Audit"));
+        assert!(input.prompt.contains("instruction_refs"));
+        assert!(input.prompt.contains("初轮无修复"));
+
+        // IR/canonical/原 review 合同仍在。
+        assert!(input.prompt.contains("wi-a"));
+        assert!(
+            input
+                .prompt
+                .contains("Provide the canonical work item contract")
+        );
+        assert!(input.prompt.contains("### Dependency Contract Graph"));
+        assert!(input.prompt.contains("### Projection Validation Report"));
+        assert!(input.structured_output_contract.is_some());
+        assert_eq!(
+            input.role,
+            crate::protocol::contracts::AdapterRole::Reviewer
+        );
+        assert!(input.tool_policy.is_some());
+        assert!(
+            !input
+                .prompt
+                .contains("compiled markdown is not authoritative")
+        );
+
+        // 96KiB 完整输入预算：真实 prompt 未超；超限输入仍被拒。
+        assert!(input.prompt.len() <= 96 * 1024);
+        assert!(
+            crate::product::workspace_engine::prompts::ensure_single_candidate_review_prompt_budget(
+                &"x".repeat(96 * 1024 + 1)
+            )
+            .is_err()
+        );
+        assert!(
+            crate::product::workspace_engine::prompts::ensure_single_candidate_review_prompt_budget(
+                &input.prompt
+            )
+            .is_ok()
+        );
+
+        // builder 前后 review 状态零变化。
+        assert_eq!(engine.session.review_rounds, rounds_before);
+        assert_eq!(engine.session.run_history, history_before);
+        assert_eq!(engine.session.review_invocation_scope, scope_before);
+    }
+
+    /// SG3a.1（plan Step1：`sg_03a_1_review_rejects_stale_missing_structure_context`）：
+    /// 旧 context（live 事实漂移）/rule 漂移/缺 context digest 一律拒发；
+    /// 另一个合法报告不能补「合法」——session 指向的记录才是唯一 join 面。
+    #[test]
+    fn sg_03a_1_review_rejects_stale_missing_structure_context() {
+        // —— 缺证：payload 无 context digest（missing）——
+        let (_tmp1, _lc1, mut engine1, _ref1) = sg3a1_sealed_session("missing_digest", |payload| {
+            payload.context_digest = String::new();
+        });
+        let error = engine1
+            .build_work_item_plan_review_input()
+            .expect_err("missing structure context digest must refuse to issue");
+        assert!(
+            error.contains("structure context"),
+            "typed stop must name the structure context: {error}"
+        );
+
+        // —— rule 漂移：payload 冻结在旧规则版本 ——
+        let (_tmp2, _lc2, mut engine2, _ref2) = sg3a1_sealed_session("stale_rule", |payload| {
+            payload.rule_version = "rule/planning-structure@0".to_string();
+        });
+        let error = engine2
+            .build_work_item_plan_review_input()
+            .expect_err("stale structure rule version must refuse to issue");
+        assert!(
+            error.contains("rule"),
+            "typed stop must name the rule drift: {error}"
+        );
+
+        // —— 旧 context：freeze 后 live plan options 漂移 ——
+        let (_tmp3, lifecycle3, mut engine3, stale_ref) =
+            sg3a1_sealed_session("stale_context", |_| {});
+        let rounds_before_drift = engine3.session.review_rounds;
+        let scope_before_drift = engine3.session.review_invocation_scope.clone();
+        // 另造一个「当前 context」的合法报告 B——session 指向 A 时不得被
+        // 用来补「合法」（不用另一个报告补合法）。
+        let (_tmp_b, _lc_b, _engine_b, fresh_ref) = sg3a1_sealed_session("fresh_report", |_| {});
+        let _ = fresh_ref;
+        {
+            let mut plan = lifecycle3
+                .get_issue_work_item_plan("project_0001", "issue_0001", "issue_work_item_plan_0001")
+                .expect("plan record");
+            plan.options.include_integration_tests = true;
+            write_json(
+                &lifecycle3
+                    .issue_work_item_plans_root("project_0001", "issue_0001")
+                    .join("issue_work_item_plan_0001.json"),
+                &plan,
+            )
+            .expect("persist drifted plan options");
+        }
+        let error = engine3
+            .build_work_item_plan_review_input()
+            .expect_err("stale live structure context must refuse to issue");
+        assert!(
+            error.contains("stale"),
+            "typed stop must name the stale context: {error}"
+        );
+        assert!(
+            error.contains("context_digest"),
+            "typed stop must carry the digest mismatch evidence: {error}"
+        );
+        assert_ne!(stale_ref, "");
+        // 拒发不产生任何 review 状态变化。
+        assert_eq!(engine3.session.review_rounds, rounds_before_drift);
+        assert_eq!(engine3.session.review_invocation_scope, scope_before_drift);
+    }
+}

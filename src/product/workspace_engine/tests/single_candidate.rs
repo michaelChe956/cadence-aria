@@ -1143,6 +1143,393 @@ async fn sc_legacy_revise_gate_ignores_new_findings_and_advisory_only_repetition
     );
 }
 
+mod sg3a1_structure_gate {
+    use super::contract_prerevision::{author_round_record, clean_candidate};
+    use super::*;
+    use crate::product::work_item_plan_compiler::{
+        PlanCandidateIr, PlanCandidateItemIr, WORK_ITEM_PLAN_COMPILER_VERSION,
+        WorkItemPlanSourceContext, compile_work_item_plan,
+    };
+    use crate::product::workspace_engine::plan_projection::{
+        PLANNING_STRUCTURE_RULE_VERSION, assess_single_candidate_structure,
+        planning_structure_items_from_ir,
+    };
+    use crate::web::workspace_ws_types::TimelineNodeType;
+
+    /// R1 环候选：干净基线 + WI-001 反向消费 WI-002（canonical 输入环——
+    /// SG1 有效图两个方向的真实边互相等待）。
+    fn cycle_candidate() -> String {
+        clean_candidate().replace(
+            "### Inputs\n\n### Outputs\n- contract_id: contract.levels-api",
+            "### Inputs\n- contract_id: contract.level-selector\n- provider_logical_work_item_id: WI-002\n- required_capabilities: ui.level-selector.rendered\n- compatibility_policy: require_all\n\n### Outputs\n- contract_id: contract.levels-api",
+        )
+    }
+
+    /// scope 坏候选：WI-002 的 canonical 输入引用不在本批的 provider。
+    fn unknown_provider_candidate() -> String {
+        clean_candidate().replace(
+            "- provider_logical_work_item_id: WI-001\n- required_capabilities: api.levels.read",
+            "- provider_logical_work_item_id: WI-009\n- required_capabilities: api.levels.read",
+        )
+    }
+
+    /// parser 坏候选：非法二级 heading（F1.2 第414行同族——非固定 heading，
+    /// 补齐器不规范化，compiler fail-closed）。
+    fn illegal_heading_candidate() -> String {
+        clean_candidate().replace(
+            "## Work Item WI-001: Backend levels API",
+            "## Work Item WI-001: Backend levels API\n### 验收说明",
+        )
+    }
+
+    fn assert_zero_promotion_and_zero_review(
+        lifecycle: &LifecycleStore,
+        engine: &WorkspaceEngine,
+        before: &crate::product::models::WorkspaceSessionRecord,
+        before_reviewer_nodes: usize,
+        before_confirm_nodes: usize,
+    ) {
+        let after = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load session after rejected candidate");
+        assert!(
+            after.work_item_plan_source_revision_ref.is_none()
+                && after.plan_candidate_ir_ref.is_none()
+                && after.mechanical_report_ref.is_none(),
+            "current refs must not be promoted for a gate-rejected candidate"
+        );
+        assert_eq!(
+            after.review_rounds, before.review_rounds,
+            "review rounds must not grow for a gate-rejected candidate"
+        );
+        assert_eq!(
+            after.provider_start_ledger.len(),
+            before.provider_start_ledger.len(),
+            "gate-rejected candidate must not start any provider run"
+        );
+        assert!(
+            after.review_invocation_scope.is_none(),
+            "gate-rejected candidate must not materialize a review invocation scope"
+        );
+        assert_eq!(
+            after.single_candidate_phase,
+            Some(crate::product::models::SingleCandidatePhase::Generate),
+            "phase must stay in Generate; no confirm surface is opened"
+        );
+        assert_ne!(
+            after.status,
+            crate::product::models::WorkspaceSessionStatus::WaitingForHuman,
+            "gate rejection is not a human gate"
+        );
+        let reviewer_nodes = engine
+            .timeline_nodes
+            .iter()
+            .filter(|node| matches!(node.node_type, TimelineNodeType::ReviewerRun))
+            .count();
+        assert_eq!(
+            reviewer_nodes, before_reviewer_nodes,
+            "no new reviewer node may appear for a gate-rejected candidate"
+        );
+        let confirm_nodes = engine
+            .timeline_nodes
+            .iter()
+            .filter(|node| matches!(node.node_type, TimelineNodeType::HumanConfirm))
+            .count();
+        assert_eq!(
+            confirm_nodes, before_confirm_nodes,
+            "no new human confirm node may appear for a gate-rejected candidate"
+        );
+    }
+
+    fn reviewer_and_confirm_node_counts(engine: &WorkspaceEngine) -> (usize, usize) {
+        (
+            engine
+                .timeline_nodes
+                .iter()
+                .filter(|node| matches!(node.node_type, TimelineNodeType::ReviewerRun))
+                .count(),
+            engine
+                .timeline_nodes
+                .iter()
+                .filter(|node| matches!(node.node_type, TimelineNodeType::HumanConfirm))
+                .count(),
+        )
+    }
+
+    /// SG3a.1（plan Step1：`sg_03a_1_bad_candidate_zero_review`）：R1/parser/
+    /// scope 坏 output 保留 typed evidence，但 current refs/version 不提升、
+    /// review start 0、无 confirm；target 未授权由同一纯评估门单测覆盖；
+    /// 合法候选随 current refs 绑定 Some 结构报告。
+    #[tokio::test]
+    async fn sg_03a_1_bad_candidate_zero_review() {
+        // —— R1：canonical 输入环 → 系统门拒收，零提升/零评审/零确认 ——
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        author_round_record(&lifecycle, &mut engine);
+        let before = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("session before cycle candidate");
+        let error = engine
+            .complete_single_candidate_work_item_plan_author(
+                cycle_candidate(),
+                "repo_fixture".to_string(),
+                None,
+            )
+            .await
+            .expect_err("R1 cycle candidate must be gate-rejected");
+        assert!(
+            error.contains("structure gate rejected"),
+            "typed gate stop point required: {error}"
+        );
+        assert!(
+            error.contains("dependency_cycle[WI-001->WI-002]"),
+            "witness-path evidence must ride the typed stop: {error}"
+        );
+        let (reviewer_before, confirm_before) = reviewer_and_confirm_node_counts(&engine);
+        assert_zero_promotion_and_zero_review(
+            &lifecycle,
+            &engine,
+            &before,
+            reviewer_before,
+            confirm_before,
+        );
+
+        // —— parser：非法 heading 在 compiler 期 fail-closed（同一零提升面）——
+        let (_tmp2, lifecycle2, _plan_id2, mut engine2) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        author_round_record(&lifecycle2, &mut engine2);
+        let before2 = lifecycle2
+            .get_workspace_session(&engine2.session().session_id)
+            .expect("session before parser candidate");
+        let error2 = engine2
+            .complete_single_candidate_work_item_plan_author(
+                illegal_heading_candidate(),
+                "repo_fixture".to_string(),
+                None,
+            )
+            .await
+            .expect_err("illegal heading candidate must fail closed at compile");
+        assert!(
+            error2.contains("compile markdown source failed"),
+            "parser evidence surfaces the compiler diagnostics: {error2}"
+        );
+        let (reviewer2_before, confirm2_before) = reviewer_and_confirm_node_counts(&engine2);
+        assert_zero_promotion_and_zero_review(
+            &lifecycle2,
+            &engine2,
+            &before2,
+            reviewer2_before,
+            confirm2_before,
+        );
+
+        // —— scope：canonical 输入引用批外 provider → 系统门拒收 ——
+        let (_tmp3, lifecycle3, _plan_id3, mut engine3) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        author_round_record(&lifecycle3, &mut engine3);
+        let before3 = lifecycle3
+            .get_workspace_session(&engine3.session().session_id)
+            .expect("session before scope candidate");
+        let error3 = engine3
+            .complete_single_candidate_work_item_plan_author(
+                unknown_provider_candidate(),
+                "repo_fixture".to_string(),
+                None,
+            )
+            .await
+            .expect_err("unknown-provider candidate must be gate-rejected");
+        assert!(
+            error3.contains("unknown_provider_logical_work_item[WI-009->WI-002]"),
+            "scope evidence must carry provider/consumer ids: {error3}"
+        );
+        let (reviewer3_before, confirm3_before) = reviewer_and_confirm_node_counts(&engine3);
+        assert_zero_promotion_and_zero_review(
+            &lifecycle3,
+            &engine3,
+            &before3,
+            reviewer3_before,
+            confirm3_before,
+        );
+
+        // —— target：未授权 logical target → 同一纯评估门 typed 拒收 ——
+        // （legacy 单仓不裁归属——与 lowering 同口径；本例用非空成员表
+        // 且缺该成员授权的最小上下文驱动同一门。）
+        let gateway = crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4());
+        let frontend = crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::new_v4());
+        let mut contract = crate::product::work_item_contract::canonical_contract_fixture("wi-a");
+        contract.intent_contract =
+            Some(crate::product::work_item_contract::WorkItemIntentContract {
+                intent: crate::product::work_item_contract::WorkItemIntent::Create,
+                provider_work_item_id: "wi-a".to_string(),
+                depends_on: Vec::new(),
+                exclusive_scopes: Vec::new(),
+                forbidden_scopes: Vec::new(),
+                target: crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                    logical_codebase_id: "lc-fixture".to_string(),
+                    logical_repository_id: frontend,
+                },
+            });
+        let ir = PlanCandidateIr {
+            source_revision_hash: "target-mismatch-source-hash".to_string(),
+            compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+            items: vec![PlanCandidateItemIr {
+                target_repository_id: "repository_gateway".to_string(),
+                contract,
+                verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                    checks: Vec::new(),
+                },
+                trusted_commands: Vec::new(),
+            }],
+        };
+        let context = crate::product::workspace_engine::draft_batch::compile_support::PlanningStructureContext {
+            source_revision_ref: "plan-source/sg3a1-target".to_string(),
+            plan_candidate_ir_ref: "plan-ir/sg3a1-target".to_string(),
+            source_hash: "target-mismatch-source-hash".to_string(),
+            compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+            rule_version: PLANNING_STRUCTURE_RULE_VERSION.to_string(),
+            context_digest: "sg3a1-target-context-digest".to_string(),
+            confirmed_design_id: None,
+            confirmed_design_digest: None,
+            member_table_digest: None,
+            selection_digest: None,
+            physical_by_logical: std::collections::BTreeMap::from([(
+                gateway,
+                "repository_gateway".to_string(),
+            )]),
+            change_order: vec![gateway],
+            options_digest: "sg3a1-options-digest".to_string(),
+            baseline_tree_digest: None,
+            intent_digest: None,
+        };
+        let assessment = assess_single_candidate_structure(String::new(), &ir, &context);
+        let stop =
+            crate::product::workspace_engine::plan_projection::structural_assessment_stop_reason(
+                &assessment,
+            )
+            .expect_err("unauthorized logical target must be rejected");
+        assert!(
+            stop.contains("structure gate rejected") && stop.contains("target_mismatch[wi-a]"),
+            "typed target evidence: {stop}"
+        );
+
+        // —— 合法候选：current refs 绑定 Some 结构报告（同 refs/content_hash）——
+        let (_tmp5, lifecycle5, _plan_id5, mut engine5) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        author_round_record(&lifecycle5, &mut engine5);
+        let item_count = engine5
+            .complete_single_candidate_work_item_plan_author(
+                clean_candidate(),
+                "repo_fixture".to_string(),
+                None,
+            )
+            .await
+            .expect("clean candidate must pass the structure gate");
+        assert_eq!(item_count, 3);
+        let report_ref = engine5
+            .session()
+            .mechanical_report_ref
+            .clone()
+            .expect("promoted mechanical report ref");
+        let source_store = WorkItemPlanSourceStore::new(lifecycle5.app_paths());
+        let record = source_store
+            .get_mechanical_report(
+                &crate::product::work_item_plan_source_store::SourceStoreScope {
+                    project_id: engine5.session().project_id.clone(),
+                    issue_id: engine5.session().issue_id.clone(),
+                    plan_id: engine5.session().entity_id.clone(),
+                },
+                &report_ref,
+            )
+            .expect("reload promoted mechanical report record");
+        let structure = record
+            .structure_report
+            .as_ref()
+            .expect("legal candidate binds a Some structure report");
+        assert_eq!(structure.source_revision_id, record.source_revision_id);
+        assert_eq!(structure.ir_id, record.ir_id);
+        assert!(structure.structurally_valid);
+        assert!(!structure.context_digest.trim().is_empty());
+        assert_eq!(structure.rule_version, PLANNING_STRUCTURE_RULE_VERSION);
+        assert!(
+            !structure.effective_edges.is_empty(),
+            "clean candidate carries its canonical input edges"
+        );
+        // 独立重投影与冻结 payload 的边集合一致（producer 单源事实）。
+        let ir_record = source_store
+            .get_plan_candidate_ir(
+                &crate::product::work_item_plan_source_store::SourceStoreScope {
+                    project_id: engine5.session().project_id.clone(),
+                    issue_id: engine5.session().issue_id.clone(),
+                    plan_id: engine5.session().entity_id.clone(),
+                },
+                engine5
+                    .session()
+                    .plan_candidate_ir_ref
+                    .as_deref()
+                    .expect("promoted IR ref"),
+            )
+            .expect("reload promoted IR record");
+        let live_context = engine5
+            .build_single_candidate_structure_context(
+                &ir_record.ir,
+                engine5
+                    .session()
+                    .work_item_plan_source_revision_ref
+                    .as_deref()
+                    .expect("promoted source ref"),
+                engine5
+                    .session()
+                    .plan_candidate_ir_ref
+                    .as_deref()
+                    .expect("promoted IR ref"),
+            )
+            .expect("live context for the promoted candidate");
+        assert_eq!(structure.context_digest, live_context.context_digest);
+        let items = planning_structure_items_from_ir(&ir_record.ir);
+        let edges: Vec<String> = structure
+            .effective_edges
+            .iter()
+            .map(|edge| format!("{}->{}", edge.from, edge.to))
+            .collect();
+        let projected =
+            crate::product::workspace_engine::draft_batch::compile_support::project_effective_planning_graph(
+                &items, &live_context,
+            );
+        let projected_edges: Vec<String> = projected
+            .effective_edges
+            .iter()
+            .map(|edge| format!("{}->{}", edge.from, edge.to))
+            .collect();
+        assert_eq!(edges, projected_edges);
+    }
+
+    #[test]
+    fn sg3a1_helper_fixtures_compile_through_real_compiler() {
+        // 守卫：三个坏 fixture 都必须通过真实 compiler（环/未授权引用是
+        // 结构层失败，不是语法失败），确保上面断的是系统门而非 parser。
+        for source in [cycle_candidate(), unknown_provider_candidate()] {
+            compile_work_item_plan(
+                &source,
+                &WorkItemPlanSourceContext {
+                    target_repository_id: "repo_fixture".to_string(),
+                    member_targets: None,
+                },
+            )
+            .expect("structural fixtures must compile");
+        }
+        assert!(
+            compile_work_item_plan(
+                &illegal_heading_candidate(),
+                &WorkItemPlanSourceContext {
+                    target_repository_id: "repo_fixture".to_string(),
+                    member_targets: None,
+                },
+            )
+            .is_err(),
+            "illegal heading fixture must fail at compile"
+        );
+    }
+}
+
 // F5 契约机械校验前移（contract_prerevision）用例按大文件守卫(>1200 行)拆分至子文件内联。
 include!("single_candidate/contract_prerevision.rs");
 // DEF-PVR-ALL 确定性 capability 补齐器（contract_autorepair）用例拆分至子文件内联。

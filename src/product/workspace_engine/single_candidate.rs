@@ -492,6 +492,39 @@ impl WorkspaceEngine {
                 )
             })?;
 
+        // SG3a.1 系统门（REQ-SG-02/03、REQ-PLN-09，plan §0.6.2）：先于
+        // current refs 提升与 reviewer。R1/parser/target/scope 坏候选保留
+        // typed evidence 但零提升、零评审、零确认；合法候选才冻结 Some
+        // 结构报告并随同 source/IR/report refs 落盘（None 是旧记录参考
+        // 形态，不冒新合法授权）。live 事实一次装载，只读不 selection
+        // 写回；装载失败是 operational 停点，同样不提升。
+        let structure_context = self
+            .build_single_candidate_structure_context(&ir_record.ir, &source_ref, &ir_ref)
+            .map_err(|error| format!("single-candidate structure context unavailable: {error}"))?;
+        let assessment = plan_projection::assess_single_candidate_structure(
+            source.clone(),
+            &ir_record.ir,
+            &structure_context,
+        );
+        let frozen_structure_report = match &assessment {
+            crate::product::workspace_engine::types::StructuralAssessment::Accepted(prepared) => {
+                Some(
+                    plan_projection::freeze_persisted_structure_report(
+                        &prepared.report,
+                        &source_revision.id,
+                        &ir_id,
+                    )
+                    .map_err(|error| format!("freeze structure report failed: {error}"))?,
+                )
+            }
+            _ => {
+                return Err(
+                    plan_projection::structural_assessment_stop_reason(&assessment)
+                        .expect_err("non-accepted assessment must produce a typed stop"),
+                );
+            }
+        };
+
         let expected = lifecycle
             .get_workspace_session(&self.session.session_id)
             .map_err(|error| {
@@ -553,9 +586,10 @@ impl WorkspaceEngine {
             source_revision_id: source_revision.id.clone(),
             ir_id: ir_id.clone(),
             report,
-            // SG3a.0：机械报告先落 None 结构投影；SG3a.1/SG6 新合法
-            // 报告才写 Some（同 record/content_hash 绑定）。
-            structure_report: None,
+            // SG3a.1：系统门通过的合法候选同 refs 冻结 Some 结构投影
+            // （同 record/content_hash 绑定，context 同代由 reviewer
+            // builder 复验）；拒收候选在提升前已 typed 停点，不落 record。
+            structure_report: frozen_structure_report,
             content_hash: String::new(),
         };
         report_record.id = report_record

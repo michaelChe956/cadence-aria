@@ -851,3 +851,337 @@ fn validate_initial_publication(
     }
     Ok(())
 }
+
+// ===================== SG3a.1 候选结构门与同代结构上下文（REQ-SG-02/03、REQ-PLN-09/10）=====================
+//
+// plan §0.6.2：结构报告的唯一生产/复验配套——author 落盘前的系统门用
+// `build_single_candidate_structure_context` 一次装载 live 事实（只读，不
+// selection 写回），SC reviewer builder 对同一事实重算同 digest 做「旧
+// context 拒发」。两端口共用本节单源，禁止第二配方/第二上下文权威。
+
+use crate::product::planning_failure::{
+    PersistedEffectivePlanningEdge, PersistedPlanningStructureReport,
+    PersistedPlanningStructureSpan, PlanningFailureKind,
+};
+use crate::product::workspace_engine::draft_batch::compile_support::{
+    PlanningStructureCanonicalInput, PlanningStructureContext, PlanningStructureItem,
+    PlanningStructureReport, PlanningStructureSpan, project_effective_planning_graph,
+};
+use crate::product::workspace_engine::types::{PreparedStructuralCandidate, StructuralAssessment};
+use sha2::{Digest, Sha256};
+
+/// 候选结构门/结构报告共用的有效图规则版本（SG1 纯投影首版：canonical
+/// Inputs ∪ change_order 自动边）。producer 冻结与 reviewer builder 复验必须
+/// 同值，漂移即旧 context 拒发。
+pub(crate) const PLANNING_STRUCTURE_RULE_VERSION: &str = "rule/planning-structure@1";
+
+/// 结构上下文 digest 的单源配方：对除 `context_digest` 自身外的全字段
+/// serde_json 序列化取 sha256。
+pub(crate) fn compute_planning_context_digest(context: &PlanningStructureContext) -> String {
+    let mut canonical = context.clone();
+    canonical.context_digest = String::new();
+    let serialized = serde_json::to_string(&canonical).unwrap_or_default();
+    hex::encode(Sha256::digest(serialized.as_bytes()))
+}
+
+fn digest_json<T: serde::Serialize>(value: &T) -> Result<String, String> {
+    let serialized = serde_json::to_string(value)
+        .map_err(|error| format!("serialize structure context digest input failed: {error}"))?;
+    Ok(hex::encode(Sha256::digest(serialized.as_bytes())))
+}
+
+impl WorkspaceEngine {
+    /// SG3a.1：装载当前 live 结构上下文（Design/member/options/baseline 同源
+    /// 事实一次装载）。author 落盘门与 SC reviewer builder 共用——对同一
+    /// session/plan 事实必然得到相同 `context_digest`；任一事实漂移（如
+    /// options/confirmed design 变更）即失配，builder 侧旧 context 拒发。
+    pub(crate) fn build_single_candidate_structure_context(
+        &self,
+        ir: &crate::product::work_item_plan_compiler::PlanCandidateIr,
+        source_revision_ref: &str,
+        plan_candidate_ir_ref: &str,
+    ) -> Result<PlanningStructureContext, String> {
+        let lifecycle = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable for structure context".to_string())?;
+        let plan = lifecycle
+            .get_issue_work_item_plan(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+            )
+            .map_err(|error| format!("load plan for structure context failed: {error}"))?;
+        let confirmed = lifecycle
+            .list_design_specs(&plan.project_id, &plan.issue_id)
+            .map_err(|error| format!("list design specs for structure context failed: {error}"))?
+            .into_iter()
+            .find(|design| {
+                plan.source_design_spec_ids.contains(&design.id)
+                    && design.confirmation_status
+                        == crate::product::models::LifecycleConfirmationStatus::Confirmed
+            });
+        let physical_by_logical =
+            crate::product::workspace_engine::draft_batch::compile_support::resolve_logical_work_item_plan_repository_targets(lifecycle, &plan)?;
+        // 成员表摘要：effective（manifest∩active∩selection）逻辑→物理映射的
+        // 单源装载结果；selection 事实折叠进同一映射，不另立第二快照。
+        let member_table_digest = physical_by_logical.as_ref().map(digest_json).transpose()?;
+        let change_order =
+            crate::product::workspace_engine::draft_batch::compile_support::load_change_order_from_confirmed_design(
+                lifecycle, &plan,
+            )?;
+        let baseline_tree = crate::product::workspace_engine::plan_preflight::plan_baseline_tree(
+            lifecycle,
+            &self.session.project_id,
+            &self.session.issue_id,
+        )?;
+        let baseline_tree_digest = baseline_tree.as_ref().map(digest_json).transpose()?;
+        // Plan Intent 归属事实来自候选 IR（per-WI intent target）；无任何
+        // intent 声明的 legacy 候选为 None。
+        let intent_targets: Vec<(String, crate::product::logical_codebase::EnrollmentTarget)> = ir
+            .items
+            .iter()
+            .filter_map(|item| {
+                item.contract.intent_contract.as_ref().map(|intent| {
+                    (
+                        item.contract.identity.logical_work_item_id.clone(),
+                        intent.target.clone(),
+                    )
+                })
+            })
+            .collect();
+        let intent_digest = (!intent_targets.is_empty())
+            .then(|| digest_json(&intent_targets))
+            .transpose()?;
+        let mut context = PlanningStructureContext {
+            source_revision_ref: source_revision_ref.to_string(),
+            plan_candidate_ir_ref: plan_candidate_ir_ref.to_string(),
+            source_hash: ir.source_revision_hash.clone(),
+            compiler_version: ir.compiler_version.clone(),
+            rule_version: PLANNING_STRUCTURE_RULE_VERSION.to_string(),
+            context_digest: String::new(),
+            confirmed_design_id: confirmed.as_ref().map(|design| design.id.clone()),
+            confirmed_design_digest: confirmed.as_ref().map(digest_json).transpose()?,
+            member_table_digest,
+            selection_digest: None,
+            physical_by_logical: physical_by_logical.unwrap_or_default(),
+            change_order,
+            options_digest: digest_json(&plan.options)?,
+            baseline_tree_digest,
+            intent_digest,
+        };
+        context.context_digest = compute_planning_context_digest(&context);
+        Ok(context)
+    }
+}
+
+/// 将候选 IR 投影为 SG1 纯图输入。lowering 后的 IR 不保留 source 行号——
+/// canonical input 的 span 只携带逻辑字段路径（line=0=无行事实，缺事实不
+/// 伪行，与 F1.2 validator 投影同口径）；item 级 source_spans 为空。
+pub(crate) fn planning_structure_items_from_ir(
+    ir: &crate::product::work_item_plan_compiler::PlanCandidateIr,
+) -> Vec<PlanningStructureItem> {
+    ir.items
+        .iter()
+        .map(|item| {
+            let (declared_member, logical_target) = match item
+                .contract
+                .intent_contract
+                .as_ref()
+                .map(|intent| &intent.target)
+            {
+                Some(crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                    logical_repository_id,
+                    ..
+                }) => (
+                    Some(logical_repository_id.0.to_string()),
+                    Some(*logical_repository_id),
+                ),
+                _ => (None, None),
+            };
+            PlanningStructureItem {
+                logical_work_item_id: item.contract.identity.logical_work_item_id.clone(),
+                short_id: item.contract.identity.logical_work_item_id.clone(),
+                title: item.contract.identity.title.clone(),
+                declared_member,
+                logical_target,
+                physical_target: Some(item.target_repository_id.clone()),
+                canonical_inputs: item
+                    .contract
+                    .input_contracts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, contract)| PlanningStructureCanonicalInput {
+                        contract: contract.clone(),
+                        span: PlanningStructureSpan {
+                            field: format!("input_contracts[{index}]"),
+                            line: 0,
+                        },
+                    })
+                    .collect(),
+                declared_depends_on: item.contract.depends_on.clone(),
+                source_spans: Vec::new(),
+            }
+        })
+        .collect()
+}
+
+/// SG3a.1 系统门的纯评估：SG1 有效图投影 + typed 失败分流。零 store/网络
+/// I/O——live 事实由外层 `build_single_candidate_structure_context` 一次装载。
+pub(crate) fn assess_single_candidate_structure(
+    source: String,
+    ir: &crate::product::work_item_plan_compiler::PlanCandidateIr,
+    context: &PlanningStructureContext,
+) -> StructuralAssessment {
+    let mut items = planning_structure_items_from_ir(ir);
+    // legacy 单仓（无授权成员表）与 Final Compile lowering 同口径：
+    // member_targets=None 时 Plan Intent 归属不参与物理 target 解析，
+    // 结构门不重裁其授权——归属核验只在 LC 多仓（成员表非空）生效。
+    if context.physical_by_logical.is_empty() {
+        for item in &mut items {
+            item.declared_member = None;
+            item.logical_target = None;
+        }
+    }
+    let report = project_effective_planning_graph(&items, context);
+    let source_hash = report.source_hash.clone();
+    let context_digest = report.context_digest.clone();
+    if report.failures.is_empty() {
+        return StructuralAssessment::Accepted(Box::new(PreparedStructuralCandidate {
+            source,
+            ir: ir.clone(),
+            report,
+            source_hash,
+            context_digest,
+        }));
+    }
+    if report
+        .failures
+        .failures
+        .iter()
+        .any(|failure| matches!(failure.kind, PlanningFailureKind::Operational { .. }))
+    {
+        // 工程/装载内部错：typed operational 停点，不驱 author。
+        return StructuralAssessment::Operational(report.failures);
+    }
+    // typed 结构失败：修复指令初轮为空集（SG5/SG6 接线 instruction producer）。
+    StructuralAssessment::Rejected(report.failures, Vec::new())
+}
+
+/// SG1 纯报告 → SG3a.0 持久 payload 的单次冻结投影。`report_digest` 沿
+/// store 单源函数封口；仅对 structurally_valid 报告调用（合法才冻结）。
+pub(crate) fn freeze_persisted_structure_report(
+    report: &PlanningStructureReport,
+    source_revision_id: &str,
+    ir_id: &str,
+) -> Result<PersistedPlanningStructureReport, String> {
+    let effective_edges: Vec<PersistedEffectivePlanningEdge> = report
+        .effective_edges
+        .iter()
+        .map(|edge| PersistedEffectivePlanningEdge {
+            from: edge.from.clone(),
+            to: edge.to.clone(),
+            sources: edge.sources.clone(),
+            contract_refs: edge.contract_refs.clone(),
+            spans: edge
+                .spans
+                .iter()
+                .map(|span| PersistedPlanningStructureSpan {
+                    field: span.field.clone(),
+                    line: span.line,
+                })
+                .collect(),
+            order_indices: edge.order_indices.clone(),
+        })
+        .collect();
+    // 合法报告无环，witness 恒空；防御性提取保持 payload 合同完整——
+    // 任一 witness 跳缺少真实有效边即 fail-closed，不虚构边。
+    let edge_by_pair: std::collections::BTreeMap<(&str, &str), &PersistedEffectivePlanningEdge> =
+        effective_edges
+            .iter()
+            .map(|edge| ((edge.from.as_str(), edge.to.as_str()), edge))
+            .collect();
+    let mut cycle_witness: Vec<PersistedEffectivePlanningEdge> = Vec::new();
+    for failure in &report.failures.failures {
+        if let PlanningFailureKind::DependencyCycle { witness } = &failure.kind {
+            for hop in witness {
+                let edge = edge_by_pair
+                    .get(&(hop.from.as_str(), hop.to.as_str()))
+                    .ok_or_else(|| {
+                        format!(
+                            "cycle witness hop {}->{} missing effective edge",
+                            hop.from, hop.to
+                        )
+                    })?;
+                cycle_witness.push((*edge).clone());
+            }
+        }
+    }
+    let protected_predicates = if report.structurally_valid {
+        vec![
+            "effective_graph_acyclic".to_string(),
+            "canonical_inputs_preserved".to_string(),
+            "acceptance_criteria_preserved".to_string(),
+            "change_order_unchanged".to_string(),
+        ]
+    } else {
+        Vec::new()
+    };
+    let mut payload = PersistedPlanningStructureReport {
+        source_revision_id: source_revision_id.to_string(),
+        source_hash: report.source_hash.clone(),
+        ir_id: ir_id.to_string(),
+        compiler_version: report.compiler_version.clone(),
+        rule_version: report.rule_version.clone(),
+        context_digest: report.context_digest.clone(),
+        effective_edges,
+        cycle_witness,
+        findings: report.failures.clone(),
+        structurally_valid: report.structurally_valid,
+        protected_predicates,
+        // 初轮无修复明确空（plan §0.6.2）：不伪模型许可；SG5/SG6 接线
+        // instruction/audit producer 后才携带真实引用。
+        instruction_refs: Vec::new(),
+        repair_audit_refs: Vec::new(),
+        report_digest: String::new(),
+    };
+    payload.report_digest =
+        crate::product::work_item_plan_source_store::persisted_structure_report_digest(&payload)
+            .map_err(|error| format!("derive structure report digest failed: {error:?}"))?;
+    Ok(payload)
+}
+
+/// 系统门停点渲染：typed stable_code + affected_ids（依赖环的 affected_ids
+/// 即 witness 节点序，`->` 连接呈现真实有向路径）。
+pub(crate) fn structural_assessment_stop_reason(
+    assessment: &StructuralAssessment,
+) -> Result<(), String> {
+    let render = |set: &crate::product::planning_failure::PlanningFailureSet| {
+        set.failures
+            .iter()
+            .map(|failure| {
+                format!(
+                    "{}[{}]",
+                    failure.kind.stable_code(),
+                    failure.evidence.affected_ids.join("->")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    match assessment {
+        StructuralAssessment::Accepted(_) => Ok(()),
+        StructuralAssessment::Rejected(set, _) => Err(format!(
+            "single-candidate structure gate rejected: {}",
+            render(set)
+        )),
+        StructuralAssessment::Operational(set) => Err(format!(
+            "single-candidate structure gate operational stop: {}",
+            render(set)
+        )),
+        StructuralAssessment::ExistingGate(set) => Err(format!(
+            "single-candidate structure gate existing-gate stop: {}",
+            render(set)
+        )),
+    }
+}

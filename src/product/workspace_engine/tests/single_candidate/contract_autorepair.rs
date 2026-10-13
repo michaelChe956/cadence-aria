@@ -8,7 +8,9 @@
 /// 即零返修轮（不产生 verdict、不消费预算、不播指纹）；残余非机械缺口
 /// 才走 F5-A 模型返修通道（既有语义零变化）。
 mod contract_autorepair {
-    use super::contract_prerevision::{REP4_FIXTURE, author_round_record, clean_candidate};
+    use super::contract_prerevision::{
+        REP4_FIXTURE, author_round_record, clean_candidate, missing_contract_candidate,
+    };
     use super::*;
     use crate::product::work_item_plan_compiler::{
         WorkItemPlanSourceContext, compile_work_item_plan,
@@ -29,23 +31,12 @@ mod contract_autorepair {
             )
     }
 
-    /// 非机械可修缺口（依赖环）：WI-001 反向消费 WI-002 制造环——补齐器
-    /// 边界外的 Error 仍走既有机械 verdict → 模型返修通道。
-    fn cycle_candidate(round: usize) -> String {
-        clean_candidate()
-            .replace(
-                "### Inputs\n\n### Outputs\n- contract_id: contract.levels-api",
-                "### Inputs\n- contract_id: contract.level-selector\n- provider_logical_work_item_id: WI-002\n- required_capabilities: ui.level-selector.rendered\n- compatibility_policy: require_all\n\n### Outputs\n- contract_id: contract.levels-api",
-            )
-            .replace(
-                "Backend levels API",
-                &format!("Backend levels API round-{round}"),
-            )
-    }
+    /// 非机械可修缺口（required_contract_missing）见 contract_prerevision::
+    /// missing_contract_candidate——provider 未承诺被消费契约，补齐器边界外。
 
-    /// 混合缺口：机械可修（capability）+ 非机械（依赖环）并存。
+    /// 混合缺口：机械可修（capability）+ 非机械（required_contract_missing）并存。
     fn mixed_gap_candidate(round: usize) -> String {
-        cycle_candidate(round).replace(
+        missing_contract_candidate(round).replace(
             "- required_capabilities: api.levels.read\n",
             "- required_capabilities: api.levels.read, api.levels.write\n",
         )
@@ -177,8 +168,10 @@ mod contract_autorepair {
         );
     }
 
-    /// 边界：非机械可修缺口（依赖环）不被补齐器拦截，
-    /// 仍走既有机械 verdict → 模型返修通道；残余 verdict 只含非机械 finding。
+    /// 边界：非机械可修缺口（required_contract_missing——provider 未承诺
+    /// 被消费契约）不被补齐器拦截，仍走既有机械 verdict → 模型返修通道；
+    /// 残余 verdict 只含非机械 finding。依赖环自 SG3a.1 起在候选结构门
+    /// 拒收（零提升/零评审），不再走本通道。
     #[tokio::test]
     async fn non_mechanical_gap_still_routes_model_revision() {
         let (_tmp, lifecycle, _plan_id, mut engine) =
@@ -187,22 +180,22 @@ mod contract_autorepair {
 
         engine
             .complete_single_candidate_work_item_plan_author(
-                cycle_candidate(1),
+                missing_contract_candidate(1),
                 "repo_fixture".to_string(),
                 None,
             )
             .await
-            .expect("cycle candidate must still complete");
+            .expect("missing-contract candidate must still complete");
 
-        let pending = engine
-            .single_candidate_pending_revision_verdict()
-            .expect("non-mechanical cycle gap must still drive a mechanical revision round");
+        let pending = engine.single_candidate_pending_revision_verdict().expect(
+            "non-mechanical supply-demand gap must still drive a mechanical revision round",
+        );
         assert_eq!(pending.verdict, ReviewVerdictType::Revise);
         assert!(
             pending
                 .findings
                 .iter()
-                .all(|finding| finding.message.starts_with("dependency_cycle: ")),
+                .all(|finding| finding.message.starts_with("required_contract_missing: ")),
             "residual verdict must carry only the non-autorepairable findings: {:?}",
             pending
                 .findings
@@ -245,7 +238,7 @@ mod contract_autorepair {
             pending
                 .findings
                 .iter()
-                .all(|finding| finding.message.starts_with("dependency_cycle: ")),
+                .all(|finding| finding.message.starts_with("required_contract_missing: ")),
             "repaired capability findings must not ride the residual verdict: {:?}",
             pending
                 .findings

@@ -24,15 +24,21 @@ mod contract_prerevision {
         )
     }
 
-    /// 干净基线 + WI-001 反向消费 WI-002（contract.level-selector）制造依赖环
-    /// ——非机械可修缺口（DEF-PVR-ALL 补齐器边界外），驱动机械 verdict 走
-    /// 模型返修；capability 类缺口已由 contract_autorepair 确定性补齐，
+    /// 非机械可修缺口（REQ-SG-02 供需族）：WI-002/WI-003 的 require_all
+    /// 输入改指 WI-001 从未提供的 contract.levels-magic——补齐器不能替
+    /// author 伪造业务契约（capability/handoff 类缺口已由 contract_autorepair
+    /// 确定性补齐），驱动机械 verdict 走模型返修。依赖环自 SG3a.1 起在
+    /// 候选结构门拒收（零提升/零评审，见 sg3a1_structure_gate 用例），
     /// 不再抵达本通道。
-    fn cycle_gap_candidate(round: usize) -> String {
+    pub(super) fn missing_contract_candidate(round: usize) -> String {
         clean_candidate()
             .replace(
-                "### Inputs\n\n### Outputs\n- contract_id: contract.levels-api",
-                "### Inputs\n- contract_id: contract.level-selector\n- provider_logical_work_item_id: WI-002\n- required_capabilities: ui.level-selector.rendered\n- compatibility_policy: require_all\n\n### Outputs\n- contract_id: contract.levels-api",
+                "- contract_id: contract.levels-api\n- provider_logical_work_item_id: WI-001\n- required_capabilities: api.levels.read\n- compatibility_policy: require_all\n\n### Outputs\n- contract_id: contract.level-selector",
+                "- contract_id: contract.levels-magic\n- provider_logical_work_item_id: WI-001\n- required_capabilities: api.levels.read\n- compatibility_policy: require_all\n\n### Outputs\n- contract_id: contract.level-selector",
+            )
+            .replace(
+                "- reason_code: level_selector_contract_invalid\n- route: plan_repair_upstream\n- target_contract_refs: contract.levels-api",
+                "- reason_code: level_selector_contract_invalid\n- route: plan_repair_upstream\n- target_contract_refs: contract.levels-magic",
             )
             .replace(
                 "Backend levels API",
@@ -78,7 +84,7 @@ mod contract_prerevision {
 
         let item_count = engine
             .complete_single_candidate_work_item_plan_author(
-                cycle_gap_candidate(1),
+                missing_contract_candidate(1),
                 "repo_fixture".to_string(),
                 None,
             )
@@ -96,11 +102,11 @@ mod contract_prerevision {
         let gap_finding = pending
             .findings
             .iter()
-            .find(|finding| finding.message.contains("dependency_cycle"))
-            .expect("cycle gap finding must ride the verdict");
+            .find(|finding| finding.message.starts_with("required_contract_missing: "))
+            .expect("supply-demand gap finding must ride the verdict");
         assert!(
-            gap_finding.required_action.contains("拆除依赖环"),
-            "required_action must name the cycle teardown: {}",
+            gap_finding.required_action.contains("需在输出契约中提供"),
+            "required_action must name the missing contract teardown: {}",
             gap_finding.required_action
         );
 
@@ -211,7 +217,7 @@ mod contract_prerevision {
 
         engine
             .complete_single_candidate_work_item_plan_author(
-                cycle_gap_candidate(1),
+                missing_contract_candidate(1),
                 "repo_fixture".to_string(),
                 None,
             )
@@ -227,7 +233,7 @@ mod contract_prerevision {
         // 同指纹——fingerprint 基于 category+contract_field，与措辞无关）。
         engine
             .complete_single_candidate_work_item_plan_author(
-                cycle_gap_candidate(2),
+                missing_contract_candidate(2),
                 "repo_fixture".to_string(),
                 None,
             )

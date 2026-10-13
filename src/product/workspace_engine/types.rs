@@ -514,8 +514,7 @@ impl ConfirmationTrustWaiting {
 /// 客户端传路径**。调用方据此在引擎锁外执行 ensure（home IO 不楔死
 /// 引擎），precondition 复用确认链/聚合初始化同一生产实例。
 pub(crate) struct ExplicitTrustRegistrationTarget {
-    pub(crate) precondition:
-        Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>,
+    pub(crate) precondition: Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>,
     pub(crate) project_id: String,
     pub(crate) session_id: String,
     pub(crate) registry_lc_id: String,
@@ -532,7 +531,6 @@ pub(crate) struct ExplicitTrustRegistrationContextWaiting {
     pub(crate) reason_code: String,
     pub(crate) message: String,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceConfirmOutcome {
@@ -634,6 +632,38 @@ pub(crate) struct WorkItemPlanCompileProjectionContext<'a> {
         >,
     >,
     pub(crate) now: &'a str,
+}
+
+/// SG3a.1（plan §0.5 接口字典）：候选结构门产出的「已备好的合法结构候选」。
+/// `report` 是 SG1 纯有效图投影的同代结果；`source_hash`/`context_digest`
+/// 绑定候选 source 与冻结上下文，供 SG3a.0 payload 同 refs 落盘、
+/// SG3b Final Compile 复验与 SG6a.1 修订轮评估消费。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PreparedStructuralCandidate {
+    pub(crate) source: String,
+    pub(crate) ir: crate::product::work_item_plan_compiler::PlanCandidateIr,
+    pub(crate) report:
+        crate::product::workspace_engine::draft_batch::compile_support::PlanningStructureReport,
+    pub(crate) source_hash: String,
+    pub(crate) context_digest: String,
+}
+
+/// SG3a.1（plan §0.5 接口字典）：候选输出的结构评估结果——
+/// - `Accepted`：全套件通过，可随 current refs 冻结结构报告；
+/// - `Rejected`：typed 结构失败（事实完整），修复指令初轮为空集
+///   （SG5/SG6 接线 instruction producer 后携带）；
+/// - `ExistingGate`：命中既有业务门（SG6a.1 修订轮语义，SG3a.1 不产生）；
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum StructuralAssessment {
+    Accepted(Box<PreparedStructuralCandidate>),
+    Rejected(
+        crate::product::planning_failure::PlanningFailureSet,
+        Vec<crate::product::workspace_engine::contract_prerevision::StructuralRepairInstruction>,
+    ),
+    /// 尚未接线：SG3a.1 系统门不产生该分支，SG6a.1 修订轮评估消费。
+    #[allow(dead_code)]
+    ExistingGate(crate::product::planning_failure::PlanningFailureSet),
+    Operational(crate::product::planning_failure::PlanningFailureSet),
 }
 
 #[cfg(test)]
