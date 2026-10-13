@@ -8,9 +8,7 @@ use crate::product::models::{
     SingleCandidateCompileReservation, SingleCandidatePhase, WorkspaceSessionRecord, WorkspaceType,
 };
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
-use crate::product::work_item_plan_source_store::{
-    SourceStoreScope, validate_canonical_ref_for_scope,
-};
+use crate::product::work_item_plan_source_store::{SourceStoreScope, validate_canonical_ref_for_scope};
 use crate::web::workspace_ws_types::ArtifactVersion;
 
 pub(super) fn max_workspace_session_sequence(
@@ -622,11 +620,24 @@ impl LifecycleStore {
             }
             match stored.mechanical_report_ref.as_deref() {
                 Some(existing) if existing == mechanical_report_ref => return Ok(stored),
-                Some(_) => {
-                    return Err(ProductStoreError::Conflict {
-                        kind: "single_candidate_evaluation",
-                        id: stored.id.clone(),
-                    });
+                Some(existing) => {
+                    // report_id 内容寻址化后，同内容重放会轮换 id（旧会话
+                    // 持旧格式 ref 或早前内容寻址 ref）。ref 不等时按两 ref
+                    // 各自加载 record，比对剔除 id/content_hash 后的全量
+                    // 内容摘要：等价内容接受 ref 轮换（Evaluate 重入幂等
+                    // 与内容寻址化前一致）；内容真变或任一 ref 悬空/不可
+                    // 解析（无法证明等价）维持 Conflict fail-closed。
+                    if !equivalent_mechanical_reports(
+                        self.app_paths(),
+                        &scope,
+                        existing,
+                        mechanical_report_ref,
+                    ) {
+                        return Err(ProductStoreError::Conflict {
+                            kind: "single_candidate_evaluation",
+                            id: stored.id.clone(),
+                        });
+                    }
                 }
                 None => {}
             }
@@ -793,6 +804,29 @@ impl LifecycleStore {
             other => CompileReservationError::PersistenceFailure(other),
         })
     }
+}
+
+/// 判断两个 mechanical report canonical ref 是否指向等价内容：各按
+/// 完整校验链加载 record，比对剔除 `id`/`content_hash` 后的全量内容
+/// 摘要（`content_addressed_id`）。任一 ref 悬空/校验失败（无法证明
+/// 等价）返回 false，由调用方 fail-closed。
+fn equivalent_mechanical_reports(
+    paths: crate::product::app_paths::ProductAppPaths,
+    scope: &SourceStoreScope,
+    existing_ref: &str,
+    incoming_ref: &str,
+) -> bool {
+    let store = crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(paths);
+    let Ok(existing) = store.get_mechanical_report(scope, existing_ref) else {
+        return false;
+    };
+    let Ok(incoming) = store.get_mechanical_report(scope, incoming_ref) else {
+        return false;
+    };
+    matches!(
+        (existing.content_addressed_id(), incoming.content_addressed_id()),
+        (Ok(existing_id), Ok(incoming_id)) if existing_id == incoming_id
+    )
 }
 
 #[cfg(test)]

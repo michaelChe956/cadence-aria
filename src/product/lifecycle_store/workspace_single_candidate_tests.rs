@@ -249,6 +249,174 @@ fn single_candidate_evaluation_persists_report_without_upgrading_invocation_scop
 }
 
 #[test]
+fn evaluation_cas_accepts_report_ref_rotation_for_equivalent_content() {
+    // P2 回归（session_0003 重放面）：report_id 内容寻址化后，持有旧格式
+    // mechanical_report_ref 的会话在重启重放 author Evaluate（既有支撑
+    // 路径）时，同内容的新 report 轮换 id → CAS ref 不等。等价内容（剔除
+    // id/content_hash 的全量体摘要相等，即 content_addressed_id 相等）
+    // 必须接受 ref 轮换保持重入幂等；内容真变或任一 ref 悬空仍 Conflict。
+    use crate::product::models::{
+        WorkItemSplitFinding, WorkItemSplitFindingSeverity,
+    };
+    use crate::product::planning_failure::PlanningFailureKind;
+    use crate::product::work_item_plan_compiler::{
+        WORK_ITEM_PLAN_COMPILER_VERSION, PlanCandidateIr, PlanCandidateMechanicalReport,
+    };
+    use crate::product::work_item_plan_source_store::{
+        PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
+        WorkItemPlanSourceStore,
+    };
+    use sha2::{Digest, Sha256};
+
+    fn e2e_finding(kind: Option<PlanningFailureKind>) -> WorkItemSplitFinding {
+        WorkItemSplitFinding {
+            severity: WorkItemSplitFindingSeverity::Warning,
+            code: "integration_or_e2e_skipped_risk".to_string(),
+            message: "integration or e2e verification skipped risk".to_string(),
+            work_item_ids: Vec::new(),
+            kind,
+        }
+    }
+
+    let temp = tempdir().unwrap();
+    let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+    let mut session = store
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "entity_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: Some(ProviderName::ClaudeCode),
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                run_policy: RunPolicy::Interactive,
+                rollout_snapshot: true,
+            }),
+        })
+        .expect("create single candidate session");
+    session.single_candidate_phase = Some(SingleCandidatePhase::Evaluate);
+
+    // 落盘三件套：source/ir + 旧格式 id 的存量报告（kind=None，模拟
+    // 内容寻址化之前落盘的历史记录）。
+    let source_store = WorkItemPlanSourceStore::new(store.app_paths());
+    let source_text = "# Work Item Plan\n";
+    let source_hash = hex::encode(Sha256::digest(source_text.as_bytes()));
+    let mut source = SourceRevisionRecord {
+        id: "source-001".to_string(),
+        source: source_text.to_string(),
+        source_revision_hash: source_hash.clone(),
+        content_hash: String::new(),
+    };
+    source.content_hash = source.content_hash().unwrap();
+    let source_ref = source_store
+        .put_source_revision("project_0001", "issue_0001", "entity_0001", &source)
+        .unwrap();
+    let mut ir = PlanCandidateIrRecord {
+        id: "ir-001".to_string(),
+        source_revision_id: source.id.clone(),
+        ir: PlanCandidateIr {
+            source_revision_hash: source_hash.clone(),
+            compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+            items: Vec::new(),
+        },
+        content_hash: String::new(),
+    };
+    ir.content_hash = ir.content_hash().unwrap();
+    let ir_ref = source_store
+        .put_plan_candidate_ir("project_0001", "issue_0001", "entity_0001", &ir)
+        .unwrap();
+    session.work_item_plan_source_revision_ref = Some(source_ref);
+    session.plan_candidate_ir_ref = Some(ir_ref);
+
+    let report_body = |findings| PlanCandidateMechanicalReport {
+        source_revision_hash: source_hash.clone(),
+        compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+        findings,
+    };
+    let legacy_findings = vec![e2e_finding(None)];
+    let mut legacy = PlanCandidateMechanicalReportRecord {
+        id: format!("report-{}", &source_hash[..16]),
+        source_revision_id: source.id.clone(),
+        ir_id: ir.id.clone(),
+        report: report_body(legacy_findings.clone()),
+        content_hash: String::new(),
+    };
+    legacy.content_hash = legacy.content_hash().unwrap();
+    let legacy_ref = source_store
+        .put_mechanical_report("project_0001", "issue_0001", "entity_0001", &legacy)
+        .unwrap();
+    session.mechanical_report_ref = Some(legacy_ref.clone());
+    write_json(
+        &store
+            .workspace_sessions_root("project_0001", "issue_0001")
+            .join(format!("{}.json", session.id)),
+        &session,
+    )
+    .expect("seed evaluate session with legacy report ref");
+
+    // 同内容新 report：内容寻址 id（≠ 旧格式 id）→ ref 轮换。
+    let mut rotated = PlanCandidateMechanicalReportRecord {
+        id: String::new(),
+        source_revision_id: source.id.clone(),
+        ir_id: ir.id.clone(),
+        report: report_body(legacy_findings),
+        content_hash: String::new(),
+    };
+    rotated.id = rotated.content_addressed_id().unwrap();
+    rotated.content_hash = rotated.content_hash().unwrap();
+    assert_ne!(rotated.id, legacy.id);
+    let rotated_ref = source_store
+        .put_mechanical_report("project_0001", "issue_0001", "entity_0001", &rotated)
+        .unwrap();
+
+    let expected = store
+        .get_workspace_session(&session.id)
+        .expect("load evaluate session");
+    let saved = store
+        .compare_and_save_single_candidate_evaluation(&expected, &rotated_ref)
+        .expect("equivalent-content report ref rotation must stay idempotent");
+    assert_eq!(saved.mechanical_report_ref.as_deref(), Some(rotated_ref.as_str()));
+
+    // 轮换后同 ref 重放仍幂等（相等分支）。
+    let replayed = store
+        .get_workspace_session(&session.id)
+        .expect("reload rotated session");
+    let saved_again = store
+        .compare_and_save_single_candidate_evaluation(&replayed, &rotated_ref)
+        .expect("replay after rotation is idempotent");
+    assert_eq!(
+        saved_again.mechanical_report_ref.as_deref(),
+        Some(rotated_ref.as_str())
+    );
+
+    // 内容真变（typed kind）→ 不同内容寻址 id → CAS 仍 Conflict。
+    let mut diverged = PlanCandidateMechanicalReportRecord {
+        id: String::new(),
+        source_revision_id: source.id.clone(),
+        ir_id: ir.id.clone(),
+        report: report_body(vec![e2e_finding(Some(PlanningFailureKind::Unknown {
+            code: "integration_or_e2e_skipped_risk".to_string(),
+        }))]),
+        content_hash: String::new(),
+    };
+    diverged.id = diverged.content_addressed_id().unwrap();
+    diverged.content_hash = diverged.content_hash().unwrap();
+    let diverged_ref = source_store
+        .put_mechanical_report("project_0001", "issue_0001", "entity_0001", &diverged)
+        .unwrap();
+    let current = store
+        .get_workspace_session(&session.id)
+        .expect("reload current session");
+    assert!(matches!(
+        store.compare_and_save_single_candidate_evaluation(&current, &diverged_ref),
+        Err(ProductStoreError::Conflict { .. })
+    ));
+}
+#[test]
 fn single_candidate_compile_id_uses_the_published_test_vector() {
     assert_eq!(
         single_candidate_compile_id(

@@ -86,3 +86,30 @@ cargo test --lib product::workspace_engine::compile
 - 存量数据:旧 `report-{source_hash[..16]}` 记录不迁移、仍可 get;新 payload 使用内容摘要生成 id(摘要输入与旧方案的 source 摘要不同,新旧 id 同为 `report-{16hex}` 形、并非命名空间隔离)。16-hex 为 64-bit 截断、非绝对唯一:残余理论碰撞退化为 64-bit 随机碰撞,仍由 put_immutable 不可变守卫兜底(同内容幂等、不同内容显式 IdentityMismatch,绝不静默覆写),无迁移/清理需求。
 - session_0003 解卡:新代码重放同 source 时新 report 获新 id 正常落盘,IdentityMismatch 不再复现。
 - provenance 引用:`mechanical_report_ref` 由 put 返回的 canonical ref 透传,新 id 自动进入新 provenance;旧 provenance 引用旧 id 记录,照常可读。
+
+## 7. 复审 P2 修复:评估 CAS 接受等价内容的 report ref 轮换
+
+提交:`fix: 评估CAS接受等价内容的report ref轮换`
+
+**回归机理**(Main 复审):持有旧方案 durable `mechanical_report_ref` 的会话重启重放 author(Evaluate 重入是既有支撑路径)时,同内容重放在新方案下轮换 id → `compare_and_save_single_candidate_evaluation`(lifecycle_store/workspace_single_candidate.rs:621-628)对 ref 不等一律 `Conflict` —— 旧行为是整记录相等分支幂等 Ok,新方案把旧会话重放从幂等变确定性失败。
+
+**修法**:评估 CAS 在 ref 不等时,按 stored ref 与 incoming ref 各自经完整校验链(`get_mechanical_report`)加载 record,比对剔除 `id`/`content_hash` 后的全量内容摘要(`content_addressed_id` 相等 ⇔ 等价内容,与 id 格式无关):等价 → 接受轮换(更新 session ref,重入幂等语义与内容寻址化前一致);内容真变或任一 ref 悬空/校验失败(无法证明等价)→ 维持 `Conflict` fail-closed。
+
+**TDD**:
+- 红(修复前,/tmp/p2-verify 隔离树 = da2e35b4 + 仅新测试):
+  `panicked: equivalent-content report ref rotation must stay idempotent: Conflict { kind: "single_candidate_evaluation", id: "workspace_session_0001" }`
+- 绿(修复后):新测试 `evaluation_cas_accepts_report_ref_rotation_for_equivalent_content` 过(旧格式 ref 会话 + 同内容轮换 → Ok 且 ref 更新;轮换后同 ref 重放幂等;内容真变 typed kind → 仍 Conflict);CAS 族 9/9。
+
+**回归**:
+```
+cargo test --lib product::lifecycle_store
+  → 105 passed # 全族(含 CAS/轮换/预约 + 新测试)
+cargo test --lib product::work_item_plan_compiler::tests::publish_freshness → 6 passed
+cargo test --lib product::workspace_engine::tests::single_candidate       → 70 passed
+cargo test --lib product::work_item_split_validator::tests::sg_f2         → 5 passed
+cargo test --lib product::workspace_engine::tests::conversational_gate   → 109 passed
+cargo test --lib product::workspace_engine::compile                       → 8 passed
+合计 303 passed / 0 failed(/tmp/p2-verify 隔离树 = da2e35b4 + 本修复两文件)
+```
+
+范围:lifecycle_store 全族(含 CAS/轮换/预约)+ 原 198 面(publish_freshness/single_candidate/sg_f2/conversational_gate/compile)。
