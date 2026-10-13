@@ -11,6 +11,8 @@ pub mod coding_work_item_context;
 pub mod coding_workspace_engine;
 pub mod coding_workspace_runner;
 pub mod compatibility_scan;
+pub mod entity_deletion_store;
+pub mod entity_operation_store;
 pub mod execution_record_store;
 pub mod gate_store;
 pub mod git_workspace_service;
