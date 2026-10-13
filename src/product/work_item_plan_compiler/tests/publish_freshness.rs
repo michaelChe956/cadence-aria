@@ -3,10 +3,14 @@ use super::super::{
 };
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::models::{WorkItemSplitFinding, WorkItemSplitFindingSeverity};
-use crate::product::planning_failure::PlanningFailureKind;
+use crate::product::planning_failure::{
+    PersistedEffectivePlanningEdge, PersistedPlanningStructureReport,
+    PersistedPlanningStructureSpan, PlanningEdgeSource, PlanningFailureKind, PlanningFailureSet,
+};
 use crate::product::work_item_plan_source_store::{
     PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, PlanCandidatePublicationProvenance,
     SourceRevisionRecord, SourceStoreError, SourceStoreScope, WorkItemPlanSourceStore,
+    persisted_structure_report_digest,
 };
 use sha2::{Digest, Sha256};
 
@@ -69,6 +73,8 @@ fn mechanical_report_record(
         source_revision_id: source_revision_id.to_string(),
         ir_id: ir_id.to_string(),
         report: report(source),
+        // SG3a.0：旧 fixture 形态（无结构报告），不启动新 review。
+        structure_report: None,
         content_hash: String::new(),
     };
     record.content_hash = record.content_hash().unwrap();
@@ -372,6 +378,8 @@ fn report_record_with_findings(
             compiler_version: COMPILER_VERSION.to_string(),
             findings,
         },
+        // SG3a.0：旧 fixture 形态（无结构报告），不启动新 review。
+        structure_report: None,
         content_hash: String::new(),
     };
     record.content_hash = record.content_hash().unwrap();
@@ -384,8 +392,7 @@ fn content_addressed_report_record(
     source: &str,
     findings: Vec<WorkItemSplitFinding>,
 ) -> PlanCandidateMechanicalReportRecord {
-    let mut record =
-        report_record_with_findings("", source_revision_id, ir_id, source, findings);
+    let mut record = report_record_with_findings("", source_revision_id, ir_id, source, findings);
     record.id = record.content_addressed_id().unwrap();
     record.content_hash = record.content_hash().unwrap();
     record
@@ -530,4 +537,283 @@ fn content_addressed_report_id_appends_evolved_report_without_collision() {
         vec![e2e_finding(None)],
     );
     assert_ne!(legacy_replay.id, evolved.id);
+}
+
+// ============ SG3a.0：immutable 结构报告存储与同提交构造兼容 ============
+
+fn structure_payload(
+    source_revision_id: &str,
+    ir_id: &str,
+    source: &str,
+    context_digest: &str,
+) -> PersistedPlanningStructureReport {
+    let mut payload = PersistedPlanningStructureReport {
+        source_revision_id: source_revision_id.to_string(),
+        source_hash: source_hash(source),
+        ir_id: ir_id.to_string(),
+        compiler_version: COMPILER_VERSION.to_string(),
+        rule_version: "effective-planning-graph@sg1".to_string(),
+        context_digest: context_digest.to_string(),
+        // R1 双来源边：WI-004→WI-005 canonical_input（契约+源定位）、
+        // WI-005→WI-004 change_order（[前仓索引, 后仓索引]）。
+        effective_edges: vec![
+            PersistedEffectivePlanningEdge {
+                from: "WI-004".to_string(),
+                to: "WI-005".to_string(),
+                sources: vec![PlanningEdgeSource::CanonicalInput],
+                contract_refs: vec!["contract.e2e-verification".to_string()],
+                spans: vec![PersistedPlanningStructureSpan {
+                    field: "inputs[0]".to_string(),
+                    line: 12,
+                }],
+                order_indices: Vec::new(),
+            },
+            PersistedEffectivePlanningEdge {
+                from: "WI-005".to_string(),
+                to: "WI-004".to_string(),
+                sources: vec![PlanningEdgeSource::ChangeOrder],
+                contract_refs: Vec::new(),
+                spans: Vec::new(),
+                order_indices: vec![1, 0],
+            },
+        ],
+        cycle_witness: Vec::new(),
+        findings: PlanningFailureSet::default(),
+        structurally_valid: true,
+        protected_predicates: vec![
+            "canonical_inputs_preserved".to_string(),
+            "acceptance_criteria_preserved".to_string(),
+        ],
+        instruction_refs: Vec::new(),
+        repair_audit_refs: Vec::new(),
+        report_digest: String::new(),
+    };
+    payload.report_digest = persisted_structure_report_digest(&payload).unwrap();
+    payload
+}
+
+fn sealed_structure_report_record(
+    source_revision_id: &str,
+    ir_id: &str,
+    source: &str,
+    context_digest: &str,
+) -> PlanCandidateMechanicalReportRecord {
+    let mut record = report_record_with_findings("", source_revision_id, ir_id, source, Vec::new());
+    record.structure_report = Some(structure_payload(
+        source_revision_id,
+        ir_id,
+        source,
+        context_digest,
+    ));
+    record.id = record.content_addressed_id().unwrap();
+    record.content_hash = record.content_hash().unwrap();
+    record
+}
+
+fn report_json_path(paths: &ProductAppPaths, report_id: &str) -> std::path::PathBuf {
+    paths
+        .issue_root(PROJECT_ID, ISSUE_ID)
+        .join("work-item-plan-sources")
+        .join(PLAN_ID)
+        .join("mechanical_report")
+        .join(format!("{report_id}.json"))
+}
+
+#[test]
+fn sg_03a_0_report_roundtrip_join_and_legacy_hash() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemPlanSourceStore::new(paths.clone());
+    let scope = scope();
+    let source = "# Work Item Plan\n";
+    let revision = source_revision("source-001", source);
+    store
+        .put_source_revision(PROJECT_ID, ISSUE_ID, PLAN_ID, &revision)
+        .unwrap();
+    let candidate = ir_record("ir-001", &revision.id, source);
+    store
+        .put_plan_candidate_ir(PROJECT_ID, ISSUE_ID, PLAN_ID, &candidate)
+        .unwrap();
+
+    // 旧 record 无 structure 字段：get/put/content_hash 仍合法。
+    let legacy = mechanical_report_record("report-001", &revision.id, &candidate.id, source);
+    let legacy_ref = store
+        .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &legacy)
+        .unwrap();
+    assert_eq!(
+        store.get_mechanical_report(&scope, &legacy_ref).unwrap(),
+        legacy
+    );
+    // 同 record 重放幂等（ref 稳定）。
+    assert_eq!(
+        store
+            .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &legacy)
+            .unwrap(),
+        legacy_ref
+    );
+
+    // None skip 序列化：旧形态 JSON 不含 structure_report 键。
+    let legacy_json = serde_json::to_value(&legacy).unwrap();
+    assert!(legacy_json.get("structure_report").is_none());
+    // 旧 JSON（缺字段）解析为 None，不伪合法结构证据。
+    let legacy_text = serde_json::to_string(&legacy_json).unwrap();
+    let parsed: PlanCandidateMechanicalReportRecord = serde_json::from_str(&legacy_text).unwrap();
+    assert_eq!(parsed, legacy);
+    assert!(parsed.structure_report.is_none());
+
+    // 新 Some 经 content_hash 完整绑定：put/get roundtrip 全字段保真，
+    // 机械三字段保留在同一 immutable record 内。
+    let sealed =
+        sealed_structure_report_record(&revision.id, &candidate.id, source, "ctx-digest-a");
+    assert_ne!(sealed.id, legacy.id);
+    let sealed_ref = store
+        .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &sealed)
+        .unwrap();
+    assert_eq!(
+        store.get_mechanical_report(&scope, &sealed_ref).unwrap(),
+        sealed
+    );
+    assert_eq!(sealed.report.source_revision_hash, source_hash(source));
+    assert_eq!(sealed.report.compiler_version, COMPILER_VERSION);
+
+    // get 路径篡改：盘上 payload 改 context_digest 并重算外层
+    // content_hash 封口 → report_digest 失配仍拒（拒绝依据是 payload
+    // 级绑定，不是外层哈希兜底）。
+    let report_path = report_json_path(&paths, &sealed.id);
+    let mut on_disk: PlanCandidateMechanicalReportRecord =
+        serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+    on_disk.structure_report.as_mut().unwrap().context_digest = "ctx-tampered".to_string();
+    on_disk.content_hash = on_disk.content_hash().unwrap();
+    std::fs::write(&report_path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+    assert_code(
+        store
+            .get_mechanical_report(&scope, &sealed_ref)
+            .unwrap_err(),
+        "SOURCE_STORE_CONTENT_HASH_MISMATCH",
+    );
+}
+
+#[test]
+fn sg_03a_0_structure_payload_bindings_reject_tampering() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemPlanSourceStore::new(paths);
+    let scope = scope();
+    let source = "# Work Item Plan\n";
+    let revision = source_revision("source-001", source);
+    store
+        .put_source_revision(PROJECT_ID, ISSUE_ID, PLAN_ID, &revision)
+        .unwrap();
+    let candidate = ir_record("ir-001", &revision.id, source);
+    store
+        .put_plan_candidate_ir(PROJECT_ID, ISSUE_ID, PLAN_ID, &candidate)
+        .unwrap();
+
+    let sealed =
+        sealed_structure_report_record(&revision.id, &candidate.id, source, "ctx-digest-a");
+    let sealed_ref = store
+        .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &sealed)
+        .unwrap();
+
+    // 篡改任一绑定字段后重封外层 id/content_hash（模拟完整伪造），
+    // put 仍必须按 payload 级绑定拒绝。
+    let tamper = |mutate: &dyn Fn(&mut PersistedPlanningStructureReport),
+                      expected_code: &str| {
+        let mut tampered = sealed.clone();
+        mutate(tampered.structure_report.as_mut().unwrap());
+        tampered.id = tampered.content_addressed_id().unwrap();
+        tampered.content_hash = tampered.content_hash().unwrap();
+        assert_code(
+            store
+                .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &tampered)
+                .unwrap_err(),
+            expected_code,
+        );
+    };
+
+    // source/ir/context/report_digest 任一篡改拒（plan Task SG3a.0 Step1）。
+    tamper(
+        &|p| p.source_revision_id = "source-999".to_string(),
+        "SOURCE_STORE_IDENTITY_MISMATCH",
+    );
+    tamper(
+        &|p| p.source_hash = source_hash("other source"),
+        "SOURCE_STORE_SOURCE_HASH_MISMATCH",
+    );
+    tamper(
+        &|p| p.ir_id = "ir-999".to_string(),
+        "SOURCE_STORE_IDENTITY_MISMATCH",
+    );
+    tamper(
+        &|p| p.context_digest = "ctx-tampered".to_string(),
+        "SOURCE_STORE_CONTENT_HASH_MISMATCH",
+    );
+    tamper(
+        &|p| p.report_digest = "0".repeat(64),
+        "SOURCE_STORE_CONTENT_HASH_MISMATCH",
+    );
+    tamper(
+        &|p| p.compiler_version = "work-item-plan-compiler@old".to_string(),
+        "SOURCE_STORE_COMPILER_VERSION_MISMATCH",
+    );
+
+    // 全部拒绝后，合法原 record 不受影响（旧对象字节不改）。
+    assert_eq!(
+        store.get_mechanical_report(&scope, &sealed_ref).unwrap(),
+        sealed
+    );
+}
+
+#[test]
+fn sg_03a_0_same_source_new_context_gets_new_report_id_and_ref() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = ProductAppPaths::new(temp.path().join(".aria"));
+    let store = WorkItemPlanSourceStore::new(paths.clone());
+    let scope = scope();
+    let source = "# Work Item Plan\n";
+    let revision = source_revision("source-001", source);
+    store
+        .put_source_revision(PROJECT_ID, ISSUE_ID, PLAN_ID, &revision)
+        .unwrap();
+    let candidate = ir_record("ir-001", &revision.id, source);
+    store
+        .put_plan_candidate_ir(PROJECT_ID, ISSUE_ID, PLAN_ID, &candidate)
+        .unwrap();
+
+    let sealed_a =
+        sealed_structure_report_record(&revision.id, &candidate.id, source, "ctx-digest-a");
+    let ref_a = store
+        .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &sealed_a)
+        .unwrap();
+    let bytes_before = std::fs::read(report_json_path(&paths, &sealed_a.id)).unwrap();
+
+    // 同 source/IR、不同 context → 须新 report ID/ref（source-only 撞历史
+    // 教训：身份由 source/IR/context/report digest 共同决定）。
+    let sealed_b =
+        sealed_structure_report_record(&revision.id, &candidate.id, source, "ctx-digest-b");
+    assert_ne!(sealed_b.id, sealed_a.id);
+    let ref_b = store
+        .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &sealed_b)
+        .unwrap();
+    assert_ne!(ref_b, ref_a);
+
+    // 旧对象字节不改；两 ref 各自取回正确 record。
+    let bytes_after = std::fs::read(report_json_path(&paths, &sealed_a.id)).unwrap();
+    assert_eq!(bytes_before, bytes_after);
+    assert_eq!(
+        store.get_mechanical_report(&scope, &ref_a).unwrap(),
+        sealed_a
+    );
+    assert_eq!(
+        store.get_mechanical_report(&scope, &ref_b).unwrap(),
+        sealed_b
+    );
+
+    // 同 payload 重放幂等（整记录相等分支，ref 稳定）。
+    assert_eq!(
+        store
+            .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &sealed_b)
+            .unwrap(),
+        ref_b
+    );
 }

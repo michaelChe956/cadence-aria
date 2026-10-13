@@ -259,6 +259,8 @@ fn conversational_gate_recovery_revision_crash_window_with_cross_round_refs_fail
         source_revision_id: source.id,
         ir_id: ir_record.id,
         report,
+        // SG3a.0：旧 fixture 形态（无结构报告）。
+        structure_report: None,
         content_hash: String::new(),
     };
     report_record.content_hash = report_record.content_hash().expect("report content hash");
@@ -490,6 +492,8 @@ fn conversational_gate_recovery_forward_evidence_completes_revision() {
         source_revision_id: source.id,
         ir_id: ir_record.id,
         report,
+        // SG3a.0：旧 fixture 形态（无结构报告）。
+        structure_report: None,
         content_hash: String::new(),
     };
     report_record.content_hash = report_record.content_hash().expect("report content hash");

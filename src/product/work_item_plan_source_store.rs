@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::planning_failure::PersistedPlanningStructureReport;
 pub use crate::product::work_item_plan_compiler::PlanCandidatePublicationProvenance;
 use crate::product::work_item_plan_compiler::{PlanCandidateIr, PlanCandidateMechanicalReport};
 
@@ -81,6 +82,13 @@ pub struct PlanCandidateMechanicalReportRecord {
     pub source_revision_id: String,
     pub ir_id: String,
     pub report: PlanCandidateMechanicalReport,
+    /// SG3a.0（plan §0.6.2）：同 record 冻结的 SG1 纯结构报告单次
+    /// 投影，与机械 refs/content_hash 在同一 immutable 对象中绑定。
+    /// `None` + serde default/skip：旧记录 JSON 不含该键、字节与
+    /// content_hash 不变，缺字段解析为 None，不原位补造结构证据；
+    /// 生产 literal 在 SG3a.1/SG6 新合法报告前恒 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structure_report: Option<PersistedPlanningStructureReport>,
     pub content_hash: String,
 }
 
@@ -104,6 +112,16 @@ impl PlanCandidateMechanicalReportRecord {
         let digest = hash_record_without_fields(self, &["id", "content_hash"])?;
         Ok(format!("report-{}", &digest[..16]))
     }
+}
+
+/// 计算持久结构报告 payload 的耐久 `report_digest`：对 payload 全字段
+/// （除 `report_digest` 自身）的 serde_json 序列化取 sha256。put/get
+/// 校验与 SG3a.1/SG6 producer 冻结 payload 必须共用本函数单源封口，
+/// 不得自造第二摘要算法。
+pub fn persisted_structure_report_digest(
+    payload: &PersistedPlanningStructureReport,
+) -> Result<String, SourceStoreError> {
+    hash_record_without_fields(payload, &["report_digest"])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -480,6 +498,27 @@ impl WorkItemPlanSourceStore {
         }
         if report.report.compiler_version != ir.ir.compiler_version {
             return Err(SourceStoreError::CompilerVersionMismatch);
+        }
+        // SG3a.0（plan §0.6.2）：Some payload 另核 digest 与同 source/IR
+        // 绑定——结构报告与机械 refs 在同一 immutable record 中同代；
+        // source/ir/context/report_digest 任一漂移即拒（context 漂移由
+        // report_digest 封口失配兜住，store 不解读 context 语义，当前
+        // context 同代性由 SG3a.1 读取时对活上下文核验）。
+        if let Some(structure) = &report.structure_report {
+            if structure.source_revision_id != report.source_revision_id
+                || structure.ir_id != report.ir_id
+            {
+                return Err(SourceStoreError::IdentityMismatch);
+            }
+            if structure.source_hash != source.source_revision_hash {
+                return Err(SourceStoreError::SourceHashMismatch);
+            }
+            if structure.compiler_version != report.report.compiler_version {
+                return Err(SourceStoreError::CompilerVersionMismatch);
+            }
+            if structure.report_digest != persisted_structure_report_digest(structure)? {
+                return Err(SourceStoreError::ContentHashMismatch);
+            }
         }
         Ok(())
     }

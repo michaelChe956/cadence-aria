@@ -553,6 +553,9 @@ impl WorkspaceEngine {
             source_revision_id: source_revision.id.clone(),
             ir_id: ir_id.clone(),
             report,
+            // SG3a.0：机械报告先落 None 结构投影；SG3a.1/SG6 新合法
+            // 报告才写 Some（同 record/content_hash 绑定）。
+            structure_report: None,
             content_hash: String::new(),
         };
         report_record.id = report_record

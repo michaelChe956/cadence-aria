@@ -247,6 +247,63 @@ impl PlanningFailureSet {
     }
 }
 
+/// SG3a.0 持久有效图边的源定位（plan §0.6.2 冻结投影）：canonical 源内
+/// 字段路径与 1-based 行号。与 engine 私有的 `PlanningStructureSpan`
+/// 同形但独立公开——source store 与 wire 不得依赖 engine 私有图类型。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedPlanningStructureSpan {
+    pub field: String,
+    pub line: usize,
+}
+
+/// SG3a.0 持久有效图边（plan §0.6.2）：`from`→`to` 及全部来源证据。
+/// `sources` 固定保留全部来源（canonical_input→`contract_refs`/`spans`、
+/// change_order→`order_indices` 为 `[前仓索引, 后仓索引]`），同端点多
+/// 来源不合并丢弃；这是 SG1 纯图的单次冻结投影，读取方不得把它回读成
+/// 图算法第二权威（不重派生边、不重算拓扑）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedEffectivePlanningEdge {
+    pub from: String,
+    pub to: String,
+    pub sources: Vec<PlanningEdgeSource>,
+    pub contract_refs: Vec<String>,
+    pub spans: Vec<PersistedPlanningStructureSpan>,
+    pub order_indices: Vec<usize>,
+}
+
+/// SG3a.0 immutable 结构报告 payload（plan §0.6.2）：SG1 纯报告的**单次
+/// 冻结投影**，随 `PlanCandidateMechanicalReportRecord.structure_report`
+/// 在同一 report-record/content_hash 中耐久保存。
+/// - 身份绑定：`source_revision_id`/`source_hash`/`ir_id`/
+///   `compiler_version`/`rule_version`/`context_digest` 与机械三 refs
+///   同代；`report_digest` 由 store 单源函数封口（payload 除该字段外
+///   全量 sha256），source/IR/context/report digest 任一漂移即拒。
+/// - 结构事实：`effective_edges`/`cycle_witness`（每跳真实、可为空
+///   合法 DAG）、`findings`/`structurally_valid`（合法报告不含未解决
+///   阻断）。
+/// - 治理引用：`protected_predicates`/`instruction_refs`/
+///   `repair_audit_refs`（SG3a.1/SG6 后续消费；初轮无修复明确空）。
+///
+/// 旧记录缺该字段解析为 `None`，仅 Unknown/参考，不原位补造结构证据；
+/// 生产 producer 在 SG3a.1/SG6 之前不写 `Some`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedPlanningStructureReport {
+    pub source_revision_id: String,
+    pub source_hash: String,
+    pub ir_id: String,
+    pub compiler_version: String,
+    pub rule_version: String,
+    pub context_digest: String,
+    pub effective_edges: Vec<PersistedEffectivePlanningEdge>,
+    pub cycle_witness: Vec<PersistedEffectivePlanningEdge>,
+    pub findings: PlanningFailureSet,
+    pub structurally_valid: bool,
+    pub protected_predicates: Vec<String>,
+    pub instruction_refs: Vec<String>,
+    pub repair_audit_refs: Vec<String>,
+    pub report_digest: String,
+}
+
 /// 耐久授权事实快照（REQ-SG-05）。全部字段由外层从既有 grant/turn/run/
 /// role-run 读取；本类型不新增入站许可，也不能绕过 gateway admission。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -74,6 +74,8 @@ fn single_candidate_review_prompt_reads_compiled_ir_and_mechanical_report() {
                 kind: None,
             }],
         },
+        // SG3a.0：旧 fixture 形态（无结构报告）。
+        structure_report: None,
         content_hash: String::new(),
     };
     report.content_hash = report.content_hash().expect("report content hash");

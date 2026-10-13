@@ -545,6 +545,8 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
             compiler_version: ir_record.ir.compiler_version.clone(),
             findings: Vec::new(),
         },
+        // SG3a.0：旧 fixture 形态（无结构报告）。
+        structure_report: None,
         content_hash: String::new(),
     };
     report.content_hash = report.content_hash().expect("report content hash");

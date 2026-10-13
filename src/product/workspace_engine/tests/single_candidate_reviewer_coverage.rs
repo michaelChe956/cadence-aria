@@ -130,6 +130,8 @@ fn single_candidate_reviewer_coverage_prompt_contains_projection_and_gap_teachin
                 kind: None,
             }],
         },
+        // SG3a.0：旧 fixture 形态（无结构报告）。
+        structure_report: None,
         content_hash: String::new(),
     };
     report_record.content_hash = report_record.content_hash().expect("report hash");

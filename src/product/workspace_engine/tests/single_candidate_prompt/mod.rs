@@ -139,6 +139,8 @@ fn persist_verification_artifacts(
             compiler_version: ir.ir.compiler_version,
             findings: Vec::<WorkItemSplitFinding>::new(),
         },
+        // SG3a.0：旧 fixture 形态（无结构报告）。
+        structure_report: None,
         content_hash: String::new(),
     };
     report.content_hash = report.content_hash().expect("report content hash");

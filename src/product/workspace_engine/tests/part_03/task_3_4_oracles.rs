@@ -321,6 +321,8 @@ async fn task_3_4_single_candidate_continue_uses_only_canonical_refs_and_binds_p
             compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
             findings: Vec::new(),
         },
+        // SG3a.0：旧 fixture 形态（无结构报告）。
+        structure_report: None,
         content_hash: String::new(),
     };
     report.content_hash = report.content_hash().expect("report content hash");
