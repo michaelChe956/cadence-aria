@@ -229,6 +229,30 @@ describe("toPlanCodingProgressView pure projection", () => {
       }),
     ).toBeNull();
   });
+
+  it("maps invalidated plan-run authorization to its copy instead of the raw token", () => {
+    const view = toPlanCodingProgressView(
+      planCodingProgressDto({
+        phase: "invalidated",
+        units: [
+          {
+            unit_id: "coding_unit_0011",
+            logical_work_item_id: "wi_revoked",
+            target_repository_id: "repo_busi",
+            attempt_id: "coding_attempt_busi_0001",
+            unit_status: "pending",
+            execution_state: "invalidated",
+            unsatisfied_dependency_ids: [],
+            waiting_reason: null,
+          },
+        ],
+      }),
+    );
+
+    expect(view.units[0]?.executionState).toBe("invalidated");
+    expect(view.units[0]?.executionStateLabel).toBe("授权已失效");
+    expect(view.units[0]?.waitingLabel).toBeNull();
+  });
 });
 
 const LOCAL_UNITS: CodingExecutionUnit[] = [

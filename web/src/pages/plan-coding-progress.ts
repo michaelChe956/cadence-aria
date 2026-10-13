@@ -49,7 +49,8 @@ export type PlanCodingProgressView = {
 };
 
 // execution_state 值域文案：initialized=初始化桶物化（无 provider 事实），
-// running=provider 真实运行——两者必须可区分。
+// running=provider 真实运行——两者必须可区分；invalidated=plan-run 授权失效
+// 投影（成员删除/精确 purge 后），与 unit 事实状态无关。
 const EXECUTION_STATE_LABELS: Record<string, string> = {
   initialized: "已初始化",
   running: "provider 运行中",
@@ -57,7 +58,12 @@ const EXECUTION_STATE_LABELS: Record<string, string> = {
   waiting_slot: "等待执行槽位",
   paused: "安全暂停",
   completed: "已完成",
+  invalidated: "授权已失效",
 };
+
+function executionStateLabel(state: string): string {
+  return EXECUTION_STATE_LABELS[state] ?? state;
+}
 
 // REQ-CS-06 冻结等待文案。
 const WAITING_REASON_LABELS: Record<string, string> = {
@@ -65,10 +71,6 @@ const WAITING_REASON_LABELS: Record<string, string> = {
   execution_slot_occupied: "等待执行槽位",
   plan_coding_continuation_not_enabled: "下一项编排尚未启用",
 };
-
-function executionStateLabel(state: string): string {
-  return EXECUTION_STATE_LABELS[state] ?? state;
-}
 
 /** 等待文案：waiting_reason 优先，缺失时仅按 execution_state 兜底投影。 */
 export function planCodingWaitingLabel(

@@ -85,6 +85,58 @@ describe("onboarding 锚点契约（宿主组件渲染）", () => {
     expect(screen.getByTestId("onboarding-anchor-coding-progress")).toBeInTheDocument();
   });
 
+  it("Coding 组进度区在聚合分支同样暴露进度锚点（第 13 步契约）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            plan_id: "plan_0001",
+            bound_plan_revision_id: "plan_revision_0002",
+            command_id: null,
+            mode: null,
+            phase: "started",
+            primary_attempt_id: "coding_attempt_0001",
+            selected_unit_id: null,
+            selected_attempt_id: null,
+            target_attempts: [],
+            units: [
+              {
+                unit_id: "coding_unit_0001",
+                logical_work_item_id: "wi_0001",
+                target_repository_id: "repo_busi",
+                attempt_id: "coding_attempt_0001",
+                unit_status: "running",
+                execution_state: "running",
+                unsatisfied_dependency_ids: [],
+                waiting_reason: null,
+              },
+            ],
+            plan_complete: false,
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="plan_0001"
+        currentWorkItemId="wi_0001"
+        units={[{ logical_work_item_id: "wi_0001", status: "running" } as never]}
+        projectId="project_0001"
+        issueId="issue_0001"
+        selectedAttemptId="coding_attempt_0001"
+      />,
+    );
+
+    // 先等聚合分支真正渲染，再同步查锚点——不允许 legacy 初渲染蒙混过关。
+    expect(await screen.findByTestId("plan-coding-progress")).toBeInTheDocument();
+    expect(screen.getByTestId("onboarding-anchor-coding-progress")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
   it("配置引用的锚点全部为稳定非空字符串，且手动 13 步互不重复（复用的 Coding 入口除外）", () => {
     const steps = getEnabledOnboardingSteps();
     const anchors = steps.map((step) => step.anchorTestId);

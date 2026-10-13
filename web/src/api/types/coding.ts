@@ -559,14 +559,17 @@ export type PlanCodingStartRequest = {
 export type PlanCodingLeaseState = "absent" | "held" | "contested";
 
 // execution_state 值域 initialized|running|waiting_dependency|waiting_slot|paused|
-// completed——provider 事实与初始化桶首 unit Running（物化事实）严格区分。
+// completed|invalidated——provider 事实与初始化桶首 unit Running（物化事实）
+// 严格区分；invalidated 为 plan-run 授权失效投影（成员删除/精确 purge 后），
+// 不与 unit 事实状态混写。
 export type PlanCodingExecutionState =
   | "initialized"
   | "running"
   | "waiting_dependency"
   | "waiting_slot"
   | "paused"
-  | "completed";
+  | "completed"
+  | "invalidated";
 
 // waiting_reason 值域 dependency_not_ready|execution_slot_occupied|
 // plan_coding_continuation_not_enabled（依赖优先于暂停文案）。

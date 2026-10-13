@@ -3,7 +3,7 @@
 - Change：`openspec/changes/fix-multi-repo-group-coding-start/`（Task 3.1，REQ-CS-01/06/08）
 - Plan：`cadence/plans/2026-10-13_实施计划_多仓分组coding启动_v1.0.md` §7
 - Worktree：`.worktrees/feat-b-0808-add-monorepo`（分支 feat-b-0808-add-monorepo）
-- 状态：DONE（红→绿→vitest 全量+build 双绿；独立 commit `fix: N6 前端 plan 一键启动+聚合进度（GET互证/单发POST/selected打开/防抖重试/v1不变）`）
+- 状态：DONE（红→绿→vitest 全量+build 双绿；初版 commit `fix: N6 前端 plan 一键启动+聚合进度（GET互证/单发POST/selected打开/防抖重试/v1不变）`；P2 修复轮 commit `fix: N6 invalidated镜像与onboarding锚点`）
 
 ## 交付（两新建 + 八窄改）
 
@@ -26,8 +26,9 @@
   `countPlanTargetRepositories`（plan work items 落 ≥2 个非兼容投影 target 仓才走新
   链）。多仓无现成 attempt：GET 聚合取 `bound_plan_revision_id` → 单发 POST
   `startPlanCoding`（`command_id` 一次用户动作生成、失败重试同 plan 复用同一
-  command）→ 打开 `selected_attempt_id ?? primary_attempt_id`（primary 仅打开投影），
-  无 ready 首项时停留抽屉提示等待不导航；在途 `planCodingStartInFlightRef` 防双击/
+  command）→ 打开 `selected_attempt_id ?? primary_attempt_id`——selected 缺失时
+  打开 primary 为设计接受（纯查看入口，不代表启动成功）；两 id 均缺失（零绑定
+  等待窗）才停留抽屉提示等待不导航；在途 `planCodingStartInFlightRef` 防双击/
   请求中重复出站；失败走错误横幅。已有 group attempt（多仓或单仓）：原样直接打开，
   零 POST（不把 latestGroupAttempt 存在当开始成功）。单仓/无分仓投影：v1 旧
   `createGroupCodingAttempt` 端点原路径零改动。
@@ -84,3 +85,19 @@
   同窗口串行移交。
 - 发布/真人启动门禁维持：N6 UI 落地不代表开放真人启动；真 provider 验收属 Main
   统一窗口（plan §9.2），REQ-CS-04 的真实 Git/provider 证据不在本包冒充。
+
+## P2 修复轮（Main 审查派回，2×P2）
+
+- **P2-1（invalidated 镜像）**：`types/coding.ts` `PlanCodingExecutionState`
+  union 补 `"invalidated"`（plan-run 授权失效投影：成员删除/精确 purge 后，与
+  unit 事实状态无关）；`plan-coding-progress.ts` `EXECUTION_STATE_LABELS` 增
+  `invalidated: "授权已失效"`，注释含物化事实区分说明。红：
+  `expected 'invalidated' to be '授权已失效'`（原显示英文 token）。
+- **P2-2（onboarding 锚点）**：聚合分支外层补
+  `data-testid="onboarding-anchor-coding-progress"` 包裹 div（section 类名/断言
+  不变），恢复 onboarding 第 13 步锚点契约；`anchors.test.tsx` 补聚合分支断言
+  （先 `findByTestId("plan-coding-progress")` 确认聚合已渲染，再同步查锚点，
+  杜绝 legacy 初渲染蒙混）。红：`Unable to find onboarding-anchor-coding-progress`。
+- 非阻断观察（selected 缺失恒打开 primary）按设计接受，上文表述已同步弱化。
+- 证据：定向 6 files / **82 tests 全绿**（+2 新测）；全量 `pnpm test` **213
+  files / 2145 tests 全绿**；`pnpm build` **成功**。

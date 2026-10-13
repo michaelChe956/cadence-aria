@@ -27,6 +27,9 @@ function currentUnitIndex(
  * （bound target attempts 全景：owning 仓/依赖/槽位/暂停文案），selected WS 仍是
  * 局部实时通道；GET 缺席或失败时静默降级回既有单仓局部投影，不新增 plan 全局
  * 事件框架。refreshKey 变化（手动刷新/运行时快照更新）触发重拉。
+ *
+ * 两个分支都携带 onboarding 第 13 步锚点 `onboarding-anchor-coding-progress`
+ * （聚合分支由外层包裹 div 提供，局部分支沿 section 本体）。
  */
 export function CodingWorkspaceGroupProgress({
   planId,
@@ -78,45 +81,47 @@ export function CodingWorkspaceGroupProgress({
 
   if (aggregate) {
     return (
-      <section
-        data-testid="plan-coding-progress"
-        className="grid min-h-11 shrink-0 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2 text-xs md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-center"
-      >
-        <div className="min-w-0">
-          <div className="font-semibold text-[var(--aria-ink)]">WorkItemGroup</div>
-          <div className="truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
-            {planId}
+      <div data-testid="onboarding-anchor-coding-progress">
+        <section
+          data-testid="plan-coding-progress"
+          className="grid min-h-11 shrink-0 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2 text-xs md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-center"
+        >
+          <div className="min-w-0">
+            <div className="font-semibold text-[var(--aria-ink)]">WorkItemGroup</div>
+            <div className="truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
+              {planId}
+            </div>
           </div>
-        </div>
-        <div className="shrink-0 text-right font-mono text-[var(--aria-ink-muted)]">
-          {aggregate.completedUnitCount} / {aggregate.units.length} ·{" "}
-          {aggregate.planComplete ? "plan 完成" : "plan 未完成"}
-        </div>
-        <div className="col-span-2 min-w-0 truncate font-mono text-[11px] text-[var(--aria-ink-muted)] md:col-span-1 md:text-right">
-          {selectedAttemptId ? `selected ${selectedAttemptId}` : (aggregate.phase ?? "-")}
-        </div>
-        <ul className="col-span-2 grid min-w-0 gap-1 md:col-span-3">
-          {aggregate.units.map((unit) => (
-            <li
-              key={unit.unitId}
-              data-testid={`plan-coding-unit-${unit.logicalWorkItemId}`}
-              className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]"
-            >
-              <span className="font-semibold text-[var(--aria-ink)]">
-                {unit.logicalWorkItemId}
-              </span>
-              <span>@{unit.targetRepositoryId}</span>
-              <span>{unit.executionStateLabel}</span>
-              {unit.waitingLabel ? (
-                <span className="text-[var(--aria-primary)]">{unit.waitingLabel}</span>
-              ) : null}
-              {unit.unsatisfiedDependencyIds.length > 0 ? (
-                <span>依赖 {unit.unsatisfiedDependencyIds.join(", ")}</span>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      </section>
+          <div className="shrink-0 text-right font-mono text-[var(--aria-ink-muted)]">
+            {aggregate.completedUnitCount} / {aggregate.units.length} ·{" "}
+            {aggregate.planComplete ? "plan 完成" : "plan 未完成"}
+          </div>
+          <div className="col-span-2 min-w-0 truncate font-mono text-[11px] text-[var(--aria-ink-muted)] md:col-span-1 md:text-right">
+            {selectedAttemptId ? `selected ${selectedAttemptId}` : (aggregate.phase ?? "-")}
+          </div>
+          <ul className="col-span-2 grid min-w-0 gap-1 md:col-span-3">
+            {aggregate.units.map((unit) => (
+              <li
+                key={unit.unitId}
+                data-testid={`plan-coding-unit-${unit.logicalWorkItemId}`}
+                className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]"
+              >
+                <span className="font-semibold text-[var(--aria-ink)]">
+                  {unit.logicalWorkItemId}
+                </span>
+                <span>@{unit.targetRepositoryId}</span>
+                <span>{unit.executionStateLabel}</span>
+                {unit.waitingLabel ? (
+                  <span className="text-[var(--aria-primary)]">{unit.waitingLabel}</span>
+                ) : null}
+                {unit.unsatisfiedDependencyIds.length > 0 ? (
+                  <span>依赖 {unit.unsatisfiedDependencyIds.join(", ")}</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      </div>
     );
   }
 
