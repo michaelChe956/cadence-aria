@@ -17,10 +17,14 @@ mod revision;
 
 use history_compaction::{HistoryCompactionInput, HistoryCompactionMode, compact_history};
 
+// SG5.2 接口 re-export：生产消费在 SG5.3 delivery / SG6a.2 handler 接线，
+// 允许未使用（先例：尚未接线 typed 接口仅测试引用）。
+#[allow(unused_imports)]
 pub(crate) use human_gate_revision::{
-    LANGUAGE_RULE_FILE_CONTENT, ScCandidateTransport, ScManualRevisionPromptInput,
-    assemble_sc_revision_input, assembly_digest_of, build_sc_manual_revision_prompt,
-    sc_provider_input_budget, validate_sc_manual_revision_feedback,
+    FrozenStructuralPrompt, LANGUAGE_RULE_FILE_CONTENT, ScCandidateTransport,
+    ScManualRevisionPromptInput, assemble_sc_revision_input, assembly_digest_of,
+    build_sc_manual_revision_prompt, build_structural_revision_prompt, sc_provider_input_budget,
+    validate_sc_manual_revision_feedback,
 };
 #[cfg(test)]
 pub(crate) use human_gate_revision::{
@@ -441,10 +445,7 @@ impl WorkspaceEngine {
         contract_family: PlanAuthorOutputContract,
     ) -> Result<StreamingProviderInput, String> {
         let resume_provider_session_id = self
-            .provider_resume_session_candidate(
-                ProviderConversationRole::Author,
-                &author_provider,
-            )
+            .provider_resume_session_candidate(ProviderConversationRole::Author, &author_provider)
             .map_err(|error| error.to_string())?
             .map(|candidate| candidate.native_id);
         self.build_work_item_plan_streaming_input_with_session(
