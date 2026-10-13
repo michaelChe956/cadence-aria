@@ -26,7 +26,7 @@ fn turn(status: HumanGateTurnStatus, attempt_no: u32) -> HumanGateTurn {
 
 #[test]
 fn conversational_gate_recovery_resumes_reserved_attempt_one() {
-    let action = recover_human_gate_turn(&turn(HumanGateTurnStatus::Reserved, 1), false)
+    let action = recover_human_gate_turn(&turn(HumanGateTurnStatus::Reserved, 1), false, false)
         .expect("reserved turn should restart its unstarted provider attempt");
     assert_eq!(
         action,
@@ -36,7 +36,7 @@ fn conversational_gate_recovery_resumes_reserved_attempt_one() {
 
 #[test]
 fn conversational_gate_recovery_waits_for_running_provider() {
-    let action = recover_human_gate_turn(&turn(HumanGateTurnStatus::Running, 1), true)
+    let action = recover_human_gate_turn(&turn(HumanGateTurnStatus::Running, 1), true, false)
         .expect("running provider should be waitable");
     assert_eq!(action, HumanGateRecoveryAction::WaitForProvider);
 }
@@ -44,7 +44,8 @@ fn conversational_gate_recovery_waits_for_running_provider() {
 #[test]
 fn conversational_gate_recovery_retries_dead_provider_on_same_turn() {
     let original = turn(HumanGateTurnStatus::Running, 1);
-    let action = recover_human_gate_turn(&original, false).expect("dead provider should retry");
+    let action =
+        recover_human_gate_turn(&original, false, false).expect("dead provider should retry");
     assert_eq!(
         action,
         HumanGateRecoveryAction::ResumeSameTurn { next_attempt_no: 2 }
@@ -61,6 +62,7 @@ fn conversational_gate_recovery_fails_after_fixed_attempt_limit() {
             HumanGateTurnStatus::Running,
             HUMAN_GATE_PROVIDER_MAX_ATTEMPTS,
         ),
+        false,
         false,
     )
     .expect("attempt limit should produce a terminal action");
@@ -103,7 +105,8 @@ fn conversational_gate_recovery_preserves_event_prefix_and_budget() {
         .expect("recovery may append only a suffix");
 
     let original = turn(HumanGateTurnStatus::Running, 1);
-    let action = recover_human_gate_turn(&original, false).expect("dead provider should retry");
+    let action =
+        recover_human_gate_turn(&original, false, false).expect("dead provider should retry");
     assert!(matches!(
         action,
         HumanGateRecoveryAction::ResumeSameTurn { next_attempt_no: 2 }
@@ -218,7 +221,10 @@ fn conversational_gate_recovery_revision_crash_window_with_cross_round_refs_fail
         .expect("repository id");
     let ir = compile_work_item_plan(
         &revised_source,
-        &WorkItemPlanSourceContext { target_repository_id: repository_id, member_targets: None },
+        &WorkItemPlanSourceContext {
+            target_repository_id: repository_id,
+            member_targets: None,
+        },
     )
     .expect("compile revised source");
     let repository_profile = plan.repository_profile_ref.as_deref().map(|profile_id| {
@@ -452,7 +458,10 @@ fn conversational_gate_recovery_forward_evidence_completes_revision() {
         .expect("repository id");
     let ir = compile_work_item_plan(
         revised_source,
-        &WorkItemPlanSourceContext { target_repository_id: repository_id, member_targets: None },
+        &WorkItemPlanSourceContext {
+            target_repository_id: repository_id,
+            member_targets: None,
+        },
     )
     .expect("compile revised source");
     let repository_profile = plan.repository_profile_ref.as_deref().map(|profile_id| {
@@ -585,7 +594,7 @@ fn conversational_gate_recovery_forward_evidence_completes_revision() {
 #[test]
 fn conversational_gate_recovery_reservation_commit_restart_keeps_budget_and_turn() {
     let original = turn(HumanGateTurnStatus::Reserved, 1);
-    let action = recover_human_gate_turn(&original, false)
+    let action = recover_human_gate_turn(&original, false, false)
         .expect("reserved turn should restart attempt one after reconnect");
     assert_eq!(
         action,
@@ -984,4 +993,177 @@ async fn orphaned_candidate_snapshot_requires_recovery_before_approve() {
         CandidateRecoveryOutcome::Replayed { record, .. } if record.state
             == crate::product::models::OperationState::NeedsHuman
     ));
+}
+
+// ---------------------------------------------------------------------------
+// SG6a.1 P2 修复轮（Main 审查裁定）：recovery 车道识别结构 claim 不续跑。
+// 现场链：结构拒收已同 turn claim attempt2（活动 grant phase=
+// Attempt2Claimed，冻结机器指令 prompt 身份在案）→ 会话重开
+// recover_human_gate_turns 若按普通 Running+attempt_no<2 续跑，会以空
+// prompt spawn 并重跑原反馈 prompt——唯一 attempt2 被错误消费，REQ-CG-03
+// 机器指令驱动不成立。修后：AwaitingStructuralClosure（零写零 spawn），
+// 终结收口归 SG6a.3。
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sg_06a_1_recovery_lane_honors_structural_claim_without_resume() {
+    use crate::product::json_store::write_json;
+    use crate::product::models::workspace::{
+        StructuralGovernanceState, StructuralGrantPhase, StructuralRevisionGrant,
+    };
+    use crate::product::models::{
+        HumanGateReservation, SingleCandidatePhase, WorkspaceSessionStatus,
+    };
+    use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason};
+
+    let (_tmp, lifecycle, _plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_accepted_contract_drafts();
+    let mut session = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session");
+    session.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    session.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+    session.status = WorkspaceSessionStatus::WaitingForHuman;
+    session.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 2,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: true,
+        accepted_feedback_turns: None,
+    });
+    // 无 current refs/审批残留：确定不进 cross-round refs fail-closed 臂。
+    session.work_item_plan_source_revision_ref = None;
+    session.plan_candidate_ir_ref = None;
+    session.mechanical_report_ref = None;
+    session.approval_attempt_id = None;
+    session.approved_at = None;
+    session.compile_reservation = None;
+    session.publication_provenance_ref = None;
+    let session_path = lifecycle
+        .app_paths()
+        .issue_root(&session.project_id, &session.issue_id)
+        .join("workspace-sessions")
+        .join(format!("{}.json", session.id));
+    write_json(&session_path, &session).expect("persist human gate session");
+
+    let now = "2026-10-14T00:00:00Z".to_string();
+    let turn_id = "turn_sg6a1_p2_recovery".to_string();
+    let command_id = "cmd_sg6a1_p2_recovery".to_string();
+    let reserved_turn = HumanGateTurn {
+        turn_id: turn_id.clone(),
+        session_id: session.id.clone(),
+        command_id: command_id.clone(),
+        feedback_text: "结构拒收后的原反馈".to_string(),
+        status: HumanGateTurnStatus::Reserved,
+        attempt_no: 1,
+        budget_reserved: 1,
+        source_hash: "a".repeat(64),
+        result_artifact_ref: None,
+        failure_class: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    let reservation = HumanGateReservation {
+        command_id: command_id.clone(),
+        turn_id: turn_id.clone(),
+        provider_start_idempotency_key: format!("human_gate:{turn_id}:attempt:1"),
+        reserved_at: now,
+    };
+    let (reserved_session, _) = lifecycle
+        .compare_and_reserve_human_gate_turn(&session, reserved_turn, reservation)
+        .expect("reserve durable turn");
+    let running_turn = HumanGateTurn {
+        status: HumanGateTurnStatus::Running,
+        ..lifecycle
+            .get_human_gate_turn(&session.id, &turn_id)
+            .expect("reserved turn")
+    };
+    lifecycle
+        .update_human_gate_turn(&reserved_session, running_turn)
+        .expect("mark running");
+
+    // 注入活动 grant（真实 claim 后、终结收口前的耐久形状）：phase=
+    // Attempt2Claimed、attempt 2、prompt/instruction 身份在案。
+    let mut seeded = lifecycle
+        .get_workspace_session(&session.id)
+        .expect("reload for grant seed");
+    let before_ledger_len = seeded.provider_start_ledger.len();
+    let state = seeded
+        .structural_governance_state
+        .get_or_insert_with(StructuralGovernanceState::default);
+    state.current_grant = Some(StructuralRevisionGrant {
+        grant_id: format!("structural_grant_{turn_id}"),
+        authorization_hash: "f".repeat(64),
+        turn_id: Some(turn_id.clone()),
+        command_id: Some(command_id),
+        candidate_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        phase: Some(StructuralGrantPhase::Attempt2Claimed),
+        attempt_no: 2,
+        prompt_ref: Some(format!("structural-prompt://{turn_id}")),
+        prompt_digest: Some("d".repeat(64)),
+        instruction_digest: Some("b".repeat(64)),
+        failing_source_hash: Some("a".repeat(64)),
+        review_identity: None,
+        granted_at: "2026-10-14T00:00:00Z".to_string(),
+    });
+    write_json(&session_path, &seeded).expect("persist structural claim fixture");
+
+    // 会话重开恢复（provider dead）：不 ResumeSameTurn——结构 claim 的
+    // attempt2 属于冻结机器指令 prompt，不是空 prompt 的原反馈重跑。
+    let actions = engine
+        .recover_human_gate_turns(false)
+        .expect("recovery must classify");
+    assert_eq!(
+        actions,
+        vec![(
+            turn_id.clone(),
+            HumanGateRecoveryAction::AwaitingStructuralClosure
+        )],
+        "structurally-claimed turn must await SG6a.3 closure, not resume with the original feedback prompt"
+    );
+    // durable 零推进：turn 仍 Running/attempt 1，grant 原样，ledger 零新增。
+    let after_turn = lifecycle
+        .get_human_gate_turn(&session.id, &turn_id)
+        .expect("turn after recovery");
+    assert_eq!(after_turn.status, HumanGateTurnStatus::Running);
+    assert_eq!(
+        after_turn.attempt_no, 1,
+        "recovery must not advance the attempt"
+    );
+    let after_session = lifecycle
+        .get_workspace_session(&session.id)
+        .expect("session after recovery");
+    assert_eq!(
+        after_session.provider_start_ledger.len(),
+        before_ledger_len,
+        "no provider start is spawned from the recovery lane"
+    );
+    let grant = after_session
+        .structural_governance_state
+        .and_then(|state| state.current_grant)
+        .expect("grant untouched by recovery");
+    assert_eq!(grant.phase, Some(StructuralGrantPhase::Attempt2Claimed));
+    assert_eq!(grant.attempt_no, 2);
+
+    // 判定面纯函数：claim 标志直接驱动 AwaitingStructuralClosure；provider
+    // 在跑时仍先 WaitForProvider（attempt2 在飞）。
+    let claimed_running = turn(HumanGateTurnStatus::Running, 1);
+    assert_eq!(
+        recover_human_gate_turn(&claimed_running, true, true).expect("classify"),
+        HumanGateRecoveryAction::WaitForProvider
+    );
+    assert_eq!(
+        recover_human_gate_turn(&claimed_running, false, true).expect("classify"),
+        HumanGateRecoveryAction::AwaitingStructuralClosure
+    );
+    // 无 claim 的既有语义逐字不变。
+    assert_eq!(
+        recover_human_gate_turn(&claimed_running, false, false).expect("classify"),
+        HumanGateRecoveryAction::ResumeSameTurn { next_attempt_no: 2 }
+    );
 }

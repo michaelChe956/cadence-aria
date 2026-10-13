@@ -28,14 +28,26 @@ pub(crate) enum HumanGateRecoveryAction {
     BlockedByLcRecovery {
         recovery_id: String,
     },
+    /// SG6a.1 P2 修复轮（Main 审查裁定）：结构拒收已同 turn claim
+    /// attempt2（活动 grant phase=Attempt2Claimed，冻结机器指令 prompt 身份
+    /// 在案）但 L1 交付/终结尚未收口——recovery 车道不 ResumeSameTurn
+    ///（空 prompt 重跑原反馈 prompt 会错消费唯一 attempt2，违背
+    /// REQ-CG-03 机器指令驱动）、不 MarkFailed、不增 attempt、不 spawn；
+    /// 终结收口（含 release/门交互恢复）归 SG6a.3。
+    AwaitingStructuralClosure,
 }
 
 /// Classify a durable turn without allocating a new turn or changing the
 /// session budget. A running provider is left alone; a dead provider resumes
 /// the same logical turn until the fixed attempt limit is reached.
+///
+/// `structural_attempt_claimed`（SG6a.1 P2）：session 活动 grant 绑定本 turn
+/// 且 phase=Attempt2Claimed（结构拒收已 claim attempt2）——由调用方从
+/// durable 聚合状态读取，判定面保持纯函数。
 pub(crate) fn recover_human_gate_turn(
     turn: &HumanGateTurn,
     provider_is_running: bool,
+    structural_attempt_claimed: bool,
 ) -> Result<HumanGateRecoveryAction, String> {
     if turn.attempt_no == 0 {
         return Err("human gate turn attempt_no must start at 1".to_string());
@@ -60,6 +72,13 @@ pub(crate) fn recover_human_gate_turn(
         HumanGateTurnStatus::Running => {
             if provider_is_running {
                 return Ok(HumanGateRecoveryAction::WaitForProvider);
+            }
+            // SG6a.1 P2（Main 审查裁定）：结构拒收已同 turn claim attempt2
+            //（活动 grant phase=Attempt2Claimed）——attempt2 属于冻结机器
+            // 指令 prompt，不属空 prompt 的原反馈重跑；recovery 车道不
+            // resume/不 MarkFailed/不增 attempt，终结收口归 SG6a.3。
+            if structural_attempt_claimed {
+                return Ok(HumanGateRecoveryAction::AwaitingStructuralClosure);
             }
             if turn.attempt_no < HUMAN_GATE_PROVIDER_MAX_ATTEMPTS {
                 return Ok(HumanGateRecoveryAction::ResumeSameTurn {
@@ -280,11 +299,26 @@ impl super::WorkspaceEngine {
                 actions.push((turn.turn_id, action));
                 continue;
             }
-            let action = recover_human_gate_turn(&turn, provider_is_running)?;
+            // SG6a.1 P2：活动 grant 绑定本 turn 且 phase=Attempt2Claimed =
+            // 结构拒收已 claim attempt2（冻结机器指令 prompt 身份在案）。
+            let structural_attempt_claimed = expected
+                .structural_governance_state
+                .as_ref()
+                .and_then(|state| state.current_grant.as_ref())
+                .is_some_and(|grant| {
+                    grant.turn_id.as_deref() == Some(turn.turn_id.as_str())
+                        && grant.phase
+                            == Some(
+                                crate::product::models::workspace::StructuralGrantPhase::Attempt2Claimed,
+                            )
+                });
+            let action =
+                recover_human_gate_turn(&turn, provider_is_running, structural_attempt_claimed)?;
             match &action {
                 HumanGateRecoveryAction::WaitForProvider
                 | HumanGateRecoveryAction::CompletedRevision
-                | HumanGateRecoveryAction::BlockedByLcRecovery { .. } => {}
+                | HumanGateRecoveryAction::BlockedByLcRecovery { .. }
+                | HumanGateRecoveryAction::AwaitingStructuralClosure => {}
                 HumanGateRecoveryAction::ResumeSameTurn { next_attempt_no } => {
                     let mut resumed = turn.clone();
                     resumed.status = HumanGateTurnStatus::Running;
