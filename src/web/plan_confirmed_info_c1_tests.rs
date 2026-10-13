@@ -258,6 +258,8 @@ fn c1_waiting_items_include_identity_and_actions() {
                 message: "provider outputs paths outside baseline without create intent"
                     .to_string(),
                 work_item_ids: vec![],
+                // F1.2：fixture 沿旧 record 形态（kind=None）。
+                kind: None,
             }],
             abort_requested_at: None,
             failure_reason: Some("intent_undeclared".to_string()),

@@ -755,6 +755,8 @@ fn make_work_item_plan_engine_with_draft_candidate(
                     code: "W001".to_string(),
                     message: "scope overlap risk".to_string(),
                     work_item_ids: vec![work_item_1.id.clone()],
+                    // F1.2：fixture 沿旧 record 形态（kind=None）。
+                    kind: None,
                 }],
             },
         )

@@ -318,12 +318,16 @@ fn seeded_gate_findings() -> Vec<WorkItemSplitFinding> {
             code: "WI_DEP_CYCLE".to_string(),
             message: "work item dependency cycle: wi_a -> wi_b -> wi_a".to_string(),
             work_item_ids: vec!["wi_a".to_string(), "wi_b".to_string()],
+            // F1.2：fixture 沿旧 record 形态（kind=None）。
+            kind: None,
         },
         WorkItemSplitFinding {
             severity: WorkItemSplitFindingSeverity::Warning,
             code: "WI_MISSING_VERIFICATION".to_string(),
             message: "work item wi_c has no verification plan".to_string(),
             work_item_ids: vec!["wi_c".to_string()],
+            // F1.2：fixture 沿旧 record 形态（kind=None）。
+            kind: None,
         },
     ]
 }

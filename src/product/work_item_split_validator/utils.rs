@@ -5,11 +5,15 @@ pub(crate) fn error(
     message: impl Into<String>,
     work_item_ids: Vec<String>,
 ) -> WorkItemSplitFinding {
+    // F1.2（REQ-SG-01/02/02A）：旧三参签名保持不变，恒写 kind=None
+    //（None 按 Unknown 投影，不产生 L1 自动资格）；显式 kind 工厂与全
+    // caller 清切归 F2b，本包不得从 code/message 推导 kind。
     WorkItemSplitFinding {
         severity: WorkItemSplitFindingSeverity::Error,
         code: code.to_string(),
         message: message.into(),
         work_item_ids,
+        kind: None,
     }
 }
 
@@ -18,11 +22,13 @@ pub(crate) fn warning(
     message: impl Into<String>,
     work_item_ids: Vec<String>,
 ) -> WorkItemSplitFinding {
+    // F1.2：同 error——旧三参签名不变，恒写 kind=None。
     WorkItemSplitFinding {
         severity: WorkItemSplitFindingSeverity::Warning,
         code: code.to_string(),
         message: message.into(),
         work_item_ids,
+        kind: None,
     }
 }
 

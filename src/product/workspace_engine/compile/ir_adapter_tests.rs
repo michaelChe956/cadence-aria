@@ -110,6 +110,8 @@ fn ir_adapter_rejects_mechanical_error_before_pure_prepare() {
             code: "mechanical_error".to_string(),
             message: "invalid candidate".to_string(),
             work_item_ids: Vec::new(),
+            // F1.2：fixture 沿旧 record 形态（kind=None）。
+            kind: None,
         });
     let journal = crate::product::work_item_plan_store::observe_compile_transaction_writes();
     assert!(initial_plan_compile_input_from_ir(&context, &ir(), &report).is_err());

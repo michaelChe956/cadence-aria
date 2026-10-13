@@ -17,7 +17,9 @@
 //!   诊断已带 key 与 1-based 行号；仅当该行 strip 后为 `- <key>:` 或 `<key>:`
 //!   形态才删——未知 section/非 key-value 行/section 外内容共用同一 code，保持
 //!   失败关闭。复验 F-41：修订轮 author 在 `### Handoff Schema` 自创
-//!   `requested_fields` 属此形态）。
+//!   `requested_fields` 属此形态。F1.2：携带 typed kind 的诊断（非法二级
+//!   heading，REQ-SG-02 第414行场景）按类型排除，绝不按共享码删 heading 行；
+//!   重复 trusted command 的资格同样只认结构身份，不匹配自由文本 message）。
 //!
 //! 修复落在 markdown source 层再走正常重编译（source/IR/report 新鲜一致，
 //! `verify_publish_freshness` 链路零变化）；残余 Error（`required_contract_missing`/
@@ -129,10 +131,18 @@ fn apply_unknown_structured_key_autorepair(
 }
 
 /// 单条 `unknown_structured_key` 诊断能否精确映射到「该 key 自己的源行」。
-/// 仅当诊断行号在界内且该行 strip 后为 `- <key>:` 或 `<key>:` 形态时返回该行号；
-/// 行号错位/越界、或 field 与行内容不符（未知 section、非 key/value 行等）返回
-/// None。
+/// F1.2：携带 typed kind 的诊断（如非法二级 heading）先按类型整体排除；
+/// 其余仅当诊断行号在界内且该行 strip 后为 `- <key>:` 或 `<key>:` 形态时
+/// 返回该行号；行号错位/越界、或 field 与行内容不符（未知 section、非
+/// key/value 行等）返回 None。
 fn unknown_structured_key_line(source: &str, diagnostic: &CompilerDiagnostic) -> Option<usize> {
+    // F1.2（REQ-SG-02 第414行场景）：机械删除资格切 compiler typed——
+    // 携带 typed kind 的诊断（如非法二级 heading，携 source 原行/field/
+    // example）不是可删除的未知 key 行，按类型整体排除，绝不按共享
+    // unknown_structured_key 码删行；未 typed 诊断仍走逐行精确映射。
+    if diagnostic.kind.is_some() {
+        return None;
+    }
     let key = diagnostic.field.trim();
     if key.is_empty() {
         return None;
@@ -187,9 +197,13 @@ fn apply_duplicate_trusted_command_autorepair(
 }
 
 fn is_duplicate_trusted_command_diagnostic(diagnostic: &CompilerDiagnostic) -> bool {
-    diagnostic.code == "lowering_error"
+    // F1.2（REQ-SG-01/02A）：资格切 compiler typed——只认 compiler 源分支
+    // 的结构身份（code+field）且诊断未携带 typed kind；不再从自由文本
+    // message 匹配资格（不从 message 分类）。携带 typed kind 的诊断一律
+    // 排除机械删除，交 typed 指令通道处理。
+    diagnostic.kind.is_none()
+        && diagnostic.code == "lowering_error"
         && diagnostic.field == "trusted_commands"
-        && diagnostic.message == "同一 Work Item 不得重复引用 trusted command。"
 }
 
 fn duplicate_trusted_command_repair(
@@ -865,6 +879,7 @@ mod tests {
             field: field.to_string(),
             message: "未知结构化 key 必须拒绝。".to_string(),
             repair_example: "- kind: backend".to_string(),
+            kind: None,
         }
     }
 
@@ -980,6 +995,78 @@ mod tests {
             !diagnostics
                 .iter()
                 .any(is_duplicate_trusted_command_diagnostic)
+        );
+    }
+
+    // —— F1.2（REQ-SG-01/02/02A）：机械删除资格切 compiler typed ——
+
+    #[test]
+    fn sg_f1_2_typed_heading_never_deleted_as_unknown_key() {
+        use crate::product::planning_failure::PlanningFailureKind;
+
+        // REQ-SG-02 第414行场景（R2 防线）：非法二级 heading 与未知 key
+        // 共享 unknown_structured_key code；heading 分支携带 typed kind，
+        // 机械删除资格按 typed payload 排除——绝不按共享码删 heading 行，
+        // 混合集合同样整体 fail-closed。
+        let source = unknown_structured_key_candidate().replacen(
+            "### Blockers\n",
+            "## 验收说明\n### Blockers\n",
+            1,
+        );
+        let diagnostics = compile_work_item_plan(&source, &source_context())
+            .expect_err("heading + unknown key 必须编译失败");
+        let heading = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.field == "work_item_heading")
+            .expect("heading 诊断必须存在");
+        assert_eq!(heading.code, "unknown_structured_key");
+        assert!(matches!(
+            &heading.kind,
+            Some(PlanningFailureKind::InvalidWorkItemHeading {
+                line,
+                raw_line,
+                ..
+            }) if *line >= 1 && raw_line == "## 验收说明"
+        ));
+        assert!(
+            apply_unknown_structured_key_autorepair(&source, &diagnostics).is_none(),
+            "typed heading 排除机械删除资格，混合集合整体 fail-closed"
+        );
+        assert!(
+            converge_work_item_plan_source(&source, source_context()).is_err(),
+            "heading 错误不经机械删除收敛"
+        );
+    }
+
+    #[test]
+    fn sg_f1_2_duplicate_command_qualification_is_structural_not_message() {
+        use crate::product::planning_failure::PlanningFailureKind;
+
+        // 资格切 compiler typed（F1.2）：重复 trusted command 的机械删除
+        // 资格只认结构身份（code+field）且未携带 typed kind——message
+        // 文案漂移不改变判定（REQ-SG-01：不从自由文本分类）。
+        let drifted = CompilerDiagnostic {
+            code: "lowering_error".to_string(),
+            line: 9,
+            field: "trusted_commands".to_string(),
+            message: "文案漂移后的重复 trusted command 描述".to_string(),
+            repair_example: "- command: cargo test --locked --lib target".to_string(),
+            kind: None,
+        };
+        assert!(is_duplicate_trusted_command_diagnostic(&drifted));
+        let mut other_field = drifted.clone();
+        other_field.field = "kind".to_string();
+        assert!(!is_duplicate_trusted_command_diagnostic(&other_field));
+        let mut typed = drifted.clone();
+        typed.kind = Some(PlanningFailureKind::InvalidWorkItemHeading {
+            line: 1,
+            field: "work_item_heading".to_string(),
+            raw_line: "## 验收说明".to_string(),
+            example: "## Work Item WI-001: fixture".to_string(),
+        });
+        assert!(
+            !is_duplicate_trusted_command_diagnostic(&typed),
+            "携带 typed kind 的诊断不参与机械删除"
         );
     }
 }

@@ -308,6 +308,8 @@ mod tests {
                 message: message.to_string(),
                 work_item_ids: Vec::new(),
                 severity: crate::product::models::WorkItemSplitFindingSeverity::Error,
+                // F1.2：fixture 沿旧 record 形态（kind=None）。
+                kind: None,
             }],
         }
     }

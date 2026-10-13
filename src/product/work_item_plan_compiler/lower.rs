@@ -304,6 +304,9 @@ fn resolve_item_target_repository_id(
             field: work_item_id.to_string(),
             message,
             repair_example: "### Plan Intent\n- intent: create\n- provider_work_item_id: WI-001\n- intent_target_kind: logical_codebase\n- intent_target_codebase: <logical codebase id>\n- intent_target_logical_repo: <成员逻辑仓 UUID>".to_string(),
+            // F1.2：语义错 fail-closed 诊断未 typed（target 归属 typed
+            // producer 归 F2a/SG1），不猜 kind。
+            kind: None,
         });
     };
 
@@ -1103,5 +1106,8 @@ fn diagnostic(field: &str, message: &str, line: usize, repair_example: &str) -> 
         field: field.to_string(),
         message: message.to_string(),
         repair_example: repair_example.to_string(),
+        // F1.2：lowering 分支尚未 typed（enum 缺事实不猜、line=0 不伪行）；
+        // 显式 typed 工厂归后续 SG 包按事实接入，不从 code/message 推导。
+        kind: None,
     }
 }

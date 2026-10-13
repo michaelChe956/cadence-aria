@@ -70,6 +70,8 @@ fn single_candidate_review_prompt_reads_compiled_ir_and_mechanical_report() {
                 code: "review_warning".to_string(),
                 message: "mechanical summary evidence".to_string(),
                 work_item_ids: vec!["wi-b".to_string()],
+                // F1.2：fixture 沿旧 record 形态（kind=None）。
+                kind: None,
             }],
         },
         content_hash: String::new(),

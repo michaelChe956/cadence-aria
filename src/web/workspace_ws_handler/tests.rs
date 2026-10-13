@@ -1091,6 +1091,8 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
         code: "write_scope_required".to_string(),
         message: "work item must have at least one exclusive_write_scope".to_string(),
         work_item_ids: vec!["wi_001".to_string()],
+        // F1.2：fixture 沿旧 record 形态（kind=None）。
+        kind: None,
     };
     let plan = lifecycle
         .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {

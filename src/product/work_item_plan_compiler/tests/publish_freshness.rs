@@ -128,6 +128,8 @@ fn verify_publish_freshness_fails_closed_for_stale_source_compiler_and_report() 
         code: "mechanical_failure".to_string(),
         message: "mechanical validation found an error".to_string(),
         work_item_ids: Vec::new(),
+        // F1.2：fixture 沿旧 record 形态（kind=None，序列化字节不变）。
+        kind: None,
     });
     assert_eq!(
         verify_publish_freshness(source, &candidate, &error_report),

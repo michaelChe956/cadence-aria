@@ -126,6 +126,8 @@ fn single_candidate_reviewer_coverage_prompt_contains_projection_and_gap_teachin
                 code: "coverage_warning".to_string(),
                 message: "coverage fixture mechanical evidence".to_string(),
                 work_item_ids: vec!["WI-02".to_string()],
+                // F1.2：fixture 沿旧 record 形态（kind=None）。
+                kind: None,
             }],
         },
         content_hash: String::new(),

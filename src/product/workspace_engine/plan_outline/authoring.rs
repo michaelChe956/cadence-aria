@@ -262,6 +262,9 @@ impl WorkspaceEngine {
                 "Provider did not return a valid WorkItemPlan Outline structured output: {message}"
             ),
             work_item_ids: Vec::new(),
+            // F1.2：outline 解析失败 finding 恒 kind=None（旧 wire 兼容；
+            // 显式 typed 工厂归 F2b）。
+            kind: None,
         }];
         let design_context_gaps = self.current_work_item_plan_design_context_gaps();
 

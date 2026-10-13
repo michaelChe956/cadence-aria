@@ -141,13 +141,24 @@ fn parse_source(source: &str) -> (WorkItemPlanAst, Vec<CompilerDiagnostic>) {
                 items.push(ParsedItem::new(id, title, line));
                 current_item = Some(items.len() - 1);
             } else {
-                diagnostics.push(diagnostic(
-                    UNKNOWN_STRUCTURED_KEY_CODE,
+                // F1.2（REQ-SG-02 第414行场景）：非法二级 heading 是机器
+                // 事实完整的 typed 结构失败——保留 source 原行（1-based
+                // `line` + `raw_line`）、grammar `field` 与恰好一个可回喂
+                // `example`；与共享 `unknown_structured_key` 码下的未知
+                // key/游离正文分支严格分流，autorepair 不得按共享码删行。
+                diagnostics.push(CompilerDiagnostic {
+                    code: UNKNOWN_STRUCTURED_KEY_CODE.to_string(),
                     line,
-                    "work_item_heading",
-                    "二级 heading 必须是 Work Item heading。",
-                    "## Work Item WI-001: Levels API fixture",
-                ));
+                    field: "work_item_heading".to_string(),
+                    message: "二级 heading 必须是 Work Item heading。".to_string(),
+                    repair_example: "## Work Item WI-001: Levels API fixture".to_string(),
+                    kind: Some(crate::product::planning_failure::PlanningFailureKind::InvalidWorkItemHeading {
+                        line,
+                        field: "work_item_heading".to_string(),
+                        raw_line: raw_line.to_string(),
+                        example: "## Work Item WI-001: Levels API fixture".to_string(),
+                    }),
+                });
                 current_item = None;
             }
             continue;
@@ -613,6 +624,9 @@ fn diagnostic(
         field: field.to_string(),
         message: message.to_string(),
         repair_example: repair_example.to_string(),
+        // F1.2：本 helper 覆盖的 grammar 分支不携带完整 typed 事实，
+        // 一律 None（typed producer 分支单独构造，缺事实不猜）。
+        kind: None,
     }
 }
 

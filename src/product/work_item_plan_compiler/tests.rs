@@ -219,6 +219,7 @@ fn grammar_contract() {
         field: "".to_string(),
         message: "message".to_string(),
         repair_example: "example".to_string(),
+        kind: None,
     };
     assert_eq!(diagnostic.code, "missing_section");
     assert_eq!(diagnostic.line, 1);
@@ -1136,5 +1137,312 @@ fn parse_diagnostics_are_document_scoped_spanned_and_stable() {
         parse_work_item_plan(REP4_FIXTURE),
         parse_work_item_plan(REP4_FIXTURE),
         "同源 parse 的 AST 与 diagnostic 顺序必须稳定"
+    );
+}
+
+// —— F1.2（REQ-SG-01/02/02A）：compiler 源分支 typed producer ——
+// kind 由源分支显式决定，不按共享 code 桶推导；缺事实不猜、line=0
+// 不伪行；旧 JSON 无 kind 按 Unknown 投影、不能自动。
+
+#[test]
+fn sg_f1_2_compiler_kind_not_big_code_unknown_structured_key_branches() {
+    use crate::product::planning_failure::PlanningFailureKind;
+
+    // 共享 code `unknown_structured_key` 覆盖三个不同源分支：只有非法
+    // 二级 heading 分支携带完整机器事实（原行/field/example），写显式
+    // typed kind（REQ-SG-02 第414行场景）；未知 key 与游离正文分支
+    // kind=None，绝不按 code 桶统一推导（R2 事故防线）。
+    let heading_source = UNKNOWN_FIELD_FIXTURE
+        .replace("- unexpected_key: fixture-only\n", "")
+        .replacen("# Work Item Plan\n", "# Work Item Plan\n\n## 验收说明\n", 1);
+    let heading_diagnostics = lint_work_item_plan_source(&heading_source);
+    assert_eq!(heading_diagnostics.len(), 1, "{heading_diagnostics:#?}");
+    let heading = &heading_diagnostics[0];
+    assert_eq!(heading.code, "unknown_structured_key");
+    assert_eq!(heading.field, "work_item_heading");
+    let heading_line = heading_source
+        .lines()
+        .position(|line| line == "## 验收说明")
+        .expect("heading 原行必须存在")
+        + 1;
+    assert_eq!(heading.line, heading_line, "诊断行号必须指向真实原行");
+    assert_eq!(
+        heading.kind,
+        Some(PlanningFailureKind::InvalidWorkItemHeading {
+            line: heading_line,
+            field: "work_item_heading".to_string(),
+            raw_line: "## 验收说明".to_string(),
+            example: "## Work Item WI-001: Levels API fixture".to_string(),
+        }),
+        "非法二级 heading 携 source 原行/field/example 的 typed payload"
+    );
+
+    // 未知 key 分支：真实行号+key 在，但无封闭 kind 事实 → None。
+    let key_diagnostics = lint_work_item_plan_source(UNKNOWN_FIELD_FIXTURE);
+    let key = key_diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.field == "unexpected_key")
+        .expect("未知 key 诊断必须存在");
+    assert_eq!(key.code, "unknown_structured_key");
+    assert_eq!(key.line, 10, "行号必须保持真实 1-based");
+    assert_eq!(key.kind, None, "未知 key 分支缺事实不猜 kind");
+
+    // 游离正文分支（section 外内容）：同一 code，kind=None。
+    let floating_source = UNKNOWN_FIELD_FIXTURE
+        .replace("- unexpected_key: fixture-only\n", "")
+        .replacen(
+            "## Work Item WI-001: Levels API fixture\n",
+            "## Work Item WI-001: Levels API fixture\n游离正文\n",
+            1,
+        );
+    let floating_diagnostics = lint_work_item_plan_source(&floating_source);
+    let floating = floating_diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.field == "document_content")
+        .expect("游离正文诊断必须存在");
+    assert_eq!(floating.code, "unknown_structured_key");
+    assert_eq!(floating.kind, None, "游离正文分支缺事实不猜 kind");
+}
+
+#[test]
+fn sg_f1_2_compiler_kind_not_big_code_invalid_work_item_id_branches() {
+    use crate::product::planning_failure::PlanningFailureKind;
+
+    // `invalid_work_item_id` 五个源分支（token/duplicate/self/unknown/cycle）
+    // 都没有可单源映射的封闭 kind 事实：一律 None，不从 code 桶推 kind。
+    let assert_branch = |label: &str, source: &str, field: &str| {
+        let diagnostics = lint_work_item_plan_source(source);
+        let matched: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.field == field)
+            .collect();
+        assert!(
+            !matched.is_empty(),
+            "{label} 必须产生 {field} 诊断：{diagnostics:#?}"
+        );
+        for diagnostic in matched {
+            assert_eq!(diagnostic.code, "invalid_work_item_id", "{label}");
+            assert_eq!(diagnostic.kind, None, "{label} 分支缺 typed 事实不猜 kind");
+        }
+    };
+
+    assert_branch(
+        "token",
+        &UNKNOWN_FIELD_FIXTURE.replace("- task_id: TASK-001", "- task_id: TASK-XX"),
+        "task_id",
+    );
+    assert_branch(
+        "duplicate",
+        &UNKNOWN_FIELD_FIXTURE.replace(
+            "- requirement_refs: REQ-WSC-02",
+            "- requirement_refs: REQ-WSC-02\n- task_id: TASK-001",
+        ),
+        "task_id",
+    );
+    assert_branch(
+        "self",
+        &UNKNOWN_FIELD_FIXTURE.replace("- depends_on: []", "- depends_on: WI-001"),
+        "depends_on",
+    );
+    assert_branch(
+        "unknown",
+        &UNKNOWN_FIELD_FIXTURE.replace("- depends_on: []", "- depends_on: WI-999"),
+        "depends_on",
+    );
+
+    // 环分支：parse 期的声明 depends_on 环不是有效图 witness（witness
+    // 每跳须带 canonical Inputs/change_order 来源，SG1 才在有效图上产
+    // typed witness）——本分支保持 None，绝不编造 DependencyCycle。
+    let cycle_base = UNKNOWN_FIELD_FIXTURE
+        .replace("- unexpected_key: fixture-only\n", "")
+        .replace("- depends_on: []", "- depends_on: WI-002");
+    let cycle_source = format!(
+        "{cycle_base}\n{}",
+        "\n## Work Item WI-002: Cycle fixture\n\n### Identity\n- schema_version: 1\n- logical_work_item_id: WI-002\n- title: Cycle fixture\n- kind: backend\n\n### Goal\n- summary: WHEN the cycle fixture runs THE SYSTEM SHALL keep the fixture valid.\n\n### Non Goals\n- non_goals: Nothing.\n\n### Dependencies\n- depends_on: WI-001\n\n### Inputs\n\n### Outputs\n- contract_id: contract.cycle-fixture\n- capabilities: fixture.cycle\n\n### Tasks\n- task_id: TASK-002\n- statement: WHEN the cycle fixture runs THE SYSTEM SHALL cycle the fixture.\n- requirement_refs: REQ-WSC-02\n- done_when_refs: AC-002\n\n### Write Policy\n- exclusive_scopes: src/product/levels/**\n- forbidden_scopes: web/**\n\n### Acceptance Criteria\n- criterion_id: AC-002\n- statement: WHEN the cycle fixture runs THE SYSTEM SHALL cycle the fixture.\n- required_evidence: source_diff\n\n### Verification\n- check_id: CHECK-002\n- command: cargo test --locked --lib cycle_fixture\n- manual_instruction: Confirm the cycle fixture.\n- required: true\n- non_zero_test_execution_required: true\n\n### Handoff Schema\n- required_fields: commit_sha\n- provided_contract_refs: contract.cycle-fixture\n- reviewer_check_refs: AC-002\n\n### Blockers\n- reason_code: cycle_fixture_invalid\n- route: plan_repair_current\n- target_contract_refs: contract.cycle-fixture\n\n### Traceability\n- source_type: design_spec\n- source_id: design_spec_levels_0001\n- requirement_id: REQ-WSC-02"
+    );
+    let diagnostics = lint_work_item_plan_source(&cycle_source);
+    let depends: Vec<_> = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.field == "depends_on")
+        .collect();
+    assert!(
+        !depends.is_empty(),
+        "环 fixture 必须产生 depends_on 诊断：{diagnostics:#?}"
+    );
+    for diagnostic in &depends {
+        assert_eq!(diagnostic.code, "invalid_work_item_id");
+        assert_eq!(diagnostic.kind, None);
+    }
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.kind.is_none()),
+        "本 fixture 任何分支都不得编造 typed kind：{diagnostics:#?}"
+    );
+    assert!(
+        !diagnostics.iter().any(|diagnostic| matches!(
+            &diagnostic.kind,
+            Some(PlanningFailureKind::DependencyCycle { .. })
+        )),
+        "声明图环不是有效图 witness，不产 DependencyCycle typed payload"
+    );
+}
+
+#[test]
+fn sg_f1_2_compiler_kind_not_big_code_lowering_enum_no_guess() {
+    // lowering 枚举越界（pi-6 现场教训 intent: modify 同族）：真实行号在，
+    // 但无封闭 kind 事实 → 一律 None（REQ-SG-01：不从 code/message 推 kind）。
+    let context = WorkItemPlanSourceContext {
+        target_repository_id: "repo_fixture".to_string(),
+        member_targets: None,
+    };
+    for (needle, replacement, field) in [
+        (
+            "- compatibility_policy: require_all",
+            "- compatibility_policy: maybe",
+            "compatibility_policy",
+        ),
+        ("- route: plan_repair_current", "- route: maybe", "route"),
+        (
+            "- required_evidence: manual_check",
+            "- required_evidence: vibes",
+            "required_evidence",
+        ),
+        ("- intent: create", "- intent: modify", "contract.intent"),
+    ] {
+        let source = REP4_FIXTURE.replacen(needle, replacement, 1);
+        let diagnostics =
+            compile_work_item_plan(&source, &context).expect_err("枚举越界必须 fail-closed");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.field == field),
+            "{field} 诊断必须存在：{diagnostics:#?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.kind.is_none()),
+            "lowering enum 分支缺事实不猜 kind：{diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn sg_f1_2_compiler_kind_not_big_code_line_zero_not_faked() {
+    // Plan Intent 在场但字段不完整：lower 的行定位回落 line=0——
+    // 不伪行、不借此产 typed payload；typed 诊断必须绑定真实 1-based 行。
+    let source = REP4_FIXTURE.replacen(
+        "### Plan Intent\n- intent: create\n- provider_work_item_id: WI-001\n- intent_target_kind: single_repository\n- intent_target_repo: repo-levels\n",
+        "### Plan Intent\n- intent: create\n",
+        1,
+    );
+    let context = WorkItemPlanSourceContext {
+        target_repository_id: "repo_fixture".to_string(),
+        member_targets: None,
+    };
+    let diagnostics = compile_work_item_plan(&source, &context)
+        .expect_err("Plan Intent 字段缺失必须 fail-closed");
+    let zero_line: Vec<_> = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.line == 0)
+        .collect();
+    assert!(
+        !zero_line.is_empty() && zero_line.iter().all(|d| d.kind.is_none()),
+        "line=0 诊断不伪行、不猜 kind：{diagnostics:#?}"
+    );
+    for diagnostic in &diagnostics {
+        if diagnostic.kind.is_some() {
+            assert!(
+                diagnostic.line >= 1,
+                "typed payload 必须绑定真实 1-based 行：{:?}",
+                diagnostic.kind
+            );
+        }
+    }
+}
+
+#[test]
+fn sg_f1_2_compiler_kind_not_big_code_old_json_unknown_not_auto() {
+    use crate::product::models::WorkItemSplitFinding;
+    use crate::product::planning_failure::{
+        PlanningFailure, PlanningFailureEvidence, PlanningFailureKind, PlanningFailureOrigin,
+        PlanningFailureSet, PlanningRecoveryDisposition, PlanningStage,
+        StructuralAuthorizationFacts, StructuralAuthorizationKind, classify_failure_set,
+    };
+
+    // 旧 JSON 无 kind 字段：解析为 None，再序列化字节不变（immutable
+    // 哈希兼容，§0.5：不能 default 出 kind 使旧 content_hash 失效）。
+    let old_json = r#"{"severity":"error","code":"legacy_wire_0414","message":"旧 wire 记录","work_item_ids":[]}"#;
+    let finding: WorkItemSplitFinding =
+        serde_json::from_str(old_json).expect("旧 JSON 必须解析为 kind=None");
+    assert_eq!(finding.kind, None);
+    assert_eq!(
+        serde_json::to_string(&finding).expect("序列化"),
+        old_json,
+        "None skip 保证旧记录再序列化字节不变"
+    );
+
+    let facts = StructuralAuthorizationFacts {
+        authorization_id: "run_fixture".to_string(),
+        authorization_kind: StructuralAuthorizationKind::GenerationRun,
+        parent_id: "session_fixture".to_string(),
+        source_hash: "a".repeat(64),
+        context_digest: "b".repeat(64),
+        active: true,
+        anchor_waiting: false,
+        launch_unknown: false,
+        attempt_no: 1,
+        max_attempts: 3,
+    };
+    let projection_failure = |kind: PlanningFailureKind| PlanningFailure {
+        kind,
+        origin: PlanningFailureOrigin::Compiler,
+        stage: PlanningStage::Plan,
+        diagnostic_ref: "diagnostic_fixture".to_string(),
+        source_ref: "source_fixture".to_string(),
+        source_hash: "a".repeat(64),
+        evidence: PlanningFailureEvidence::default(),
+    };
+
+    // None → Unknown 投影：活动授权下整批 UnknownStop，不能自动。
+    let old_set = PlanningFailureSet {
+        failures: vec![projection_failure(PlanningFailureKind::Unknown {
+            code: finding.code.clone(),
+        })],
+    };
+    assert_eq!(
+        classify_failure_set(&old_set, &facts),
+        PlanningRecoveryDisposition::UnknownStop,
+        "旧 JSON 无 kind → Unknown，整批不自动"
+    );
+
+    // 对照：完整事实的 heading typed kind 才是 StructuralAuthor——资格
+    // 来自 typed payload，不来自 code 桶/中文文案；Some(kind) 正常落盘。
+    let typed = WorkItemSplitFinding {
+        severity: crate::product::models::WorkItemSplitFindingSeverity::Error,
+        code: finding.code.clone(),
+        message: finding.message.clone(),
+        work_item_ids: Vec::new(),
+        kind: Some(PlanningFailureKind::InvalidWorkItemHeading {
+            line: 414,
+            field: "work_item_heading".to_string(),
+            raw_line: "## 验收说明".to_string(),
+            example: "## Work Item WI-001: Levels API fixture".to_string(),
+        }),
+    };
+    let serialized = serde_json::to_string(&typed).expect("序列化");
+    assert!(
+        serialized.contains("\"kind\""),
+        "Some(kind) 必须落盘：{serialized}"
+    );
+    let typed_set = PlanningFailureSet {
+        failures: vec![projection_failure(
+            typed.kind.clone().expect("typed payload 必须在"),
+        )],
+    };
+    assert_eq!(
+        classify_failure_set(&typed_set, &facts),
+        PlanningRecoveryDisposition::StructuralAuthor
     );
 }

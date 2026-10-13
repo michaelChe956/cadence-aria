@@ -702,6 +702,8 @@ fn replace_issue_work_item_plan_candidate_swaps_draft_work_items_and_updates_pla
         code: "scope_overlap".to_string(),
         message: "watch overlaps".to_string(),
         work_item_ids: vec!["work_item_0003".to_string()],
+        // F1.2：fixture 沿旧 record 形态（kind=None）。
+        kind: None,
     };
     let snapshot: WorkItemPlanCandidateSnapshot = store
         .replace_issue_work_item_plan_candidate(

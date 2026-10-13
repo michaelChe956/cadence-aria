@@ -84,6 +84,9 @@ pub fn validate_plan_candidate_ir(
                         super::types::ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION
                     ),
                     work_item_ids: vec![work_item_id],
+                    // F1.2：preflight 族 finding 暂无 typed payload（None=
+                    // Unknown 不自动；显式 kind 工厂归 F2b）。
+                    kind: None,
                 });
             }
         }
@@ -99,6 +102,9 @@ pub fn validate_plan_candidate_ir(
                 code: diagnostic.code.clone(),
                 message: diagnostic.message.clone(),
                 work_item_ids: vec![diagnostic.field.clone()],
+                // F1.2：preflight 族 finding 暂无 typed payload（None=
+                // Unknown 不自动；显式 kind 工厂归 F2b）。
+                kind: None,
             });
         }
     }
@@ -195,6 +201,8 @@ pub fn validate_work_item_intent_contract(
                             "### Plan Intent\n- intent: create\n- provider_work_item_id: {}\n- intent_target_kind: single_repository\n- intent_target_repo: <repo>",
                             plan_item_ids.first().copied().unwrap_or("WI-001"),
                         ),
+                        // F1.2：line=0 诊断不伪行、未 typed 不猜 kind。
+                        kind: None,
                     });
                 }
             }
@@ -301,6 +309,8 @@ fn unexecutable(work_item_id: &str, message: String) -> CompilerDiagnostic {
         field: work_item_id.to_string(),
         message,
         repair_example: "修正 Plan Intent 的 provider/依赖/scope/target 声明后重新提交".to_string(),
+        // F1.2：line=0 诊断不伪行、未 typed 不猜 kind。
+        kind: None,
     }
 }
 
@@ -337,6 +347,9 @@ fn validator_diagnostic(finding: &WorkItemSplitFinding) -> CompilerDiagnostic {
         field: finding.work_item_ids.join(","),
         message: finding.message.clone(),
         repair_example: format!("修复 validator finding `{}`。", finding.code),
+        // F1.2：validator 投影无 source 行事实（line=0），不伪行、不猜 kind；
+        // finding 自身的可选 kind 由 split 侧显式携带（F2b）。
+        kind: None,
     }
 }
 

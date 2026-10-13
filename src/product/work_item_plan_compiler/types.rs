@@ -71,6 +71,12 @@ pub struct CompilerDiagnostic {
     pub message: String,
     /// 恰好一个可回喂的修复示例。
     pub repair_example: String,
+    /// F1.2（REQ-SG-01/02/02A）：源分支显式写入的 typed 失败 payload。
+    /// 只有机器事实完整的分支才写 `Some`（首个 producer：非法二级
+    /// heading，携 source 原行/field/example，REQ-SG-02 第414行场景）；
+    /// 其余分支一律 `None`——缺事实不猜、line=0 不伪行，严禁从
+    /// code/message 反推。旧 wire 记录只能折叠为 Unknown。
+    pub kind: Option<crate::product::planning_failure::PlanningFailureKind>,
 }
 
 /// options×items 预检（三族）、AC 路径×基线树核对（F-56）与 C1 Task 5 意图
