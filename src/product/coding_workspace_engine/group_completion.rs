@@ -130,9 +130,7 @@ impl CodingWorkspaceEngine {
         // first_ready 安全暂停。Running 分支在此显式落定 selected unit
         // Completed（原 complete_current_group_unit 的前半段），暂停命中即
         // 短路返回：不进入下一 unit 选择/推进，也不转 ReviewRequest/push。
-        let attempt = if facts.active.status == CodingExecutionUnitStatus::Completed {
-            attempt
-        } else {
+        if facts.active.status != CodingExecutionUnitStatus::Completed {
             self.store
                 .update_coding_unit_status(
                     &attempt.project_id,
@@ -143,9 +141,14 @@ impl CodingWorkspaceEngine {
                     Some("当前 Work Item 已完成".to_string()),
                 )
                 .map(|_| ())?;
-            self.store
-                .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?
-        };
+        }
+        // P2（审查修复）：advance/pause 一律传**更新前**的内存 attempt——
+        // `update_coding_unit_status` 会同步清空 durable active/current 指针，
+        // 重读会使 advance 的锁转移 from 身份回退到创建期 work_item_id，
+        // 非首 unit 完成时 from≠锁 owner 而 `issue_worktree_active` 失败。
+        // 旧路径（complete_current_group_unit→advance）同样传调用方内存对象；
+        // `pause_completed_plan_first_unit` 内部 `validate_attempt_lineage`
+        // 会重读磁盘，传旧值安全。
         if let Some(paused) = self
             .store
             .pause_completed_plan_first_unit(&attempt, &facts.active.id)?

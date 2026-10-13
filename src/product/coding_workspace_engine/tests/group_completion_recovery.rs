@@ -1181,3 +1181,104 @@ async fn plan_coding_n5_no_run_uses_existing_advance() {
         "no pause gate without a matching plan run"
     );
 }
+
+/// P2 修复轮：非首 unit 完成 + issue 共享 worktree 锁——advance 的锁转移
+/// from 身份必须取完成前的 current 指针（重读后指针已清会回退创建期
+/// work_item_id，使 from≠锁 owner 而 `issue_worktree_active` 失败）。
+#[tokio::test]
+async fn plan_coding_n5_second_unit_advance_keeps_worktree_lock_transfer() {
+    let fixture = group_completion_fixture(false, false);
+    create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+    );
+    // 第 1 个 unit 正常完成并推进第 2 个 unit（无共享锁记录，跳过转移）。
+    let second = fixture
+        .engine
+        .complete_group_unit_after_code_review(&fixture.attempt)
+        .await
+        .expect("first unit completes and advances");
+    let second_unit = fixture
+        .store
+        .list_coding_units(&second.project_id, &second.issue_id, &second.id)
+        .expect("units")
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == "work_item_0002")
+        .expect("second unit running");
+    assert_eq!(second_unit.status, CodingExecutionUnitStatus::Running);
+    let second = fixture
+        .store
+        .update_attempt_stage(
+            &second.project_id,
+            &second.issue_id,
+            &second.id,
+            CodingExecutionStage::ReviewRequest,
+        )
+        .expect("second unit review request stage");
+
+    // issue 共享 worktree 锁由本 attempt 持有、active 指向第 2 个 unit。
+    let lifecycle = LifecycleStore::new(fixture.store.paths());
+    lifecycle
+        .upsert_issue_shared_worktree(
+            crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput {
+                project_id: fixture.attempt.project_id.clone(),
+                issue_id: fixture.attempt.issue_id.clone(),
+                repository_id: "repository_0001".to_string(),
+                branch_name: fixture.attempt.branch_name.clone(),
+                worktree_path: fixture.worktree.clone(),
+                base_branch: fixture.original_head.clone(),
+            },
+        )
+        .expect("shared worktree record");
+    lifecycle
+        .try_acquire_issue_worktree_lock(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            "work_item_0002",
+            &second.id,
+        )
+        .expect("second unit owns the shared worktree lock");
+    create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0002",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+    );
+
+    // 第 2 个 unit 完成：锁必须成功转移到第 3 个 unit（from=work_item_0002）。
+    let third = fixture
+        .engine
+        .complete_group_unit_after_code_review(&second)
+        .await
+        .expect("second unit completion transfers the worktree lock");
+    let third_unit = fixture
+        .store
+        .list_coding_units(&third.project_id, &third.issue_id, &third.id)
+        .expect("units")
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == "work_item_0003")
+        .expect("third unit");
+    assert_eq!(third_unit.status, CodingExecutionUnitStatus::Running);
+    assert_eq!(
+        third.active_unit_id.as_deref(),
+        Some(third_unit.id.as_str())
+    );
+    let record = lifecycle
+        .get_issue_shared_worktree(&fixture.attempt.project_id, &fixture.attempt.issue_id)
+        .expect("shared worktree after transfer")
+        .expect("shared worktree after transfer");
+    assert_eq!(
+        record.current_active_work_item_id.as_deref(),
+        Some("work_item_0003")
+    );
+    assert_eq!(
+        record.current_lock_owner_id.as_deref(),
+        Some(third.id.as_str())
+    );
+}
