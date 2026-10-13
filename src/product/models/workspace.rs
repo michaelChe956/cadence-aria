@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::human_gate::{
     HumanGateReservation, HumanGateTurnStatus, UserBudgetHold, UserBudgetReceipt,
+    UserBudgetReceiptKind,
 };
 use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
 use crate::product::work_item_plan_policy::{
@@ -406,9 +407,10 @@ pub struct LcResumeRecoveryRecord {
     pub updated_at: String,
 }
 
-/// SG4a.0（plan v1.1 §0.5/§0.6.1）：结构治理唯一耐久聚合状态。纯模型
-/// 兼容迁移——旧 session 记录整体 None/空，不回填、不授予任何执行权；
-/// hold 结算/预算数学/attempt 账本归 SG4a/SG4b/SG6，runtime 镜像与
+/// SG4a.0/SG4a（plan v1.1 §0.5/§0.6.1）：结构治理唯一耐久聚合状态。旧
+/// session 记录整体 None/空，不回填、不授予任何执行权；SG4a 已落预算
+/// 数学（`available_user_budget`）与 reserve hold/claim/settle 账本
+/// （lifecycle_store），checkpoint/commit 归 SG4b/SG6，runtime 镜像与
 /// from_record 接线归 SG7a。accepted_feedback_turns 单源仍为
 /// HumanGateSnapshot，actual launch 单源仍为 provider_start_ledger，
 /// 本聚合不另立第二总账。
@@ -455,6 +457,77 @@ fn default_structural_user_budget_total() -> u32 {
     3
 }
 
+impl Default for StructuralGovernanceState {
+    /// SG4a（REQ-CG-02）：reserve 首次落 hold 时物化聚合状态；总额沿现
+    /// gate 默认 3（与 serde default 同源），不构成 grant/launch 授权。
+    fn default() -> Self {
+        Self {
+            current_grant: None,
+            user_budget_total: default_structural_user_budget_total(),
+            user_holds: Vec::new(),
+            user_receipts: Vec::new(),
+            structure_checkpoints: Vec::new(),
+            resolved_structure_facts: Vec::new(),
+            current_structure_report_ref: None,
+            current_context_digest: None,
+            current_turn_summary: None,
+            launch_reason: None,
+            launch_evidence: None,
+        }
+    }
+}
+
+/// SG4a（REQ-CG-02）：三终态 receipt＋活动 hold 的可用预算数学式——
+/// 可用 = 总额 − delivered_charge − nonstructural_failure_charge − 活动
+/// hold；released_structural 不计费；accepted_feedback_turns 是用户动作
+/// 计数、不是计费源。投影严格沿本式，不留第二计数旁路。
+impl StructuralGovernanceState {
+    /// 已交付计费轮次（delivered_charge）。
+    pub fn delivered_charges(&self) -> u32 {
+        self.user_receipts
+            .iter()
+            .filter(|receipt| receipt.kind == UserBudgetReceiptKind::DeliveredCharge)
+            .count() as u32
+    }
+
+    /// 原合同非结构失败扣次（nonstructural_failure_charge，不退）。
+    pub fn nonstructural_failure_charges(&self) -> u32 {
+        self.user_receipts
+            .iter()
+            .filter(|receipt| receipt.kind == UserBudgetReceiptKind::NonstructuralFailureCharge)
+            .count() as u32
+    }
+
+    /// 已计费额 = delivered_charge + nonstructural_failure_charge。
+    pub fn charged_receipts(&self) -> u32 {
+        self.delivered_charges() + self.nonstructural_failure_charges()
+    }
+
+    /// 活动 hold 数（每 turn 至多一条，reserve 幂等写）。
+    pub fn active_hold_count(&self) -> u32 {
+        self.user_holds.len() as u32
+    }
+
+    /// 当前可用用户预算（saturating：历史多扣不产生负数或退款授权）。
+    pub fn available_user_budget(&self) -> u32 {
+        self.user_budget_total
+            .saturating_sub(self.charged_receipts())
+            .saturating_sub(self.active_hold_count())
+    }
+
+    /// 按 turn 幂等查询终态 receipt（至多一条，三终态互斥）。
+    pub fn receipt_for_turn(&self, turn_id: &str) -> Option<&UserBudgetReceipt> {
+        self.user_receipts
+            .iter()
+            .find(|receipt| receipt.turn_id == turn_id)
+    }
+
+    /// 按 turn 幂等查询活动 hold（settle 后移除，不复活）。
+    pub fn active_hold_for_turn(&self, turn_id: &str) -> Option<&UserBudgetHold> {
+        self.user_holds.iter().find(|hold| hold.turn_id == turn_id)
+    }
+}
+
 /// 结构修订授权窗口（§0.5：绑定原 authorization hash/turn/command 与中间
 /// candidate/phase/attempt/prompt/review 身份）。SG4a.0 只落耐久形状：
 /// 缺字段默认 None/0，不构成任何新授权；claim/attempt 语义归 SG4a。
@@ -485,6 +558,14 @@ pub struct StructuralRevisionGrant {
     pub prompt_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_digest: Option<String>,
+    /// SG4a（设计 §7.2）：claim 绑定的修复指令摘要（与 prompt digest 共同
+    /// 构成 attempt 身份；旧 JSON 缺失读 None，无 claim 事实）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_digest: Option<String>,
+    /// SG4a（设计 §7.3）：claim 时绑定的失败候选 source hash（不覆盖原
+    /// turn.source_hash 授权，不冒充新授权）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing_source_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_identity: Option<String>,
     pub granted_at: String,
@@ -504,6 +585,28 @@ pub enum StructuralGrantPhase {
     Resolved,
     SystemFault,
     BusinessGate,
+}
+
+/// SG4a（plan v1.1 §0.5）：`claim_structural_attempt` 的结果。`Claimed`
+/// 携带本 turn 分配到的物理 attempt 与唯一 provider start key——真实启动
+/// 仍单源 provider_start_ledger，claim 不代写启动事实；`Replayed`＝同
+/// prompt 重复 claim（REQ-CG-02 恰一次，不加 attempt）；`Waiting`＝无
+/// 活动 grant/turn 绑定缺失/anchor waiting 等等待态（零写零新授权）；
+/// `Exhausted`＝同 turn 物理 attempt 上限已耗尽（REQ-SG-05：L0/L1 共用
+/// 同一 attempt key，无第 3 次）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StructuralClaimOutcome {
+    Claimed {
+        attempt_no: u32,
+        prompt_ref: String,
+        prompt_digest: String,
+        provider_start_key: String,
+    },
+    Replayed,
+    Waiting {
+        reason: String,
+    },
+    Exhausted,
 }
 
 /// 结构 checkpoint（§0.5：整组 refs/version/hash/context/authorization/
@@ -865,5 +968,97 @@ mod tests {
             serde_json::to_value(WorkspaceSessionStatus::Failed).unwrap(),
             "failed"
         );
+    }
+
+    // === SG4a（plan v1.1 Task SG4a）：可用预算数学式（REQ-CG-02）===
+
+    fn sg_04a_hold(turn_id: &str) -> UserBudgetHold {
+        UserBudgetHold {
+            turn_id: turn_id.to_string(),
+            command_id: format!("command_{turn_id}"),
+            source_hash: String::new(),
+            held_at: "2026-10-13T00:00:00Z".to_string(),
+        }
+    }
+
+    fn sg_04a_receipt_for(turn_id: &str, kind: UserBudgetReceiptKind) -> UserBudgetReceipt {
+        UserBudgetReceipt {
+            kind,
+            turn_id: turn_id.to_string(),
+            command_id: format!("command_{turn_id}"),
+            attempt_reason: None,
+            source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            structure_report_ref: None,
+            context_digest: None,
+            reason: None,
+            settled_at: "2026-10-13T01:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn sg_04a_budget_math_follows_terminal_receipts_and_active_holds() {
+        let mut state = StructuralGovernanceState::default();
+        assert_eq!(state.user_budget_total, 3, "总额沿现 gate 默认 3");
+        assert_eq!(state.available_user_budget(), 3);
+
+        // 活动 hold 立即占用：3 → 2，且不是已交付。
+        state.user_holds.push(sg_04a_hold("turn_0001"));
+        assert_eq!(state.active_hold_count(), 1);
+        assert_eq!(state.available_user_budget(), 2);
+        assert_eq!(state.delivered_charges(), 0);
+
+        // delivered_charge 计费：2 → 1。
+        state.user_receipts.push(sg_04a_receipt_for(
+            "turn_0000",
+            UserBudgetReceiptKind::DeliveredCharge,
+        ));
+        assert_eq!(state.delivered_charges(), 1);
+        assert_eq!(state.charged_receipts(), 1);
+        assert_eq!(state.available_user_budget(), 1);
+
+        // nonstructural_failure_charge 计费不退：1 → 0。
+        state.user_receipts.push(sg_04a_receipt_for(
+            "turn_0002",
+            UserBudgetReceiptKind::NonstructuralFailureCharge,
+        ));
+        assert_eq!(state.nonstructural_failure_charges(), 1);
+        assert_eq!(state.charged_receipts(), 2);
+        assert_eq!(state.available_user_budget(), 0);
+
+        // 超扣不产生负数（saturating）。
+        state.user_holds.push(sg_04a_hold("turn_0003"));
+        assert_eq!(state.available_user_budget(), 0);
+
+        // released_structural 不计费：release 后活动 hold 释放、可用恢复。
+        state.user_receipts.push(sg_04a_receipt_for(
+            "turn_0004",
+            UserBudgetReceiptKind::ReleasedStructural,
+        ));
+        assert_eq!(state.charged_receipts(), 2, "release 不进计费额");
+        state.user_holds.clear();
+        assert_eq!(state.available_user_budget(), 1);
+
+        // 按 turn 幂等查询。
+        assert_eq!(
+            state
+                .receipt_for_turn("turn_0000")
+                .map(|receipt| receipt.kind),
+            Some(UserBudgetReceiptKind::DeliveredCharge)
+        );
+        assert!(state.receipt_for_turn("turn_missing").is_none());
+        assert!(state.active_hold_for_turn("turn_0001").is_none());
+
+        // roundtrip：receipt.reason 缺省不生长字段（skip_none 字节合同）。
+        let encoded = serde_json::to_value(&state).unwrap();
+        assert!(
+            encoded["user_receipts"][0]
+                .as_object()
+                .unwrap()
+                .get("reason")
+                .is_none()
+        );
+        let decoded: StructuralGovernanceState = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, state);
     }
 }

@@ -158,6 +158,16 @@ pub struct ProviderStartLedgerEntry {
     pub started_at: Option<String>,
 }
 
+impl ProviderStartLedgerEntry {
+    /// SG4a（REQ-SG-05）：实际 launch 观察判别——必须同时具备 started
+    /// 事实与登记的 provider/started_at。旧预留占位条目（started=true 但
+    /// provider/started_at 缺失）不构成实际启动证据，launch 投影读
+    /// Unknown；旧 started 布尔不得冒充 actual start。
+    pub fn is_actual_launch_observation(&self) -> bool {
+        self.started && self.provider.is_some() && self.started_at.is_some()
+    }
+}
+
 /// Per-artifact review budget state. A review cycle is identified by the
 /// durable artifact key (`outline:<id>`, `draft:<outline_id>`, or `batch:<id>`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,4 +451,51 @@ fn is_valid_scope_digest(value: &str) -> bool {
     value
         .strip_prefix(SCOPE_DIGEST_PREFIX)
         .is_some_and(is_lowercase_sha256_hex)
+}
+
+#[cfg(test)]
+mod sg4a_launch_ledger_tests {
+    use super::*;
+
+    #[test]
+    fn sg_04a_actual_launch_requires_started_provider_and_observation_time() {
+        // 旧预留占位条目（reserve/attempt 里程经写：started=true、无
+        // provider/started_at）不是实际启动证据。
+        let legacy_placeholder = ProviderStartLedgerEntry {
+            provider_start_idempotency_key: "human_gate:turn_0001:attempt:1".to_string(),
+            started: true,
+            provider: None,
+            started_at: None,
+        };
+        assert!(!legacy_placeholder.is_actual_launch_observation());
+
+        // 缺 provider 或缺观察时间同样不算（partial 不冒充完整观察）。
+        let without_time = ProviderStartLedgerEntry {
+            started_at: None,
+            provider: Some("codex".to_string()),
+            ..legacy_placeholder.clone()
+        };
+        assert!(!without_time.is_actual_launch_observation());
+        let without_provider = ProviderStartLedgerEntry {
+            provider: None,
+            started_at: Some("2026-10-13T00:00:00Z".to_string()),
+            ..legacy_placeholder.clone()
+        };
+        assert!(!without_provider.is_actual_launch_observation());
+
+        // 完整登记（真实启动路径带 provider/started_at）才是实际观察。
+        let actual = ProviderStartLedgerEntry {
+            provider: Some("codex".to_string()),
+            started_at: Some("2026-10-13T00:00:00Z".to_string()),
+            ..legacy_placeholder
+        };
+        assert!(actual.is_actual_launch_observation());
+
+        // started=false 永远不是（显式未启动）。
+        let not_started = ProviderStartLedgerEntry {
+            started: false,
+            ..actual
+        };
+        assert!(!not_started.is_actual_launch_observation());
+    }
 }

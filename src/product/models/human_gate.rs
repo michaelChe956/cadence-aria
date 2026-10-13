@@ -59,9 +59,9 @@ pub struct HumanGateReservation {
     pub reserved_at: String,
 }
 
-/// SG4a.0（plan v1.1 §0.5/§0.6.1）：用户预算 hold——接受真实反馈时占用
-/// 一轮可用预算的耐久锚（按 turn 幂等）。本包只落耐久形状：旧记录恒不
-/// 产生，reserve/settle 行为归 SG4a。
+/// SG4a.0/SG4a（plan v1.1 §0.5/§0.6.1）：用户预算 hold——接受真实反馈时
+/// 由 reserve 与 session CAS 原子落盘（按 turn 幂等，见
+/// `LifecycleStore::compare_and_reserve_human_gate_turn`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserBudgetHold {
@@ -75,7 +75,8 @@ pub struct UserBudgetHold {
 }
 
 /// 三终态用户预算 receipt（REQ-CG-02/05：按 turn 幂等互斥、恰一次）。
-/// 本包只落耐久形状，结算逻辑归 SG4a。
+/// settle 由 `LifecycleStore::settle_structural_user_budget` 与 session
+/// CAS 同权威落盘。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserBudgetReceipt {
@@ -94,6 +95,12 @@ pub struct UserBudgetReceipt {
     pub structure_report_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_digest: Option<String>,
+    /// SG4a（REQ-CG-02）：结算精确 reason（provider_err/timeout/cancelled/
+    /// structural_exhausted_before_delivery 等 typed 文本；呈现/审计用，
+    /// 不是第二计数源）。旧 JSON 缺失读 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// 结算落盘时间（RFC3339 UTC）。
     pub settled_at: String,
 }
 
