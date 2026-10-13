@@ -300,6 +300,16 @@ async fn campaign_stage3_advance_confirmed_plan_is_ready_without_provider_start(
         .expect("durable units");
     assert_eq!(units.len(), group.units.len());
     assert_eq!(units.len(), attempts_work_item_count(&harness));
+    // park-1 契约:每个 coding unit 的 logical id 必须有 per-target
+    // LifecycleWorkItemRecord(coding 会话 WorkItem 臂 find(entity_id) 依赖)。
+    let per_target_ids = plan_domain_work_item_ids(&harness);
+    for unit in &units {
+        assert!(
+            per_target_ids.contains(&unit.logical_work_item_id),
+            "unit `{}` 缺少 per-target work item 记录",
+            unit.logical_work_item_id
+        );
+    }
     let binding = coding_store
         .get_plan_binding(&attempt)
         .expect("durable plan binding");
@@ -487,12 +497,26 @@ async fn campaign_stage3_advance_seeded_draft_control_matches_real_chain() {
     );
 }
 
-fn attempts_work_item_count(harness: &CampaignStage3Harness) -> usize {
+/// park-1 对齐:work-items 目录同时容纳 legacy plan.work_item_ids 域
+/// (fixture 预置,source_work_item_plan_id=None)与编译派生 per-target 域
+/// (source_work_item_plan_id 指向本 plan,id=logical work item id)。
+/// coding units 只与后者一一对应,计数/覆盖断言都取该域。
+fn plan_domain_work_item_ids(
+    harness: &CampaignStage3Harness,
+) -> std::collections::BTreeSet<String> {
+    let plan_id = harness.record_plan_id();
     harness
         .lifecycle
         .list_work_items(&harness.project_id, &harness.issue_id)
         .expect("work items")
-        .len()
+        .into_iter()
+        .filter(|record| record.source_work_item_plan_id.as_deref() == Some(plan_id.as_str()))
+        .map(|record| record.id)
+        .collect()
+}
+
+fn attempts_work_item_count(harness: &CampaignStage3Harness) -> usize {
+    plan_domain_work_item_ids(harness).len()
 }
 
 /// durable 不变量快照:attempt/unit/lock 三计数(重发前后必须不变)。
