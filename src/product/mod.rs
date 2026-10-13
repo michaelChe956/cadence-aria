@@ -7,6 +7,7 @@ pub mod coding_attempt_repository;
 pub mod coding_attempt_store;
 pub mod coding_evaluation_context;
 pub mod coding_models;
+pub mod coding_plan_run;
 pub mod coding_work_item_context;
 pub mod coding_workspace_engine;
 pub mod coding_workspace_runner;

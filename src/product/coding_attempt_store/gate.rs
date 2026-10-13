@@ -83,6 +83,49 @@ impl super::CodingAttemptStore {
                 "admission_missing_blocks_provider_run".to_string(),
             ));
         }
+        // N2（REQ-CS-05）：plan-coding first_ready_unit 的授权边界——Paused/
+        // Invalidated run 与「冻结 selected unit 已 Completed 而 pause 尚未写
+        // 回」的中断窗口一律拒绝 provider 进入。普通 retry/StartCoding/gate
+        // response 不得绕行安全暂停（CompletedRetry 走 pause 身份恢复，不重进
+        // provider）。
+        let plan_run_store = crate::product::coding_plan_run::CodingPlanRunStore::new(self.paths());
+        if let Some(run) = plan_run_store.matching_first_ready_run(&current)? {
+            match run.phase {
+                crate::product::coding_plan_run::CodingPlanRunPhase::Paused => {
+                    return Err(ProductStoreError::Io(format!(
+                        "plan_coding_paused: {}",
+                        current.id
+                    )));
+                }
+                crate::product::coding_plan_run::CodingPlanRunPhase::Invalidated => {
+                    return Err(ProductStoreError::Io(format!(
+                        "plan_coding_invalidated: {}",
+                        current.id
+                    )));
+                }
+                _ => {
+                    if let Some(selection) = run.selection
+                        && self
+                            .list_coding_units(
+                                &current.project_id,
+                                &current.issue_id,
+                                &current.id,
+                            )?
+                            .iter()
+                            .any(|unit| {
+                                unit.id == selection.unit_id
+                                    && unit.status
+                                        == crate::product::coding_models::CodingExecutionUnitStatus::Completed
+                            })
+                    {
+                        return Err(ProductStoreError::Io(format!(
+                            "plan_coding_first_unit_completed: {}",
+                            current.id
+                        )));
+                    }
+                }
+            }
+        }
         Ok(current)
     }
 

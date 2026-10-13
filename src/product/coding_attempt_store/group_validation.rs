@@ -276,8 +276,56 @@ impl super::CodingAttemptStore {
             stored.target_snapshot.as_ref(),
         )
         .map_err(|_| mixed_target_group_rejected())?;
-        validate_group_attempt_pointers(&stored, &units)?;
+        // N2（REQ-CS-05）：first_ready_unit 选中首项完成后的安全暂停是唯一新
+        // 合法“无 active 指针”形态——严格匹配 durable plan-run 冻结 selection
+        // 的完成身份；无匹配 run / 身份不符仍走原失败关闭。
+        let plan_coding_pause =
+            self.plan_coding_pause_matches_completed_selection(&stored, &units)?;
+        validate_group_attempt_pointers(&stored, &units, plan_coding_pause)?;
         Ok(authoritative)
+    }
+
+    /// N2（REQ-CS-05）合法暂停形状判定：Blocked+CodeReview+空指针+恰一个
+    /// Completed unit，且存在本 plan 的 first_ready run 冻结 selection 恰指向
+    /// 该完成 unit（attempt/unit 双身份）。Invalidated run 不构成暂停例外。
+    fn plan_coding_pause_matches_completed_selection(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        units: &[CodingExecutionUnit],
+    ) -> Result<bool, ProductStoreError> {
+        if attempt.status != crate::product::coding_models::CodingAttemptStatus::Blocked
+            || attempt.stage != CodingExecutionStage::CodeReview
+            || attempt.active_unit_id.is_some()
+            || attempt.current_work_item_id.is_some()
+        {
+            return Ok(false);
+        }
+        let mut completed_units = units
+            .iter()
+            .filter(|unit| unit.status == CodingExecutionUnitStatus::Completed);
+        let Some(unit) = completed_units.next() else {
+            return Ok(false);
+        };
+        if completed_units.next().is_some() {
+            return Ok(false);
+        }
+        let run = crate::product::coding_plan_run::CodingPlanRunStore::new(self.paths())
+            .matching_first_ready_run(attempt)?;
+        let Some(run) = run else {
+            return Ok(false);
+        };
+        if matches!(
+            run.phase,
+            crate::product::coding_plan_run::CodingPlanRunPhase::Invalidated
+        ) {
+            return Ok(false);
+        }
+        let Some(selection) = run.selection else {
+            return Ok(false);
+        };
+        Ok(selection.attempt_id == attempt.id
+            && selection.unit_id == unit.id
+            && selection.logical_work_item_id == unit.logical_work_item_id)
     }
 
     pub(super) fn validate_group_attempt_structure(
@@ -411,6 +459,7 @@ fn map_group_integrity_dependency_error(
 fn validate_group_attempt_pointers(
     attempt: &CodingExecutionAttempt,
     units: &[CodingExecutionUnit],
+    plan_coding_pause_allowed: bool,
 ) -> Result<(), ProductStoreError> {
     let active_units = units
         .iter()
@@ -447,8 +496,15 @@ fn validate_group_attempt_pointers(
                 && attempt.status != crate::product::coding_models::CodingAttemptStatus::Created
                 && attempt.stage.order() >= CodingExecutionStage::ReviewRequest.order()
                 && final_review_units;
-            let no_target_is_allowed =
-                terminal_no_target_is_allowed || final_review_no_target_is_allowed;
+            // N2（REQ-CS-05）：first_ready_unit 安全暂停——Blocked+CodeReview+
+            // 清指针，其余 units 保持事实状态（Pending 等）。完成身份已由
+            // plan_coding_pause_allowed（严格匹配冻结 selection）背书。
+            let plan_pause_no_target_is_allowed = plan_coding_pause_allowed
+                && attempt.status == crate::product::coding_models::CodingAttemptStatus::Blocked
+                && attempt.stage == CodingExecutionStage::CodeReview;
+            let no_target_is_allowed = terminal_no_target_is_allowed
+                || final_review_no_target_is_allowed
+                || plan_pause_no_target_is_allowed;
             if !pointers_are_empty || !no_target_is_allowed {
                 return Err(incomplete_group_attempt(
                     &attempt.id,
