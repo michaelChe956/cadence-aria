@@ -113,3 +113,11 @@ cargo test --lib product::workspace_engine::compile                       → 8 
 ```
 
 范围:lifecycle_store 全族(含 CAS/轮换/预约)+ 原 198 面(publish_freshness/single_candidate/sg_f2/conversational_gate/compile)。
+
+## 8. 格式轮:P2 修复 rustfmt 违规
+
+提交:`fix: P2修复轮格式化`(仅 lifecycle_store 两文件,纯格式零行为变化)。
+
+- 违规 3 处(复审指出):`workspace_single_candidate.rs` import 合并行 102 字符(该合并行系格式轮开工前树内既存);`workspace_single_candidate_tests.rs` 测试内 import 组与超长 `assert_eq!`。
+- 修复:`rustfmt --edition 2024` 对两文件,`--check` 复核零 diff。
+- 验证:CAS 族 9/9 仍绿(/tmp/fmt-verify 隔离树 = 2e2b1bed + 仅格式化两文件;主树当时被 SG3a.0 在途 `structure_report` 补齐面挡,45 错均非本轮引入)。
