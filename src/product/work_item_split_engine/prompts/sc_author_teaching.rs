@@ -250,7 +250,7 @@ pub(crate) fn work_item_plan_confirmed_member_order_teaching(
         "仓序自动边规则（与编译器仓序规则同源）：仓序在前的成员仓 Work Item 是仓序在后成员仓 Work Item 的依赖前置——后仓 WI 消费前仓产出时，Inputs 的 provider_logical_work_item_id 逐字填前仓 WI 在本计划 `## Work Item` 标题中的 `WI-<数字>`；同一成员仓内的 WI 之间无仓序自动边，同仓顺序仅由 depends_on 显式声明；跨仓依赖逆写仓序（后仓 WI 作为前仓 WI 的 provider）会构成 dependency_cycle，整份计划拒绝。\n",
     );
     lines.push_str(
-        "成员归属纪律：intent_target_kind=logical_codebase 时 intent_target_logical_repo 只能逐字取上列成员 logical UUID；intent_target_kind=single_repository 时 intent_target_repo 只能逐字取上列物理成员仓 ID；会话根仓/聚合根视图 ID 不得替代业务成员 target（→ work_item_target_missing 拒绝）。Plan Intent 仍为可选 section——本段不改变其可选性，也不新增任何创建/入站授权。\n\n",
+        "成员归属纪律：intent_target_kind=logical_codebase 时 intent_target_logical_repo 只能逐字取上列成员 logical UUID；intent_target_kind=single_repository 时 intent_target_repo 只能逐字取上列物理成员仓 ID；会话根仓/聚合根视图 ID 不得替代业务成员 target（→ work_item_target_missing 拒绝）。LC 多仓限定（本段在场即生效）：intent_target_repo 改为逐字取本段上列物理成员仓 ID，不取 [issue] 头 repo=——grammar 段「逐字取 [issue] 头 repo= 的 repository id」仅是单仓默认取值。Plan Intent 仍为可选 section——本段不改变其可选性，也不新增任何创建/入站授权。\n\n",
     );
     lines
 }
