@@ -62,6 +62,28 @@
 | `plan_coding_n3_` | 5/5 失败且可归因业务缺失：one-click/replay/needs_human 期望 Started/回执而得 `plan_coding_start_not_implemented`；GET 聚合 500≠200；drift 期望 `coding_plan_run_revision` 得 not_implemented | **5 passed** |
 | `plan_coding_n1_ plan_coding_n2_ group_split_target coding_provider_snapshot advance_tests` | — | **27 passed, 0 failed** |
 
+### 修复轮（Main 审查 1×P2×2+1×P3，commit `fix: N3 聚合失效投影与clippy门禁`）
+
+| 命令 | 红 | 绿 |
+|---|---|---|
+| `plan_coding_n3_claimed_barrier` / `plan_coding_n3_deleted_member` | P3：Claimed 相位误投 `running`（期望 initialized）；P2-1：成员删除后 GET 炸 `coding_attempt_not_found`（期望 200+失效投影） | 并入族后 **7 passed** |
+| `plan_coding_n3_ plan_coding_n1_ plan_coding_n2_ group_split_target coding_provider_snapshot advance_tests` | — | **34 passed, 0 failed** |
+| `cargo clippy --locked --all-targets -- -D warnings` | plan_start.rs:593 多余 `mut` 一处 | **plan_start 零报**（其余报错均在其他波次文件，非 N3 面） |
+
+- P2-1：聚合载入冻结成员时 `NotFound{kind:"coding_attempt"}` 不再上抛——该
+  target 投影失效终态（`attempt_status=aborted`、worktree None、冻结 binding
+  保留），已删成员桶 units 不再投影（不造 unit 猜测），其余成员事实不受影响；
+  身份错配/IO/JSON 仍 fail-closed。run Invalidated 时整体失效文案：未完成
+  units `execution_state=invalidated`（值域 additive 扩展，types.rs 已同步注释），
+  完成事实仍投影 completed，`waiting_reason=None`。
+- P2-2：`map_or(true,…)`→`is_none_or(…)`（clippy 门禁归一）。
+- P3：`provider_started` 增判 claim 相位 ≥ ProviderMayHaveStarted
+  （ProviderMayHaveStarted|NeedsHuman；Claimed/RunnerRegistered 回落
+  initialized），对齐 REQ-CS-04「已接受首启 ≠ provider 实际进度」口径。
+  新增测试 `plan_coding_n3_claimed_barrier_phase_is_not_provider_running`、
+  `plan_coding_n3_deleted_member_aggregates_invalidated_not_500`（后者含
+  N7 接线前窗口 run-active 与 N2 invalidate 后 Invalidated 两段断言）。
+
 新增测试（全部真实 Git/materialize 链，无 mock provider 冒充验收）：
 
 - `plan_coding_n3_one_click_binds_all_and_starts_selected_once`：五 WI/四 target

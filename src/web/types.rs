@@ -1224,8 +1224,10 @@ pub struct PlanCodingTargetDto {
 }
 
 /// N3（REQ-CS-06）：plan 聚合中的 WI 进度投影。`execution_state` 值域
-/// `initialized|running|waiting_dependency|waiting_slot|paused|completed`，
-/// provider 事实与初始化 unit Running 区分；`waiting_reason` 值域
+/// `initialized|running|waiting_dependency|waiting_slot|paused|completed|invalidated`
+///（invalidated=run 授权失效，完成事实仍投影 completed），provider 事实
+/// （claim 相位 ≥ ProviderMayHaveStarted）与初始化 unit Running 区分；
+/// `waiting_reason` 值域
 /// `dependency_not_ready|execution_slot_occupied|plan_coding_continuation_not_enabled`。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

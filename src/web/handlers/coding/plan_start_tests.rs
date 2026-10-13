@@ -1231,3 +1231,189 @@ async fn plan_coding_n3_old_post_shape_unchanged() {
     assert_eq!(new_body["plan_id"], PLAN_ID);
     assert!(new_body["target_attempts"].is_array());
 }
+
+/// REQ-CS-04：claim 停在 Claimed 相位（尚未过 RunnerRegistered/
+/// ProviderMayHaveStarted barrier）时，聚合不得把初始化 unit Running 当作
+/// provider 执行——execution_state 回落 initialized（区分口径）。
+#[tokio::test]
+async fn plan_coding_n3_claimed_barrier_phase_is_not_provider_running() {
+    let fixture = n3_fixture().await;
+    let run_store = fixture.run_store();
+    let coding_store = fixture.coding_store();
+    let run = run_store
+        .prepare(
+            PROJECT_ID,
+            ISSUE_ID,
+            PLAN_ID,
+            "cmd_n3_claimed",
+            PLAN_REVISION_ID,
+        )
+        .unwrap();
+    let outcome = advance_plan(
+        &fixture.state,
+        AdvanceInput {
+            command_id: run.command_id.clone(),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: PLAN_ID.to_string(),
+        },
+        AdvancePlanOrigin::Manual,
+    )
+    .await
+    .unwrap();
+    let AdvanceOutcome::Completed {
+        target_attempts, ..
+    } = outcome
+    else {
+        panic!("expected advance Completed, got {outcome:?}");
+    };
+    let selection = fixture.busi_selection("cmd_n3_claimed");
+    let bound = run_store
+        .bind_ready(&run, &target_attempts, Some(selection.clone()))
+        .unwrap();
+    run_store.mark_start_requested(&bound).unwrap();
+    let busi_attempt = fixture.busi_attempt();
+    let crate::product::coding_attempt_store::ClaimCodingStartOutcome::Claimed(claimed) =
+        coding_store
+            .claim_coding_start(
+                &busi_attempt,
+                &selection.start_command_id,
+                &CodingStartOrigin::Manual,
+            )
+            .unwrap()
+    else {
+        panic!("expected fresh claim");
+    };
+    assert!(matches!(
+        claimed.start_claim.as_ref().unwrap().phase,
+        CodingStartPhase::Claimed
+    ));
+
+    let progress = get_progress(&fixture.state)
+        .await
+        .expect("GET aggregates the claimed window");
+    assert_eq!(progress.phase.as_deref(), Some("start_requested"));
+    let core = unit_dto(&progress, "wi_core");
+    assert_eq!(core.unit_status, CodingExecutionUnitStatus::Running);
+    assert_eq!(
+        core.execution_state, "initialized",
+        "claim below ProviderMayHaveStarted must not project provider running"
+    );
+}
+
+/// REQ-CS-07：冻结集合成员被独立删除后，GET 聚合不再 500——该 target
+/// 投影失效终态（Aborted）、成员 units 不再投影；run 失效（invalidated）
+/// 后整体走失效文案，已完成事实保留。
+#[tokio::test]
+async fn plan_coding_n3_deleted_member_aggregates_invalidated_not_500() {
+    let fixture = n3_fixture().await;
+    let run_store = fixture.run_store();
+    let coding_store = fixture.coding_store();
+    let run = run_store
+        .prepare(
+            PROJECT_ID,
+            ISSUE_ID,
+            PLAN_ID,
+            "cmd_n3_member_delete",
+            PLAN_REVISION_ID,
+        )
+        .unwrap();
+    let outcome = advance_plan(
+        &fixture.state,
+        AdvanceInput {
+            command_id: run.command_id.clone(),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: PLAN_ID.to_string(),
+        },
+        AdvancePlanOrigin::Manual,
+    )
+    .await
+    .unwrap();
+    let AdvanceOutcome::Completed {
+        target_attempts, ..
+    } = outcome
+    else {
+        panic!("expected advance Completed, got {outcome:?}");
+    };
+    let selection = fixture.busi_selection("cmd_n3_member_delete");
+    let bound = run_store
+        .bind_ready(&run, &target_attempts, Some(selection.clone()))
+        .unwrap();
+    let requested = run_store.mark_start_requested(&bound).unwrap();
+    let busi_attempt = fixture.busi_attempt();
+    let crate::product::coding_attempt_store::ClaimCodingStartOutcome::Claimed(claimed) =
+        coding_store
+            .claim_coding_start(
+                &busi_attempt,
+                &selection.start_command_id,
+                &CodingStartOrigin::Manual,
+            )
+            .unwrap()
+    else {
+        panic!("expected fresh claim");
+    };
+    for phase in [
+        CodingStartPhase::RunnerRegistered,
+        CodingStartPhase::ProviderMayHaveStarted,
+    ] {
+        coding_store
+            .advance_coding_start_phase(&claimed, &selection.start_command_id, phase)
+            .unwrap();
+    }
+    run_store
+        .record_start_outcome(
+            &requested,
+            CodingPlanStartOutcome::Started {
+                attempt_id: selection.attempt_id.clone(),
+            },
+        )
+        .unwrap();
+
+    // 删除 web 成员 attempt（N7 删除闭包接线前的窗口：run 仍 active）。
+    let web_attempt = fixture.target_attempt(fixture.web);
+    coding_store
+        .delete_attempt(PROJECT_ID, ISSUE_ID, &web_attempt.id)
+        .unwrap();
+    let progress = get_progress(&fixture.state)
+        .await
+        .expect("member deletion must not 500 the aggregation");
+    assert_eq!(progress.phase.as_deref(), Some("started"));
+    // 冻结绑定集保留：该 target 行仍在，但投影失效终态。
+    assert_eq!(progress.target_attempts.len(), 4);
+    let web_row = progress
+        .target_attempts
+        .iter()
+        .find(|row| row.target_repository_id == fixture.web.0.to_string())
+        .unwrap();
+    assert_eq!(web_row.attempt_status, CodingAttemptStatus::Aborted);
+    assert!(web_row.worktree_path.is_none());
+    // 已删成员桶的 units 不再投影（记录已删，不造 unit 猜测）。
+    assert_eq!(progress.units.len(), 4);
+    assert!(
+        progress
+            .units
+            .iter()
+            .all(|unit| unit.logical_work_item_id != "wi_registration")
+    );
+    // 未受影响成员的事实保持：busi 首项 provider 执行中。
+    assert_eq!(unit_dto(&progress, "wi_core").execution_state, "running");
+
+    // 成员删除授权失效（N2 invalidate，N7 接线后的事实）→ 整体失效文案。
+    run_store
+        .invalidate_for_deleted_attempt(&web_attempt)
+        .unwrap();
+    let invalidated = get_progress(&fixture.state)
+        .await
+        .expect("invalidated run still aggregates");
+    assert_eq!(invalidated.phase.as_deref(), Some("invalidated"));
+    for unit in &invalidated.units {
+        assert_eq!(
+            unit.execution_state, "invalidated",
+            "invalidated run must project its units as invalidated: {:?}",
+            unit.logical_work_item_id
+        );
+        assert_eq!(unit.waiting_reason, None);
+    }
+    assert!(!invalidated.plan_complete);
+}

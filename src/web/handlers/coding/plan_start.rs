@@ -24,6 +24,7 @@ use crate::product::advance_store::{
 use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionUnit, CodingExecutionUnitStatus, CodingStartOrigin,
+    CodingStartPhase,
 };
 use crate::product::coding_plan_run::{
     CodingPlanRun, CodingPlanRunPhase, CodingPlanRunStore, CodingPlanSelection,
@@ -491,7 +492,7 @@ fn select_first_ready_unit(
                 unit.logical_work_item_id.clone(),
                 binding.target_repository_id.clone(),
             );
-            if best.as_ref().map_or(true, |current| &key < current) {
+            if best.as_ref().is_none_or(|current| &key < current) {
                 best = Some(key);
                 best_selection = Some(CodingPlanSelection {
                     unit_id: unit.id.clone(),
@@ -557,7 +558,8 @@ fn repo_lease_state(
 
 struct PlanCodingTargetFacts {
     binding: AdvanceTargetAttemptBinding,
-    attempt: crate::product::coding_models::CodingExecutionAttempt,
+    /// `None` = 冻结成员 attempt 已被独立删除（REQ-CS-07 失效窗口）。
+    attempt: Option<crate::product::coding_models::CodingExecutionAttempt>,
     units: Vec<CodingExecutionUnit>,
 }
 
@@ -588,7 +590,7 @@ pub(crate) fn build_plan_coding_progress(
     let bindings = match run.filter(|run| !run.target_attempts.is_empty()) {
         Some(run) => run.target_attempts.clone(),
         None => {
-            let mut targets: BTreeSet<LogicalRepositoryId> = authoritative
+            let targets: BTreeSet<LogicalRepositoryId> = authoritative
                 .units
                 .iter()
                 .filter_map(|unit| unit.target_repository_id)
@@ -614,8 +616,21 @@ pub(crate) fn build_plan_coding_progress(
 
     let mut facts: Vec<PlanCodingTargetFacts> = Vec::new();
     for binding in &bindings {
-        let attempt = store.get_attempt(project_id, issue_id, &binding.attempt_id)?;
-        let units = store.list_coding_units(project_id, issue_id, &binding.attempt_id)?;
+        // REQ-CS-07：冻结成员被独立删除（NotFound）时按 run 相位投影该
+        // target 为失效态，不让单成员删除炸整条 GET；身份错配/IO/JSON
+        // 错误仍 fail-closed 上抛。
+        let attempt = match store.get_attempt(project_id, issue_id, &binding.attempt_id) {
+            Ok(attempt) => Some(attempt),
+            Err(ProductStoreError::NotFound {
+                kind: "coding_attempt",
+                ..
+            }) => None,
+            Err(error) => return Err(error),
+        };
+        let units = match &attempt {
+            Some(_) => store.list_coding_units(project_id, issue_id, &binding.attempt_id)?,
+            None => Vec::new(),
+        };
         facts.push(PlanCodingTargetFacts {
             binding: binding.clone(),
             attempt,
@@ -635,6 +650,7 @@ pub(crate) fn build_plan_coding_progress(
     let ranks = global_topological_ranks(&authoritative.units);
     let selection = run.and_then(|run| run.selection.clone());
     let paused = run.is_some_and(|run| run.phase == CodingPlanRunPhase::Paused);
+    let invalidated = run.is_some_and(|run| run.phase == CodingPlanRunPhase::Invalidated);
 
     let lifecycle = LifecycleStore::new(paths.clone());
     let mut target_attempts = Vec::new();
@@ -646,11 +662,17 @@ pub(crate) fn build_plan_coding_progress(
             &facts.binding.target_repository_id,
             &facts.binding.attempt_id,
         )?;
+        let (attempt_status, worktree_path) = match &facts.attempt {
+            Some(attempt) => (attempt.status.clone(), attempt.worktree_path.clone()),
+            // 成员已删除：授权失效的终态投影（repo lock/worktree 归 N7/D2.2
+            // 删除闭包按真实事实清理，此处不猜测资源）。
+            None => (CodingAttemptStatus::Aborted, None),
+        };
         target_attempts.push(PlanCodingTargetDto {
             target_repository_id: facts.binding.target_repository_id.clone(),
             attempt_id: facts.binding.attempt_id.clone(),
-            attempt_status: facts.attempt.status.clone(),
-            worktree_path: facts.attempt.worktree_path.clone(),
+            attempt_status,
+            worktree_path,
             lease_state,
         });
     }
@@ -680,14 +702,31 @@ pub(crate) fn build_plan_coding_progress(
             .cloned()
             .collect();
         unsatisfied_dependency_ids.sort();
-        // provider 事实（durable claim + active 指针 + unit Running）与初始化
-        // 桶首 unit Running（物化事实）严格分开。
-        let provider_started = facts.attempt.start_claim.is_some()
-            && facts.attempt.active_unit_id.as_deref() == Some(unit.id.as_str())
+        // provider 事实（durable claim 相位 ≥ ProviderMayHaveStarted + active
+        // 指针 + unit Running）与初始化桶首 unit Running（物化事实）严格分开
+        //（REQ-CS-04）：Claimed/RunnerRegistered 回落 initialized。
+        let provider_started = facts
+            .attempt
+            .as_ref()
+            .and_then(|attempt| attempt.start_claim.as_ref())
+            .is_some_and(|claim| {
+                matches!(
+                    claim.phase,
+                    CodingStartPhase::ProviderMayHaveStarted | CodingStartPhase::NeedsHuman
+                )
+            })
+            && facts
+                .attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.active_unit_id.as_deref() == Some(unit.id.as_str()))
             && unit.status == CodingExecutionUnitStatus::Running;
         let (execution_state, waiting_reason): (&str, Option<&str>) =
             if unit.status == CodingExecutionUnitStatus::Completed {
+                // 完成事实不因授权失效回滚（REQ-CS-05/07）。
                 ("completed", None)
+            } else if invalidated {
+                // run Invalidated：整体失效文案（成员删除授权失效）。
+                ("invalidated", None)
             } else if !unsatisfied_dependency_ids.is_empty() {
                 ("waiting_dependency", Some("dependency_not_ready"))
             } else if provider_started {
