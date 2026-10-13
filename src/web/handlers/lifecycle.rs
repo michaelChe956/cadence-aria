@@ -23,9 +23,7 @@ mod deletion;
 pub(crate) mod plan_preparation;
 pub(crate) mod preflight;
 
-pub use deletion::{
-    delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan,
-};
+pub use deletion::{delete_design_spec, delete_story_spec, delete_work_item, delete_work_item_plan};
 pub(crate) use plan_preparation::{PreparedPlanRecords, prepare_plan_records};
 // 仅测试模块消费（见 lifecycle_tests.inc.rs）。
 #[cfg(test)]
@@ -365,13 +363,23 @@ pub async fn issue_lifecycle(
         }
     }
     let repository_store = RepositoryStore::for_project(app_paths.clone(), &project);
+    // 展示名补充是 best-effort 分支:以 issue 归属 LC 解析(v1.3 per-LC 子树),
+    // 不经 project 级 ensure 驱动权威迁移(路由权威重灌事故触发点,2026-10-13 诊断)。
+    let issue_lc_id = crate::product::issue_store::IssueStore::new(app_paths.clone())
+        .get(&project_id, &issue_id)
+        .ok()
+        .and_then(|issue| issue.logical_codebase_id);
     for record in &persisted_work_items {
         if let Some(target) = record.target_repository_id {
             if member_index.contains_key(&target) {
                 continue;
             }
-            if let Ok((_, _, repository)) =
-                repository_store.resolve_logical_repository(&project_id, target)
+            if let Ok((_, _, repository)) = repository_store
+                .resolve_logical_repository_for_issue_codebase(
+                    &project_id,
+                    issue_lc_id.as_deref(),
+                    target,
+                )
             {
                 member_index.insert(target, repository.name.clone());
             }

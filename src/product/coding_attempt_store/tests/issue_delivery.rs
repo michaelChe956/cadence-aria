@@ -22,11 +22,13 @@ use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
 use crate::product::json_store::{read_json, write_json};
 use crate::product::lifecycle_store::{CreateWorkItemInput, LifecycleStore};
 use crate::product::logical_codebase::{
-    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalCodebaseManifest,
-    LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
-    RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalCodebaseCreateInput,
+    LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId, MemberStatus,
+    RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
 };
-use crate::product::models::{LifecycleWorkItemRecord, ProviderName, RepositoryRecord};
+use crate::product::models::{
+    IssueRecord, LifecycleWorkItemRecord, ProviderName, RepositoryRecord,
+};
 use crate::product::project_store::{CreateProjectInput, ProjectStore};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -1048,5 +1050,143 @@ fn ten_work_items_compute_within_one_second() {
     assert!(
         elapsed < Duration::from_secs(1),
         "aggregation took {elapsed:?}"
+    );
+}
+
+/// v1.3 注册形态夹具:LC record + per-LC 子树权威(manifest/member/checkout),
+/// 不写 repos.json、不写 project 级默认槽位——「无 legacy 可迁」的原生布局。
+fn seed_v13_logical_codebase(
+    root: &Path,
+    store: &CodingAttemptStore,
+) -> (String, LogicalRepositoryId) {
+    let record = LogicalCodebaseStore::new(store.paths())
+        .create(
+            PROJECT_ID,
+            LogicalCodebaseCreateInput {
+                name: "notify-center".to_string(),
+                aggregate_root: root.join("aggregate-root"),
+            },
+        )
+        .unwrap();
+    let authority = LogicalCodebaseStore::for_lc(store.paths().clone(), record.id.clone());
+    let logical_id = LogicalRepositoryId(Uuid::new_v4());
+    let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+    let repository_path = root.join("checkout_repo_alpha");
+    let source_identity = RepositorySourceIdentity::from_git_parts(
+        &repository_path,
+        repository_path.join(".git"),
+        None,
+    );
+    authority
+        .save_manifest(
+            PROJECT_ID,
+            &LogicalCodebaseManifest::new(
+                PROJECT_ID,
+                root.join("aggregate-root"),
+                vec![logical_id],
+            ),
+        )
+        .unwrap();
+    authority
+        .save_member(
+            PROJECT_ID,
+            &CodebaseMemberRecord {
+                logical_repository_id: logical_id,
+                physical_repository_id: "repository_01871a0f".to_string(),
+                alias: "checkout_repo_alpha".to_string(),
+                role: "repository".to_string(),
+                ordinal: 1,
+                source_identity: source_identity.clone(),
+                repo_type: RepositoryType::Unknown,
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![checkout_id],
+                status: MemberStatus::Active,
+                created_at: "2026-10-12T00:00:00Z".to_string(),
+                updated_at: "2026-10-12T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+    authority
+        .save_checkout(
+            PROJECT_ID,
+            &RepositoryCheckoutRecord {
+                checkout_id,
+                logical_repository_id: logical_id,
+                physical_repository_id: "repository_01871a0f".to_string(),
+                kind: CheckoutKind::Main,
+                canonical_path: repository_path,
+                checkout_path_hash: "sha256:checkout".to_string(),
+                git_dir_identity: source_identity.git_dir_identity(),
+                revision: Some("abcdef".to_string()),
+                availability: CheckoutAvailability::Available,
+                observed_at: "2026-10-12T00:00:00Z".to_string(),
+                created_at: "2026-10-12T00:00:00Z".to_string(),
+                updated_at: "2026-10-12T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+    (record.id, logical_id)
+}
+
+fn set_issue_logical_codebase(store: &CodingAttemptStore, lc_id: &str) {
+    let path = store
+        .paths()
+        .issue_root(PROJECT_ID, ISSUE_ID)
+        .join("issue.json");
+    let mut record: IssueRecord = read_json(&path).unwrap();
+    record.logical_codebase_id = Some(lc_id.to_string());
+    write_json(&path, &record).unwrap();
+}
+
+/// 路由权威重灌事故回归(2026-10-13 诊断):交付聚合的仓名解析改走 issue
+/// 归属 LC(per-LC 子树权威),不得触发 project 级 ensure/legacy 迁移引导,
+/// 也不得经 migrate_legacy 二次扩散出 legacy 别名 LC。
+#[test]
+fn v13_native_delivery_summary_resolves_names_via_issue_codebase_without_migration() {
+    let (tmp, store) = setup_store();
+    let (lc_id, logical_id) = seed_v13_logical_codebase(tmp.path(), &store);
+    set_issue_logical_codebase(&store, &lc_id);
+    seed_work_item(&store, "work_item_0001", "repository_01871a0f");
+    set_work_item_target_repository(&store, "work_item_0001", logical_id);
+
+    let summary = store
+        .compute_issue_delivery_summary(PROJECT_ID, ISSUE_ID)
+        .unwrap();
+
+    assert_eq!(summary.entries.len(), 1);
+    assert_eq!(
+        summary.entries[0].repository_name, "checkout_repo_alpha",
+        "仓名必须来自 issue 归属 LC 的成员 checkout 路径"
+    );
+    // 读路径零迁移写入。
+    let slot = store.paths().logical_codebase_root(PROJECT_ID);
+    assert!(
+        !slot.join("manifest.json").exists(),
+        "交付聚合不得触发槽位 manifest bootstrap"
+    );
+    assert!(
+        !slot.join("aggregate-policy.json").exists(),
+        "交付聚合不得写 bootstrap 政策"
+    );
+    assert!(
+        !slot.join("identity-migration.json").exists(),
+        "交付聚合不得创建迁移 journal"
+    );
+    // ProjectStore 读路径不得把污染槽位复制成 legacy 别名 LC。
+    ProjectStore::new(store.paths()).get(PROJECT_ID).unwrap();
+    let alias_root = store.paths().logical_codebase_record_root(
+        PROJECT_ID,
+        &crate::product::logical_codebase::legacy_logical_codebase_id(PROJECT_ID),
+    );
+    assert!(!alias_root.join("record.json").exists(), "别名 LC 不得生成");
+    assert!(
+        !store
+            .paths()
+            .logical_codebase_migration_lock_path(PROJECT_ID)
+            .exists(),
+        "migrate_legacy 锁不得出现"
     );
 }

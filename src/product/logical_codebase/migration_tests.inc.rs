@@ -617,6 +617,43 @@ mod tests {
         );
     }
 
+    /// 路由权威重灌事故回归(2026-10-13 诊断):零 legacy 仓时迁移执行器必须
+    /// fail-closed——禁止以 project_root(.aria 数据目录)兜底聚合根伪造 0 成员
+    /// 空 LC,不得写出槽位 manifest/bootstrap 政策。
+    #[test]
+    fn empty_legacy_repositories_fail_closed_without_bootstrapping_empty_manifest() {
+        let root = tempfile::tempdir().expect("temporary product root");
+        let paths = ProductAppPaths::new(root.path());
+        write_json(
+            &paths.project_root("project_0001").join("repos.json"),
+            &Vec::<RepositoryRecord>::new(),
+        )
+        .expect("write empty legacy repositories");
+
+        let result =
+            IdentityMigrationExecutor::new(paths.clone()).ensure_identity_schema("project_0001");
+
+        assert!(
+            matches!(
+                result,
+                Err(ProductStoreError::IdentityMismatch {
+                    kind: "logical_codebase_manifest",
+                    ..
+                })
+            ),
+            "零 legacy 仓必须 fail-closed,不得 bootstrap 空 LC"
+        );
+        let slot = paths.logical_codebase_root("project_0001");
+        assert!(
+            !slot.join("manifest.json").exists(),
+            "不得伪造槽位 manifest"
+        );
+        assert!(
+            !slot.join("aggregate-policy.json").exists(),
+            "不得写 bootstrap 政策"
+        );
+    }
+
     struct FailAfterAuthorityWrite {
         has_failed: AtomicBool,
     }

@@ -323,14 +323,13 @@ impl IdentityMigrationExecutor {
         inputs: &[AuthorityInput],
         member_ids: Vec<LogicalRepositoryId>,
     ) -> Result<(), ProductStoreError> {
-        let provider_context_root = common_non_git_parent(inputs)
-            .unwrap_or_else(|| self.paths.project_root(&journal.project_id));
+        let provider_context_root = common_non_git_parent(inputs);
         match self.authority.load_manifest(&journal.project_id)? {
             Some(manifest)
                 if manifest.schema_version == 1
                     && manifest.project_id == journal.project_id
                     && manifest.layout == LogicalCodebaseLayout::CommonNonGitParent
-                    && manifest.provider_context_root == provider_context_root
+                    && provider_context_root.as_deref() == Some(manifest.provider_context_root.as_path())
                     && manifest.member_ids == member_ids =>
             {
                 Ok(())
@@ -346,6 +345,18 @@ impl IdentityMigrationExecutor {
                 journal.project_id.clone(),
             ),
             None => {
+                // bootstrap 根防呆(路由权威重灌事故,2026-10-13 诊断):
+                // 聚合根只能来自 legacy 仓的公共非 git 父目录,禁止以
+                // `.aria/projects/{p}` 数据目录兜底充当 provider_context_root。
+                // 零 legacy 输入(或无公共父)时 fail-closed,不得伪造 0 成员
+                // 空 LC 覆盖默认槽位。
+                let Some(provider_context_root) = provider_context_root else {
+                    return self.fail_identity_mismatch(
+                        journal,
+                        "logical_codebase_manifest",
+                        journal.project_id.clone(),
+                    );
+                };
                 let manifest = LogicalCodebaseManifest::new(
                     &journal.project_id,
                     provider_context_root,

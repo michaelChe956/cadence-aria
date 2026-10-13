@@ -57,8 +57,9 @@ impl super::CodingAttemptStore {
     ) -> Result<IssueDeliverySummary, ProductStoreError> {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
-        // 读 issue 以确认其存在，避免对不存在的 issue 返回空聚合（与 T4 组装点一致）。
-        IssueStore::new(self.paths()).get(project_id, issue_id)?;
+        // 读 issue 以确认其存在，避免对不存在的 issue 返回空聚合（与 T4 组装点一致）；
+        // 其 codebase 归属是仓名解析的权威入口(v1.3 per-LC 子树)。
+        let issue = IssueStore::new(self.paths()).get(project_id, issue_id)?;
 
         let work_items = LifecycleStore::new(self.paths()).list_work_items(project_id, issue_id)?;
 
@@ -93,7 +94,11 @@ impl super::CodingAttemptStore {
                 None => (None, None),
             };
 
-            let repository_name = self.resolve_repository_name(project_id, work_item)?;
+            let repository_name = self.resolve_repository_name(
+                project_id,
+                issue.logical_codebase_id.as_deref(),
+                work_item,
+            )?;
 
             entries.push(DeliveryEntry {
                 repository_name,
@@ -178,18 +183,26 @@ impl super::CodingAttemptStore {
     /// 解析 Work Item 的仓库展示名。
     ///
     /// 优先 `target_repository_id`（`Option<LogicalRepositoryId>`）经
-    /// `RepositoryStore::resolve_logical_repository_strict` 解析出 checkout 路径末段目录名；
-    /// `target_repository_id` 缺省或 checkout 路径无末段时回退 `repository_id` 字符串本身。
+    /// `RepositoryStore::resolve_logical_repository_for_issue_codebase`
+    /// （issue 归属 lc_id，v1.3 走 per-LC 子树权威，不触发 project 级
+    /// ensure/legacy 迁移引导——路由权威重灌事故触发点，2026-10-13 诊断）
+    /// 解析出 checkout 路径末段目录名；`target_repository_id` 缺省或
+    /// checkout 路径无末段时回退 `repository_id` 字符串本身。
     fn resolve_repository_name(
         &self,
         project_id: &str,
+        issue_lc_id: Option<&str>,
         work_item: &LifecycleWorkItemRecord,
     ) -> Result<String, ProductStoreError> {
         if let Some(logical_id) = work_item.target_repository_id {
             let paths = self.paths();
             let project = ProjectStore::new(paths.clone()).get(project_id)?;
             let (_, checkout, _) = RepositoryStore::for_project(paths, &project)
-                .resolve_logical_repository_strict(project_id, logical_id)?;
+                .resolve_logical_repository_for_issue_codebase(
+                    project_id,
+                    issue_lc_id,
+                    logical_id,
+                )?;
             if let Some(name) = checkout
                 .canonical_path
                 .file_name()

@@ -345,10 +345,17 @@ impl RepositoryStore {
             None => registry.upsert_active(&input.project_id, expected_registry)?,
         }
 
+        let aggregate_root = repository.path.parent().map(Path::to_path_buf).ok_or_else(
+            || ProductStoreError::InvalidRecord {
+                kind: "logical_codebase_manifest",
+                reason: "repository path has no non-git parent".to_string(),
+            },
+        )?;
         self.ensure_manifest_membership(
             authority,
             &input.project_id,
             member.logical_repository_id,
+            aggregate_root,
         )?;
         debug_assert_eq!(checkout.checkout_id, identity.primary_checkout_id);
         Ok(())
@@ -359,14 +366,36 @@ impl RepositoryStore {
         authority: &LogicalCodebaseStore,
         project_id: &str,
         member_id: LogicalRepositoryId,
+        aggregate_root: PathBuf,
     ) -> Result<(), ProductStoreError> {
-        let mut manifest =
-            authority
-                .load_manifest(project_id)?
-                .ok_or_else(|| ProductStoreError::NotFound {
-                    kind: "logical_codebase_manifest",
-                    id: project_id.to_string(),
-                })?;
+        let mut manifest = match authority.load_manifest(project_id)? {
+            Some(manifest) => manifest,
+            None => {
+                // 路由权威重灌事故(2026-10-13 诊断)修复后,ensure 门不再对
+                // 无 repos.json 的项目伪造槽位 manifest。feature 项目的首个
+                // 仓在 create 事务内 bootstrap 槽位 manifest:聚合根取新仓的
+                // 公共非 git 父目录(与迁移语义一致),禁止以 .aria 数据目录
+                // 兜底。已有成员而 manifest 缺失属损坏窗口,fail-closed 不猜。
+                // 当前事务已先落盘本 member;只认「非本事务成员」为孤儿。
+                if authority
+                    .list_members(project_id)?
+                    .iter()
+                    .any(|member| member.logical_repository_id != member_id)
+                {
+                    return Err(ProductStoreError::NotFound {
+                        kind: "logical_codebase_manifest",
+                        id: project_id.to_string(),
+                    });
+                }
+                let manifest = crate::product::logical_codebase::LogicalCodebaseManifest::new(
+                    project_id,
+                    aggregate_root,
+                    Vec::new(),
+                );
+                authority.save_manifest(project_id, &manifest)?;
+                manifest
+            }
+        };
         if manifest.member_ids.contains(&member_id) {
             return Ok(());
         }

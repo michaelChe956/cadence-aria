@@ -115,7 +115,8 @@ impl super::CodingAttemptStore {
         validate_relative_id(issue_id)?;
         validate_relative_id(plan_id)?;
         // 同 compute_issue_delivery_summary：先读 issue 确认存在，避免对不存在的 issue 返回空投影。
-        IssueStore::new(self.paths()).get(project_id, issue_id)?;
+        // 其 codebase 归属是 target 仓名解析的权威入口(v1.3 per-LC 子树)。
+        let issue = IssueStore::new(self.paths()).get(project_id, issue_id)?;
 
         let attempts = self.list_attempts_for_work_item_group(project_id, issue_id, plan_id)?;
 
@@ -159,7 +160,11 @@ impl super::CodingAttemptStore {
             all_delivered = all_delivered && delivered;
             any_target_started = any_target_started || target_started;
 
-            let repository_name = self.resolve_plan_target_repository_name(project_id, *target)?;
+            let repository_name = self.resolve_plan_target_repository_name(
+                project_id,
+                issue.logical_codebase_id.as_deref(),
+                *target,
+            )?;
             entries.push(PlanTargetEntry {
                 target_repository_id: *target,
                 repository_name,
@@ -230,17 +235,20 @@ impl super::CodingAttemptStore {
     }
 
     /// 解析 plan target 的仓展示名（issue_delivery.rs `resolve_repository_name`
-    /// 同款）：logical id 经 `resolve_logical_repository_strict` 取 checkout 路径
-    /// 末段目录名；解析不出末段时回落 logical id 字符串本身。
+    /// 同款）：logical id 经 `resolve_logical_repository_for_issue_codebase`
+    /// （issue 归属 lc_id，v1.3 走 per-LC 子树权威，不触发 project 级
+    /// ensure/legacy 迁移引导——路由权威重灌事故触发点，2026-10-13 诊断）
+    /// 取 checkout 路径末段目录名；解析不出末段时回落 logical id 字符串本身。
     fn resolve_plan_target_repository_name(
         &self,
         project_id: &str,
+        issue_lc_id: Option<&str>,
         target: LogicalRepositoryId,
     ) -> Result<String, ProductStoreError> {
         let paths = self.paths();
         let project = ProjectStore::new(paths.clone()).get(project_id)?;
         let (_, checkout, _) = RepositoryStore::for_project(paths, &project)
-            .resolve_logical_repository_strict(project_id, target)?;
+            .resolve_logical_repository_for_issue_codebase(project_id, issue_lc_id, target)?;
         if let Some(name) = checkout
             .canonical_path
             .file_name()

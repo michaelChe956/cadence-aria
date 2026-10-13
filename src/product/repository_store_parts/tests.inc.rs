@@ -544,6 +544,72 @@ mod tests {
         assert_eq!(replacement.id, "repository_0004");
     }
 
+    /// 路由权威重灌事故回归(2026-10-13 诊断):v1.3 原生项目(LC record 在
+    /// per-LC 子树、无 repos.json、无槽位 manifest)不得被 ensure 门误判为
+    /// 「待迁移」——任何 RepositoryStore 读路径零写入,别名 LC 不生成。
+    #[test]
+    fn v13_native_project_without_repos_json_never_bootstraps_default_slot() {
+        let fixture = repository_fixture();
+        let project = fixture.create_project("project_native");
+        // v1.3 注册形态:LC record + per-LC 子树权威,槽位无 manifest。
+        LogicalCodebaseStore::new(fixture.paths.clone())
+            .create(
+                &project.id,
+                LogicalCodebaseCreateInput {
+                    name: "notify-center".to_string(),
+                    aggregate_root: fixture.root.path().to_path_buf(),
+                },
+            )
+            .unwrap();
+
+        let store = RepositoryStore::for_project(fixture.paths.clone(), &project);
+        assert!(
+            store.logical_codebase_feature.is_enabled(),
+            "v1.3 LC record 存在时 feature 必须开启"
+        );
+        assert!(
+            store.list(&project.id).unwrap().is_empty(),
+            "无 repos.json 时 list 返回空"
+        );
+        // strict 是 project 级槽位权威语义:无槽位 manifest → NotFound,零写入。
+        assert!(matches!(
+            store.resolve_logical_repository_strict(
+                &project.id,
+                LogicalRepositoryId(Uuid::new_v4())
+            ),
+            Err(ProductStoreError::NotFound {
+                kind: "logical_repository_manifest",
+                ..
+            })
+        ));
+
+        let slot = fixture.paths.logical_codebase_root(&project.id);
+        assert!(
+            !slot.join("manifest.json").exists(),
+            "ensure 不得伪造槽位 manifest"
+        );
+        assert!(
+            !slot.join("aggregate-policy.json").exists(),
+            "ensure 不得写 bootstrap 政策"
+        );
+        assert!(
+            !slot.join("identity-migration.json").exists(),
+            "ensure 不得创建迁移 journal"
+        );
+        // ProjectStore::get 驱动的 migrate_legacy 不产生 legacy 别名 LC。
+        ProjectStore::new(fixture.paths.clone())
+            .get(&project.id)
+            .unwrap();
+        let alias_root = fixture.paths.logical_codebase_record_root(
+            &project.id,
+            &crate::product::logical_codebase::legacy_logical_codebase_id(&project.id),
+        );
+        assert!(
+            !alias_root.join("record.json").exists(),
+            "别名 LC 不得生成"
+        );
+    }
+
     #[test]
     fn repository_initialization_launch_is_nameable_through_repository_store() {
         let _: Option<crate::product::repository_store::RepositoryInitializationLaunch> = None;

@@ -130,10 +130,17 @@ impl RepositoryStore {
 
     pub fn ensure_identity_schema(&self, project_id: &str) -> Result<(), ProductStoreError> {
         validate_relative_id(project_id)?;
+        // v1.3 原生项目(LC record 在 per-LC 子树、无 repos.json)没有 v1.2
+        // legacy 可迁:槽位 manifest 缺失不得误判为「待迁移」而 bootstrap 出
+        // 指向数据目录、0 成员的假 LC 覆盖默认槽位(路由权威重灌事故,
+        // 2026-10-13 诊断)。迁移执行器的唯一 legacy 源是 repos.json——
+        // 槽位 manifest 缺失时仅当 repos.json 存在才执行迁移;否则权威在
+        // per-LC 子树,由 issue 归属解析(resolve_logical_repository_for_issue_codebase)。
         if self.logical_codebase_feature.is_enabled()
             && LogicalCodebaseStore::new(self.paths.clone())
                 .load_manifest(project_id)?
                 .is_none()
+            && self.repos_path(project_id).exists()
         {
             IdentityMigrationExecutor::new(self.paths.clone())
                 .ensure_identity_schema(project_id)?;
