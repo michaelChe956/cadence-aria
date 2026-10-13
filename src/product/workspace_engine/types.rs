@@ -666,6 +666,162 @@ pub(crate) enum StructuralAssessment {
     Operational(crate::product::planning_failure::PlanningFailureSet),
 }
 
+/// SG3b（plan §0.5 接口字典）：Final Compile 的 typed 失败。kind 为字典
+/// 两变体 `Structure(PlanningFailureSet) | Operational{stable_code,cause}`，
+/// 并按字典要求「携本次 failure_id/approval/source context」——身份字段由
+/// SC Final Compile 链在返回边界统一 seal（内容寻址 failure_id），不经
+/// String 渲染再 parse；Operational 保留原 cause 原文与既有 stable code。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PlanningCompileFailure {
+    pub(crate) kind: PlanningCompileFailureKind,
+    /// 内容寻址身份（sha256，seal 前为空）；同输入幂等复现。
+    pub(crate) failure_id: String,
+    /// 本次 close 的 approval 元组身份（approval CAS 前失败为 None）。
+    pub(crate) approval_attempt_id: Option<String>,
+    pub(crate) source_revision_ref: Option<String>,
+    pub(crate) plan_candidate_ir_ref: Option<String>,
+    pub(crate) mechanical_report_ref: Option<String>,
+    /// 结构复验时的 live 上下文 digest（未达结构门为 None）。
+    pub(crate) context_digest: Option<String>,
+    /// 产生本次失败的 compile 运行（reservation 前失败为 None）；close 侧
+    /// 仅按它匹配本运行 Failed transaction 的 validator findings。
+    pub(crate) compile_run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PlanningCompileFailureKind {
+    Structure(crate::product::planning_failure::PlanningFailureSet),
+    Operational { stable_code: String, cause: String },
+}
+
+impl PlanningCompileFailure {
+    /// 结构失败族稳定 code（单值映射，供 durable diagnostic/DTO 复用）。
+    pub(crate) const STRUCTURE_STABLE_CODE: &'static str = "final_compile_structure_rejected";
+
+    pub(crate) fn operational(stable_code: &str, cause: String) -> Self {
+        Self {
+            kind: PlanningCompileFailureKind::Operational {
+                stable_code: stable_code.to_string(),
+                cause,
+            },
+            failure_id: String::new(),
+            approval_attempt_id: None,
+            source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            context_digest: None,
+            compile_run_id: None,
+        }
+    }
+
+    pub(crate) fn structure(
+        failures: crate::product::planning_failure::PlanningFailureSet,
+    ) -> Self {
+        Self {
+            kind: PlanningCompileFailureKind::Structure(failures),
+            failure_id: String::new(),
+            approval_attempt_id: None,
+            source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            context_digest: None,
+            compile_run_id: None,
+        }
+    }
+
+    pub(crate) fn stable_code(&self) -> &str {
+        match &self.kind {
+            PlanningCompileFailureKind::Operational { stable_code, .. } => stable_code,
+            PlanningCompileFailureKind::Structure(_) => Self::STRUCTURE_STABLE_CODE,
+        }
+    }
+
+    /// 人读渲染（时间线/事件与旧 String 边界共用；不是身份来源）。
+    pub(crate) fn render(&self) -> String {
+        match &self.kind {
+            PlanningCompileFailureKind::Operational { stable_code, cause } => {
+                format!("[{stable_code}] {cause}")
+            }
+            PlanningCompileFailureKind::Structure(set) => {
+                let failures = set
+                    .failures
+                    .iter()
+                    .map(|failure| {
+                        format!(
+                            "{}[{}]",
+                            failure.kind.stable_code(),
+                            failure.evidence.affected_ids.join("->")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                format!("final compile structure gate rejected: {failures}")
+            }
+        }
+    }
+
+    /// 返回边界统一 seal：从 durable record 补 approval/source 三 refs 并
+    /// 计算内容寻址 failure_id（同失败重放幂等同 id）。
+    pub(crate) fn seal(
+        &mut self,
+        session_id: &str,
+        record: &crate::product::models::WorkspaceSessionRecord,
+    ) {
+        self.seal_with_identity(
+            session_id,
+            record.approval_attempt_id.clone(),
+            record.work_item_plan_source_revision_ref.clone(),
+            record.plan_candidate_ir_ref.clone(),
+            record.mechanical_report_ref.clone(),
+        );
+    }
+
+    pub(crate) fn seal_with_identity(
+        &mut self,
+        session_id: &str,
+        approval_attempt_id: Option<String>,
+        source_revision_ref: Option<String>,
+        plan_candidate_ir_ref: Option<String>,
+        mechanical_report_ref: Option<String>,
+    ) {
+        self.approval_attempt_id = approval_attempt_id;
+        self.source_revision_ref = source_revision_ref;
+        self.plan_candidate_ir_ref = plan_candidate_ir_ref;
+        self.mechanical_report_ref = mechanical_report_ref;
+        self.failure_id = self.compute_failure_id(session_id);
+    }
+
+    fn compute_failure_id(&self, session_id: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let kind_payload = match &self.kind {
+            PlanningCompileFailureKind::Operational { stable_code, cause } => {
+                serde_json::json!({ "stable_code": stable_code, "cause": cause })
+            }
+            PlanningCompileFailureKind::Structure(set) => serde_json::json!({
+                "structure_failures": set,
+            }),
+        };
+        let input = serde_json::json!({
+            "session_id": session_id,
+            "kind": kind_payload,
+            "approval_attempt_id": self.approval_attempt_id,
+            "source_revision_ref": self.source_revision_ref,
+            "plan_candidate_ir_ref": self.plan_candidate_ir_ref,
+            "mechanical_report_ref": self.mechanical_report_ref,
+            "context_digest": self.context_digest,
+            "compile_run_id": self.compile_run_id,
+        });
+        let digest = Sha256::digest(input.to_string().as_bytes());
+        format!("planning_compile_failure_{digest:x}")
+    }
+}
+
+impl std::fmt::Display for PlanningCompileFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.render())
+    }
+}
+
 #[cfg(test)]
 pub(crate) type PolicyRouteBeforePersistHook = Box<dyn FnOnce(&LifecycleStore, &str) + Send>;
 

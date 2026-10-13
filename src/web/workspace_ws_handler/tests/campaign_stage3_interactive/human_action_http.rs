@@ -371,15 +371,22 @@ async fn workspace_human_action_http_approve_compile_failure_never_confirms() {
             "expected_gate_id": gate_id,
         }))
         .await;
-    // 该失败形态无 Failed 事务（引擎未落 findings 事务）——与 WS 层同形映射：
-    // 通用引擎错误面（human_action_engine_error，5xx），绝不 200/accepted。
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body={body}");
-    assert_eq!(body["code"], "human_action_engine_error");
+    // SG3b：无 Failed 事务的 compile 失败同样携带 typed PlanningCompileFailure
+    // 上下文（不再依赖 latest-Failed-tx 扫描捞 findings）——REST 与 WS 同形
+    // 映射 422 single_candidate_approval_compile_failed，绝不 200/accepted。
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body={body}");
+    assert_eq!(body["code"], "single_candidate_approval_compile_failed");
     assert!(
         body["message"]
             .as_str()
             .is_some_and(|message| message.contains("compile failed; human gate remains open")),
         "错误必须如实携带 deterministic compile 失败语义: {body}"
+    );
+    assert!(
+        body["details"]["failure_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "typed failure_id 必须随 422 details 上抛: {body}"
     );
     assert_eq!(
         fixture.session_record().await.status,

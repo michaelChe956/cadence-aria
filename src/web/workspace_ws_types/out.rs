@@ -148,6 +148,46 @@ impl LcResumeRecoveryDto {
     }
 }
 
+/// SG3b（plan 附录A）：Final Compile typed 失败的最低必要 wire 投影——
+/// close→WS/REST 同一 DTO，同一 failure_id/approval/source context 直达
+/// 客户端。只含失败基础字段；机器修复/预算/快照字段由 SG7 在此扩展
+///（不提前占用）。结构 findings 为最小呈现（code/category/affected_ids），
+/// 完整 PlanningFailurePresentation 归 SG7。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanningCompileFailureDto {
+    pub failure_id: String,
+    /// "structure" | "operational"。
+    pub kind: String,
+    pub stable_code: String,
+    /// 身份字段显式序列化（含 null）：失败身份合同在 wire 上始终可见，
+    /// 不因缺事实而静默缺字段。
+    pub approval_attempt_id: Option<String>,
+    pub source_revision_ref: Option<String>,
+    pub plan_candidate_ir_ref: Option<String>,
+    pub mechanical_report_ref: Option<String>,
+    pub context_digest: Option<String>,
+    pub compile_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structure_findings: Vec<PlanningCompileStructureFindingDto>,
+    /// 仅当本 close 运行（compile_run_id 匹配）的 Failed transaction 携带
+    /// strict validator findings 时非空；不同 failure 的旧 Failed tx 不捞。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validator_findings: Vec<crate::product::models::WorkItemSplitFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanningCompileStructureFindingDto {
+    pub code: String,
+    pub category: String,
+    pub affected_ids: Vec<String>,
+}
+
+/// SG3b：engine typed 失败载体（本次 close 捕获）→ 本 DTO 的纯投影由
+/// `conversational_gate::HumanGateCloseCompileFailure::wire_presentation`
+/// 单源完成（engine 私有 types 不对 web 层开放），此处只承载 wire 合同。
+
 /// run_context 的对外 kind 名与 durable serde tag（snake_case）严格一致，
 /// 不引入第二套字符串协议；未知 kind 拒收由 durable 反序列化承载。
 fn lc_recovery_run_kind(context: &LcRecoveryRunContext) -> &'static str {

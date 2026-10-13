@@ -403,8 +403,11 @@ fn seed_failed_compile_with_findings(lifecycle: &LifecycleStore, plan_id: &str) 
 }
 
 #[tokio::test]
-async fn conversational_gate_approve_compile_failure_surfaces_validator_findings() {
+async fn conversational_gate_approve_compile_failure_ignores_stale_failed_transaction() {
     let (_root, lifecycle, mut engine) = super::conversational_gate::gate_fixture(1);
+    // SG3b 行为切割留痕：本夹具（无候选 refs）close 失败曾按 latest-scan 捞
+    // 旧 Failed tx 的 failure_reason/findings 冒充本次失败；现上下文只认
+    // 本次 close 捕获的 typed PlanningCompileFailure。
     seed_failed_compile_with_findings(&lifecycle, "plan_0001");
 
     let error = engine
@@ -412,43 +415,23 @@ async fn conversational_gate_approve_compile_failure_surfaces_validator_findings
         .await
         .expect_err("incomplete fixture must fail closed before confirming");
     assert!(error.contains("human gate remains open"), "{error}");
-    // failure_reason 原文与每条 finding 的 severity/code/message/work_item_ids 原文可见
-    assert!(error.contains(SEEDED_FAILURE_REASON), "{error}");
-    assert!(error.contains("[error] WI_DEP_CYCLE"), "{error}");
-    assert!(
-        error.contains("work item dependency cycle: wi_a -> wi_b -> wi_a"),
-        "{error}"
-    );
-    assert!(
-        error.contains("[warning] WI_MISSING_VERIFICATION"),
-        "{error}"
-    );
-    assert!(error.contains("wi_a, wi_b"), "{error}");
+    // 不同 failure 的旧 Failed tx 不捞：其 findings/failure_reason 不出现。
+    assert!(!error.contains(SEEDED_FAILURE_REASON), "{error}");
+    assert!(!error.contains("WI_DEP_CYCLE"), "{error}");
+    assert!(!error.contains("WI_MISSING_VERIFICATION"), "{error}");
 
-    // 结构化副本供 web 层 ProtocolError.context 使用
-    let context = engine
-        .last_human_gate_close_compile_failure_context()
-        .expect("structured findings context");
+    // typed 上下文（本 close 的 refs 缺失失败）经 wire 投影可见。
+    let context = sg3b_wire_context(&engine);
+    assert_eq!(context["kind"], serde_json::json!("operational"));
     assert_eq!(
-        context["failure_reason"],
-        serde_json::json!(SEEDED_FAILURE_REASON)
+        context["stable_code"],
+        serde_json::json!("SOURCE_STORE_MALFORMED_REF")
     );
-    let findings = context["findings"].as_array().expect("findings array");
-    assert_eq!(findings.len(), 2);
-    assert_eq!(findings[0]["severity"], serde_json::json!("error"));
-    assert_eq!(findings[0]["code"], serde_json::json!("WI_DEP_CYCLE"));
-    assert_eq!(
-        findings[0]["message"],
-        serde_json::json!("work item dependency cycle: wi_a -> wi_b -> wi_a")
-    );
-    assert_eq!(
-        findings[0]["work_item_ids"],
-        serde_json::json!(["wi_a", "wi_b"])
-    );
-    assert_eq!(findings[1]["severity"], serde_json::json!("warning"));
-    assert_eq!(
-        findings[1]["code"],
-        serde_json::json!("WI_MISSING_VERIFICATION")
+    assert!(
+        context["failure_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "{context}"
     );
 }
 
@@ -467,10 +450,668 @@ async fn conversational_gate_approve_success_leaves_no_compile_failure_context()
         .await;
     assert_eq!(result, Ok(HumanGateCloseOutcome::Confirmed), "{result:?}");
     assert!(
-        engine
-            .last_human_gate_close_compile_failure_context()
-            .is_none(),
+        engine.last_human_gate_close_compile_failure().is_none(),
         "successful approval must not surface stale compile failure findings"
+    );
+}
+
+// —— SG3b（REQ-SG-03、REQ-PLN-09、REQ-CG-04/05）：冻结 Final Compile 及
+// 同次 typed 传播——结构门先于 prepare/transaction，typed
+// failure_id/approval/source context 直达 close→WS/REST，旧 Failed
+// transaction 不同 failure 不捞，冻结 refs/context 漂移拒不重 lower。 ——
+
+use crate::product::work_item_contract::RequiredInputContract;
+use crate::product::work_item_contract::canonical_contract_fixture;
+use crate::product::work_item_plan_compiler::{
+    PlanCandidateIr, PlanCandidateItemIr, PlanCandidateMechanicalReport,
+    WORK_ITEM_PLAN_COMPILER_VERSION,
+};
+use crate::product::work_item_plan_source_store::{
+    PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
+    SourceStoreScope, WorkItemPlanSourceStore,
+};
+use sha2::{Digest, Sha256};
+
+/// 把自定义 IR items 持久化为 SC source/IR/report 三 refs 候选（报告沿旧
+/// None 形态；Some 冻结由 `sg3b_report_ref_with_frozen_structure` 升级）。
+fn sg3b_persist_candidate_with_ir(
+    lifecycle: &LifecycleStore,
+    engine: &WorkspaceEngine,
+    suffix: &str,
+    ir_items: Vec<PlanCandidateItemIr>,
+) -> (String, String, String, String, String) {
+    let project_id = engine.session().project_id.clone();
+    let issue_id = engine.session().issue_id.clone();
+    let plan_id = engine.session().entity_id.clone();
+    let scope = SourceStoreScope {
+        project_id: project_id.clone(),
+        issue_id: issue_id.clone(),
+        plan_id: plan_id.clone(),
+    };
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let source_text = format!("# sg3b single candidate source {suffix}\n");
+    let source_hash = hex::encode(Sha256::digest(source_text.as_bytes()));
+    let mut source = SourceRevisionRecord {
+        id: format!("source-{suffix}"),
+        source: source_text,
+        source_revision_hash: source_hash.clone(),
+        content_hash: String::new(),
+    };
+    source.content_hash = source.content_hash().expect("source content hash");
+    let source_ref = source_store
+        .put_source_revision(&scope.project_id, &scope.issue_id, &scope.plan_id, &source)
+        .expect("persist sg3b source");
+    let repository_id = engine
+        .work_item_plan_repository_id(lifecycle, &{
+            lifecycle
+                .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+                .expect("sg3b previous plan")
+        })
+        .expect("sg3b repository id");
+    let mut ir_record = PlanCandidateIrRecord {
+        id: format!("ir-{suffix}"),
+        source_revision_id: source.id.clone(),
+        ir: PlanCandidateIr {
+            source_revision_hash: source_hash,
+            compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+            items: ir_items,
+        },
+        content_hash: String::new(),
+    };
+    ir_record.content_hash = ir_record.content_hash().expect("IR content hash");
+    let ir_ref = source_store
+        .put_plan_candidate_ir(
+            &scope.project_id,
+            &scope.issue_id,
+            &scope.plan_id,
+            &ir_record,
+        )
+        .expect("persist sg3b IR");
+    let report_ref = sg3b_put_mechanical_report(
+        &source_store,
+        &scope,
+        &format!("report-{suffix}"),
+        &source,
+        &ir_record,
+        None,
+    );
+    (source_ref, ir_ref, report_ref, source.id, ir_record.id)
+}
+
+fn sg3b_put_mechanical_report(
+    source_store: &WorkItemPlanSourceStore,
+    scope: &SourceStoreScope,
+    report_id: &str,
+    source: &SourceRevisionRecord,
+    ir_record: &PlanCandidateIrRecord,
+    structure_report: Option<crate::product::planning_failure::PersistedPlanningStructureReport>,
+) -> String {
+    let mut report = PlanCandidateMechanicalReportRecord {
+        id: report_id.to_string(),
+        source_revision_id: source.id.clone(),
+        ir_id: ir_record.id.clone(),
+        report: PlanCandidateMechanicalReport {
+            source_revision_hash: ir_record.ir.source_revision_hash.clone(),
+            compiler_version: ir_record.ir.compiler_version.clone(),
+            findings: Vec::new(),
+        },
+        structure_report,
+        content_hash: String::new(),
+    };
+    report.content_hash = report.content_hash().expect("report content hash");
+    source_store
+        .put_mechanical_report(&scope.project_id, &scope.issue_id, &scope.plan_id, &report)
+        .expect("persist sg3b mechanical report")
+}
+
+/// 用真实 live context + SG1 纯评估冻结 Some 结构报告并落新 report ref
+///（候选门同款冻结路径；返回 (report_ref, context_digest)）。
+fn sg3b_report_ref_with_frozen_structure(
+    engine: &WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    scope: &SourceStoreScope,
+    suffix: &str,
+    source: &SourceRevisionRecord,
+    source_ref: &str,
+    ir_record: &PlanCandidateIrRecord,
+    ir_ref: &str,
+) -> (String, String) {
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let context = engine
+        .build_single_candidate_structure_context(&ir_record.ir, source_ref, ir_ref)
+        .expect("sg3b live structure context");
+    let assessment =
+        crate::product::workspace_engine::plan_projection::assess_single_candidate_structure(
+            source.source.clone(),
+            &ir_record.ir,
+            &context,
+        );
+    let crate::product::workspace_engine::types::StructuralAssessment::Accepted(prepared) =
+        assessment
+    else {
+        panic!("sg3b fixture candidate must pass the structure gate");
+    };
+    let frozen =
+        crate::product::workspace_engine::plan_projection::freeze_persisted_structure_report(
+            &prepared.report,
+            &source.id,
+            &ir_record.id,
+        )
+        .expect("freeze sg3b structure report");
+    let digest = frozen.context_digest.clone();
+    let report_ref = sg3b_put_mechanical_report(
+        &source_store,
+        scope,
+        &format!("report-{suffix}-frozen"),
+        source,
+        ir_record,
+        Some(frozen),
+    );
+    (report_ref, digest)
+}
+
+fn sg3b_cycle_ir_items(repository_id: &str) -> Vec<PlanCandidateItemIr> {
+    let mut contract_a = canonical_contract_fixture("wi_sg3b_a");
+    contract_a.input_contracts = vec![RequiredInputContract {
+        contract_id: "contract.sg3b_b".to_string(),
+        provider_logical_work_item_id: "wi_sg3b_b".to_string(),
+        required_capabilities: vec!["sg3b_ready".to_string()],
+        compatibility_policy:
+            crate::product::work_item_contract::ContractCompatibilityPolicy::RequireAll,
+    }];
+    let mut contract_b = canonical_contract_fixture("wi_sg3b_b");
+    contract_b.input_contracts = vec![RequiredInputContract {
+        contract_id: "contract.sg3b_a".to_string(),
+        provider_logical_work_item_id: "wi_sg3b_a".to_string(),
+        required_capabilities: vec!["sg3b_ready".to_string()],
+        compatibility_policy:
+            crate::product::work_item_contract::ContractCompatibilityPolicy::RequireAll,
+    }];
+    vec![
+        PlanCandidateItemIr {
+            target_repository_id: repository_id.to_string(),
+            contract: contract_a,
+            verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                checks: Vec::new(),
+            },
+            trusted_commands: Vec::new(),
+        },
+        PlanCandidateItemIr {
+            target_repository_id: repository_id.to_string(),
+            contract: contract_b,
+            verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                checks: Vec::new(),
+            },
+            trusted_commands: Vec::new(),
+        },
+    ]
+}
+
+/// 两个互不依赖但写面重叠的 WI：结构门（有效图）通过，strict validator 在
+/// execute 段以 parallel_scope_overlap 落本运行 Failed transaction。
+fn sg3b_scope_overlap_ir_items(repository_id: &str) -> Vec<PlanCandidateItemIr> {
+    let mut contract_a = canonical_contract_fixture("wi_sg3b_scope_a");
+    contract_a.input_contracts.clear();
+    contract_a.handoff_contract.provided_contract_refs.clear();
+    contract_a.write_policy.exclusive_scopes = vec!["src/sg3b_overlap".to_string()];
+    let mut contract_b = canonical_contract_fixture("wi_sg3b_scope_b");
+    contract_b.input_contracts.clear();
+    contract_b.handoff_contract.provided_contract_refs.clear();
+    contract_b.write_policy.exclusive_scopes = vec!["src/sg3b_overlap".to_string()];
+    vec![
+        PlanCandidateItemIr {
+            target_repository_id: repository_id.to_string(),
+            contract: contract_a,
+            verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                checks: Vec::new(),
+            },
+            trusted_commands: Vec::new(),
+        },
+        PlanCandidateItemIr {
+            target_repository_id: repository_id.to_string(),
+            contract: contract_b,
+            verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                checks: Vec::new(),
+            },
+            trusted_commands: Vec::new(),
+        },
+    ]
+}
+
+fn sg3b_wire_context(engine: &WorkspaceEngine) -> serde_json::Value {
+    let failure = engine
+        .last_human_gate_close_compile_failure()
+        .expect("typed close compile failure context");
+    serde_json::to_value(failure.wire_presentation()).expect("wire presentation json")
+}
+
+#[tokio::test]
+async fn sg_03b_prepare_failure_this_close() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, lifecycle, mut engine) = approval_fixture();
+    let repository_id = engine
+        .work_item_plan_repository_id(
+            &lifecycle,
+            &lifecycle
+                .get_issue_work_item_plan(
+                    &engine.session().project_id,
+                    &engine.session().issue_id,
+                    &engine.session().entity_id,
+                )
+                .expect("plan"),
+        )
+        .expect("repository");
+    let (source_ref, ir_ref, report_ref, _source_id, _ir_id) = sg3b_persist_candidate_with_ir(
+        &lifecycle,
+        &engine,
+        "sg3b_cycle",
+        sg3b_cycle_ir_items(&repository_id),
+    );
+    super::single_candidate_recovery::single_candidate_recovery_update_refs(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Approval,
+        (source_ref.clone(), ir_ref.clone(), report_ref.clone()),
+    );
+    // 不同 failure 的旧 Failed transaction（strict validator 失败）不得被
+    // latest-scan 捞为本次失败事实。
+    let plan_id = engine.session().entity_id.clone();
+    seed_failed_compile_with_findings(&lifecycle, &plan_id);
+
+    let journal = crate::product::work_item_plan_store::observe_compile_transaction_writes();
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    engine.event_tx = event_tx;
+    let error = engine
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+        .await
+        .expect_err("cycle candidate must fail the final compile structure gate");
+
+    // prepare 前结构失败：零 compile transaction 写入。
+    assert!(
+        journal.snapshots().is_empty(),
+        "structure gate rejection must precede any transaction put"
+    );
+    assert!(error.contains("human gate remains open"), "{error}");
+    assert!(
+        error.contains("final compile structure gate rejected"),
+        "{error}"
+    );
+    assert!(error.contains("dependency_cycle"), "{error}");
+    // 旧 Failed tx（不同 failure）不捞：其 findings/failure_reason 不出现。
+    assert!(!error.contains("WI_DEP_CYCLE"), "{error}");
+    assert!(!error.contains(SEEDED_FAILURE_REASON), "{error}");
+
+    // typed failure_id/approval/source context 同次直达 close 上下文。
+    let context = sg3b_wire_context(&engine);
+    let failure_id = context["failure_id"]
+        .as_str()
+        .expect("failure_id")
+        .to_string();
+    assert!(
+        failure_id.starts_with("planning_compile_failure_"),
+        "{failure_id}"
+    );
+    assert_eq!(context["kind"], serde_json::json!("structure"));
+    assert_eq!(
+        context["stable_code"],
+        serde_json::json!("final_compile_structure_rejected")
+    );
+    let durable = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("durable session");
+    assert_eq!(
+        context["approval_attempt_id"],
+        serde_json::json!(durable.approval_attempt_id),
+        "approval identity must be the durable approval tuple of this close"
+    );
+    assert_eq!(
+        context["source_revision_ref"],
+        serde_json::json!(source_ref)
+    );
+    assert_eq!(context["plan_candidate_ir_ref"], serde_json::json!(ir_ref));
+    assert_eq!(
+        context["mechanical_report_ref"],
+        serde_json::json!(report_ref)
+    );
+    assert!(
+        context["context_digest"]
+            .as_str()
+            .is_some_and(|digest| !digest.is_empty()),
+        "live structure context digest must ride the typed failure"
+    );
+    let findings = context["structure_findings"].as_array().expect("findings");
+    assert_eq!(findings.len(), 1, "{context}");
+    assert_eq!(findings[0]["code"], serde_json::json!("dependency_cycle"));
+    let affected = findings[0]["affected_ids"].as_array().expect("witness");
+    assert_eq!(affected.len(), 2, "{context}");
+    // 本 close 无 validator findings：旧 tx 不得冒充。
+    assert!(
+        context
+            .get("validator_findings")
+            .map(serde_json::Value::is_null)
+            .unwrap_or(true),
+        "{context}"
+    );
+
+    // durable 安全 diagnostic：typed failure_id + 结构稳定 code 落 policy 诊断。
+    let durable = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("durable session after failure");
+    let diagnostic = durable
+        .policy_diagnostics
+        .last()
+        .expect("structure rejection diagnostic");
+    assert_eq!(diagnostic.code, "final_compile_structure_rejected");
+    assert!(
+        diagnostic.message.contains(&failure_id),
+        "{}",
+        diagnostic.message
+    );
+
+    // 晚发现结构缺口且无活动 grant：零 author（provider 启动）、零确认、零发布。
+    assert!(durable.provider_start_ledger.is_empty());
+    assert_ne!(durable.status, WorkspaceSessionStatus::Confirmed);
+    assert_ne!(
+        durable.single_candidate_phase,
+        Some(SingleCandidatePhase::Completed)
+    );
+    assert!(durable.publication_provenance_ref.is_none());
+    assert!(
+        !event_rx
+            .try_recv()
+            .is_ok_and(|event| matches!(event, EngineEvent::HumanGateClosed { .. }))
+    );
+}
+
+#[tokio::test]
+async fn sg_03b_frozen_context_drift_refuses_without_relower() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, lifecycle, mut engine) = approval_fixture();
+    let project_id = engine.session().project_id.clone();
+    let issue_id = engine.session().issue_id.clone();
+    let plan_id = engine.session().entity_id.clone();
+    let scope = SourceStoreScope {
+        project_id: project_id.clone(),
+        issue_id: issue_id.clone(),
+        plan_id: plan_id.clone(),
+    };
+    let previous_plan = lifecycle
+        .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+        .expect("plan");
+    let repository_id = engine
+        .work_item_plan_repository_id(&lifecycle, &previous_plan)
+        .expect("repository");
+    let single = |contract: crate::product::work_item_contract::CanonicalWorkItemContract| {
+        PlanCandidateItemIr {
+            target_repository_id: repository_id.clone(),
+            contract,
+            verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                checks: Vec::new(),
+            },
+            trusted_commands: Vec::new(),
+        }
+    };
+    let mut contract = canonical_contract_fixture("wi_sg3b_drift");
+    contract.input_contracts.clear();
+    contract.handoff_contract.provided_contract_refs.clear();
+    let (source_ref, ir_ref, _report_ref, source_id, ir_id) =
+        sg3b_persist_candidate_with_ir(&lifecycle, &engine, "sg3b_drift", vec![single(contract)]);
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let source = source_store
+        .get_source_revision(&scope, &source_ref)
+        .expect("source record");
+    let ir_record = source_store
+        .get_plan_candidate_ir(&scope, &ir_ref)
+        .expect("IR record");
+    let (frozen_report_ref, _frozen_digest) = sg3b_report_ref_with_frozen_structure(
+        &engine,
+        &lifecycle,
+        &scope,
+        "sg3b_drift",
+        &source,
+        &source_ref,
+        &ir_record,
+        &ir_ref,
+    );
+    super::single_candidate_recovery::single_candidate_recovery_update_refs(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Approval,
+        (
+            source_ref.clone(),
+            ir_ref.clone(),
+            frozen_report_ref.clone(),
+        ),
+    );
+
+    // 冻结后 live 上下文漂移：plan options 变更 → options_digest →
+    // context_digest 变化。
+    let mut drifted_plan = previous_plan.clone();
+    drifted_plan.options.include_e2e_tests = !previous_plan.options.include_e2e_tests;
+    lifecycle
+        .restore_issue_work_item_plan_snapshot(&project_id, &issue_id, &plan_id, &drifted_plan)
+        .expect("drift plan options");
+    let live_context = engine
+        .build_single_candidate_structure_context(&ir_record.ir, &source_ref, &ir_ref)
+        .expect("live context after drift");
+
+    let journal = crate::product::work_item_plan_store::observe_compile_transaction_writes();
+    let error = engine
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+        .await
+        .expect_err("frozen context drift must refuse the final compile");
+    assert!(error.contains("human gate remains open"), "{error}");
+    assert!(
+        error.contains("single_candidate_structure_context_drift"),
+        "{error}"
+    );
+    // 冻结 refs/context 变化拒不重 lower：零 transaction、零发布物替换。
+    assert!(journal.snapshots().is_empty(), "{error}");
+    let durable = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("durable session");
+    assert_eq!(
+        durable.work_item_plan_source_revision_ref.as_deref(),
+        Some(source_ref.as_str()),
+        "current refs must keep pointing at the frozen candidate (no re-lower)"
+    );
+    assert_eq!(
+        durable.mechanical_report_ref.as_deref(),
+        Some(frozen_report_ref.as_str())
+    );
+    assert!(durable.publication_provenance_ref.is_none());
+    assert_ne!(durable.status, WorkspaceSessionStatus::Confirmed);
+    assert!(durable.provider_start_ledger.is_empty());
+
+    let context = sg3b_wire_context(&engine);
+    assert_eq!(context["kind"], serde_json::json!("operational"));
+    assert_eq!(
+        context["stable_code"],
+        serde_json::json!("single_candidate_structure_context_drift")
+    );
+    assert_eq!(
+        context["context_digest"],
+        serde_json::json!(live_context.context_digest)
+    );
+    assert_eq!(
+        context["source_revision_ref"],
+        serde_json::json!(source_ref)
+    );
+    assert_eq!(context["plan_candidate_ir_ref"], serde_json::json!(ir_ref));
+    assert_eq!(
+        context["mechanical_report_ref"],
+        serde_json::json!(frozen_report_ref)
+    );
+    assert!(
+        context["approval_attempt_id"].as_str().is_some(),
+        "{context}"
+    );
+}
+
+#[tokio::test]
+async fn sg_03b_this_run_validator_findings_still_surface() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, lifecycle, mut engine) = approval_fixture();
+    let plan_id = engine.session().entity_id.clone();
+    let previous_plan = lifecycle
+        .get_issue_work_item_plan(
+            &engine.session().project_id,
+            &engine.session().issue_id,
+            &plan_id,
+        )
+        .expect("plan");
+    let repository_id = engine
+        .work_item_plan_repository_id(&lifecycle, &previous_plan)
+        .expect("repository");
+    let (source_ref, ir_ref, report_ref, _source_id, _ir_id) = sg3b_persist_candidate_with_ir(
+        &lifecycle,
+        &engine,
+        "sg3b_scope",
+        sg3b_scope_overlap_ir_items(&repository_id),
+    );
+    super::single_candidate_recovery::single_candidate_recovery_update_refs(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Approval,
+        (source_ref, ir_ref, report_ref),
+    );
+
+    let error = engine
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+        .await
+        .expect_err("scope overlap must fail the strict validator in execute");
+    assert!(error.contains("human gate remains open"), "{error}");
+    assert!(error.contains("parallel_scope_overlap"), "{error}");
+
+    // 本 close 运行（compile_run_id 匹配）的 Failed tx findings 原文可见。
+    let context = sg3b_wire_context(&engine);
+    let findings = context["validator_findings"].as_array().expect("findings");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding["code"] == serde_json::json!("parallel_scope_overlap")),
+        "{context}"
+    );
+    assert_eq!(context["kind"], serde_json::json!("operational"));
+    let run_id = context["compile_run_id"].as_str().expect("run id");
+    assert!(!run_id.is_empty(), "{context}");
+    let failed_tx =
+        crate::product::work_item_plan_store::WorkItemPlanStore::new(lifecycle.app_paths())
+            .list_compile_transactions(
+                &engine.session().project_id,
+                &engine.session().issue_id,
+                &engine.session().entity_id,
+            )
+            .expect("transactions")
+            .into_iter()
+            .find(|tx| tx.compile_id == run_id && tx.status == WorkItemPlanCompileStatus::Failed)
+            .expect("this-run Failed transaction");
+    assert_eq!(
+        failed_tx.validator_findings.len(),
+        findings.len(),
+        "findings must originate from this run's Failed transaction"
+    );
+}
+
+#[tokio::test]
+async fn sg_03b_candidate_and_compile_share_effective_edges() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, lifecycle, mut engine) = approval_fixture();
+    let project_id = engine.session().project_id.clone();
+    let issue_id = engine.session().issue_id.clone();
+    let plan_id = engine.session().entity_id.clone();
+    let scope = SourceStoreScope {
+        project_id: project_id.clone(),
+        issue_id: issue_id.clone(),
+        plan_id: plan_id.clone(),
+    };
+    let previous_plan = lifecycle
+        .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
+        .expect("plan");
+    let repository_id = engine
+        .work_item_plan_repository_id(&lifecycle, &previous_plan)
+        .expect("repository");
+    let mut contract = canonical_contract_fixture("wi_sg3b_edges");
+    contract.input_contracts.clear();
+    contract.handoff_contract.provided_contract_refs.clear();
+    let item = PlanCandidateItemIr {
+        target_repository_id: repository_id.clone(),
+        contract,
+        verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+            checks: Vec::new(),
+        },
+        trusted_commands: Vec::new(),
+    };
+    let (source_ref, ir_ref, _report_ref, _source_id, _ir_id) =
+        sg3b_persist_candidate_with_ir(&lifecycle, &engine, "sg3b_edges", vec![item]);
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let source = source_store
+        .get_source_revision(&scope, &source_ref)
+        .expect("source record");
+    let ir_record = source_store
+        .get_plan_candidate_ir(&scope, &ir_ref)
+        .expect("IR record");
+    let (frozen_report_ref, _digest) = sg3b_report_ref_with_frozen_structure(
+        &engine,
+        &lifecycle,
+        &scope,
+        "sg3b_edges",
+        &source,
+        &source_ref,
+        &ir_record,
+        &ir_ref,
+    );
+    super::single_candidate_recovery::single_candidate_recovery_update_refs(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Approval,
+        (
+            source_ref.clone(),
+            ir_ref.clone(),
+            frozen_report_ref.clone(),
+        ),
+    );
+
+    // 同源 candidate/compile：冻结 payload（候选门冻结）与 compile 时重新
+    // 投影的边逐条相等（report_digest 单源封口一致）。
+    let frozen = source_store
+        .get_mechanical_report(&scope, &frozen_report_ref)
+        .expect("frozen report record")
+        .structure_report
+        .expect("Some frozen payload");
+    let result = engine
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+        .await;
+    assert_eq!(result, Ok(HumanGateCloseOutcome::Confirmed), "{result:?}");
+    let recompile_context = engine
+        .build_single_candidate_structure_context(&ir_record.ir, &source_ref, &ir_ref)
+        .expect("compile-side context");
+    let assessment =
+        crate::product::workspace_engine::plan_projection::assess_single_candidate_structure(
+            source.source.clone(),
+            &ir_record.ir,
+            &recompile_context,
+        );
+    let crate::product::workspace_engine::types::StructuralAssessment::Accepted(prepared) =
+        assessment
+    else {
+        panic!("compile-side re-projection must stay accepted");
+    };
+    let recompiled =
+        crate::product::workspace_engine::plan_projection::freeze_persisted_structure_report(
+            &prepared.report,
+            &frozen.source_revision_id,
+            &frozen.ir_id,
+        )
+        .expect("recompile freeze");
+    assert_eq!(
+        recompiled.effective_edges, frozen.effective_edges,
+        "candidate-gate and final-compile effective edges must be identical for the same source"
+    );
+    assert_eq!(recompiled.report_digest, frozen.report_digest);
+    assert!(
+        engine.last_human_gate_close_compile_failure().is_none(),
+        "successful approval must not surface stale compile failure context"
     );
 }
 
@@ -864,8 +1505,11 @@ fn gate_with_static_eligibility_fixture(
         .app_paths()
         .issue_root(&record.project_id, &record.issue_id)
         .join("workspace-sessions");
-    crate::product::json_store::write_json(&session_dir.join(format!("{}.json", record.id)), &record)
-        .expect("persist static eligibility session");
+    crate::product::json_store::write_json(
+        &session_dir.join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist static eligibility session");
     std::fs::remove_file(session_dir.join(format!("{old_session_id}.json"))).ok();
     let artifact = engine.session.artifact.clone();
     engine.session = WorkspaceSession::from_record(record);
@@ -918,17 +1562,16 @@ async fn conversational_gate_confirm_static_eligibility_matrix_rejects_before_cl
         let error = engine
             .handle_human_gate_termination(HumanGateCloseDecision::Approve)
             .await
-            .expect_err(&format!("无效静态资格（{label}）confirm 必须在 close CAS 前拒收"));
+            .expect_err(&format!(
+                "无效静态资格（{label}）confirm 必须在 close CAS 前拒收"
+            ));
         assert!(error.contains("product_store_conflict"), "{label}: {error}");
         assert!(error.contains("human_gate_close"), "{label}: {error}");
 
         let after = lifecycle
             .get_workspace_session(&session_id)
             .expect("durable session after rejected confirm");
-        assert_eq!(
-            after, before,
-            "拒收零副作用：durable 全字段不变（{label}）"
-        );
+        assert_eq!(after, before, "拒收零副作用：durable 全字段不变（{label}）");
         assert_eq!(
             close_cas_attempts(&session_id),
             cas_attempts_before,
@@ -1074,7 +1717,11 @@ mod confirmation_trust {
     struct PresenceSyncAdapter;
 
     impl crate::cross_cutting::provider_adapter::ProviderAdapter for PresenceSyncAdapter {
-        fn run(&self, _input: &AdapterInput) -> Result<AdapterOutput, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+        fn run(
+            &self,
+            _input: &AdapterInput,
+        ) -> Result<AdapterOutput, crate::cross_cutting::provider_adapter::ProviderAdapterError>
+        {
             Ok(AdapterOutput {
                 exit_code: Some(0),
                 stdout: "ok".to_string(),
@@ -1087,12 +1734,10 @@ mod confirmation_trust {
         }
     }
 
-    fn presence_availability_gate(
-    ) -> Arc<crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate> {
+    fn presence_availability_gate()
+    -> Arc<crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate> {
         use crate::cross_cutting::provider_availability_gate::ProviderHealthSource;
-        use crate::cross_cutting::provider_health::{
-            ProviderHealthEntry, ProviderHealthSnapshot,
-        };
+        use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 
         struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
 
@@ -1218,13 +1863,11 @@ mod confirmation_trust {
                 providers: providers.to_vec(),
                 scenario,
             });
-            self.scripted
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or(ProviderTrustPreparationResult::Ready {
+            self.scripted.lock().unwrap().pop_front().unwrap_or(
+                ProviderTrustPreparationResult::Ready {
                     registrations: Vec::new(),
-                })
+                },
+            )
         }
     }
 
@@ -1329,11 +1972,7 @@ mod confirmation_trust {
         LogicalCodebaseStore::for_lc(app_paths.clone(), lc_id.clone())
             .save_manifest(
                 "project_0001",
-                &LogicalCodebaseManifest::new(
-                    "project_0001",
-                    canonical_root.clone(),
-                    Vec::new(),
-                ),
+                &LogicalCodebaseManifest::new("project_0001", canonical_root.clone(), Vec::new()),
             )
             .expect("save LC manifest");
         let lifecycle = LifecycleStore::new(app_paths.clone());
@@ -1421,7 +2060,10 @@ mod confirmation_trust {
         confirmation_gate_fixture(true, author, reviewer, None, trust)
     }
 
-    fn durable_record(lifecycle: &LifecycleStore, facts: &ConfirmationGateFacts) -> crate::product::models::WorkspaceSessionRecord {
+    fn durable_record(
+        lifecycle: &LifecycleStore,
+        facts: &ConfirmationGateFacts,
+    ) -> crate::product::models::WorkspaceSessionRecord {
         lifecycle
             .get_workspace_session(&facts.session_id)
             .expect("durable session")
@@ -1502,8 +2144,11 @@ mod confirmation_trust {
     #[tokio::test]
     async fn sc_confirm_ready_trust_proceeds_to_original_close_cas() {
         let trust = Arc::new(RecordingTrustGate::default());
-        let (_root, _lifecycle, mut engine, _event_rx, facts) =
-            sc_confirm_fixture(ProviderName::Codex, Some(ProviderName::KimiCode), trust.clone());
+        let (_root, _lifecycle, mut engine, _event_rx, facts) = sc_confirm_fixture(
+            ProviderName::Codex,
+            Some(ProviderName::KimiCode),
+            trust.clone(),
+        );
         let cas_attempts_before = close_cas_attempts(&facts.session_id);
 
         // fixture 未铺 accepted contract drafts：Ready 后 approve 沿原链在
@@ -1585,13 +2230,12 @@ mod confirmation_trust {
                 .expect_err("矩阵用例均走原链（compile 段失败）");
             assert!(error.contains("compile failed"), "{}: {error}", case.label);
             let calls = trust.calls();
+            assert_eq!(calls.len(), 1, "{}：恰一次 ensure 调用", case.label);
             assert_eq!(
-                calls.len(),
-                1,
-                "{}：恰一次 ensure 调用",
+                calls[0].providers, case.expected_providers,
+                "{}",
                 case.label
             );
-            assert_eq!(calls[0].providers, case.expected_providers, "{}", case.label);
             assert_eq!(
                 close_cas_attempts(&facts.session_id),
                 cas_before + 1,
@@ -1602,7 +2246,11 @@ mod confirmation_trust {
 
         // 零调用豁免：Claude-only / Fake / 非 LC 会话。
         for (label, author, reviewer) in [
-            ("Claude-only author+reviewer", ProviderName::ClaudeCode, Some(ProviderName::ClaudeCode)),
+            (
+                "Claude-only author+reviewer",
+                ProviderName::ClaudeCode,
+                Some(ProviderName::ClaudeCode),
+            ),
             ("Fake provider", ProviderName::Fake, None),
         ] {
             let trust = Arc::new(RecordingTrustGate::default());
@@ -1851,13 +2499,7 @@ mod confirmation_trust {
         let trust = Arc::new(RecordingTrustGate::default());
         trust.script_waiting("fixture_home_failure");
         let (_root, lifecycle, mut engine, mut event_rx, facts) =
-            confirmation_gate_fixture(
-                false,
-                ProviderName::Codex,
-                None,
-                None,
-                trust.clone(),
-            );
+            confirmation_gate_fixture(false, ProviderName::Codex, None, None, trust.clone());
         let before = durable_record(&lifecycle, &facts);
         let outcome = engine
             .handle_confirm()
@@ -1869,7 +2511,11 @@ mod confirmation_trust {
             }
             other => panic!("expected TrustWaiting, got {other:?}"),
         }
-        assert_eq!(trust.calls().len(), 1, "非 SC mutex 内锁定事实触发恰一次 ensure");
+        assert_eq!(
+            trust.calls().len(),
+            1,
+            "非 SC mutex 内锁定事实触发恰一次 ensure"
+        );
         assert_eq!(trust.calls()[0].providers, vec![ProviderName::Codex]);
         assert_gate_untouched_by_waiting(&lifecycle, &facts, &before, &mut event_rx);
 
@@ -1877,13 +2523,7 @@ mod confirmation_trust {
         // 如实失败——非 TrustWaiting）。
         let trust2 = Arc::new(RecordingTrustGate::default());
         let (_root2, _lifecycle2, mut engine2, _event_rx2, facts2) =
-            confirmation_gate_fixture(
-                false,
-                ProviderName::Codex,
-                None,
-                None,
-                trust2.clone(),
-            );
+            confirmation_gate_fixture(false, ProviderName::Codex, None, None, trust2.clone());
         let result = engine2.handle_confirm().await;
         assert!(
             result.is_err(),
@@ -1962,8 +2602,8 @@ mod confirmation_trust {
                 .any(|record| record.action == "gate_waiting" && record.provider == "kimi_code"),
             "失败侧留 gate_waiting 审计（audit={audit:?}）"
         );
-        let codex_config = CodexTrustAdapter::for_home(home.path())
-            .artifact_path(&facts.canonical_root);
+        let codex_config =
+            CodexTrustAdapter::for_home(home.path()).artifact_path(&facts.canonical_root);
         let codex_bytes_after_first = std::fs::read(&codex_config).expect("codex config written");
 
         // 修复 Kimi（移除损坏记录）后显式重新确认：Ready、Codex replay、Kimi 注册。
@@ -1986,19 +2626,15 @@ mod confirmation_trust {
         .list_audit("project_0001")
         .expect("audit after retry");
         assert!(
-            audit
-                .iter()
-                .any(|record| record.action == "ensure"
-                    && record.outcome == "replay"
-                    && record.provider == "codex"),
+            audit.iter().any(|record| record.action == "ensure"
+                && record.outcome == "replay"
+                && record.provider == "codex"),
             "重试保守复用：Codex 走 ensure/replay（audit={audit:?}）"
         );
         assert!(
-            audit
-                .iter()
-                .any(|record| record.action == "ensure"
-                    && record.outcome == "registered"
-                    && record.provider == "kimi_code"),
+            audit.iter().any(|record| record.action == "ensure"
+                && record.outcome == "registered"
+                && record.provider == "kimi_code"),
             "Kimi 修复后注册（audit={audit:?}）"
         );
         let codex_bytes_after_retry = std::fs::read(&codex_config).expect("codex config kept");
@@ -2034,8 +2670,8 @@ mod confirmation_trust {
             issue_lc_id: Some(facts.lc_id.clone()),
             frozen_root: facts.canonical_root.clone(),
         });
-        let codex_config = CodexTrustAdapter::for_home(home.path())
-            .artifact_path(&facts.canonical_root);
+        let codex_config =
+            CodexTrustAdapter::for_home(home.path()).artifact_path(&facts.canonical_root);
         let bytes_after_seed = std::fs::read(&codex_config).expect("codex config");
         let error = engine
             .handle_human_gate_termination(HumanGateCloseDecision::Approve)
@@ -2085,8 +2721,8 @@ mod confirmation_trust {
             issue_lc_id: Some(facts2.lc_id.clone()),
             frozen_root: facts2.canonical_root.clone(),
         });
-        let codex_config2 = CodexTrustAdapter::for_home(home2.path())
-            .artifact_path(&facts2.canonical_root);
+        let codex_config2 =
+            CodexTrustAdapter::for_home(home2.path()).artifact_path(&facts2.canonical_root);
         let bytes_before_reuse = std::fs::read(&codex_config2).expect("codex config 2");
         let error = engine2
             .handle_human_gate_termination(HumanGateCloseDecision::Approve)
@@ -2100,11 +2736,9 @@ mod confirmation_trust {
         .list_audit("project_0001")
         .expect("audit 2");
         assert!(
-            audit2
-                .iter()
-                .any(|record| record.action == "ensure"
-                    && record.outcome == "reuse_user_entry"
-                    && record.provider == "codex"),
+            audit2.iter().any(|record| record.action == "ensure"
+                && record.outcome == "reuse_user_entry"
+                && record.provider == "codex"),
             "首次复用其它 LC 条目记 ensure/reuse_user_entry（audit={audit2:?}）"
         );
         assert_eq!(
@@ -2199,9 +2833,8 @@ mod confirmation_trust {
         let before = durable_record(&lifecycle, &facts);
         let cas_before = close_cas_attempts(&facts.session_id);
 
-        let mut confirm = Box::pin(
-            engine.handle_human_gate_termination(HumanGateCloseDecision::Approve),
-        );
+        let mut confirm =
+            Box::pin(engine.handle_human_gate_termination(HumanGateCloseDecision::Approve));
         // 并发轮询 confirm future 与「临界区开始」信号：confirm 被执行到
         // ensure 的提交边界（spawn_blocking 已启动）后，caller 取消。
         let started_wait = async {

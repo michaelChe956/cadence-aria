@@ -34,6 +34,45 @@ static SINGLE_CANDIDATE_COMPILE_FAILPOINTS: std::sync::OnceLock<
 static NEXT_SINGLE_CANDIDATE_COMPILE_FAILPOINT_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
+/// SG3b（REQ-SG-03、REQ-PLN-09）：Final Compile 冻结结构上下文复验的纯
+/// 判定。Some 冻结 payload 与当前 live context 必须同代——rule_version 或
+/// context_digest 漂移均为 typed Operational 拒绝（拒不重 lower 最新
+/// artifact 偷换发布物）；None（旧记录参考形态）不做冻结 digest 要求，
+/// 同源纯评估（assess）另在调用侧执行。
+pub(super) fn verify_frozen_structure_context(
+    frozen: Option<&crate::product::planning_failure::PersistedPlanningStructureReport>,
+    current: &draft_batch::compile_support::PlanningStructureContext,
+) -> Result<(), crate::product::workspace_engine::types::PlanningCompileFailure> {
+    let Some(frozen) = frozen else {
+        return Ok(());
+    };
+    let current_rule =
+        crate::product::workspace_engine::plan_projection::PLANNING_STRUCTURE_RULE_VERSION;
+    if frozen.rule_version != current_rule {
+        return Err(
+            crate::product::workspace_engine::types::PlanningCompileFailure::operational(
+                "single_candidate_structure_rule_stale",
+                format!(
+                    "frozen rule_version {} != current {current_rule}",
+                    frozen.rule_version
+                ),
+            ),
+        );
+    }
+    if frozen.context_digest != current.context_digest {
+        return Err(
+            crate::product::workspace_engine::types::PlanningCompileFailure::operational(
+                "single_candidate_structure_context_drift",
+                format!(
+                    "frozen context_digest {} != current {}",
+                    frozen.context_digest, current.context_digest
+                ),
+            ),
+        );
+    }
+    Ok(())
+}
+
 impl WorkspaceEngine {
     #[cfg(test)]
     pub(crate) fn register_single_candidate_compile_failpoint(
@@ -86,20 +125,186 @@ impl WorkspaceEngine {
         Ok(())
     }
 
+    /// SG3b：SC Final Compile 的 typed 入口——inner 产
+    /// `PlanningCompileFailure`，本边界统一 seal（内容寻址 failure_id +
+    /// approval/source refs）、缓存 typed 失败供本次 close 的
+    /// WS/REST 投影消费（`close_human_gate` 开始时清空，无跨 close 陈旧）。
+    /// 未达 seal 的失败（plain `?` 站点）在此兜底 seal；diagnostic 落点
+    /// 沿 `sg3b_failure` 站点原语义（非 closure 站点原本不落诊断，保持）。
     pub(super) async fn run_single_candidate_initial_plan_compile(
         &mut self,
-    ) -> Result<InitialPlanCompileOutcome, String> {
-        let lifecycle = self
-            .lifecycle_store
-            .clone()
-            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
-        let failure = |engine: &mut WorkspaceEngine, code: &str, message: String| {
-            engine.record_single_candidate_compile_failure(&lifecycle, code, &message);
-            message
-        };
+    ) -> Result<
+        InitialPlanCompileOutcome,
+        crate::product::workspace_engine::types::PlanningCompileFailure,
+    > {
+        let result = self.run_single_candidate_initial_plan_compile_inner().await;
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(mut failure) => {
+                if failure.failure_id.is_empty() {
+                    let identity = self
+                        .lifecycle_store
+                        .clone()
+                        .and_then(|lifecycle| {
+                            lifecycle
+                                .get_workspace_session(&self.session.session_id)
+                                .ok()
+                        })
+                        .map(|record| {
+                            (
+                                record.approval_attempt_id,
+                                record.work_item_plan_source_revision_ref,
+                                record.plan_candidate_ir_ref,
+                                record.mechanical_report_ref,
+                            )
+                        });
+                    match identity {
+                        Some((approval, source_ref, ir_ref, report_ref)) => {
+                            failure.seal_with_identity(
+                                &self.session.session_id,
+                                approval,
+                                source_ref,
+                                ir_ref,
+                                report_ref,
+                            );
+                        }
+                        None => failure.seal_with_identity(
+                            &self.session.session_id,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                    }
+                }
+                self.last_gate_close_compile_failure = Some(
+                    crate::product::workspace_engine::conversational_gate::HumanGateCloseCompileFailure {
+                        failure: failure.clone(),
+                        validator_findings: Vec::new(),
+                    },
+                );
+                Err(failure)
+            }
+        }
+    }
+
+    /// SG3b typed 失败站点：构造（携 run/digest 身份）→ seal → durable
+    /// diagnostic（failure_id + 渲染）→ 返回 typed 失败。替代旧
+    /// `failure(engine, code, message) -> String` closure 的单点等价物。
+    fn sg3b_failure(
+        &mut self,
+        lifecycle: &LifecycleStore,
+        code: &str,
+        message: String,
+        compile_run_id: Option<&str>,
+        context_digest: Option<&str>,
+    ) -> crate::product::workspace_engine::types::PlanningCompileFailure {
+        let mut failure =
+            crate::product::workspace_engine::types::PlanningCompileFailure::operational(
+                code, message,
+            );
+        failure.compile_run_id = compile_run_id.map(str::to_string);
+        failure.context_digest = context_digest.map(str::to_string);
+        self.sg3b_seal_with_diagnostic(lifecycle, failure)
+    }
+
+    /// SG3b：seal（durable record 身份）+ durable diagnostic 落盘的单源
+    /// helper——Operational 与 Structure 两类 gate 失败共用。
+    fn sg3b_seal_with_diagnostic(
+        &mut self,
+        lifecycle: &LifecycleStore,
+        mut failure: crate::product::workspace_engine::types::PlanningCompileFailure,
+    ) -> crate::product::workspace_engine::types::PlanningCompileFailure {
+        match lifecycle.get_workspace_session(&self.session.session_id) {
+            Ok(record) => failure.seal(&self.session.session_id, &record),
+            Err(_) => failure.seal_with_identity(&self.session.session_id, None, None, None, None),
+        }
+        let diagnostic = format!("failure_id={}; {}", failure.failure_id, failure.render());
+        self.record_single_candidate_compile_failure(lifecycle, failure.stable_code(), &diagnostic);
+        failure
+    }
+
+    /// SG3b：Final Compile 结构复验门（initial 与 recovery resume 共用，
+    /// 与候选门同源：同一 `build_single_candidate_structure_context` 装载 +
+    /// SG1 纯评估 + 冻结 payload rule/context digest 同代检查）。返回 live
+    /// context digest；非 Accepted 返回 typed 失败（未 seal——由调用边界统
+    /// 一 seal/落诊断）。None 冻结 payload（旧记录参考形态）只做纯评估。
+    fn sg3b_final_compile_structure_gate(
+        &self,
+        lifecycle: &LifecycleStore,
+        ir: &crate::product::work_item_plan_compiler::PlanCandidateIr,
+        source_markdown: &str,
+        source_ref: &str,
+        ir_ref: &str,
+        frozen: Option<&crate::product::planning_failure::PersistedPlanningStructureReport>,
+    ) -> Result<String, crate::product::workspace_engine::types::PlanningCompileFailure> {
+        use crate::product::workspace_engine::types::PlanningCompileFailure;
+        let structure_context = self
+            .build_single_candidate_structure_context(ir, source_ref, ir_ref)
+            .map_err(|cause| {
+                PlanningCompileFailure::operational(
+                    "single_candidate_structure_context_failed",
+                    format!("single-candidate structure context unavailable: {cause}"),
+                )
+            })?;
+        verify_frozen_structure_context(frozen, &structure_context).map_err(|mut failure| {
+            failure.context_digest = Some(structure_context.context_digest.clone());
+            failure
+        })?;
+        let assessment =
+            crate::product::workspace_engine::plan_projection::assess_single_candidate_structure(
+                source_markdown.to_string(),
+                ir,
+                &structure_context,
+            );
+        match assessment {
+            crate::product::workspace_engine::types::StructuralAssessment::Accepted(_) => {
+                Ok(structure_context.context_digest)
+            }
+            crate::product::workspace_engine::types::StructuralAssessment::Rejected(set, _) => {
+                let mut failure = PlanningCompileFailure::structure(set);
+                failure.context_digest = Some(structure_context.context_digest.clone());
+                Err(failure)
+            }
+            other => {
+                let rendered =
+                    crate::product::workspace_engine::plan_projection::structural_assessment_stop_reason(&other)
+                        .expect_err("non-accepted assessment must produce a typed stop");
+                let mut failure = PlanningCompileFailure::operational(
+                    "single_candidate_structure_operational",
+                    rendered,
+                );
+                failure.context_digest = Some(structure_context.context_digest.clone());
+                Err(failure)
+            }
+        }
+    }
+
+    async fn run_single_candidate_initial_plan_compile_inner(
+        &mut self,
+    ) -> Result<
+        InitialPlanCompileOutcome,
+        crate::product::workspace_engine::types::PlanningCompileFailure,
+    > {
+        use crate::product::workspace_engine::types::PlanningCompileFailure;
+        let lifecycle = self.lifecycle_store.clone().ok_or_else(|| {
+            PlanningCompileFailure::operational(
+                "lifecycle_store_unavailable",
+                "lifecycle_store unavailable".to_string(),
+            )
+        })?;
+        // SG3b：本运行的 compile 身份与结构门 digest（结构门通过后填充，
+        // 供 post-reservation 失败站点随失败上行）。
+        let mut compile_run_id: Option<String> = None;
+        let mut gate_context_digest: Option<String> = None;
         let record = lifecycle
             .get_workspace_session(&self.session.session_id)
-            .map_err(|error| format!("load single candidate session failed: {error}"))?;
+            .map_err(|error| {
+                PlanningCompileFailure::operational(
+                    "single_candidate_session_load_failed",
+                    format!("load single candidate session failed: {error}"),
+                )
+            })?;
         if record.project_id != self.session.project_id
             || record.issue_id != self.session.issue_id
             || record.entity_id != self.session.entity_id
@@ -107,10 +312,12 @@ impl WorkspaceEngine {
             || record.single_candidate_phase
                 != Some(crate::product::models::SingleCandidatePhase::Approval)
         {
-            return Err(failure(
-                self,
+            return Err(self.sg3b_failure(
+                &lifecycle,
                 "single_candidate_invalid_session",
                 "single candidate compile session is not in Approval for this scope".to_string(),
+                None,
+                None,
             ));
         }
         let scope = SourceStoreScope {
@@ -122,59 +329,73 @@ impl WorkspaceEngine {
             .work_item_plan_source_revision_ref
             .clone()
             .ok_or_else(|| {
-                failure(
-                    self,
+                self.sg3b_failure(
+                    &lifecycle,
                     "SOURCE_STORE_MALFORMED_REF",
                     "single candidate source revision ref is missing".to_string(),
+                    None,
+                    None,
                 )
             })?;
         let ir_ref = record.plan_candidate_ir_ref.clone().ok_or_else(|| {
-            failure(
-                self,
+            self.sg3b_failure(
+                &lifecycle,
                 "SOURCE_STORE_MALFORMED_REF",
                 "single candidate IR ref is missing".to_string(),
+                None,
+                None,
             )
         })?;
         let report_ref = record.mechanical_report_ref.clone().ok_or_else(|| {
-            failure(
-                self,
+            self.sg3b_failure(
+                &lifecycle,
                 "SOURCE_STORE_MALFORMED_REF",
                 "single candidate mechanical report ref is missing".to_string(),
+                None,
+                None,
             )
         })?;
         let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
         let source = source_store
             .get_source_revision(&scope, &source_ref)
             .map_err(|error| {
-                failure(
-                    self,
+                self.sg3b_failure(
+                    &lifecycle,
                     error.code(),
                     format!("single candidate source reload failed: {error:?}"),
+                    None,
+                    None,
                 )
             })?;
         let ir = source_store
             .get_plan_candidate_ir(&scope, &ir_ref)
             .map_err(|error| {
-                failure(
-                    self,
+                self.sg3b_failure(
+                    &lifecycle,
                     error.code(),
                     format!("single candidate IR reload failed: {error:?}"),
+                    None,
+                    None,
                 )
             })?;
         let report = source_store
             .get_mechanical_report(&scope, &report_ref)
             .map_err(|error| {
-                failure(
-                    self,
+                self.sg3b_failure(
+                    &lifecycle,
                     error.code(),
                     format!("single candidate mechanical report reload failed: {error:?}"),
+                    None,
+                    None,
                 )
             })?;
         verify_publish_freshness(&source.source, &ir.ir, &report.report).map_err(|error| {
-            failure(
-                self,
+            self.sg3b_failure(
+                &lifecycle,
                 "single_candidate_freshness_failed",
                 format!("single candidate publish freshness failed: {error:?}"),
+                None,
+                None,
             )
         })?;
 
@@ -198,10 +419,12 @@ impl WorkspaceEngine {
                         &approved_at,
                     )
                     .map_err(|error| {
-                        failure(
-                            self,
+                        self.sg3b_failure(
+                            &lifecycle,
                             "persistence_failure",
                             format!("save single candidate Approval failed: {error}"),
+                            None,
+                            None,
                         )
                     })?;
                 (approved_at, approved)
@@ -214,18 +437,40 @@ impl WorkspaceEngine {
                 (existing_at.to_string(), record)
             }
             _ => {
-                return Err(failure(
-                    self,
+                return Err(self.sg3b_failure(
+                    &lifecycle,
                     "single_candidate_approval_conflict",
                     "single candidate Approval tuple conflicts with current durable refs"
                         .to_string(),
+                    None,
+                    None,
                 ));
             }
         };
         #[cfg(test)]
         self.maybe_fail_single_candidate_compile(
             SingleCandidateCompileCheckpoint::ApprovalPersisted,
-        )?;
+        )
+        .map_err(|error| {
+            PlanningCompileFailure::operational("single_candidate_compile_failpoint", error)
+        })?;
+
+        // SG3b 结构复验门（REQ-SG-03、REQ-PLN-09，plan §0.6.2 同源）：与候选
+        // 门同一 context 装载 + SG1 纯评估 + 冻结 payload 同代检查；非
+        // Accepted 一律 typed 停点（seal + durable diagnostic），零
+        // reservation、零 transaction、零发布，拒不重 lower。
+        gate_context_digest = Some(
+            self.sg3b_final_compile_structure_gate(
+                &lifecycle,
+                &ir.ir,
+                &source.source,
+                &source_ref,
+                &ir_ref,
+                report.structure_report.as_ref(),
+            )
+            .map_err(|failure| self.sg3b_seal_with_diagnostic(&lifecycle, failure))?,
+        );
+
         let reservation = crate::product::models::SingleCandidateCompileReservation {
             compile_id: single_candidate_compile_id(
                 &approved.id,
@@ -241,6 +486,7 @@ impl WorkspaceEngine {
             "project/{}/issue/{}/plan/{}/publication_provenance/{}",
             approved.project_id, approved.issue_id, approved.entity_id, reservation.compile_id
         );
+        compile_run_id = Some(reservation.compile_id.clone());
         let reserved = lifecycle
             .put_compile_reservation_cas(
                 &approved.project_id,
@@ -251,46 +497,75 @@ impl WorkspaceEngine {
                 &reservation,
             )
             .map_err(|error| match error {
-                CompileReservationError::Conflict => failure(
-                    self,
+                CompileReservationError::Conflict => self.sg3b_failure(
+                    &lifecycle,
                     "SINGLE_CANDIDATE_COMPILE_RESERVATION_CONFLICT",
                     error.to_string(),
+                    compile_run_id.as_deref(),
+                    gate_context_digest.as_deref(),
                 ),
-                CompileReservationError::InvalidSession(message) => failure(
-                    self,
+                CompileReservationError::InvalidSession(message) => self.sg3b_failure(
+                    &lifecycle,
                     "SINGLE_CANDIDATE_COMPILE_RESERVATION_INVALID_SESSION",
                     message,
+                    compile_run_id.as_deref(),
+                    gate_context_digest.as_deref(),
                 ),
-                CompileReservationError::PersistenceFailure(error) => failure(
-                    self,
+                CompileReservationError::PersistenceFailure(error) => self.sg3b_failure(
+                    &lifecycle,
                     "persistence_failure",
                     format!("save compile reservation failed: {error}"),
+                    compile_run_id.as_deref(),
+                    gate_context_digest.as_deref(),
                 ),
             })?;
         #[cfg(test)]
         self.maybe_fail_single_candidate_compile(
             SingleCandidateCompileCheckpoint::ReservationPersisted,
-        )?;
+        )
+        .map_err(|error| {
+            PlanningCompileFailure::operational("single_candidate_compile_failpoint", error)
+        })?;
         self.session.approval_attempt_id = reserved.approval_attempt_id.clone();
         self.session.approved_at = reserved.approved_at.clone();
         self.session.compile_reservation = reserved.compile_reservation.clone();
         self.session.publication_provenance_ref = reserved.publication_provenance_ref.clone();
-        let reservation = reserved
-            .compile_reservation
-            .as_ref()
-            .ok_or_else(|| "compile reservation disappeared after CAS".to_string())?;
+        let reservation = reserved.compile_reservation.as_ref().ok_or_else(|| {
+            PlanningCompileFailure::operational(
+                "persistence_failure",
+                "compile reservation disappeared after CAS".to_string(),
+            )
+        })?;
         let previous_plan = lifecycle
             .get_issue_work_item_plan(&scope.project_id, &scope.issue_id, &scope.plan_id)
-            .map_err(|error| format!("load plan for single candidate compile failed: {error}"))?;
+            .map_err(|error| {
+                PlanningCompileFailure::operational(
+                    "single_candidate_plan_load_failed",
+                    format!("load plan for single candidate compile failed: {error}"),
+                )
+            })?;
         let logical_targets = self
             .logical_work_item_plan_repository_targets(&lifecycle, &previous_plan)
-            .map_err(|error| failure(self, "single_candidate_target_failed", error))?;
+            .map_err(|error| {
+                self.sg3b_failure(
+                    &lifecycle,
+                    "single_candidate_target_failed",
+                    error,
+                    compile_run_id.as_deref(),
+                    gate_context_digest.as_deref(),
+                )
+            })?;
         let repository_id = if logical_targets.is_none() {
             ir.ir
                 .items
                 .first()
                 .map(|item| item.target_repository_id.clone())
-                .ok_or_else(|| "single candidate IR contains no items".to_string())?
+                .ok_or_else(|| {
+                    PlanningCompileFailure::operational(
+                        "single_candidate_ir_empty",
+                        "single candidate IR contains no items".to_string(),
+                    )
+                })?
         } else {
             String::new()
         };
@@ -298,7 +573,15 @@ impl WorkspaceEngine {
             &lifecycle,
             &previous_plan,
         )
-        .map_err(|error| failure(self, "single_candidate_change_order_failed", error))?;
+        .map_err(|error| {
+            self.sg3b_failure(
+                &lifecycle,
+                "single_candidate_change_order_failed",
+                error,
+                compile_run_id.as_deref(),
+                gate_context_digest.as_deref(),
+            )
+        })?;
         let context = ir_adapter::IrCompileAdapterContext {
             project_id: scope.project_id.clone(),
             issue_id: scope.issue_id.clone(),
@@ -330,10 +613,12 @@ impl WorkspaceEngine {
                 &logical_ids,
             )
             .map_err(|error| {
-                failure(
-                    self,
+                self.sg3b_failure(
+                    &lifecycle,
                     "single_candidate_publication_ids_failed",
                     error.to_string(),
+                    compile_run_id.as_deref(),
+                    gate_context_digest.as_deref(),
                 )
             })?;
         let mut provenance = PlanCandidatePublicationProvenance {
@@ -349,10 +634,12 @@ impl WorkspaceEngine {
             content_hash: String::new(),
         };
         provenance.content_hash = provenance.content_hash().map_err(|error| {
-            failure(
-                self,
+            self.sg3b_failure(
+                &lifecycle,
                 error.code(),
                 format!("hash provenance failed: {error:?}"),
+                compile_run_id.as_deref(),
+                gate_context_digest.as_deref(),
             )
         })?;
         let provenance_ref = source_store
@@ -363,43 +650,79 @@ impl WorkspaceEngine {
                 &provenance,
             )
             .map_err(|error| {
-                failure(
-                    self,
+                self.sg3b_failure(
+                    &lifecycle,
                     error.code(),
                     format!("persist provenance failed: {error:?}"),
+                    compile_run_id.as_deref(),
+                    gate_context_digest.as_deref(),
                 )
             })?;
         if provenance_ref != reservation.publication_provenance_ref {
-            return Err(failure(
-                self,
+            return Err(self.sg3b_failure(
+                &lifecycle,
                 "single_candidate_provenance_ref_mismatch",
                 "provenance canonical ref does not match reservation".to_string(),
+                compile_run_id.as_deref(),
+                gate_context_digest.as_deref(),
             ));
         }
         let provenance = source_store
             .get_publication_provenance(&scope, &provenance_ref)
             .map_err(|error| {
-                failure(
-                    self,
+                self.sg3b_failure(
+                    &lifecycle,
                     error.code(),
                     format!("reload provenance failed: {error:?}"),
+                    compile_run_id.as_deref(),
+                    gate_context_digest.as_deref(),
                 )
             })?;
         #[cfg(test)]
         self.maybe_fail_single_candidate_compile(
             SingleCandidateCompileCheckpoint::ProvenancePersisted,
-        )?;
-        let durable_context = ir_adapter::durable_compile_context_from_ir(&context, &provenance)?;
+        )
+        .map_err(|error| {
+            PlanningCompileFailure::operational("single_candidate_compile_failpoint", error)
+        })?;
+        let durable_context = ir_adapter::durable_compile_context_from_ir(&context, &provenance)
+            .map_err(|cause| {
+                PlanningCompileFailure::operational(
+                    "single_candidate_durable_context_failed",
+                    cause,
+                )
+            })?;
         let input =
-            ir_adapter::initial_plan_compile_input_from_ir(&context, &ir.ir, &report.report)?;
-        let prepared = prepare_initial_plan_compile(input, durable_context)?;
+            ir_adapter::initial_plan_compile_input_from_ir(&context, &ir.ir, &report.report)
+                .map_err(|cause| {
+                    PlanningCompileFailure::operational("single_candidate_ir_adapter_failed", cause)
+                })?;
+        let prepared = prepare_initial_plan_compile(input, durable_context).map_err(|cause| {
+            PlanningCompileFailure::operational("final_compile_prepare_failed", cause)
+        })?;
         let stores = CompileStores {
-            plan_store: self.work_item_plan_store()?,
+            plan_store: self.work_item_plan_store().map_err(|cause| {
+                PlanningCompileFailure::operational("plan_store_unavailable", cause)
+            })?,
             revision_store: self.revision_store(),
         };
-        let (outcome, mut tx) = execute_initial_plan_compile(&stores, prepared)?;
+        let (outcome, mut tx) =
+            execute_initial_plan_compile(&stores, prepared).map_err(|cause| {
+                let mut failure =
+                    PlanningCompileFailure::operational("final_compile_execute_failed", cause);
+                failure.compile_run_id = compile_run_id.clone();
+                failure.context_digest = gate_context_digest.clone();
+                failure
+            })?;
         self.finalize_initial_plan_compile(&lifecycle, &stores.plan_store, &mut tx, &outcome)
-            .await?;
+            .await
+            .map_err(|cause| {
+                let mut failure =
+                    PlanningCompileFailure::operational("final_compile_finalize_failed", cause);
+                failure.compile_run_id = compile_run_id.clone();
+                failure.context_digest = gate_context_digest.clone();
+                failure
+            })?;
         Ok(outcome)
     }
 
@@ -486,6 +809,23 @@ impl WorkspaceEngine {
                 .plan_revision_id
         {
             return Err("single candidate provenance identity mismatch".to_string());
+        }
+
+        // SG3b resume 复验门：恢复重放（重新 lower IR 构造 publication）前对
+        // 冻结候选与当前 live 上下文做同源结构复验——漂移/规则过期/坏有效图
+        // 均拒绝重放（拒不重 lower 偷换发布物）；typed 身份（seal 后
+        // failure_id）落 durable diagnostic，边界只取人读渲染。
+        if let Err(mut gate_failure) = self.sg3b_final_compile_structure_gate(
+            &lifecycle,
+            &ir.ir,
+            &source.source,
+            &source_ref,
+            &ir_ref,
+            report.structure_report.as_ref(),
+        ) {
+            gate_failure.compile_run_id = Some(tx.compile_id.clone());
+            let sealed = self.sg3b_seal_with_diagnostic(&lifecycle, gate_failure);
+            return Err(sealed.render());
         }
         let previous_plan = tx.previous_plan_snapshot.clone();
         let logical_targets =

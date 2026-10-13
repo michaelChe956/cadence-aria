@@ -98,13 +98,64 @@ pub(crate) enum HumanGateCloseDecision {
     Abandon,
 }
 
-/// confirm 后 compile 失败的结构化详情：engine 层 Err 文本与 web 层
-/// ProtocolError.context 共用同一 durable 来源（最近一次 Failed compile
-/// transaction 的 failure_reason + validator findings）。
+/// confirm 后 compile 失败的 typed 详情（SG3b）：`failure` 为本次 close 内
+/// Final Compile 捕获的 PlanningCompileFailure（failure_id/approval/source
+/// context 已 seal）；`validator_findings` 仅当本 close 运行
+/// （compile_run_id 匹配）的 Failed compile transaction 携带 strict
+/// validator findings 时非空——不同 failure 的旧 Failed tx 不捞。web 层
+/// （WS ProtocolError.context 与 REST 422 details）经 out.rs 纯投影共用。
 #[derive(Debug, Clone)]
 pub(crate) struct HumanGateCloseCompileFailure {
-    pub(crate) failure_reason: Option<String>,
-    pub(crate) findings: Vec<WorkItemSplitFinding>,
+    pub(crate) failure: super::types::PlanningCompileFailure,
+    pub(crate) validator_findings: Vec<WorkItemSplitFinding>,
+}
+
+impl HumanGateCloseCompileFailure {
+    /// SG3b：本次 close typed 失败 → out.rs wire DTO 的单源纯投影
+    ///（WS ProtocolError.context 与 REST 422 details 共用）。
+    pub(crate) fn wire_presentation(
+        &self,
+    ) -> crate::web::workspace_ws_types::out::PlanningCompileFailureDto {
+        use crate::web::workspace_ws_types::out::{
+            PlanningCompileFailureDto, PlanningCompileStructureFindingDto,
+        };
+        let failure = &self.failure;
+        let (kind, stable_code, cause, structure_findings) = match &failure.kind {
+            super::types::PlanningCompileFailureKind::Operational { stable_code, cause } => (
+                "operational".to_string(),
+                stable_code.clone(),
+                Some(cause.clone()),
+                Vec::new(),
+            ),
+            super::types::PlanningCompileFailureKind::Structure(set) => (
+                "structure".to_string(),
+                super::types::PlanningCompileFailure::STRUCTURE_STABLE_CODE.to_string(),
+                None,
+                set.failures
+                    .iter()
+                    .map(|item| PlanningCompileStructureFindingDto {
+                        code: item.kind.stable_code().to_string(),
+                        category: item.kind.category().as_str().to_string(),
+                        affected_ids: item.evidence.affected_ids.clone(),
+                    })
+                    .collect(),
+            ),
+        };
+        PlanningCompileFailureDto {
+            failure_id: failure.failure_id.clone(),
+            kind,
+            stable_code,
+            approval_attempt_id: failure.approval_attempt_id.clone(),
+            source_revision_ref: failure.source_revision_ref.clone(),
+            plan_candidate_ir_ref: failure.plan_candidate_ir_ref.clone(),
+            mechanical_report_ref: failure.mechanical_report_ref.clone(),
+            context_digest: failure.context_digest.clone(),
+            compile_run_id: failure.compile_run_id.clone(),
+            cause,
+            structure_findings,
+            validator_findings: self.validator_findings.clone(),
+        }
+    }
 }
 
 fn rejected(code: &str, reason: impl Into<String>) -> HumanGateCommandOutcome {
@@ -603,6 +654,9 @@ impl super::WorkspaceEngine {
         &mut self,
         decision: HumanGateCloseDecision,
     ) -> Result<HumanGateCloseOutcome, String> {
+        // SG3b：入口先清 typed close 失败 stash（close_human_gate 内再清一次，
+        // 覆盖绕过本入口的直调路径）。
+        self.last_gate_close_compile_failure = None;
         // F-18（w2c 实测矩阵）：story/design 会话（legacy 流）恒停
         // author_confirm 门——approve 有 HTTP confirm 端点，terminate 此前
         // 零通路。typed abandon 对 story/design 门分流到本门关门语义
@@ -627,6 +681,10 @@ impl super::WorkspaceEngine {
         &mut self,
         decision: HumanGateCloseDecision,
     ) -> Result<HumanGateCloseOutcome, String> {
+        // SG3b：typed close 失败 stash 在任何早退（含 stage 拒绝）前清空——
+        // 非 close 运行（如 routing 直入 compile）留下的 stash 不得泄漏为
+        // 本次 close 的失败上下文。
+        self.last_gate_close_compile_failure = None;
         let lifecycle = self
             .lifecycle_store
             .clone()
@@ -637,7 +695,6 @@ impl super::WorkspaceEngine {
         {
             return Err("human gate close is only available for a single-candidate work-item plan in human_confirm".to_string());
         }
-        self.last_gate_close_compile_failure = None;
 
         let expected = lifecycle
             .get_workspace_session(&self.session.session_id)
@@ -861,39 +918,53 @@ impl super::WorkspaceEngine {
         }
     }
 
-    /// confirm 后 compile 未达 Confirmed/Completed 的失败错误：附加最近一次
-    /// Failed compile transaction 的 failure_reason 与 validator findings 原文，
-    /// 并缓存结构化副本供 web 层 ProtocolError.context 上抛（WS 客户端可见）。
+    /// confirm 后 compile 未达 Confirmed/Completed 的失败错误（SG3b typed
+    /// 化）：消息与结构化副本都来自本次 close 内 Final Compile 捕获的
+    /// PlanningCompileFailure——typed failure_id/approval/source context 直
+    /// 达 web 层；validator findings 仅按本 close 运行（compile_run_id 匹配
+    /// 的 Failed compile transaction）附带，不同 failure 的旧 Failed tx
+    /// 不得被 latest-scan 捞为本次失败事实。stash 缺席（本次 close 未运行
+    /// compile，如 durable 竞态翻译路径）保持基础消息，不伪结构化上下文。
     fn single_candidate_gate_close_failure_error(&mut self) -> String {
         let mut message =
             "single-candidate approval compile failed; human gate remains open".to_string();
-        let failure = self.latest_single_candidate_compile_failure();
-        if let Some(tx) = &failure {
-            if let Some(reason) = tx.failure_reason.as_deref() {
-                message.push_str("\nfailure_reason: ");
-                message.push_str(reason);
-            }
-            if !tx.validator_findings.is_empty() {
-                message.push_str("\nvalidator findings:");
-                for finding in &tx.validator_findings {
-                    message.push_str(&format!(
-                        "\n[{}] {}: {} (work_items: {})",
-                        finding.severity.as_str(),
-                        finding.code,
-                        finding.message,
-                        finding.work_item_ids.join(", ")
-                    ));
+        let Some(mut captured) = self.last_gate_close_compile_failure.take() else {
+            return message;
+        };
+        message.push_str("\nfailure_id: ");
+        message.push_str(&captured.failure.failure_id);
+        message.push('\n');
+        message.push_str(&captured.failure.render());
+        if let Some(run_id) = captured.failure.compile_run_id.as_deref() {
+            if let Some(tx) = self.latest_failed_compile_tx_for_run(run_id) {
+                if let Some(reason) = tx.failure_reason.as_deref() {
+                    message.push_str("\nfailure_reason: ");
+                    message.push_str(reason);
                 }
+                if !tx.validator_findings.is_empty() {
+                    message.push_str("\nvalidator findings:");
+                    for finding in &tx.validator_findings {
+                        message.push_str(&format!(
+                            "\n[{}] {}: {} (work_items: {})",
+                            finding.severity.as_str(),
+                            finding.code,
+                            finding.message,
+                            finding.work_item_ids.join(", ")
+                        ));
+                    }
+                }
+                captured.validator_findings = tx.validator_findings.clone();
             }
         }
-        self.last_gate_close_compile_failure = failure.map(|tx| HumanGateCloseCompileFailure {
-            failure_reason: tx.failure_reason.clone(),
-            findings: tx.validator_findings.clone(),
-        });
+        self.last_gate_close_compile_failure = Some(captured);
         message
     }
 
-    fn latest_single_candidate_compile_failure(&self) -> Option<WorkItemPlanCompileTransaction> {
+    /// 本 close 运行身份（compile_id）匹配的最近 Failed compile transaction。
+    fn latest_failed_compile_tx_for_run(
+        &self,
+        compile_run_id: &str,
+    ) -> Option<WorkItemPlanCompileTransaction> {
         if self.session.workspace_type != WorkspaceType::WorkItemPlan {
             return None;
         }
@@ -906,19 +977,19 @@ impl super::WorkspaceEngine {
             )
             .ok()?
             .into_iter()
-            .filter(|tx| tx.status == WorkItemPlanCompileStatus::Failed)
+            .filter(|tx| {
+                tx.status == WorkItemPlanCompileStatus::Failed && tx.compile_id == compile_run_id
+            })
             .max_by(|left, right| left.created_at.cmp(&right.created_at))
     }
 
-    /// web 层读取最近一次 gate close compile 失败的结构化 findings 上下文
-    /// （仅在同一 close 调用内失败时非空，避免陈旧 findings 误挂）。
-    pub(crate) fn last_human_gate_close_compile_failure_context(
+    /// web 层读取本次 close 内 Final Compile typed 失败的结构化载体（仅在
+    /// 同一 close 调用内失败时非空，避免陈旧失败误挂）；WS ProtocolError
+    /// .context 与 REST 422 details 经 out.rs
+    /// `planning_compile_failure_presentation` 同源投影。
+    pub(crate) fn last_human_gate_close_compile_failure(
         &self,
-    ) -> Option<serde_json::Value> {
-        let failure = self.last_gate_close_compile_failure.as_ref()?;
-        Some(serde_json::json!({
-            "failure_reason": failure.failure_reason,
-            "findings": failure.findings,
-        }))
+    ) -> Option<&HumanGateCloseCompileFailure> {
+        self.last_gate_close_compile_failure.as_ref()
     }
 }

@@ -108,6 +108,37 @@ export type WorkItemPlanPolicyDiagnostic = {
   field: string | null;
 };
 
+/**
+ * SG3b：Final Compile typed 失败的最低必要 wire 投影（Rust
+ * `workspace_ws_types::out::PlanningCompileFailureDto` 镜像）。同一
+ * failure_id/approval/source context 直达 WS ProtocolError.context 与
+ * REST 422 details；机器修复/预算/快照字段由 SG7 扩展。
+ */
+export type PlanningCompileFailurePresentation = {
+  failure_id: string;
+  kind: "structure" | "operational";
+  stable_code: string;
+  approval_attempt_id?: string | null;
+  source_revision_ref?: string | null;
+  plan_candidate_ir_ref?: string | null;
+  mechanical_report_ref?: string | null;
+  context_digest?: string | null;
+  compile_run_id?: string | null;
+  cause?: string | null;
+  structure_findings?: Array<{
+    code: string;
+    category: string;
+    affected_ids: Array<string>;
+  }>;
+  /** 仅本 close 运行（compile_run_id 匹配）的 Failed tx 携带时非空。 */
+  validator_findings?: Array<{
+    severity: string;
+    code: string;
+    message: string;
+    work_item_ids: Array<string>;
+  }>;
+};
+
 export type WorkItemPlanProviderStartLedgerEntry = {
   provider_start_idempotency_key: string;
   started: boolean;

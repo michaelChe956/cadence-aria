@@ -762,6 +762,133 @@ mod confirmation_trust_waiting {
         assert_eq!(trust.call_count(), 1, "Ready 也恰一次 ensure");
     }
 
+    /// SG3b（REQ-SG-03、REQ-CG-04）：REST Approve 后 compile 失败的 typed
+    /// PlanningCompileFailure（failure_id/approval/source context 字段）经
+    /// 422 details 直达客户端；同场景种入的旧 Failed tx（不同 failure）
+    /// 不得被捞为本次失败事实。本 fixture 无候选 refs——refs 缺失失败，
+    /// 字段以 null 序列化、合同不缺。
+    #[tokio::test]
+    async fn sg_03b_rest_approve_compile_failure_typed_failure_details() {
+        use crate::product::models::{
+            IssueWorkItemDependencyEdge, IssueWorkItemPlan, IssueWorkItemPlanOptions,
+            IssueWorkItemPlanStatus, WorkItemPlanCommitState, WorkItemPlanCompileStatus,
+            WorkItemPlanCompileTransaction, WorkItemSplitFinding, WorkItemSplitFindingSeverity,
+        };
+        use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+        use crate::product::work_item_plan_store::WorkItemPlanStore;
+
+        let trust = std::sync::Arc::new(ScriptedTrustPrecondition::default());
+        let fixture = lc_sc_approval_gate_fixture(trust.clone()).await;
+        let durable = fixture.durable();
+        // 种入旧 Failed tx（strict validator 失败，不同 failure）。
+        WorkItemPlanStore::new(fixture.lifecycle.app_paths())
+            .put_compile_transaction(&WorkItemPlanCompileTransaction {
+                compile_id: "compile_sg3b_rest_stale".to_string(),
+                project_id: durable.project_id.clone(),
+                issue_id: durable.issue_id.clone(),
+                plan_id: durable.entity_id.clone(),
+                flow_kind: Some(WorkItemPlanFlowKind::SingleCandidate),
+                source_revision_id: None,
+                source_revision_ref: None,
+                plan_candidate_ir_ref: None,
+                mechanical_report_ref: None,
+                publication_provenance_ref: None,
+                publication_provenance_content_hash: None,
+                generation_round_id: "round_sg3b_rest_stale".to_string(),
+                outline_version_ref: "outline_sg3b_rest_stale".to_string(),
+                active_draft_ids: Vec::new(),
+                status: WorkItemPlanCompileStatus::Failed,
+                plan_commit_state: WorkItemPlanCommitState::NotStarted,
+                step_cursor: "validating".to_string(),
+                outline_to_work_item_id: Default::default(),
+                outline_to_verification_plan_id: Default::default(),
+                created_work_item_ids: Vec::new(),
+                created_verification_plan_ids: Vec::new(),
+                child_session_ids: Vec::new(),
+                validator_findings: vec![WorkItemSplitFinding {
+                    severity: WorkItemSplitFindingSeverity::Error,
+                    code: "WI_STALE_SG3B_REST".to_string(),
+                    message: "stale failure of a different compile run".to_string(),
+                    work_item_ids: vec!["wi_stale".to_string()],
+                    kind: None,
+                }],
+                abort_requested_at: None,
+                failure_reason: Some("stale strict validator failure".to_string()),
+                previous_plan_snapshot: IssueWorkItemPlan {
+                    id: durable.entity_id.clone(),
+                    project_id: durable.project_id.clone(),
+                    issue_id: durable.issue_id.clone(),
+                    source_story_spec_ids: Vec::new(),
+                    source_design_spec_ids: Vec::new(),
+                    options: IssueWorkItemPlanOptions {
+                        include_integration_tests: false,
+                        include_e2e_tests: false,
+                        force_frontend_backend_split: false,
+                        require_execution_plan_confirm: false,
+                    },
+                    status: IssueWorkItemPlanStatus::Draft,
+                    work_item_ids: Vec::new(),
+                    repository_profile_ref: None,
+                    verification_plan_ids: Vec::new(),
+                    dependency_graph: vec![IssueWorkItemDependencyEdge {
+                        from_work_item_id: "wi_stale".to_string(),
+                        to_work_item_id: "wi_stale_2".to_string(),
+                    }],
+                    created_from_provider_run: None,
+                    validator_findings: Vec::new(),
+                    review_summary: None,
+                    created_at: "2026-10-13T00:00:00Z".to_string(),
+                    updated_at: "2026-10-13T00:00:00Z".to_string(),
+                },
+                created_at: "2026-10-13T00:00:01Z".to_string(),
+                updated_at: "2026-10-13T00:00:01Z".to_string(),
+                committed_at: None,
+            })
+            .expect("seed stale failed compile transaction");
+
+        let (status, body) = fixture
+            .post_human_action(json!({
+                "type": "approve",
+                "command_id": "cmd_sg3b_rest_approve_compile_failure",
+                "expected_gate_id": fixture.gate_id,
+            }))
+            .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body["code"],
+            json!("single_candidate_approval_compile_failed")
+        );
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("human gate remains open"), "{message}");
+        assert!(message.contains("SOURCE_STORE_MALFORMED_REF"), "{message}");
+        assert!(!message.contains("WI_STALE_SG3B_REST"), "{message}");
+        let details = &body["details"];
+        assert!(
+            details["failure_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()),
+            "{details}"
+        );
+        assert_eq!(details["kind"], json!("operational"));
+        assert_eq!(details["stable_code"], json!("SOURCE_STORE_MALFORMED_REF"));
+        for field in [
+            "approval_attempt_id",
+            "source_revision_ref",
+            "plan_candidate_ir_ref",
+            "mechanical_report_ref",
+        ] {
+            assert!(details.get(field).is_some(), "{field} missing: {details}");
+        }
+        assert!(
+            details
+                .get("validator_findings")
+                .map(serde_json::Value::is_null)
+                .unwrap_or(true),
+            "stale failed tx findings must not be salvaged: {details}"
+        );
+    }
+
     /// REST Abandon 脱困不变：LC 会话确认 trust 未 Ready 也不影响 abandon
     /// 逃生门——200 accepted + durable Terminated + 零 trust 调用。
     #[tokio::test]

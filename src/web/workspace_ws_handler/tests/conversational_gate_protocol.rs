@@ -567,9 +567,11 @@ async fn conversational_gate_post_approve_feedback_is_structured_protocol_error(
 }
 
 #[tokio::test]
-async fn confirm_compile_failure_surfaces_findings_as_protocol_error_context() {
-    // F7 项 1（历史观察项族 12）：SC Approval 门 confirm 后 compile 失败，
-    // validator findings 数组必须经 ProtocolError.context 上抛（WS 客户端可见）。
+async fn sg_03b_confirm_compile_failure_typed_context_as_protocol_error() {
+    // F7 项 1 → SG3b：SC Approval 门 confirm 后 compile 失败的 typed
+    // PlanningCompileFailure 上下文（failure_id/approval/source refs）经
+    // ProtocolError.context 上抛（WS 客户端可见）；本测试同场景种入的旧
+    // Failed tx（不同 failure）不得被捞为本次失败事实。
     use crate::product::lifecycle_store::{
         CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
     };
@@ -761,25 +763,40 @@ async fn confirm_compile_failure_surfaces_findings_as_protocol_error_context() {
     };
     assert_eq!(code, "SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED");
     assert!(message.contains("human gate remains open"), "{message}");
-    assert!(message.contains("WI_DEP_CYCLE"), "{message}");
-    let context = context.expect("findings context");
-    assert_eq!(context["failure_reason"], serde_json::json!(failure_reason));
-    let findings = context["findings"].as_array().expect("findings array");
-    assert_eq!(findings.len(), 2);
-    assert_eq!(findings[0]["severity"], serde_json::json!("error"));
-    assert_eq!(findings[0]["code"], serde_json::json!("WI_DEP_CYCLE"));
-    assert_eq!(
-        findings[0]["message"],
-        serde_json::json!("work item dependency cycle: wi_a -> wi_b -> wi_a")
+    // SG3b：typed PlanningCompileFailure 上下文直达 WS 客户端——
+    // failure_id/kind/stable_code 与 approval/source context 字段在场；本
+    // fixture 无候选 refs（refs 缺失失败），字段以 null 序列化、合同不缺。
+    assert!(message.contains("SOURCE_STORE_MALFORMED_REF"), "{message}");
+    let context = context.expect("typed failure context");
+    assert!(
+        context["failure_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "{context}"
     );
+    assert_eq!(context["kind"], serde_json::json!("operational"));
     assert_eq!(
-        findings[0]["work_item_ids"],
-        serde_json::json!(["wi_a", "wi_b"])
+        context["stable_code"],
+        serde_json::json!("SOURCE_STORE_MALFORMED_REF")
     );
-    assert_eq!(findings[1]["severity"], serde_json::json!("warning"));
-    assert_eq!(
-        findings[1]["code"],
-        serde_json::json!("WI_MISSING_VERIFICATION")
+    for field in [
+        "approval_attempt_id",
+        "source_revision_ref",
+        "plan_candidate_ir_ref",
+        "mechanical_report_ref",
+    ] {
+        assert!(context.get(field).is_some(), "{field} missing: {context}");
+    }
+    // 不同 failure 的旧 Failed tx（本测试种入的 strict-validator 失败）不得
+    // 被 latest-scan 捞为本次失败事实。
+    assert!(!message.contains("WI_DEP_CYCLE"), "{message}");
+    assert!(!message.contains("WI_MISSING_VERIFICATION"), "{message}");
+    assert!(
+        context
+            .get("validator_findings")
+            .map(serde_json::Value::is_null)
+            .unwrap_or(true),
+        "{context}"
     );
 }
 

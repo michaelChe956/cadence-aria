@@ -180,3 +180,149 @@ fn ir_adapter_provenance_context_requires_exact_reservation_values() {
     wrong.published_at = "2026-08-28T00:00:00Z".to_string();
     assert!(durable_compile_context_from_ir(&context, &wrong).is_err());
 }
+
+// —— SG3b：Final Compile typed 失败与冻结结构复验纯判定 ——
+
+fn sg3b_structure_context(
+    digest: &str,
+) -> crate::product::workspace_engine::draft_batch::compile_support::PlanningStructureContext {
+    use crate::product::workspace_engine::draft_batch::compile_support::PlanningStructureContext;
+    PlanningStructureContext {
+        source_revision_ref: "project/p/issue/i/plan/pl/source_revision/s".to_string(),
+        plan_candidate_ir_ref: "project/p/issue/i/plan/pl/plan_candidate_ir/ir".to_string(),
+        source_hash: "source-hash".to_string(),
+        compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+        rule_version:
+            crate::product::workspace_engine::plan_projection::PLANNING_STRUCTURE_RULE_VERSION
+                .to_string(),
+        context_digest: digest.to_string(),
+        confirmed_design_id: None,
+        confirmed_design_digest: None,
+        member_table_digest: None,
+        selection_digest: None,
+        physical_by_logical: Default::default(),
+        change_order: Vec::new(),
+        options_digest: "options-digest".to_string(),
+        baseline_tree_digest: None,
+        intent_digest: None,
+    }
+}
+
+fn sg3b_frozen_payload(
+    rule: &str,
+    digest: &str,
+) -> crate::product::planning_failure::PersistedPlanningStructureReport {
+    crate::product::planning_failure::PersistedPlanningStructureReport {
+        source_revision_id: "source-sg3b".to_string(),
+        source_hash: "source-hash".to_string(),
+        ir_id: "ir-sg3b".to_string(),
+        compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+        rule_version: rule.to_string(),
+        context_digest: digest.to_string(),
+        effective_edges: Vec::new(),
+        cycle_witness: Vec::new(),
+        findings: Default::default(),
+        structurally_valid: true,
+        protected_predicates: Vec::new(),
+        instruction_refs: Vec::new(),
+        repair_audit_refs: Vec::new(),
+        report_digest: "digest-sealed-by-store".to_string(),
+    }
+}
+
+#[test]
+fn sg_03b_frozen_structure_gate_rule_and_drift_pure_checks() {
+    let current = sg3b_structure_context("ctx-live");
+    // None（旧记录参考形态）不要求冻结 digest。
+    assert!(super::single_candidate::verify_frozen_structure_context(None, &current).is_ok());
+    // 同代（rule + context digest 一致）放行。
+    assert!(
+        super::single_candidate::verify_frozen_structure_context(
+            Some(&sg3b_frozen_payload(
+                crate::product::workspace_engine::plan_projection::PLANNING_STRUCTURE_RULE_VERSION,
+                "ctx-live"
+            )),
+            &current
+        )
+        .is_ok()
+    );
+    // 规则版本过期：typed Operational 拒绝，stable code 单源。
+    let stale = super::single_candidate::verify_frozen_structure_context(
+        Some(&sg3b_frozen_payload(
+            "rule/planning-structure@0",
+            "ctx-live",
+        )),
+        &current,
+    )
+    .expect_err("stale rule must refuse");
+    assert_eq!(stale.stable_code(), "single_candidate_structure_rule_stale");
+    // 冻结 context 漂移：typed Operational 拒绝（拒不重 lower）。
+    let drift = super::single_candidate::verify_frozen_structure_context(
+        Some(&sg3b_frozen_payload(
+            crate::product::workspace_engine::plan_projection::PLANNING_STRUCTURE_RULE_VERSION,
+            "ctx-frozen",
+        )),
+        &current,
+    )
+    .expect_err("context drift must refuse");
+    assert_eq!(
+        drift.stable_code(),
+        "single_candidate_structure_context_drift"
+    );
+    assert!(drift.render().contains("ctx-frozen"), "{}", drift.render());
+    assert!(drift.render().contains("ctx-live"), "{}", drift.render());
+}
+
+#[test]
+fn sg_03b_planning_compile_failure_identity_seal_is_deterministic() {
+    use crate::product::workspace_engine::types::PlanningCompileFailure;
+    let mut failure = PlanningCompileFailure::operational(
+        "SOURCE_STORE_MALFORMED_REF",
+        "single candidate source revision ref is missing".to_string(),
+    );
+    assert_eq!(failure.stable_code(), "SOURCE_STORE_MALFORMED_REF");
+    assert!(
+        failure.render().contains("[SOURCE_STORE_MALFORMED_REF]"),
+        "{}",
+        failure.render()
+    );
+
+    failure.seal_with_identity(
+        "workspace_session_sg3b",
+        Some("approval-1".to_string()),
+        Some("source-ref".to_string()),
+        Some("ir-ref".to_string()),
+        Some("report-ref".to_string()),
+    );
+    let first_id = failure.failure_id.clone();
+    assert!(
+        first_id.starts_with("planning_compile_failure_"),
+        "{first_id}"
+    );
+
+    // 同输入幂等同 id；身份字段变化 → 新 id。
+    let mut replay = PlanningCompileFailure::operational(
+        "SOURCE_STORE_MALFORMED_REF",
+        "single candidate source revision ref is missing".to_string(),
+    );
+    replay.seal_with_identity(
+        "workspace_session_sg3b",
+        Some("approval-1".to_string()),
+        Some("source-ref".to_string()),
+        Some("ir-ref".to_string()),
+        Some("report-ref".to_string()),
+    );
+    assert_eq!(replay.failure_id, first_id);
+    replay.seal_with_identity(
+        "workspace_session_sg3b",
+        Some("approval-2".to_string()),
+        Some("source-ref".to_string()),
+        Some("ir-ref".to_string()),
+        Some("report-ref".to_string()),
+    );
+    assert_ne!(replay.failure_id, first_id);
+
+    // Structure kind：稳定 code 单源。
+    let structure = PlanningCompileFailure::structure(Default::default());
+    assert_eq!(structure.stable_code(), "final_compile_structure_rejected");
+}

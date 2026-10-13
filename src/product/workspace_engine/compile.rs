@@ -787,7 +787,14 @@ impl WorkspaceEngine {
         &mut self,
     ) -> Result<InitialPlanCompileOutcome, String> {
         if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
-            return self.run_single_candidate_initial_plan_compile().await;
+            // SG3b：SC 链 typed PlanningCompileFailure 在 engine 内经
+            // `last_gate_close_compile_failure` stash 直达 close/WS/REST；
+            // 此 String 边界（时间线/事件与既有 legacy 测试面）只取人读
+            // 渲染，不作为身份来源。
+            return self
+                .run_single_candidate_initial_plan_compile()
+                .await
+                .map_err(|failure| failure.render());
         }
         let lifecycle = self
             .lifecycle_store

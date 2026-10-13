@@ -311,21 +311,25 @@ pub(crate) async fn apply_human_gate_termination(
             HumanGateTerminationEffect::TrustWaiting { waiting }
         }
         Err(message) => {
-            // F7 项 1（历史观察项族 12）：confirm 后 compile 失败的 validator
-            // findings 经 ProtocolError.context 上抛给 WS 客户端；其余错误维持
+            // F7 项 1 → SG3b：confirm 后 compile 失败的 typed
+            // PlanningCompileFailure（failure_id/approval/source context）
+            // 经 out.rs 纯投影上抛 WS ProtocolError.context；其余错误维持
             // 既有 Error 通道。
-            let findings_context = if is_confirm {
+            let failure = if is_confirm {
                 engine
                     .lock()
                     .await
-                    .last_human_gate_close_compile_failure_context()
+                    .last_human_gate_close_compile_failure()
+                    .cloned()
             } else {
                 None
             };
-            if findings_context.is_some() {
+            if let Some(failure) = failure {
                 HumanGateTerminationEffect::CompileFailed {
                     message,
-                    findings_context,
+                    findings_context: Some(
+                        serde_json::to_value(&failure.wire_presentation()).unwrap_or_default(),
+                    ),
                 }
             } else {
                 HumanGateTerminationEffect::EngineError(message)
