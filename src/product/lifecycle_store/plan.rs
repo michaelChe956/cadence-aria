@@ -39,8 +39,22 @@ impl LifecycleStore {
         let upstream_scopes: Vec<EntityScope> = input
             .source_story_spec_ids
             .iter()
-            .map(|story_id| EntityScope::new(&input.project_id, &input.issue_id, DeletionEntityKind::Story, story_id))
-            .chain(input.source_design_spec_ids.iter().map(|design_id| EntityScope::new(&input.project_id, &input.issue_id, DeletionEntityKind::Design, design_id)))
+            .map(|story_id| {
+                EntityScope::new(
+                    &input.project_id,
+                    &input.issue_id,
+                    DeletionEntityKind::Story,
+                    story_id,
+                )
+            })
+            .chain(input.source_design_spec_ids.iter().map(|design_id| {
+                EntityScope::new(
+                    &input.project_id,
+                    &input.issue_id,
+                    DeletionEntityKind::Design,
+                    design_id,
+                )
+            }))
             .collect();
         let project_id = input.project_id.clone();
         let issue_id = input.issue_id.clone();
@@ -121,7 +135,12 @@ impl LifecycleStore {
                 EntityScope::new(&project_id, &issue_id, DeletionEntityKind::Story, story_id)
             })
             .chain(input.source_design_spec_ids.iter().map(|design_id| {
-                EntityScope::new(&project_id, &issue_id, DeletionEntityKind::Design, design_id)
+                EntityScope::new(
+                    &project_id,
+                    &issue_id,
+                    DeletionEntityKind::Design,
+                    design_id,
+                )
             }))
             .collect();
         admission_scopes.push(EntityScope::new(
@@ -249,54 +268,54 @@ impl LifecycleStore {
         let plan_scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
         self.with_entity_live_write(&plan_scope, move || {
             let mut plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
-        if plan.status != IssueWorkItemPlanStatus::Draft {
-            return Err(ProductStoreError::Io(
-                "issue_work_item_plan_not_draft".to_string(),
-            ));
-        }
-
-        let work_items = self.list_work_items(project_id, issue_id)?;
-        let mut linked = Vec::with_capacity(plan.work_item_ids.len());
-        for work_item_id in &plan.work_item_ids {
-            let item = work_items
-                .iter()
-                .find(|item| &item.id == work_item_id)
-                .ok_or_else(|| ProductStoreError::NotFound {
-                    kind: "work_item",
-                    id: work_item_id.clone(),
-                })?;
-            if item.project_id != project_id || item.issue_id != issue_id {
+            if plan.status != IssueWorkItemPlanStatus::Draft {
                 return Err(ProductStoreError::Io(
-                    "issue_work_item_plan_project_issue_mismatch".to_string(),
+                    "issue_work_item_plan_not_draft".to_string(),
                 ));
             }
-            linked.push(item.clone());
-        }
 
-        for verification_plan_id in &plan.verification_plan_ids {
-            self.get_verification_plan(project_id, issue_id, verification_plan_id)?;
-        }
+            let work_items = self.list_work_items(project_id, issue_id)?;
+            let mut linked = Vec::with_capacity(plan.work_item_ids.len());
+            for work_item_id in &plan.work_item_ids {
+                let item = work_items
+                    .iter()
+                    .find(|item| &item.id == work_item_id)
+                    .ok_or_else(|| ProductStoreError::NotFound {
+                        kind: "work_item",
+                        id: work_item_id.clone(),
+                    })?;
+                if item.project_id != project_id || item.issue_id != issue_id {
+                    return Err(ProductStoreError::Io(
+                        "issue_work_item_plan_project_issue_mismatch".to_string(),
+                    ));
+                }
+                linked.push(item.clone());
+            }
 
-        let now = Utc::now().to_rfc3339();
-        plan.status = IssueWorkItemPlanStatus::Confirmed;
-        plan.updated_at = now.clone();
-        write_json(
-            &self
-                .issue_work_item_plans_root(project_id, issue_id)
-                .join(format!("{plan_id}.json")),
-            &plan,
-        )?;
+            for verification_plan_id in &plan.verification_plan_ids {
+                self.get_verification_plan(project_id, issue_id, verification_plan_id)?;
+            }
 
-        let mut confirmed = Vec::with_capacity(linked.len());
-        for item in linked {
-            let updated = self.update_work_item_plan_status(
-                project_id,
-                issue_id,
-                &item.id,
-                WorkItemPlanStatus::Confirmed,
+            let now = Utc::now().to_rfc3339();
+            plan.status = IssueWorkItemPlanStatus::Confirmed;
+            plan.updated_at = now.clone();
+            write_json(
+                &self
+                    .issue_work_item_plans_root(project_id, issue_id)
+                    .join(format!("{plan_id}.json")),
+                &plan,
             )?;
-            confirmed.push(updated);
-        }
+
+            let mut confirmed = Vec::with_capacity(linked.len());
+            for item in linked {
+                let updated = self.update_work_item_plan_status(
+                    project_id,
+                    issue_id,
+                    &item.id,
+                    WorkItemPlanStatus::Confirmed,
+                )?;
+                confirmed.push(updated);
+            }
             Ok((plan, confirmed))
         })
     }
@@ -361,58 +380,58 @@ impl LifecycleStore {
         let plan_scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
         self.with_entity_live_write(&plan_scope, move || {
             let mut plan = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
-        if plan.status != IssueWorkItemPlanStatus::Draft
-            && plan.status != IssueWorkItemPlanStatus::Confirmed
-        {
-            return Err(ProductStoreError::Io(
-                "issue_work_item_plan_not_actionable".to_string(),
-            ));
-        }
-
-        let work_items = self.list_work_items(project_id, issue_id)?;
-        let mut linked = Vec::with_capacity(plan.work_item_ids.len());
-        for work_item_id in &plan.work_item_ids {
-            let item = work_items
-                .iter()
-                .find(|item| &item.id == work_item_id)
-                .ok_or_else(|| ProductStoreError::NotFound {
-                    kind: "work_item",
-                    id: work_item_id.clone(),
-                })?;
-            if item.project_id != project_id || item.issue_id != issue_id {
+            if plan.status != IssueWorkItemPlanStatus::Draft
+                && plan.status != IssueWorkItemPlanStatus::Confirmed
+            {
                 return Err(ProductStoreError::Io(
-                    "issue_work_item_plan_project_issue_mismatch".to_string(),
+                    "issue_work_item_plan_not_actionable".to_string(),
                 ));
             }
-            linked.push(item.clone());
-        }
 
-        for verification_plan_id in &plan.verification_plan_ids {
-            self.get_verification_plan(project_id, issue_id, verification_plan_id)?;
-        }
+            let work_items = self.list_work_items(project_id, issue_id)?;
+            let mut linked = Vec::with_capacity(plan.work_item_ids.len());
+            for work_item_id in &plan.work_item_ids {
+                let item = work_items
+                    .iter()
+                    .find(|item| &item.id == work_item_id)
+                    .ok_or_else(|| ProductStoreError::NotFound {
+                        kind: "work_item",
+                        id: work_item_id.clone(),
+                    })?;
+                if item.project_id != project_id || item.issue_id != issue_id {
+                    return Err(ProductStoreError::Io(
+                        "issue_work_item_plan_project_issue_mismatch".to_string(),
+                    ));
+                }
+                linked.push(item.clone());
+            }
 
-        let now = Utc::now().to_rfc3339();
-        plan.status = IssueWorkItemPlanStatus::ChangeRequested;
-        plan.updated_at = now.clone();
-        write_json(
-            &self
-                .issue_work_item_plans_root(project_id, issue_id)
-                .join(format!("{plan_id}.json")),
-            &plan,
-        )?;
+            for verification_plan_id in &plan.verification_plan_ids {
+                self.get_verification_plan(project_id, issue_id, verification_plan_id)?;
+            }
 
-        let mut updated_items = Vec::with_capacity(linked.len());
-        for item in linked {
-            let updated = self.update_work_item_plan_status(
-                project_id,
-                issue_id,
-                &item.id,
-                WorkItemPlanStatus::Draft,
+            let now = Utc::now().to_rfc3339();
+            plan.status = IssueWorkItemPlanStatus::ChangeRequested;
+            plan.updated_at = now.clone();
+            write_json(
+                &self
+                    .issue_work_item_plans_root(project_id, issue_id)
+                    .join(format!("{plan_id}.json")),
+                &plan,
             )?;
-            updated_items.push(updated);
-        }
+
+            let mut updated_items = Vec::with_capacity(linked.len());
+            for item in linked {
+                let updated = self.update_work_item_plan_status(
+                    project_id,
+                    issue_id,
+                    &item.id,
+                    WorkItemPlanStatus::Draft,
+                )?;
+                updated_items.push(updated);
+            }
             Ok((plan, updated_items))
-            })
+        })
     }
 
     pub fn update_issue_work_item_plan(
@@ -451,7 +470,8 @@ impl LifecycleStore {
         validate_relative_ids(&update.verification_plan_ids)?;
         let plan_scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
         self.with_entity_live_write(&plan_scope, move || {
-            let mut plan = self.update_issue_work_item_plan(project_id, issue_id, plan_id, update)?;
+            let mut plan =
+                self.update_issue_work_item_plan(project_id, issue_id, plan_id, update)?;
             plan.status = IssueWorkItemPlanStatus::Confirmed;
             plan.updated_at = Utc::now().to_rfc3339();
             let path = self
@@ -502,124 +522,128 @@ impl LifecycleStore {
     ) -> Result<WorkItemPlanCandidateSnapshot, ProductStoreError> {
         let plan_scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
         self.with_entity_live_write(&plan_scope, move || {
-        let existing = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
-        if existing.status != IssueWorkItemPlanStatus::Draft {
-            return Err(ProductStoreError::Io(format!(
-                "issue_work_item_plan_not_draft: {plan_id} status={:?}",
-                existing.status
-            )));
-        }
+            let existing = self.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
+            if existing.status != IssueWorkItemPlanStatus::Draft {
+                return Err(ProductStoreError::Io(format!(
+                    "issue_work_item_plan_not_draft: {plan_id} status={:?}",
+                    existing.status
+                )));
+            }
 
-        for old_wi_id in &existing.work_item_ids {
-            let path = self
-                .work_items_root(project_id, issue_id)
-                .join(format!("{old_wi_id}.json"));
-            remove_file_if_exists(&path)?;
-        }
-        for old_vp_id in &existing.verification_plan_ids {
-            let path = self
-                .verification_plans_root(project_id, issue_id)
-                .join(format!("{old_vp_id}.json"));
-            let _ = remove_file_if_exists(&path);
-        }
-        if let Some(old_profile_id) = &existing.repository_profile_ref {
-            let path = self
-                .repository_profiles_root(project_id, issue_id)
-                .join(format!("{old_profile_id}.json"));
-            let _ = remove_file_if_exists(&path);
-        }
+            for old_wi_id in &existing.work_item_ids {
+                let path = self
+                    .work_items_root(project_id, issue_id)
+                    .join(format!("{old_wi_id}.json"));
+                remove_file_if_exists(&path)?;
+            }
+            for old_vp_id in &existing.verification_plan_ids {
+                let path = self
+                    .verification_plans_root(project_id, issue_id)
+                    .join(format!("{old_vp_id}.json"));
+                let _ = remove_file_if_exists(&path);
+            }
+            if let Some(old_profile_id) = &existing.repository_profile_ref {
+                let path = self
+                    .repository_profiles_root(project_id, issue_id)
+                    .join(format!("{old_profile_id}.json"));
+                let _ = remove_file_if_exists(&path);
+            }
 
-        self.create_repository_profile(CreateRepositoryProfileInput {
-            id: Some(output.repository_profile.id.clone()),
-            project_id: project_id.to_string(),
-            issue_id: issue_id.to_string(),
-            repository_id: output.repository_profile.repository_id.clone(),
-            provider_run_ref: output.repository_profile.provider_run_ref.clone(),
-            languages: output.repository_profile.languages.clone(),
-            frameworks: output.repository_profile.frameworks.clone(),
-            package_managers: output.repository_profile.package_managers.clone(),
-            test_frameworks: output.repository_profile.test_frameworks.clone(),
-            build_systems: output.repository_profile.build_systems.clone(),
-            verification_capabilities: output.repository_profile.verification_capabilities.clone(),
-            detected_layers: output.repository_profile.detected_layers.clone(),
-            split_recommendation: output.repository_profile.split_recommendation.clone(),
-            confidence: output.repository_profile.confidence.clone(),
-            uncertainties: output.repository_profile.uncertainties.clone(),
-        })?;
-
-        for vp in &output.verification_plans {
-            self.create_verification_plan(CreateVerificationPlanInput {
-                id: Some(vp.id.clone()),
+            self.create_repository_profile(CreateRepositoryProfileInput {
+                id: Some(output.repository_profile.id.clone()),
                 project_id: project_id.to_string(),
                 issue_id: issue_id.to_string(),
-                work_item_id: vp.work_item_id.clone(),
-                repository_profile_ref: vp.repository_profile_ref.clone(),
-                provider_run_ref: vp.provider_run_ref.clone(),
-                scope: vp.scope.clone(),
-                commands: vp.commands.clone(),
-                manual_checks: vp.manual_checks.clone(),
-                required_gates: vp.required_gates.clone(),
-                risk_notes: vp.risk_notes.clone(),
-                confidence: vp.confidence.clone(),
-                fallback_policy: vp.fallback_policy.clone(),
+                repository_id: output.repository_profile.repository_id.clone(),
+                provider_run_ref: output.repository_profile.provider_run_ref.clone(),
+                languages: output.repository_profile.languages.clone(),
+                frameworks: output.repository_profile.frameworks.clone(),
+                package_managers: output.repository_profile.package_managers.clone(),
+                test_frameworks: output.repository_profile.test_frameworks.clone(),
+                build_systems: output.repository_profile.build_systems.clone(),
+                verification_capabilities: output
+                    .repository_profile
+                    .verification_capabilities
+                    .clone(),
+                detected_layers: output.repository_profile.detected_layers.clone(),
+                split_recommendation: output.repository_profile.split_recommendation.clone(),
+                confidence: output.repository_profile.confidence.clone(),
+                uncertainties: output.repository_profile.uncertainties.clone(),
             })?;
-        }
 
-        for wi in &output.work_items {
-            self.create_work_item(CreateWorkItemInput {
-                id: Some(wi.id.clone()),
-                project_id: project_id.to_string(),
-                issue_id: issue_id.to_string(),
-                repository_id: wi.repository_id.clone(),
-                story_spec_ids: wi.story_spec_ids.clone(),
-                design_spec_ids: wi.design_spec_ids.clone(),
-                title: wi.title.clone(),
-                work_item_set_id: wi.work_item_set_id.clone(),
-                source_work_item_plan_id: wi.source_work_item_plan_id.clone(),
-                source_outline_id: wi.source_outline_id.clone(),
-                source_draft_id: wi.source_draft_id.clone(),
-                planned_implementation_context: wi.planned_implementation_context.clone(),
-                kind: wi.kind.clone(),
-                sequence_hint: wi.sequence_hint,
-                depends_on: wi.depends_on.clone(),
-                exclusive_write_scopes: wi.exclusive_write_scopes.clone(),
-                forbidden_write_scopes: wi.forbidden_write_scopes.clone(),
-                context_budget: wi.context_budget.clone(),
-                verification_plan_ref: wi.verification_plan_ref.clone(),
-                require_execution_plan_confirm: wi.require_execution_plan_confirm,
-                plan_status: WorkItemPlanStatus::Draft,
-            })?;
-        }
+            for vp in &output.verification_plans {
+                self.create_verification_plan(CreateVerificationPlanInput {
+                    id: Some(vp.id.clone()),
+                    project_id: project_id.to_string(),
+                    issue_id: issue_id.to_string(),
+                    work_item_id: vp.work_item_id.clone(),
+                    repository_profile_ref: vp.repository_profile_ref.clone(),
+                    provider_run_ref: vp.provider_run_ref.clone(),
+                    scope: vp.scope.clone(),
+                    commands: vp.commands.clone(),
+                    manual_checks: vp.manual_checks.clone(),
+                    required_gates: vp.required_gates.clone(),
+                    risk_notes: vp.risk_notes.clone(),
+                    confidence: vp.confidence.clone(),
+                    fallback_policy: vp.fallback_policy.clone(),
+                })?;
+            }
 
-        let new_wi_ids: Vec<String> = output.work_items.iter().map(|wi| wi.id.clone()).collect();
-        let new_vp_ids: Vec<String> = output
-            .verification_plans
-            .iter()
-            .map(|vp| vp.id.clone())
-            .collect();
-        let new_profile_id = output.repository_profile.id.clone();
-        let new_graph = output.plan.dependency_graph.clone();
-        let provider_run_ref = output.plan.created_from_provider_run.clone();
-        self.update_issue_work_item_plan(
-            project_id,
-            issue_id,
-            plan_id,
-            IssueWorkItemPlanUpdate {
-                work_item_ids: new_wi_ids.clone(),
-                verification_plan_ids: new_vp_ids.clone(),
-                repository_profile_ref: Some(new_profile_id.clone()),
-                dependency_graph: new_graph,
-                created_from_provider_run: provider_run_ref,
-                validator_findings,
-            },
-        )?;
+            for wi in &output.work_items {
+                self.create_work_item(CreateWorkItemInput {
+                    id: Some(wi.id.clone()),
+                    project_id: project_id.to_string(),
+                    issue_id: issue_id.to_string(),
+                    repository_id: wi.repository_id.clone(),
+                    story_spec_ids: wi.story_spec_ids.clone(),
+                    design_spec_ids: wi.design_spec_ids.clone(),
+                    title: wi.title.clone(),
+                    work_item_set_id: wi.work_item_set_id.clone(),
+                    source_work_item_plan_id: wi.source_work_item_plan_id.clone(),
+                    source_outline_id: wi.source_outline_id.clone(),
+                    source_draft_id: wi.source_draft_id.clone(),
+                    planned_implementation_context: wi.planned_implementation_context.clone(),
+                    kind: wi.kind.clone(),
+                    sequence_hint: wi.sequence_hint,
+                    depends_on: wi.depends_on.clone(),
+                    exclusive_write_scopes: wi.exclusive_write_scopes.clone(),
+                    forbidden_write_scopes: wi.forbidden_write_scopes.clone(),
+                    context_budget: wi.context_budget.clone(),
+                    verification_plan_ref: wi.verification_plan_ref.clone(),
+                    require_execution_plan_confirm: wi.require_execution_plan_confirm,
+                    plan_status: WorkItemPlanStatus::Draft,
+                })?;
+            }
 
-        Ok(WorkItemPlanCandidateSnapshot {
-            plan_id: plan_id.to_string(),
-            work_item_ids: new_wi_ids,
-            verification_plan_ids: new_vp_ids,
-            repository_profile_id: new_profile_id,
-        })
+            let new_wi_ids: Vec<String> =
+                output.work_items.iter().map(|wi| wi.id.clone()).collect();
+            let new_vp_ids: Vec<String> = output
+                .verification_plans
+                .iter()
+                .map(|vp| vp.id.clone())
+                .collect();
+            let new_profile_id = output.repository_profile.id.clone();
+            let new_graph = output.plan.dependency_graph.clone();
+            let provider_run_ref = output.plan.created_from_provider_run.clone();
+            self.update_issue_work_item_plan(
+                project_id,
+                issue_id,
+                plan_id,
+                IssueWorkItemPlanUpdate {
+                    work_item_ids: new_wi_ids.clone(),
+                    verification_plan_ids: new_vp_ids.clone(),
+                    repository_profile_ref: Some(new_profile_id.clone()),
+                    dependency_graph: new_graph,
+                    created_from_provider_run: provider_run_ref,
+                    validator_findings,
+                },
+            )?;
+
+            Ok(WorkItemPlanCandidateSnapshot {
+                plan_id: plan_id.to_string(),
+                work_item_ids: new_wi_ids,
+                verification_plan_ids: new_vp_ids,
+                repository_profile_id: new_profile_id,
+            })
         })
     }
 
