@@ -1189,3 +1189,137 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
     drop(engine);
     event_drain.await.expect("event drain");
 }
+
+// ---- N4（REQ-CS-04/REQ-ENV-10/11）：Logical envelope 接线回归 ----
+
+/// N4：逻辑 launch envelope 的 root cwd/写根边界——Coder 角色 cwd 冻结为
+/// authority_root（readable 随 root 化），唯一 writable root 是所选 target 派生
+/// worktree（root 不可写），PolicyTarget 匹配冻结 logical/checkout 身份；reviewer
+/// 角色可写根恒空且 root 仍不可写。真实 provider 进入由 controller 统一终验。
+#[test]
+fn plan_coding_n4_logical_launch_keeps_root_cwd_and_only_target_writable() {
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::product::coding_models::provider_config::CodingRoleProviderConfigSnapshot;
+    use crate::product::coding_models::AttemptTargetSnapshot;
+    use crate::product::logical_codebase::policy::SessionPolicyAction;
+    use crate::product::logical_codebase::{
+        GatewayRunAudit, LogicalRepositoryId, RepositoryCheckoutId,
+    };
+
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+
+    // 冻结 target snapshot：logical/checkout 身份 + canonical path（成员 worktree
+    // 位于聚合根之下，与 build_gateway_with_registry 的 cwd authority 契约一致）。
+    let mut logical = attempt.clone();
+    logical.target_snapshot = Some(AttemptTargetSnapshot {
+        logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
+        checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+        physical_repository_id: "repository_0001".to_string(),
+        canonical_path: worktree.clone(),
+        git_dir_identity: "git-dir-identity".to_string(),
+        revision: None,
+        policy_digest: String::new(),
+        membership_revision: 1,
+        captured_at: "2026-10-13T00:00:00Z".to_string(),
+        capture_source: "test".to_string(),
+    });
+    let attempt_path = store
+        .paths()
+        .issue_lifecycle_root(&logical.project_id, &logical.issue_id)
+        .join("coding-attempts")
+        .join(format!("{}.json", logical.id));
+    crate::product::json_store::write_json(&attempt_path, &logical)
+        .expect("persist logical attempt");
+
+    store
+        .update_role_provider_config_snapshot(
+            &logical.project_id,
+            &logical.issue_id,
+            &logical.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: crate::product::models::ProviderName::ClaudeCode,
+                code_reviewer: Some(crate::product::models::ProviderName::ClaudeCode),
+                internal_reviewer: Some(crate::product::models::ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: Default::default(),
+            },
+        )
+        .expect("seed role provider config");
+
+    let gateway = super::provider_gateway_validated_input::build_gateway_with_registry(
+        &store.paths(),
+        &logical.project_id,
+        Arc::new(ProviderRegistry::new()),
+        Arc::new(GatewayRunAudit::new()),
+    );
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+        .with_logical_provider_gateway(Arc::new(gateway));
+
+    // Coder：root cwd + 唯一 target 写根。
+    let policy = engine
+        .resolve_launch_policy_for_role(&logical, CodingProviderRole::Coder, &worktree)
+        .expect("coder launch policy resolves")
+        .expect("logical attempt + gateway must produce policy");
+    let envelope = policy.envelope();
+    assert_eq!(envelope.action, SessionPolicyAction::CodingTargetWrite);
+    assert_eq!(
+        envelope.working_directory, envelope.authority_root,
+        "session cwd stays the LC authority root (REQ-ENV-10)"
+    );
+    assert_eq!(
+        envelope.readable_roots,
+        vec![envelope.authority_root.clone()],
+        "readable roots follow the root cwd"
+    );
+    assert_eq!(
+        envelope.writable_roots,
+        vec![worktree.clone()],
+        "Coder has exactly one writable root: the derived target worktree"
+    );
+    assert_ne!(envelope.authority_root, worktree);
+    assert!(
+        !envelope.writable_roots.contains(&envelope.authority_root),
+        "root cwd must not become writable (REQ-ENV-11)"
+    );
+    let snapshot = logical.target_snapshot.as_ref().expect("snapshot");
+    assert_eq!(
+        envelope.target.worktree, worktree,
+        "PolicyTarget worktree is the derived target worktree"
+    );
+    assert_eq!(
+        envelope.target.logical_repository_id,
+        snapshot.logical_repository_id.0.to_string(),
+        "PolicyTarget keeps the frozen logical identity"
+    );
+    assert_eq!(
+        envelope.target.checkout_id,
+        snapshot.checkout_id.0.to_string(),
+        "PolicyTarget keeps the frozen checkout identity"
+    );
+
+    // reviewer：可写根恒空，cwd 仍为 root 且 root 不可写。
+    for role in [
+        CodingProviderRole::CodeReviewer,
+        CodingProviderRole::InternalReviewer,
+    ] {
+        let policy = engine
+            .resolve_launch_policy_for_role(&logical, role, &worktree)
+            .expect("reviewer launch policy resolves")
+            .expect("reviewer policy present");
+        let envelope = policy.envelope();
+        assert_eq!(envelope.action, SessionPolicyAction::ReviewReadOnly);
+        assert_eq!(
+            envelope.working_directory, envelope.authority_root,
+        "reviewer session cwd stays the authority root"
+        );
+        assert!(envelope.writable_roots.is_empty());
+        assert!(
+            !envelope.writable_roots.contains(&envelope.authority_root),
+            "root cwd stays non-writable for reviewer roles"
+        );
+    }
+
+    drop(root);
+}

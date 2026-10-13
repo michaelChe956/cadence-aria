@@ -782,3 +782,277 @@ async fn split_semi_started_unmaterialized_demotes_per_attempt_only() {
         crate::product::coding_models::CodingAttemptStatus::Created
     );
 }
+
+// ---- N4（REQ-CS-04）：多仓 Ready 首项真实 Git 物化接线回归 ----
+
+/// 捕获 git 命令 stdout（真实 branch/worktree 证据断言用）。
+fn git_capture(cwd: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// physical repo 的 `git worktree list --porcelain` 是否含指向 `worktree_path`
+/// 且 branch 为 `refs/heads/{branch}` 的真实条目。
+fn porcelain_has_worktree_branch(
+    cwd: &std::path::Path,
+    worktree_path: &std::path::Path,
+    branch: &str,
+) -> bool {
+    let porcelain = git_capture(cwd, &["worktree", "list", "--porcelain"]);
+    porcelain.split("\n\n").any(|block| {
+        let expected_worktree = format!("worktree {}", worktree_path.display());
+        let expected_branch = format!("branch refs/heads/{branch}");
+        block.lines().any(|line| line == expected_worktree)
+            && block.lines().any(|line| line == expected_branch)
+    })
+}
+
+/// N4（REQ-CS-04 Scenario「busi 首项物化」）：多仓 Ready 首项真实物化——split
+/// 建组后 worktree 仅元数据（目录不存在，repo 维 lease/owner 已按冻结 attempt
+/// 绑定）；StartCoding 对未物化路径回落 WorktreePrepare，execute_worktree_prepare
+/// 在冻结 physical repo 派生真实 branch/worktree（porcelain 可见、head 回填），
+/// owner/lease 与冻结 attempt 一致。真实 provider 进入由 controller 统一终验。
+#[tokio::test]
+async fn plan_coding_n4_ready_target_real_git_materialization() {
+    let fixture = split_advance_fixture(false).await;
+    let mut engine = fixture.engine();
+    let AdvanceOutcome::Completed { record, .. } = engine
+        .handle_advance(split_input("cmd_n4_real_git"))
+        .await
+        .expect("split advance completes")
+    else {
+        panic!("expected Completed");
+    };
+
+    let coding_store = fixture.coding_store();
+    let first_id = record.attempt_id.expect("record first attempt");
+    let first = coding_store
+        .get_attempt(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID, &first_id)
+        .unwrap();
+    let worktree_path = first.worktree_path.clone().expect("split worktree path");
+    assert!(
+        !worktree_path.exists(),
+        "Ready target stays metadata-only before explicit start"
+    );
+
+    let snapshot = first.target_snapshot.as_ref().expect("frozen target snapshot");
+    let target = snapshot.logical_repository_id;
+    let repository = crate::product::repository_store::RepositoryStore::new(fixture.paths.clone())
+        .resolve_logical_repository_for_issue_codebase(SPLIT_PROJECT_ID, None, target)
+        .map(|(_, _, repository)| repository)
+        .unwrap();
+
+    // owner/lease 冻结匹配：repo 维 worktree 三件套与锁 owner 均指向冻结 attempt。
+    let shared = fixture
+        .lifecycle
+        .get_repo_shared_worktree(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID, target)
+        .unwrap()
+        .expect("repo-dim shared worktree registered");
+    assert_eq!(shared.target_repository_id, Some(target));
+    assert_eq!(shared.worktree_path, worktree_path);
+    assert_eq!(shared.branch_name, first.branch_name);
+    assert_eq!(shared.base_branch, first.base_branch);
+    assert_eq!(
+        shared.current_lock_owner_id.as_deref(),
+        Some(first.id.as_str()),
+        "lease owner is the frozen selected attempt"
+    );
+    fixture
+        .lifecycle
+        .validate_repo_worktree_lock_owner(
+            SPLIT_PROJECT_ID,
+            SPLIT_ISSUE_ID,
+            target,
+            first
+                .current_work_item_id
+                .as_deref()
+                .expect("current work item"),
+            &first.id,
+        )
+        .expect("owner/lease frozen to the selected attempt");
+
+    // 未物化 Ready 首启：回落 WorktreePrepare（不物化目录）。
+    let ws_engine = coding_ws_engine(&coding_store);
+    let started = ws_engine
+        .start_attempt(&first.project_id, &first.issue_id, &first.id)
+        .await
+        .expect("unmaterialized Ready target falls back to WorktreePrepare");
+    assert_eq!(
+        started.status,
+        crate::product::coding_models::CodingAttemptStatus::Running
+    );
+    assert_eq!(
+        started.stage,
+        crate::product::coding_models::CodingExecutionStage::WorktreePrepare
+    );
+    assert!(
+        !worktree_path.exists(),
+        "start_attempt only stages; materialization belongs to execute_worktree_prepare"
+    );
+
+    // 真实物化：冻结 physical repo 下派生真实 branch+worktree。
+    let prepared = ws_engine
+        .execute_worktree_prepare(&started, &repository.path)
+        .await
+        .expect("materialize selected target worktree");
+    assert!(worktree_path.exists());
+    assert_eq!(
+        prepared.worktree_path.as_deref(),
+        Some(worktree_path.as_path())
+    );
+    assert!(
+        porcelain_has_worktree_branch(&repository.path, &worktree_path, &first.branch_name),
+        "real git worktree list must show the derived worktree on the frozen branch"
+    );
+    run_git(
+        &repository.path,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{}", first.branch_name),
+        ],
+    );
+
+    // 物化后再入：group 短路进 Coding 并回填真实 head。
+    let coding = ws_engine
+        .start_attempt(&prepared.project_id, &prepared.issue_id, &prepared.id)
+        .await
+        .expect("materialized target enters coding");
+    assert_eq!(
+        coding.stage,
+        crate::product::coding_models::CodingExecutionStage::Coding
+    );
+    let worktree_head = git_capture(&worktree_path, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        coding.head_commit.as_deref(),
+        Some(worktree_head.trim()),
+        "head commit backfilled from the real derived worktree"
+    );
+}
+
+/// N4（REQ-CS-04 Scenario「未选择 target 不产生执行副作用」）：恢复 demote 只
+/// 作用于 selected target——selected 未物化半启动降级 WorktreePrepare；未 selected
+/// target attempt 恒等、physical repo 零真实 Git 写副作用、两 attempt 零 provider
+/// role runs；资源占用仅按冻结 lease 展示，不被标为 provider 已运行。
+#[tokio::test]
+async fn plan_coding_n4_resume_demotes_only_unmaterialized_selected_target() {
+    let fixture = split_advance_fixture(false).await;
+    let mut engine = fixture.engine();
+    let AdvanceOutcome::Completed { record, .. } = engine
+        .handle_advance(split_input("cmd_n4_resume_demote"))
+        .await
+        .expect("split advance completes")
+    else {
+        panic!("expected Completed");
+    };
+
+    let coding_store = fixture.coding_store();
+    let first_id = record.attempt_id.expect("record first attempt");
+    let first = coding_store
+        .get_attempt(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID, &first_id)
+        .unwrap();
+    let other_id = record
+        .target_attempts
+        .iter()
+        .map(|binding| binding.attempt_id.as_str())
+        .find(|id| *id != first_id.as_str())
+        .expect("other target attempt")
+        .to_string();
+    let other = coding_store
+        .get_attempt(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID, &other_id)
+        .unwrap();
+
+    // selected：未物化半启动（Running+Coding+head 缺失）→ 降级 WorktreePrepare。
+    let mut semi_started = first.clone();
+    semi_started.status = crate::product::coding_models::CodingAttemptStatus::Running;
+    semi_started.stage = crate::product::coding_models::CodingExecutionStage::Coding;
+    semi_started.head_commit = None;
+    coding_store
+        .write_coding_attempt_for_test(&semi_started)
+        .unwrap();
+
+    let ws_engine = coding_ws_engine(&coding_store);
+    let prepared = ws_engine
+        .prepare_resumed_attempt_for_runner(&semi_started)
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.stage,
+        crate::product::coding_models::CodingExecutionStage::WorktreePrepare
+    );
+    assert_eq!(
+        prepared.status,
+        crate::product::coding_models::CodingAttemptStatus::Running
+    );
+
+    // 各 target 独立恢复：未 selected attempt（Created/PrepareContext）恒等。
+    let other_prepared = ws_engine
+        .prepare_resumed_attempt_for_runner(&other)
+        .await
+        .unwrap();
+    assert_eq!(other_prepared, other, "un-selected sibling is untouched");
+
+    // 未 selected 无真实 Git 副作用：两 physical repo 都没有 aria worktree/branch。
+    for attempt in [&first, &other] {
+        let snapshot = attempt.target_snapshot.as_ref().expect("frozen snapshot");
+        let repository =
+            crate::product::repository_store::RepositoryStore::new(fixture.paths.clone())
+                .resolve_logical_repository_for_issue_codebase(
+                    SPLIT_PROJECT_ID,
+                    None,
+                    snapshot.logical_repository_id,
+                )
+                .map(|(_, _, repository)| repository)
+                .unwrap();
+        let porcelain = git_capture(&repository.path, &["worktree", "list", "--porcelain"]);
+        assert!(
+            !porcelain.contains("aria-issues"),
+            "no aria worktree materialized for {} before runner pipeline",
+            attempt.id
+        );
+        let branches = git_capture(&repository.path, &["branch", "--list", "aria/issues/*"]);
+        assert!(
+            branches.trim().is_empty(),
+            "no aria branch created for {} before runner pipeline",
+            attempt.id
+        );
+    }
+
+    // 资源占用按真实 lease 展示：未 selected target 的 repo 维锁 owner 仍冻结为
+    // 其 attempt（split 登记的意图），不是 provider 已运行。
+    let other_snapshot = other.target_snapshot.as_ref().expect("frozen snapshot");
+    let other_shared = fixture
+        .lifecycle
+        .get_repo_shared_worktree(
+            SPLIT_PROJECT_ID,
+            SPLIT_ISSUE_ID,
+            other_snapshot.logical_repository_id,
+        )
+        .unwrap()
+        .expect("un-selected target lease registered");
+    assert_eq!(
+        other_shared.current_lock_owner_id.as_deref(),
+        Some(other.id.as_str())
+    );
+
+    // 零 provider 副作用：两 attempt 均无任何 role run。
+    for attempt_id in [&first_id, &other_id] {
+        assert!(
+            coding_store
+                .list_role_runs(SPLIT_PROJECT_ID, SPLIT_ISSUE_ID, attempt_id)
+                .unwrap()
+                .is_empty(),
+            "no provider role runs for {attempt_id}"
+        );
+    }
+}
