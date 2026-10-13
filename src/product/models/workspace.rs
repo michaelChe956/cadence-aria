@@ -568,18 +568,24 @@ impl StructuralGovernanceState {
     }
 
     /// SG4b（REQ-SG-04）：按确定性 id 幂等记录 checkpoint。同 id 重放保
-    /// 原记录（含 `recorded_at` 审计事实），仅在状态非 Active 时回升
-    /// Active（restore 回绑）；新 checkpoint 落位时旧 Active 全部转
-    /// Superseded——grant 终态后 checkpoint 仍保留（不清理历史）。
-    /// 返回是否为新追加（false＝重放零写）。
+    /// 原记录（含 `recorded_at` 审计事实）；回升/落位 Active 前其它
+    /// Active 统一转 Superseded——同一时刻至多一个 Active（finalize 按
+    /// Active 定位当前交付代次，双 Active 会写错 review 证据代次）；
+    /// grant 终态后 checkpoint 仍保留（不清理历史）。返回是否为新追加
+    /// （false＝重放零写）。
     pub fn record_structure_checkpoint(&mut self, checkpoint: StructuralCheckpoint) -> bool {
-        if let Some(existing) = self
+        if let Some(index) = self
             .structure_checkpoints
-            .iter_mut()
-            .find(|recorded| recorded.checkpoint_id == checkpoint.checkpoint_id)
+            .iter()
+            .position(|recorded| recorded.checkpoint_id == checkpoint.checkpoint_id)
         {
-            if existing.status != StructuralCheckpointStatus::Active {
-                existing.status = StructuralCheckpointStatus::Active;
+            if self.structure_checkpoints[index].status != StructuralCheckpointStatus::Active {
+                for (offset, recorded) in self.structure_checkpoints.iter_mut().enumerate() {
+                    if offset != index && recorded.status == StructuralCheckpointStatus::Active {
+                        recorded.status = StructuralCheckpointStatus::Superseded;
+                    }
+                }
+                self.structure_checkpoints[index].status = StructuralCheckpointStatus::Active;
             }
             return false;
         }

@@ -1188,7 +1188,7 @@ impl LifecycleStore {
             match turn.status {
                 HumanGateTurnStatus::Completed => {
                     // typed review 证据：评审节点 + scope digest（绑定同
-                    /// refs/context）缺一不可，不提前 Resolved。
+                    // refs/context）缺一不可，不提前 Resolved。
                     let (Some(node_id), Some(scope_digest)) = (review_node_id, review_scope_digest)
                     else {
                         return Err(ProductStoreError::InvalidRecord {
@@ -1337,7 +1337,7 @@ impl LifecycleStore {
         }
         // 当前上下文重验：以调用方按当前 Design/member/options/baseline
         // 派生的 SG1 报告对三 refs 同源复验（缺 payload/IR/report、hash
-        /// 或 context 漂移全部 fail-closed）。
+        // 或 context 漂移全部 fail-closed）。
         let (source_record, payload) = load_sealed_structure_generation(
             self.app_paths(),
             &scope,

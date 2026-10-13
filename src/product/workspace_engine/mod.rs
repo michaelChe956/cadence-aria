@@ -134,9 +134,13 @@ pub use plan_projection::{
 };
 // SG3a.1 §⑥ 移交：SG4b store 侧 commit/restore 对冻结 payload 同源
 // 复验消费（plan §0.6.2——lifecycle_store 不复刻冻结/摘要配方）。
+// freeze 有生产消费点（load_sealed_structure_generation）；其余三名仅
+// 测试构建消费（sg_04b fixture 同源复验），门控以免非测试构建 unused。
+pub(crate) use plan_projection::freeze_persisted_structure_report;
+#[cfg(test)]
 pub(crate) use plan_projection::{
     PLANNING_STRUCTURE_RULE_VERSION, compute_planning_context_digest,
-    freeze_persisted_structure_report, planning_structure_items_from_ir,
+    planning_structure_items_from_ir,
 };
 pub use review::policy_routing::{
     GateSnapshotContext, HumanGateSnapshot, RoutingAction, route_outcome,

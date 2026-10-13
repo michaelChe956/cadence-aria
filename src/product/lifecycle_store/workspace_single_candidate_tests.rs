@@ -1924,3 +1924,130 @@ fn sg_04b_finalize_grant_requires_typed_evidence() {
         Some(StructuralGrantPhase::SystemFault)
     );
 }
+
+/// SG4b fix round F1(P2):`record_structure_checkpoint` 同 id 回绑分支必须
+/// 把其它 Active 统一降 Superseded——同一时刻至多一个 Active
+/// (finalize 按 Active 定位当前交付代次)。复现链:commit G1→(新 turn)
+/// commit G2(旧 Active 降级)→restore G1→双 Active 缺陷。
+#[test]
+fn sg_04b_rebind_restores_single_active_checkpoint() {
+    let temp = tempdir().unwrap();
+    let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+    let (committed, turn, generation, checkpoint_a) =
+        sg_04b_committed_generation(&store, "entity_sg4b_h");
+
+    // turn1 终态化后,真实链路预约第二反馈 turn,携同代 refs 再交付一代。
+    let completed_turn = HumanGateTurn {
+        status: HumanGateTurnStatus::Completed,
+        ..turn.clone()
+    };
+    let completed = store
+        .update_human_gate_turn(&committed, completed_turn)
+        .expect("terminalize first turn");
+    let (g2_expected, g2_turn) =
+        sg_04b_reserve_running_turn(&store, &completed, "turn_sg4b_0002", "cmd_sg4b_0002");
+    // grant 轮换到 turn2(SG6 producer 空缺,fixture 直写——SG4a 先例)。
+    let mut g2_expected = g2_expected;
+    {
+        let state = g2_expected.structural_governance_state.as_mut().unwrap();
+        let grant = state.current_grant.as_mut().unwrap();
+        grant.grant_id = "sgr_turn_sg4b_0002".to_string();
+        grant.turn_id = Some("turn_sg4b_0002".to_string());
+        grant.command_id = Some("cmd_sg4b_0002".to_string());
+        grant.phase = Some(StructuralGrantPhase::AuthorRunning);
+        grant.attempt_no = 1;
+        grant.review_identity = None;
+    }
+    sg_04b_write_session(&store, &g2_expected);
+    let mut artifact_v2 = sg_04b_artifact_versions(&g2_expected);
+    artifact_v2[0].version = 2;
+    let committed_g2 = store
+        .commit_structurally_valid_revision(
+            &g2_expected,
+            g2_turn.clone(),
+            &generation.source_ref,
+            &generation.ir_ref,
+            &generation.report_ref,
+            &artifact_v2,
+            "artifact_version_002",
+            &generation.report,
+        )
+        .expect("commit second delivery turn");
+    {
+        let state = committed_g2.structural_governance_state.as_ref().unwrap();
+        assert_eq!(state.structure_checkpoints.len(), 2);
+        let active_ids: Vec<&str> = state
+            .structure_checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.status == StructuralCheckpointStatus::Active)
+            .map(|checkpoint| checkpoint.checkpoint_id.as_str())
+            .collect();
+        assert_eq!(active_ids.len(), 1, "G2 落位时旧 Active 降级(既有行为)");
+    }
+
+    // restore 回绑第一代:唯一 Active 必须回到 G1,第二代降 Superseded。
+    let restored = store
+        .restore_structural_checkpoint(&committed_g2, &checkpoint_a, &generation.report)
+        .expect("restore first generation");
+    let active_checkpoints: Vec<StructuralCheckpoint> = restored
+        .structural_governance_state
+        .as_ref()
+        .unwrap()
+        .structure_checkpoints
+        .iter()
+        .filter(|checkpoint| checkpoint.status == StructuralCheckpointStatus::Active)
+        .cloned()
+        .collect();
+    assert_eq!(
+        active_checkpoints.len(),
+        1,
+        "回绑后同一时刻至多一个 Active checkpoint"
+    );
+    assert_eq!(
+        active_checkpoints[0].checkpoint_id, checkpoint_a.checkpoint_id,
+        "回绑代次即当前 Active"
+    );
+
+    // Active 定位后果:finalize 的 review 证据必须写入回绑代次(Active)。
+    let g2_completed_turn = HumanGateTurn {
+        status: HumanGateTurnStatus::Completed,
+        ..g2_turn.clone()
+    };
+    let g2_completed = store
+        .update_human_gate_turn(&restored, g2_completed_turn.clone())
+        .expect("terminalize second turn");
+    let finalized = store
+        .finalize_structural_revision_grant(
+            &g2_completed,
+            g2_completed_turn,
+            "sgr_turn_sg4b_0002",
+            Some("review_node_sg4b_0002"),
+            Some("scope_sg4b_0002"),
+        )
+        .expect("finalize targets the rebound active generation");
+    let state = finalized.structural_governance_state.as_ref().unwrap();
+    let checkpoint_a_after = state
+        .structure_checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.checkpoint_id == checkpoint_a.checkpoint_id)
+        .unwrap();
+    assert_eq!(
+        checkpoint_a_after.status,
+        StructuralCheckpointStatus::Active
+    );
+    assert_eq!(
+        checkpoint_a_after.review_scope.as_deref(),
+        Some("scope_sg4b_0002"),
+        "review 证据落在 Active(回绑代次)"
+    );
+    let checkpoint_b_after = state
+        .structure_checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.checkpoint_id != checkpoint_a.checkpoint_id)
+        .unwrap();
+    assert_eq!(
+        checkpoint_b_after.status,
+        StructuralCheckpointStatus::Superseded
+    );
+    assert_eq!(checkpoint_b_after.review_scope, None);
+}
