@@ -274,14 +274,20 @@ impl super::WorkspaceEngine {
                 &ir_record,
             )
             .map_err(|error| error.code().to_string())?;
-        let report_id = format!("report-{}", &source_hash[..16]);
+        // report_id 全量内容寻址（对齐 single_candidate author 路径与
+        // provenance 全 sha256 惯例）：id 由全量记录体派生，同 source 上
+        // validator 语义演进产生新 id 追加写入，杜绝同 id 不同 body 撞
+        // put_immutable 的确定性 IdentityMismatch。
         let mut report_record = PlanCandidateMechanicalReportRecord {
-            id: report_id,
+            id: String::new(),
             source_revision_id: source_id,
             ir_id,
             report,
             content_hash: String::new(),
         };
+        report_record.id = report_record
+            .content_addressed_id()
+            .map_err(|error| error.code().to_string())?;
         report_record.content_hash = report_record
             .content_hash()
             .map_err(|error| error.code().to_string())?;

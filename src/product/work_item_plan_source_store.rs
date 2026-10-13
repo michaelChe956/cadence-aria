@@ -88,6 +88,22 @@ impl PlanCandidateMechanicalReportRecord {
     pub fn content_hash(&self) -> Result<String, SourceStoreError> {
         hash_without_content_hash(self)
     }
+
+    /// report record 的内容寻址 id：对全量记录体（除 `id` 与
+    /// `content_hash` 两字段）取 sha256，前 16 位十六进制，长度对齐
+    /// `source-`/`ir-` 的 id 惯例（同为 64-bit 截断、非绝对唯一）。
+    /// report_id 只按 source hash 寻址时，同 source 上 validator 语义
+    /// 演进（如 F2b 给 findings 强制 typed kind）会以同 id 不同 body
+    /// **确定性**撞 put_immutable 不可变闭包
+    /// （SOURCE_STORE_IDENTITY_MISMATCH，plan 用户重试被确定性阻塞）；
+    /// 全量内容寻址使内容变→新 id 追加写入，同内容→同 id 走整记录
+    /// 相等分支幂等 Ok。旧 id 格式存量记录照常可读、无需迁移；与旧
+    /// id 残余的理论碰撞退化为 64-bit 随机碰撞，仍由不可变守卫显式
+    /// 失败兜底（绝不静默覆写）。
+    pub fn content_addressed_id(&self) -> Result<String, SourceStoreError> {
+        let digest = hash_record_without_fields(self, &["id", "content_hash"])?;
+        Ok(format!("report-{}", &digest[..16]))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -663,6 +679,13 @@ fn canonical_ref(
 }
 
 fn hash_without_content_hash<T: Serialize>(record: &T) -> Result<String, SourceStoreError> {
+    hash_record_without_fields(record, &["content_hash"])
+}
+
+fn hash_record_without_fields<T: Serialize>(
+    record: &T,
+    removed: &[&str],
+) -> Result<String, SourceStoreError> {
     let mut value = serde_json::to_value(record)
         .map_err(|error| SourceStoreError::Serialize(error.to_string()))?;
     let Some(object) = value.as_object_mut() else {
@@ -670,7 +693,9 @@ fn hash_without_content_hash<T: Serialize>(record: &T) -> Result<String, SourceS
             "source-store records must serialize to JSON objects".to_string(),
         ));
     };
-    object.remove("content_hash");
+    for field in removed {
+        object.remove(*field);
+    }
     let bytes = serde_json::to_vec(&value)
         .map_err(|error| SourceStoreError::Serialize(error.to_string()))?;
     Ok(hash_bytes(&bytes))

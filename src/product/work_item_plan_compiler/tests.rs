@@ -14,6 +14,7 @@ mod member_targets;
 mod null_placeholder_command;
 mod preflight_baseline_paths;
 mod preflight_options;
+mod publish_freshness;
 mod repeated_field_accumulation;
 mod reviewer_finding_channel_boundary;
 

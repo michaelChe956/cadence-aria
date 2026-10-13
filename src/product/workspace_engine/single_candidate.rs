@@ -542,14 +542,22 @@ impl WorkspaceEngine {
         // Warning 级 findings 以 Suggestion+Advisory 搭车同一 verdict。
         let contract_prerevision_verdict =
             contract_prerevision::single_candidate_contract_prerevision_verdict(&ir_record.ir);
-        let report_id = format!("report-{}", &ir_record.ir.source_revision_hash[..16]);
+        // report_id 全量内容寻址（对齐 provenance 全 sha256 惯例）：
+        // id 由 (source_revision_id, ir_id, findings/kind,
+        // compiler_version) 全量记录体派生，不再只按 source hash 寻址
+        // ——同 source 上 validator 语义演进（如 F2b typed kind）产生新
+        // id 追加写入，同内容重放走整记录相等分支幂等 Ok，杜绝同 id
+        // 不同 body 撞 put_immutable 的确定性 IdentityMismatch。
         let mut report_record = PlanCandidateMechanicalReportRecord {
-            id: report_id,
+            id: String::new(),
             source_revision_id: source_revision.id.clone(),
             ir_id: ir_id.clone(),
             report,
             content_hash: String::new(),
         };
+        report_record.id = report_record
+            .content_addressed_id()
+            .map_err(|error| format!("derive mechanical report id failed: {error:?}"))?;
         // C1 preflight 前移（F-51/F-56）：存储 options×items 三族缺口与 AC
         // 路径×基线树缺口同样在本轮 Evaluate 产生机械返修 verdict（preflight
         // 族不硬失败 author 轮次），与 canonical 契约缺口共用一次 complete_review

@@ -3,6 +3,7 @@ use super::super::{
 };
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::models::{WorkItemSplitFinding, WorkItemSplitFindingSeverity};
+use crate::product::planning_failure::PlanningFailureKind;
 use crate::product::work_item_plan_source_store::{
     PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, PlanCandidatePublicationProvenance,
     SourceRevisionRecord, SourceStoreError, SourceStoreScope, WorkItemPlanSourceStore,
@@ -339,4 +340,194 @@ fn source_store_ref_error_precedence_and_immutable_hashes_are_stable() {
             .unwrap_err(),
         "SOURCE_STORE_CONTENT_HASH_MISMATCH",
     );
+}
+
+fn e2e_finding(kind: Option<PlanningFailureKind>) -> WorkItemSplitFinding {
+    WorkItemSplitFinding {
+        severity: WorkItemSplitFindingSeverity::Warning,
+        code: "integration_or_e2e_skipped_risk".to_string(),
+        message: "integration or e2e verification skipped risk".to_string(),
+        work_item_ids: Vec::new(),
+        kind,
+    }
+}
+
+fn source_addressed_report_id(source: &str) -> String {
+    format!("report-{}", &source_hash(source)[..16])
+}
+
+fn report_record_with_findings(
+    id: &str,
+    source_revision_id: &str,
+    ir_id: &str,
+    source: &str,
+    findings: Vec<WorkItemSplitFinding>,
+) -> PlanCandidateMechanicalReportRecord {
+    let mut record = PlanCandidateMechanicalReportRecord {
+        id: id.to_string(),
+        source_revision_id: source_revision_id.to_string(),
+        ir_id: ir_id.to_string(),
+        report: PlanCandidateMechanicalReport {
+            source_revision_hash: source_hash(source),
+            compiler_version: COMPILER_VERSION.to_string(),
+            findings,
+        },
+        content_hash: String::new(),
+    };
+    record.content_hash = record.content_hash().unwrap();
+    record
+}
+
+fn content_addressed_report_record(
+    source_revision_id: &str,
+    ir_id: &str,
+    source: &str,
+    findings: Vec<WorkItemSplitFinding>,
+) -> PlanCandidateMechanicalReportRecord {
+    let mut record =
+        report_record_with_findings("", source_revision_id, ir_id, source, findings);
+    record.id = record.content_addressed_id().unwrap();
+    record.content_hash = record.content_hash().unwrap();
+    record
+}
+
+#[test]
+fn legacy_source_addressed_report_id_collides_on_validator_kind_evolution() {
+    // 回归锚（session_0003 撞历史机理）：report_id 只按 source hash 前
+    // 16 位寻址时，同 source 上 validator 语义演进（F2b：findings 强制
+    // typed kind）→ 同 id 不同 body → put_immutable 不可变闭包按锚字段
+    // 全等落 else 分支 = SOURCE_STORE_IDENTITY_MISMATCH，plan 用户重试
+    // 被确定性阻塞。该锚证明：内容寻址 id 是免撞的必要条件。
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkItemPlanSourceStore::new(ProductAppPaths::new(temp.path().join(".aria")));
+    let source = "# Work Item Plan\n";
+    let revision = source_revision("source-001", source);
+    store
+        .put_source_revision(PROJECT_ID, ISSUE_ID, PLAN_ID, &revision)
+        .unwrap();
+    let candidate = ir_record("ir-001", &revision.id, source);
+    store
+        .put_plan_candidate_ir(PROJECT_ID, ISSUE_ID, PLAN_ID, &candidate)
+        .unwrap();
+
+    let legacy_id = source_addressed_report_id(source);
+    let legacy = report_record_with_findings(
+        &legacy_id,
+        &revision.id,
+        &candidate.id,
+        source,
+        vec![e2e_finding(None)],
+    );
+    store
+        .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &legacy)
+        .unwrap();
+
+    let evolved = report_record_with_findings(
+        &legacy_id,
+        &revision.id,
+        &candidate.id,
+        source,
+        vec![e2e_finding(Some(PlanningFailureKind::Unknown {
+            code: "integration_or_e2e_skipped_risk".to_string(),
+        }))],
+    );
+    assert_code(
+        store
+            .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &evolved)
+            .unwrap_err(),
+        "SOURCE_STORE_IDENTITY_MISMATCH",
+    );
+}
+
+#[test]
+fn content_addressed_report_id_appends_evolved_report_without_collision() {
+    // 主案验收：同 source、findings 仅 kind 不同（旧 None vs 新 typed）
+    // 的两 record 在全量内容寻址 id 下 id 不同、各自落盘成功；旧
+    // id 格式存量记录不被撞；同 record 重放走整记录相等分支幂等 Ok；
+    // get 按各自 canonical ref 取回正确记录。
+    let temp = tempfile::tempdir().unwrap();
+    let store = WorkItemPlanSourceStore::new(ProductAppPaths::new(temp.path().join(".aria")));
+    let scope = scope();
+    let source = "# Work Item Plan\n";
+    let revision = source_revision("source-001", source);
+    let source_ref = store
+        .put_source_revision(PROJECT_ID, ISSUE_ID, PLAN_ID, &revision)
+        .unwrap();
+    let candidate = ir_record("ir-001", &revision.id, source);
+    let ir_ref = store
+        .put_plan_candidate_ir(PROJECT_ID, ISSUE_ID, PLAN_ID, &candidate)
+        .unwrap();
+
+    // 存量：F1.2 时代旧 id 格式报告（kind=None），模拟 13:58 落盘历史。
+    let legacy = report_record_with_findings(
+        &source_addressed_report_id(source),
+        &revision.id,
+        &candidate.id,
+        source,
+        vec![e2e_finding(None)],
+    );
+    let legacy_ref = store
+        .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &legacy)
+        .unwrap();
+
+    // 新 validate 产出（F2b 后 typed kind），内容寻址 id。
+    let evolved = content_addressed_report_record(
+        &revision.id,
+        &candidate.id,
+        source,
+        vec![e2e_finding(Some(PlanningFailureKind::Unknown {
+            code: "integration_or_e2e_skipped_risk".to_string(),
+        }))],
+    );
+    assert_ne!(evolved.id, legacy.id);
+    assert!(evolved.id.starts_with("report-"));
+    assert_eq!(evolved.id.len(), "report-".len() + 16);
+    let evolved_ref = store
+        .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &evolved)
+        .unwrap();
+    assert_ne!(evolved_ref, legacy_ref);
+
+    // 同 record 重放：整记录相等分支幂等 Ok，ref 稳定。
+    assert_eq!(
+        store
+            .put_mechanical_report(PROJECT_ID, ISSUE_ID, PLAN_ID, &evolved)
+            .unwrap(),
+        evolved_ref
+    );
+
+    // get 按各自 canonical ref 取回正确记录，存量不受影响。
+    assert_eq!(
+        store.get_mechanical_report(&scope, &legacy_ref).unwrap(),
+        legacy
+    );
+    assert_eq!(
+        store.get_mechanical_report(&scope, &evolved_ref).unwrap(),
+        evolved
+    );
+    assert_eq!(
+        store.get_source_revision(&scope, &source_ref).unwrap(),
+        revision
+    );
+    assert_eq!(
+        store.get_plan_candidate_ir(&scope, &ir_ref).unwrap(),
+        candidate
+    );
+
+    // 同内容重放派生同 id（内容寻址确定性）：kind 演进前后各自幂等。
+    let replay = content_addressed_report_record(
+        &revision.id,
+        &candidate.id,
+        source,
+        vec![e2e_finding(Some(PlanningFailureKind::Unknown {
+            code: "integration_or_e2e_skipped_risk".to_string(),
+        }))],
+    );
+    assert_eq!(replay.id, evolved.id);
+    let legacy_replay = content_addressed_report_record(
+        &revision.id,
+        &candidate.id,
+        source,
+        vec![e2e_finding(None)],
+    );
+    assert_ne!(legacy_replay.id, evolved.id);
 }
