@@ -13,7 +13,7 @@ use crate::product::planning_failure::{
     PlanningFailureKind, PlanningFailureOrigin, PlanningFailureSet, PlanningStage,
 };
 use crate::product::repository_store::RepositoryStore;
-use crate::product::work_item_contract::{ContractCompatibilityPolicy, RequiredInputContract};
+use crate::product::work_item_contract::RequiredInputContract;
 
 impl WorkspaceEngine {
     pub(crate) fn is_current_work_item_plan_batch_mode(&self) -> bool {
@@ -285,6 +285,8 @@ pub(crate) fn load_involved_from_confirmed_design(
 
 /// SG1 有效图源字段定位（纯事实）：`field` 为 canonical 源内字段路径，
 /// `line` 为 1-based 行号；不携带任何 store/provider 引用。
+/// 尚未接线：SG2/SG3a 消费前仅测试引用。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanningStructureSpan {
     pub field: String,
@@ -296,6 +298,8 @@ pub(crate) struct PlanningStructureSpan {
 /// Design/member/selection/options/baseline/intent 摘要；本类型不构成新
 /// 入站许可——缺失/失效/多份矛盾 Design 由外层装载时按原
 /// operational/业务门阻断，不在这里随便选一个。
+/// 尚未接线：SG2/SG3a 消费前仅测试引用。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanningStructureContext {
     pub source_revision_ref: String,
@@ -321,6 +325,8 @@ pub(crate) struct PlanningStructureContext {
 
 /// SG1 canonical Input 连同源定位：契约原样保留（provider、contract_id、
 /// required_capabilities、compatibility_policy），`span` 指向声明字段。
+/// 尚未接线：SG2/SG3a 消费前仅测试引用。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanningStructureCanonicalInput {
     pub contract: RequiredInputContract,
@@ -331,6 +337,8 @@ pub(crate) struct PlanningStructureCanonicalInput {
 /// 解析后逻辑/物理 target、canonical Inputs、声明依赖与源定位。
 /// `declared_depends_on`（Dependencies.depends_on）单独保留、按既有规则
 /// 验证一致性——它不是有效图边，未参与当前编译的声明边不得误称实际边。
+/// 尚未接线：SG2/SG3a 消费前仅测试引用。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanningStructureItem {
     pub logical_work_item_id: String,
@@ -352,6 +360,8 @@ pub(crate) struct PlanningStructureItem {
 /// 都保，删一来源不等于删除有效边；`contract_refs`/`spans` 属
 /// canonical_input 来源，`order_indices` 属 change_order 来源
 /// （[前仓索引, 后仓索引]，无该来源时为空）。
+/// 尚未接线：SG2/SG3a 消费前仅测试引用。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct EffectivePlanningEdge {
     pub from: String,
@@ -366,6 +376,8 @@ pub(crate) struct EffectivePlanningEdge {
 /// `from`=被依赖方、`to`=声明方（与 IssueWorkItemDependencyEdge 同向）。
 /// `resolvable`=被引用 ID 在本批 items 内；`effective`=该端点对在有效图
 /// 中确有边（来源不限）。声明边不是有效图边。
+/// 尚未接线：SG2/SG3a 消费前仅测试引用。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanningStructureDeclaredDependencyFact {
     pub from: String,
@@ -379,6 +391,8 @@ pub(crate) struct PlanningStructureDeclaredDependencyFact {
 /// typed failures（真实有向 witness 在 DependencyCycle payload 内）。
 /// 残余组只是 Kahn 分组事实，不是有向 witness，禁止画成 A→B→A
 /// （REQ-PLN-10）。纯输出，不含 store/provider I/O。
+/// 尚未接线：SG2/SG3a 消费前仅测试引用。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanningStructureReport {
     pub source_hash: String,
@@ -408,6 +422,8 @@ pub(crate) struct PlanningStructureReport {
 /// ④ change_order 自动边（同仓无自动边、空顺序不映射——单仓语义不变）；
 /// ⑤ 现 Kahn 核心判可排序性 + 确定性 DFS 提取真实有向 witness
 ///    （每一跳确在有效图中并标来源）。
+/// 尚未接线：SG2/SG3a 消费前仅测试引用。
+#[allow(dead_code)]
 pub(crate) fn project_effective_planning_graph(
     items: &[PlanningStructureItem],
     context: &PlanningStructureContext,
@@ -431,7 +447,7 @@ pub(crate) fn project_effective_planning_graph(
                     ),
                 },
                 PlanningFailureOrigin::System,
-                &[item.logical_work_item_id.clone()],
+                std::slice::from_ref(&item.logical_work_item_id),
                 context,
             ));
         }
@@ -597,43 +613,41 @@ pub(crate) fn project_effective_planning_graph(
         .map(|(id, _)| (*id).to_string())
         .collect();
 
-    if !sortable {
-        if let Some(path) = find_cycle_witness(&known_ids, &adjacency) {
-            let witness: Vec<PlanningCycleWitnessHop> = path
-                .iter()
-                .map(|(from, to)| {
-                    let entry = &edges[&(*from, *to)];
-                    let mut sources = Vec::new();
-                    if entry.canonical {
-                        sources.push(PlanningEdgeSource::CanonicalInput);
-                    }
-                    if entry.change_order {
-                        sources.push(PlanningEdgeSource::ChangeOrder);
-                    }
-                    PlanningCycleWitnessHop {
-                        from: (*from).to_string(),
-                        to: (*to).to_string(),
-                        sources,
-                    }
-                })
-                .collect();
-            // affected_ids 保持 witness 节点序（首跳 from + 各跳 to 去重）。
-            let mut affected_ids: Vec<String> = Vec::with_capacity(witness.len() + 1);
-            for (index, hop) in witness.iter().enumerate() {
-                if index == 0 {
-                    affected_ids.push(hop.from.clone());
+    if !sortable && let Some(path) = find_cycle_witness(&known_ids, &adjacency) {
+        let witness: Vec<PlanningCycleWitnessHop> = path
+            .iter()
+            .map(|(from, to)| {
+                let entry = &edges[&(*from, *to)];
+                let mut sources = Vec::new();
+                if entry.canonical {
+                    sources.push(PlanningEdgeSource::CanonicalInput);
                 }
-                if !affected_ids.contains(&hop.to) {
-                    affected_ids.push(hop.to.clone());
+                if entry.change_order {
+                    sources.push(PlanningEdgeSource::ChangeOrder);
                 }
+                PlanningCycleWitnessHop {
+                    from: (*from).to_string(),
+                    to: (*to).to_string(),
+                    sources,
+                }
+            })
+            .collect();
+        // affected_ids 保持 witness 节点序（首跳 from + 各跳 to 去重）。
+        let mut affected_ids: Vec<String> = Vec::with_capacity(witness.len() + 1);
+        for (index, hop) in witness.iter().enumerate() {
+            if index == 0 {
+                affected_ids.push(hop.from.clone());
             }
-            failures.push(structure_failure(
-                PlanningFailureKind::DependencyCycle { witness },
-                PlanningFailureOrigin::EffectiveGraph,
-                &affected_ids,
-                context,
-            ));
+            if !affected_ids.contains(&hop.to) {
+                affected_ids.push(hop.to.clone());
+            }
         }
+        failures.push(structure_failure(
+            PlanningFailureKind::DependencyCycle { witness },
+            PlanningFailureOrigin::EffectiveGraph,
+            &affected_ids,
+            context,
+        ));
     }
 
     // 声明依赖单独保留（不是有效图边）：resolvable=被引用 ID 在本批；
@@ -668,6 +682,8 @@ pub(crate) fn project_effective_planning_graph(
 
 /// 有效边来源累加器：同端点 canonical/change_order 贡献分别保留，
 /// 输出按固定枚举序合并（删一来源不等于删除有效边）。
+// 尚未接线：SG2/SG3a 消费前仅测试引用。
+#[allow(dead_code)]
 #[derive(Default)]
 struct EffectiveEdgeAccumulator {
     canonical: bool,
@@ -679,6 +695,8 @@ struct EffectiveEdgeAccumulator {
 
 /// 构造带 context 身份的 typed 结构失败（stage 恒 Plan；diagnostic_ref
 /// 由 source_hash+稳定码单源派生）。
+// 尚未接线：SG2/SG3a 消费前仅测试引用。
+#[allow(dead_code)]
 fn structure_failure(
     kind: PlanningFailureKind,
     origin: PlanningFailureOrigin,
@@ -707,6 +725,8 @@ fn structure_failure(
 /// 确定性 DFS 提取有向环 witness（固定 ID/邻接序）：遇到指向栈内节点的
 /// 回边即返回栈片段+回边；每一跳都确在有效图邻接中。只取首个环，
 /// 不枚举全部环，也不把 Kahn 残余节点集合画成环（REQ-PLN-10）。
+// 尚未接线：SG2/SG3a 消费前仅测试引用。
+#[allow(dead_code)]
 fn find_cycle_witness<'a>(
     sorted_ids: &BTreeSet<&'a str>,
     adjacency: &BTreeMap<&'a str, BTreeSet<&'a str>>,
@@ -731,10 +751,10 @@ fn find_cycle_witness<'a>(
                     path.push((node, *next));
                     return Some(path);
                 }
-                if !visited.contains(next) {
-                    if let Some(found) = dfs(adjacency, on_stack, visited, *next) {
-                        return Some(found);
-                    }
+                if !visited.contains(next)
+                    && let Some(found) = dfs(adjacency, on_stack, visited, next)
+                {
+                    return Some(found);
                 }
             }
         }
@@ -745,7 +765,7 @@ fn find_cycle_witness<'a>(
     let mut visited: BTreeSet<&'a str> = BTreeSet::new();
     for id in sorted_ids {
         if !visited.contains(id)
-            && let Some(found) = dfs(adjacency, &mut on_stack, &mut visited, *id)
+            && let Some(found) = dfs(adjacency, &mut on_stack, &mut visited, id)
         {
             return Some(found);
         }
@@ -1114,6 +1134,7 @@ mod tests {
         RepositoryCheckoutId, RepositorySourceIdentity, RepositoryType,
     };
     use crate::product::models::{IssueWorkItemPlanOptions, IssueWorkItemPlanStatus};
+    use crate::product::work_item_contract::ContractCompatibilityPolicy;
     use std::collections::BTreeSet;
     use tempfile::TempDir;
     use uuid::Uuid;
