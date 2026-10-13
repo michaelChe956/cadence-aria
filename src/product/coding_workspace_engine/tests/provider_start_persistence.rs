@@ -1213,8 +1213,10 @@ fn plan_coding_n4_logical_launch_keeps_root_cwd_and_only_target_writable() {
     // 位于聚合根之下，与 build_gateway_with_registry 的 cwd authority 契约一致）。
     let mut logical = attempt.clone();
     logical.target_snapshot = Some(AttemptTargetSnapshot {
-        logical_repository_id: LogicalRepositoryId(uuid::Uuid::nil()),
-        checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+        // 两个互不相同的非零 UUID：使下方 PolicyTarget 身份断言具串位判别力
+        // （nil 值下实现若将 checkout_id 串位填入 logical 槽断言仍会通过）。
+        logical_repository_id: LogicalRepositoryId(uuid::Uuid::new_v4()),
+        checkout_id: RepositoryCheckoutId(uuid::Uuid::new_v4()),
         physical_repository_id: "repository_0001".to_string(),
         canonical_path: worktree.clone(),
         git_dir_identity: "git-dir-identity".to_string(),
