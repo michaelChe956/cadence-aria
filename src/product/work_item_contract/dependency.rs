@@ -3,11 +3,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::cross_cutting::worktree::scopes_may_overlap;
+use crate::product::planning_failure::{
+    PlanningCycleWitnessHop, PlanningEdgeSource, PlanningFailureKind,
+};
 
 use super::{
     CanonicalWorkItemContract, ContractCompatibilityPolicy, ContractValidationFinding,
     ContractValidationReport,
-    validation::{error_finding, sorted_report},
+    validation::{error_finding, sorted_report, typed_error_finding},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,7 +373,9 @@ fn report_contract_requirements(
     findings: &mut Vec<ContractValidationFinding>,
 ) {
     for fact in unknown_provider_facts(graph) {
-        findings.push(error_finding(
+        // F2a：typed payload 保留 provider/consumer/contract 三元 ID，
+        // 真实 Inputs 引用不因检出被删除（REQ-PLN-09）。
+        findings.push(typed_error_finding(
             "unknown_provider_logical_work_item",
             &fact.provider,
             Some(&fact.contract_id),
@@ -379,6 +384,11 @@ fn report_contract_requirements(
                 "consumer {} references unknown provider {} for contract {}",
                 fact.consumer, fact.provider, fact.contract_id
             ),
+            PlanningFailureKind::UnknownProvider {
+                provider: fact.provider.clone(),
+                consumer: fact.consumer.clone(),
+                contract_id: fact.contract_id.clone(),
+            },
         ));
     }
     for edge in graph
@@ -399,7 +409,7 @@ fn report_contract_requirements(
                     .iter()
                     .any(|output| output.contract_id == required.contract_id)
             {
-                findings.push(error_finding(
+                findings.push(typed_error_finding(
                     "required_contract_missing",
                     &edge.to,
                     Some(&required.contract_id),
@@ -408,6 +418,11 @@ fn report_contract_requirements(
                         "provider {} does not provide contract {} required by {}",
                         edge.from, required.contract_id, edge.to
                     ),
+                    PlanningFailureKind::RequiredContractMissing {
+                        provider: edge.from.clone(),
+                        consumer: edge.to.clone(),
+                        contract_id: required.contract_id.clone(),
+                    },
                 ));
                 continue;
             }
@@ -419,7 +434,7 @@ fn report_contract_requirements(
             );
 
             for capability in missing_capabilities {
-                findings.push(error_finding(
+                findings.push(typed_error_finding(
                     "required_capability_missing",
                     &edge.to,
                     Some(&required.contract_id),
@@ -428,6 +443,12 @@ fn report_contract_requirements(
                         "provider {} contract {} lacks capability {capability} required by {}",
                         edge.from, required.contract_id, edge.to
                     ),
+                    PlanningFailureKind::RequiredCapabilityMissing {
+                        provider: edge.from.clone(),
+                        consumer: edge.to.clone(),
+                        contract_id: required.contract_id.clone(),
+                        capability: capability.clone(),
+                    },
                 ));
             }
         }
@@ -493,7 +514,16 @@ fn report_unconsumed_handoffs(
     }
 }
 
-fn dependency_cycle_facts(graph: &DependencyContractGraph) -> Vec<Vec<String>> {
+/// 环事实（F2a）：`nodes` 是稳定排序去重节点集合——沿旧规则承担判定
+/// 身份与消息渲染；`witness` 是从 DFS 栈提取的真实有向路径，每一跳都
+/// 确在本图邻接（canonical Inputs 边）中，末跳回到首跳起点。排序集合
+/// 不标有向 witness（REQ-PLN-10），两者分别保留、互不冒充。
+struct ContractDependencyCycleFact {
+    nodes: Vec<String>,
+    witness: Vec<PlanningCycleWitnessHop>,
+}
+
+fn dependency_cycle_facts(graph: &DependencyContractGraph) -> Vec<ContractDependencyCycleFact> {
     let mut adjacency = graph
         .contracts
         .keys()
@@ -510,7 +540,7 @@ fn dependency_cycle_facts(graph: &DependencyContractGraph) -> Vec<Vec<String>> {
 
     let mut states = BTreeMap::new();
     let mut stack = Vec::new();
-    let mut cycles = BTreeSet::new();
+    let mut cycles = BTreeMap::new();
     for node in adjacency.keys().copied() {
         if states.get(node).copied().unwrap_or(VisitState::Unvisited) == VisitState::Unvisited {
             visit_node(node, &adjacency, &mut states, &mut stack, &mut cycles);
@@ -518,7 +548,10 @@ fn dependency_cycle_facts(graph: &DependencyContractGraph) -> Vec<Vec<String>> {
     }
     cycles
         .into_iter()
-        .map(|cycle| cycle.into_iter().map(str::to_string).collect())
+        .map(|(nodes, witness)| ContractDependencyCycleFact {
+            nodes: nodes.into_iter().map(str::to_string).collect(),
+            witness,
+        })
         .collect()
 }
 
@@ -526,14 +559,19 @@ fn report_dependency_cycles(
     graph: &DependencyContractGraph,
     findings: &mut Vec<ContractValidationFinding>,
 ) {
-    for cycle in dependency_cycle_facts(graph) {
-        let logical_work_item_id = cycle.first().expect("cycle must contain a node");
-        findings.push(error_finding(
+    for fact in dependency_cycle_facts(graph) {
+        let logical_work_item_id = fact.nodes.first().expect("cycle must contain a node");
+        // F2a：typed payload 携真实有向 witness（每跳 canonical Inputs 来源），
+        // finding 身份/消息仍由排序集合渲染（canonical 判定规则不变）。
+        findings.push(typed_error_finding(
             "dependency_cycle",
             logical_work_item_id,
             None,
             None,
-            format!("dependency cycle contains {}", cycle.join(" -> ")),
+            format!("dependency cycle contains {}", fact.nodes.join(" -> ")),
+            PlanningFailureKind::DependencyCycle {
+                witness: fact.witness,
+            },
         ));
     }
 }
@@ -543,7 +581,7 @@ fn visit_node<'a>(
     adjacency: &BTreeMap<&'a str, BTreeSet<&'a str>>,
     states: &mut BTreeMap<&'a str, VisitState>,
     stack: &mut Vec<&'a str>,
-    cycles: &mut BTreeSet<Vec<&'a str>>,
+    cycles: &mut BTreeMap<Vec<&'a str>, Vec<PlanningCycleWitnessHop>>,
 ) {
     states.insert(node, VisitState::Visiting);
     stack.push(node);
@@ -562,10 +600,28 @@ fn visit_node<'a>(
                     if let Some(cycle_start) =
                         stack.iter().position(|stack_node| stack_node == neighbor)
                     {
+                        // witness 从栈路径提取：相邻栈帧是真实邻接边，末跳
+                        // （node→neighbor）即当前命中的回边；本图全部边来自
+                        // canonical Inputs（provider→consumer），来源恒标注
+                        // CanonicalInput，不虚构 change_order 来源（SG1 域）。
+                        let witness = stack[cycle_start..]
+                            .windows(2)
+                            .map(|pair| PlanningCycleWitnessHop {
+                                from: pair[0].to_string(),
+                                to: pair[1].to_string(),
+                                sources: vec![PlanningEdgeSource::CanonicalInput],
+                            })
+                            .chain(std::iter::once(PlanningCycleWitnessHop {
+                                from: node.to_string(),
+                                to: neighbor.to_string(),
+                                sources: vec![PlanningEdgeSource::CanonicalInput],
+                            }))
+                            .collect::<Vec<_>>();
                         let mut cycle = stack[cycle_start..].to_vec();
+                        // 排序集合仍是旧判定身份（首个 witness 随集合保留）。
                         cycle.sort_unstable();
                         cycle.dedup();
-                        cycles.insert(cycle);
+                        cycles.entry(cycle).or_insert(witness);
                     }
                 }
                 VisitState::Visited => {}
@@ -647,7 +703,12 @@ fn project_contract_dependency_graph_facts(
         depends_on,
         declared_edges,
         contract_edges,
-        cycles: dependency_cycle_facts(graph),
+        // 投影 facts 沿旧形状：排序节点集合；有向 witness 只存在于 typed
+        // finding payload，集合不冒充路径（REQ-PLN-10）。
+        cycles: dependency_cycle_facts(graph)
+            .into_iter()
+            .map(|fact| fact.nodes)
+            .collect(),
         duplicate_edges: duplicate_edge_facts(graph),
         unknown_providers: unknown_provider_facts(graph),
     }

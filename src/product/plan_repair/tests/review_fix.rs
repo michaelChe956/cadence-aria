@@ -675,6 +675,7 @@ fn plan_repair_publish_rejects_attestation_reuse_after_candidate_package_tamperi
                         contract_ref: Some("contract.workflow".to_string()),
                         capability_ref: None,
                         message: "tampered validation content".to_string(),
+                        kind: None,
                     },
                 );
             }

@@ -185,6 +185,7 @@ async fn plan_repair_awaiting_rejects_invalid_validation_before_timeline_persist
                 contract_ref: None,
                 capability_ref: None,
                 message: "contract invalid".to_string(),
+                kind: None,
             },
         );
     })

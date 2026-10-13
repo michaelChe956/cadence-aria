@@ -30,6 +30,7 @@ fn canonical_work_item_validation_report_roundtrips_through_serde() {
             contract_ref: Some("contract.workflow".to_string()),
             capability_ref: Some("workflow_explicit_completion".to_string()),
             message: "diagnostic warning".to_string(),
+            kind: None,
         }],
     };
 
@@ -51,6 +52,7 @@ fn canonical_work_item_validation_report_is_invalid_when_it_contains_an_error() 
             contract_ref: None,
             capability_ref: None,
             message: "invalid contract".to_string(),
+            kind: None,
         }],
     };
 

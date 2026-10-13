@@ -17,6 +17,14 @@ pub struct ContractValidationFinding {
     pub contract_ref: Option<String>,
     pub capability_ref: Option<String>,
     pub message: String,
+    /// F2a（REQ-SG-01/02、REQ-PLN-09）：供需族分支显式写入的 typed 失败
+    /// payload（dependency_cycle/unknown_provider/required_contract_missing/
+    /// required_capability_missing，IDs 完整保留）。其余分支一律 `None`——
+    /// 缺事实不猜，严禁从 code/message 反推；旧 JSON 无该字段解析为 None
+    /// （按 Unknown 投影，绝不产生 L1 自动资格）。serde 形状遵循 plan §0.5
+    /// 哈希兼容纪律：Option + default + skip，旧记录再序列化字节不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::product::planning_failure::PlanningFailureKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,7 +459,32 @@ pub(crate) fn error_finding(
         contract_ref: contract_ref.map(str::to_string),
         capability_ref: capability_ref.map(str::to_string),
         message,
+        // F2a：helper 覆盖的分支不携带完整 typed 供需事实，一律 None
+        //（供需族 typed 分支经 typed_error_finding 构造，缺事实不猜）。
+        kind: None,
     }
+}
+
+/// F2a（REQ-SG-01/02、REQ-PLN-09）：供需族 typed 构造——finding 携带
+/// `PlanningFailureKind` payload（consumer/provider/contract/capability IDs
+/// 完整保留）；witness/ID 不完整的分支不得调用，仍走 `error_finding`。
+pub(crate) fn typed_error_finding(
+    code: &str,
+    logical_work_item_id: &str,
+    contract_ref: Option<&str>,
+    capability_ref: Option<&str>,
+    message: String,
+    kind: crate::product::planning_failure::PlanningFailureKind,
+) -> ContractValidationFinding {
+    let mut finding = error_finding(
+        code,
+        logical_work_item_id,
+        contract_ref,
+        capability_ref,
+        message,
+    );
+    finding.kind = Some(kind);
+    finding
 }
 
 pub(crate) fn warning_finding(
@@ -468,6 +501,7 @@ pub(crate) fn warning_finding(
         contract_ref: contract_ref.map(str::to_string),
         capability_ref: capability_ref.map(str::to_string),
         message,
+        kind: None,
     }
 }
 

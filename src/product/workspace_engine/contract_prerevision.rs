@@ -433,6 +433,7 @@ mod tests {
             contract_ref: Some("AC-001".to_string()),
             capability_ref: None,
             message: "acceptance criterion AC-001 must describe an observable result".to_string(),
+            kind: None,
         };
         let finding = contract_finding_to_review_finding(&warning, Some(&graph));
         assert_eq!(finding.severity, ReviewFindingSeverity::Suggestion);

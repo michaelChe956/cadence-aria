@@ -41,6 +41,30 @@ pub enum PlanningFailureKind {
     DependencyCycle {
         witness: Vec<PlanningCycleWitnessHop>,
     },
+    /// canonical Inputs 引用缺口（F2a，REQ-PLN-09）：消费方引用的 provider
+    /// 不在本 plan 内。producer 完整保留 provider/consumer/contract ID；
+    /// 真实 Inputs 引用不因检出被删除，修复经 author 重组。
+    UnknownProvider {
+        provider: String,
+        consumer: String,
+        contract_id: String,
+    },
+    /// canonical Inputs 供需缺口（F2a，REQ-PLN-09）：provider 存在但未声明
+    /// 被消费的契约。producer 保留 provider/consumer/contract ID。
+    RequiredContractMissing {
+        provider: String,
+        consumer: String,
+        contract_id: String,
+    },
+    /// canonical Inputs 能力缺口（F2a，REQ-PLN-09）：契约已声明但 required
+    /// capability 未被逐字提供。producer 保留 provider/consumer/contract/
+    /// capability 四元 ID，缺口精确到 capability 级。
+    RequiredCapabilityMissing {
+        provider: String,
+        consumer: String,
+        contract_id: String,
+        capability: String,
+    },
     /// target×成员归属不一致：逻辑 WI 的声明/解析归属与授权成员或 Plan
     /// Intent 解析归属不同构；真实 Inputs/AC 保留，由 author 重组。
     TargetMismatch {
@@ -70,6 +94,9 @@ impl PlanningFailureKind {
         match self {
             Self::InvalidWorkItemHeading { .. } => "invalid_work_item_heading",
             Self::DependencyCycle { .. } => "dependency_cycle",
+            Self::UnknownProvider { .. } => "unknown_provider_logical_work_item",
+            Self::RequiredContractMissing { .. } => "required_contract_missing",
+            Self::RequiredCapabilityMissing { .. } => "required_capability_missing",
             Self::TargetMismatch { .. } => "target_mismatch",
             Self::StructuralRegression { .. } => "structural_regression",
             Self::Operational { stable_code, .. } => stable_code,
@@ -83,6 +110,9 @@ impl PlanningFailureKind {
         match self {
             Self::InvalidWorkItemHeading { .. } => PlanningFailureCategory::Grammar,
             Self::DependencyCycle { .. } => PlanningFailureCategory::Dependency,
+            Self::UnknownProvider { .. }
+            | Self::RequiredContractMissing { .. }
+            | Self::RequiredCapabilityMissing { .. } => PlanningFailureCategory::Dependency,
             Self::TargetMismatch { .. } => PlanningFailureCategory::Attribution,
             Self::StructuralRegression { .. } => PlanningFailureCategory::Regression,
             Self::Operational { .. } => PlanningFailureCategory::Operational,
@@ -355,6 +385,27 @@ fn l1_facts_complete(kind: &PlanningFailureKind) -> bool {
             example,
         } => *line >= 1 && !field.is_empty() && !raw_line.is_empty() && !example.is_empty(),
         PlanningFailureKind::DependencyCycle { witness } => is_complete_cycle_witness(witness),
+        PlanningFailureKind::UnknownProvider {
+            provider,
+            consumer,
+            contract_id,
+        }
+        | PlanningFailureKind::RequiredContractMissing {
+            provider,
+            consumer,
+            contract_id,
+        } => !provider.is_empty() && !consumer.is_empty() && !contract_id.is_empty(),
+        PlanningFailureKind::RequiredCapabilityMissing {
+            provider,
+            consumer,
+            contract_id,
+            capability,
+        } => {
+            !provider.is_empty()
+                && !consumer.is_empty()
+                && !contract_id.is_empty()
+                && !capability.is_empty()
+        }
         PlanningFailureKind::TargetMismatch {
             logical_work_item_id,
             resolved_target,
