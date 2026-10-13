@@ -132,7 +132,15 @@ pub use plan_projection::{
     WorkspaceEngineError, compile_plan_projection_bundle, compile_work_item_revision,
     plan_projection_input, prepare_initial_plan_publication, publish_initial_plan_revision,
 };
-pub use review::policy_routing::{GateSnapshotContext, HumanGateSnapshot, RoutingAction, route_outcome};
+// SG3a.1 §⑥ 移交：SG4b store 侧 commit/restore 对冻结 payload 同源
+// 复验消费（plan §0.6.2——lifecycle_store 不复刻冻结/摘要配方）。
+pub(crate) use plan_projection::{
+    PLANNING_STRUCTURE_RULE_VERSION, compute_planning_context_digest,
+    freeze_persisted_structure_report, planning_structure_items_from_ir,
+};
+pub use review::policy_routing::{
+    GateSnapshotContext, HumanGateSnapshot, RoutingAction, route_outcome,
+};
 pub use types::{
     ArtifactUpdateEvent, EngineEvent, LinkedWorkspaceAmendmentTarget,
     LinkedWorkspaceSessionSnapshot, PendingAuthorChoiceError, ReviewDecisionOutcome,

@@ -5,12 +5,18 @@ use super::*;
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, write_json};
 use crate::product::models::{
-    SingleCandidateCompileReservation, SingleCandidatePhase, WorkspaceSessionRecord, WorkspaceType,
+    HumanGateTurn, HumanGateTurnFailureClass, HumanGateTurnStatus,
+    SingleCandidateCompileReservation, SingleCandidatePhase, StructuralAttemptReason,
+    StructuralCheckpoint, StructuralCheckpointStatus, StructuralGovernanceState,
+    StructuralGrantPhase, StructuralSettlementError, UserBudgetReceipt, UserBudgetReceiptKind,
+    WorkspaceSessionRecord, WorkspaceType, structural_checkpoint_id,
 };
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use crate::product::work_item_plan_source_store::{
     SourceStoreScope, validate_canonical_ref_for_scope,
 };
+use crate::product::workspace_engine::draft_batch::compile_support::PlanningStructureReport;
+use crate::product::workspace_engine::freeze_persisted_structure_report;
 use crate::web::workspace_ws_types::ArtifactVersion;
 
 pub(super) fn max_workspace_session_sequence(
@@ -806,6 +812,630 @@ impl LifecycleStore {
             other => CompileReservationError::PersistenceFailure(other),
         })
     }
+
+    /// SG4b（plan v1.1 §0.5 / REQ-SG-04）：合法结构修订交付。与
+    /// `complete_human_gate_revision` 分离——turn 保持 Running（完成化由
+    /// 评审/finalize 链推进，不提前 Completed）；refs 轮换、checkpoint、
+    /// deliver receipt 与 grant phase→Reviewing 同一 session CAS。
+    /// 只接受已含 `Some` 合法 payload 的同代 refs（§0.6.2），deliver 经
+    /// SG4a 结算核心 settle 恰一次（REQ-CG-02：结构合法且同代 refs 提交
+    /// 后同 turn settle 一次为 delivered_charge）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_structurally_valid_revision(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        mut turn: HumanGateTurn,
+        source_revision_ref: &str,
+        plan_candidate_ir_ref: &str,
+        mechanical_report_ref: &str,
+        artifact_versions: &[ArtifactVersion],
+        result_artifact_ref: &str,
+        structure_report: &PlanningStructureReport,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        if expected.workspace_type != WorkspaceType::WorkItemPlan
+            || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || turn.status != HumanGateTurnStatus::Running
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "structural_revision_commit",
+                reason: "commit requires a Running single-candidate human gate turn".to_string(),
+            });
+        }
+        let scope = SourceStoreScope {
+            project_id: expected.project_id.clone(),
+            issue_id: expected.issue_id.clone(),
+            plan_id: expected.entity_id.clone(),
+        };
+        for (reference, kind) in [
+            (source_revision_ref, "source_revision"),
+            (plan_candidate_ir_ref, "plan_candidate_ir"),
+            (mechanical_report_ref, "mechanical_report"),
+        ] {
+            validate_canonical_ref_for_scope(&scope, reference, kind).map_err(|error| {
+                ProductStoreError::InvalidRecord {
+                    kind: "structural_revision_commit",
+                    reason: error.code().to_string(),
+                }
+            })?;
+        }
+        if !structure_report.structurally_valid {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "structural_revision_commit",
+                reason: "structure report is not structurally valid".to_string(),
+            });
+        }
+        // 同源复验：三 refs 装载 + Some 合法 payload + 传入 SG1 报告经
+        // SG3a.1 冻结单源与持久 payload 全等。
+        let (source_record, payload) = load_sealed_structure_generation(
+            self.app_paths(),
+            &scope,
+            source_revision_ref,
+            plan_candidate_ir_ref,
+            mechanical_report_ref,
+            structure_report,
+        )?;
+        let expected_checkpoint_id = structural_checkpoint_id(
+            &turn.turn_id,
+            source_revision_ref,
+            plan_candidate_ir_ref,
+            mechanical_report_ref,
+        );
+
+        let session_path = self.find_workspace_session_path(&expected.id)?;
+        let turn_path = self.human_gate_turn_path(expected, &turn.turn_id)?;
+        with_exclusive_lock(&session_path, || {
+            let stored: WorkspaceSessionRecord = read_json(&session_path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::Conflict {
+                    kind: "workspace_session",
+                    id: expected.id.clone(),
+                });
+            }
+            let existing: HumanGateTurn = read_json(&turn_path)?;
+            Self::validate_human_gate_turn(&existing, &stored.id, &turn.turn_id)?;
+            let immutable_fields_match = existing.session_id == turn.session_id
+                && existing.command_id == turn.command_id
+                && existing.feedback_text == turn.feedback_text
+                && existing.budget_reserved == turn.budget_reserved
+                && existing.source_hash == turn.source_hash
+                && existing.created_at == turn.created_at;
+            if !immutable_fields_match
+                || existing.status != HumanGateTurnStatus::Running
+                || existing.attempt_no != turn.attempt_no
+            {
+                return Err(ProductStoreError::Conflict {
+                    kind: "human_gate_turn",
+                    id: turn.turn_id.clone(),
+                });
+            }
+            let state = stored.structural_governance_state.as_ref().ok_or_else(|| {
+                ProductStoreError::InvalidRecord {
+                    kind: "structural_governance_state",
+                    reason: "structural governance state missing".to_string(),
+                }
+            })?;
+            let grant =
+                state
+                    .current_grant
+                    .as_ref()
+                    .ok_or_else(|| ProductStoreError::InvalidRecord {
+                        kind: "structural_revision_grant",
+                        reason: "no active structural revision grant".to_string(),
+                    })?;
+            let Some(grant_turn_id) = grant.turn_id.as_deref() else {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "structural_revision_grant",
+                    id: turn.turn_id.clone(),
+                });
+            };
+            if grant_turn_id != turn.turn_id {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "structural_revision_grant",
+                    id: turn.turn_id.clone(),
+                });
+            }
+            if let Some(grant_command_id) = grant.command_id.as_deref()
+                && grant_command_id != existing.command_id
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "structural_revision_grant",
+                    id: existing.command_id.clone(),
+                });
+            }
+            // 幂等重放窗口：前次 commit 已落（同代 refs/checkpoint/receipt）
+            // 时只补 turn 结果绑定，零新结算（跨文件裂缝按 durable 证据恢复）。
+            let receipt_settled_generation =
+                state
+                    .receipt_for_turn(&turn.turn_id)
+                    .is_some_and(|receipt| {
+                        receipt.kind == UserBudgetReceiptKind::DeliveredCharge
+                            && receipt.source_revision_ref.as_deref() == Some(source_revision_ref)
+                            && receipt.plan_candidate_ir_ref.as_deref()
+                                == Some(plan_candidate_ir_ref)
+                            && receipt.structure_report_ref.as_deref()
+                                == Some(mechanical_report_ref)
+                    });
+            let replay = receipt_settled_generation
+                && stored.work_item_plan_source_revision_ref.as_deref()
+                    == Some(source_revision_ref)
+                && stored.plan_candidate_ir_ref.as_deref() == Some(plan_candidate_ir_ref)
+                && stored.mechanical_report_ref.as_deref() == Some(mechanical_report_ref)
+                && state
+                    .structure_checkpoints
+                    .iter()
+                    .any(|checkpoint| checkpoint.checkpoint_id == expected_checkpoint_id);
+            if !replay {
+                match grant.phase {
+                    // 评审/终态/业务门阶段无第二次交付（同代重放除外）。
+                    Some(
+                        StructuralGrantPhase::Reviewing
+                        | StructuralGrantPhase::Resolved
+                        | StructuralGrantPhase::SystemFault
+                        | StructuralGrantPhase::BusinessGate,
+                    ) => {
+                        return Err(ProductStoreError::Conflict {
+                            kind: "structural_revision_grant",
+                            id: grant.grant_id.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            let original_versions = self.list_artifact_versions(&stored.id)?;
+            let mut next = stored.clone();
+            // refs 真正轮换即产生新候选：旧 Approval/编译代次整组失效
+            // （与 complete_human_gate_revision 同语义，F-54 B1）。
+            let refs_rotated = next.work_item_plan_source_revision_ref.as_deref()
+                != Some(source_revision_ref)
+                || next.plan_candidate_ir_ref.as_deref() != Some(plan_candidate_ir_ref)
+                || next.mechanical_report_ref.as_deref() != Some(mechanical_report_ref);
+            next.work_item_plan_source_revision_ref = Some(source_revision_ref.to_string());
+            next.plan_candidate_ir_ref = Some(plan_candidate_ir_ref.to_string());
+            next.mechanical_report_ref = Some(mechanical_report_ref.to_string());
+            if refs_rotated {
+                next.approval_attempt_id = None;
+                next.approved_at = None;
+                next.compile_reservation = None;
+                next.publication_provenance_ref = None;
+            }
+            // deliver settle 恰一次（同 CAS；SG4a 结算核心单源）。
+            if !replay {
+                let receipt = UserBudgetReceipt {
+                    kind: UserBudgetReceiptKind::DeliveredCharge,
+                    turn_id: turn.turn_id.clone(),
+                    command_id: existing.command_id.clone(),
+                    attempt_reason: Some(StructuralAttemptReason::HumanRevision),
+                    source_revision_ref: Some(source_revision_ref.to_string()),
+                    plan_candidate_ir_ref: Some(plan_candidate_ir_ref.to_string()),
+                    structure_report_ref: Some(mechanical_report_ref.to_string()),
+                    context_digest: Some(payload.context_digest.clone()),
+                    reason: None,
+                    settled_at: Utc::now().to_rfc3339(),
+                };
+                let snapshot = next.human_gate_snapshot.as_mut();
+                next.structural_governance_state
+                    .as_mut()
+                    .expect("state checked above")
+                    .settle_turn_receipt(snapshot, &turn.turn_id, &receipt)
+                    .map_err(|error| match error {
+                        StructuralSettlementError::TerminalConflict => {
+                            ProductStoreError::Conflict {
+                                kind: "user_budget_receipt",
+                                id: turn.turn_id.clone(),
+                            }
+                        }
+                        StructuralSettlementError::CommandMismatch => {
+                            ProductStoreError::IdentityMismatch {
+                                kind: "user_budget_hold",
+                                id: existing.command_id.clone(),
+                            }
+                        }
+                        StructuralSettlementError::NoActiveHold => {
+                            ProductStoreError::InvalidRecord {
+                                kind: "user_budget_hold",
+                                reason: "no active hold for turn".to_string(),
+                            }
+                        }
+                    })?;
+            }
+            {
+                let state = next
+                    .structural_governance_state
+                    .as_mut()
+                    .expect("state checked above");
+                let grant = state.current_grant.as_mut().expect("grant checked above");
+                grant.phase = Some(StructuralGrantPhase::Reviewing);
+                grant.candidate_source_revision_ref = Some(source_revision_ref.to_string());
+                grant.plan_candidate_ir_ref = Some(plan_candidate_ir_ref.to_string());
+                grant.mechanical_report_ref = Some(mechanical_report_ref.to_string());
+                state.current_structure_report_ref = Some(mechanical_report_ref.to_string());
+                state.current_context_digest = Some(payload.context_digest.clone());
+                let checkpoint = StructuralCheckpoint {
+                    checkpoint_id: expected_checkpoint_id.clone(),
+                    source_revision_ref: Some(source_revision_ref.to_string()),
+                    plan_candidate_ir_ref: Some(plan_candidate_ir_ref.to_string()),
+                    structure_report_ref: Some(mechanical_report_ref.to_string()),
+                    artifact_version: artifact_versions.last().map(|version| version.version),
+                    source_hash: Some(source_record.source_revision_hash.clone()),
+                    context_digest: Some(payload.context_digest.clone()),
+                    authorization_hash: Some(grant.authorization_hash.clone()),
+                    receipt_ref: Some(format!("user_budget_receipt:{}", turn.turn_id)),
+                    review_scope: None,
+                    status: StructuralCheckpointStatus::Active,
+                    recorded_at: Utc::now().to_rfc3339(),
+                };
+                state.record_structure_checkpoint(checkpoint);
+            }
+            if original_versions != *artifact_versions {
+                self.save_artifact_versions(&stored.id, artifact_versions)?;
+            }
+            next.updated_at = Utc::now().to_rfc3339();
+            // turn 保持 Running（与 complete 分离）：只绑结果 ref。
+            turn.result_artifact_ref = Some(result_artifact_ref.to_string());
+            turn.updated_at = next.updated_at.clone();
+            if let Err(error) = write_json(&session_path, &next) {
+                let _ = self.save_artifact_versions(&next.id, &original_versions);
+                return Err(error);
+            }
+            if let Err(error) = write_json(&turn_path, &turn) {
+                let _ = write_json(&session_path, &expected);
+                let _ = self.save_artifact_versions(&next.id, &original_versions);
+                return Err(error);
+            }
+            Ok(next)
+        })
+    }
+
+    /// SG4b（plan v1.1 §0.5 / REQ-SG-04）：grant 终态化。turn
+    /// Completed/Failed 且取 review 或耗尽 typed 证据；不提前 Complete、
+    /// 不新开 author（终态 grant）；grant 结束不清 history（checkpoint/
+    /// receipt 保留）。
+    pub fn finalize_structural_revision_grant(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        turn: HumanGateTurn,
+        grant_id: &str,
+        review_node_id: Option<&str>,
+        review_scope_digest: Option<&str>,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        if expected.workspace_type != WorkspaceType::WorkItemPlan
+            || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+            || !matches!(
+                turn.status,
+                HumanGateTurnStatus::Completed | HumanGateTurnStatus::Failed
+            )
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "structural_revision_finalize",
+                reason: "finalize requires a Completed or Failed single-candidate turn".to_string(),
+            });
+        }
+        let session_path = self.find_workspace_session_path(&expected.id)?;
+        let turn_path = self.human_gate_turn_path(expected, &turn.turn_id)?;
+        with_exclusive_lock(&session_path, || {
+            let stored: WorkspaceSessionRecord = read_json(&session_path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::Conflict {
+                    kind: "workspace_session",
+                    id: expected.id.clone(),
+                });
+            }
+            let existing: HumanGateTurn = read_json(&turn_path)?;
+            Self::validate_human_gate_turn(&existing, &stored.id, &turn.turn_id)?;
+            let turn_matches = existing.session_id == turn.session_id
+                && existing.command_id == turn.command_id
+                && existing.feedback_text == turn.feedback_text
+                && existing.budget_reserved == turn.budget_reserved
+                && existing.source_hash == turn.source_hash
+                && existing.created_at == turn.created_at
+                && existing.status == turn.status
+                && existing.attempt_no == turn.attempt_no
+                && existing.failure_class == turn.failure_class;
+            if !turn_matches {
+                return Err(ProductStoreError::Conflict {
+                    kind: "human_gate_turn",
+                    id: turn.turn_id.clone(),
+                });
+            }
+            let state = stored.structural_governance_state.as_ref().ok_or_else(|| {
+                ProductStoreError::InvalidRecord {
+                    kind: "structural_governance_state",
+                    reason: "structural governance state missing".to_string(),
+                }
+            })?;
+            let grant =
+                state
+                    .current_grant
+                    .as_ref()
+                    .ok_or_else(|| ProductStoreError::InvalidRecord {
+                        kind: "structural_revision_grant",
+                        reason: "no active structural revision grant".to_string(),
+                    })?;
+            if grant.grant_id != grant_id {
+                return Err(ProductStoreError::Conflict {
+                    kind: "structural_revision_grant",
+                    id: grant_id.to_string(),
+                });
+            }
+            if grant.turn_id.as_deref() != Some(turn.turn_id.as_str()) {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "structural_revision_grant",
+                    id: turn.turn_id.clone(),
+                });
+            }
+            if let Some(grant_command_id) = grant.command_id.as_deref()
+                && grant_command_id != existing.command_id
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "structural_revision_grant",
+                    id: existing.command_id.clone(),
+                });
+            }
+            // 幂等重放：grant 已按同证据终态化 → 零写返回。
+            let already_finalized = match turn.status {
+                HumanGateTurnStatus::Completed => {
+                    grant.phase == Some(StructuralGrantPhase::Resolved)
+                        && grant.review_identity.as_deref() == review_node_id
+                }
+                _ => grant.phase == Some(StructuralGrantPhase::SystemFault),
+            };
+            if already_finalized {
+                return Ok(stored);
+            }
+
+            let mut next = stored.clone();
+            match turn.status {
+                HumanGateTurnStatus::Completed => {
+                    // typed review 证据：评审节点 + scope digest（绑定同
+                    /// refs/context）缺一不可，不提前 Resolved。
+                    let (Some(node_id), Some(scope_digest)) = (review_node_id, review_scope_digest)
+                    else {
+                        return Err(ProductStoreError::InvalidRecord {
+                            kind: "structural_revision_finalize",
+                            reason: "completed turn requires review join evidence".to_string(),
+                        });
+                    };
+                    // durable 分账证据：commit 已结算 delivered receipt。
+                    if !state
+                        .receipt_for_turn(&turn.turn_id)
+                        .is_some_and(|receipt| {
+                            receipt.kind == UserBudgetReceiptKind::DeliveredCharge
+                        })
+                    {
+                        return Err(ProductStoreError::InvalidRecord {
+                            kind: "structural_revision_finalize",
+                            reason: "completed turn has no delivered receipt".to_string(),
+                        });
+                    }
+                    let state = next
+                        .structural_governance_state
+                        .as_mut()
+                        .expect("state checked above");
+                    // Active checkpoint 回填 review scope；既有不同 scope →
+                    // 绑定完整性冲突（同 checkpoint 不重绑第二次评审身份）。
+                    if let Some(checkpoint) = state
+                        .structure_checkpoints
+                        .iter_mut()
+                        .find(|checkpoint| checkpoint.status == StructuralCheckpointStatus::Active)
+                    {
+                        match checkpoint.review_scope.as_deref() {
+                            None => checkpoint.review_scope = Some(scope_digest.to_string()),
+                            Some(existing_scope) if existing_scope == scope_digest => {}
+                            Some(_) => {
+                                return Err(ProductStoreError::Conflict {
+                                    kind: "structural_checkpoint",
+                                    id: checkpoint.checkpoint_id.clone(),
+                                });
+                            }
+                        }
+                    }
+                    let grant = state.current_grant.as_mut().expect("grant checked above");
+                    grant.phase = Some(StructuralGrantPhase::Resolved);
+                    grant.review_identity = Some(node_id.to_string());
+                }
+                HumanGateTurnStatus::Failed => {
+                    // 耗尽 typed 证据：BudgetExhausted + released receipt
+                    //（未交付结构耗尽的 hold 已按 REQ-CG-02 释放）。
+                    if turn.failure_class != Some(HumanGateTurnFailureClass::BudgetExhausted) {
+                        return Err(ProductStoreError::InvalidRecord {
+                            kind: "structural_revision_finalize",
+                            reason: "failed turn requires exhaustion (BudgetExhausted) evidence"
+                                .to_string(),
+                        });
+                    }
+                    if !state
+                        .receipt_for_turn(&turn.turn_id)
+                        .is_some_and(|receipt| {
+                            receipt.kind == UserBudgetReceiptKind::ReleasedStructural
+                        })
+                    {
+                        return Err(ProductStoreError::InvalidRecord {
+                            kind: "structural_revision_finalize",
+                            reason: "exhausted turn has no released_structural receipt".to_string(),
+                        });
+                    }
+                    next.structural_governance_state
+                        .as_mut()
+                        .expect("state checked above")
+                        .current_grant
+                        .as_mut()
+                        .expect("grant checked above")
+                        .phase = Some(StructuralGrantPhase::SystemFault);
+                }
+                _ => unreachable!("terminal status checked at entry"),
+            }
+            next.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &next)?;
+            Ok(next)
+        })
+    }
+
+    /// SG4b（plan v1.1 §0.5 / REQ-SG-04）：整组历史恢复（纯状态回绑）。
+    /// 按当前 Design/member/options/baseline 派生的 SG1 合法报告对
+    /// checkpoint 三 refs 同源重验；缺 join/漂移/新反馈未满足一律拒绝
+    /// 回退；回绑同 CAS 失效旧审批，不复活批准、不把旧 receipt 计本轮、
+    /// 零 author 启动（ledger/attempt/prompt 不动）。
+    pub fn restore_structural_checkpoint(
+        &self,
+        expected: &WorkspaceSessionRecord,
+        checkpoint: &StructuralCheckpoint,
+        current_report: &PlanningStructureReport,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        if expected.workspace_type != WorkspaceType::WorkItemPlan
+            || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "structural_checkpoint_restore",
+                reason: "session is not a SingleCandidate WorkItemPlan".to_string(),
+            });
+        }
+        // 整组三 refs 完整（缺任一＝历史证据不全——只有 Markdown 或缺
+        // IR/report 的历史版本禁止回退，仅可作 author 参考）。
+        let source_revision_ref = checkpoint.source_revision_ref.clone().ok_or_else(|| {
+            ProductStoreError::InvalidRecord {
+                kind: "structural_checkpoint_restore",
+                reason: "checkpoint source_revision_ref is missing".to_string(),
+            }
+        })?;
+        let plan_candidate_ir_ref = checkpoint.plan_candidate_ir_ref.clone().ok_or_else(|| {
+            ProductStoreError::InvalidRecord {
+                kind: "structural_checkpoint_restore",
+                reason: "checkpoint plan_candidate_ir_ref is missing".to_string(),
+            }
+        })?;
+        let structure_report_ref = checkpoint.structure_report_ref.clone().ok_or_else(|| {
+            ProductStoreError::InvalidRecord {
+                kind: "structural_checkpoint_restore",
+                reason: "checkpoint structure_report_ref is missing".to_string(),
+            }
+        })?;
+        let checkpoint_source_hash =
+            checkpoint
+                .source_hash
+                .clone()
+                .ok_or_else(|| ProductStoreError::InvalidRecord {
+                    kind: "structural_checkpoint_restore",
+                    reason: "checkpoint source_hash is missing".to_string(),
+                })?;
+        let scope = SourceStoreScope {
+            project_id: expected.project_id.clone(),
+            issue_id: expected.issue_id.clone(),
+            plan_id: expected.entity_id.clone(),
+        };
+        for (reference, kind) in [
+            (source_revision_ref.as_str(), "source_revision"),
+            (plan_candidate_ir_ref.as_str(), "plan_candidate_ir"),
+            (structure_report_ref.as_str(), "mechanical_report"),
+        ] {
+            validate_canonical_ref_for_scope(&scope, reference, kind).map_err(|error| {
+                ProductStoreError::InvalidRecord {
+                    kind: "structural_checkpoint_restore",
+                    reason: error.code().to_string(),
+                }
+            })?;
+        }
+        // 当前上下文重验：以调用方按当前 Design/member/options/baseline
+        // 派生的 SG1 报告对三 refs 同源复验（缺 payload/IR/report、hash
+        /// 或 context 漂移全部 fail-closed）。
+        let (source_record, payload) = load_sealed_structure_generation(
+            self.app_paths(),
+            &scope,
+            &source_revision_ref,
+            &plan_candidate_ir_ref,
+            &structure_report_ref,
+            current_report,
+        )?;
+        if !current_report.structurally_valid {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "structural_checkpoint_restore",
+                reason: "current structure report is not structurally valid".to_string(),
+            });
+        }
+        if checkpoint_source_hash != source_record.source_revision_hash
+            || checkpoint.context_digest.as_deref() != Some(payload.context_digest.as_str())
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "structural_checkpoint_restore",
+                reason: "checkpoint hash/context digest does not match the durable generation"
+                    .to_string(),
+            });
+        }
+        let session_path = self.find_workspace_session_path(&expected.id)?;
+        with_exclusive_lock(&session_path, || {
+            let stored: WorkspaceSessionRecord = read_json(&session_path)?;
+            if stored != *expected {
+                return Err(ProductStoreError::Conflict {
+                    kind: "workspace_session",
+                    id: expected.id.clone(),
+                });
+            }
+            // 新反馈未满足（活动 hold）禁止整组回退：本轮存在未交付业务
+            // 请求，历史结构只能作 author 指令参考，不得回退假交付。
+            if let Some(state) = stored.structural_governance_state.as_ref()
+                && let Some(hold) = state.user_holds.first()
+            {
+                return Err(ProductStoreError::Conflict {
+                    kind: "structural_checkpoint_restore",
+                    id: hold.turn_id.clone(),
+                });
+            }
+            let mut next = stored.clone();
+            // 纯状态回绑（0 author）：refs 整组回绑 + 旧审批代次同 CAS 失效。
+            next.work_item_plan_source_revision_ref = Some(source_revision_ref.clone());
+            next.plan_candidate_ir_ref = Some(plan_candidate_ir_ref.clone());
+            next.mechanical_report_ref = Some(structure_report_ref.clone());
+            next.approval_attempt_id = None;
+            next.approved_at = None;
+            next.compile_reservation = None;
+            next.publication_provenance_ref = None;
+            {
+                let state = next
+                    .structural_governance_state
+                    .get_or_insert_with(StructuralGovernanceState::default);
+                // review join：仅已绑定同 refs/context 的评审可保
+                // Reviewing；无法 join → Assessing 复评，不伪造已评审；
+                // 终态 grant 不因回绑重开（REQ-SG-04）。
+                let review_joins = state.current_grant.as_ref().is_some_and(|grant| {
+                    grant.review_identity.is_some()
+                        && grant.candidate_source_revision_ref.as_deref()
+                            == Some(source_revision_ref.as_str())
+                        && grant.plan_candidate_ir_ref.as_deref()
+                            == Some(plan_candidate_ir_ref.as_str())
+                        && grant.mechanical_report_ref.as_deref()
+                            == Some(structure_report_ref.as_str())
+                });
+                if let Some(grant) = state.current_grant.as_mut() {
+                    let terminal = matches!(
+                        grant.phase,
+                        Some(
+                            StructuralGrantPhase::Resolved
+                                | StructuralGrantPhase::SystemFault
+                                | StructuralGrantPhase::BusinessGate
+                        )
+                    );
+                    if !terminal {
+                        grant.candidate_source_revision_ref = Some(source_revision_ref.clone());
+                        grant.plan_candidate_ir_ref = Some(plan_candidate_ir_ref.clone());
+                        grant.mechanical_report_ref = Some(structure_report_ref.clone());
+                        grant.phase = Some(if review_joins {
+                            StructuralGrantPhase::Reviewing
+                        } else {
+                            StructuralGrantPhase::Assessing
+                        });
+                    }
+                }
+                state.current_structure_report_ref = Some(structure_report_ref.clone());
+                state.current_context_digest = Some(payload.context_digest.clone());
+                // checkpoint 回 Active（同 id 幂等，旧 Active 转 Superseded）；
+                // 旧 receipt 不新计（user_receipts 不动）。
+                state.record_structure_checkpoint(checkpoint.clone());
+            }
+            next.updated_at = Utc::now().to_rfc3339();
+            write_json(&session_path, &next)?;
+            Ok(next)
+        })
+    }
 }
 
 /// 判断两个 mechanical report canonical ref 是否指向等价内容：各按
@@ -829,6 +1459,72 @@ fn equivalent_mechanical_reports(
         (existing.content_addressed_id(), incoming.content_addressed_id()),
         (Ok(existing_id), Ok(incoming_id)) if existing_id == incoming_id
     )
+}
+
+/// SG4b（plan §0.6.2）：装载三 refs 并同源复验同代结构报告——commit 与
+/// restore 只接受已含 `Some` 合法 payload 的同代 refs：store 完整校验链
+/// （scope/身份/hash/编译器/digest 闭包）之上，以 SG3a.1 冻结单源对传入
+/// SG1 报告重投影，与持久 payload 全等比较；任一漂移/缺证 fail-closed。
+fn load_sealed_structure_generation(
+    paths: crate::product::app_paths::ProductAppPaths,
+    scope: &SourceStoreScope,
+    source_revision_ref: &str,
+    plan_candidate_ir_ref: &str,
+    mechanical_report_ref: &str,
+    structure_report: &PlanningStructureReport,
+) -> Result<
+    (
+        crate::product::work_item_plan_source_store::SourceRevisionRecord,
+        crate::product::planning_failure::PersistedPlanningStructureReport,
+    ),
+    ProductStoreError,
+> {
+    let store = crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(paths);
+    let seal_error = |error: crate::product::work_item_plan_source_store::SourceStoreError| {
+        ProductStoreError::InvalidRecord {
+            kind: "structural_generation",
+            reason: error.code().to_string(),
+        }
+    };
+    let source = store
+        .get_source_revision(scope, source_revision_ref)
+        .map_err(seal_error)?;
+    let ir = store
+        .get_plan_candidate_ir(scope, plan_candidate_ir_ref)
+        .map_err(seal_error)?;
+    let report = store
+        .get_mechanical_report(scope, mechanical_report_ref)
+        .map_err(seal_error)?;
+    if ir.source_revision_id != source.id
+        || report.source_revision_id != source.id
+        || report.ir_id != ir.id
+    {
+        return Err(ProductStoreError::IdentityMismatch {
+            kind: "structural_generation",
+            id: mechanical_report_ref.to_string(),
+        });
+    }
+    let Some(payload) = report.structure_report else {
+        return Err(ProductStoreError::InvalidRecord {
+            kind: "structural_generation",
+            reason: "mechanical report has no sealed structure payload (legacy generation)"
+                .to_string(),
+        });
+    };
+    let frozen = freeze_persisted_structure_report(structure_report, &source.id, &ir.id).map_err(
+        |reason| ProductStoreError::InvalidRecord {
+            kind: "structural_generation",
+            reason: format!("re-freeze current structure report failed: {reason}"),
+        },
+    )?;
+    if frozen != payload {
+        return Err(ProductStoreError::InvalidRecord {
+            kind: "structural_generation",
+            reason: "structure report does not match the sealed same-generation payload"
+                .to_string(),
+        });
+    }
+    Ok((source, payload))
 }
 
 #[cfg(test)]

@@ -4,8 +4,8 @@ use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
     HumanGateReservation, HumanGateTurn, HumanGateTurnStatus, StructuralClaimOutcome,
-    StructuralGovernanceState, StructuralGrantPhase, UserBudgetHold, UserBudgetReceipt,
-    UserBudgetReceiptKind, WorkspaceSessionRecord,
+    StructuralGovernanceState, StructuralGrantPhase, StructuralSettlement,
+    StructuralSettlementError, UserBudgetHold, UserBudgetReceipt, WorkspaceSessionRecord,
 };
 
 use crate::product::workspace_engine::HUMAN_GATE_PROVIDER_MAX_ATTEMPTS;
@@ -622,57 +622,48 @@ impl LifecycleStore {
                 });
             }
             // 旧记录无聚合状态 → 不凭空造账。
-            let Some(state) = stored.structural_governance_state.as_ref() else {
+            if stored.structural_governance_state.is_none() {
                 return Err(ProductStoreError::InvalidRecord {
                     kind: "structural_governance_state",
                     reason: "structural governance state missing".to_string(),
                 });
-            };
-            if let Some(existing) = state.receipt_for_turn(turn_id) {
-                if *existing == receipt {
+            }
+            let mut next = stored.clone();
+            {
+                // 结算数学单源（SG4b）：`commit_structurally_valid_revision`
+                // 的同 CAS deliver 与本入口共用 `settle_turn_receipt` 核心
+                // ——三终态互斥恰一次、同 receipt 重放零写、无 hold 不造账、
+                // released_structural 快照恢复（不实扣）。
+                let snapshot = next.human_gate_snapshot.as_mut();
+                let outcome = next
+                    .structural_governance_state
+                    .as_mut()
+                    .expect("state checked above")
+                    .settle_turn_receipt(snapshot, turn_id, &receipt)
+                    .map_err(|error| match error {
+                        StructuralSettlementError::TerminalConflict => {
+                            ProductStoreError::Conflict {
+                                kind: "user_budget_receipt",
+                                id: turn_id.to_string(),
+                            }
+                        }
+                        StructuralSettlementError::CommandMismatch => {
+                            ProductStoreError::IdentityMismatch {
+                                kind: "user_budget_hold",
+                                id: receipt.command_id.clone(),
+                            }
+                        }
+                        StructuralSettlementError::NoActiveHold => {
+                            ProductStoreError::InvalidRecord {
+                                kind: "user_budget_hold",
+                                reason: "no active hold for turn".to_string(),
+                            }
+                        }
+                    })?;
+                if matches!(outcome, StructuralSettlement::Replayed) {
                     // 恰一次：同 receipt 重放零写。
                     return Ok(stored);
                 }
-                // 终态互斥：已结算 turn 不得二次结算/退款/改判（含已
-                // deliver 后复评失败不退）。
-                return Err(ProductStoreError::Conflict {
-                    kind: "user_budget_receipt",
-                    id: turn_id.to_string(),
-                });
-            }
-            let Some(hold_command_id) = state
-                .active_hold_for_turn(turn_id)
-                .map(|hold| hold.command_id.clone())
-            else {
-                return Err(ProductStoreError::InvalidRecord {
-                    kind: "user_budget_hold",
-                    reason: "no active hold for turn".to_string(),
-                });
-            };
-            if hold_command_id != receipt.command_id {
-                return Err(ProductStoreError::IdentityMismatch {
-                    kind: "user_budget_hold",
-                    id: receipt.command_id.clone(),
-                });
-            }
-            let user_budget_total = state.user_budget_total;
-            let released_structural = receipt.kind == UserBudgetReceiptKind::ReleasedStructural;
-            let mut next = stored.clone();
-            {
-                let state = next
-                    .structural_governance_state
-                    .as_mut()
-                    .expect("state checked above");
-                state.user_holds.retain(|hold| hold.turn_id != turn_id);
-                state.user_receipts.push(receipt);
-            }
-            // released_structural 不实扣用户轮次：快照可用预算同 CAS 恢复
-            // （不超过总额；旧已扣预算不追溯重算）。
-            if released_structural && let Some(snapshot) = next.human_gate_snapshot.as_mut() {
-                snapshot.manual_repairs_remaining = snapshot
-                    .manual_repairs_remaining
-                    .saturating_add(1)
-                    .min(user_budget_total);
             }
             next.updated_at = Utc::now().to_rfc3339();
             write_json(&session_path, &next)?;

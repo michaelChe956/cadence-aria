@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::human_gate::{
     HumanGateReservation, HumanGateTurnStatus, UserBudgetHold, UserBudgetReceipt,
@@ -526,6 +527,70 @@ impl StructuralGovernanceState {
     pub fn active_hold_for_turn(&self, turn_id: &str) -> Option<&UserBudgetHold> {
         self.user_holds.iter().find(|hold| hold.turn_id == turn_id)
     }
+
+    /// SG4b（REQ-CG-02/05）：同 turn 终态结算的纯状态转移核心，语义
+    /// 单源——`LifecycleStore::settle_structural_user_budget`（独立结算
+    /// 入口，SG4a）与 `commit_structurally_valid_revision`（合法交付同
+    /// CAS settle 一次，SG4b）都经本核心落账：终态按 turn 幂等互斥、恰
+    /// 一次；同 receipt 重放零写；不同 receipt（含已 deliver 复评失败）
+    /// 终态冲突不退款；无活动 hold 不凭空造账；released_structural 不
+    /// 实扣、快照可用预算同转移恢复（不超过总额，旧已扣不追溯）。
+    pub fn settle_turn_receipt(
+        &mut self,
+        human_gate_snapshot: Option<&mut crate::product::work_item_plan_policy::HumanGateSnapshot>,
+        turn_id: &str,
+        receipt: &UserBudgetReceipt,
+    ) -> Result<StructuralSettlement, StructuralSettlementError> {
+        if let Some(existing) = self.receipt_for_turn(turn_id) {
+            return if *existing == *receipt {
+                Ok(StructuralSettlement::Replayed)
+            } else {
+                Err(StructuralSettlementError::TerminalConflict)
+            };
+        }
+        let Some(hold) = self.active_hold_for_turn(turn_id) else {
+            return Err(StructuralSettlementError::NoActiveHold);
+        };
+        if hold.command_id != receipt.command_id {
+            return Err(StructuralSettlementError::CommandMismatch);
+        }
+        let user_budget_total = self.user_budget_total;
+        let released_structural = receipt.kind == UserBudgetReceiptKind::ReleasedStructural;
+        self.user_holds.retain(|hold| hold.turn_id != turn_id);
+        self.user_receipts.push(receipt.clone());
+        if released_structural && let Some(snapshot) = human_gate_snapshot {
+            snapshot.manual_repairs_remaining = snapshot
+                .manual_repairs_remaining
+                .saturating_add(1)
+                .min(user_budget_total);
+        }
+        Ok(StructuralSettlement::Settled)
+    }
+
+    /// SG4b（REQ-SG-04）：按确定性 id 幂等记录 checkpoint。同 id 重放保
+    /// 原记录（含 `recorded_at` 审计事实），仅在状态非 Active 时回升
+    /// Active（restore 回绑）；新 checkpoint 落位时旧 Active 全部转
+    /// Superseded——grant 终态后 checkpoint 仍保留（不清理历史）。
+    /// 返回是否为新追加（false＝重放零写）。
+    pub fn record_structure_checkpoint(&mut self, checkpoint: StructuralCheckpoint) -> bool {
+        if let Some(existing) = self
+            .structure_checkpoints
+            .iter_mut()
+            .find(|recorded| recorded.checkpoint_id == checkpoint.checkpoint_id)
+        {
+            if existing.status != StructuralCheckpointStatus::Active {
+                existing.status = StructuralCheckpointStatus::Active;
+            }
+            return false;
+        }
+        for recorded in &mut self.structure_checkpoints {
+            if recorded.status == StructuralCheckpointStatus::Active {
+                recorded.status = StructuralCheckpointStatus::Superseded;
+            }
+        }
+        self.structure_checkpoints.push(checkpoint);
+        true
+    }
 }
 
 /// 结构修订授权窗口（§0.5：绑定原 authorization hash/turn/command 与中间
@@ -648,6 +713,48 @@ pub enum StructuralCheckpointStatus {
     Unknown,
     Active,
     Superseded,
+}
+
+/// SG4b：`settle_turn_receipt` 的结果（重放时调用方不得重复外层副作用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuralSettlement {
+    /// 本次转移新落账（hold→receipt）。
+    Settled,
+    /// 同 receipt 重放（零写，幂等成功）。
+    Replayed,
+}
+
+/// SG4b：结算核心的 typed 失败（由 store 入口映射为既有错误形状，
+/// 不在 models 层引入 store 错误依赖）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuralSettlementError {
+    /// 已结算 turn 的二次/改判结算（终态互斥，不退款）。
+    TerminalConflict,
+    /// receipt 与 hold 的 command 身份不一致。
+    CommandMismatch,
+    /// 无活动 hold（不凭空造账）。
+    NoActiveHold,
+}
+
+/// SG4b（REQ-SG-04）：合法交付 checkpoint 的确定性身份——同 turn 提交
+/// 同三 refs 得同 id（重放幂等），任一 ref 变化即新 checkpoint。持久
+/// digest 配方与仓库其余内容寻址惯例一致（sha256 全量字段，前 16 位
+/// 十六进制仅展示、不截断身份域）。
+pub fn structural_checkpoint_id(
+    turn_id: &str,
+    source_revision_ref: &str,
+    plan_candidate_ir_ref: &str,
+    structure_report_ref: &str,
+) -> String {
+    let canonical = [
+        "structural_checkpoint",
+        turn_id,
+        source_revision_ref,
+        plan_candidate_ir_ref,
+        structure_report_ref,
+    ]
+    .join("\0");
+    hex::encode(Sha256::digest(canonical.as_bytes()))
 }
 
 /// 已解决结构事实（§0.5：规则谓词＋证据，非固定边值）。历史恢复整组
