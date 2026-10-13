@@ -8,7 +8,9 @@ use crate::product::models::{
     SingleCandidateCompileReservation, SingleCandidatePhase, WorkspaceSessionRecord, WorkspaceType,
 };
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
-use crate::product::work_item_plan_source_store::{SourceStoreScope, validate_canonical_ref_for_scope};
+use crate::product::work_item_plan_source_store::{
+    SourceStoreScope, validate_canonical_ref_for_scope,
+};
 use crate::web::workspace_ws_types::ArtifactVersion;
 
 pub(super) fn max_workspace_session_sequence(

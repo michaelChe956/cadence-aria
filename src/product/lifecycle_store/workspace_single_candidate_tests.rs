@@ -255,12 +255,10 @@ fn evaluation_cas_accepts_report_ref_rotation_for_equivalent_content() {
     // 路径）时，同内容的新 report 轮换 id → CAS ref 不等。等价内容（剔除
     // id/content_hash 的全量体摘要相等，即 content_addressed_id 相等）
     // 必须接受 ref 轮换保持重入幂等；内容真变或任一 ref 悬空仍 Conflict。
-    use crate::product::models::{
-        WorkItemSplitFinding, WorkItemSplitFindingSeverity,
-    };
+    use crate::product::models::{WorkItemSplitFinding, WorkItemSplitFindingSeverity};
     use crate::product::planning_failure::PlanningFailureKind;
     use crate::product::work_item_plan_compiler::{
-        WORK_ITEM_PLAN_COMPILER_VERSION, PlanCandidateIr, PlanCandidateMechanicalReport,
+        PlanCandidateIr, PlanCandidateMechanicalReport, WORK_ITEM_PLAN_COMPILER_VERSION,
     };
     use crate::product::work_item_plan_source_store::{
         PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
@@ -343,6 +341,8 @@ fn evaluation_cas_accepts_report_ref_rotation_for_equivalent_content() {
         source_revision_id: source.id.clone(),
         ir_id: ir.id.clone(),
         report: report_body(legacy_findings.clone()),
+        // SG3a.0：旧 fixture 形态（无结构报告）。
+        structure_report: None,
         content_hash: String::new(),
     };
     legacy.content_hash = legacy.content_hash().unwrap();
@@ -364,6 +364,8 @@ fn evaluation_cas_accepts_report_ref_rotation_for_equivalent_content() {
         source_revision_id: source.id.clone(),
         ir_id: ir.id.clone(),
         report: report_body(legacy_findings),
+        // SG3a.0：旧 fixture 形态（无结构报告）。
+        structure_report: None,
         content_hash: String::new(),
     };
     rotated.id = rotated.content_addressed_id().unwrap();
@@ -379,7 +381,10 @@ fn evaluation_cas_accepts_report_ref_rotation_for_equivalent_content() {
     let saved = store
         .compare_and_save_single_candidate_evaluation(&expected, &rotated_ref)
         .expect("equivalent-content report ref rotation must stay idempotent");
-    assert_eq!(saved.mechanical_report_ref.as_deref(), Some(rotated_ref.as_str()));
+    assert_eq!(
+        saved.mechanical_report_ref.as_deref(),
+        Some(rotated_ref.as_str())
+    );
 
     // 轮换后同 ref 重放仍幂等（相等分支）。
     let replayed = store
@@ -401,6 +406,8 @@ fn evaluation_cas_accepts_report_ref_rotation_for_equivalent_content() {
         report: report_body(vec![e2e_finding(Some(PlanningFailureKind::Unknown {
             code: "integration_or_e2e_skipped_risk".to_string(),
         }))]),
+        // SG3a.0：旧 fixture 形态（无结构报告）。
+        structure_report: None,
         content_hash: String::new(),
     };
     diverged.id = diverged.content_addressed_id().unwrap();
