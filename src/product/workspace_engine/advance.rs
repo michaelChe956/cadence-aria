@@ -157,13 +157,20 @@ pub use crate::product::advance_store::{
     AdvanceInitializationPhase, AdvanceInput, AdvanceOutcome, AdvanceRecord, AdvanceStatus,
     AdvanceStore,
 };
+use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::target_snapshot::build_attempt_target_snapshot;
 use crate::product::coding_attempt_store::{
     AuthoritativeGroupPlanBinding, CodingAttemptStore, CreateGroupCodingAttemptInput,
     units_by_target,
 };
 use crate::product::coding_models::CodingAdmissionKind;
+use crate::product::coding_plan_run::CodingPlanRunStore;
+use crate::product::entity_deletion_store::{
+    DeletionEntityKind, DeletionPhase, EntityDeletionStore, EntityScope,
+};
+use crate::product::entity_operation_store::{EntityOperationError, EntityOperationStore};
 use crate::product::issue_store::IssueStore;
+use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::{RepositoryRouting, resolve_issue_logical_codebase_id};
 use crate::product::models::{IssueWorkItemPlanStatus, WorkspaceType};
 use crate::product::repository_store::RepositoryStore;
@@ -173,14 +180,221 @@ use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 use super::types::WorkspaceEngine;
 
+/// D2.1d/H3（fix-cascade-deletion＋设计 2026-10-14 H3）：advance 真实入口
+/// 的 owning Plan run lease。
+///
+/// 在 `manager.engine` 锁与任何 arbitration/对象锁**之前**取得（scope →
+/// engine 锁固定序，plan §0.4），任务全生命周期持有——准入在持期间删除
+/// 独占（Plan 删除/工作区重置）立即 Busy；内层经 `guard_round_admission`
+/// 只读消费（墓碑复核＋执行轮退役围栏），不重取 scope、不在
+/// engine/arbitration 锁内首次取 scope。
+pub struct AdvancePlanAdmission {
+    lease: crate::product::entity_operation_store::EntityRunLease,
+}
+
+impl AdvancePlanAdmission {
+    /// 入口准入（try-shared＋锁内墓碑复核）：purging/deleted/争用由
+    /// `EntityOperationStore::acquire_run` 在 scope 锁内精确分类。
+    pub fn acquire(
+        paths: &ProductAppPaths,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<Self, EntityOperationError> {
+        let scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
+        scope.validate().map_err(EntityOperationError::Store)?;
+        Ok(Self {
+            lease: EntityOperationStore::new(paths.clone()).acquire_run(&scope)?,
+        })
+    }
+
+    pub fn scope(&self) -> &EntityScope {
+        self.lease.scope()
+    }
+
+    /// 已持准入守卫（消费外层 lease，不重取 scope）：purging/deleted 墓碑与
+    /// 执行轮退役围栏（clearing/退役 command）先于 command_id/plan_id 旧幂
+    /// 等命中。真实 IO/JSON 错误 fail-closed 上抛（`Store`），不当稳定拒绝。
+    pub(crate) fn guard_round_admission(
+        &self,
+        paths: &ProductAppPaths,
+        command_id: &str,
+    ) -> Result<(), AdvanceRoundGuardFailure> {
+        let tombstone = EntityDeletionStore::new(paths.clone())
+            .get(self.lease.scope())
+            .map_err(AdvanceRoundGuardFailure::Store)?;
+        if let Some(record) = tombstone {
+            return Err(AdvanceRoundGuardFailure::Round(match record.phase {
+                DeletionPhase::Purging => AdvanceRoundRejection::PlanDeleting,
+                DeletionPhase::Deleted => AdvanceRoundRejection::PlanDeleted,
+            }));
+        }
+        let scope = self.lease.scope();
+        if let Err(error) = CodingPlanRunStore::new(paths.clone()).verify_workspace_round_admission(
+            &scope.project_id,
+            &scope.issue_id,
+            &scope.entity_id,
+            command_id,
+        ) {
+            return Err(match error {
+                ProductStoreError::Conflict { ref kind, .. }
+                    if *kind == "coding_plan_workspace_clearing" =>
+                {
+                    AdvanceRoundGuardFailure::Round(AdvanceRoundRejection::WorkspaceClearing)
+                }
+                ProductStoreError::Conflict { ref kind, .. }
+                    if *kind == "coding_plan_run_retired" =>
+                {
+                    AdvanceRoundGuardFailure::Round(AdvanceRoundRejection::CommandRetired)
+                }
+                other => AdvanceRoundGuardFailure::Store(other),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// 稳定轮次拒绝（映射 `AdvanceOutcome::Rejected`，不发 AdvanceCompleted）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdvanceRoundRejection {
+    PlanDeleting,
+    PlanDeleted,
+    WorkspaceClearing,
+    CommandRetired,
+}
+
+impl AdvanceRoundRejection {
+    /// 稳定 store kind（HTTP/REST 面与 H1 白名单同族）。
+    pub(crate) fn stable_kind(self) -> &'static str {
+        match self {
+            Self::PlanDeleting => "entity_deleting",
+            Self::PlanDeleted => "entity_deleted",
+            Self::WorkspaceClearing => "coding_plan_workspace_clearing",
+            Self::CommandRetired => "coding_plan_run_retired",
+        }
+    }
+
+    /// WS advance 面稳定码（AdvanceRejected.code）。
+    pub(crate) fn ws_code(self) -> &'static str {
+        match self {
+            Self::PlanDeleting => "ADVANCE_PLAN_DELETING",
+            Self::PlanDeleted => "ADVANCE_PLAN_DELETED",
+            Self::WorkspaceClearing => "ADVANCE_PLAN_WORKSPACE_CLEARING",
+            Self::CommandRetired => "ADVANCE_PLAN_RUN_RETIRED",
+        }
+    }
+
+    pub(crate) fn reason_text(self, plan_id: &str) -> String {
+        match self {
+            Self::PlanDeleting => format!(
+                "entity_deleting: owning plan {plan_id} is being deleted; advance is rejected"
+            ),
+            Self::PlanDeleted => format!(
+                "entity_deleted: owning plan {plan_id} has been deleted; advance is rejected"
+            ),
+            Self::WorkspaceClearing => format!(
+                "coding_plan_workspace_clearing: the coding workspace round of plan {plan_id} is being cleared"
+            ),
+            Self::CommandRetired => format!(
+                "coding_plan_run_retired: the command belongs to a retired workspace round of plan {plan_id}"
+            ),
+        }
+    }
+
+    pub(crate) fn into_rejected(self, plan_id: &str) -> AdvanceOutcome {
+        AdvanceOutcome::Rejected {
+            record: None,
+            code: self.ws_code().to_string(),
+            reason: self.reason_text(plan_id),
+        }
+    }
+}
+
+/// 守卫失败：`Round`＝稳定拒绝（Replayed/Completed 均不得发生）；`Store`＝
+/// 真实 IO/JSON fail-closed（上抛，不吞错当拒绝）。
+pub(crate) enum AdvanceRoundGuardFailure {
+    Round(AdvanceRoundRejection),
+    Store(ProductStoreError),
+}
+
+/// D2.1d：入口准入失败的稳定 Rejected（web advance_plan 与 engine 独立
+/// 路径共用；争用/IO 与删除相位分码，不伪装成业务前置失败）。
+pub fn advance_admission_rejected(error: EntityOperationError, plan_id: &str) -> AdvanceOutcome {
+    let (code, reason) = match error {
+        EntityOperationError::Deleting => (
+            AdvanceRoundRejection::PlanDeleting.ws_code(),
+            AdvanceRoundRejection::PlanDeleting.reason_text(plan_id),
+        ),
+        EntityOperationError::Deleted => (
+            AdvanceRoundRejection::PlanDeleted.ws_code(),
+            AdvanceRoundRejection::PlanDeleted.reason_text(plan_id),
+        ),
+        EntityOperationError::Busy => (
+            "ADVANCE_PLAN_ADMISSION_CONTENDED",
+            format!(
+                "entity_busy: plan {plan_id} admission is contended by an exclusive deletion; retry"
+            ),
+        ),
+        EntityOperationError::Store(error) => (
+            "ADVANCE_PLAN_ADMISSION_FAILED",
+            format!("entity_admission_failed: plan {plan_id} admission failed: {error}"),
+        ),
+    };
+    AdvanceOutcome::Rejected {
+        record: None,
+        code: code.to_string(),
+        reason,
+    }
+}
+
+/// D2.1d：retry 面准入失败的稳定错误串（engine Err 通道；message 前缀携带
+/// 稳定 store kind，D2.1a 同惯例）。
+pub(crate) fn advance_admission_error(error: EntityOperationError, plan_id: &str) -> String {
+    match error {
+        EntityOperationError::Deleting
+        | EntityOperationError::Deleted
+        | EntityOperationError::Busy => {
+            let stable = match error {
+                EntityOperationError::Deleted => AdvanceRoundRejection::PlanDeleted.stable_kind(),
+                EntityOperationError::Busy => "entity_busy",
+                _ => AdvanceRoundRejection::PlanDeleting.stable_kind(),
+            };
+            format!("{stable}: owning plan {plan_id} is not admissible for advance retry")
+        }
+        EntityOperationError::Store(error) => {
+            format!("entity_admission_failed: plan {plan_id} admission failed: {error}")
+        }
+    }
+}
+
 impl WorkspaceEngine {
     /// Runs only the first-request preflight. Record creation and group
     /// initialization belong to the following advance tasks; until then a valid
     /// request is deliberately rejected without durable side effects.
+    ///
+    /// D2.1d：独立 engine 路径同 guard——在未持任何 engine/arbitration 锁处
+    /// 取 owning Plan run lease（session 身份）；web 入口已在 engine.lock 前
+    /// 取得准入时不走本包装（直接调 `handle_advance_with_start_policy` 消费
+    /// 同一 lease）。
     pub async fn handle_advance(&mut self, input: AdvanceInput) -> Result<AdvanceOutcome, String> {
+        let paths = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?
+            .app_paths();
+        let admission = match AdvancePlanAdmission::acquire(
+            &paths,
+            &self.session.project_id,
+            &self.session.issue_id,
+            &self.session.entity_id,
+        ) {
+            Ok(admission) => admission,
+            Err(error) => return Ok(advance_admission_rejected(error, &self.session.entity_id)),
+        };
         self.handle_advance_with_start_policy(
             input,
             crate::product::coding_models::CodingStartRunPolicy::Manual,
+            &admission,
         )
         .await
     }
@@ -189,10 +403,15 @@ impl WorkspaceEngine {
     /// 传入 AutoStartOnce；只在**新建单 target group journal** 时穿透
     /// `CreateGroupCodingAttemptInput.start_run_policy`，已有 journal replay
     /// 保留原 policy，不随当前 enrollment 变更覆盖。
+    ///
+    /// D2.1d/H3：`admission` 是入口在 engine.lock 前取得的 owning Plan run
+    /// lease——purging/deleted 身份守卫与执行轮退役围栏先于 command_id/
+    /// plan_id 旧幂等命中（删除/重置身份优先，不回放旧 Ready/旧 command）。
     pub async fn handle_advance_with_start_policy(
         &mut self,
         input: AdvanceInput,
         start_policy: crate::product::coding_models::CodingStartRunPolicy,
+        admission: &AdvancePlanAdmission,
     ) -> Result<AdvanceOutcome, String> {
         if input.project_id != self.session.project_id
             || input.issue_id != self.session.issue_id
@@ -210,6 +429,19 @@ impl WorkspaceEngine {
             .as_ref()
             .ok_or_else(|| "lifecycle_store unavailable".to_string())?
             .app_paths();
+        // D2.1d/H3：purging/deleted 身份守卫与执行轮退役围栏先于下方
+        // command_id/plan_id 旧幂等命中——旧 Ready record 不因幂等回放成
+        /// AdvanceCompleted 旧入口；真实 IO/JSON 错误 fail-closed 上抛。
+        if let Err(failure) = admission.guard_round_admission(&app_paths, &input.command_id) {
+            return match failure {
+                AdvanceRoundGuardFailure::Round(rejection) => {
+                    Ok(rejection.into_rejected(&input.plan_id))
+                }
+                AdvanceRoundGuardFailure::Store(error) => {
+                    Err(format!("advance round admission check failed: {error}"))
+                }
+            };
+        }
         let advance_store = AdvanceStore::new(app_paths.clone());
 
         // A completed/terminal record is an idempotent replay. An initializing
@@ -358,6 +590,7 @@ impl WorkspaceEngine {
             coding_store,
             authoritative,
             start_policy,
+            admission,
         )
         .await
         .map_err(|error| error.to_string())
@@ -371,6 +604,7 @@ impl WorkspaceEngine {
         coding_store: CodingAttemptStore,
         authoritative: AuthoritativeGroupPlanBinding,
         start_policy: crate::product::coding_models::CodingStartRunPolicy,
+        admission: &AdvancePlanAdmission,
     ) -> Result<AdvanceOutcome, String> {
         let result = self
             .initialize_advance_inner(
@@ -379,6 +613,7 @@ impl WorkspaceEngine {
                 coding_store,
                 authoritative,
                 start_policy,
+                admission,
             )
             .await;
         if let Err(error) = &result
@@ -499,6 +734,36 @@ impl WorkspaceEngine {
         &mut self,
         request: &crate::product::models::automation::RetryInitializationRequest,
     ) -> Result<crate::product::models::automation::RetryInitializationResult, String> {
+        // D2.1d：独立 engine 路径同 guard——在未持任何 engine/arbitration
+        // 锁处取 owning Plan run lease（session 身份）；web retry 入口已在
+        // engine.lock 前取得准入时不走本包装（直接调
+        // `retry_initialization_with_lease` 消费同一 lease）。
+        let paths = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?
+            .app_paths();
+        let admission = match AdvancePlanAdmission::acquire(
+            &paths,
+            &self.session.project_id,
+            &self.session.issue_id,
+            &self.session.entity_id,
+        ) {
+            Ok(admission) => admission,
+            Err(error) => return Err(advance_admission_error(error, &self.session.entity_id)),
+        };
+        self.retry_initialization_with_lease(request, &admission)
+            .await
+    }
+
+    /// D2.1d：retry 的 lease 消费实现（入口准入在 engine.lock 前取得）。
+    /// purging/deleted 墓碑与执行轮退役围栏先于命令账本幂等与任何 retry
+    /// 事实写入——旧轮 retry 不复活。
+    pub async fn retry_initialization_with_lease(
+        &mut self,
+        request: &crate::product::models::automation::RetryInitializationRequest,
+        admission: &AdvancePlanAdmission,
+    ) -> Result<crate::product::models::automation::RetryInitializationResult, String> {
         use crate::product::models::automation::{
             EnrollmentError, OperationState, RetryInitializationResult,
         };
@@ -515,10 +780,42 @@ impl WorkspaceEngine {
         let automation =
             crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone());
 
+        // D2.1d/H3：墓碑/退役围栏先于命令账本幂等与 retry 事实写入。
+        if let Err(failure) = admission.guard_round_admission(&app_paths, &request.command_id) {
+            return Err(match failure {
+                AdvanceRoundGuardFailure::Round(rejection) => {
+                    format!(
+                        "{}: {}",
+                        rejection.stable_kind(),
+                        rejection.reason_text(&plan_id)
+                    )
+                }
+                AdvanceRoundGuardFailure::Store(error) => {
+                    format!("retry round admission check failed: {error}")
+                }
+            });
+        }
+
         let record = advance_store
             .get_advance_for_plan(&project_id, &issue_id, &plan_id)
             .map_err(|error| format!("load advance record failed: {error}"))?
             .ok_or_else(|| "no advance record for plan".to_string())?;
+        // 退役的原 command 同样先于命令账本幂等/retry 写（旧轮 retry 不
+        // 复活）。
+        if let Err(failure) = admission.guard_round_admission(&app_paths, &record.command_id) {
+            return Err(match failure {
+                AdvanceRoundGuardFailure::Round(rejection) => {
+                    format!(
+                        "{}: {}",
+                        rejection.stable_kind(),
+                        rejection.reason_text(&plan_id)
+                    )
+                }
+                AdvanceRoundGuardFailure::Store(error) => {
+                    format!("retry round admission check failed: {error}")
+                }
+            });
+        }
 
         // 命令幂等：enrollment 命令账本先判（同 command 异 payload
         // fail-closed；同 payload 命中 → 幂等重放）。
@@ -542,12 +839,16 @@ impl WorkspaceEngine {
             // 幂等续做投影：Ready → Replayed；仍 Initializing → 续做；
             // 再次 Failed → Replayed(原失败事实)，不重复建 retry。
             let outcome = self
-                .handle_advance(AdvanceInput {
-                    command_id: record.command_id.clone(),
-                    project_id,
-                    issue_id,
-                    plan_id,
-                })
+                .handle_advance_with_start_policy(
+                    AdvanceInput {
+                        command_id: record.command_id.clone(),
+                        project_id,
+                        issue_id,
+                        plan_id,
+                    },
+                    crate::product::coding_models::CodingStartRunPolicy::Manual,
+                    admission,
+                )
                 .await?;
             return Ok(RetryInitializationResult {
                 command_id: request.command_id.clone(),
@@ -667,7 +968,14 @@ impl WorkspaceEngine {
             issue_id,
             plan_id,
         };
-        match self.handle_advance(input).await {
+        match self
+            .handle_advance_with_start_policy(
+                input,
+                crate::product::coding_models::CodingStartRunPolicy::Manual,
+                admission,
+            )
+            .await
+        {
             Ok(outcome @ (AdvanceOutcome::Completed { .. } | AdvanceOutcome::Replayed { .. })) => {
                 Ok(RetryInitializationResult {
                     command_id: request.command_id.clone(),

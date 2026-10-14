@@ -845,7 +845,10 @@ async fn plan_coding_n4_ready_target_real_git_materialization() {
         "Ready target stays metadata-only before explicit start"
     );
 
-    let snapshot = first.target_snapshot.as_ref().expect("frozen target snapshot");
+    let snapshot = first
+        .target_snapshot
+        .as_ref()
+        .expect("frozen target snapshot");
     let target = snapshot.logical_repository_id;
     let repository = crate::product::repository_store::RepositoryStore::new(fixture.paths.clone())
         .resolve_logical_repository_for_issue_codebase(SPLIT_PROJECT_ID, None, target)

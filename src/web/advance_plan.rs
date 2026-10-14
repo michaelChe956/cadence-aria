@@ -15,6 +15,7 @@ use crate::product::json_store::validate_relative_id;
 use crate::product::models::automation::{EnrollmentBindingIdentity, IssueAutomationEnrollment};
 use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
+use crate::product::workspace_engine::{AdvancePlanAdmission, advance_admission_rejected};
 use crate::web::state::WebAppState;
 /// advance 请求归属：Manual 走人工 WS 语义；Enrolled 是自动编排的精确
 /// enrollment 身份（id + policy_revision 快照），两者不得互相冒充。
@@ -92,6 +93,21 @@ pub async fn advance_plan(
                 input.plan_id
             )
         })?;
+
+    // D2.1d/H3（fix-cascade-deletion＋设计 2026-10-14 H3）：advance 入口在
+    // manager.engine 锁前取 owning Plan run lease（scope → engine 锁固定
+    // 序），持租约贯穿整个 engine 操作——准入在持期间删除独占/工作区重置
+    // 立即 Busy；purging/deleted 身份守卫与执行轮退役围栏先于旧幂等命中
+    // （不回放旧 Ready/旧 command），稳定拒绝不发 AdvanceCompleted。
+    let plan_admission = match AdvancePlanAdmission::acquire(
+        &paths,
+        &input.project_id,
+        &input.issue_id,
+        &input.plan_id,
+    ) {
+        Ok(admission) => admission,
+        Err(error) => return Ok(advance_admission_rejected(error, &input.plan_id)),
+    };
 
     // P2 Task 2：Enrolled origin 在精确核验后冻结 AutoStartOnce（enrollment
     // id/revision + plan revision id）；Manual 恒为 Manual，不按 enrollment
@@ -306,14 +322,14 @@ pub async fn advance_plan(
         Some(manager) => {
             let engine_arc = manager.engine();
             let mut engine = engine_arc.lock().await;
-            match enrolled_start_policy {
-                Some(policy) => {
-                    engine
-                        .handle_advance_with_start_policy(input, policy)
-                        .await?
-                }
-                None => engine.handle_advance(input).await?,
-            }
+            engine
+                .handle_advance_with_start_policy(
+                    input,
+                    enrolled_start_policy
+                        .unwrap_or(crate::product::coding_models::CodingStartRunPolicy::Manual),
+                    &plan_admission,
+                )
+                .await?
         }
         None => {
             let full_record = lifecycle
@@ -328,14 +344,14 @@ pub async fn advance_plan(
                 event_tx,
                 crate::product::workspace_engine::WorkspaceSession::from_record(full_record),
             );
-            match enrolled_start_policy {
-                Some(policy) => {
-                    engine
-                        .handle_advance_with_start_policy(input, policy)
-                        .await?
-                }
-                None => engine.handle_advance(input).await?,
-            }
+            engine
+                .handle_advance_with_start_policy(
+                    input,
+                    enrolled_start_policy
+                        .unwrap_or(crate::product::coding_models::CodingStartRunPolicy::Manual),
+                    &plan_admission,
+                )
+                .await?
         }
     };
 
@@ -405,12 +421,43 @@ pub async fn post_work_item_plan_advance_retry_initialization(
             )
         })?;
 
+    // D2.1d：retry HTTP 入口同在 manager.engine 锁前取 owning Plan run
+    // lease——purging/deleted 稳定 409（H1 白名单 entity_* 族），持租约
+    // 贯穿 retry 全链（命令账本/retry 事实/续做）。
+    let plan_admission =
+        match AdvancePlanAdmission::acquire(&paths, &project_id, &issue_id, &plan_id) {
+            Ok(admission) => admission,
+            Err(error) => {
+                let code = match &error {
+                    crate::product::entity_operation_store::EntityOperationError::Deleting => {
+                        "entity_deleting"
+                    }
+                    crate::product::entity_operation_store::EntityOperationError::Deleted => {
+                        "entity_deleted"
+                    }
+                    crate::product::entity_operation_store::EntityOperationError::Busy => {
+                        "entity_busy"
+                    }
+                    crate::product::entity_operation_store::EntityOperationError::Store(_) => {
+                        "entity_admission_failed"
+                    }
+                };
+                return Err(ApiError::runtime(
+                    code,
+                    format!("advance retry admission rejected for plan {plan_id}: {error}"),
+                    serde_json::json!({}),
+                ));
+            }
+        };
+
     let retry = async {
         match state.workspace_sessions.peek(&session_record.id).await {
             Some(manager) => {
                 let engine_arc = manager.engine();
                 let mut engine = engine_arc.lock().await;
-                engine.retry_initialization(&request).await
+                engine
+                    .retry_initialization_with_lease(&request, &plan_admission)
+                    .await
             }
             None => {
                 let full_record = lifecycle
@@ -425,7 +472,9 @@ pub async fn post_work_item_plan_advance_retry_initialization(
                     event_tx,
                     crate::product::workspace_engine::WorkspaceSession::from_record(full_record),
                 );
-                engine.retry_initialization(&request).await
+                engine
+                    .retry_initialization_with_lease(&request, &plan_admission)
+                    .await
             }
         }
     }
@@ -1117,6 +1166,70 @@ mod tests {
         assert!(
             error.contains("cross-carrier pollution") || error.contains("target snapshot"),
             "snapshot pollution must fail closed: {error}"
+        );
+        assert_eq!(fixture.coding_runner_count(), 0);
+    }
+
+    /// D2.1d（fix-cascade-deletion）：advance_plan 服务入口在 engine.lock
+    /// 前取 owning Plan run lease——purging 墓碑先于旧 command 幂等命中：
+    /// 同 command 重放不产生 Replayed/Completed，稳定 Rejected；attempt/
+    /// runner 零新增（REQ-DEL-06/07；WS 面经 map_advance_outcome 仍真实
+    /// Rejected）。
+    #[tokio::test]
+    async fn cascade_d2_1d_deleted_plan_rejected_before_replay_at_service_entry() {
+        use crate::product::entity_deletion_store::{
+            DeletionEntityKind, EntityDeletionStore, EntityScope,
+        };
+        use crate::product::entity_operation_store::EntityOperationStore;
+
+        let fixture = confirmed_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        let plan_id = enrollment.plan_id.clone().unwrap();
+        let input = AdvanceInput {
+            command_id: format!("wiga-advance-{}-{plan_id}", enrollment.enrollment_id),
+            project_id: enrollment.project_id.clone(),
+            issue_id: enrollment.issue_id.clone(),
+            plan_id: plan_id.clone(),
+        };
+        let origin = AdvancePlanOrigin::Enrolled {
+            enrollment_id: enrollment.enrollment_id.clone(),
+            policy_revision: enrollment.policy_revision,
+        };
+        let first = advance_plan(&fixture.state, input.clone(), origin.clone())
+            .await
+            .unwrap();
+        assert!(matches!(
+            first,
+            AdvanceOutcome::Completed { .. } | AdvanceOutcome::Replayed { .. }
+        ),);
+        let attempts_before = fixture.coding_attempts().len();
+
+        let paths = ProductAppPaths::new(fixture.state.workspace_root.join(".aria"));
+        let scope = EntityScope::new(
+            &enrollment.project_id,
+            &enrollment.issue_id,
+            DeletionEntityKind::Plan,
+            &plan_id,
+        );
+        let operations = EntityOperationStore::new(paths.clone());
+        let deletions = EntityDeletionStore::new(paths);
+        let lease = operations
+            .try_acquire_delete(&scope)
+            .expect("delete exclusive while no advance is running");
+        deletions.begin(&lease).expect("purging tombstone");
+        drop(lease);
+
+        let second = advance_plan(&fixture.state, input, origin).await.unwrap();
+        match &second {
+            AdvanceOutcome::Rejected { code, reason, .. } => {
+                assert_eq!(code, "ADVANCE_PLAN_DELETING", "{reason}");
+            }
+            other => panic!("purging plan must reject before replay, got {other:?}"),
+        }
+        assert_eq!(
+            fixture.coding_attempts().len(),
+            attempts_before,
+            "rejected replay must not add attempts"
         );
         assert_eq!(fixture.coding_runner_count(), 0);
     }

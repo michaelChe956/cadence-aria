@@ -3,7 +3,10 @@
 //! 自 `advance.rs` 拆出（1200 行守护，WP6 关闸）：纯移动零语义变化；单 target
 //! 路径仍全程在 `advance.rs`（D1 显式两分支零变化）。
 
-use super::advance::{AdvanceInitializationFailpoint, maybe_fail_advance_initialization};
+use super::advance::{
+    AdvanceInitializationFailpoint, AdvancePlanAdmission, AdvanceRoundGuardFailure,
+    maybe_fail_advance_initialization,
+};
 use super::types::WorkspaceEngine;
 use crate::product::advance_store::{
     AdvanceInitializationPhase, AdvanceInput, AdvanceOutcome, AdvanceRecord, AdvanceStatus,
@@ -45,8 +48,9 @@ impl WorkspaceEngine {
         authoritative: AuthoritativeGroupPlanBinding,
         grouped: UnitsByTarget,
         record: AdvanceRecord,
+        admission: &AdvancePlanAdmission,
     ) -> Result<AdvanceOutcome, String> {
-        // D2.1 对偶（A2 不静默归属）：≥2 target 桶下无归属 unit 不入任何桶、也
+        // D2.1d 对偶（A2 不静默归属）：≥2 target 桶下无归属 unit 不入任何桶、也
         // 不回退 focus——显式 fail-closed。
         if !grouped.unattributed.is_empty() {
             return Err(
@@ -54,7 +58,19 @@ impl WorkspaceEngine {
                     .to_string(),
             );
         }
+        // D2.1d：split 分流循环同消费外层准入——per-target journal 写前复核
+        // 墓碑/退役围栏（不首次取 scope）。
         let paths = advance_store.app_paths();
+        if let Err(failure) = admission.guard_round_admission(&paths, &input.command_id) {
+            return match failure {
+                AdvanceRoundGuardFailure::Round(rejection) => {
+                    Ok(rejection.into_rejected(&input.plan_id))
+                }
+                AdvanceRoundGuardFailure::Store(error) => Err(format!(
+                    "advance split round admission recheck failed: {error}"
+                )),
+            };
+        }
         let lc_id = resolve_issue_logical_codebase_id(&paths, &input.project_id, &input.issue_id)
             .map_err(|error| format!("resolve advance target codebase failed: {error}"))?;
         let RepositoryRouting::Logical { manifest, .. } =

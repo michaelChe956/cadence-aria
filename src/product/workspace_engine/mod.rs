@@ -119,7 +119,10 @@ mod types;
 #[cfg(test)]
 pub(crate) mod tests;
 
-pub use advance::{AdvanceInput, AdvanceOutcome, AdvanceRecord, AdvanceStatus};
+pub use advance::{
+    AdvanceInput, AdvanceOutcome, AdvancePlanAdmission, AdvanceRecord, AdvanceStatus,
+    advance_admission_rejected,
+};
 pub use compile::{
     CompileStores, InitialPlanCompileDurableContext, InitialPlanCompileInput,
     PreparedInitialPlanCompile, execute_initial_plan_compile, prepare_initial_plan_compile,

@@ -7,10 +7,26 @@ impl WorkspaceEngine {
         coding_store: CodingAttemptStore,
         authoritative: AuthoritativeGroupPlanBinding,
         start_policy: crate::product::coding_models::CodingStartRunPolicy,
+        admission: &AdvancePlanAdmission,
     ) -> Result<AdvanceOutcome, String> {
         let _initialization_guard = coding_store
             .acquire_group_initialization_arbitration(&input.project_id, &input.issue_id)
             .map_err(|error| format!("acquire advance initialization lock failed: {error}"))?;
+        // D2.1d：arbitration 锁内只消费外层已持准入（不首次取 scope）——
+        // 墓碑/退役围栏复核一次；lease 在持时删除独占/工作区重置无法并发，
+        // 跨进程 reset/start 仍只有一个胜者。
+        if let Err(failure) =
+            admission.guard_round_admission(&advance_store.app_paths(), &input.command_id)
+        {
+            return match failure {
+                AdvanceRoundGuardFailure::Round(rejection) => {
+                    Ok(rejection.into_rejected(&input.plan_id))
+                }
+                AdvanceRoundGuardFailure::Store(error) => {
+                    Err(format!("advance round admission recheck failed: {error}"))
+                }
+            };
+        }
         let record = advance_store
             .persist_advance_record_if_absent(&input, &authoritative.plan_revision_id)
             .map_err(|error| format!("persist advance record failed: {error}"))?;
@@ -34,6 +50,7 @@ impl WorkspaceEngine {
                     authoritative,
                     grouped,
                     record,
+                    admission,
                 )
                 .await;
         }

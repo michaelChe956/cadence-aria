@@ -133,6 +133,24 @@ impl CheckpointStore {
 
         Ok(target)
     }
+
+    /// D2.1d（fix-cascade-deletion plan Interfaces）：按调用方真实 base_path
+    /// 精确删除单一 session 的 checkpoints（`workspace-sessions/{session_id}`
+    /// 目录整体）——advance 独立 engine 基座为
+    /// `workspace_root/advance-engine-checkpoints`，不整删共享 base root，
+    /// 其他 session 目录保留；missing 幂等 OK（NotFound=已清）；真实 IO
+    /// 错误上抛不吞。
+    pub fn purge_session_checkpoints(&self, session_id: &str) -> Result<(), ProductStoreError> {
+        let session_root = self.base_path.join("workspace-sessions").join(session_id);
+        match fs::remove_dir_all(&session_root) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ProductStoreError::Io(format!(
+                "remove {}: {error}",
+                session_root.display()
+            ))),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -245,5 +263,44 @@ mod tests {
 
         let result = store.list_checkpoints("nonexistent").unwrap();
         assert!(result.is_empty());
+    }
+
+    /// D2.1d（fix-cascade-deletion plan Interfaces）：按调用方真实 base_path
+    /// 精确删除单一 session 的 checkpoints——只清
+    /// `workspace-sessions/{session_id}` 目录，不整删 base root，其他
+    /// session 保留；missing 幂等 OK。
+    #[test]
+    fn cascade_d2_1d_purge_session_checkpoints_scopes_to_owning_session() {
+        let (tmp, store) = setup();
+
+        store
+            .create_checkpoint("session_d21d_a", 0, None, "prepare_context")
+            .unwrap();
+        store
+            .create_checkpoint("session_d21d_b", 0, None, "prepare_context")
+            .unwrap();
+        store
+            .create_checkpoint("session_d21d_b", 1, None, "running")
+            .unwrap();
+
+        store.purge_session_checkpoints("session_d21d_a").unwrap();
+
+        let session_root = tmp.path().join("workspace-sessions");
+        assert!(
+            !session_root.join("session_d21d_a").exists(),
+            "owning session checkpoints must be removed precisely"
+        );
+        assert_eq!(store.list_checkpoints("session_d21d_b").unwrap().len(), 2);
+        assert!(
+            session_root.exists(),
+            "the shared workspace-sessions root must survive a session purge"
+        );
+
+        // missing 幂等；再purge既有 session 同样幂等。
+        store.purge_session_checkpoints("session_d21d_a").unwrap();
+        store
+            .purge_session_checkpoints("session_d21d_missing")
+            .unwrap();
+        assert_eq!(store.list_checkpoints("session_d21d_b").unwrap().len(), 2);
     }
 }
