@@ -127,7 +127,8 @@ pub async fn post_plan_coding_start(
                 .map_err(product_store_api_error)?
             {
                 let drive =
-                    drive_ready_units_for_plan(&state, &project_id, &issue_id, &plan_id).await?;
+                    drive_ready_units_for_plan(&state, &project_id, &issue_id, &plan_id, None)
+                        .await?;
                 if drive.started_attempt_ids.is_empty() && drive.resumed_attempt_ids.is_empty() {
                     (final_run, PostFlow::Existing(phase))
                 } else {
@@ -806,6 +807,9 @@ pub(crate) struct PlanContinuationDriveOutcome {
     pub started_attempt_ids: Vec<String>,
     /// 本轮跨桶桥续跑（物化就绪 unit + 重启 runner）的 attempt。
     pub resumed_attempt_ids: Vec<String>,
+    /// 本轮就地续跑(runner 在册命中 in_place:仅物化就绪 unit,不重复
+    /// 拉起 runner——在册 runner 重读 attempt 后继续排程)的 attempt。
+    pub continued_in_place_attempt_ids: Vec<String>,
     /// 未推进的 attempt：忙（已启动/在册 runner/claim 已消费）、人控或
     /// 终态事实（失败链按事实停，不误报为错误）。
     pub busy_attempt_ids: Vec<String>,
@@ -834,6 +838,7 @@ pub(crate) async fn drive_ready_units_for_plan(
     project_id: &str,
     issue_id: &str,
     plan_id: &str,
+    in_place_attempt_id: Option<&str>,
 ) -> Result<PlanContinuationDriveOutcome, ApiError> {
     let app_paths = product_app_paths(state);
     let run_store = CodingPlanRunStore::new(app_paths.clone());
@@ -986,7 +991,12 @@ pub(crate) async fn drive_ready_units_for_plan(
                 }
             }
             CodingAttemptStatus::Running => {
-                if runner_live || attempt.active_unit_id.is_some() {
+                // S2 切片B:完成链挂点的在册 runner 自驱——in_place 命中本
+                // attempt 时不判 runner_live busy(下方只物化不 spawn,由该
+                // 在册 runner 重读后继续排程)。
+                let continues_in_place =
+                    runner_live && in_place_attempt_id == Some(attempt.id.as_str());
+                if (runner_live && !continues_in_place) || attempt.active_unit_id.is_some() {
                     // 忙：桶内推进归在册 runner（single-active-unit 不变量）。
                     outcome.busy_attempt_ids.push(attempt.id.clone());
                     continue;
@@ -1007,6 +1017,17 @@ pub(crate) async fn drive_ready_units_for_plan(
                 let Some(unit) = candidate else {
                     continue;
                 };
+                if continues_in_place {
+                    // 在册 runner 现场:只物化(状态/索引/锁转移),不重复
+                    // 拉起 runner、不轮换 selection——在册 runner 重读
+                    // attempt 后按 PrepareContext 继续内循环排程。
+                    materialize_parked_plan_attempt(state, &app_paths, &store, &attempt, unit)
+                        .await?;
+                    outcome
+                        .continued_in_place_attempt_ids
+                        .push(attempt.id.clone());
+                    continue;
+                }
                 if resume_parked_plan_attempt(state, &app_paths, &store, &attempt, unit).await? {
                     outcome.resumed_attempt_ids.push(attempt.id.clone());
                     let selection = CodingPlanSelection {
@@ -1090,18 +1111,19 @@ fn plan_has_terminal_coding_unit(
     Ok(false)
 }
 
-/// 跨桶桥 parked 续跑（Running 且无 active unit 的 attempt）：物化就绪
-/// unit（Running+指针对齐）、stage 回 PrepareContext、worktree 锁转移、
-/// 重启 runner——与 `advance_to_next_group_unit` 的 next 分支同源，但就绪
-/// 判定按全图完成事实。返回 false=registry 拒绝（已有 runner，幂等）。
+/// 跨桶桥 parked 物化(S2 切片B 拆段):就绪 unit 的状态/索引修复——unit
+/// →Running、current/active 指针对齐、stage 回 PrepareContext、worktree
+/// 锁转移。与 `advance_to_next_group_unit` 的 next 分支同源,但就绪判定按
+/// 全图完成事实;不含 runner 拉起(in_place 续跑只物化,由在册 runner
+/// 重读 attempt 后继续排程)。
 #[allow(clippy::too_many_arguments)]
-async fn resume_parked_plan_attempt(
+async fn materialize_parked_plan_attempt(
     state: &WebAppState,
     app_paths: &ProductAppPaths,
     store: &CodingAttemptStore,
     attempt: &crate::product::coding_models::CodingExecutionAttempt,
     unit: &CodingExecutionUnit,
-) -> Result<bool, ApiError> {
+) -> Result<crate::product::coding_models::CodingExecutionAttempt, ApiError> {
     // 锁转移 from 取**推进前**身份（与引擎 advance_to_next_group_unit 同款
     // 先例）：park 形状的 current 指针仍是上一完成 unit（真实锁记录的
     // active 端）；先物化再读会把 from 同步成新 unit（from==to 自转移），
@@ -1139,7 +1161,7 @@ async fn resume_parked_plan_attempt(
     let engine = crate::product::coding_workspace_engine::CodingWorkspaceEngine::new(
         store.clone(),
         crate::product::git_workspace_service::GitWorkspaceService::new(),
-        event_tx.clone(),
+        event_tx,
     );
     let route = engine
         .route_issue_shared_worktree(&updated)
@@ -1191,7 +1213,26 @@ async fn resume_parked_plan_attempt(
             serde_json::json!({}),
         )
     })?;
+    Ok(updated)
+}
 
+/// 跨桶桥 parked 续跑（Running 且无 active unit 的 attempt）：物化就绪
+/// unit（`materialize_parked_plan_attempt`：Running+指针对齐、stage 回
+/// PrepareContext、worktree 锁转移）、重启 runner——与
+/// `advance_to_next_group_unit` 的 next 分支同源，但就绪判定按全图完成
+/// 事实。返回 false=registry 拒绝（已有 runner，幂等）。
+#[allow(clippy::too_many_arguments)]
+async fn resume_parked_plan_attempt(
+    state: &WebAppState,
+    app_paths: &ProductAppPaths,
+    store: &CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    unit: &CodingExecutionUnit,
+) -> Result<bool, ApiError> {
+    let updated = materialize_parked_plan_attempt(state, app_paths, store, attempt, unit).await?;
+    let event_tx = state
+        .coding_sockets
+        .hub_sender(&CodingAttemptRunKey::from_attempt(&updated));
     Ok(crate::web::coding_ws_handler::spawn_coding_runner(
         state.clone(),
         store.clone(),

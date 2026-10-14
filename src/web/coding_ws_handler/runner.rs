@@ -866,6 +866,15 @@ pub(crate) async fn execute_start_coding_flow(
                 .complete_group_unit_after_code_review(&current)
                 .await?;
             refresh_runtime_history(&current)?;
+            // S2 parked 修复(切片A):完成链可能 park——下一 unit 依赖桶外
+            // 上游时,advance Waiting 清 active_unit_id、stage 保持
+            // ReviewRequest。此形状禁止落入下方 review_request/final_confirm
+            // 准备段:那会发出 review request 并撞终审就绪守卫,runner 死亡
+            // 转 AMR。
+            let parked_after_completion = current.scope
+                == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
+                && current.active_unit_id.is_none()
+                && !engine.group_attempt_ready_for_final_review(&current)?;
             // S2b（N5 暂停移除）：完成链自动推进后无默认步暂停停点——直接
             // emit session_state；PrepareContext 即继续内循环驱动下一 unit。
             // 跨桶就绪集推进在完成事件上经入口面 drive 桥重入（编排器复用
@@ -894,11 +903,29 @@ pub(crate) async fn execute_start_coding_flow(
                     &current.project_id,
                     &current.issue_id,
                     &plan_id,
+                    Some(&current.id),
                 )
                 .await
                 {
                     tracing::warn!(?error, "plan_coding_ready_set_drive_failed");
                 }
+            }
+            if parked_after_completion {
+                // 重读 attempt:循环变量 current 是完成链返回时的陈旧值,
+                // 上方 drive 桥(切片B in_place 物化)可能已把就绪的下一
+                // unit 物化为 PrepareContext+active 指针——继续内循环排程;
+                // 否则干净退出(attempt 保持 Running,由入口面 drive 续跑)。
+                current = coding_store.get_attempt(
+                    &current.project_id,
+                    &current.issue_id,
+                    &current.id,
+                )?;
+                if current.stage == CodingExecutionStage::PrepareContext
+                    && current.active_unit_id.is_some()
+                {
+                    continue 'pipeline;
+                }
+                return Ok(());
             }
             if current.stage == CodingExecutionStage::PrepareContext {
                 continue 'pipeline;
@@ -1632,7 +1659,6 @@ mod tests {
         attempt: CodingExecutionAttempt,
         unit_a: crate::product::coding_models::CodingExecutionUnit,
         unit_b: crate::product::coding_models::CodingExecutionUnit,
-        original_head: String,
     }
 
     /// 2-unit sc_advance 桶 parked 夹具(S2 切片C):桶内 wi_a/wi_b,wi_b
@@ -2018,7 +2044,6 @@ mod tests {
             attempt: seeded,
             unit_a,
             unit_b,
-            original_head,
         }
     }
 
@@ -2071,8 +2096,7 @@ mod tests {
     /// 非 AMR(保持 Running park 形状:active 清空/stage 保持)、wi_b 物化
     /// 在场,上游未完成(wi_x 完成事实不在任何绑定桶)→ runner 干净退出。
     #[tokio::test]
-    async fn sc_advance_completion_parks_cleanly_when_next_unit_waits_on_out_of_bucket_work_item()
-    {
+    async fn sc_advance_completion_parks_cleanly_when_next_unit_waits_on_out_of_bucket_work_item() {
         let fixture = n5_sc_advance_parked_fixture();
         seed_n5_parked_plan_run(&fixture);
         let provider = CountingProvider::default();
