@@ -12,6 +12,7 @@ export type ChatEntryType =
   | "review_verdict"
   | "gate_prompt"
   | "human_decision"
+  | "stage_change"
   | "delivery_facts"
   | "error";
 

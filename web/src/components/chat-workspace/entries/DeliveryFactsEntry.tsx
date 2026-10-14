@@ -15,6 +15,10 @@ export function DeliveryFactsEntry({ entry }: { entry: ChatEntry }) {
   const changedFiles = Array.isArray(metadata?.changed_files)
     ? metadata.changed_files.filter((file): file is string => typeof file === "string")
     : [];
+  const changedFilesUnavailableReason =
+    typeof metadata?.changed_files_unavailable_reason === "string"
+      ? metadata.changed_files_unavailable_reason
+      : null;
   const verification = (metadata?.verification ?? null) as Record<string, unknown> | null;
   const reviewReportId =
     verification && typeof verification.review_report_id === "string"
@@ -65,6 +69,10 @@ export function DeliveryFactsEntry({ entry }: { entry: ChatEntry }) {
                   </li>
                 ))}
               </ul>
+            ) : changedFilesUnavailableReason ? (
+              <div className="mt-0.5 text-xs text-[var(--aria-ink-muted)]">
+                不可用:<span className="font-mono break-all">{changedFilesUnavailableReason}</span>
+              </div>
             ) : (
               <div className="mt-0.5 text-xs text-[var(--aria-ink-muted)]">无</div>
             )}

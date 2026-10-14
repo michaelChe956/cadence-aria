@@ -441,6 +441,62 @@ describe("chat workspace entries", () => {
     expect(screen.getByText(/evidence:\/\/tests\/cargo-test/)).toBeInTheDocument();
     expect(screen.getByText("handoff_revision_coding_unit_run_0001")).toBeInTheDocument();
   });
+
+  it("dispatches error entries through the renderer", () => {
+    const entry = makeEntry({
+      type: "error",
+      role: "system",
+      content: "阶段不允许",
+      metadata: { code: "INVALID_MESSAGE_FOR_STAGE" },
+    });
+
+    render(<ChatEntryRenderer entry={entry} />);
+
+    expect(screen.getByText("错误 INVALID_MESSAGE_FOR_STAGE")).toBeInTheDocument();
+    expect(screen.getByText("阶段不允许")).toBeInTheDocument();
+  });
+
+  it("dispatches execution events through the renderer", () => {
+    const entry = makeEntry({
+      type: "execution_event",
+      role: "system",
+      content: "git push origin",
+      metadata: { command: "git push origin" },
+    });
+
+    render(<ChatEntryRenderer entry={entry} />);
+
+    expect(screen.getByText("执行事件")).toBeInTheDocument();
+    expect(screen.getAllByText("git push origin").length).toBeGreaterThan(0);
+  });
+
+  it("labels unavailable delivery facts file lists with the platform reason", () => {
+    const entry = makeEntry({
+      type: "delivery_facts",
+      role: "system",
+      content: "Work Item work_item_0001 交付完成",
+      metadata: {
+        source: "platform_delivery_facts",
+        logical_work_item_id: "work_item_0001",
+        start_commit: "startsha",
+        completion_commit: "completionsha",
+        changed_files: [],
+        changed_files_unavailable_reason: "worktree_missing",
+        verification: {
+          review_report_id: null,
+          verdict: null,
+          tested_evidence_refs: [],
+        },
+        handoff_revision_id: "handoff_revision_coding_unit_run_0001",
+      },
+    } as Partial<ChatEntry>);
+
+    render(<ChatEntryRenderer entry={entry} />);
+
+    expect(screen.getByText("不可用:")).toBeInTheDocument();
+    expect(screen.getByText("worktree_missing")).toBeInTheDocument();
+    expect(screen.queryByText(/^无$/)).not.toBeInTheDocument();
+  });
 });
 
 function makeEntry(overrides: Partial<ChatEntry>): ChatEntry {
