@@ -570,6 +570,21 @@ async fn handle_coding_socket(
                     );
                     match recovered {
                         Ok(updated) => {
+                            // S4：恢复清场——残留 Running role run（死亡路径
+                            // 收尾修复落地前遗留的脏数据；先例
+                            // `ensure_failed_code_review_retry_role_run` 的
+                            // stale 收尾）统一标 Superseded。必须在 spawn 之前
+                            // 执行：旧 runner 已死、新 run 未建，此刻仍 Running
+                            // 的只能是残留；失败 fail-visible 告警，不阻断恢复。
+                            if let Err(role_run_error) = coding_store
+                                .supersede_residual_running_role_runs_for_attempt(&updated)
+                            {
+                                tracing::warn!(
+                                    attempt_id = updated.id.as_str(),
+                                    error = %role_run_error,
+                                    "failed to supersede residual running role runs on recovery"
+                                );
+                            }
                             let Some(command_tx) = spawn_coding_runner(
                                 state.clone(),
                                 coding_store.clone(),

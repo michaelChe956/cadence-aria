@@ -299,6 +299,57 @@ impl super::CodingAttemptStore {
         Ok(next)
     }
 
+    /// S4：runner 死亡转 AwaitingManualRecovery 时的同步收尾——该 attempt
+    /// 名下仍处于 Running 的 role run 的唯一终态写方（runner）已死，不收尾
+    /// 会让 RoleRunHistoryPanel 对已 fail-closed 的 attempt 永久投影「运行
+    /// 中」。统一收尾为 Failed，并携带 attempt 同款稳定 reason 码。返回收尾
+    /// 条数（0 表示本无残留）。
+    pub fn fail_running_role_runs_for_attempt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        reason_code: &str,
+    ) -> Result<usize, ProductStoreError> {
+        let mut finalized = 0usize;
+        for mut run in self
+            .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+        {
+            if run.status != CodingRoleRunStatus::Running {
+                continue;
+            }
+            run.status = CodingRoleRunStatus::Failed;
+            run.reason_code = Some(reason_code.to_string());
+            run.completed_at = Some(Utc::now().to_rfc3339());
+            self.save_role_run(&attempt.project_id, &attempt.issue_id, &run)?;
+            finalized += 1;
+        }
+        Ok(finalized)
+    }
+
+    /// S4：RecoverCoding 显式恢复时的清场——修复落地前死亡路径不收尾遗留
+    /// 的残留 Running role run 统一标 Superseded（先例
+    /// `ensure_failed_code_review_retry_role_run` 的 stale 收尾）。恢复瞬间
+    /// 旧 runner 已死、新 run 由重启后的 runner 另行创建（各阶段重入处仅
+    /// 复用 `Running && node_id.is_none()` 的 run），此刻仍 Running 的只能是
+    /// 残留脏数据。返回收尾条数（0 表示本无残留）。
+    pub fn supersede_residual_running_role_runs_for_attempt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<usize, ProductStoreError> {
+        let mut superseded = 0usize;
+        for mut run in self
+            .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+        {
+            if run.status != CodingRoleRunStatus::Running {
+                continue;
+            }
+            run.status = CodingRoleRunStatus::Superseded;
+            run.completed_at = Some(Utc::now().to_rfc3339());
+            self.save_role_run(&attempt.project_id, &attempt.issue_id, &run)?;
+            superseded += 1;
+        }
+        Ok(superseded)
+    }
+
     pub fn update_role_run_refs(
         &self,
         project_id: &str,

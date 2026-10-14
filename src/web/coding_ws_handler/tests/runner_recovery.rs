@@ -9,7 +9,8 @@ use crate::product::coding_attempt_store::{
 };
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
-    CodingProviderPermissionMode, CodingRolePermissionModes, CodingRoleProviderConfigSnapshot,
+    CodingProviderPermissionMode, CodingProviderRole, CodingRolePermissionModes,
+    CodingRoleProviderConfigSnapshot, CodingRoleRunStatus, CodingRoleRunTrigger,
 };
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::models::ProviderName;
@@ -159,6 +160,170 @@ async fn runner_dying_before_provider_moves_running_attempt_to_manual_recovery()
     assert!(
         saw_protocol_error,
         "runner 失败必须仍发出 coding_start_failed protocol error"
+    );
+}
+
+/// S4 红测：runner 死亡转 AwaitingManualRecovery 时，死亡 runner 名下仍
+/// Running 的 role run 必须同步收尾为 Failed（reason 沿用 attempt 稳定
+/// reason 码）——runner 已死，这些 run 不再有任何终态写方，不收尾会让
+/// RoleRunHistoryPanel 对已 fail-closed 的 attempt 永久投影「运行中」
+/// （现场两 attempt 的脏数据形态）。对照面：已完结的历史 run 不被改写。
+#[tokio::test]
+async fn runner_death_finalizes_running_role_runs_to_failed() {
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::KimiCode,
+                reviewer: Some(ProviderName::KimiCode),
+                review_rounds: 1,
+                permission_modes: Default::default(),
+            },
+            target_snapshot: None,
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    let attempt = store
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("admitted running attempt");
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::Coding,
+        )
+        .expect("coding stage");
+    store
+        .update_role_provider_config_snapshot(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: ProviderName::KimiCode,
+                code_reviewer: Some(ProviderName::KimiCode),
+                internal_reviewer: Some(ProviderName::KimiCode),
+                review_rounds: 1,
+                permission_modes: CodingRolePermissionModes {
+                    coder: CodingProviderPermissionMode::Auto,
+                    code_reviewer: CodingProviderPermissionMode::Auto,
+                    internal_reviewer: CodingProviderPermissionMode::Auto,
+                },
+            },
+        )
+        .expect("role config points coder at unregistered provider");
+
+    // 预置在途 coder run（模拟 provider 阶段开跑后 runner 死亡的现场形态）
+    // 与一条已完结的 code reviewer run（对照面：收尾不得改写非 Running）。
+    let in_flight = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("seed in-flight coder role run");
+    let settled = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::CodeReview,
+            CodingProviderRole::CodeReviewer,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("seed code reviewer role run");
+    store
+        .update_role_run_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &settled.id,
+            CodingRoleRunStatus::Completed,
+            None,
+        )
+        .expect("settle reviewer role run");
+
+    // registry 为空：runner 穿过 coding stage gate 后死于 provider_for
+    // （引擎尚未进入 coding 阶段入口，不会自行创建/收尾 coder run）。
+    let mut state = WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        ProviderRegistry::new(),
+    );
+    state.test_provider_enabled = true;
+
+    let attempt_id = attempt.id.clone();
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let attempt_key = CodingAttemptRunKey::new("project_0001", "issue_0001", attempt_id.as_str());
+    let command_tx = spawn_coding_runner(state.clone(), store.clone(), event_tx.clone(), attempt)
+        .expect("resume runner spawned (run registry empty)");
+    command_tx
+        .send(CodingRunnerCommand::StageGateConfirm {
+            stage: CodingExecutionStage::Coding,
+        })
+        .await
+        .expect("confirm coding stage gate");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.coding_runs.runner_count(&attempt_key) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed runner must exit and clear its registration");
+
+    let final_attempt = store
+        .get_attempt("project_0001", "issue_0001", &attempt_id)
+        .expect("final attempt");
+    assert_eq!(
+        final_attempt.status,
+        CodingAttemptStatus::AwaitingManualRecovery,
+        "S4 前置：runner 死亡仍必须 fail-closed 转人工恢复（F-14 零回归）"
+    );
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt_id)
+        .expect("role runs after death");
+    let in_flight_final = runs
+        .iter()
+        .find(|run| run.id == in_flight.id)
+        .expect("in-flight run persisted");
+    assert_eq!(
+        in_flight_final.status,
+        CodingRoleRunStatus::Failed,
+        "S4：死亡转 AMR 必须同步收尾在途 role run，消除「永久运行中」投影"
+    );
+    assert_eq!(
+        in_flight_final.reason_code.as_deref(),
+        Some("coding_runner_failed_while_running"),
+        "收尾必须携带 attempt 同款稳定 reason 码"
+    );
+    assert!(
+        in_flight_final.completed_at.is_some(),
+        "收尾必须落 completed_at"
+    );
+    let settled_final = runs
+        .iter()
+        .find(|run| run.id == settled.id)
+        .expect("settled run persisted");
+    assert_eq!(
+        settled_final.status,
+        CodingRoleRunStatus::Completed,
+        "收尾只针对 Running，不得改写已完结 run"
+    );
+    assert!(
+        runs.iter()
+            .all(|run| run.status != CodingRoleRunStatus::Running),
+        "死亡转 AMR 后不得残留任何 Running role run"
     );
 }
 
@@ -533,6 +698,168 @@ async fn recover_coding_channel_re_admits_and_restarts_runner() {
         }
     }
     assert!(saw_protocol_error, "恢复后的 runner 失败必须仍可见");
+}
+
+/// S4 红测：RecoverCoding 恢复现场时，修复落地前死亡路径不收尾遗留的
+/// 残留 Running role run 必须统一标 Superseded（先例
+/// `ensure_failed_code_review_retry_role_run` 的 stale 收尾）——恢复瞬间旧
+/// runner 已死，这些 run 不再有合法终态写方；新 run 由重启后的 runner 另行
+/// 创建。对照面：死亡路径已收尾的 Failed run 不被改写。本测试在 lib 层复刻
+/// socket RecoverCoding 分支的组合（CAS 回 Running → 清场 → spawn），与
+/// F-16 先例同款。
+#[tokio::test]
+async fn recover_coding_supersedes_residual_running_role_runs() {
+    let root = tempfile::tempdir().expect("root");
+    let worktree = root.path().join("worktree");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "HEAD".to_string(),
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::KimiCode,
+                reviewer: Some(ProviderName::KimiCode),
+                review_rounds: 1,
+                permission_modes: Default::default(),
+            },
+            target_snapshot: None,
+            max_auto_rework: 2,
+        })
+        .expect("create attempt");
+    let attempt = store
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("admitted running attempt");
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::Coding,
+        )
+        .expect("coding stage");
+    store
+        .update_role_provider_config_snapshot(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: ProviderName::KimiCode,
+                code_reviewer: Some(ProviderName::KimiCode),
+                internal_reviewer: Some(ProviderName::KimiCode),
+                review_rounds: 1,
+                permission_modes: CodingRolePermissionModes {
+                    coder: CodingProviderPermissionMode::Auto,
+                    code_reviewer: CodingProviderPermissionMode::Auto,
+                    internal_reviewer: CodingProviderPermissionMode::Auto,
+                },
+            },
+        )
+        .expect("role config points coder at unregistered provider");
+
+    let in_flight = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("seed in-flight coder role run");
+
+    let mut state = WebAppState::with_provider_registry(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        ProviderRegistry::new(),
+    );
+    state.test_provider_enabled = true;
+
+    let attempt_id = attempt.id.clone();
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let attempt_key = CodingAttemptRunKey::new("project_0001", "issue_0001", attempt_id.as_str());
+    let command_tx = spawn_coding_runner(state.clone(), store.clone(), event_tx.clone(), attempt)
+        .expect("resume runner spawned (run registry empty)");
+    command_tx
+        .send(CodingRunnerCommand::StageGateConfirm {
+            stage: CodingExecutionStage::Coding,
+        })
+        .await
+        .expect("confirm coding stage gate");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.coding_runs.runner_count(&attempt_key) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed runner must exit and clear its registration");
+
+    let quarantined = store
+        .get_attempt("project_0001", "issue_0001", &attempt_id)
+        .expect("quarantined attempt");
+    assert_eq!(
+        quarantined.status,
+        CodingAttemptStatus::AwaitingManualRecovery
+    );
+
+    // 模拟修复落地前的遗留脏数据：死亡路径未收尾的残留 Running run
+    //（现场形态：review_request 阶段卡 PushStarted 的 internal reviewer run）。
+    let residual = store
+        .create_role_run(
+            &quarantined,
+            CodingExecutionStage::InternalPrReview,
+            CodingProviderRole::InternalReviewer,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("seed residual internal reviewer role run");
+
+    // socket RecoverCoding 分支同款组合：CAS 回 Running → 清场残留 → spawn。
+    let recovered = store
+        .recover_attempt_from_manual_recovery("project_0001", "issue_0001", &attempt_id)
+        .expect("explicit recovery channel");
+    assert_eq!(recovered.status, CodingAttemptStatus::Running);
+    store
+        .supersede_residual_running_role_runs_for_attempt(&recovered)
+        .expect("supersede residual running role runs on recovery");
+
+    let runs = store
+        .list_role_runs("project_0001", "issue_0001", &attempt_id)
+        .expect("role runs after recovery");
+    let residual_final = runs
+        .iter()
+        .find(|run| run.id == residual.id)
+        .expect("residual run persisted");
+    assert_eq!(
+        residual_final.status,
+        CodingRoleRunStatus::Superseded,
+        "S4：恢复清场必须把残留 Running role run 标 Superseded"
+    );
+    assert!(
+        residual_final.completed_at.is_some(),
+        "清场必须落 completed_at"
+    );
+    let in_flight_final = runs
+        .iter()
+        .find(|run| run.id == in_flight.id)
+        .expect("in-flight run persisted");
+    assert_eq!(
+        in_flight_final.status,
+        CodingRoleRunStatus::Failed,
+        "死亡路径已收尾的 Failed run 不得被恢复清场改写"
+    );
+    assert_eq!(
+        in_flight_final.reason_code.as_deref(),
+        Some("coding_runner_failed_while_running")
+    );
+    assert!(
+        runs.iter()
+            .all(|run| run.status != CodingRoleRunStatus::Running),
+        "恢复清场后不得残留任何 Running role run"
+    );
 }
 
 // ---------------------------------------------------------------------------

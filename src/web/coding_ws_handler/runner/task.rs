@@ -250,6 +250,21 @@ async fn run_coding_runner_task_body(
                     .transition_to_awaiting_manual_recovery(&attempt.id, MANUAL_RECOVERY_REASON)
                 {
                     Ok(()) => {
+                        // S4：死亡转 AMR 的同步收尾——死亡 runner 名下仍
+                        // Running 的 role run 不再有任何终态写方，必须同批落
+                        // Failed（reason 沿用稳定码），否则 RoleRunHistoryPanel
+                        // 永久投影「运行中」。置于快照重放之前，保证重放投影
+                        // 已含收尾事实；失败仅告警（fail-visible，不吞没后续
+                        // protocol error）。
+                        if let Err(role_run_error) = coding_store
+                            .fail_running_role_runs_for_attempt(&latest, MANUAL_RECOVERY_REASON)
+                        {
+                            tracing::warn!(
+                                attempt_id = attempt.id.as_str(),
+                                error = %role_run_error,
+                                "failed to finalize running role runs after runner death"
+                            );
+                        }
                         match coding_store.get_attempt(
                             &attempt.project_id,
                             &attempt.issue_id,
