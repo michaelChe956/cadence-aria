@@ -52,6 +52,66 @@ impl WorkspaceEngine {
                 }
             }
         }
+        // SG6b（plan v1.1 Task SG6b / REQ-CG-03:74、REQ-SG-03/04A/05）：
+        // SC 结构授权窗口（durable current_grant）的 verdict 面分域——
+        // - phase=Reviewing：本 verdict 即该 grant 复评的收口 verdict，
+        //   路由后执行 turn Completed + grant Resolved finalize（携
+        //   review_node_id/scope digest）；
+        // - 终态相位（Resolved/SystemFault/BusinessGate）：tombstone——
+        //   迟到 review 全量拒收（两 attempt 满后 review Revise 第三
+        //   start 0、single_candidate_author key/reservation/repairs_used
+        //   增量 0；同 turn 已收口的重复 verdict 同族）；
+        // - 人工窗口活动相位（AuthorRunning/Assessing/InstructionFrozen/
+        //   Attempt2Claimed/BlockedByLcRecovery）：未知外部调用等待——
+        //   人工窗口拥有流转，verdict 不路由（旧 policy 自动返修不得
+        //   旁路结构 attempt 上限）。
+        // durable 判据不可读＝持久化失败 fail-closed（I-1 round3 F-A 同
+        // 构），不得静默按无窗口处理。
+        let mut sc_reviewing_closure: Option<String> = None;
+        if self.is_single_candidate_plan() {
+            let Some(store) = self.lifecycle_store.as_ref() else {
+                return;
+            };
+            let record = match store.get_workspace_session(&self.session.session_id) {
+                Ok(record) => record,
+                Err(error) => {
+                    self.finish_policy_failure(
+                        FatalReason::PersistenceFailure,
+                        vec![PolicyDiagnostic {
+                            code: FatalReason::PersistenceFailure.as_code().to_owned(),
+                            message: error.to_string(),
+                            field: Some("structural_governance_state".to_owned()),
+                        }],
+                    )
+                    .await;
+                    return;
+                }
+            };
+            if let Some(grant) = record
+                .structural_governance_state
+                .as_ref()
+                .and_then(|state| state.current_grant.as_ref())
+            {
+                match grant.phase {
+                    Some(crate::product::models::workspace::StructuralGrantPhase::Reviewing) => {
+                        sc_reviewing_closure = grant.turn_id.clone();
+                    }
+                    Some(
+                        crate::product::models::workspace::StructuralGrantPhase::Resolved
+                        | crate::product::models::workspace::StructuralGrantPhase::SystemFault
+                        | crate::product::models::workspace::StructuralGrantPhase::BusinessGate,
+                    ) => {
+                        // 终态 grant tombstone：迟到 review 零 durable 写。
+                        return;
+                    }
+                    Some(_) => {
+                        // 人工窗口活动相位：等待（不路由、零写）。
+                        return;
+                    }
+                    None => {}
+                }
+            }
+        }
         let node_id = self
             .active_node_id
             .clone()
@@ -97,11 +157,101 @@ impl WorkspaceEngine {
         if let Some(action) = self.work_item_policy_action(&node_id, &verdict) {
             self.apply_policy_route(action, verdict, active_node_type, round)
                 .await;
-            return;
+        } else {
+            self.route_legacy_review(verdict, active_node_type, round, false)
+                .await;
         }
+        // SG6b（REQ-CG-03:74）：Reviewing grant 的 verdict 收口——路由
+        // 完成后 turn Completed + grant 携 review 证据终态 Resolved（幂
+        // 等；失败可观测上抛，grant 留待恢复对账，不假称成功）。
+        if let Some(turn_id) = sc_reviewing_closure {
+            if let Err(error) = self
+                .close_reviewing_structural_grant(&turn_id, &node_id)
+                .await
+            {
+                let _ = self
+                    .event_tx
+                    .send(EngineEvent::Error {
+                        message: format!(
+                            "structural verdict closure for turn {turn_id} failed: {error}"
+                        ),
+                    })
+                    .await;
+            }
+        }
+    }
 
-        self.route_legacy_review(verdict, active_node_type, round, false)
-            .await;
+    /// SG6b（REQ-CG-03:74 / SG6a.3⑧1 移交）：有 reviewer 分支的 verdict
+    /// 面收口——turn 终态化 Completed（幂等）+ `finalize_structural_
+    /// revision_grant` 携 review_node_id/scope digest 终态 Resolved
+    ///（store 单源幂等；turn/grant/会话快照同 CAS 链重读）。
+    async fn close_reviewing_structural_grant(
+        &mut self,
+        turn_id: &str,
+        review_node_id: &str,
+    ) -> Result<(), String> {
+        let store = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let mut expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        let mut turn = store
+            .get_human_gate_turn(&self.session.session_id, turn_id)
+            .map_err(|error| error.to_string())?;
+        if turn.status != crate::product::models::HumanGateTurnStatus::Completed {
+            turn.status = crate::product::models::HumanGateTurnStatus::Completed;
+            turn.failure_class = None;
+            turn.updated_at = chrono::Utc::now().to_rfc3339();
+            expected = store
+                .update_human_gate_turn(&expected, turn)
+                .map_err(|error| error.to_string())?;
+            turn = store
+                .get_human_gate_turn(&self.session.session_id, turn_id)
+                .map_err(|error| error.to_string())?;
+        }
+        let state = expected
+            .structural_governance_state
+            .as_ref()
+            .ok_or_else(|| "structural governance state missing".to_string())?;
+        let grant = state
+            .current_grant
+            .as_ref()
+            .ok_or_else(|| "no active structural revision grant".to_string())?;
+        if grant.turn_id.as_deref() != Some(turn_id) {
+            return Err(format!(
+                "structural grant is bound to turn {:?}, not {turn_id}",
+                grant.turn_id
+            ));
+        }
+        let scope_digest =
+            crate::product::workspace_engine::conversational_gate::sc_revision_review_scope_digest(
+                expected
+                    .work_item_plan_source_revision_ref
+                    .as_deref()
+                    .unwrap_or_default(),
+                expected
+                    .plan_candidate_ir_ref
+                    .as_deref()
+                    .unwrap_or_default(),
+                expected
+                    .mechanical_report_ref
+                    .as_deref()
+                    .unwrap_or_default(),
+                state.current_context_digest.as_deref().unwrap_or_default(),
+            );
+        let saved = store
+            .finalize_structural_revision_grant(
+                &expected,
+                turn,
+                &grant.grant_id,
+                Some(review_node_id),
+                Some(&scope_digest),
+            )
+            .map_err(|error| error.to_string())?;
+        self.reload_session_from_record(saved);
+        Ok(())
     }
 
     /// The policy layer is deliberately restricted to the existing WorkItemPlan
@@ -419,6 +569,44 @@ impl WorkspaceEngine {
             &invocation,
             findings,
         );
+        // SG6b（Interfaces「同 grant route 先于旧 policy/repair
+        // reservation」）：SC 会话存在结构授权窗口（durable
+        // current_grant——人工反馈轮的结构 attempt 通道）时，旧 policy
+        // 自动返修不得旁路结构 attempt 上限——TriggerAggregateRepair
+        // 在 repairs_used/cycle 计数合并之前改道原人工门（Interactive
+        // → EnterHumanGate / AutoIfValid → StopNeedsHuman；L2 退役同
+        // 语义）：零 author start、零 single_candidate_author 预领键、
+        // 零 repair_reservation、零 repairs_used/cycle 增量。
+        let action = if matches!(action, RoutingAction::TriggerAggregateRepair { .. })
+            && self.is_single_candidate_plan()
+            && self.durable_structural_grant_present()
+        {
+            let findings = match action {
+                RoutingAction::TriggerAggregateRepair { findings } => findings,
+                _ => unreachable!("guarded by matches! above"),
+            };
+            let snapshot = HumanGateSnapshot {
+                candidate_recovery: None,
+                findings,
+                repeated_fingerprints: Vec::new(),
+                attempts_used: history
+                    .repairs_used
+                    .saturating_add(history.manual_repairs_used),
+                manual_repairs_remaining: RunBudgets::default()
+                    .max_manual_repairs
+                    .saturating_sub(history.manual_repairs_used),
+                trigger: HumanReason::RepairBudgetExhausted,
+                resumable: self.session.run_policy == RunPolicy::Interactive,
+                accepted_feedback_turns: Some(0),
+            };
+            if self.session.run_policy == RunPolicy::Interactive {
+                RoutingAction::EnterHumanGate { snapshot }
+            } else {
+                RoutingAction::StopNeedsHuman { snapshot }
+            }
+        } else {
+            action
+        };
         if matches!(action, RoutingAction::TriggerAggregateRepair { .. }) {
             // Keep the cross-cycle session total for observability, while
             // consuming the automatic-repair budget only inside this artifact
@@ -503,6 +691,15 @@ impl WorkspaceEngine {
             RoutingAction::ContinueToCompleted => {
                 self.route_legacy_review(verdict, active_node_type, round, true)
                     .await;
+            }
+            RoutingAction::TriggerAggregateRepair { .. }
+                if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+                    && self.durable_structural_grant_present() =>
+            {
+                // SG6b「scope/dispatch 二次 guard」：评估层转换漏网（如
+                // 内存回退分支）时，dispatch 面仍不得以旧 policy 自动返修
+                // 旁路结构 attempt 上限——改道原人工门，零 author start。
+                self.enter_human_confirm(Some(verdict.summary)).await;
             }
             RoutingAction::TriggerAggregateRepair { .. }
                 if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate =>
@@ -638,6 +835,21 @@ impl WorkspaceEngine {
     fn is_single_candidate_plan(&self) -> bool {
         self.session.workspace_type == WorkspaceType::WorkItemPlan
             && self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+    }
+
+    /// SG6b：durable 结构授权窗口在场探测（dispatch 二次 guard 用；读取
+    /// 失败按无窗口处理——评估层的一级 guard 已以 expected 记录权威拦截，
+    /// 此处只作纵深防御）。
+    fn durable_structural_grant_present(&self) -> bool {
+        self.lifecycle_store
+            .as_ref()
+            .and_then(|store| store.get_workspace_session(&self.session.session_id).ok())
+            .and_then(|record| {
+                record
+                    .structural_governance_state
+                    .and_then(|state| state.current_grant)
+            })
+            .is_some()
     }
 
     async fn route_legacy_review(

@@ -1186,7 +1186,126 @@ fn verify_lc_fresh_sc_manual_revision_payload(
             record.work_item_plan_source_revision_ref
         )));
     }
-    Ok(())
+    // SG6b：结构授权窗口 join（recovery×turn×grant×attempt×prompt）。
+    verify_sc_manual_fresh_structural_grant_join(&record, context)
+}
+
+/// SG6b（plan v1.1 Task SG6b / REQ-SG-05「显式 fresh 同 attempt
+/// None-resume/子 prompt」）：sc_manual_revision 显式 fresh dispatch 的
+/// 结构授权窗口 join（recovery×turn×grant×attempt×prompt 的 durable 侧
+/// 判据，纯函数零 I/O）——活动 grant 绑定本 turn 且 phase=Attempt2Claimed
+/// 时，fresh 重入驱动的就是 claim 绑定的冻结机器指令子 prompt：grant 必
+/// 须携带完整 prompt 身份且恰消费下一 attempt（grant.attempt_no ==
+/// payload attempt_no + 1）；漂移（错 recovery/身份缺失/attempt 越界/
+/// 窗口已 closed）一律 `lc_resume_recovery_stale` 拒收回等待（零
+/// start、预算不改写）。无结构窗口（无 grant）保持原 fresh 路径不变。
+fn verify_sc_manual_fresh_structural_grant_join(
+    record: &crate::product::models::WorkspaceSessionRecord,
+    context: &crate::product::models::LcRecoveryRunContext,
+) -> Result<(), LcFreshDispatchRejection> {
+    let crate::product::models::LcRecoveryRunContext::ScManualRevision {
+        turn_id,
+        command_id,
+        attempt_no,
+        ..
+    } = context
+    else {
+        return Ok(());
+    };
+    verify_sc_manual_fresh_grant_join_core(
+        record
+            .structural_governance_state
+            .as_ref()
+            .and_then(|state| state.current_grant.as_ref()),
+        turn_id,
+        command_id,
+        *attempt_no,
+    )
+}
+
+fn verify_sc_manual_fresh_grant_join_core(
+    grant: Option<&crate::product::models::workspace::StructuralRevisionGrant>,
+    turn_id: &str,
+    command_id: &str,
+    attempt_no: u32,
+) -> Result<(), LcFreshDispatchRejection> {
+    use crate::product::models::workspace::StructuralGrantPhase;
+    let stale = |message: String| LcFreshDispatchRejection {
+        code: crate::product::lifecycle_store::LcFreshClaimOutcome::STALE_SUPERSEDED,
+        message,
+    };
+    let Some(grant) = grant else {
+        // 无结构授权窗口：原 fresh 路径不变。
+        return Ok(());
+    };
+    match grant.turn_id.as_deref() {
+        Some(grant_turn_id) if grant_turn_id == turn_id => {}
+        Some(grant_turn_id) => {
+            return Err(stale(format!(
+                "sc manual fresh structural join failed: grant is bound to turn {grant_turn_id}, not {turn_id}"
+            )));
+        }
+        None => {
+            return Err(stale(
+                "sc manual fresh structural join failed: grant has no bound turn".to_string(),
+            ));
+        }
+    }
+    if let Some(grant_command_id) = grant.command_id.as_deref()
+        && grant_command_id != command_id
+    {
+        return Err(stale(format!(
+            "sc manual fresh structural join failed: grant is bound to command {grant_command_id}, not {command_id}"
+        )));
+    }
+    match grant.phase {
+        Some(StructuralGrantPhase::Attempt2Claimed) => {
+            let (prompt_ref, prompt_digest) = (
+                grant.prompt_ref.as_deref().unwrap_or_default(),
+                grant.prompt_digest.as_deref().unwrap_or_default(),
+            );
+            if prompt_ref.trim().is_empty() || prompt_digest.trim().is_empty() {
+                return Err(stale(format!(
+                    "sc manual fresh structural join failed: claimed grant carries an incomplete frozen prompt identity (ref {prompt_ref:?}, digest present: {})",
+                    !prompt_digest.trim().is_empty()
+                )));
+            }
+            // 恰消费下一 attempt：子 prompt 绑定 payload attempt + 1。
+            if grant.attempt_no != attempt_no.saturating_add(1) {
+                return Err(stale(format!(
+                    "sc manual fresh structural join failed: claimed grant attempt {} does not continue payload attempt {attempt_no}",
+                    grant.attempt_no
+                )));
+            }
+            Ok(())
+        }
+        Some(
+            StructuralGrantPhase::Reviewing
+            | StructuralGrantPhase::Resolved
+            | StructuralGrantPhase::SystemFault
+            | StructuralGrantPhase::BusinessGate,
+        ) => Err(stale(format!(
+            "sc manual fresh structural join failed: structural window is closed for delivery (phase {:?}); explicit fresh stays waiting",
+            grant.phase
+        ))),
+        // 未 claim 窗口（AuthorRunning/Assessing/InstructionFrozen/
+        // BlockedByLcRecovery 且无 claim 身份）：fresh 重入＝原反馈 prompt
+        // 的同 turn 重装，放行；携带 claim 身份的非 Attempt2Claimed 相位
+        // 是不一致 durable，拒收。
+        _ => {
+            if grant
+                .prompt_ref
+                .as_deref()
+                .is_some_and(|v| !v.trim().is_empty())
+            {
+                return Err(stale(format!(
+                    "sc manual fresh structural join failed: grant phase {:?} carries a claimed prompt identity; refusing inconsistent structural state",
+                    grant.phase
+                )));
+            }
+            Ok(())
+        }
+    }
 }
 
 /// B1（终审 P1，设计 §5.3 author 族行）：author 族 payload 与 durable 的
@@ -1637,6 +1756,100 @@ mod tests {
             mapped.stderr.contains("SENTINEL_WS_GW_STDERR_TAIL"),
             "stderr 字段应同源保留，got: {}",
             mapped.stderr
+        );
+    }
+
+    /// SG6b：sc_manual_revision 显式 fresh dispatch 的结构授权窗口 join
+    ///（recovery×turn×grant×attempt×prompt 纯核心判据）。
+    fn sg06b_grant(
+        turn_id: &str,
+        phase: crate::product::models::workspace::StructuralGrantPhase,
+        attempt_no: u32,
+        prompt_identity: bool,
+    ) -> crate::product::models::workspace::StructuralRevisionGrant {
+        crate::product::models::workspace::StructuralRevisionGrant {
+            grant_id: format!("structural_grant_{turn_id}"),
+            authorization_hash: "f".repeat(64),
+            turn_id: Some(turn_id.to_string()),
+            command_id: Some(format!("cmd_{turn_id}")),
+            candidate_source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            phase: Some(phase),
+            attempt_no,
+            prompt_ref: prompt_identity.then(|| format!("structural-prompt://{turn_id}")),
+            prompt_digest: prompt_identity.then(|| "d".repeat(64)),
+            instruction_digest: prompt_identity.then(|| "b".repeat(64)),
+            failing_source_hash: Some("a".repeat(64)),
+            review_identity: None,
+            granted_at: "2026-10-14T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn sg_06b_sc_manual_fresh_grant_join_matrix() {
+        use crate::product::lifecycle_store::LcFreshClaimOutcome;
+        use crate::product::models::workspace::StructuralGrantPhase;
+
+        let turn_id = "turn_sg6b_fresh";
+        let command_id = "cmd_turn_sg6b_fresh";
+        let stale_code = LcFreshClaimOutcome::STALE_SUPERSEDED;
+
+        // 无结构窗口（无 grant）：原 fresh 路径不变。
+        assert!(verify_sc_manual_fresh_grant_join_core(None, turn_id, command_id, 1).is_ok());
+
+        // claim 绑定子 prompt 的合法 join：grant=Attempt2Claimed、完整
+        // prompt 身份、恰消费下一 attempt（payload attempt 1 → grant 2）。
+        let claimed = sg06b_grant(turn_id, StructuralGrantPhase::Attempt2Claimed, 2, true);
+        assert!(
+            verify_sc_manual_fresh_grant_join_core(Some(&claimed), turn_id, command_id, 1).is_ok(),
+            "合法 claim join：显式 fresh 同 attempt 交付冻结子 prompt"
+        );
+
+        // 错 recovery（grant 绑定其它 turn）→ stale（0 start/预算不改写）。
+        let mismatch = verify_sc_manual_fresh_grant_join_core(
+            Some(&claimed),
+            "turn_sg6b_other",
+            command_id,
+            1,
+        )
+        .expect_err("cross-turn join failure must be stale");
+        assert_eq!(mismatch.code, stale_code);
+
+        // 错 digest/ref（claim 无 prompt 身份）→ stale。
+        let identity_missing =
+            sg06b_grant(turn_id, StructuralGrantPhase::Attempt2Claimed, 2, false);
+        let missing =
+            verify_sc_manual_fresh_grant_join_core(Some(&identity_missing), turn_id, command_id, 1)
+                .expect_err("claim without prompt identity must be stale");
+        assert_eq!(missing.code, stale_code);
+
+        // attempt 越界（grant 未消费下一 attempt）→ stale。
+        let attempt_mismatch = sg06b_grant(turn_id, StructuralGrantPhase::Attempt2Claimed, 1, true);
+        let overreach =
+            verify_sc_manual_fresh_grant_join_core(Some(&attempt_mismatch), turn_id, command_id, 1)
+                .expect_err("grant attempt must be exactly payload attempt + 1");
+        assert_eq!(overreach.code, stale_code);
+
+        // 窗口已 closed（终态/评审相位）→ stale。
+        for phase in [
+            StructuralGrantPhase::Reviewing,
+            StructuralGrantPhase::Resolved,
+            StructuralGrantPhase::SystemFault,
+            StructuralGrantPhase::BusinessGate,
+        ] {
+            let closed = sg06b_grant(turn_id, phase, 2, true);
+            let rejected =
+                verify_sc_manual_fresh_grant_join_core(Some(&closed), turn_id, command_id, 1)
+                    .expect_err("closed window must be stale");
+            assert_eq!(rejected.code, stale_code);
+        }
+
+        // 未 claim 窗口（AuthorRunning 等无 prompt 身份）→ 原反馈 fresh 放行。
+        let unclaimed = sg06b_grant(turn_id, StructuralGrantPhase::AuthorRunning, 0, false);
+        assert!(
+            verify_sc_manual_fresh_grant_join_core(Some(&unclaimed), turn_id, command_id, 1)
+                .is_ok()
         );
     }
 }

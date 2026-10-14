@@ -1167,3 +1167,397 @@ async fn sg_06a_1_recovery_lane_honors_structural_claim_without_resume() {
         HumanGateRecoveryAction::ResumeSameTurn { next_attempt_no: 2 }
     );
 }
+
+// ---------------------------------------------------------------------------
+// SG6b（plan v1.1 Task SG6b / REQ-CG-05 恢复分域 + SG6a.3⑧2/⑧3 移交）：
+// recovery 按 phase 及原授权 hash/current 合法 hash 分域——Reviewing 重连
+// 不 Completed/不 author（合法中间 candidate 不同原授权 hash 不得误
+// Failed/误 Completed）；BlockedByLcRecovery（grant phase）优先；
+// cancel 臂 hold 结算（Failed(cancelled) → nonstructural_failure_charge）。
+// ---------------------------------------------------------------------------
+
+/// Reviewing/BlockedByLcRecovery 分域的通用基座：真实 reserve（物化 hold）
+/// + Running turn + 注入指定 phase 的活动 grant + current refs 轮换到真实
+/// 落盘的「已交付 candidate」（合法中间/交付 hash ≠ 原授权 hash 的现场
+/// 形态）。返回 (turn_id, session_path, delivered_source_ref)。
+fn sg06b_structural_recovery_fixture(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    engine: &mut crate::product::workspace_engine::WorkspaceEngine,
+    plan_id: &str,
+    phase: crate::product::models::workspace::StructuralGrantPhase,
+    turn_label: &str,
+    turn_source_hash: &str,
+) -> (String, std::path::PathBuf, String) {
+    use crate::product::json_store::write_json;
+    use crate::product::models::workspace::{StructuralGovernanceState, StructuralRevisionGrant};
+    use crate::product::models::{
+        HumanGateReservation, HumanGateTurnStatus, SingleCandidatePhase, WorkspaceSessionStatus,
+    };
+    use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason};
+    use crate::product::work_item_plan_source_store::{
+        SourceRevisionRecord, WorkItemPlanSourceStore,
+    };
+    use sha2::{Digest, Sha256};
+
+    let mut session = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session");
+    session.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    session.single_candidate_phase = Some(SingleCandidatePhase::Approval);
+    session.status = WorkspaceSessionStatus::WaitingForHuman;
+    session.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 3,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: true,
+        accepted_feedback_turns: None,
+    });
+    session.work_item_plan_source_revision_ref = None;
+    session.plan_candidate_ir_ref = None;
+    session.mechanical_report_ref = None;
+    session.approval_attempt_id = None;
+    session.approved_at = None;
+    session.compile_reservation = None;
+    session.publication_provenance_ref = None;
+    let session_path = lifecycle
+        .app_paths()
+        .issue_root(&session.project_id, &session.issue_id)
+        .join("workspace-sessions")
+        .join(format!("{}.json", session.id));
+    write_json(&session_path, &session).expect("persist gate session");
+
+    let now = "2026-10-14T00:00:00Z".to_string();
+    let turn_id = format!("turn_sg6b_{turn_label}");
+    let command_id = format!("cmd_sg6b_{turn_label}");
+    let reserved_turn = HumanGateTurn {
+        turn_id: turn_id.clone(),
+        session_id: session.id.clone(),
+        command_id: command_id.clone(),
+        feedback_text: "SG6b 恢复分域原反馈".to_string(),
+        status: HumanGateTurnStatus::Reserved,
+        attempt_no: 1,
+        budget_reserved: 1,
+        source_hash: turn_source_hash.to_string(),
+        result_artifact_ref: None,
+        failure_class: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    let reservation = HumanGateReservation {
+        command_id,
+        turn_id: turn_id.clone(),
+        provider_start_idempotency_key: format!("human_gate:{turn_id}:attempt:1"),
+        reserved_at: now,
+    };
+    let (reserved_session, _) = lifecycle
+        .compare_and_reserve_human_gate_turn(&session, reserved_turn, reservation)
+        .expect("reserve durable turn");
+    let running_turn = HumanGateTurn {
+        status: HumanGateTurnStatus::Running,
+        ..lifecycle
+            .get_human_gate_turn(&session.id, &turn_id)
+            .expect("reserved turn")
+    };
+    lifecycle
+        .update_human_gate_turn(&reserved_session, running_turn)
+        .expect("mark running");
+
+    // 已交付 candidate：真实 source store 落盘 + refs 轮换（合法中间/
+    // 交付 hash，允许不同于原授权 turn.source_hash）。
+    let delivered_source = format!("# SG6b delivered candidate {turn_label}\n\n## 交付正文\n");
+    let delivered_hash = hex::encode(Sha256::digest(delivered_source.as_bytes()));
+    let mut source = SourceRevisionRecord {
+        id: format!("source-sg6b-{turn_label}"),
+        source: delivered_source,
+        source_revision_hash: delivered_hash.clone(),
+        content_hash: String::new(),
+    };
+    source.content_hash = source.content_hash().expect("source content hash");
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let delivered_ref = source_store
+        .put_source_revision(&session.project_id, &session.issue_id, plan_id, &source)
+        .expect("persist delivered source");
+
+    let mut seeded = lifecycle
+        .get_workspace_session(&session.id)
+        .expect("reload for grant seed");
+    seeded.work_item_plan_source_revision_ref = Some(delivered_ref);
+    let state = seeded
+        .structural_governance_state
+        .get_or_insert_with(StructuralGovernanceState::default);
+    state.current_grant = Some(StructuralRevisionGrant {
+        grant_id: format!("structural_grant_{turn_id}"),
+        authorization_hash: "f".repeat(64),
+        turn_id: Some(turn_id.clone()),
+        command_id: Some(format!("cmd_sg6b_{turn_label}")),
+        candidate_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        phase: Some(phase),
+        attempt_no: 2,
+        prompt_ref: Some(format!("structural-prompt://{turn_id}")),
+        prompt_digest: Some("d".repeat(64)),
+        instruction_digest: Some("b".repeat(64)),
+        failing_source_hash: Some("a".repeat(64)),
+        review_identity: None,
+        granted_at: "2026-10-14T00:00:00Z".to_string(),
+    });
+    write_json(&session_path, &seeded).expect("persist structural phase fixture");
+    (turn_id, session_path, delivered_hash)
+}
+
+#[tokio::test]
+async fn sg_06b_reviewing_reconnect_neither_completes_nor_authors() {
+    use crate::product::models::workspace::StructuralGrantPhase;
+    use crate::product::models::{HumanGateTurnStatus, WorkspaceSessionRecord};
+    use crate::web::workspace_ws_types::{ArtifactPayload, ArtifactVersion};
+    use sha2::{Digest, Sha256};
+
+    let (_tmp, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_accepted_contract_drafts();
+    // 变体①（误 Failed 现场）：turn 原授权 hash ≠ 已交付 candidate hash。
+    let (turn_id, _session_path, _delivered_hash) = sg06b_structural_recovery_fixture(
+        &lifecycle,
+        &mut engine,
+        plan_id.as_str(),
+        StructuralGrantPhase::Reviewing,
+        "reviewing_drift",
+        &"a".repeat(64),
+    );
+    let session_id = engine.session().session_id.clone();
+    let before: WorkspaceSessionRecord = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session before recovery");
+    let ledger_before = before.provider_start_ledger.clone();
+    engine.session = super::WorkspaceSession::from_record(before.clone());
+
+    let actions = engine
+        .recover_human_gate_turns(false)
+        .expect("recovery must classify");
+    assert_eq!(
+        actions,
+        vec![(
+            turn_id.clone(),
+            HumanGateRecoveryAction::AwaitingStructuralClosure
+        )],
+        "Reviewing 重连不 Completed/不 author：verdict 面拥有收口，零写零 spawn"
+    );
+    let turn_after = lifecycle
+        .get_human_gate_turn(&session_id, &turn_id)
+        .expect("turn after recovery");
+    assert_eq!(turn_after.status, HumanGateTurnStatus::Running);
+    let after = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session after recovery");
+    assert_eq!(after, before, "Reviewing 恢复零 durable 写");
+    assert_eq!(after.provider_start_ledger, ledger_before);
+
+    // 变体②（误 Completed 现场）：turn 原授权 hash == 已交付 candidate
+    // hash + 晚于 turn 的 current artifact 版本——不得从 artifact 误
+    // Completed（verdict 面拥有收口）。
+    let (_tmp2, lifecycle2, plan2, mut engine2) =
+        super::make_work_item_plan_engine_with_accepted_contract_drafts();
+    let label = "reviewing_artifact";
+    let delivered_source = format!("# SG6b delivered candidate {label}\n\n## 交付正文\n");
+    let delivered_hash = hex::encode(Sha256::digest(delivered_source.as_bytes()));
+    let (turn2, _session_path2, _delivered2) = sg06b_structural_recovery_fixture(
+        &lifecycle2,
+        &mut engine2,
+        plan2.as_str(),
+        StructuralGrantPhase::Reviewing,
+        label,
+        &delivered_hash,
+    );
+    let session2 = engine2.session().session_id.clone();
+    lifecycle2
+        .save_artifact_versions(
+            &session2,
+            &[
+                ArtifactVersion {
+                    version: 1,
+                    payload: ArtifactPayload::Markdown {
+                        markdown: "# old\n".to_string(),
+                        diff: None,
+                    },
+                    generated_by: crate::product::models::ProviderName::Fake,
+                    reviewed_by: None,
+                    review_verdict: None,
+                    confirmed_by: None,
+                    is_current: false,
+                    created_at: "2026-10-13T00:00:00Z".to_string(),
+                    source_node_id: "node_sg6b_old".to_string(),
+                },
+                ArtifactVersion {
+                    version: 2,
+                    payload: ArtifactPayload::Markdown {
+                        markdown: delivered_source,
+                        diff: None,
+                    },
+                    generated_by: crate::product::models::ProviderName::Fake,
+                    reviewed_by: None,
+                    review_verdict: None,
+                    confirmed_by: None,
+                    is_current: true,
+                    created_at: "2026-10-14T01:00:00Z".to_string(),
+                    source_node_id: "node_sg6b_new".to_string(),
+                },
+            ],
+        )
+        .expect("persist artifact versions");
+    let before2: WorkspaceSessionRecord = lifecycle2
+        .get_workspace_session(&session2)
+        .expect("session before artifact recovery");
+    engine2.session = super::WorkspaceSession::from_record(before2.clone());
+    let actions2 = engine2
+        .recover_human_gate_turns(false)
+        .expect("recovery must classify");
+    assert_eq!(
+        actions2,
+        vec![(
+            turn2.clone(),
+            HumanGateRecoveryAction::AwaitingStructuralClosure
+        )],
+        "见 artifact 不误 Completed：Reviewing 的收口属于 verdict 面"
+    );
+    let turn2_after = lifecycle2
+        .get_human_gate_turn(&session2, &turn2)
+        .expect("turn after artifact recovery");
+    assert_eq!(turn2_after.status, HumanGateTurnStatus::Running);
+
+    // 判定面纯函数对照：provider 在跑（reviewer in-flight）→ WaitForProvider。
+    let reviewing_running = turn(HumanGateTurnStatus::Running, 1);
+    assert_eq!(
+        recover_human_gate_turn(&reviewing_running, true, false).expect("classify"),
+        HumanGateRecoveryAction::WaitForProvider
+    );
+}
+
+#[tokio::test]
+async fn sg_06b_recovery_blocked_by_lc_recovery_grant_phase_takes_priority() {
+    use crate::product::models::WorkspaceSessionRecord;
+    use crate::product::models::workspace::StructuralGrantPhase;
+
+    let (_tmp, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_accepted_contract_drafts();
+    // anchor 漂移现场：current refs 指向已交付 candidate（hash ≠ 原
+    // turn.source_hash）——若无优先级，source-drift 臂会误 Failed。
+    let (turn_id, _session_path, _delivered_hash) = sg06b_structural_recovery_fixture(
+        &lifecycle,
+        &mut engine,
+        plan_id.as_str(),
+        StructuralGrantPhase::BlockedByLcRecovery,
+        "lc_blocked_drift",
+        &"a".repeat(64),
+    );
+    let session_id = engine.session().session_id.clone();
+    let before: WorkspaceSessionRecord = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session before recovery");
+    engine.session = super::WorkspaceSession::from_record(before.clone());
+
+    let actions = engine
+        .recover_human_gate_turns(false)
+        .expect("recovery must classify");
+    assert_eq!(
+        actions,
+        vec![(
+            turn_id.clone(),
+            HumanGateRecoveryAction::BlockedByLcRecovery {
+                recovery_id: format!("structural_grant_{turn_id}")
+            }
+        )],
+        "BlockedByLcRecovery（grant phase）优先：不 resume/不 MarkFailed/零写"
+    );
+    let after = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session after recovery");
+    assert_eq!(after, before, "Blocked 优先级零 durable 写");
+}
+
+#[tokio::test]
+async fn sg_06b_cancelled_turn_hold_settles_nonstructural_failure_charge() {
+    use crate::product::models::workspace::StructuralGrantPhase;
+    use crate::product::models::{HumanGateTurnStatus, UserBudgetReceiptKind};
+
+    let (_tmp, lifecycle, plan_id, mut engine) =
+        super::make_work_item_plan_engine_with_accepted_contract_drafts();
+    let (turn_id, _session_path, _delivered_hash) = sg06b_structural_recovery_fixture(
+        &lifecycle,
+        &mut engine,
+        plan_id.as_str(),
+        StructuralGrantPhase::AuthorRunning,
+        "cancelled_settle",
+        &"a".repeat(64),
+    );
+    let session_id = engine.session().session_id.clone();
+    // cancel 臂生产点在 handler（fail_human_gate_turn(Cancelled)）；fixture
+    // 直写终态模拟「turn 已 Failed(cancelled) 而 hold 结算在崩溃窗内丢失」。
+    let expected = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session");
+    let mut cancelled = lifecycle
+        .get_human_gate_turn(&session_id, &turn_id)
+        .expect("turn");
+    cancelled.status = HumanGateTurnStatus::Failed;
+    cancelled.failure_class = Some(crate::product::models::HumanGateTurnFailureClass::Cancelled);
+    cancelled.updated_at = chrono::Utc::now().to_rfc3339();
+    lifecycle
+        .update_human_gate_turn(&expected, cancelled)
+        .expect("persist cancelled turn");
+    engine.session = {
+        let record = lifecycle
+            .get_workspace_session(&session_id)
+            .expect("reload");
+        super::WorkspaceSession::from_record(record)
+    };
+
+    let actions = engine
+        .recover_human_gate_turns(false)
+        .expect("recovery entry");
+    assert!(
+        actions.is_empty(),
+        "终态 turn 不进恢复分类（结算面单独收口），got {actions:?}"
+    );
+    let settled = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session after settlement");
+    let state = settled.structural_governance_state.as_ref().expect("state");
+    assert_eq!(
+        state
+            .user_receipts
+            .iter()
+            .filter(|receipt| receipt.turn_id == turn_id
+                && receipt.kind == UserBudgetReceiptKind::NonstructuralFailureCharge)
+            .count(),
+        1,
+        "REQ-CG-02：cancelled → nonstructural_failure_charge 恰一次"
+    );
+    assert_eq!(state.active_hold_count(), 0, "hold 已结算清空");
+    assert_eq!(
+        state.available_user_budget(),
+        2,
+        "非结构失败扣次不退：3 − 1 charge"
+    );
+    assert_eq!(
+        settled
+            .human_gate_snapshot
+            .as_ref()
+            .expect("snapshot")
+            .manual_repairs_remaining,
+        2,
+        "快照可用预算同 CAS 扣减"
+    );
+
+    // 幂等：二次恢复零二次结算。
+    let again = engine
+        .recover_human_gate_turns(false)
+        .expect("second recovery entry");
+    assert!(again.is_empty());
+    let settled_again = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session after second recovery");
+    assert_eq!(settled_again, settled, "幂等：零二次结算/零写");
+}

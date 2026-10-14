@@ -208,6 +208,78 @@ impl super::WorkspaceEngine {
         }
     }
 
+    /// SG6b（plan v1.1 Task SG6b / REQ-SG-05「显式 fresh 同 attempt
+    /// None-resume/子 prompt」）：claim 绑定的冻结机器指令子 prompt 的
+    /// 内容寻址持久化——session 分区 `structural-prompts/<digest>.json`
+    ///（幂等：同 digest 覆写同字节）。跨 spawn 的显式 fresh 重入据此读回
+    /// 冻结全文并以 grant.prompt_ref/prompt_digest 精确 join，不依赖
+    /// in-flight run 的内存携带。持久化失败上抛（claim 前调用方停等，
+    /// 不留无冻结证据的 claim）。
+    pub(crate) fn persist_frozen_structural_prompt(
+        paths: &crate::product::app_paths::ProductAppPaths,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+        frozen: &super::prompts::FrozenStructuralPrompt,
+    ) -> Result<(), String> {
+        let digest_hex = frozen
+            .prompt_digest
+            .trim_start_matches("sha256:")
+            .to_string();
+        if digest_hex.is_empty() {
+            return Err(
+                "STRUCTURAL_PROMPT_PERSIST_REJECTED: frozen prompt carries no digest".to_string(),
+            );
+        }
+        let dir = paths
+            .issue_lifecycle_root(project_id, issue_id)
+            .join("workspace-sessions")
+            .join(session_id)
+            .join("structural-prompts");
+        std::fs::create_dir_all(&dir).map_err(|error| format!("{error:?}"))?;
+        crate::product::json_store::write_json(&dir.join(format!("{digest_hex}.json")), frozen)
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    /// 上一函数的读回（内容寻址）；文件缺失/不可读/身份不符一律 Err（调用方
+    /// 以稳定码拒绝，0 start、预算不改写，不臆测冻结内容）。
+    pub(crate) fn load_frozen_structural_prompt(
+        paths: &crate::product::app_paths::ProductAppPaths,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+        prompt_ref: &str,
+    ) -> Result<super::prompts::FrozenStructuralPrompt, String> {
+        let digest_hex = prompt_ref
+            .trim_start_matches("structural-prompt://")
+            .to_string();
+        if digest_hex.is_empty() || digest_hex.len() != 64 {
+            return Err(format!(
+                "STRUCTURAL_REVISION_DELIVERY_PROMPT_IDENTITY_MISMATCH: frozen prompt ref {prompt_ref} is not a content-addressed identity"
+            ));
+        }
+        let path = paths
+            .issue_lifecycle_root(project_id, issue_id)
+            .join("workspace-sessions")
+            .join(session_id)
+            .join("structural-prompts")
+            .join(format!("{digest_hex}.json"));
+        let frozen: super::prompts::FrozenStructuralPrompt =
+        crate::product::json_store::read_json(&path).map_err(|error| {
+            format!(
+                "STRUCTURAL_REVISION_DELIVERY_CANDIDATE_DRIFTED: frozen prompt {prompt_ref} is not readable from the durable store ({error:?})"
+            )
+        })?;
+        let expected_ref = format!("structural-prompt://{digest_hex}");
+        if frozen.prompt_ref != expected_ref {
+            return Err(format!(
+                "STRUCTURAL_REVISION_DELIVERY_PROMPT_IDENTITY_MISMATCH: persisted frozen prompt carries ref {} but was addressed as {prompt_ref}",
+                frozen.prompt_ref
+            ));
+        }
+        Ok(frozen)
+    }
+
     /// B2d（Task 5.6，设计 §5.3 sc_manual_revision 行）：显式 fresh 的同
     /// turn prompt 重装——重读同 turn（feedback 全量）并对 candidate hash
     /// 复验（turn.source_hash 与当前候选 markdown 不一致＝业务漂移，稳定
@@ -215,7 +287,67 @@ impl super::WorkspaceEngine {
     /// 强行修订漂移后的候选；空 source_hash 的 legacy 记录不可判定，同码
     /// fail-closed）；复验通过仍走现完整 SC manual prompt 装配（原预算/
     /// transport 契约不变，零新持久化）。
+    ///
+    /// SG6b（REQ-SG-05「显式 fresh 同 attempt None-resume/子 prompt」）：
+    /// 活动 grant 绑定本 turn 且 phase=Attempt2Claimed 时，fresh 重入驱动
+    /// 的就是 claim 绑定的冻结机器指令子 prompt——从 durable 冻结件读回
+    /// 并以 grant 身份精确 join 后交付冻结全文（resume=None 由 fresh 输入
+    /// 组装结构保证），不得复造原反馈 prompt 覆盖当前 instruction
+    ///（REQ-CG-03 机器指令驱动）；身份/候选漂移＝稳定码拒绝（0 start、
+    /// 预算不改写）。其余形态（无 grant/未 claim/绑其它 turn 之外的合法
+    /// 相位）保持下方原 fresh 路径逐字段不变；绑定其它 turn 的活动 grant
+    /// fail-closed 拒绝（不跨授权窗口交付）。
     pub(crate) fn build_sc_manual_revision_prompt_for_fresh_turn(
+        &self,
+        turn: &crate::product::models::HumanGateTurn,
+    ) -> Result<String, String> {
+        use crate::product::models::workspace::StructuralGrantPhase;
+
+        // SG6b：结构授权窗口 join（先于任何组装/落账）。
+        let store = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let record = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        match record
+            .structural_governance_state
+            .as_ref()
+            .and_then(|state| state.current_grant.as_ref())
+        {
+            Some(grant) => {
+                match grant.turn_id.as_deref() {
+                    Some(grant_turn_id) if grant_turn_id == turn.turn_id => {}
+                    Some(grant_turn_id) => {
+                        return Err(format!(
+                            "STRUCTURAL_REVISION_DELIVERY_GRANT_TURN_MISMATCH: structural grant is bound to turn {grant_turn_id} but fresh re-entry carries turn {}; refusing to deliver a revision prompt across an unjoined grant",
+                            turn.turn_id
+                        ));
+                    }
+                    None => {
+                        return Err(
+                        "STRUCTURAL_REVISION_DELIVERY_GRANT_TURN_MISMATCH: active structural grant has no bound turn; refusing to deliver a revision prompt across an unjoined grant"
+                            .to_string(),
+                    );
+                    }
+                }
+                if grant.phase == Some(StructuralGrantPhase::Attempt2Claimed) {
+                    return self
+                        .deliver_claimed_frozen_prompt_for_fresh_recovery(&record, turn, grant);
+                }
+                // 其余相位（未 claim 的 AuthorRunning/Assessing/…/已收口终
+                // 态）无冻结子 prompt 通道——原 fresh 路径。
+            }
+            None => {
+                // 无结构授权窗口：原 fresh 分支（逐字段不变）。
+            }
+        }
+        self.build_sc_manual_revision_prompt_for_fresh_turn_original(turn)
+    }
+
+    /// SG6b：原 fresh 路径（SG6b 结构窗口分支拆出后逐字段保持）。
+    fn build_sc_manual_revision_prompt_for_fresh_turn_original(
         &self,
         turn: &crate::product::models::HumanGateTurn,
     ) -> Result<String, String> {
@@ -227,9 +359,9 @@ impl super::WorkspaceEngine {
         })?;
         if turn.source_hash.is_empty() {
             return Err(
-                "HUMAN_GATE_REVISION_CANDIDATE_DRIFTED: turn carries no candidate hash (legacy record); cannot re-assemble a fresh revision prompt"
-                    .to_string(),
-            );
+            "HUMAN_GATE_REVISION_CANDIDATE_DRIFTED: turn carries no candidate hash (legacy record); cannot re-assemble a fresh revision prompt"
+                .to_string(),
+        );
         }
         let current_hash = hex::encode(sha2::Sha256::digest(candidate_markdown.as_bytes()));
         if current_hash != turn.source_hash {
@@ -239,6 +371,104 @@ impl super::WorkspaceEngine {
             ));
         }
         self.build_sc_manual_revision_prompt_for_turn(&turn.feedback_text)
+    }
+
+    /// SG6b：Attempt2Claimed 窗口的显式 fresh 冻结子 prompt 交付——durable
+    /// 冻结件读回＋grant 身份/命令/失败候选证据全量 join（全部先于任何
+    /// turn CAS/组装落账，稳定码拒绝）。
+    fn deliver_claimed_frozen_prompt_for_fresh_recovery(
+        &self,
+        record: &crate::product::models::WorkspaceSessionRecord,
+        turn: &crate::product::models::HumanGateTurn,
+        grant: &crate::product::models::workspace::StructuralRevisionGrant,
+    ) -> Result<String, String> {
+        let (Some(prompt_ref), Some(prompt_digest)) = (
+            grant
+                .prompt_ref
+                .as_deref()
+                .filter(|value| !value.trim().is_empty()),
+            grant
+                .prompt_digest
+                .as_deref()
+                .filter(|value| !value.trim().is_empty()),
+        ) else {
+            return Err(format!(
+                "STRUCTURAL_REVISION_DELIVERY_PROMPT_IDENTITY_MISMATCH: claimed grant binds prompt ref {} / digest {}; the frozen sub-prompt identity is incomplete",
+                grant.prompt_ref.as_deref().unwrap_or("<missing>"),
+                grant.prompt_digest.as_deref().unwrap_or("<missing>"),
+            ));
+        };
+        if let Some(grant_command_id) = grant.command_id.as_deref()
+            && grant_command_id != turn.command_id
+        {
+            return Err(format!(
+                "STRUCTURAL_REVISION_DELIVERY_GRANT_TURN_MISMATCH: structural grant is bound to command {grant_command_id} but fresh re-entry carries command {}",
+                turn.command_id
+            ));
+        }
+        let store = self
+            .lifecycle_store
+            .as_ref()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        let frozen = Self::load_frozen_structural_prompt(
+            &store.app_paths(),
+            &record.project_id,
+            &record.issue_id,
+            &record.id,
+            prompt_ref,
+        )?;
+        // provider 预算 fail-closed（SG5.2 裁决同款）。
+        let budget = super::prompts::sc_provider_input_budget(&self.session.author_provider);
+        if let Err(rejection) = frozen.adjudicate_provider_budget(&budget) {
+            return Err(render_structural_prompt_rejection(&rejection));
+        }
+        if frozen.prompt_digest != prompt_digest {
+            return Err(format!(
+                "STRUCTURAL_REVISION_DELIVERY_PROMPT_IDENTITY_MISMATCH: grant binds prompt ref {prompt_ref} / digest {prompt_digest} but the persisted frozen prompt carries digest {}; refusing to deliver across an unbound prompt identity",
+                frozen.prompt_digest
+            ));
+        }
+        // claim 绑定的失败候选证据包含校验（SG5.3⑧4：候选逐字节包含不可
+        // 放松；fresh 恢复按 durable 证据对账，不读内存投影）。
+        if let Some(failed_hash) = grant
+            .failing_source_hash
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+                project_id: record.project_id.clone(),
+                issue_id: record.issue_id.clone(),
+                plan_id: record.entity_id.clone(),
+            };
+            let source_store =
+                crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
+                    store.app_paths(),
+                );
+            let evidence_ref = format!(
+                "project/{}/issue/{}/plan/{}/source_revision/source-{}",
+                record.project_id,
+                record.issue_id,
+                record.entity_id,
+                &failed_hash[..failed_hash.len().min(16)]
+            );
+            let evidence = source_store
+            .get_source_revision(&scope, &evidence_ref)
+            .map_err(|error| {
+                format!(
+                    "STRUCTURAL_REVISION_DELIVERY_CANDIDATE_DRIFTED: claimed failure candidate sha256:{failed_hash} evidence is unreadable ({error:?})"
+                )
+            })?;
+            if !frozen.full_prompt.contains(&evidence.source) {
+                return Err(format!(
+                    "STRUCTURAL_REVISION_DELIVERY_CANDIDATE_DRIFTED: frozen prompt no longer embeds the claimed failure candidate sha256:{failed_hash}"
+                ));
+            }
+        }
+        // 交付冻结全文：复用现完整组装/传输路径（无新 run kind）。
+        match self.assemble_sc_revision_delivery(&turn.command_id, frozen.full_prompt.clone()) {
+            Ok(delivered) => Ok(delivered),
+            Err((code, reason)) => Err(format!("{code}: {reason}")),
+        }
     }
 
     /// C2 Task 11（REQ-CG-03，#15）：SC 修订完整预算组装与交付（HumanGateTurn

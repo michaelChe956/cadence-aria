@@ -326,6 +326,41 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             .drive_review_session(provider_for_run.clone(), command_rx)
                             .await;
                     }
+                    // SG6b（REQ-CG-03:74 / SG6a.3⑥移交「帧时序」）：本
+                    // run 期间 grant 绑定 turn 由 Running 收口为 Completed
+                    //（verdict 面）时，在此发送 human_gate_turn_completed
+                    // 回呈同代候选——迟到/重复 verdict（turn 已 Completed
+                    // 进入本 run 前）不重复发帧。
+                    if let Ok(record) = LifecycleStore::new(run_context_clone.app_paths.clone())
+                        .get_workspace_session(&engine.session().session_id)
+                    {
+                        let closed_turn = record
+                            .structural_governance_state
+                            .as_ref()
+                            .and_then(|state| state.current_grant.as_ref())
+                            .and_then(|grant| grant.turn_id.clone())
+                            .and_then(|turn_id| {
+                                LifecycleStore::new(run_context_clone.app_paths.clone())
+                                    .get_human_gate_turn(&record.id, &turn_id)
+                                    .ok()
+                                    .filter(|turn| {
+                                        turn.status
+                                            == crate::product::models::HumanGateTurnStatus::Completed
+                                    })
+                                    .filter(|turn| turn.result_artifact_ref.is_some())
+                                    .map(|turn| (turn_id, turn.result_artifact_ref))
+                            });
+                        if let Some((turn_id, Some(artifact_ref))) = closed_turn {
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::HumanGateTurnCompleted {
+                                    turn_id,
+                                    artifact_ref,
+                                },
+                            )
+                            .await;
+                        }
+                    }
                 }
                 ProviderRunKind::WorkItemPlanLegacyAuthor
                 | ProviderRunKind::WorkItemPlanOutlineRevision { .. }
@@ -1093,7 +1128,7 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             })
                     })
                     .unwrap_or(true);
-                    if structural_claim_pending {
+                    if structural_claim_pending && !manual_fresh_recovery {
                         engine.mark_active_run_finished(&run_label);
                         drop(engine);
                         drop(provider_drive_guard.take());
@@ -1401,10 +1436,26 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                         .await
                     {
                         Ok(crate::product::workspace_engine::ScManualRevisionResult::Accepted { artifact_ref }) => {
-                            let _ = send_json_outbound(
-                                &outbound_tx_for_task,
-                                &WsOutMessage::HumanGateTurnCompleted { turn_id: turn_id.clone(), artifact_ref },
-                            ).await;
+                            // SG6b（REQ-CG-03:74 / SG6a.3⑥移交「帧时序」）：
+                            // human_gate_turn_completed 只在 turn durable
+                            // Completed（synthetic 收口）后回呈；有 reviewer
+                            // 分支 turn 仍 Running（verdict 面收口），帧由
+                            // ReviewOnly 臂在 verdict 收口后发送。
+                            let turn_closed = LifecycleStore::new(
+                                run_context_clone.app_paths.clone(),
+                            )
+                            .get_human_gate_turn(&engine.session().session_id, &turn_id)
+                            .map(|turn| {
+                                turn.status
+                                    == crate::product::models::HumanGateTurnStatus::Completed
+                            })
+                            .unwrap_or(false);
+                            if turn_closed {
+                                let _ = send_json_outbound(
+                                    &outbound_tx_for_task,
+                                    &WsOutMessage::HumanGateTurnCompleted { turn_id: turn_id.clone(), artifact_ref },
+                                ).await;
+                            }
                             break;
                         }
                         Ok(crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected { diagnostics, claim }) => {

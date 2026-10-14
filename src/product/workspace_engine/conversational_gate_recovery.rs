@@ -248,6 +248,45 @@ impl super::WorkspaceEngine {
         let turns = store
             .list_human_gate_turns(&self.session.session_id)
             .map_err(|error| error.to_string())?;
+        // SG6b（SG6a.3⑧2 移交 / REQ-CG-02）：cancel 臂 hold 结算——
+        // Failed(cancelled) turn 的活动 hold 以 nonstructural_failure_charge
+        // 收口（非结构失败扣次不退），幂等恰一次；结算失败按 durable 证据
+        // 上浮（不伪结算）。cancel 臂生产点在 handler
+        // （fail_human_gate_turn(Cancelled)），此处是崩溃窗对账面。
+        for turn in turns.iter().filter(|turn| {
+            turn.status == HumanGateTurnStatus::Failed
+                && turn.failure_class == Some(HumanGateTurnFailureClass::Cancelled)
+        }) {
+            let hold_active = expected
+                .structural_governance_state
+                .as_ref()
+                .is_some_and(|state| {
+                    state
+                        .user_holds
+                        .iter()
+                        .any(|hold| hold.turn_id == turn.turn_id)
+                });
+            if !hold_active {
+                continue;
+            }
+            let receipt = crate::product::models::UserBudgetReceipt {
+                kind: crate::product::models::UserBudgetReceiptKind::NonstructuralFailureCharge,
+                turn_id: turn.turn_id.clone(),
+                command_id: turn.command_id.clone(),
+                attempt_reason: Some(
+                    crate::product::models::StructuralAttemptReason::HumanRevision,
+                ),
+                source_revision_ref: None,
+                plan_candidate_ir_ref: None,
+                structure_report_ref: None,
+                context_digest: None,
+                reason: Some("provider_run_cancelled".to_string()),
+                settled_at: Utc::now().to_rfc3339(),
+            };
+            expected = store
+                .settle_structural_user_budget(&expected, &turn.turn_id, receipt)
+                .map_err(|error| error.to_string())?;
+        }
         let blocked_sc_manual = blocked_sc_manual_turn(expected.lc_resume_recovery.as_ref());
         let mut actions = Vec::new();
         for turn in turns {
@@ -256,6 +295,50 @@ impl super::WorkspaceEngine {
                 HumanGateTurnStatus::Reserved | HumanGateTurnStatus::Running
             ) {
                 continue;
+            }
+            // SG6b（REQ-CG-05 恢复分域 / Interfaces「recovery 按 phase 及
+            // 原授权 hash/current 合法 hash 分域」）：活动 grant 绑定本
+            // turn 的相位先于一切通用车道——
+            // - BlockedByLcRecovery 优先：anchor 等待窗不 resume/不
+            //   MarkFailed/不 artifact-complete（零写零 spawn）；
+            // - Reviewing：交付候选 hash ≠ 原授权 hash 是合法形态，收口
+            //   属 verdict 面——不误 Failed（source-drift）、不误
+            //   Completed（artifact）、不 author。
+            let bound_grant_phase = expected
+                .structural_governance_state
+                .as_ref()
+                .and_then(|state| state.current_grant.as_ref())
+                .filter(|grant| grant.turn_id.as_deref() == Some(turn.turn_id.as_str()))
+                .and_then(|grant| grant.phase);
+            match bound_grant_phase {
+                Some(
+                    crate::product::models::workspace::StructuralGrantPhase::BlockedByLcRecovery,
+                ) => {
+                    let recovery_id = expected
+                        .lc_resume_recovery
+                        .as_ref()
+                        .filter(|recovery| {
+                            recovery.state
+                                != crate::product::models::LcResumeRecoveryState::Resolved
+                        })
+                        .map(|recovery| recovery.recovery_id.clone())
+                        .unwrap_or_else(|| format!("structural_grant_{}", turn.turn_id));
+                    actions.push((
+                        turn.turn_id,
+                        HumanGateRecoveryAction::BlockedByLcRecovery { recovery_id },
+                    ));
+                    continue;
+                }
+                Some(crate::product::models::workspace::StructuralGrantPhase::Reviewing) => {
+                    let action = if provider_is_running {
+                        HumanGateRecoveryAction::WaitForProvider
+                    } else {
+                        HumanGateRecoveryAction::AwaitingStructuralClosure
+                    };
+                    actions.push((turn.turn_id, action));
+                    continue;
+                }
+                _ => {}
             }
             if let Some((blocked_turn_id, recovery_id)) = &blocked_sc_manual
                 && blocked_turn_id == &turn.turn_id

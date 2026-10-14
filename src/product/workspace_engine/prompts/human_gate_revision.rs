@@ -295,7 +295,7 @@ use std::collections::BTreeMap;
 /// 现传输描述（复用 `ScCandidateTransport`）。纯数据：不启动 provider、
 /// 不做 turn CAS、不产生 hold/start。
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FrozenStructuralPrompt {
     /// 完整 prompt 全文（唯一内容源：inline/分块交付都逐字节取自此串，
     /// 不 summary、不 truncate、不以「模型可自行读取本地路径」当运输）。

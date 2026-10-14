@@ -189,10 +189,7 @@ pub(super) fn single_candidate_review_cycle(
                 .ok_or_else(|| {
                     "active plan candidate is unavailable for SingleCandidate review".to_string()
                 })?;
-            let cycle_key = format!(
-                "sc:candidate:{}",
-                candidate_revision_hash_segment(ir_ref)
-            );
+            let cycle_key = format!("sc:candidate:{}", candidate_revision_hash_segment(ir_ref));
             // r37 根修:终态 action(EnterHumanGate 等)已关闭 durable scope,
             // 同一候选(人工修订原样复写→源哈希不变→同 key)再进评审时,与
             // Some(Initial{R}) 臂同规——该 key cycle 的初评已计数则判
@@ -416,11 +413,7 @@ impl WorkspaceEngine {
                             }],
                         })
                     })?;
-                let original_fingerprints = self
-                    .session
-                    .run_history
-                    .seen_fingerprints
-                    .clone();
+                let original_fingerprints = self.session.run_history.seen_fingerprints.clone();
                 ReviewInvocationScope::verification(
                     original_fingerprints,
                     repaired_revision_id,

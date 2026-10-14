@@ -210,8 +210,9 @@ async fn conversational_gate_revision_completed_turn_stale_evaluate_reconnect_ne
         crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
     ));
 
-    // 现场死锁残留形态:phase=Evaluate + completed turn + reservation。
-    // 重连恢复必须零 provider 重启(completed turn 是终态),session 保持可重试。
+    // On-site deadlock residue form: phase=Evaluate + reviewer in-flight turn + reservation.
+    // SG6b (REQ-CG-03:74 turn remains Running/gate_busy until verdict closure): after legal delivery the turn is not
+    // early-terminalized; the reconnect recovery plane waits for verdict closure (zero writes/zero spawn), the session remains retryable.
     let record = lifecycle
         .get_workspace_session(engine.session().session_id.as_str())
         .expect("stale durable session");
@@ -234,10 +235,15 @@ async fn conversational_gate_revision_completed_turn_stale_evaluate_reconnect_ne
     let actions = recovered
         .recover_human_gate_turns(false)
         .expect("recover human gate turns");
-    assert!(
-        actions.is_empty(),
-        "a completed turn must not resume or restart a provider: {actions:?}"
+    assert_eq!(
+        actions,
+        vec![(
+            turn_id.clone(),
+            crate::product::workspace_engine::HumanGateRecoveryAction::AwaitingStructuralClosure
+        )],
+        "SG6b: turn in Reviewing phase awaits verdict closure on reconnect (zero writes/zero spawn, no resume/restart)"
     );
+    // (Old assertion: completed turn is terminal state, recovery is empty — SG6a.3's early-terminalization deviation; migrated per REQ-CG-03:74.)
     let after = lifecycle
         .get_workspace_session(engine.session().session_id.as_str())
         .expect("durable session after recovery");

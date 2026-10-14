@@ -306,27 +306,33 @@ impl super::WorkspaceEngine {
                             .await;
                     }
                 }
-                // 终态写与 grant 终态化（断点幂等：已终态零写）。
-                {
-                    let expected = lifecycle
-                        .get_workspace_session(&self.session.session_id)
-                        .map_err(|error| error.to_string())?;
-                    let mut completed_turn = lifecycle
-                        .get_human_gate_turn(&self.session.session_id, turn_id)
-                        .map_err(|error| error.to_string())?;
-                    if completed_turn.status
-                        != crate::product::models::HumanGateTurnStatus::Completed
-                    {
-                        completed_turn.status =
-                            crate::product::models::HumanGateTurnStatus::Completed;
-                        completed_turn.failure_class = None;
-                        completed_turn.updated_at = chrono::Utc::now().to_rfc3339();
-                        lifecycle
-                            .update_human_gate_turn(&expected, completed_turn)
-                            .map_err(|error| error.to_string())?;
-                    }
-                }
+                // 终态写与 grant 终态化（断点幂等：已终态零写）。SG6b
+                //（REQ-CG-03:74 / SG6a.3⑧1 移交）：verdict 面时序——
+                // synthetic 收口（无 reviewer）在本驱动面同步终态化
+                // turn+grant；有 reviewer 分支 turn 保持 Running/gate_busy
+                // 至原 reviewer verdict 收口（complete_review 面：
+                // turn Completed + grant Resolved finalize），此处不再
+                // 提前终态化。
                 if review_closed_synchronously {
+                    {
+                        let expected = lifecycle
+                            .get_workspace_session(&self.session.session_id)
+                            .map_err(|error| error.to_string())?;
+                        let mut completed_turn = lifecycle
+                            .get_human_gate_turn(&self.session.session_id, turn_id)
+                            .map_err(|error| error.to_string())?;
+                        if completed_turn.status
+                            != crate::product::models::HumanGateTurnStatus::Completed
+                        {
+                            completed_turn.status =
+                                crate::product::models::HumanGateTurnStatus::Completed;
+                            completed_turn.failure_class = None;
+                            completed_turn.updated_at = chrono::Utc::now().to_rfc3339();
+                            lifecycle
+                                .update_human_gate_turn(&expected, completed_turn)
+                                .map_err(|error| error.to_string())?;
+                        }
+                    }
                     let expected = lifecycle
                         .get_workspace_session(&self.session.session_id)
                         .map_err(|error| error.to_string())?;
@@ -443,6 +449,21 @@ impl super::WorkspaceEngine {
                                             provider_start_key,
                                         },
                                     ) => {
+                                        // SG6b（REQ-SG-05「显式 fresh 同
+                                        // attempt None-resume/子 prompt」）：
+                                        // claim 成功即把冻结件内容寻址持久
+                                        // 化——跨 spawn 的显式 fresh 重入据此
+                                        // 读回交付，不依赖 in-flight run 的
+                                        // 内存携带；持久化失败上抛（claim
+                                        // 事实已落，冻结证据缺席时 fresh
+                                        // join 会稳定码拒绝，0 start）。
+                                        Self::persist_frozen_structural_prompt(
+                                            &lifecycle.app_paths(),
+                                            &self.session.project_id,
+                                            &self.session.issue_id,
+                                            &self.session.session_id,
+                                            &frozen,
+                                        )?;
                                         diagnostics.push(format!(
                                             "STRUCTURAL_ATTEMPT_CLAIMED: attempt {attempt_no} binds frozen prompt {prompt_ref} on the same turn"
                                         ));
@@ -738,7 +759,7 @@ fn sc_revision_digest_json<T: serde::Serialize>(value: &T) -> String {
 /// 为 `finalize_structural_revision_grant`（Completed→Resolved）的
 /// review 证据与 checkpoint `review_scope` 回填值（与
 /// `structural_checkpoint_id` 同代身份域，不另立第二候选权威）。
-fn sc_revision_review_scope_digest(
+pub(crate) fn sc_revision_review_scope_digest(
     source_revision_ref: &str,
     plan_candidate_ir_ref: &str,
     structure_report_ref: &str,
