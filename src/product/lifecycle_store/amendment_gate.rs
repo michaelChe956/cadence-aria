@@ -17,7 +17,11 @@ impl super::LifecycleStore {
         &self,
         expected: &WorkspaceSessionRecord,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
-        validate_amendment_gate_record(expected, "human_gate_amendment_reopen")?;
+        validate_amendment_gate_record(
+            expected,
+            "human_gate_amendment_reopen",
+            &[SingleCandidatePhase::Completed],
+        )?;
         if expected.status != WorkspaceSessionStatus::Confirmed {
             return Err(ProductStoreError::Conflict {
                 kind: "human_gate_amendment_reopen",
@@ -56,16 +60,29 @@ impl super::LifecycleStore {
     }
 
     /// Close a reopened amendment gate back to its post-approval terminal
-    /// status after the amendment was applied (or cancelled). Only accepts the
+    /// status after the amendment was applied (or cancelled). Accepts the
     /// reopen signature (WaitingForHuman + phase Completed + retained gate
-    /// snapshot); the initial-approval gate (phase Approval) never flows
-    /// through here. Callers must ensure no non-terminal human gate turn is
+    /// snapshot) and, since SG6（REQ-CG-03:74 verdict 收口）, the closure-
+    /// rebuilt Approval signature（WaitingForHuman + phase Approval + retained
+    /// snapshot）——合法修订交付后 turn 由原 reviewer/synthetic Pass 收口，
+    /// 收口 verdict 经 Evaluate 路由重建 Approval 门，重开门在 resume 时
+    /// 以该签名等待关回。The initial-approval gate never flows through here:
+    /// the sole production caller reaches close only from a lineage-verified,
+    /// just-Applied `PlanAmendmentContext` resume bound to this exact plan
+    /// session. Callers must ensure no non-terminal human gate turn is
     /// in flight before closing.
     pub fn compare_and_close_reopened_amendment_gate(
         &self,
         expected: &WorkspaceSessionRecord,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
-        validate_amendment_gate_record(expected, "human_gate_amendment_close")?;
+        validate_amendment_gate_record(
+            expected,
+            "human_gate_amendment_close",
+            &[
+                SingleCandidatePhase::Completed,
+                SingleCandidatePhase::Approval,
+            ],
+        )?;
         if expected.status != WorkspaceSessionStatus::WaitingForHuman {
             return Err(ProductStoreError::Conflict {
                 kind: "human_gate_amendment_close",
@@ -107,11 +124,15 @@ impl super::LifecycleStore {
 fn validate_amendment_gate_record(
     record: &WorkspaceSessionRecord,
     kind: &'static str,
+    accepted_phases: &[SingleCandidatePhase],
 ) -> Result<(), ProductStoreError> {
     validate_relative_id(&record.id)?;
     if record.workspace_type != WorkspaceType::WorkItemPlan
         || record.flow_kind != WorkItemPlanFlowKind::SingleCandidate
-        || record.single_candidate_phase != Some(SingleCandidatePhase::Completed)
+        || !record
+            .single_candidate_phase
+            .as_ref()
+            .is_some_and(|phase| accepted_phases.contains(phase))
         || record.human_gate_snapshot.is_none()
     {
         return Err(ProductStoreError::Conflict {
