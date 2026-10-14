@@ -19,9 +19,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::super::support::*;
 use super::super::*;
 use crate::product::advance_store::{
-    AdvanceInput, AdvanceOutcome, AdvanceStatus, AdvanceTargetAttemptBinding,
+    AdvanceInitializationPhase, AdvanceInput, AdvanceOutcome, AdvanceStatus, AdvanceStore,
+    AdvanceTargetAttemptBinding,
 };
-use crate::product::coding_attempt_store::AuthoritativeCodingUnitBinding;
+use crate::product::coding_attempt_store::{
+    AuthoritativeCodingUnitBinding, CodingGroupInitializationPhase,
+};
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionUnit, CodingExecutionUnitStatus, CodingStartOrigin,
     CodingStartPhase,
@@ -37,9 +40,11 @@ use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::automation::OperationState;
 use crate::web::advance_plan::{AdvancePlanOrigin, advance_plan};
 use crate::web::coding_start::{StartCodingCommand, StartCodingOutcome, start_coding_once};
+use crate::web::state::CodingAttemptRunKey;
 use crate::web::types::{
     PlanCodingProgressDto, PlanCodingStartRequest, PlanCodingStartResultDto, PlanCodingTargetDto,
-    PlanCodingUnitProgressDto,
+    PlanCodingUnitProgressDto, PlanCodingWorkspaceDeletionQuery,
+    PlanCodingWorkspaceDeletionResultDto, PlanWorkspaceLifecycleDto,
 };
 
 /// POST 推进结果分类：区分“本次新冻结的首启回执 / 无 ready 等待 / 已有
@@ -81,6 +86,18 @@ pub async fn post_plan_coding_start(
     let group_lock_key = format!("work_item_group:{project_id}:{issue_id}:{plan_id}");
     let _group_guard = state.coding_runs.lock_named(&group_lock_key).await;
 
+    // H4（设计 A 状态表/C 节）：开始动作先收敛半残执行轮——clearing 在案以
+    // `clearing.command_id` 身份续清（H2a 语义：同 command 续清/异 command 拒，
+    // 开始入口是钩子中断态的可达续清出口）；零成员且旧执行引用已证断裂
+    // （旧 Ready/journal 指向已亡全集）则走 H2a 零成员闭包完整重置后正常
+    // 新建；正常初始化前缀与有成员现场零动作（N2/prepare 权威语义不变）。
+    converge_stale_plan_coding_round(
+        &app_paths,
+        &project_id,
+        &issue_id,
+        &plan_id,
+        &request.command_id,
+    )?;
     let run_store = CodingPlanRunStore::new(app_paths.clone());
     let run = run_store
         .prepare(
@@ -169,6 +186,430 @@ pub async fn get_plan_coding_progress(
         build_plan_coding_progress(&app_paths, &project_id, &issue_id, &plan_id, run.as_ref())
             .map_err(product_store_api_error)?;
     Ok(Json(progress))
+}
+
+/// H4（设计 2026-10-14 C/D 节）：plan-scoped 一键整组删除——服务端一个受
+/// 保护操作（非浏览器四次单删），范围权威是服务端按 `(project,issue,plan)`
+/// 枚举的真实 group attempts，不收前端 attempt ID 列表。
+///
+/// 顺序：删除准入（Plan 真删除互斥，闭包 own 本清理）→ 组串行键 →
+/// clearing 在案以 `clearing.command_id` 身份续清（删除动作是中断态的产品
+/// 续清出口；pending 冻结清单即本次回执 deleted 集）→ 同 command 回执
+/// 幂等重放（Replayed，不扫下一代刚创建的 attempts）→ 服务端分类确认
+/// （无对象无残留零弹窗；浅/强恰一次 409 `deletion_confirmation_required`，
+/// 文案权威）→ `expected_generation` 互证（≠当前 409，零写，晚到删除不删
+/// 新轮）→ 逐成员复用 N7 清理（abort runner→mutation lease→Git 终止协调→
+/// worktree 锁释放→workspace/handoff 清理→delete_attempt→N7 run 失效→
+/// 锁残留）→ H2a 零成员闭包收口（本 command 记纯 ID 回执：generation 单调
+/// +1、退役围栏、run/advance/journal/专属资源清，保留 Plan/WI/revisions）。
+pub async fn delete_plan_coding_workspaces(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id, plan_id)): Path<(String, String, String)>,
+    Query(query): Query<PlanCodingWorkspaceDeletionQuery>,
+) -> ApiResult<Json<PlanCodingWorkspaceDeletionResultDto>> {
+    for id in [
+        project_id.as_str(),
+        issue_id.as_str(),
+        plan_id.as_str(),
+        query.command_id.as_str(),
+    ] {
+        validate_relative_id(id).map_err(|error| {
+            ApiError::validation(
+                "plan_coding_workspace_delete_invalid_id",
+                format!("invalid plan coding workspace delete id: {error}"),
+            )
+        })?;
+    }
+    let app_paths = product_app_paths(&state);
+    plan_live_admission(&app_paths, &project_id, &issue_id, &plan_id)
+        .map_err(product_store_api_error)?;
+
+    // 与 POST/组创建同一进程内串行键，避免并写 group attempt 初始化。
+    let group_lock_key = format!("work_item_group:{project_id}:{issue_id}:{plan_id}");
+    let _group_guard = state.coding_runs.lock_named(&group_lock_key).await;
+
+    let run_store = CodingPlanRunStore::new(app_paths.clone());
+    let lifecycle = run_store
+        .get_workspace_lifecycle(&project_id, &issue_id, &plan_id)
+        .map_err(product_store_api_error)?;
+    let mut operation_state = "accepted";
+    let mut deleted_attempt_ids: Vec<String> = Vec::new();
+    if let Some(clearing) = lifecycle
+        .as_ref()
+        .and_then(|metadata| metadata.clearing.as_ref())
+    {
+        // 清理中断重入：同一删除动作续清（H2a：同 command 续清/异 command 拒
+        // ——此处按记录身份 `clearing.command_id` 续清，幂等 missing=OK）。
+        deleted_attempt_ids = clearing.pending_attempt_ids.clone();
+        close_plan_coding_workspace_round(
+            &app_paths,
+            &project_id,
+            &issue_id,
+            &plan_id,
+            &clearing.command_id,
+            None,
+            false,
+        )?;
+    } else if lifecycle.as_ref().is_some_and(|metadata| {
+        metadata
+            .receipts
+            .iter()
+            .any(|receipt| receipt.command_id == query.command_id)
+    }) {
+        // 同 command 已完整删除过的幂等重放：不再次清、不扫下一代 attempts。
+        operation_state = "replayed";
+    } else {
+        let coding_store = CodingAttemptStore::new(app_paths.clone());
+        let members = coding_store
+            .list_attempts_for_plan(&project_id, &issue_id, &plan_id)
+            .map_err(product_store_api_error)?;
+        let run = run_store
+            .get(&project_id, &issue_id, &plan_id)
+            .map_err(product_store_api_error)?;
+        let references = AdvanceStore::new(app_paths.clone())
+            .plan_execution_references(&project_id, &issue_id, &plan_id)
+            .map_err(product_store_api_error)?;
+        let journals = coding_store
+            .list_group_initialization_journals_for_plan(&project_id, &issue_id, &plan_id)
+            .map_err(product_store_api_error)?;
+        let residue = run.is_some()
+            || !references.records.is_empty()
+            || references.initialization_journal.is_some()
+            || !journals.is_empty();
+        if !members.is_empty() || residue {
+            // 互证先行（零写拒绝）：confirmed=true 不是跨 generation 授权。
+            let current_generation = lifecycle.as_ref().map_or(1, |metadata| metadata.generation);
+            if query
+                .expected_generation
+                .is_some_and(|generation| generation != current_generation)
+            {
+                return Err(ApiError::runtime(
+                    "coding_plan_workspace_generation_conflict",
+                    "coding workspace 轮次已切换，本次删除未执行；请刷新后按当前状态操作",
+                    json!({ "plan_id": plan_id }),
+                ));
+            }
+            if query.confirmed != Some(true) {
+                return Err(plan_coding_deletion_confirmation_required(
+                    &plan_id,
+                    &members,
+                    run.as_ref(),
+                ));
+            }
+            // 逐成员复用 N7 清理（服务端一个操作内完成，非浏览器四次单删）。
+            for attempt in members {
+                let attempt_id = attempt.id.clone();
+                teardown_plan_coding_member(&state, &app_paths, attempt).await?;
+                deleted_attempt_ids.push(attempt_id);
+            }
+            // H2a 零成员闭包收口：本 command 记回执（同 command 重试 Replayed）。
+            close_plan_coding_workspace_round(
+                &app_paths,
+                &project_id,
+                &issue_id,
+                &plan_id,
+                &query.command_id,
+                None,
+                false,
+            )?;
+        }
+        // members 空 && 无残留：幂等成功，零弹窗零变更（Clean）。
+    }
+    deleted_attempt_ids.sort();
+    deleted_attempt_ids.dedup();
+    let run = run_store
+        .get(&project_id, &issue_id, &plan_id)
+        .map_err(product_store_api_error)?;
+    let workspace_lifecycle = plan_workspace_lifecycle_projection(
+        &app_paths,
+        &project_id,
+        &issue_id,
+        &plan_id,
+        run.as_ref(),
+    )
+    .map_err(product_store_api_error)?;
+    let generation = workspace_lifecycle.generation;
+    let remaining_attempt_ids = Vec::new();
+    Ok(Json(PlanCodingWorkspaceDeletionResultDto {
+        plan_id,
+        command_id: query.command_id,
+        operation_state: operation_state.to_string(),
+        generation,
+        deleted_attempt_ids,
+        remaining_attempt_ids,
+        workspace_lifecycle,
+    }))
+}
+
+/// 服务端三分类（设计 C 节确认分级）→ 稳定 409 `deletion_confirmation_required`
+///（复用 D2.3 已铺面）：message 为浅/强分级文案权威（前端恰一次 window.confirm
+/// 消费）；强=任一成员已开始执行（status≠Created/有 start claim）或 run 已冻结
+/// 首启事实（selection/start_outcome）；浅=整组 Created 零执行内容或仅无成员
+/// 技术残留；无对象无残留不弹窗（幂等成功）。
+fn plan_coding_deletion_confirmation_required(
+    plan_id: &str,
+    members: &[crate::product::coding_models::CodingExecutionAttempt],
+    run: Option<&CodingPlanRun>,
+) -> ApiError {
+    let strong = members.iter().any(|attempt| {
+        attempt.status != CodingAttemptStatus::Created || attempt.start_claim.is_some()
+    }) || run
+        .is_some_and(|run| run.selection.is_some() || run.start_outcome.is_some());
+    let (level, message) = if members.is_empty() {
+        (
+            "shallow",
+            "本计划 Coding 工作区已删除完毕，仍存在残留执行引用：本次操作将清理残留并重置执行轮，保留计划与工作项。"
+                .to_string(),
+        )
+    } else if strong {
+        (
+            "strong",
+            format!(
+                "将终止并删除本计划全部 {} 个 Coding 工作区：运行中的 Coding 会先终止；日志、测试与 worktree 内容不可恢复；计划与工作项保留。",
+                members.len()
+            ),
+        )
+    } else {
+        (
+            "shallow",
+            format!(
+                "将删除本计划 {} 个 Coding 初始化工作区：仅删除 Coding 工作区与初始化内容，保留计划与工作项。",
+                members.len()
+            ),
+        )
+    };
+    ApiError::runtime(
+        "deletion_confirmation_required",
+        message,
+        json!({
+            "level": level,
+            "member_count": members.len(),
+            "plan_id": plan_id,
+        }),
+    )
+}
+
+/// 组删单成员清理：复用单删端点（N7）的同一清理链——abort runner→mutation
+/// lease→Git 终止协调→组初始化 arbitration→worktree 锁释放（含 owner 幂等
+/// 释放）→workspace/branch 清理→handoff revision 清理→`delete_attempt`→
+/// N7 run 失效→锁残留。与 `finalize_coding_attempt_deletion` 的差别：不接
+/// 最后成员钩子（闭包由本编排以 DELETE command 收口，回执/续清按本 command
+/// 幂等），仓维/issue 维 shared worktree 清理并入 H2a 闭包的 manifest 清理。
+#[allow(clippy::too_many_arguments)]
+async fn teardown_plan_coding_member(
+    state: &WebAppState,
+    app_paths: &ProductAppPaths,
+    attempt: crate::product::coding_models::CodingExecutionAttempt,
+) -> ApiResult<()> {
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+    state.coding_runs.abort_attempt(&attempt_key).await;
+    let _mutation_lease = state.coding_runs.lock_attempt_mutation(&attempt_key).await;
+    let attempt = coding_store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
+    let attempt = coding_workspace_engine_with_dummy_events(coding_store.clone())
+        .reconcile_coding_git_operation_for_termination(&attempt)
+        .await
+        .map_err(coding_workspace_api_error)?;
+    let _group_initialization_guard = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup)
+    {
+        Some(
+            coding_store
+                .acquire_group_initialization_arbitration_async(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                )
+                .await
+                .map_err(product_store_api_error)?,
+        )
+    } else {
+        None
+    };
+    let active_work_item_id = attempt
+        .current_work_item_id
+        .as_deref()
+        .unwrap_or(&attempt.work_item_id);
+    let repository = super::resolve_attempt_repository(app_paths, &attempt)?;
+    if let Ok(Some(shared)) =
+        lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        && shared.current_active_work_item_id.as_deref() == Some(active_work_item_id)
+    {
+        coding_workspace_engine_with_dummy_events(coding_store.clone())
+            .handle_delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .await
+            .map_err(coding_workspace_api_error)?;
+    } else if let Ok(Some(shared)) =
+        lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+        && shared.current_lock_owner_id.as_deref() == Some(attempt.id.as_str())
+    {
+        let _ = lifecycle.release_issue_worktree_lock_by_owner(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        );
+    }
+    cleanup_coding_attempt_workspace(&repository, &attempt).await?;
+    super::cleanup_attempt_handoff_revisions(app_paths, &coding_store, &attempt)
+        .map_err(product_store_api_error)?;
+    let attempt_work_item_ids = collect_attempt_work_item_ids(&coding_store, &attempt);
+    coding_store
+        .delete_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
+    // N7：成员删除即整 run 失效（部分删除现场不得再被旧授权首启/收养）。
+    CodingPlanRunStore::new(app_paths.clone())
+        .invalidate_for_deleted_attempt(&attempt)
+        .map_err(product_store_api_error)?;
+    purge_coding_attempt_lock_residue(app_paths, &attempt, &attempt_work_item_ids);
+    Ok(())
+}
+
+/// H4（设计 A 状态表/C 节）：开始动作的半残现场收敛——只在 Plan 准入＋组
+/// 串行键内做（检测、耐久 clearing、重新准入是同一受保护操作）：
+///
+/// - clearing 在案：以 `clearing.command_id` 身份续清（H2a 硬约束：同 command
+///   续清/异 command 拒），完成后按请求正常新建；
+/// - 零成员且旧执行引用已证断裂：H2a 零成员闭包完整重置（`require_broken_
+///   proof=true`，正常初始化前缀不重置），回执记在请求 command 下（同
+///   command 重试返回/续做这一次操作，不再次清新轮）；
+/// - 同 command 承接（设计 C 行135）：现场若恰有请求 command 的空 Prepared
+///   前缀 run（无 claim/provider 事实），先清该前缀再闭包，避免闭包退役
+///   请求 command 后同动作自拒；原已 Started/Invalidated run 一律退役；
+/// - 有成员现场零动作（N2/prepare 权威语义不变）。
+fn converge_stale_plan_coding_round(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+    request_command_id: &str,
+) -> ApiResult<()> {
+    let run_store = CodingPlanRunStore::new(app_paths.clone());
+    let lifecycle = run_store
+        .get_workspace_lifecycle(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?;
+    if let Some(clearing) = lifecycle
+        .as_ref()
+        .and_then(|metadata| metadata.clearing.as_ref())
+    {
+        close_plan_coding_workspace_round(
+            app_paths,
+            project_id,
+            issue_id,
+            plan_id,
+            &clearing.command_id,
+            None,
+            true,
+        )?;
+        return Ok(());
+    }
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    if !coding_store
+        .list_attempts_for_plan(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?
+        .is_empty()
+    {
+        return Ok(());
+    }
+    let run = run_store
+        .get(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?;
+    if let Some(run) = &run
+        && run.command_id == request_command_id
+        && run.phase == CodingPlanRunPhase::Prepared
+        && run.target_attempts.is_empty()
+        && run.selection.is_none()
+        && run.start_outcome.is_none()
+    {
+        run_store
+            .purge_plan(project_id, issue_id, plan_id)
+            .map_err(product_store_api_error)?;
+    }
+    // Reset=半残已收敛（新轮由随后的 prepare 新建）；InitializationPrefix/
+    // Clean=零动作（正常初始化前缀续原协议/正常新建）。
+    close_plan_coding_workspace_round(
+        app_paths,
+        project_id,
+        issue_id,
+        plan_id,
+        request_command_id,
+        None,
+        true,
+    )?;
+    Ok(())
+}
+
+/// H4（设计 C 节）：workspace_lifecycle 事实投影——generation/现存/缺失成员
+/// 计数与状态。数据来自 run 冻结集 ∪ Ready record 绑定 ∪（已越
+/// AttemptPersisted 的）外层 journal/per-target journal 绑定与真实存活集的
+/// 交叉核验（设计 A 节判据），不从 attempt_status=aborted 猜物理存在性；
+/// 未越 AttemptPersisted 的绑定是初始化前缀，不计缺失。
+fn plan_workspace_lifecycle_projection(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+    run: Option<&CodingPlanRun>,
+) -> Result<PlanWorkspaceLifecycleDto, ProductStoreError> {
+    let generation = CodingPlanRunStore::new(paths.clone())
+        .current_workspace_generation(project_id, issue_id, plan_id)?;
+    let existing: BTreeSet<String> = CodingAttemptStore::new(paths.clone())
+        .list_attempts_for_plan(project_id, issue_id, plan_id)?
+        .into_iter()
+        .map(|attempt| attempt.id)
+        .collect();
+    let references = AdvanceStore::new(paths.clone())
+        .plan_execution_references(project_id, issue_id, plan_id)?;
+    let mut referenced: BTreeSet<String> = BTreeSet::new();
+    if let Some(run) = run {
+        for binding in &run.target_attempts {
+            referenced.insert(binding.attempt_id.clone());
+        }
+        if let Some(selection) = &run.selection {
+            referenced.insert(selection.attempt_id.clone());
+        }
+    }
+    referenced.extend(references.ready_bound_attempt_ids());
+    let journal_beyond_attempt_persisted =
+        references
+            .initialization_journal
+            .as_ref()
+            .is_some_and(|journal| {
+                journal.phase.order_for_engine()
+                    >= AdvanceInitializationPhase::AttemptPersisted.order_for_engine()
+            });
+    if journal_beyond_attempt_persisted {
+        referenced.extend(references.journal_bound_attempt_ids());
+    }
+    let journals = CodingAttemptStore::new(paths.clone())
+        .list_group_initialization_journals_for_plan(project_id, issue_id, plan_id)?;
+    for journal in &journals {
+        if journal
+            .phase
+            .has_reached(CodingGroupInitializationPhase::AttemptPersisted)
+        {
+            referenced.insert(journal.attempt.id.clone());
+        }
+    }
+    let missing = referenced.difference(&existing).count();
+    let clearing = CodingPlanRunStore::new(paths.clone())
+        .get_workspace_lifecycle(project_id, issue_id, plan_id)?
+        .is_some_and(|metadata| metadata.clearing.is_some());
+    let state = if clearing {
+        "clearing"
+    } else if missing > 0 {
+        "incomplete"
+    } else if !existing.is_empty() {
+        "complete"
+    } else {
+        "clean"
+    };
+    Ok(PlanWorkspaceLifecycleDto {
+        generation,
+        existing_member_count: existing.len(),
+        missing_member_count: missing,
+        state: state.to_string(),
+    })
 }
 
 /// 已有终态回执/首启事实按事实返回（不再 start）；在途相位沿同一冻结
@@ -807,5 +1248,8 @@ pub(crate) fn build_plan_coding_progress(
         target_attempts,
         units,
         plan_complete,
+        workspace_lifecycle: plan_workspace_lifecycle_projection(
+            paths, project_id, issue_id, plan_id, run,
+        )?,
     })
 }

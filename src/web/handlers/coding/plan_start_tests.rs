@@ -1485,3 +1485,513 @@ async fn plan_coding_n3_deleted_member_aggregates_invalidated_not_500() {
     }
     assert!(!invalidated.plan_complete);
 }
+
+// ─── H4（设计 2026-10-14 C/D 节）：组删端点与重启收敛 ───
+
+use crate::product::advance_store::AdvanceStore;
+use crate::product::coding_plan_run::{
+    CODING_PLAN_WORKSPACE_LIFECYCLES_DIR, CodingPlanWorkspaceResetChecklist,
+};
+use crate::web::types::{PlanCodingWorkspaceDeletionQuery, PlanCodingWorkspaceDeletionResultDto};
+
+async fn delete_workspaces(
+    state: &WebAppState,
+    command_id: &str,
+    expected_generation: Option<u64>,
+    confirmed: bool,
+) -> Result<PlanCodingWorkspaceDeletionResultDto, crate::web::error::ApiError> {
+    super::plan_start::delete_plan_coding_workspaces(
+        axum::extract::State(state.clone()),
+        axum::extract::Path((
+            PROJECT_ID.to_string(),
+            ISSUE_ID.to_string(),
+            PLAN_ID.to_string(),
+        )),
+        axum::extract::Query(PlanCodingWorkspaceDeletionQuery {
+            command_id: command_id.to_string(),
+            expected_generation,
+            confirmed: Some(confirmed),
+        }),
+    )
+    .await
+    .map(|json| json.0)
+}
+
+fn h4_member_ids(fixture: &N3Fixture) -> Vec<String> {
+    let mut ids: Vec<String> = fixture
+        .coding_store()
+        .list_attempts_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+        .into_iter()
+        .map(|attempt| attempt.id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// store 级成员删除的测试补面：复刻 N7 端点路径的仓维 shared worktree 条件
+/// 清理（owner 属已删成员且无其他活动 attempt → 删记录）。真实四删走端点
+/// 时由 `cleanup_repo_shared_worktree_if_no_active_attempts` 完成；本捷径
+/// 绕过端点时按同一语义手工收敛，避免孤儿锁阻塞新轮 advance。
+fn h4_release_dead_member_worktrees(fixture: &N3Fixture, dead_ids: &[String]) {
+    let lifecycle = LifecycleStore::new(fixture.paths.clone());
+    for repository in lifecycle
+        .list_repo_shared_worktrees(PROJECT_ID, ISSUE_ID)
+        .unwrap()
+    {
+        let Some(record) = lifecycle
+            .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, repository)
+            .unwrap()
+        else {
+            continue;
+        };
+        if record
+            .current_lock_owner_id
+            .as_deref()
+            .is_some_and(|owner| dead_ids.iter().any(|id| id == owner))
+        {
+            lifecycle
+                .delete_repo_shared_worktree(PROJECT_ID, ISSUE_ID, repository)
+                .unwrap();
+        }
+    }
+}
+
+/// H4 端到端（验收矩阵 1）：四仓一键首启 → GET lifecycle 事实 → 未确认 409
+/// → 确认整组删除（run/advance/journal 清、Plan/WI/revisions 保留、
+/// generation 2）→ 同 command 重试 Replayed → 新 command 开新轮（新 attempt
+/// IDs、首启回执 Started）→ 晚到旧 DELETE/过期 generation 不删新轮。
+#[tokio::test]
+async fn plan_coding_h4_group_delete_end_to_end_then_new_round() {
+    let fixture = n3_fixture().await;
+    let started = post_start(&fixture.state, "cmd_h4_round1", PLAN_REVISION_ID)
+        .await
+        .expect("round 1 one-click start");
+    assert!(matches!(
+        started.start_outcome,
+        Some(CodingPlanStartOutcome::Started { .. })
+    ));
+    let round1_ids = h4_member_ids(&fixture);
+    assert_eq!(round1_ids.len(), 4);
+
+    // GET 事实投影：generation 1、四成员齐全、complete。
+    let progress = get_progress(&fixture.state).await.unwrap();
+    let lifecycle = progress.workspace_lifecycle;
+    assert_eq!(lifecycle.generation, 1);
+    assert_eq!(lifecycle.existing_member_count, 4);
+    assert_eq!(lifecycle.missing_member_count, 0);
+    assert_eq!(lifecycle.state, "complete");
+
+    // 未确认：稳定 409 + 强警告文案（首启事实在案）。
+    let unconfirmed =
+        delete_workspaces(&fixture.state, "plan_delete_ui_h4_1", Some(1), false).await;
+    let error = unconfirmed.expect_err("unconfirmed group delete must be rejected");
+    assert_eq!(error.code, "deletion_confirmation_required");
+    assert!(
+        error.message.contains("终止并删除"),
+        "strong confirmation message is authoritative: {}",
+        error.message
+    );
+    // 拒绝路径零变更。
+    assert_eq!(h4_member_ids(&fixture), round1_ids);
+
+    // 确认删除：四成员清、轮次关闭（generation 2）、回执四字段。
+    let receipt = delete_workspaces(&fixture.state, "plan_delete_ui_h4_1", Some(1), true)
+        .await
+        .expect("confirmed group delete");
+    assert_eq!(receipt.operation_state, "accepted");
+    assert_eq!(receipt.generation, 2);
+    assert_eq!(receipt.deleted_attempt_ids, round1_ids);
+    assert!(receipt.remaining_attempt_ids.is_empty());
+    assert_eq!(receipt.workspace_lifecycle.generation, 2);
+    assert_eq!(receipt.workspace_lifecycle.existing_member_count, 0);
+    assert_eq!(receipt.workspace_lifecycle.state, "clean");
+    assert!(h4_member_ids(&fixture).is_empty());
+    assert!(!fixture.run_file().exists(), "closure purges the run");
+    let artifacts = AdvanceStore::new(fixture.paths.clone())
+        .list_plan_artifacts(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap();
+    assert!(artifacts.advance_ids.is_empty() && artifacts.retry_command_ids.is_empty());
+    assert!(
+        fixture
+            .coding_store()
+            .list_group_initialization_journals_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
+            .is_empty(),
+        "closure purges group initialization journals"
+    );
+    // 保留面：Plan/WI/revisions 不删（闭包只清执行闭包）。
+    let lineage = WorkItemRevisionStore::new(fixture.paths.clone())
+        .get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap();
+    assert_eq!(
+        lineage.active_revision_id.as_deref(),
+        Some(PLAN_REVISION_ID)
+    );
+    assert!(
+        LifecycleStore::new(fixture.paths.clone())
+            .get_issue_work_item_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .is_ok(),
+        "plan record must survive workspace deletion"
+    );
+
+    // 同 command 幂等重放：Replayed、零删除、不清新轮。
+    let replay = delete_workspaces(&fixture.state, "plan_delete_ui_h4_1", None, true)
+        .await
+        .expect("same-command retry replays");
+    assert_eq!(replay.operation_state, "replayed");
+    assert!(replay.deleted_attempt_ids.is_empty());
+
+    // 新 command 开新轮：四个新 attempt IDs（不复用已删 ID）、Started 恰一次。
+    let round2 = post_start(&fixture.state, "cmd_h4_round2", PLAN_REVISION_ID)
+        .await
+        .expect("new round start after full deletion");
+    assert!(matches!(
+        round2.start_outcome,
+        Some(CodingPlanStartOutcome::Started { .. })
+    ));
+    let round2_ids = h4_member_ids(&fixture);
+    assert_eq!(round2_ids.len(), 4);
+    assert!(
+        round2_ids.iter().all(|id| !round1_ids.contains(id)),
+        "new round must not reuse deleted attempt ids"
+    );
+    let progress2 = get_progress(&fixture.state).await.unwrap();
+    assert_eq!(progress2.workspace_lifecycle.generation, 2);
+    assert_eq!(progress2.workspace_lifecycle.existing_member_count, 4);
+    assert_eq!(progress2.workspace_lifecycle.state, "complete");
+    assert_eq!(progress2.command_id.as_deref(), Some("cmd_h4_round2"));
+
+    // 晚到旧 DELETE（同 command 回执）：Replayed，不扫下一代。
+    let late_same = delete_workspaces(&fixture.state, "plan_delete_ui_h4_1", None, true)
+        .await
+        .expect("late same-command delete replays");
+    assert_eq!(late_same.operation_state, "replayed");
+    assert_eq!(h4_member_ids(&fixture), round2_ids);
+
+    // 过期 generation（新 command）：typed 409，零删除。
+    let stale = delete_workspaces(&fixture.state, "plan_delete_ui_h4_2", Some(1), true).await;
+    let error = stale.expect_err("stale generation must be rejected");
+    assert_eq!(error.code, "coding_plan_workspace_generation_conflict");
+    assert_eq!(h4_member_ids(&fixture), round2_ids);
+}
+
+/// H4 部分删除（验收矩阵 2）：单成员删除 → GET 投影 incomplete/缺失计数 →
+/// 清剩余入口整组收口（deleted=剩余成员、generation 切换）。
+#[tokio::test]
+async fn plan_coding_h4_partial_delete_projection_and_remaining_cleanup() {
+    let fixture = n3_fixture().await;
+    post_start(&fixture.state, "cmd_h4_partial", PLAN_REVISION_ID)
+        .await
+        .expect("start for partial deletion");
+    let all_ids = h4_member_ids(&fixture);
+
+    // v1 单删语义（N7）：成员删除即整 run 失效。
+    let web_attempt = fixture.target_attempt(fixture.web);
+    fixture
+        .coding_store()
+        .delete_attempt(PROJECT_ID, ISSUE_ID, &web_attempt.id)
+        .unwrap();
+    fixture
+        .run_store()
+        .invalidate_for_deleted_attempt(&web_attempt)
+        .unwrap();
+
+    let progress = get_progress(&fixture.state).await.unwrap();
+    assert_eq!(progress.workspace_lifecycle.existing_member_count, 3);
+    assert_eq!(progress.workspace_lifecycle.missing_member_count, 1);
+    assert_eq!(progress.workspace_lifecycle.state, "incomplete");
+    assert_eq!(progress.phase.as_deref(), Some("invalidated"));
+
+    // 清剩余：整组删除收口（Invalidated run 一并退役清空）。
+    let receipt = delete_workspaces(&fixture.state, "plan_delete_ui_h4_partial", None, true)
+        .await
+        .expect("delete remaining workspaces");
+    let mut expected_deleted: Vec<String> = all_ids
+        .into_iter()
+        .filter(|id| id != &web_attempt.id)
+        .collect();
+    expected_deleted.sort();
+    assert_eq!(receipt.deleted_attempt_ids, expected_deleted);
+    assert_eq!(receipt.generation, 2);
+    assert!(h4_member_ids(&fixture).is_empty());
+    assert!(!fixture.run_file().exists());
+
+    // 清剩余后可重启（验收矩阵 2 出口）。
+    let restarted = post_start(&fixture.state, "cmd_h4_partial_round2", PLAN_REVISION_ID)
+        .await
+        .expect("restart after clearing remaining");
+    assert!(matches!(
+        restarted.start_outcome,
+        Some(CodingPlanStartOutcome::Started { .. })
+    ));
+    assert_eq!(h4_member_ids(&fixture).len(), 4);
+}
+
+/// H4 半残现场收敛（验收矩阵 3 事故形态）：旧 Ready/外层 journal 指向已亡
+/// 全集 + 旧 run 仍盘 → 开始动作内部走 H2a 零成员闭包完整重置后按最新
+/// Confirmed revision 新建；不复活旧 attempt ID，无手工修数据。
+#[tokio::test]
+async fn plan_coding_h4_start_converges_half_dead_scene() {
+    let fixture = n3_fixture().await;
+    post_start(&fixture.state, "cmd_h4_incident_1", PLAN_REVISION_ID)
+        .await
+        .expect("incident round start");
+    let dead_ids = h4_member_ids(&fixture);
+    // 事故形态：四次删除走了旧路径（store 级删除 + N7 失效），旧
+    // run/Ready/外层 journal 全部残留。
+    let run_store = fixture.run_store();
+    for attempt_id in &dead_ids {
+        let attempt = fixture
+            .coding_store()
+            .get_attempt(PROJECT_ID, ISSUE_ID, attempt_id)
+            .unwrap();
+        fixture
+            .coding_store()
+            .delete_attempt(PROJECT_ID, ISSUE_ID, attempt_id)
+            .unwrap();
+        run_store.invalidate_for_deleted_attempt(&attempt).unwrap();
+    }
+    assert!(h4_member_ids(&fixture).is_empty());
+    assert!(fixture.run_file().exists(), "old run residue stays on disk");
+    let residue = AdvanceStore::new(fixture.paths.clone())
+        .list_plan_artifacts(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap();
+    assert!(!residue.advance_ids.is_empty(), "old Ready record residue");
+
+    // 半残投影：零成员 + 缺失全集 → incomplete。
+    let progress = get_progress(&fixture.state).await.unwrap();
+    assert_eq!(progress.workspace_lifecycle.existing_member_count, 0);
+    assert_eq!(progress.workspace_lifecycle.missing_member_count, 4);
+    assert_eq!(progress.workspace_lifecycle.state, "incomplete");
+
+    // 开始动作自动收敛：旧轮完整关闭 + 新轮正常新建。
+    let converged = post_start(&fixture.state, "cmd_h4_incident_2", PLAN_REVISION_ID)
+        .await
+        .expect("start converges the half-dead scene");
+    assert!(matches!(
+        converged.start_outcome,
+        Some(CodingPlanStartOutcome::Started { .. })
+    ));
+    let run = run_store
+        .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+        .expect("new round run");
+    assert_eq!(run.command_id, "cmd_h4_incident_2");
+    let new_ids = h4_member_ids(&fixture);
+    assert_eq!(new_ids.len(), 4);
+    assert!(
+        new_ids.iter().all(|id| !dead_ids.contains(id)),
+        "dead attempt ids must not be revived"
+    );
+    // 旧执行引用不指向已亡 attempts：新轮 advance 产物对新增成员 Intact。
+    let references = AdvanceStore::new(fixture.paths.clone())
+        .plan_execution_references(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap();
+    assert_eq!(
+        references.classify_stale_references(&new_ids),
+        crate::product::advance_store::AdvanceStaleReferenceVerdict::Intact,
+        "old stale references must be purged; new round references stay intact"
+    );
+    let lifecycle = run_store
+        .get_workspace_lifecycle(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+        .expect("lifecycle metadata written by convergence");
+    assert_eq!(lifecycle.generation, 2);
+    assert!(lifecycle.clearing.is_none());
+
+    // 同 command 重试：N2 重放语义（返回同 run，零二次 provider）。
+    let replay = post_start(&fixture.state, "cmd_h4_incident_2", PLAN_REVISION_ID)
+        .await
+        .expect("same-command retry replays the new round");
+    assert_eq!(replay.command_id, "cmd_h4_incident_2");
+    assert_eq!(h4_member_ids(&fixture), new_ids);
+}
+
+/// H4 同 command 承接（设计 C 行135）：现场恰有请求 command 的空 Prepared
+/// 前缀 run + 旧 Ready 指向已亡全集 → 先清前缀再闭包，同动作不退役请求
+/// command 自拒；新轮以该 command 正常落位。
+#[tokio::test]
+async fn plan_coding_h4_start_carries_same_command_prepared_prefix() {
+    let fixture = n3_fixture().await;
+    post_start(&fixture.state, "cmd_h4_carry_seed", PLAN_REVISION_ID)
+        .await
+        .expect("seed round");
+    let dead_ids = h4_member_ids(&fixture);
+    let run_store = fixture.run_store();
+    for attempt_id in &dead_ids {
+        let attempt = fixture
+            .coding_store()
+            .get_attempt(PROJECT_ID, ISSUE_ID, attempt_id)
+            .unwrap();
+        fixture
+            .coding_store()
+            .delete_attempt(PROJECT_ID, ISSUE_ID, attempt_id)
+            .unwrap();
+        run_store.invalidate_for_deleted_attempt(&attempt).unwrap();
+    }
+    // 真实四删走端点时的仓维 worktree 条件清理（闭包收口前 run 已被前缀
+    // 承接清走，需按端点同一语义先释放孤儿锁）。
+    h4_release_dead_member_worktrees(&fixture, &dead_ids);
+    // 手工手术形态：旧 run 被移走，留下请求 command 的空 Prepared 前缀。
+    run_store.purge_plan(PROJECT_ID, ISSUE_ID, PLAN_ID).unwrap();
+    run_store
+        .prepare(
+            PROJECT_ID,
+            ISSUE_ID,
+            PLAN_ID,
+            "cmd_h4_carry",
+            PLAN_REVISION_ID,
+        )
+        .unwrap();
+
+    let carried = post_start(&fixture.state, "cmd_h4_carry", PLAN_REVISION_ID)
+        .await
+        .expect("same command is carried into the new round");
+    assert_eq!(carried.command_id, "cmd_h4_carry");
+    assert!(matches!(
+        carried.start_outcome,
+        Some(CodingPlanStartOutcome::Started { .. })
+    ));
+    let run = run_store
+        .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+        .expect("carried run");
+    assert_eq!(run.command_id, "cmd_h4_carry");
+    let new_ids = h4_member_ids(&fixture);
+    assert_eq!(new_ids.len(), 4);
+    assert!(new_ids.iter().all(|id| !dead_ids.contains(id)));
+}
+
+/// H4 clearing 续清（H2a 复审硬约束）：清理中断态下，开始入口与组删入口
+/// 都必须以记录身份 `clearing.command_id` 续清（同 command 续清/异 command
+/// 拒），完成后才允许新轮；pending 冻结清单是回执 deleted 集。
+#[tokio::test]
+async fn plan_coding_h4_clearing_resume_from_recorded_command() {
+    let fixture = n3_fixture().await;
+    post_start(&fixture.state, "cmd_h4_clearing_seed", PLAN_REVISION_ID)
+        .await
+        .expect("seed round");
+    let member_ids = h4_member_ids(&fixture);
+    let run_store = fixture.run_store();
+    // 钩子中断形态：成员已删（teardown 完成）、闭包冻结 clearing 后中断。
+    for attempt_id in &member_ids {
+        let attempt = fixture
+            .coding_store()
+            .get_attempt(PROJECT_ID, ISSUE_ID, attempt_id)
+            .unwrap();
+        fixture
+            .coding_store()
+            .delete_attempt(PROJECT_ID, ISSUE_ID, attempt_id)
+            .unwrap();
+        run_store.invalidate_for_deleted_attempt(&attempt).unwrap();
+    }
+    let scope = EntityScope::new(PROJECT_ID, ISSUE_ID, DeletionEntityKind::Plan, PLAN_ID);
+    let lease = EntityOperationStore::new(fixture.paths.clone())
+        .try_acquire_delete(&scope)
+        .unwrap();
+    run_store
+        .retire_workspace_round_with_lease(
+            &lease,
+            &CodingPlanWorkspaceResetChecklist {
+                command_id: "plan_workspace_close_interrupted".to_string(),
+                retired_command_ids: vec!["cmd_h4_clearing_seed".to_string()],
+                retired_attempt_ids: member_ids.clone(),
+                retired_advance_ids: Vec::new(),
+                pending_attempt_ids: member_ids.clone(),
+                pending_advance_ids: Vec::new(),
+                pending_retry_command_ids: Vec::new(),
+                pending_target_repository_ids: Vec::new(),
+            },
+        )
+        .unwrap();
+    drop(lease);
+
+    // clearing 投影。
+    let progress = get_progress(&fixture.state).await.unwrap();
+    assert_eq!(progress.workspace_lifecycle.state, "clearing");
+
+    // 组删入口续清：以 clearing.command_id 记录身份，回执 deleted=pending。
+    let receipt = delete_workspaces(&fixture.state, "plan_delete_ui_h4_resume", None, true)
+        .await
+        .expect("delete action resumes the interrupted clearing");
+    assert_eq!(receipt.operation_state, "accepted");
+    assert_eq!(receipt.deleted_attempt_ids, member_ids);
+    assert_eq!(receipt.generation, 2);
+    let lifecycle = run_store
+        .get_workspace_lifecycle(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(lifecycle.generation, 2);
+    assert!(lifecycle.clearing.is_none());
+
+    // 新轮正常。
+    let restarted = post_start(&fixture.state, "cmd_h4_clearing_round2", PLAN_REVISION_ID)
+        .await
+        .expect("start after clearing resume");
+    assert!(matches!(
+        restarted.start_outcome,
+        Some(CodingPlanStartOutcome::Started { .. })
+    ));
+    assert_eq!(h4_member_ids(&fixture).len(), 4);
+}
+
+/// H4 clearing 续清（开始入口面）：新开始动作在 clearing 在案时先以记录
+/// command 续清，再正常新建——钩子中断态的可达续清出口（H2a 硬约束）。
+#[tokio::test]
+async fn plan_coding_h4_start_resumes_clearing_before_new_round() {
+    let fixture = n3_fixture().await;
+    post_start(&fixture.state, "cmd_h4_start_resume_seed", PLAN_REVISION_ID)
+        .await
+        .expect("seed round");
+    let member_ids = h4_member_ids(&fixture);
+    let run_store = fixture.run_store();
+    for attempt_id in &member_ids {
+        let attempt = fixture
+            .coding_store()
+            .get_attempt(PROJECT_ID, ISSUE_ID, attempt_id)
+            .unwrap();
+        fixture
+            .coding_store()
+            .delete_attempt(PROJECT_ID, ISSUE_ID, attempt_id)
+            .unwrap();
+        run_store.invalidate_for_deleted_attempt(&attempt).unwrap();
+    }
+    let scope = EntityScope::new(PROJECT_ID, ISSUE_ID, DeletionEntityKind::Plan, PLAN_ID);
+    let lease = EntityOperationStore::new(fixture.paths.clone())
+        .try_acquire_delete(&scope)
+        .unwrap();
+    run_store
+        .retire_workspace_round_with_lease(
+            &lease,
+            &CodingPlanWorkspaceResetChecklist {
+                command_id: "plan_workspace_close_via_start".to_string(),
+                retired_command_ids: vec!["cmd_h4_start_resume_seed".to_string()],
+                retired_attempt_ids: member_ids.clone(),
+                retired_advance_ids: Vec::new(),
+                pending_attempt_ids: member_ids.clone(),
+                pending_advance_ids: Vec::new(),
+                pending_retry_command_ids: Vec::new(),
+                pending_target_repository_ids: Vec::new(),
+            },
+        )
+        .unwrap();
+    drop(lease);
+
+    let started = post_start(&fixture.state, "cmd_h4_start_resume_new", PLAN_REVISION_ID)
+        .await
+        .expect("start resumes clearing then builds the new round");
+    assert!(matches!(
+        started.start_outcome,
+        Some(CodingPlanStartOutcome::Started { .. })
+    ));
+    let lifecycle = run_store
+        .get_workspace_lifecycle(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(lifecycle.generation, 2);
+    assert!(lifecycle.clearing.is_none());
+    let new_ids = h4_member_ids(&fixture);
+    assert_eq!(new_ids.len(), 4);
+    assert!(new_ids.iter().all(|id| !member_ids.contains(id)));
+}

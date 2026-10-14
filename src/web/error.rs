@@ -208,7 +208,16 @@ impl IntoResponse for ApiError {
             | "coding_plan_run_selected_unit"
             | "plan_coding_paused"
             | "plan_coding_invalidated"
-            | "plan_coding_first_unit_completed" => StatusCode::CONFLICT,
+            | "plan_coding_first_unit_completed"
+            // H4（设计 2026-10-14 B 节,H2a 码透出 + H5 移交④清理中/资源
+            // busy 稳定码):执行轮生命周期状态冲突与目标仓资源占用统一
+            // 409——clearing 续清/退役围栏/generation 互证/成员在场/资源
+            // busy 或删除中,均为可重试或可收敛的产品状态,非 500 故障。
+            | "coding_plan_workspace_clearing"
+            | "coding_plan_workspace_generation_conflict"
+            | "coding_plan_workspace_members_present"
+            | "plan_coding_run_resource_busy"
+            | "plan_coding_run_resource_unavailable" => StatusCode::CONFLICT,
             // N2 族语义拒绝：空 selection 不能首启 / purge 作用域非法 / 在途
             // amendment / plan 未确认（对齐 work_item_plan_not_confirmed 的
             // 前置语义，REST 前 ensure_plan_confirmed 已先拒，此处为防御层）。

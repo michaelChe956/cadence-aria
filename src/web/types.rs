@@ -1263,6 +1263,50 @@ pub struct PlanCodingProgressDto {
     pub target_attempts: Vec<PlanCodingTargetDto>,
     pub units: Vec<PlanCodingUnitProgressDto>,
     pub plan_complete: bool,
+    /// H4（设计 C 节，H5 冻结形状对齐）：workspace_lifecycle 事实——
+    /// generation 单调、现存/缺失成员计数与状态；数据来自 run/advance/
+    /// journal 交叉核验，不从 attempt_status 猜物理存在性。
+    pub workspace_lifecycle: PlanWorkspaceLifecycleDto,
+}
+
+/// H4（设计 C 节）：plan Coding 工作区生命周期事实投影（GET/DELETE 共用）。
+/// `state` 值域 `clean|complete|incomplete|clearing`——clean=无执行内容、
+/// complete=成员齐全、incomplete=成员缺失（部分删除后）、clearing=清理进行中。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanWorkspaceLifecycleDto {
+    pub generation: u64,
+    pub existing_member_count: usize,
+    pub missing_member_count: usize,
+    pub state: String,
+}
+
+/// H4（设计 C 节，H5 冻结名对齐）：DELETE …/coding-workspaces 成功回执——
+/// `operation_state: accepted|replayed`（replayed=同 command 幂等重放，不扫
+/// 下一代刚创建的 attempts）；`generation` 为操作完成后的当前轮次；
+/// `deleted/remaining_attempt_ids` 为本次操作权威范围结果（服务端枚举，
+/// 不收前端 attempt ID 列表）；`workspace_lifecycle` 为操作后事实投影。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanCodingWorkspaceDeletionResultDto {
+    pub plan_id: String,
+    pub command_id: String,
+    pub operation_state: String,
+    pub generation: u64,
+    pub deleted_attempt_ids: Vec<String>,
+    pub remaining_attempt_ids: Vec<String>,
+    pub workspace_lifecycle: PlanWorkspaceLifecycleDto,
+}
+
+/// H4（设计 C 节）：组删 DELETE 的 query 参数——稳定 `command_id`（同动作
+/// 重试复用）、`expected_generation`（GET workspace_lifecycle.generation 互证，
+/// 未知时省略）、`confirmed=true`（仅确认弹窗同意后显式携带；query 布尔不是
+/// 安全授权，服务端分类才是权威）。
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct PlanCodingWorkspaceDeletionQuery {
+    pub command_id: String,
+    pub expected_generation: Option<u64>,
+    pub confirmed: Option<bool>,
 }
 
 /// N3（REQ-CS-01/02）：一键启动结果——`operation_state` 沿现

@@ -514,3 +514,88 @@ async fn plan_coding_n7_missing_resource_reentry_and_late_start() {
         );
     }
 }
+
+fn n7_lifecycle_file(paths: &ProductAppPaths, plan_id: &str) -> std::path::PathBuf {
+    paths
+        .issue_root(PROJECT_ID, ISSUE_ID)
+        .join("coding-plan-workspace-lifecycles")
+        .join(format!("{plan_id}.json"))
+}
+
+fn n7_lifecycle_lock(paths: &ProductAppPaths, plan_id: &str) -> std::path::PathBuf {
+    n7_lifecycle_file(paths, plan_id).with_file_name(format!(".{plan_id}.json.lock"))
+}
+
+/// H4（H2a 移交项，设计 A 节）：真实 Plan 删除闭包必须清生命周期元数据
+///（generation/退役围栏/clearing/回执）与其稳定前导点锁——不留内容引用；
+/// 他 plan 的元数据不动。
+#[tokio::test]
+async fn plan_coding_h4_plan_delete_purges_workspace_lifecycle_metadata() {
+    let root = TempDir::new().expect("root");
+    let app = build_test_router(root.path());
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = n7_seed_project_issue(&paths);
+    n7_seed_plan(&lifecycle, N7_PLAN_A);
+    n7_seed_plan(&lifecycle, N7_PLAN_B);
+
+    // 两 plan 各落一份生命周期元数据（retire→complete 走真实 store 面）。
+    let run_store = CodingPlanRunStore::new(paths.clone());
+    for (plan_id, command_id) in [
+        (N7_PLAN_A, "plan_workspace_close_n7_a"),
+        (N7_PLAN_B, "plan_workspace_close_n7_b"),
+    ] {
+        let scope = crate::product::entity_deletion_store::EntityScope::new(
+            PROJECT_ID,
+            ISSUE_ID,
+            crate::product::entity_deletion_store::DeletionEntityKind::Plan,
+            plan_id,
+        );
+        let lease =
+            crate::product::entity_operation_store::EntityOperationStore::new(paths.clone())
+                .try_acquire_delete(&scope)
+                .expect("acquire lease");
+        run_store
+            .retire_workspace_round_with_lease(
+                &lease,
+                &crate::product::coding_plan_run::CodingPlanWorkspaceResetChecklist {
+                    command_id: command_id.to_string(),
+                    retired_command_ids: Vec::new(),
+                    retired_attempt_ids: Vec::new(),
+                    retired_advance_ids: Vec::new(),
+                    pending_attempt_ids: Vec::new(),
+                    pending_advance_ids: Vec::new(),
+                    pending_retry_command_ids: Vec::new(),
+                    pending_target_repository_ids: Vec::new(),
+                },
+            )
+            .expect("freeze clearing");
+        run_store
+            .complete_workspace_reset_with_lease(&lease, command_id)
+            .expect("complete reset");
+        drop(lease);
+        assert!(n7_lifecycle_file(&paths, plan_id).exists());
+    }
+
+    let (status, body) = delete_work_item_plan_request(&app, N7_PLAN_A).await;
+    assert_eq!(status, StatusCode::OK, "delete body: {body}");
+
+    // 本 plan 生命周期元数据 + 稳定前导点锁清；他 plan 保留。
+    assert!(
+        !n7_lifecycle_file(&paths, N7_PLAN_A).exists(),
+        "plan deletion must purge workspace lifecycle metadata"
+    );
+    assert!(
+        !n7_lifecycle_lock(&paths, N7_PLAN_A).exists(),
+        "plan deletion must purge the lifecycle leading-dot lock"
+    );
+    assert!(
+        n7_lifecycle_file(&paths, N7_PLAN_B).exists(),
+        "other plan lifecycle metadata must be preserved"
+    );
+    assert!(
+        run_store
+            .get_workspace_lifecycle(PROJECT_ID, ISSUE_ID, N7_PLAN_B)
+            .expect("read plan b lifecycle")
+            .is_some()
+    );
+}

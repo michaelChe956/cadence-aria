@@ -32,7 +32,9 @@ mod worktree_route;
 #[allow(unused_imports)]
 pub(crate) use advance::map_advance_outcome;
 pub use group::create_group_coding_attempt;
-pub use plan_start::{get_plan_coding_progress, post_plan_coding_start};
+pub use plan_start::{
+    delete_plan_coding_workspaces, get_plan_coding_progress, post_plan_coding_start,
+};
 #[cfg(test)]
 #[path = "coding/advance_tests.rs"]
 mod advance_tests;

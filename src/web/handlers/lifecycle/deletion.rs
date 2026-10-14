@@ -210,6 +210,12 @@ async fn cascade_delete_entity(
         crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone())
             .purge_plan_with_lease(&lease)
             .map_err(product_store_api_error)?;
+        // H4（H2a 移交项，设计 A 节）：生命周期元数据（generation/退役围栏/
+        // clearing/回执）随真 Plan 删除清理——含稳定前导点锁（workspace 重置
+        // 闭包绝不删它，仅此安全删除窗口 unlink）。
+        crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone())
+            .purge_workspace_lifecycle_with_lease(&lease)
+            .map_err(product_store_api_error)?;
     }
     // advance 独立 engine checkpoint：纯 session 索引枚举（§0.5），不整删全局根。
     let checkpoint_session_root = state
@@ -262,6 +268,17 @@ async fn cascade_delete_entity(
             return Err(ApiError::runtime(
                 "entity_deletion_residue",
                 "plan run 存在未清残留，拒绝记完成",
+                json!({ "entity_id": entity_id }),
+            ));
+        }
+        if crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone())
+            .get_workspace_lifecycle(project_id, issue_id, entity_id)
+            .map_err(product_store_api_error)?
+            .is_some()
+        {
+            return Err(ApiError::runtime(
+                "entity_deletion_residue",
+                "plan workspace lifecycle metadata 存在未清残留，拒绝记完成",
                 json!({ "entity_id": entity_id }),
             ));
         }

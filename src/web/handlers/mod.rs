@@ -107,7 +107,7 @@ mod workspace_sc_recovery;
 mod workspace_session;
 
 #[rustfmt::skip]
-pub use coding::{create_coding_attempt, create_group_coding_attempt, get_plan_coding_progress, post_plan_coding_start};
+pub use coding::{create_coding_attempt, create_group_coding_attempt, delete_plan_coding_workspaces, get_plan_coding_progress, post_plan_coding_start};
 #[rustfmt::skip]
 pub(crate) use coding::{
     abort_coding_attempt, build_group_work_item_progress, coding_attempt_artifact_content, coding_attempt_diff,

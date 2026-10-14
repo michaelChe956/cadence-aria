@@ -1037,6 +1037,43 @@ impl CodingPlanRunStore {
         crate::product::coding_attempt_store::remove_file_if_exists(&lock_path)
     }
 
+    /// H4（设计 2026-10-14 A 节，H2a 移交项）：真实 Plan 删除闭包消费——
+    /// purge 生命周期元数据 `{plan_id}.json` 与同目录稳定前导点锁
+    /// `.{plan_id}.json.lock`。workspace 重置清理**绝不**删除该锁（稳定
+    /// inode）；仅 Plan 真删除的安全删除窗口 unlink。缺失=已清（幂等重入）；
+    /// 元数据在位时先读校验身份（坏 JSON/身份错配 fail-closed，不当空强删）。
+    pub fn purge_workspace_lifecycle_with_lease(
+        &self,
+        lease: &EntityDeletionLease,
+    ) -> Result<(), ProductStoreError> {
+        let scope = lease.scope();
+        scope.validate()?;
+        if scope.kind != DeletionEntityKind::Plan {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_plan_workspace_lifecycle_purge_scope",
+                id: scope.entity_id.clone(),
+            });
+        }
+        let (project_id, issue_id, plan_id) = (
+            scope.project_id.as_str(),
+            scope.issue_id.as_str(),
+            scope.entity_id.as_str(),
+        );
+        let path = self.lifecycle_path(project_id, issue_id, plan_id)?;
+        if path_is_regular_file(&path)? {
+            with_exclusive_lock(&path, || {
+                let _ = self.read_workspace_lifecycle(project_id, issue_id, plan_id)?;
+                std::fs::remove_file(&path).map_err(|error| {
+                    ProductStoreError::Io(format!("remove {}: {error}", path.display()))
+                })
+            })?;
+        }
+        // 与 run 前导点锁同约定：`.{plan_id}.json.lock`（lifecycle 文件名为
+        // `{plan_id}.json`）。
+        let lock_path = path.with_file_name(format!(".{plan_id}.json.lock"));
+        crate::product::coding_attempt_store::remove_file_if_exists(&lock_path)
+    }
+
     // ─── H2a（设计 2026-10-14 A/C 节）：plan 执行轮生命周期元数据 ───
 
     /// 生命周期元数据目录（冻结地址）：
