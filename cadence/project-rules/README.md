@@ -139,6 +139,9 @@
   - 例外：`cadence/reports/` 正式验收证据与仓内测试代码资产。会话结束清理自建 /tmp 产物；所有 subagent brief 必须携带本规则。
   - 完整规则详见 `cadence/project-rules/test-content-tmp-only.md`。
 
+- **main 分支保护规则**
+  - main 分支禁止直接 commit（受 shared `pre-commit` hook 与本规则双约束）；实施/交付一律在功能 worktree 分支进行，主仓 main 仅作合并目标；误在 main 产生的 commit 按「备份 tag → 复位 `origin/main` → cherry-pick 回功能分支」处置。完整规则详见 `cadence/project-rules/branch-protection.md`。
+
 **示例规则**（默认不启用，需用户主动添加）：
 
 ```markdown
