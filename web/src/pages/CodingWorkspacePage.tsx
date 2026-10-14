@@ -423,7 +423,9 @@ export function CodingWorkspacePage({
   }, []);
 
   useEffect(() => {
+    // 地址切换：两类删除 busy 一并复位（P2-1；在途请求由地址守卫忽略结算）。
     setDeleteBusy(false);
+    setGroupDeleteBusy(false);
     setDeleteError(null);
     setPlanError(null);
     setPendingJumpEntryId(null);
@@ -519,17 +521,17 @@ export function CodingWorkspacePage({
   }
 
   async function handleDeleteCodingWorkspace() {
-    if (!storeMatchesAddress) {
+    // P2-1：与整组删除互斥——双 handler 共用 deleteGenerationRef，并发顶号会使
+    // 先发者 finally 的地址守卫永假、busy 永久卡死（顶栏唯一删除出口）。
+    if (!storeMatchesAddress || groupDeleteBusy) {
       return;
     }
     const active = ACTIVE_ATTEMPT_STATUSES.has(store.status ?? "created");
-    // H5（设计 D）：多仓 group 下单删是防呆确认——明确「仅删当前」会使整轮
-    // 授权失效，其余成员保留且不能用于新一键首启，主恢复出口是整组删除。
-    const groupMemberCount = store.workItemGroupId ? store.units.length : 0;
+    // H5（设计 D）＋P2-2：多仓 group 下单删是防呆确认——明确「仅删当前」会使
+    // 整轮授权失效。units.length 是工作项数，冒充工作区成员数会 N×R 失真，
+    // 恒用泛化句（成员计数由服务端聚合权威给出）。
     const groupNotice = store.workItemGroupId
-      ? groupMemberCount > 1
-        ? `这是本计划 ${groupMemberCount} 个 Coding 工作区之一；仅删此项会使整轮授权失效，其余 ${groupMemberCount - 1} 个保留且不能用于新一键首启。若要从头开始，请使用「删除本计划全部 Coding 工作区」。`
-        : "这是本计划的 Coding 工作区之一；仅删此项会使整轮授权失效，其余工作区保留且不能用于新一键首启。若要从头开始，请使用「删除本计划全部 Coding 工作区」。"
+      ? "这是本计划的 Coding 工作区之一；仅删此项会使整轮授权失效，其余工作区保留且不能用于新一键首启。若要从头开始，请使用「删除本计划全部 Coding 工作区」。"
       : "";
     const message = [
       active
@@ -574,7 +576,8 @@ export function CodingWorkspacePage({
   // lifecycle 与 run facts）；typed 409/500 直达错误面，不自动重试。
   async function handleDeleteAllCodingWorkspaces() {
     const planId = store.workItemGroupId;
-    if (!planId || groupDeleteBusy || !storeMatchesAddress) {
+    // P2-1：与单删互斥（同上，防止 groupDeleteBusy 永久卡死清剩余唯一出口）。
+    if (!planId || groupDeleteBusy || deleteBusy || !storeMatchesAddress) {
       return;
     }
     const requestAddressKey = addressKey;

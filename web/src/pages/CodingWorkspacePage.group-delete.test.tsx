@@ -506,13 +506,198 @@ describe("CodingWorkspacePage H5 single attempt delete copy (design D)", () => {
       );
 
       expect(confirm).toHaveBeenCalledTimes(1);
-      expect(confirm.mock.calls[0]?.[0]).toContain("这是本计划 4 个 Coding 工作区之一");
+      // P2-2：units.length 是工作项数，冒充工作区成员数会 N×R 失真——恒用泛化句。
+      expect(confirm.mock.calls[0]?.[0]).toContain("这是本计划的 Coding 工作区之一");
+      expect(confirm.mock.calls[0]?.[0]).not.toMatch(/这是本计划 \d+ 个/u);
       expect(confirm.mock.calls[0]?.[0]).toContain("整轮授权失效");
       expect(confirm.mock.calls[0]?.[0]).toContain("删除本计划全部 Coding 工作区");
       expect(onBack).not.toHaveBeenCalled();
       expect(attemptDeleteCount(fetchMock)).toBe(0);
     } finally {
       confirm.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("CodingWorkspacePage H5 P2 修复轮:双删除 busy 互斥与地址复位", () => {
+  installCodingWorkspacePageTestHooks();
+
+  const ADDRESS_B: CodingAttemptAddress = {
+    projectId: "project_0002",
+    issueId: "issue_0002",
+    attemptId: "coding_attempt_0002",
+  };
+
+  it("单删在途时整组入口互斥:零组删出站,单删结算后顶栏 busy 复位不卡死", async () => {
+    mockCodingWs();
+    const pending = deferred<void>();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === CODING_START_URL) {
+        return jsonResponse(planProgressRecord());
+      }
+      if (url === ATTEMPT_DELETE_URL && init?.method === "DELETE") {
+        await pending.promise;
+        return jsonResponse({ status: "deleted" });
+      }
+      if (url.startsWith(GROUP_DELETE_URL_PREFIX) && init?.method === "DELETE") {
+        return jsonResponse(deletionResultRecord());
+      }
+      return jsonResponse({ code: "not_found", message: "no route" }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    setGroupReadyState();
+    const onBack = vi.fn();
+
+    try {
+      render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={onBack} />);
+      await screen.findByTestId("plan-coding-progress");
+      const topBar = screen.getByRole("button", { name: "仅删除当前 Coding 工作区" });
+      const groupEntry = screen.getByTestId("plan-coding-delete-all");
+
+      await userEvent.click(topBar);
+      expect(topBar).toBeDisabled();
+
+      // 互斥：单删在途时整组入口零出站（现实现会顶号发起组删）。
+      await userEvent.click(groupEntry);
+      // 给在途异步链一个结算窗口（若互斥失效，组删会在此窗口内出站）。
+      const settle = deferred<void>();
+      setTimeout(settle.resolve, 50);
+      await act(async () => {
+        await settle.promise;
+      });
+      expect(groupDeleteUrls(fetchMock)).toHaveLength(0);
+
+      await act(async () => {
+        pending.resolve(undefined);
+        await pending.promise.catch(() => undefined);
+      });
+      await waitFor(() => expect(onBack).toHaveBeenCalledTimes(1));
+      // busy 复位：顶栏不因组删顶号而永久禁用。
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "仅删除当前 Coding 工作区" }),
+        ).toBeEnabled(),
+      );
+      expect(attemptDeleteCount(fetchMock)).toBe(1);
+    } finally {
+      confirm.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("整组在途时单删入口互斥:不弹确认零出站,组删结算后单删恢复可用", async () => {
+    mockCodingWs();
+    const pending = deferred<void>();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === CODING_START_URL) {
+        return jsonResponse(planProgressRecord());
+      }
+      if (url.startsWith(GROUP_DELETE_URL_PREFIX) && init?.method === "DELETE") {
+        await pending.promise;
+        return jsonResponse(deletionResultRecord());
+      }
+      if (url === ATTEMPT_DELETE_URL && init?.method === "DELETE") {
+        return jsonResponse({ status: "deleted" });
+      }
+      return jsonResponse({ code: "not_found", message: "no route" }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    setGroupReadyState();
+    const onBack = vi.fn();
+
+    try {
+      render(<CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={onBack} />);
+      await screen.findByTestId("plan-coding-progress");
+      await userEvent.click(screen.getByTestId("plan-coding-delete-all"));
+      expect(screen.getByTestId("plan-coding-delete-all")).toBeDisabled();
+
+      // 互斥：整组在途时单删入口直接返回（不弹确认、零出站）。
+      await userEvent.click(
+        screen.getByRole("button", { name: "仅删除当前 Coding 工作区" }),
+      );
+      expect(confirm).not.toHaveBeenCalled();
+      expect(attemptDeleteCount(fetchMock)).toBe(0);
+
+      await act(async () => {
+        pending.resolve(undefined);
+        await pending.promise.catch(() => undefined);
+      });
+      await waitFor(() => expect(onBack).toHaveBeenCalledTimes(1));
+      // 组删结算后单删入口恢复可用（busy 复位）。
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "仅删除当前 Coding 工作区" }),
+        ).toBeEnabled(),
+      );
+    } finally {
+      confirm.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("地址切换复位整组删除 busy,回到组页后入口不卡死且可再发起", async () => {
+    mockCodingWs();
+    const pending = deferred<void>();
+    let groupDeleteCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === CODING_START_URL) {
+        return jsonResponse(planProgressRecord());
+      }
+      if (url.startsWith(GROUP_DELETE_URL_PREFIX) && init?.method === "DELETE") {
+        groupDeleteCalls += 1;
+        if (groupDeleteCalls === 1) {
+          await pending.promise;
+        }
+        return jsonResponse(deletionResultRecord());
+      }
+      return jsonResponse({ code: "not_found", message: "no route" }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    setGroupReadyState();
+    const onBackA = vi.fn();
+    const onBackB = vi.fn();
+
+    try {
+      const view = render(
+        <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={onBackA} />,
+      );
+      await screen.findByTestId("plan-coding-progress");
+      await userEvent.click(screen.getByTestId("plan-coding-delete-all"));
+      expect(screen.getByTestId("plan-coding-delete-all")).toBeDisabled();
+
+      // 地址切换：effect 复位 groupDeleteBusy（现实现只复位 deleteBusy）。
+      useCodingWorkspaceStore.setState({
+        projectId: ADDRESS_B.projectId,
+        issueId: ADDRESS_B.issueId,
+        attemptId: ADDRESS_B.attemptId,
+        workItemGroupId: null,
+        attemptScope: "work_item",
+      });
+      view.rerender(<CodingWorkspacePage address={ADDRESS_B} onBack={vi.fn()} />);
+      await act(async () => {
+        pending.resolve(undefined);
+        await pending.promise.catch(() => undefined);
+      });
+      expect(onBackA).not.toHaveBeenCalled();
+
+      // 回到组页：入口可用（不卡死），可再次发起组删。
+      setGroupReadyState();
+      view.rerender(
+        <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={onBackB} />,
+      );
+      const reEntry = await screen.findByTestId("plan-coding-delete-all");
+      await waitFor(() => expect(reEntry).toBeEnabled());
+      // slim→聚合分支切换会替换节点，点击前重取挂载中的引用。
+      await userEvent.click(screen.getByTestId("plan-coding-delete-all"));
+      await waitFor(() => expect(onBackB).toHaveBeenCalledTimes(1));
+      expect(groupDeleteCalls).toBe(2);
+    } finally {
       vi.unstubAllGlobals();
     }
   });
