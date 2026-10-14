@@ -20,6 +20,7 @@ use std::sync::Mutex as StdMutex;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 
 /// 会话 timeline 根下的 degraded 投递诊断分区文件名（事后检索脚本契约）。
@@ -63,6 +64,10 @@ pub(super) struct DegradedDeliveryDiagnostics {
     session_id: String,
     path: Option<PathBuf>,
     max_file_bytes: u64,
+    /// D2.1a（fix-cascade-deletion）：scope 准入桥——purging/deleted 会话的
+    /// 迟到打点不重建已删除 timeline 分区；None（测试 fixture 无真实
+    /// store）保持原行为。
+    admission: Option<LifecycleStore>,
 }
 
 impl DegradedDeliveryDiagnostics {
@@ -71,7 +76,14 @@ impl DegradedDeliveryDiagnostics {
             session_id: session_id.to_string(),
             path,
             max_file_bytes: DEGRADED_DIAGNOSTICS_FILE_CAP_BYTES,
+            admission: None,
         }
+    }
+
+    /// D2.1a：注入 scope 准入桥（生产 manager create / 真实 store fixture）。
+    pub(super) fn with_admission(mut self, lifecycle: LifecycleStore) -> Self {
+        self.admission = Some(lifecycle);
+        self
     }
 
     /// 仅供单测注入滚动上限。
@@ -132,16 +144,34 @@ impl DegradedDeliveryDiagnostics {
         let Some(path) = self.path.as_ref() else {
             return;
         };
+        // D2.1a（fix-cascade-deletion，plan Interfaces）：scope 准入内核墓碑
+        //（lease-diagnostics 同款纪律，准入在日志 Mutex 之前）——purging/
+        // deleted 会话的迟到打点不得凭缓存 path 重建已删除 timeline；准入
+        // 失败静默跳过（打点零影响仲裁不变），未删除实体原降级语义不变。
+        let write = || self.append_durable_in_admission(path, value);
+        let outcome = match self.admission.as_ref() {
+            Some(lifecycle) => lifecycle.with_workspace_session_live_write(&self.session_id, write),
+            None => write(),
+        };
+        let _ = outcome;
+    }
+
+    /// 已准入（或无准入面）的 durable 追加；所有 IO 失败静默（原语义）。
+    fn append_durable_in_admission(
+        &self,
+        path: &Path,
+        value: &Value,
+    ) -> Result<(), ProductStoreError> {
         let Ok(_guard) = DEGRADED_DIAGNOSTICS_LOG_MUTEX.lock() else {
-            return;
+            return Ok(());
         };
         let Ok(line) = serde_json::to_string(value) else {
-            return;
+            return Ok(());
         };
         if let Some(parent) = path.parent()
             && std::fs::create_dir_all(parent).is_err()
         {
-            return;
+            return Ok(());
         }
         // 滚动上限：超限时保留最近半数行（原子 rename 重写），durable 证据
         // 优先保住「最近转移序列」（lease-diagnostics 同构）。
@@ -149,13 +179,14 @@ impl DegradedDeliveryDiagnostics {
             && metadata.len().saturating_add(line.len() as u64) > self.max_file_bytes
             && Self::rotate(path).is_err()
         {
-            return;
+            return Ok(());
         }
         let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
-            return;
+            return Ok(());
         };
         let _ = writeln!(file, "{line}");
         let _ = file.flush();
+        Ok(())
     }
 
     fn rotate(path: &Path) -> std::io::Result<()> {

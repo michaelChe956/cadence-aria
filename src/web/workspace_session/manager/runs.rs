@@ -92,6 +92,11 @@ impl WorkspaceSessionManager {
         ),
         String,
     > {
+        // D2.1a（fix-cascade-deletion）：实体删除后的旧 Arc dispatch 检查——
+        // 失效 manager 不再登记任何新 run（不 cancel 在途 run，无副作用）。
+        if self.invalidated_for_entity_deletion() {
+            return Err(super::ENTITY_DELETED_STABLE_MESSAGE.to_string());
+        }
         let (replaced_run, run) = {
             let (command_tx, command_rx) = mpsc::channel(8);
             let cancel = CancellationToken::new();
@@ -224,6 +229,10 @@ impl WorkspaceSessionManager {
         )>,
         String,
     > {
+        // D2.1a：同 start_run_from_attachment 的旧 Arc dispatch 检查。
+        if self.invalidated_for_entity_deletion() {
+            return Err(super::ENTITY_DELETED_STABLE_MESSAGE.to_string());
+        }
         let (command_tx, command_rx) = mpsc::channel(8);
         let cancel = CancellationToken::new();
         let mut state = self

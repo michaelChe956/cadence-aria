@@ -131,9 +131,35 @@ pub(super) async fn spawn_provider_run_with_start_mode(
         workspace_runs,
         session_id,
         connection_id,
-        app_paths: _,
-        session_record: _,
+        app_paths,
+        session_record,
     } = run_context;
+
+    // D2.1a（fix-cascade-deletion Task 3.1；REQ-DEL-06，plan §0.4）：任何
+    // engine/session 锁之前取得完整 run lease——本函数是 author/review/
+    // revision/event-recovery 全部真实入口的单一收口；lease 随任务全生命
+    // 周期持有（move 进下方 spawn，drive/收口/最终 store writes 完成后释放），
+    // 删除侧 try-exclusive 立即 entity_busy。Deleting/Deleted/Busy 稳定拒，
+    // 不复用旧 Arc；旧无 owner 档案（None）保持原行为。
+    let entity_run_lease =
+        crate::product::provider_workspace_runner::acquire_run_lease_for_session(
+            &app_paths,
+            &session_record,
+        )
+        .map_err(|error| match error {
+            crate::product::entity_operation_store::EntityOperationError::Deleting => {
+                "entity_deleting: workspace session owner entity is being deleted".to_string()
+            }
+            crate::product::entity_operation_store::EntityOperationError::Deleted => {
+                "entity_deleted: workspace session owner entity has been deleted".to_string()
+            }
+            crate::product::entity_operation_store::EntityOperationError::Busy => {
+                "entity_busy: workspace session owner entity admission contended".to_string()
+            }
+            crate::product::entity_operation_store::EntityOperationError::Store(inner) => {
+                format!("entity_admission_failed: workspace session run admission failed: {inner}")
+            }
+        })?;
 
     // Handler-originated starts always supersede the active provider run: a user
     // message must cancel a streaming run before waiting for the engine mutex
@@ -245,6 +271,9 @@ pub(super) async fn spawn_provider_run_with_start_mode(
     };
     let cancel_arm_outbound_tx = outbound_tx_for_task.clone();
     tokio::spawn(async move {
+        // D2.1a：run lease 随任务全生命周期持有——drive/取消臂收口/最终
+        // store writes 完成前不释放（supersede 接力 run 自行另持新 lease）。
+        let _entity_run_lease = entity_run_lease;
         let mut provider_drive_guard = Some(provider_drive_guard);
         let mut engine = engine_for_run.lock().await;
         engine.use_run_token(run_cancel.clone());

@@ -22,6 +22,19 @@ impl WorkspaceSessionManager {
         connection_id: &str,
         outbound_tx: mpsc::Sender<OutboundControl>,
     ) {
+        // D2.1a（fix-cascade-deletion）：实体删除后的旧 Arc attach 检查——
+        // 回执稳定错误帧后不登记（不再投递直播/journal 面）；无其他副作用。
+        if self.invalidated_for_entity_deletion() {
+            let _ = outbound_tx.try_send(OutboundControl::Text(
+                serde_json::to_string(&WsOutMessage::Error {
+                    message: super::ENTITY_DELETED_STABLE_MESSAGE.to_string(),
+                })
+                .unwrap_or_else(|_| {
+                    "{\"type\":\"error\",\"message\":\"serialization failed\"}".to_string()
+                }),
+            ));
+            return;
+        }
         let mut state = self
             .state
             .lock()

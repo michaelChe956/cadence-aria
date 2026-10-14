@@ -125,6 +125,10 @@ pub struct WorkspaceSessionManager {
     /// 时以它判定门态（非阻塞拒收）；初值 false（manager 重建后由下一次
     /// 门事件/全量基线收敛，误判面= 放行进取消臂=既有语义，fail-open 安全）。
     human_confirm_gate_open: AtomicBool,
+    /// D2.1a（fix-cascade-deletion）：实体删除后的旧 Arc 失效标志——dispatch
+    /// （start_run 族）与 attach 检查面消费；registry 驱逐后的重建面由
+    /// `create` 的墓碑检查拒绝。
+    invalidated_for_deletion: AtomicBool,
     pub session_id: String,
     pub session_record: WorkspaceSessionRecord,
     pub app_paths: ProductAppPaths,
@@ -132,6 +136,10 @@ pub struct WorkspaceSessionManager {
     workspace_runs: crate::web::state::WorkspaceRunRegistry,
     registry: WorkspaceSessionRegistry,
 }
+
+/// D2.1a：旧 Arc 失效/重建拒绝的稳定消息（dispatch/attach/create 共用）。
+pub(crate) const ENTITY_DELETED_STABLE_MESSAGE: &str =
+    "entity_deleted: workspace session owner entity has been deleted";
 #[cfg(test)]
 impl WorkspaceSessionManager {
     /// 仅供 registry 并发单测制造可做指针比较的具体 manager；不启动 router 或 provider。
@@ -179,6 +187,7 @@ impl WorkspaceSessionManager {
             workspace_runs: crate::web::state::WorkspaceRunRegistry::default(),
             next_event_seq: AtomicU64::new(1),
             human_confirm_gate_open: AtomicBool::new(false),
+            invalidated_for_deletion: AtomicBool::new(false),
             registry: WorkspaceSessionRegistry::default(),
         })
     }
@@ -205,24 +214,31 @@ impl WorkspaceSessionManager {
                 lease: LeaseState::default(),
                 recovery_error: None,
             }),
+            // D2.1a：诊断分区随 fixture 的 app_paths 唯一（record id 跨 fixture
+            // 重号不共享 temp 路径），并接 scope 准入（真实 store 在场）。
             lease_diagnostics: lease_diagnostics::LeaseDiagnostics::new(
                 session_id,
                 Some(
-                    std::env::temp_dir()
+                    app_paths
+                        .state_root()
                         .join(session_id)
                         .join(lease_diagnostics::LEASE_DIAGNOSTICS_FILE),
                 ),
-            ),
+            )
+            .with_admission(LifecycleStore::new(app_paths.clone())),
             degraded_diagnostics: degraded_diagnostics::DegradedDeliveryDiagnostics::new(
                 session_id,
                 Some(
-                    std::env::temp_dir()
+                    app_paths
+                        .state_root()
                         .join(session_id)
                         .join(degraded_diagnostics::DEGRADED_DIAGNOSTICS_FILE),
                 ),
-            ),
+            )
+            .with_admission(LifecycleStore::new(app_paths.clone())),
             next_event_seq: AtomicU64::new(1),
             human_confirm_gate_open: AtomicBool::new(false),
+            invalidated_for_deletion: AtomicBool::new(false),
             session_id: session_id.to_string(),
             session_record,
             app_paths,
@@ -351,6 +367,31 @@ impl WorkspaceSessionManager {
         let session_record = lifecycle
             .get_workspace_session(session_id)
             .map_err(|error| format!("workspace session not found: {error}"))?;
+        // D2.1a（fix-cascade-deletion，plan Interfaces）：registry 重建面
+        //（旧 Arc 驱逐后的复活口）——purging/deleted 会话不重建 manager。
+        // scope 解析是只读文件访问（非阻塞，registry creation lock 内侧执行，
+        // 与 scope flock 无等待交互，锁序固定无环）。
+        let run_scope = crate::product::provider_workspace_runner::resolve_session_run_scope(
+            &app_paths,
+            &session_record,
+        )
+        .map_err(|error| format!("workspace session run admission failed: {error}"))?;
+        if let Some(scope) = &run_scope
+            && let Some(record) =
+                crate::product::entity_deletion_store::EntityDeletionStore::new(app_paths.clone())
+                    .get(scope)
+                    .map_err(|error| format!("entity deletion record read failed: {error}"))?
+        {
+            return Err(match record.phase {
+                crate::product::entity_deletion_store::DeletionPhase::Purging => {
+                    "entity_deleting: workspace session owner entity is being deleted"
+                }
+                crate::product::entity_deletion_store::DeletionPhase::Deleted => {
+                    ENTITY_DELETED_STABLE_MESSAGE
+                }
+            }
+            .to_string());
+        }
         let session_record =
             ensure_workspace_context_message(&app_paths, &lifecycle, session_record)
                 .await
@@ -358,14 +399,18 @@ impl WorkspaceSessionManager {
         let repository = workspace_repository_for_session(&app_paths, &lifecycle, &session_record)
             .map_err(|error| format!("workspace repository unavailable: {error}"))?;
         // REQ-DLS-03：打点路径解析失败（如会话目录不可定位）静默降级为无 durable 腿。
+        // D2.1a：两诊断通道接 scope 准入（purging/deleted 迟到打点不重建
+        // 已删除 timeline 分区）。
         let lease_diagnostics = lease_diagnostics::LeaseDiagnostics::new(
             session_id,
             lease_diagnostics::lease_diagnostics_path(&lifecycle, session_id),
-        );
+        )
+        .with_admission(lifecycle.clone());
         let degraded_diagnostics = degraded_diagnostics::DegradedDeliveryDiagnostics::new(
             session_id,
             degraded_diagnostics::degraded_diagnostics_path(&lifecycle, session_id),
-        );
+        )
+        .with_admission(lifecycle.clone());
         let checkpoint_store = Arc::new(CheckpointStore::new(
             app_paths.issue_lifecycle_root(&session_record.project_id, &session_record.issue_id),
         ));
@@ -457,6 +502,7 @@ impl WorkspaceSessionManager {
             registry: state.workspace_sessions.clone(),
             next_event_seq: AtomicU64::new(1),
             human_confirm_gate_open: AtomicBool::new(false),
+            invalidated_for_deletion: AtomicBool::new(false),
         });
         manager.spawn_event_router(engine_rx, state.workspace_runs.clone());
         manager.recover_on_creation().await;
@@ -483,6 +529,27 @@ impl WorkspaceSessionManager {
     /// C3/REQ-HTR-01：人工确认门是否开着（router 维护，锁无关）。
     pub fn human_confirm_gate_open(&self) -> bool {
         self.human_confirm_gate_open
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// D2.1a（fix-cascade-deletion，plan Interfaces）：实体删除后的旧 Arc
+    /// 失效标记。只在删除独占已取得/无 run 时由删除编排调用（D2.2 升级
+    /// 消费），无 cancel 副作用：不 abort 活 run、不写 durable、不把
+    /// registry remove 当 stop；dispatch（start_run/
+    /// try_start_run_if_idle）与 attach（register_attachment）检查后稳定
+    /// 拒绝，旧 Arc 不可再驱动 provider 或重挂新连接。
+    pub fn invalidate_for_entity_deletion(&self) {
+        self.invalidated_for_deletion
+            .store(true, std::sync::atomic::Ordering::Release);
+        eprintln!(
+            "[aria-entity-deletion] workspace manager invalidated session={}",
+            self.session_id
+        );
+    }
+
+    /// D2.1a：旧 Arc 是否已因实体删除失效（dispatch/attach 检查面）。
+    pub fn invalidated_for_entity_deletion(&self) -> bool {
+        self.invalidated_for_deletion
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
@@ -594,6 +661,7 @@ impl WorkspaceSessionManager {
             workspace_runs: crate::web::state::WorkspaceRunRegistry::default(),
             next_event_seq: AtomicU64::new(1),
             human_confirm_gate_open: AtomicBool::new(false),
+            invalidated_for_deletion: AtomicBool::new(false),
             registry: WorkspaceSessionRegistry::default(),
         });
         manager.spawn_event_router(
