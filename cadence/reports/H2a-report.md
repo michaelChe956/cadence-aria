@@ -43,6 +43,12 @@
 | `coding_attempt_store` | — | 208 passed |
 | rustfmt(edition 2024,仅本包 5 文件)后复验 | — | `h2a` 6 / `plan_coding_n7_` 4 / `plan_coding_n2_` 8 passed |
 
+## P2 修复轮(Main 审查派回,commit 见文末)
+
+- **缺陷**:闭包 entry 生命周期判定为无锁读,锁内 `retire_workspace_round_with_lease` 返回值被丢弃——并发同 command(双最后成员钩子/H4 沿用同 command)在读→租约间交错时,陈旧「无 clearing」判定继续 ③-⑦ 破坏性清理(可清新轮);钩子 `expected_generation: None` 使 generation 守卫生产不生效。
+- **修复**(按审查 suggestion):锁内接 retire 返回的 frozen 权威核验——clearing 缺失(同 command 回执已在)→Ok Reset 幂等返回、**不继续 ③-⑦**;installed.command_id≠本次→409 `coding_plan_workspace_clearing`(retire 已拒,防御性复核同拒);最后成员钩子传 `Some(generation)`。
+- **证据**(隔离树,同批次回退 conversational/amendment 在途坏文件):新增 `h2a_concurrent_same_command_interleave_keeps_new_round` 先红(交错窗下新轮 run 被陈旧清理清除,`expect("new round run must survive...")` panic)→修复后 `h2a` 7 passed;回归 `plan_coding_n7_` 4 / `plan_coding_n2_` 8 / `finalize_coding_attempt_deletion` 3 / `coding_attempt_store` 208 全绿;rustfmt 后 `h2a` 7 复验绿。
+
 主树状态:本包五文件 `cargo check --lib --tests` 零错误零警告(仅一条预存 `coding_store` 未用变量警告,HEAD 既有,非本包引入);主树整体编译被兄弟包 conversational_gate 系在途错误阻塞(E0308/E0425/E0596/E0382),故红绿在隔离树取证(设计预案「隔离树备用」)。
 
 ## 边界与移交

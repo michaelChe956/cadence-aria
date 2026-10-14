@@ -297,7 +297,7 @@ pub(crate) fn finalize_coding_attempt_deletion(
             &attempt.issue_id,
             plan_id,
             &command_id,
-            None,
+            Some(generation),
             false,
         )?;
     }
@@ -589,9 +589,29 @@ fn close_plan_coding_workspace_round_with_lease(
         pending_retry_command_ids: manifest.advance_retry_command_ids.clone(),
         pending_target_repository_ids,
     };
-    run_store
+    let frozen = run_store
         .retire_workspace_round_with_lease(lease, &checklist)
         .map_err(product_store_api_error)?;
+    // P2 修复轮（审查派回）：entry 的生命周期判定是无锁读——并发同 command
+    // （双最后成员钩子/H4 沿用同 command）在读→租约间交错时，此处以租约内
+    // retire 返回的 frozen 为权威核验 clearing 安装：clearing 缺失＝同
+    // command 回执已在（另一并发调用已完整重置）→ 幂等返回轮次切换，
+    // **绝不以陈旧快照继续 ③-⑦ 破坏性清理清掉新轮引用**；异 command
+    // clearing 由 retire 拒绝（防御性复核同样拒绝）。
+    match frozen.clearing.as_ref() {
+        None => {
+            return Ok(PlanCodingWorkspaceResetOutcome::Reset {
+                generation: frozen.generation,
+            });
+        }
+        Some(installed) if installed.command_id != command_id => {
+            return Err(product_store_api_error(ProductStoreError::Conflict {
+                kind: "coding_plan_workspace_clearing",
+                id: plan_id.to_string(),
+            }));
+        }
+        Some(_) => {}
+    }
     // 原授权 Invalidated（幂等；阻断清理窗口内的本轮首启；run 已清则跳过）。
     if let Some(run) = &state.run
         && run_store
@@ -1289,5 +1309,100 @@ mod h2a_workspace_reset_tests {
             .expect("lifecycle after resume");
         assert_eq!(lifecycle.generation, 2);
         assert!(lifecycle.clearing.is_none());
+    }
+
+    /// H2a P2 修复轮（审查派回）：并发同 command 交错窗——第一个同 command
+    /// 调用已完成轮次切换、新轮 run 已重建后，持陈旧「无 clearing」判定的
+    /// 第二个调用进入租约：锁内核验 retire 返回的 frozen，clearing 缺失
+    /// （同 command 回执已在）＝幂等返回 Reset，**绝不继续 ③-⑦ 破坏性
+    /// 清理清掉新轮引用**；陈旧 expected_generation 被 generation 守卫拒。
+    #[tokio::test]
+    async fn h2a_concurrent_same_command_interleave_keeps_new_round() {
+        let fixture = n2_fixture().await;
+        let run_store = fixture.run_store();
+        let run = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_h2a_x_round1",
+                &fixture.revision_id,
+            )
+            .unwrap();
+        run_store.bind_ready(&run, &fixture.bindings, None).unwrap();
+        let coding_store = fixture.coding_store();
+
+        // 零成员半残（原事故形态）：attempt JSON 已亡、journal/advance 残留。
+        for attempt in [fixture.api_attempt(), fixture.web_attempt()] {
+            std::fs::remove_file(attempt_file(&fixture.paths, &attempt.id)).unwrap();
+        }
+
+        // 第一个同 command 调用完整重置（generation 1→2）。
+        match close_plan_coding_workspace_round(
+            &fixture.paths,
+            PROJECT_ID,
+            ISSUE_ID,
+            PLAN_ID,
+            "cmd_h2a_x_close",
+            None,
+            false,
+        )
+        .unwrap()
+        {
+            PlanCodingWorkspaceResetOutcome::Reset { generation } => assert_eq!(generation, 2),
+            other => panic!("expected first reset, got {other:?}"),
+        }
+
+        // 新轮已重建（新 command 的 prepared run）。
+        let fresh = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_h2a_x_round2",
+                &fixture.revision_id,
+            )
+            .unwrap();
+        assert_eq!(fresh.command_id, "cmd_h2a_x_round2");
+
+        // 交错窗：第二个同 command 调用已在旧状态完成 entry 判定（无
+        // clearing、非 resuming），现取到租约——直接进执行体模拟该窗口。
+        let scope = plan_scope();
+        let lease = EntityOperationStore::new(fixture.paths.clone())
+            .try_acquire_delete(&scope)
+            .unwrap();
+        match close_plan_coding_workspace_round_with_lease(
+            &fixture.paths,
+            &lease,
+            PLAN_ID,
+            "cmd_h2a_x_close",
+            false,
+            false,
+        )
+        .unwrap()
+        {
+            PlanCodingWorkspaceResetOutcome::Reset { generation } => assert_eq!(generation, 2),
+            other => panic!("expected idempotent replay under lease, got {other:?}"),
+        }
+        drop(lease);
+        // 新轮引用不被清（破坏性清理不得以陈旧快照清掉新轮 run）。
+        let kept = run_store
+            .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
+            .expect("new round run must survive the interleaved replay");
+        assert_eq!(kept.command_id, "cmd_h2a_x_round2");
+
+        // 陈旧 expected_generation：generation 守卫拒（版本过期刷新后重新决策）。
+        let error = close_plan_coding_workspace_round(
+            &fixture.paths,
+            PROJECT_ID,
+            ISSUE_ID,
+            PLAN_ID,
+            "cmd_h2a_x_stale",
+            Some(1),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "coding_plan_workspace_generation_conflict");
     }
 }
