@@ -37,15 +37,19 @@ async fn bootstrap_legacy_plan_with_session(app: axum::Router, repo_path: &std::
         })
         .expect("create legacy work item plan");
     lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
-        entity_id: "issue_work_item_plan_0001".to_string(),
-        workspace_type: WorkspaceType::WorkItemPlan,
-        author_provider: ProviderName::Fake,
-        reviewer_provider: Some(ProviderName::Fake),
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "issue_work_item_plan_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
 
-        review_rounds: 1,
-        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
         .expect("create work item plan session");
 }
 
@@ -130,7 +134,8 @@ async fn delete_work_item_plan_legacy_rejected_when_group_attempt_bound() {
                 author: ProviderName::Fake,
                 reviewer: Some(ProviderName::Fake),
                 review_rounds: 1,
-                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             target_snapshot: None,
             max_auto_rework: 2,
@@ -222,9 +227,8 @@ async fn delete_work_item_plan_legacy_cascades_plan_store_artifacts_without_atte
 
     // 播种 plan store 产物：真实流程里 outline 生成会写下 context index，
     // 若删除路径不清理它，plan 删除后会留下指向不存在 plan 的孤儿记录。
-    let plan_store = cadence_aria::product::work_item_plan_store::WorkItemPlanStore::new(
-        app_paths.clone(),
-    );
+    let plan_store =
+        cadence_aria::product::work_item_plan_store::WorkItemPlanStore::new(app_paths.clone());
     plan_store
         .save_outline_context_index(&cadence_aria::product::models::OutlineContextIndex {
             project_id: "project_0001".to_string(),
@@ -248,7 +252,8 @@ async fn delete_work_item_plan_legacy_cascades_plan_store_artifacts_without_atte
     let (status, body) = request_json(
         app,
         Method::DELETE,
-        "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_work_item_plan_0001",
+        // D2.2 迁移：Confirmed plan 夹具，REQ-DEL-04 下须显式确认一次。
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_work_item_plan_0001?confirmed=true",
         json!({}),
     )
     .await;

@@ -121,9 +121,7 @@ async fn story_spec_delete_evicts_cached_runtime_manager_and_regenerate_starts_c
 // 此时第一个 work item 已处于「磁盘 session 已删」状态，若驱逐被跳过，
 // registry 残留的旧 manager 会在重新生成复用同 id session 时把删除前的
 // engine 状态原样发给前端——必须即使失败也先驱逐再传播错误。
-use cadence_aria::product::coding_attempt_store::{
-    CodingAttemptStore, CreateCodingAttemptInput,
-};
+use cadence_aria::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use cadence_aria::product::lifecycle_store::CreateIssueWorkItemPlanInput;
 use cadence_aria::product::models::{
     IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, WorkspaceRolePermissionModes,
@@ -131,7 +129,7 @@ use cadence_aria::product::models::{
 use cadence_aria::web::workspace_ws_types::ProviderConfigSnapshot;
 
 #[tokio::test]
-async fn work_item_plan_delete_partial_failure_still_evicts_deleted_work_item_manager() {
+async fn work_item_plan_delete_rejects_zero_mutation_when_any_work_item_has_attempt() {
     let root = tempdir().expect("root");
     let repo = git_repo();
     let state = WebAppState::new(
@@ -191,10 +189,7 @@ async fn work_item_plan_delete_partial_failure_still_evicts_deleted_work_item_ma
                 require_execution_plan_confirm: false,
             },
             status: IssueWorkItemPlanStatus::Confirmed,
-            work_item_ids: vec![
-                "work_item_0001".to_string(),
-                "work_item_0002".to_string(),
-            ],
+            work_item_ids: vec!["work_item_0001".to_string(), "work_item_0002".to_string()],
             repository_profile_ref: None,
             verification_plan_ids: Vec::new(),
             dependency_graph: Vec::new(),
@@ -281,20 +276,20 @@ async fn work_item_plan_delete_partial_failure_still_evicts_deleted_work_item_ma
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error["code"], "coding_workspace_exists");
 
-    // 部分失败确实发生：第一个 work item 已删，其 session 磁盘级联已完成。
+    // D2.2 迁移（REQ-DEL-05）：门禁在任何删除前拒绝——两个 work item 的 session
+    // 磁盘记录与内存 manager 全部保持（旧「部分失败仍驱逐」语义被零破坏取代）。
     let disk_sessions = lifecycle
         .list_workspace_sessions("project_0001", "issue_0001")
         .expect("list sessions");
     assert!(
         disk_sessions
             .iter()
-            .all(|record| record.entity_id != "work_item_0001"),
-        "前置失效：work_item_0001 的 session 磁盘记录应已被级联删除"
+            .any(|record| record.entity_id == "work_item_0001"),
+        "拒删零破坏：work_item_0001 的 session 磁盘记录必须保留"
     );
 
-    // 内存面：即使整体删除失败，已删 work item 的 manager 也必须被驱逐。
     assert!(
-        state.workspace_sessions.get(&session.id).await.is_none(),
-        "plan 删除部分失败时也必须驱逐已删 work item 的内存 manager"
+        state.workspace_sessions.get(&session.id).await.is_some(),
+        "拒删不改 manager：plan session 的内存 manager 不被驱逐"
     );
 }

@@ -1167,3 +1167,7 @@ async fn issue_lifecycle_projects_plan_confirmed_info_with_stable_key_and_time()
     let second = fetch_info(app).await;
     assert_eq!(first, second, "重复 GET 必须得到相同投影");
 }
+
+// D2.2（fix-cascade-deletion Task 3.2）：三类 DELETE 统一编排测试（拆分文件，
+// 同 mod include!，large_file_guard 1200 行红线）。
+include!("lifecycle_tests_d2_2.inc.rs");

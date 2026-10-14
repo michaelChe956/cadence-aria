@@ -14,7 +14,9 @@ const GROUP_ISSUE_ID: &str = "issue_0001";
 const GROUP_PLAN_ID: &str = "work_item_plan_0001";
 
 fn group_plan_uri() -> &'static str {
-    "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001"
+    // D2.2 迁移：本文件删除用例均为 Confirmed plan 夹具，REQ-DEL-04 下
+    // 须显式确认一次（coding 门禁用例不受影响——门禁先于分类）。
+    "/api/projects/project_0001/issues/issue_0001/work-item-plans/work_item_plan_0001?confirmed=true"
 }
 
 fn group_attempt_uri() -> &'static str {
@@ -32,15 +34,19 @@ fn seed_bound_work_item_session(
     work_item_revision_id: &str,
 ) {
     let session = lifecycle
-        .create_workspace_session(CreateWorkspaceSessionInput { project_id: GROUP_PROJECT_ID.to_string(),
-        issue_id: GROUP_ISSUE_ID.to_string(),
-        entity_id: work_item_id.to_string(),
-        workspace_type: WorkspaceType::WorkItem,
-        author_provider: ProviderName::Fake,
-        reviewer_provider: Some(ProviderName::Fake),
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: GROUP_PROJECT_ID.to_string(),
+            issue_id: GROUP_ISSUE_ID.to_string(),
+            entity_id: work_item_id.to_string(),
+            workspace_type: WorkspaceType::WorkItem,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
 
-        review_rounds: 1,
-        superpowers_enabled: false, openspec_enabled: false, work_item_plan_options: None, })
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
         .expect("create work item session");
     let binding = WorkItemRuntimeBinding {
         plan_id: GROUP_PLAN_ID.to_string(),
@@ -105,7 +111,10 @@ fn assert_plan_artifacts_purged(app_paths: &ProductAppPaths, attempt_id: Option<
 
     // revisions + publications 整目录
     assert!(
-        !root.join("work-item-revisions").join(GROUP_PLAN_ID).exists(),
+        !root
+            .join("work-item-revisions")
+            .join(GROUP_PLAN_ID)
+            .exists(),
         "work-item-revisions/<plan> must be purged"
     );
     assert!(
@@ -130,9 +139,7 @@ fn assert_plan_artifacts_purged(app_paths: &ProductAppPaths, attempt_id: Option<
 
     // issue shared worktree json + lock
     assert!(
-        !lifecycle_root
-            .join("issue-shared-worktree.json")
-            .exists(),
+        !lifecycle_root.join("issue-shared-worktree.json").exists(),
         "issue-shared-worktree.json must be deleted"
     );
     assert!(
@@ -170,9 +177,7 @@ fn assert_plan_artifacts_purged(app_paths: &ProductAppPaths, attempt_id: Option<
             "work item attempt lock for {work_item_id} must be purged"
         );
         assert!(
-            !locks_dir
-                .join(format!(".{work_item_id}.lock"))
-                .exists(),
+            !locks_dir.join(format!(".{work_item_id}.lock")).exists(),
             "work item attempt lock sidecar for {work_item_id} must be purged"
         );
     }
@@ -203,10 +208,7 @@ fn assert_plan_artifacts_purged(app_paths: &ProductAppPaths, attempt_id: Option<
                 && session.entity_id == GROUP_PLAN_ID
         })
         .count();
-    assert_eq!(
-        plan_session_left, 0,
-        "WorkItemPlan session must be deleted"
-    );
+    assert_eq!(plan_session_left, 0, "WorkItemPlan session must be deleted");
 
     // plan 记录本身
     assert!(
@@ -220,7 +222,10 @@ fn assert_plan_artifacts_purged(app_paths: &ProductAppPaths, attempt_id: Option<
 /// 断言 issue 级与项目级「不应被删除」的资源仍在（spec「不得误伤」）。
 fn assert_issue_and_specs_preserved(app_paths: &ProductAppPaths) {
     let root = group_issue_root(app_paths);
-    assert!(root.join("issue.json").exists(), "issue.json must be preserved");
+    assert!(
+        root.join("issue.json").exists(),
+        "issue.json must be preserved"
+    );
     assert!(
         root.join("story-specs").exists(),
         "story-specs dir must be preserved"
@@ -266,7 +271,11 @@ async fn delete_work_item_plan_rejected_when_coding_workspace_exists() {
     // 没有额外 WorkItem session 也能进入删除路径；关键是存在 group coding attempt。
     let (create_status, created) =
         request_json(app.clone(), Method::POST, group_attempt_uri(), json!({})).await;
-    assert_eq!(create_status, StatusCode::OK, "group attempt create: {created}");
+    assert_eq!(
+        create_status,
+        StatusCode::OK,
+        "group attempt create: {created}"
+    );
     let attempt_id = assert_global_attempt_id(&created);
     // bootstrap 不创建 issue-shared-worktree，但 group attempt 创建会写入；先记录删除前状态。
     assert!(
@@ -276,8 +285,7 @@ async fn delete_work_item_plan_rejected_when_coding_workspace_exists() {
         "plan must exist before delete"
     );
 
-    let (status, body) =
-        request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
+    let (status, body) = request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
     // 门禁必须拒绝，且使用 409 CONFLICT 表达「资源冲突」。
     assert_eq!(status, StatusCode::CONFLICT, "delete body: {body}");
     assert_eq!(body["code"], "coding_workspace_exists");
@@ -316,8 +324,7 @@ async fn delete_work_item_plan_removes_all_artifacts_and_preserves_issue() {
     seed_issue_shared_worktree_fixture(&lifecycle);
     seed_plan_outline_context_index(&app_paths);
 
-    let (status, body) =
-        request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
+    let (status, body) = request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
     assert_eq!(status, StatusCode::OK, "delete body: {body}");
     assert_eq!(body["status"], "deleted");
 
@@ -345,7 +352,11 @@ async fn delete_work_item_plan_succeeds_on_half_deleted_state() {
     // 同时破坏部分 WorkItem session 与 worktree 目录，制造「revision bindings 不可靠」。
     let (create_status, created) =
         request_json(app.clone(), Method::POST, group_attempt_uri(), json!({})).await;
-    assert_eq!(create_status, StatusCode::OK, "group attempt create: {created}");
+    assert_eq!(
+        create_status,
+        StatusCode::OK,
+        "group attempt create: {created}"
+    );
     let attempt_id = assert_global_attempt_id(&created);
     let attempt = prepare_attempt_with_worktree(
         &CodingAttemptStore::new(app_paths.clone()),
@@ -390,8 +401,11 @@ async fn delete_work_item_plan_succeeds_on_half_deleted_state() {
     // 这些产物在 attempt 主体已删后成为孤儿，删除路径必须一并清理。
     fs::write(coding_root.join("group-initialization-arbitration"), "{}")
         .expect("seed arbitration residue");
-    fs::write(coding_root.join(".group-initialization-arbitration.lock"), "")
-        .expect("seed arbitration lock residue");
+    fs::write(
+        coding_root.join(".group-initialization-arbitration.lock"),
+        "",
+    )
+    .expect("seed arbitration lock residue");
     let journal_dir = coding_root.join("group-initializations");
     fs::create_dir_all(&journal_dir).expect("journal dir");
     fs::write(journal_dir.join(format!("{GROUP_PLAN_ID}.json")), "{}")
@@ -403,8 +417,7 @@ async fn delete_work_item_plan_succeeds_on_half_deleted_state() {
     fs::write(attempt_locks_dir.join("work_item_0001"), "{}")
         .expect("seed work item attempt lock residue");
 
-    let (status, body) =
-        request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
+    let (status, body) = request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -441,8 +454,7 @@ async fn delete_work_item_plan_preserves_other_work_items_attempt_locks() {
     fs::write(locks_dir.join("other_work_item"), "{}").expect("seed other plan lock");
     fs::write(locks_dir.join(".other_work_item.lock"), "").expect("seed other plan sidecar");
 
-    let (status, body) =
-        request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
+    let (status, body) = request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
     assert_eq!(status, StatusCode::OK, "delete body: {body}");
     assert_eq!(body["status"], "deleted");
 
@@ -452,9 +464,7 @@ async fn delete_work_item_plan_preserves_other_work_items_attempt_locks() {
         "own work item lock must be purged"
     );
     assert!(
-        !locks_dir
-            .join(".work_item_0001.lock")
-            .exists(),
+        !locks_dir.join(".work_item_0001.lock").exists(),
         "own work item lock sidecar must be purged"
     );
     // 其他 plan 的锁必须原样保留——这是 Task 3 review 发现的 spec 风险的核心断言。
@@ -463,9 +473,7 @@ async fn delete_work_item_plan_preserves_other_work_items_attempt_locks() {
         "other plan work item lock must be preserved (spec: 删除不得误伤其他 plan)"
     );
     assert!(
-        locks_dir
-            .join(".other_work_item.lock")
-            .exists(),
+        locks_dir.join(".other_work_item.lock").exists(),
         "other plan work item lock sidecar must be preserved"
     );
 }
@@ -490,7 +498,11 @@ async fn delete_work_item_plan_top_level_attempt_locks_purge_orphans_only() {
     // （直接写 `{}` 会被门禁的 list_json_records 解析失败，必须用真实记录）。
     let (create_status, created) =
         request_json(app.clone(), Method::POST, group_attempt_uri(), json!({})).await;
-    assert_eq!(create_status, StatusCode::OK, "group attempt create: {created}");
+    assert_eq!(
+        create_status,
+        StatusCode::OK,
+        "group attempt create: {created}"
+    );
     let attempt_id = assert_global_attempt_id(&created);
     let attempt = prepare_attempt_with_worktree(
         &CodingAttemptStore::new(app_paths.clone()),
@@ -531,8 +543,7 @@ async fn delete_work_item_plan_top_level_attempt_locks_purge_orphans_only() {
         fs::remove_dir_all(worktree_path).expect("remove original attempt worktree");
     }
 
-    let (status, body) =
-        request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
+    let (status, body) = request_json(app, Method::DELETE, group_plan_uri(), json!({})).await;
     assert_eq!(status, StatusCode::OK, "delete body: {body}");
     assert_eq!(body["status"], "deleted");
 

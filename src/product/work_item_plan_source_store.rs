@@ -444,6 +444,35 @@ impl WorkItemPlanSourceStore {
         Ok(record)
     }
 
+    /// D1.2a 接口（plan §0.2，D2.2 按 Main 裁定先行提供）：删除闭包的 source
+    /// plan 子树 purge。只按 (project, issue, plan) 路径 scope 清
+    /// `work-item-plan-sources/{plan_id}` 整目录（含各对象记录与其 flock 副车
+    /// 锁文件），**不解析被清内容健康性**（§0.5：只 path scope）；缺失=已清
+    /// （幂等重入）；目录/JSON/IO 真实错误必报，不当空。低层原语：HTTP/manager
+    /// 编排不在本层，仅供删除闭包在持有 Plan 独占 lease 时调用；不触碰既有
+    /// 身份寻址（content_addressed_id）/put/守卫面。
+    pub fn purge_plan_sources(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<(), SourceStoreError> {
+        self.validate_scope_ids(project_id, issue_id, plan_id)?;
+        let plan_root = self
+            .paths
+            .issue_root(project_id, issue_id)
+            .join("work-item-plan-sources")
+            .join(plan_id);
+        match std::fs::remove_dir_all(&plan_root) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(SourceStoreError::Io(format!(
+                "purge plan sources {}: {error}",
+                plan_root.display()
+            ))),
+        }
+    }
+
     fn validate_ir_record(
         &self,
         scope: &SourceStoreScope,

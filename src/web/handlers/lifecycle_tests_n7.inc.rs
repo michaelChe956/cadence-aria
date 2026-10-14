@@ -191,7 +191,10 @@ async fn delete_work_item_plan_request(
     app: &axum::Router,
     plan_id: &str,
 ) -> (StatusCode, serde_json::Value) {
-    let uri = format!("/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/work-item-plans/{plan_id}");
+    // D2.2 迁移：n7_seed_plan 以 Confirmed 落档，REQ-DEL-04 下须显式确认一次。
+    let uri = format!(
+        "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/work-item-plans/{plan_id}?confirmed=true"
+    );
     let response = app
         .clone()
         .oneshot(
@@ -416,11 +419,13 @@ async fn plan_coding_n7_missing_resource_reentry_and_late_start() {
         assert_eq!(status, StatusCode::OK, "missing run is OK: {body}");
         assert!(!n7_run_file(&paths, N7_PLAN_A).exists());
 
+        // D2.2 迁移：Deleted 墓碑在位 → 幂等 200（REQ-DEL-02「重复请求幂等返回
+        // 已删除」），且零复活。
         let (reentry_status, reentry_body) = delete_work_item_plan_request(&app, N7_PLAN_A).await;
-        assert_ne!(
+        assert_eq!(
             reentry_status,
             StatusCode::OK,
-            "re-entry on deleted plan must not report success: {reentry_body}"
+            "re-entry on deleted plan must be idempotent success: {reentry_body}"
         );
         assert!(
             !n7_run_file(&paths, N7_PLAN_A).exists() && !n7_run_lock(&paths, N7_PLAN_A).exists(),
@@ -484,8 +489,8 @@ async fn plan_coding_n7_missing_resource_reentry_and_late_start() {
         assert_eq!(status, StatusCode::OK, "delete body: {body}");
         assert!(!n7_run_file(&paths, N7_PLAN_A).exists());
         assert!(
-            n7_run_lock(&paths, N7_PLAN_A).exists(),
-            "without a deletion-window tombstone purge_plan keeps the lock file (read-only exit)"
+            !n7_run_lock(&paths, N7_PLAN_A).exists(),
+            "D2.2 统一闭包持 delete lease＋purging 墓碑（安全删除窗口）——前导点锁一并清"
         );
 
         let late = run_store.mark_start_requested(&stale);

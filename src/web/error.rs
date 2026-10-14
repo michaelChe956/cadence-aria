@@ -173,6 +173,11 @@ impl IntoResponse for ApiError {
             | "repository_initialization_in_progress"
             | "shared_worktree_dirty_manual_gate"
             | "coding_workspace_exists"
+            // 级联删除 D2.2（fix-cascade-deletion）：三类 DELETE 稳定 409 码——
+            // 分级确认必答 / 存活引用拒删 / 同 scope 运行或资源 writer 竞态。
+            | "deletion_confirmation_required"
+            | "entity_referenced"
+            | "entity_busy"
             | "aggregate_root_ownership_conflict" => StatusCode::CONFLICT,
             // T11 gateway 稳定码表收口：政策门/复验拒绝为 4xx 业务阻断，禁止回退 500。
             // policy/target/registry/drift/resume/managed_settings 一律 409；capability 与

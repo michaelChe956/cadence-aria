@@ -334,3 +334,240 @@ pub(crate) fn finalize_coding_attempt_deletion(
     )?;
     Ok(())
 }
+
+// ─── D2.2（fix-cascade-deletion Task 3.2）：三类 DELETE 的目标仓资源清理 ───
+
+/// D2.2 统一编排的目标仓资源清理（plan Interfaces：`cleanup_plan_shared_worktrees`）。
+///
+/// 仅 manifest 目标仓 ∪ plan-run 冻结 target ∪ legacy issue 布局（None 键），
+/// **不整 issue 枚举删除**（REQ-GRP-01「共享工作树仍被其他 Plan 使用」）。
+/// 每个资源在稳定 repo resource cleanup lease 内复核 D1.3c 真实 owners
+/// （`resolve_shared_resource_owners`）：他 Plan 仍使用（存活、非本 scope、
+/// 非墓碑 scope）则保留；活动锁 owner 属他人（不在本 run 冻结 attempt 集/
+/// selection 内）视为在途 writer 保留（N7 同语义——plan 删除门禁已证本 plan
+/// 无 attempt 记录，冻结集内 owner 是已删 attempt 的孤儿残留，可清）。目标
+/// 专属且无在途 writer 才调用现 `delete_repo/issue_shared_worktree` helper
+/// （worktree.rs 零改动，只读消费）。缺失=已清；IO/JSON 上抛不吞。
+///
+/// `resource_leases` 是编排层在关系短锁之前按固定序取得的 cleanup lease
+///（§0.2 锁序）；关系锁内新发现的目标仓在此现取（try，争用 Busy fail-closed
+/// 上抛供重试）。宽 helper（`cleanup_shared_worktree_by_routing`）其它 caller
+/// 语义不变。
+pub(crate) fn cleanup_plan_shared_worktrees(
+    app_paths: &ProductAppPaths,
+    lease: &crate::product::entity_operation_store::EntityDeletionLease,
+    manifest: &crate::product::entity_deletion_store::EntityDeletionManifest,
+    plan_run: Option<&crate::product::coding_plan_run::CodingPlanRun>,
+    resource_leases: &[(
+        crate::product::entity_operation_store::SharedResourceKey,
+        crate::product::entity_operation_store::SharedResourceCleanupLease,
+    )],
+) -> ApiResult<()> {
+    use crate::product::entity_deletion_store::{DeletionEntityKind, EntityDeletionStore};
+    use crate::product::entity_operation_store::{
+        EntityOperationStore, SharedResourceKey as ResourceKey,
+    };
+
+    let scope = lease.scope();
+    if scope.kind != DeletionEntityKind::Plan {
+        return Err(product_store_api_error(ProductStoreError::InvalidRecord {
+            kind: "entity_deletion_manifest",
+            reason: "shared worktree cleanup only belongs to plan deletions".to_string(),
+        }));
+    }
+    let (project_id, issue_id) = (scope.project_id.as_str(), scope.issue_id.as_str());
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let operations = EntityOperationStore::new(app_paths.clone());
+    let deletion_records = EntityDeletionStore::new(app_paths.clone());
+
+    // 目标仓集合（BTreeSet 固定排序）：manifest 派生 target ∪ run 冻结 target。
+    let mut repositories: std::collections::BTreeSet<Option<uuid::Uuid>> = Default::default();
+    for target in &manifest.target_repository_ids {
+        let parsed = uuid::Uuid::parse_str(target).map_err(|error| {
+            ApiError::runtime(
+                "entity_target_repository_invalid",
+                "owned work item target repository is not a logical id",
+                json!({
+                    "target_repository_id": target,
+                    "message": error.to_string(),
+                }),
+            )
+        })?;
+        repositories.insert(Some(parsed));
+    }
+    if let Some(run) = plan_run {
+        for binding in &run.target_attempts {
+            let parsed = uuid::Uuid::parse_str(&binding.target_repository_id).map_err(|_| {
+                ApiError::runtime(
+                    "plan_coding_run_target_invalid",
+                    "plan run frozen target is not a logical repository id",
+                    json!({
+                        "plan_id": run.plan_id,
+                        "target_repository_id": binding.target_repository_id,
+                    }),
+                )
+            })?;
+            repositories.insert(Some(parsed));
+        }
+    }
+
+    for repository_id in repositories {
+        let key = ResourceKey {
+            project_id: project_id.to_string(),
+            issue_id: issue_id.to_string(),
+            repository_id: repository_id.map(LogicalRepositoryId),
+        };
+        with_held_or_acquired_cleanup_lease(&operations, resource_leases, &key, || {
+            let repository_id = key.repository_id.expect("repo key carries a logical id");
+            let Some(record) = lifecycle
+                .get_repo_shared_worktree(project_id, issue_id, repository_id)
+                .map_err(product_store_api_error)?
+            else {
+                return Ok(()); // 缺失=已清
+            };
+            // 记录身份复核（N7 同判据）：路径派生读回的记录若身份漂移 fail-closed。
+            if record.project_id != project_id
+                || record.issue_id != issue_id
+                || record.target_repository_id != Some(repository_id)
+            {
+                return Err(product_store_api_error(
+                    ProductStoreError::IdentityMismatch {
+                        kind: "repo_shared_worktree",
+                        id: repository_id.0.to_string(),
+                    },
+                ));
+            }
+            if shared_worktree_has_other_live_owner(
+                &lifecycle,
+                &deletion_records,
+                scope,
+                &record,
+                plan_run,
+            )? {
+                return Ok(()); // 他 Plan 仍使用 / 他人持锁 → 保留
+            }
+            lifecycle
+                .delete_repo_shared_worktree(project_id, issue_id, repository_id)
+                .map_err(product_store_api_error)?;
+            Ok(())
+        })?;
+    }
+
+    // legacy issue 布局（None 键）：记录存在才清理；同 owner 判据。
+    let legacy_key = ResourceKey {
+        project_id: project_id.to_string(),
+        issue_id: issue_id.to_string(),
+        repository_id: None,
+    };
+    if lifecycle
+        .get_issue_shared_worktree(project_id, issue_id)
+        .map_err(product_store_api_error)?
+        .is_some()
+    {
+        with_held_or_acquired_cleanup_lease(&operations, resource_leases, &legacy_key, || {
+            let Some(record) = lifecycle
+                .get_issue_shared_worktree(project_id, issue_id)
+                .map_err(product_store_api_error)?
+            else {
+                return Ok(());
+            };
+            if record.project_id != project_id || record.issue_id != issue_id {
+                return Err(product_store_api_error(
+                    ProductStoreError::IdentityMismatch {
+                        kind: "issue_shared_worktree",
+                        id: record.id,
+                    },
+                ));
+            }
+            if shared_worktree_has_other_live_owner(
+                &lifecycle,
+                &deletion_records,
+                scope,
+                &record,
+                plan_run,
+            )? {
+                return Ok(());
+            }
+            lifecycle
+                .delete_issue_shared_worktree(project_id, issue_id)
+                .map_err(product_store_api_error)?;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// 复用编排层已持的 cleanup lease；未持有的 key 现取（try 非阻塞，争用
+/// Busy fail-closed 上抛——客户端可重试，不静默跳过留孤儿资源）。
+fn with_held_or_acquired_cleanup_lease<T>(
+    operations: &crate::product::entity_operation_store::EntityOperationStore,
+    resource_leases: &[(
+        crate::product::entity_operation_store::SharedResourceKey,
+        crate::product::entity_operation_store::SharedResourceCleanupLease,
+    )],
+    key: &crate::product::entity_operation_store::SharedResourceKey,
+    operation: impl FnOnce() -> ApiResult<T>,
+) -> ApiResult<T> {
+    if resource_leases.iter().any(|(held, _)| held == key) {
+        return operation();
+    }
+    let _lease = operations
+        .try_acquire_shared_resource_cleanup(key)
+        .map_err(shared_resource_cleanup_api_error)?;
+    operation()
+}
+
+/// D1.3c 真实 owner 复核：`resolve_shared_resource_owners` 反推的 scope 中
+/// 存在「非本 scope 且未墓碑」的 owner → 他 Plan 仍使用；或活动锁 owner
+/// 不属本 run 冻结 attempt 集/selection → 他人在途 writer。两者均保留。
+fn shared_worktree_has_other_live_owner(
+    lifecycle: &LifecycleStore,
+    deletion_records: &crate::product::entity_deletion_store::EntityDeletionStore,
+    scope: &crate::product::entity_deletion_store::EntityScope,
+    record: &crate::product::models::IssueSharedWorktree,
+    plan_run: Option<&crate::product::coding_plan_run::CodingPlanRun>,
+) -> ApiResult<bool> {
+    let mut claims_this_plan = false;
+    for owner in lifecycle
+        .resolve_shared_resource_owners(
+            &scope.project_id,
+            &scope.issue_id,
+            record.target_repository_id,
+        )
+        .map_err(product_store_api_error)?
+    {
+        if owner == *scope {
+            claims_this_plan = true;
+            continue;
+        }
+        // 墓碑（purging/deleted）scope 不是存活引用方——同波删除或已删实体。
+        if deletion_records
+            .get(&owner)
+            .map_err(product_store_api_error)?
+            .is_some()
+        {
+            continue;
+        }
+        return Ok(true);
+    }
+    // 活动锁 owner：资源记录真实归属（resolve）已收敛到本 plan 时，锁 owner 是
+    // 本 plan 已删 attempt 的孤儿残留（半残：attempt json 已删、记录锁 owner 字段
+    // 残留），随闭包清；记录无任何归属本 plan 证据时按 N7 语义 fail-closed 保留
+    //（属本 run 冻结集/selection 的 owner 同为可清孤儿）。
+    if let Some(owner_id) = record.current_lock_owner_id.as_deref() {
+        let own_orphan = claims_this_plan
+            || plan_run.is_some_and(|run| {
+                run.target_attempts
+                    .iter()
+                    .any(|frozen| frozen.attempt_id == owner_id)
+                    || run
+                        .selection
+                        .as_ref()
+                        .is_some_and(|selection| selection.attempt_id == owner_id)
+            });
+        if !own_orphan {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
