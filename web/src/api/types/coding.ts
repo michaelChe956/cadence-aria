@@ -107,7 +107,9 @@ export type CodingAttempt = {
   worktree_path: string | null;
   rework_count: number;
   head_commit: string | null;
-  push_status: "not_pushed" | "pushed" | "failed" | null;
+  // 复用 PushStatus 单一值域别名（含 skipped_not_configured 本地交付）；不再内联
+  // 复制一份联合类型，避免两套值域漂移。
+  push_status: PushStatus | null;
   review_request_url: string | null;
   created_at: string;
   updated_at: string;

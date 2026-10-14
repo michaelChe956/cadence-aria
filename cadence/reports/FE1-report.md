@@ -15,6 +15,12 @@
 | `web/src/components/lifecycle/PlanGroupProjectionPanel.tsx` | 私有标签表改从共享模块导入；`delivered` 谓词对齐后端 `is_delivered`（completed + 已推送/本地交付） |
 | `web/src/pages/CodingWorkspaceReports.tsx` | GitPanel `push` 行改用 `PUSH_STATUS_LABELS`（不再裸露 enum 原文） |
 
+**复审追加（P3，Main 指令）**：`coding.ts:110` `CodingAttempt.push_status` 原为内联的
+`"not_pushed" \| "pushed" \| "failed" \| null`（第三份值域副本，且漏 skipped）。改为
+`PushStatus \| null` —— 复用单一值域别名，S2a 后端可产出的 `skipped_not_configured`
+因此可承载。红：`CodingAttempt["push_status"] = "skipped_not_configured"` 触发
+`TS2322: not assignable to '"failed" | "not_pushed" | "pushed" | null'`；修后 `tsc -b` exit 0。
+
 九字段与 S3 后端契约经 ImplS3 消息确认（2026-10-14）：全部 `Option<String>`、无枚举；`execution_state` 四个新增字面量一致；`waiting_reason` 原样透传 `attempt.manual_recovery_reason`（开放值集）；`SkippedNotConfigured` 序列化为 `skipped_not_configured`。
 
 ## 2. TDD 红绿
