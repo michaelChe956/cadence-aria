@@ -115,7 +115,10 @@ impl super::CodingAttemptStore {
             IssueDeliveryOverall::None
         } else if entries.iter().all(|entry| {
             entry.attempt_status == Some(CodingAttemptStatus::Completed)
-                && entry.push_status == Some(PushStatus::Pushed)
+                && entry
+                    .push_status
+                    .as_ref()
+                    .is_some_and(PushStatus::is_delivered)
         }) {
             IssueDeliveryOverall::AllPushed
         } else {

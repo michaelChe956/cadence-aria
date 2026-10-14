@@ -360,6 +360,39 @@ fn all_delivered_when_every_target_latest_attempt_completed_and_pushed() {
     }
 }
 
+#[test]
+fn skipped_not_configured_target_counts_as_delivered() {
+    let (tmp, store) = setup_store();
+    let (alpha, beta) = seed_two_targets(tmp.path(), &store);
+    let attempt_a = seed_group_attempt(&store, Some(alpha), "aria/issues/i/api");
+    let attempt_b = seed_group_attempt(&store, Some(beta), "aria/issues/i/web");
+    let attempt_a = force_attempt_state(
+        &store,
+        &attempt_a,
+        CodingAttemptStatus::Completed,
+        CodingExecutionStage::FinalConfirm,
+        None,
+    );
+    let attempt_b = force_attempt_state(
+        &store,
+        &attempt_b,
+        CodingAttemptStatus::Completed,
+        CodingExecutionStage::FinalConfirm,
+        None,
+    );
+    seed_review_request(&store, &attempt_a, PushStatus::Pushed, None);
+    seed_review_request(&store, &attempt_b, PushStatus::SkippedNotConfigured, None);
+
+    let projection = store
+        .compute_plan_group_projection(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap();
+    assert_eq!(projection.overall, PlanGroupOverall::AllDelivered);
+    assert_eq!(
+        entry_for(&projection, beta).push_status,
+        Some(PushStatus::SkippedNotConfigured)
+    );
+}
+
 // ── 2) partial failure 三负向：不伪装全局成功 + 未满足项显式 ──
 
 #[test]

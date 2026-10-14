@@ -383,6 +383,20 @@ impl GitWorkspaceService {
         }
     }
 
+    /// 仓库是否配置了名为 `remote` 的远端。
+    ///
+    /// 以 `git remote` 列表判定，不依赖 `remote get-url`/`ls-remote` 的退出码：
+    /// 后者无法区分「未配置」与「已配置但不可达」。只有「未配置」才允许本地交付跳过推送。
+    pub async fn git_remote_configured(
+        &self,
+        worktree_path: &Path,
+        remote: &str,
+    ) -> Result<bool, GitWorkspaceError> {
+        self.ensure_git_repo(worktree_path).await?;
+        let output = self.run_git(worktree_path, &["remote"]).await?;
+        Ok(output.stdout.lines().any(|line| line.trim() == remote))
+    }
+
     pub async fn git_diff_stat(
         &self,
         worktree_path: &Path,

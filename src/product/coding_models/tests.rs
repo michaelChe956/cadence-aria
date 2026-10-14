@@ -178,6 +178,18 @@ fn review_request_deserializes_legacy_json_as_attempt_owner() {
 }
 
 #[test]
+fn push_status_skipped_not_configured_serde_roundtrip_and_delivered_predicate() {
+    let json = serde_json::to_value(PushStatus::SkippedNotConfigured).unwrap();
+    assert_eq!(json, serde_json::json!("skipped_not_configured"));
+    let back: PushStatus = serde_json::from_value(json).unwrap();
+    assert_eq!(back, PushStatus::SkippedNotConfigured);
+    assert!(PushStatus::Pushed.is_delivered());
+    assert!(PushStatus::SkippedNotConfigured.is_delivered());
+    assert!(!PushStatus::NotPushed.is_delivered());
+    assert!(!PushStatus::Failed.is_delivered());
+}
+
+#[test]
 fn review_request_rejects_json_without_attempt_id() {
     let missing_attempt_id = serde_json::json!({
         "id": "rr_1", "kind": "git_branch_only", "remote_kind": "generic_git",

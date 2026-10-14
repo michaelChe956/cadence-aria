@@ -156,7 +156,7 @@ impl super::CodingAttemptStore {
             let delivered = latest.status == CodingAttemptStatus::Completed
                 && latest_review
                     .as_ref()
-                    .is_some_and(|review| review.push_status == PushStatus::Pushed);
+                    .is_some_and(|review| review.push_status.is_delivered());
             all_delivered = all_delivered && delivered;
             any_target_started = any_target_started || target_started;
 

@@ -886,6 +886,30 @@ fn all_pushed_returns_all_pushed() {
 }
 
 #[test]
+fn skipped_not_configured_counts_as_delivered_for_all_pushed() {
+    let (_tmp, store) = setup_store();
+    seed_work_item(&store, "work_item_0001", "repo_alpha");
+    seed_work_item(&store, "work_item_0002", "repo_beta");
+
+    let attempt1 = seed_completed_attempt(&store, "work_item_0001", "aria/w1/attempt-1", "sha111");
+    seed_review_request(&store, &attempt1, PushStatus::Pushed, None);
+    let attempt2 = seed_completed_attempt(&store, "work_item_0002", "aria/w2/attempt-1", "sha222");
+    seed_review_request(&store, &attempt2, PushStatus::SkippedNotConfigured, None);
+
+    let summary = store
+        .compute_issue_delivery_summary(PROJECT_ID, ISSUE_ID)
+        .unwrap();
+
+    assert_eq!(summary.overall, IssueDeliveryOverall::AllPushed);
+    let local = summary
+        .entries
+        .iter()
+        .find(|entry| entry.work_item_id == "work_item_0002")
+        .expect("local delivery entry");
+    assert_eq!(local.push_status, Some(PushStatus::SkippedNotConfigured));
+}
+
+#[test]
 fn partial_when_one_push_failed() {
     let (_tmp, store) = setup_store();
     seed_work_item(&store, "work_item_0001", "repo_alpha");

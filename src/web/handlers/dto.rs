@@ -904,6 +904,7 @@ pub(crate) fn push_status_text(status: &PushStatus) -> &'static str {
         PushStatus::NotPushed => "not_pushed",
         PushStatus::Pushed => "pushed",
         PushStatus::Failed => "failed",
+        PushStatus::SkippedNotConfigured => "skipped_not_configured",
     }
 }
 

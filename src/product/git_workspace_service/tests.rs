@@ -546,3 +546,46 @@ async fn git_add_work_item_changes_fails_closed_when_owner_read_bit_missing_but_
         .await
         .expect("self-healed 644 stages normally");
 }
+
+#[tokio::test]
+async fn git_remote_configured_distinguishes_missing_from_unreachable_remote() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    let service = GitWorkspaceService::new();
+
+    assert!(
+        !service
+            .git_remote_configured(repo, "origin")
+            .await
+            .expect("no remote configured"),
+        "repo without remotes must report origin unconfigured"
+    );
+
+    // 已配置但指向不存在的路径（不可达）仍判定为「已配置」，不得被当作本地交付。
+    git(
+        repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            &tmp.path().join("missing.git").to_string_lossy(),
+        ],
+    );
+    assert!(
+        service
+            .git_remote_configured(repo, "origin")
+            .await
+            .expect("configured remote"),
+        "configured-but-unreachable origin must report configured"
+    );
+    assert!(
+        !service
+            .git_remote_configured(repo, "upstream")
+            .await
+            .expect("other remote name"),
+        "only the exact remote name counts"
+    );
+}

@@ -312,11 +312,21 @@ impl CodingWorkspaceEngine {
             owner_kind: ReviewRequestOwnerKind::Attempt,
             pointer_publication_id: None,
             revoked: false,
-            manual_instructions: vec![format!(
-                "基于远端 {}/{} 发起代码审查",
-                journal.remote.as_deref().unwrap_or_default(),
-                journal.branch_name
-            )],
+            manual_instructions: vec![if journal.push_status
+                == Some(PushStatus::SkippedNotConfigured)
+            {
+                format!(
+                    "本地交付：分支 {} / commit {}，未配置远端，未推送",
+                    journal.branch_name,
+                    journal.commit_sha.as_deref().unwrap_or_default()
+                )
+            } else {
+                format!(
+                    "基于远端 {}/{} 发起代码审查",
+                    journal.remote.as_deref().unwrap_or_default(),
+                    journal.branch_name
+                )
+            }],
             created_at: journal.updated_at.clone(),
             updated_at: journal.updated_at.clone(),
         };

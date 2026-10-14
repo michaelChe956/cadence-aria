@@ -778,14 +778,38 @@ impl CodingWorkspaceEngine {
                     id: attempt.id.clone(),
                 }
             })?;
-            let remote_head = if push_just_started {
+            // 本地交付判定：远端「未配置」（git remote 列表无该名）才跳过推送；
+            // 已配置但不可达/被拒仍走下方原路径（Indeterminate/Failed 语义不变）。
+            // 置于 remote_head/git_push 之前，使新进入与「恢复停在 PushStarted 的
+            // journal」两种情形同样收敛。
+            let remote_configured = match self
+                ._git_service
+                .git_remote_configured(worktree_path, remote)
+                .await
+            {
+                Ok(configured) => configured,
+                Err(GitWorkspaceError::Cancelled { .. }) => {
+                    return Err(CodingWorkspaceEngineError::Aborted);
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let remote_head = if push_just_started || !remote_configured {
                 Ok(None)
             } else {
                 self._git_service
                     .git_remote_branch_head(worktree_path, remote, &attempt.branch_name)
                     .await
             };
-            if matches!(remote_head.as_ref(), Ok(Some(head)) if head == commit_sha) {
+            if !remote_configured {
+                journal = self
+                    .finish_review_git_operation(
+                        &attempt,
+                        &journal,
+                        PushStatus::SkippedNotConfigured,
+                        None,
+                    )
+                    .await?;
+            } else if matches!(remote_head.as_ref(), Ok(Some(head)) if head == commit_sha) {
                 journal = self
                     .finish_review_git_operation(&attempt, &journal, PushStatus::Pushed, None)
                     .await?;
@@ -856,20 +880,25 @@ impl CodingWorkspaceEngine {
             })
             .await;
 
-        let (node_status, summary) = if request.push_status == PushStatus::Pushed {
-            (
+        let (node_status, summary) = match request.push_status {
+            PushStatus::Pushed => (
                 CodingTimelineNodeStatus::Completed,
                 Some("review request 已创建".to_string()),
-            )
-        } else {
-            // push 失败不阻断主流程：attempt 保持当前状态，让后续 stage gate / GroupFinalReview 继续
-            // 推进。失败原因已记录在 review_request.push_error，这里仅在 timeline node 标 Failed。
-            let base = "review request 推送失败".to_string();
-            let summary = match request.push_error.as_ref() {
-                Some(error) => format!("{base}：{error}"),
-                None => base,
-            };
-            (CodingTimelineNodeStatus::Failed, Some(summary))
+            ),
+            PushStatus::SkippedNotConfigured => (
+                CodingTimelineNodeStatus::Completed,
+                Some("本地交付（未配置远端，已跳过推送）".to_string()),
+            ),
+            _ => {
+                // push 失败不阻断主流程：attempt 保持当前状态，让后续 stage gate / GroupFinalReview 继续
+                // 推进。失败原因已记录在 review_request.push_error，这里仅在 timeline node 标 Failed。
+                let base = "review request 推送失败".to_string();
+                let summary = match request.push_error.as_ref() {
+                    Some(error) => format!("{base}：{error}"),
+                    None => base,
+                };
+                (CodingTimelineNodeStatus::Failed, Some(summary))
+            }
         };
         let completed_at = Utc::now().to_rfc3339();
         self.store.update_timeline_node_status(

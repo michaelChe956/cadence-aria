@@ -36,6 +36,17 @@ pub enum PushStatus {
     NotPushed,
     Pushed,
     Failed,
+    /// 仓库未配置目标远端（无 origin）：跳过推送，按本地交付收口。
+    /// 仅表示「远端未配置」，绝不用于「远端已配置但推送失败」。
+    SkippedNotConfigured,
+}
+
+impl PushStatus {
+    /// 「已交付」统一谓词：远端已推送，或无远端仓库的本地交付。
+    /// issue 级与 plan 组级交付聚合必须统一走本谓词，不得再直接比较 `Pushed`。
+    pub fn is_delivered(&self) -> bool {
+        matches!(self, PushStatus::Pushed | PushStatus::SkippedNotConfigured)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
