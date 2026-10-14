@@ -86,6 +86,37 @@ const SC_MANUAL_ATTEMPT2_DELIVERY_REJECTED_CODE: &str = "SC_MANUAL_ATTEMPT2_DELI
 /// （P2 修复 aa823108 恢复车道语义的 spawn 侧防线）。
 const SC_MANUAL_STRUCTURAL_CLAIM_PENDING_CODE: &str = "SC_MANUAL_STRUCTURAL_CLAIM_PENDING";
 
+/// SG6a.2（P3 修复轮）：attempt2 冻结交付 join 的候选基线窗口——按
+/// SG5.3 join 口径把失败中间候选布置为内存修订基线（refs/版本/评审
+/// 不提升，REQ-CG-03 坏 source 零提升不受影响），执行精确 join。
+///
+/// join 使命完成（Ok/Err 皆然）后 MUST 统一还原先前基线：attempt2 未
+/// 成行（join 拒/身份失配/崩溃重放/二次拒收/任何后续出口）不得污染内
+/// 存投影——否则后续 `handle_human_gate_feedback` 以残留的失败候选
+/// hash 落 durable 新 turn.source_hash（≠当前修订基线），恢复车道
+/// MarkFailed(ValidationReject) 会误杀合法修订轮。
+pub(crate) fn deliver_attempt2_frozen_prompt(
+    engine: &mut crate::product::workspace_engine::WorkspaceEngine,
+    turn: &crate::product::models::HumanGateTurn,
+    failed_source: &str,
+    carry: &crate::product::workspace_engine::conversational_gate::ScRevisionClaimCarry,
+) -> Result<String, String> {
+    // 布置：claim 绑定的失败候选=合法中间 hash（join 对账视图）；保留
+    // 先前基线供 join 使命结束后还原（P3）。
+    let previous_baseline = engine.session.artifact.clone();
+    engine.session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+        markdown: failed_source.to_string(),
+        diff: None,
+    });
+    let joined =
+        engine.build_sc_revision_delivery_for_resume(&turn.command_id, turn, Some(&carry.frozen));
+    // join 使命完成（Ok/Err 皆然）统一还原：attempt2 未成行不得污染内存
+    // 修订基线（P3——后续 handle_human_gate_feedback 的 durable
+    // turn.source_hash 单源读该投影）。
+    engine.session.artifact = previous_baseline;
+    joined
+}
+
 pub(super) async fn spawn_provider_run_with_start_mode(
     run_context: ProviderRunContext,
     run_kind: ProviderRunKind,
@@ -1393,24 +1424,17 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                                     return;
                                 }
                             };
-                            // 交付 join 的候选对账口径（SG5.3）：claim 绑定
-                            // 的失败候选=合法中间 hash——「当前修订候选」
-                            // 在 attempt2 交付窗口即该中间候选（内存修订
-                            // 基线；refs/版本/评审不提升，REQ-CG-03 坏
-                            // source 零提升不受影响）。
-                            engine.session.artifact = Some(
-                                crate::web::workspace_ws_types::ArtifactPayload::Markdown {
-                                    markdown: full_output.clone(),
-                                    diff: None,
-                                },
-                            );
-                            let frozen_prompt = match engine
-                                .build_sc_revision_delivery_for_resume(
-                                    &turn_now.command_id,
-                                    &turn_now,
-                                    Some(&carry.frozen),
-                                )
-                            {
+                            // 交付 join 的候选基线窗口（SG6a.2 P3）：布置
+                            // 失败中间候选为 join 对账视图、精确 join——
+                            // 基线还原合同由 `deliver_attempt2_frozen_prompt`
+                            // 统一承载（attempt2 未成行不污染内存修订基
+                            // 线，见其注释）。
+                            let frozen_prompt = match deliver_attempt2_frozen_prompt(
+                                &mut engine,
+                                &turn_now,
+                                full_output.as_str(),
+                                &carry,
+                            ) {
                                 Ok(frozen_prompt) => frozen_prompt,
                                 Err(message) => {
                                     engine.mark_active_run_finished(&run_label);

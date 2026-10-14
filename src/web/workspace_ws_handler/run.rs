@@ -33,8 +33,9 @@ mod provider_run;
 #[path = "run/single_candidate.rs"]
 mod single_candidate;
 pub(crate) use provider_run::{
-    fail_cancelled_human_gate_revision_turn, spawn_provider_run_claiming_idle,
-    spawn_provider_run_from_event, spawn_provider_run_from_handler,
+    deliver_attempt2_frozen_prompt, fail_cancelled_human_gate_revision_turn,
+    spawn_provider_run_claiming_idle, spawn_provider_run_from_event,
+    spawn_provider_run_from_handler,
 };
 
 pub(crate) static NEXT_ACTIVE_RUN_TOKEN: AtomicU64 = AtomicU64::new(1);

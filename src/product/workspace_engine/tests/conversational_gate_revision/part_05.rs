@@ -639,3 +639,101 @@ async fn sg_06a_2_input_fingerprint_reject_zero_start_unknown_waits() {
         crate::product::models::HumanGateTurnStatus::Running
     );
 }
+
+/// SG6a.2 P3 修复轮（Main 审查派回）：attempt2 冻结交付 join 的候选
+/// 基线窗口在 join 未成行（拒/身份失配）后 MUST 还原内存修订基线——
+/// 否则后续 `handle_human_gate_feedback` 以残留的失败候选 hash 落
+/// durable 新 turn.source_hash（≠当前修订基线），恢复车道
+/// MarkFailed(ValidationReject) 会误杀合法修订轮。链：claim 消费→
+/// join 拒→取消终态化→新反馈→新 turn.source_hash==上一接受候选 hash。
+#[tokio::test]
+async fn sg_06a_2_attempt2_join_failure_restores_candidate_baseline_for_next_turn() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("sg06a2_p3_restore", 3);
+    let turn_id = open_running_revision_turn(&mut engine, "sg06a2_p3_command").await;
+    let turn = lifecycle
+        .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+        .expect("turn after open");
+    sg61_seed_structural_grant(&lifecycle, &engine, &turn, 1);
+    // 上一接受候选（修订基线）＝fixture artifact（rep4）。
+    let baseline_markdown = engine
+        .session
+        .artifact
+        .as_ref()
+        .and_then(|artifact| artifact.markdown())
+        .expect("baseline candidate markdown")
+        .to_string();
+    let output = sg61_line414_illegal_heading_candidate();
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, output.clone())
+        .await
+        .expect("typed structural rejection is in-band");
+    let crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
+        claim: Some(carry),
+        ..
+    } = result
+    else {
+        panic!("expected claimed attempt2 carry for the P3 chain")
+    };
+    // arm 消费面的 join 拒变体：伪造 prompt 身份（真实稳定码拒）。
+    let crate::product::workspace_engine::conversational_gate::ScRevisionClaimCarry {
+        frozen,
+        attempt_no,
+        provider_start_key,
+    } = carry.clone();
+    let mut forged = frozen.clone();
+    forged.prompt_ref = "structural-prompt://forged-ref".to_string();
+    let forged_carry =
+        crate::product::workspace_engine::conversational_gate::ScRevisionClaimCarry {
+            frozen: forged,
+            attempt_no,
+            provider_start_key,
+        };
+    let rejected = crate::web::workspace_ws_handler::deliver_attempt2_frozen_prompt(
+        &mut engine,
+        &turn,
+        output.as_str(),
+        &forged_carry,
+    )
+    .expect_err("prompt identity mismatch must refuse the join");
+    assert!(
+        rejected.starts_with("STRUCTURAL_REVISION_DELIVERY_PROMPT_IDENTITY_MISMATCH"),
+        "unexpected identity rejection: {rejected}"
+    );
+    // P3 合同：join 未成行后内存修订基线还原（红：残留失败候选）。
+    assert_eq!(
+        engine
+            .session
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.markdown()),
+        Some(baseline_markdown.as_str()),
+        "join failure must restore the in-memory candidate baseline (P3)"
+    );
+    // 链尾：取消终态化 + 新反馈 → durable 新 turn.source_hash==上一接受
+    // 候选 hash（红：失败候选 hash）。
+    engine
+        .fail_human_gate_turn(
+            &turn_id,
+            crate::product::models::HumanGateTurnFailureClass::ProviderErr,
+        )
+        .await
+        .expect("terminalize the cancelled turn");
+    let reopened = engine
+        .handle_human_gate_feedback(HumanGateFeedbackInput {
+            command_id: "sg06a2_p3_new_command".to_string(),
+            feedback: "P3 后续新反馈".to_string(),
+        })
+        .await
+        .expect("new feedback opens a fresh turn after the cancelled one");
+    let new_turn = match reopened {
+        HumanGateCommandOutcome::TurnOpened { turn, .. } => turn,
+        other => panic!("expected a fresh turn, got {other:?}"),
+    };
+    use sha2::{Digest, Sha256};
+    let baseline_hash = hex::encode(Sha256::digest(baseline_markdown.as_bytes()));
+    assert_eq!(
+        new_turn.source_hash, baseline_hash,
+        "next turn must hash the last accepted candidate, not the failed attempt1 output (P3)"
+    );
+}
