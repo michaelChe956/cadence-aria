@@ -636,7 +636,8 @@ async fn sg_06a_2_input_fingerprint_reject_zero_start_unknown_waits() {
         .expect("turn2 after untyped rejection");
     assert_eq!(
         turn2_after.status,
-        crate::product::models::HumanGateTurnStatus::Running
+        crate::product::models::HumanGateTurnStatus::Failed,
+        "SG6a.3（复审①）：untyped 拒收收口 turn——原门重新可接新反馈"
     );
 }
 
@@ -735,5 +736,156 @@ async fn sg_06a_2_attempt2_join_failure_restores_candidate_baseline_for_next_tur
     assert_eq!(
         new_turn.source_hash, baseline_hash,
         "next turn must hash the last accepted candidate, not the failed attempt1 output (P3)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SG6a.3（续）：合法交付 settlement/Reviewing 与终态分离 + 断点幂等。
+// ---------------------------------------------------------------------------
+
+/// SG6a.3：合法交付的结算与终态分离（REQ-CG-03「修订成功回呈」/REQ-CG-05
+/// 「同键崩溃重放」）——deliver settle 恰一次（DeliveredCharge）+ grant
+/// Reviewing + checkpoint 先于终态写；synthetic Pass 收口后 turn Completed
+/// 且 grant Resolved（review 证据绑定）；commit→终态断点崩溃重放（turn
+/// 回置 Running 的中间态重演）零二次 settle/checkpoint/start。
+#[tokio::test]
+async fn sg_06a_3_legal_delivery_settles_reviewing_separately_from_terminal() {
+    use crate::product::models::UserBudgetReceiptKind;
+    use crate::product::models::workspace::{StructuralCheckpointStatus, StructuralGrantPhase};
+
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("sg06a3_deliver_settle", 3);
+    let turn_id = open_running_revision_turn(&mut engine, "sg06a3_deliver_command").await;
+    let candidate = handoff_clean_rep4_v2();
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, candidate.clone())
+        .await
+        .expect("legal delivery completes");
+    assert!(matches!(
+        result,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+
+    let session = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session after delivery");
+    let state = session
+        .structural_governance_state
+        .as_ref()
+        .expect("state after delivery");
+    assert_eq!(
+        state
+            .user_receipts
+            .iter()
+            .filter(|receipt| receipt.turn_id == turn_id
+                && receipt.kind == UserBudgetReceiptKind::DeliveredCharge)
+            .count(),
+        1,
+        "deliver settlement happens exactly once, separated from the terminal write"
+    );
+    assert_eq!(state.active_hold_count(), 0);
+    let grant = state.current_grant.as_ref().expect("grant after delivery");
+    assert_eq!(
+        grant.candidate_source_revision_ref, session.work_item_plan_source_revision_ref,
+        "grant 绑定交付代次中间候选 refs"
+    );
+    assert_eq!(
+        grant.phase,
+        Some(StructuralGrantPhase::Resolved),
+        "synthetic Pass 收口后 grant 携 review 证据终态 Resolved"
+    );
+    assert!(grant.review_identity.is_some());
+    assert_eq!(state.structure_checkpoints.len(), 1);
+    let checkpoint = &state.structure_checkpoints[0];
+    assert_eq!(checkpoint.status, StructuralCheckpointStatus::Active);
+    assert!(
+        checkpoint.review_scope.is_some(),
+        "finalize 回填 review scope"
+    );
+    assert_eq!(
+        checkpoint.receipt_ref.as_deref(),
+        Some(format!("user_budget_receipt:{turn_id}").as_str())
+    );
+    assert_eq!(state.available_user_budget(), 2);
+    let turn_after = lifecycle
+        .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+        .expect("turn after delivery");
+    assert_eq!(
+        turn_after.status,
+        crate::product::models::HumanGateTurnStatus::Completed
+    );
+    assert!(turn_after.result_artifact_ref.is_some());
+    let ledger_after_delivery = session.provider_start_ledger.len();
+
+    // —— 断点幂等（REQ-SG-05「同键崩溃重放」）：commit 已结算、终态写
+    // 前崩溃的 durable 中间态（turn 仍 Running）重演同候选——不重复
+    // settle/checkpoint/start、refs 不变、grant 终态不回退。中间态以
+    // fixture 直写回置（Completed→Running 非 store 合法迁移，SG4b 直写
+    // 先例），只模拟崩溃残局，不新增第二状态机。
+    let session_record = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("record for poke");
+    let mut poke = turn_after.clone();
+    poke.status = crate::product::models::HumanGateTurnStatus::Running;
+    poke.updated_at = "2026-10-14T00:00:00Z".to_string();
+    crate::product::json_store::write_json(
+        &lifecycle
+            .app_paths()
+            .issue_lifecycle_root(&session_record.project_id, &session_record.issue_id)
+            .join("workspace-sessions")
+            .join(&session_record.id)
+            .join("human-gate-turns")
+            .join(format!("{turn_id}.json")),
+        &poke,
+    )
+    .expect("re-open the turn to the pre-terminal crash window");
+    let result2 = engine
+        .run_sc_manual_revision_turn(&turn_id, candidate)
+        .await
+        .expect("crash replay of the same delivery completes idempotently");
+    assert!(matches!(
+        result2,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+    let session2 = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session after crash replay");
+    let state2 = session2
+        .structural_governance_state
+        .as_ref()
+        .expect("state after crash replay");
+    assert_eq!(
+        state2
+            .user_receipts
+            .iter()
+            .filter(|receipt| receipt.turn_id == turn_id)
+            .count(),
+        1,
+        "settle 断点重放零二次结算"
+    );
+    assert_eq!(
+        state2.structure_checkpoints.len(),
+        1,
+        "checkpoint 断点重放零重复"
+    );
+    assert_eq!(
+        state2.current_grant.as_ref().expect("grant").phase,
+        Some(StructuralGrantPhase::Resolved),
+        "已终态 grant 不因重放降级"
+    );
+    assert_eq!(
+        session2.work_item_plan_source_revision_ref,
+        session.work_item_plan_source_revision_ref
+    );
+    assert_eq!(
+        session2.provider_start_ledger.len(),
+        ledger_after_delivery,
+        "refs/settle 断点重放零 provider 启动"
+    );
+    let turn2 = lifecycle
+        .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+        .expect("turn after crash replay");
+    assert_eq!(
+        turn2.status,
+        crate::product::models::HumanGateTurnStatus::Completed
     );
 }

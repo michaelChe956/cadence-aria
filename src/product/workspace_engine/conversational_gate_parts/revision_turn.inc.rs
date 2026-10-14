@@ -111,6 +111,18 @@ impl super::WorkspaceEngine {
                 // 终态收口/release hold 归 SG6a.3）。其余是判定管道自身的
                 // operational 错——沿原 Err(String) 语义上抛，不吞错。
                 if failure.stable_code() == "STRUCTURAL_ATTEMPTS_EXHAUSTED" {
+                    // SG6a.3（复审②③）：Running+claim/上限停点的终结写
+                    //（recovery AwaitingStructuralClosure 的对端）——
+                    // Failed(validation_reject)+released_structural 恰一次
+                    // +grant SystemFault；CAS 失败上抛（release CAS 失败
+                    // 不能假通知成功）。
+                    self.close_sc_revision_turn_after_rejection(
+                        turn_id,
+                        crate::product::models::UserBudgetReceiptKind::ReleasedStructural,
+                        "structural_exhausted_before_delivery",
+                        true,
+                    )
+                    .await?;
                     return Ok(ScManualRevisionResult::ValidationRejected {
                         diagnostics: vec![render_sc_revision_compile_failure(&failure)],
                         claim: None,
@@ -162,9 +174,6 @@ impl super::WorkspaceEngine {
                         &report_record,
                     )
                     .map_err(|error| error.code().to_string())?;
-                let mut completed = turn;
-                completed.status = crate::product::models::HumanGateTurnStatus::Completed;
-                completed.failure_class = None;
                 let artifact_versions = {
                     let mut versions = self.artifact_versions.clone();
                     for version in &mut versions {
@@ -197,15 +206,29 @@ impl super::WorkspaceEngine {
                         .map(|version| version.version)
                         .unwrap_or(0)
                 );
+                // SG6a.3（REQ-CG-03「修订成功回呈」/REQ-CG-02/05）：合法
+                // refs 对应原业务才 deliver——deliver settlement 与终态分
+                // 离：commit 在 turn Running 上同 CAS settle
+                // DeliveredCharge 恰一次、轮换三 refs、grant→Reviewing、
+                // 落 checkpoint（SG4b store 单源）；终态写与 review 收口
+                // 在路由后分离落账（复评仍 in-flight）。
+                self.mark_human_gate_turn_running(turn_id)?;
+                let expected = lifecycle
+                    .get_workspace_session(&self.session.session_id)
+                    .map_err(|error| error.to_string())?;
+                let running_turn = lifecycle
+                    .get_human_gate_turn(&self.session.session_id, turn_id)
+                    .map_err(|error| error.to_string())?;
                 let saved = lifecycle
-                    .complete_human_gate_revision(
+                    .commit_structurally_valid_revision(
                         &expected,
-                        completed,
+                        running_turn,
                         &accepted.source_ref,
                         &accepted.ir_ref,
                         &report_ref,
                         &artifact_versions,
                         &artifact_id,
+                        &prepared.report,
                     )
                     .map_err(|error| error.to_string())?;
                 self.artifact_versions = artifact_versions;
@@ -260,13 +283,20 @@ impl super::WorkspaceEngine {
                     ))
                     .await;
                 }
-                // 人工修订与初始 author 同构：候选落盘后必须重走 Evaluate policy route。
-                // Evaluate 路由仍是进 Approval 的主路径；close 时的人工权威升级（confirm
-                // 视为批准权威，在 close CAS 内原子提升 phase→Approval）是兜底，二者不
-                // 互相替代：路由负责让门以 Approval 相位等待，升级负责解开路由缺席/评审
-                // 再次 must_fix 时 Evaluate 进门 × Approval 关门的死锁。无 reviewer 走本地
-                // synthetic Pass 路由进 Approval；有 reviewer 重启评审，不让 close 绕过评审。
-                if self.session.review_rounds == 0 || self.session.reviewer_provider.is_none() {
+                // SG6a.3（REQ-CG-03「修订成功回呈」）：复评收口分流——
+                // 无 reviewer 走本地 synthetic Pass（同步收口），有 reviewer
+                // 重启评审（复评仍 in-flight，turn 保持 Running 至 verdict）。
+                // 收口后（synthetic 分支在路由返回处同步成立）turn 终态化
+                // Completed；grant 携 review 证据终态 Resolved（finalize 幂
+                // 等）。有 reviewer 分支的 verdict 面收口归 SG6b（routing
+                // 面），本驱动面只完成 turn 终态写（保持既有可 confirm 面）。
+                let review_node_id = self
+                    .active_node_id
+                    .clone()
+                    .unwrap_or_else(|| "single_candidate_evaluate".to_string());
+                let review_closed_synchronously =
+                    self.session.review_rounds == 0 || self.session.reviewer_provider.is_none();
+                if review_closed_synchronously {
                     self.route_single_candidate_evaluate_without_reviewer()
                         .await;
                 } else {
@@ -274,6 +304,64 @@ impl super::WorkspaceEngine {
                     if self.session.stage == super::WorkspaceStage::CrossReview {
                         self.request_provider_run(super::ProviderRunKind::ReviewOnly)
                             .await;
+                    }
+                }
+                // 终态写与 grant 终态化（断点幂等：已终态零写）。
+                {
+                    let expected = lifecycle
+                        .get_workspace_session(&self.session.session_id)
+                        .map_err(|error| error.to_string())?;
+                    let mut completed_turn = lifecycle
+                        .get_human_gate_turn(&self.session.session_id, turn_id)
+                        .map_err(|error| error.to_string())?;
+                    if completed_turn.status
+                        != crate::product::models::HumanGateTurnStatus::Completed
+                    {
+                        completed_turn.status =
+                            crate::product::models::HumanGateTurnStatus::Completed;
+                        completed_turn.failure_class = None;
+                        completed_turn.updated_at = chrono::Utc::now().to_rfc3339();
+                        lifecycle
+                            .update_human_gate_turn(&expected, completed_turn)
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+                if review_closed_synchronously {
+                    let expected = lifecycle
+                        .get_workspace_session(&self.session.session_id)
+                        .map_err(|error| error.to_string())?;
+                    let grant_binding =
+                        expected
+                            .structural_governance_state
+                            .as_ref()
+                            .and_then(|state| {
+                                let grant = state.current_grant.as_ref()?;
+                                (grant.turn_id.as_deref() == Some(turn_id)).then(|| {
+                                    (
+                                        grant.grant_id.clone(),
+                                        state.current_context_digest.clone().unwrap_or_default(),
+                                    )
+                                })
+                            });
+                    if let Some((grant_id, context_digest)) = grant_binding {
+                        let turn_final = lifecycle
+                            .get_human_gate_turn(&self.session.session_id, turn_id)
+                            .map_err(|error| error.to_string())?;
+                        let scope_digest = sc_revision_review_scope_digest(
+                            &accepted.source_ref,
+                            &accepted.ir_ref,
+                            &report_ref,
+                            &context_digest,
+                        );
+                        lifecycle
+                            .finalize_structural_revision_grant(
+                                &expected,
+                                turn_final,
+                                &grant_id,
+                                Some(&review_node_id),
+                                Some(&scope_digest),
+                            )
+                            .map_err(|error| error.to_string())?;
                     }
                 }
                 Ok(ScManualRevisionResult::Accepted {
@@ -321,6 +409,17 @@ impl super::WorkspaceEngine {
                                 if let Err(rejection) = frozen.adjudicate_provider_budget(&budget) {
                                     diagnostics
                                         .push(render_structural_prompt_rejection(&rejection));
+                                    // SG6a.3（复审①）：预算拒收口——
+                                    // Failed(validation_reject)+nonstructural_
+                                    // failure_charge（非结构终态不退，
+                                    // REQ-CG-02），Busy 面解锁。
+                                    self.close_sc_revision_turn_after_rejection(
+                                        turn_id,
+                                        crate::product::models::UserBudgetReceiptKind::NonstructuralFailureCharge,
+                                        "structural_prompt_budget_rejected",
+                                        false,
+                                    )
+                                    .await?;
                                     return Ok(ScManualRevisionResult::ValidationRejected {
                                         diagnostics,
                                         claim: None,
@@ -365,6 +464,15 @@ impl super::WorkspaceEngine {
                                         ));
                                     }
                                     Ok(crate::product::models::workspace::StructuralClaimOutcome::Exhausted) => {
+                                    // SG6a.3（复审②③）：claim 面耗尽的同款
+                                    // 终结写（release 恰 1+grant SystemFault）。
+                                    self.close_sc_revision_turn_after_rejection(
+                                        turn_id,
+                                        crate::product::models::UserBudgetReceiptKind::ReleasedStructural,
+                                        "structural_exhausted_before_delivery",
+                                        true,
+                                    )
+                                    .await?;
                                     return Ok(ScManualRevisionResult::ValidationRejected {
                                         diagnostics: vec![
                                             "STRUCTURAL_ATTEMPTS_EXHAUSTED: physical attempt cap consumed (L0/L1 share the same turn attempt key); typed system fault, no third start"
@@ -386,10 +494,18 @@ impl super::WorkspaceEngine {
                     None => {
                         // classify 判 L1 但 producer 零指令（保护事实缺
                         // 失/producer fail-closed）：不驱 author，回原门。
+                        // SG6a.3（复审①）：零指令收口（charge 不退）。
                         diagnostics.push(
                             "STRUCTURAL_REPAIR_UNPRODUCIBLE: L1 facts classified but no machine instruction could be produced; the failure stays with the original human gate"
                                 .to_string(),
                         );
+                        self.close_sc_revision_turn_after_rejection(
+                            turn_id,
+                            crate::product::models::UserBudgetReceiptKind::NonstructuralFailureCharge,
+                            "structural_repair_unproducible",
+                            false,
+                        )
+                        .await?;
                     }
                 }
                 Ok(ScManualRevisionResult::ValidationRejected {
@@ -400,29 +516,132 @@ impl super::WorkspaceEngine {
             crate::product::workspace_engine::types::StructuralAssessment::ExistingGate(set) => {
                 // 业务事实缺少/未 typed 失败：回原门（REQ-SG-01「真实业务
                 // 矛盾」由用户裁决；类别/class_hint 不构成 L1 许可）。
+                // SG6a.3（复审①）：无 claim 的原门拒收收口——
+                // Failed(validation_reject)+nonstructural_failure_charge，
+                // `handle_human_gate_feedback` 的 Busy 面解锁（REQ-CG-02
+                //「其他非结构终态维持原预约扣次不退」）。
                 let mut diagnostics = render_sc_revision_failure_set(&set);
                 diagnostics.push(
                     "STRUCTURAL_EXISTING_GATE: failure requires the original human gate; no machine repair is licensed"
                         .to_string(),
                 );
+                self.close_sc_revision_turn_after_rejection(
+                    turn_id,
+                    crate::product::models::UserBudgetReceiptKind::NonstructuralFailureCharge,
+                    "validation_rejected_existing_gate",
+                    false,
+                )
+                .await?;
                 Ok(ScManualRevisionResult::ValidationRejected {
                     diagnostics,
                     claim: None,
                 })
             }
             crate::product::workspace_engine::types::StructuralAssessment::Operational(set) => {
-                // operational/授权等待：沿原安全等待，不驱 author。
+                // operational/授权等待：沿原安全等待，不驱 author；等待
+                // 不构成 claim（复审①同款收口，charge 不退——机器窗口无
+                // 授权事实时不留 Running 死锁）。
                 let mut diagnostics = render_sc_revision_failure_set(&set);
                 diagnostics.push(
                     "STRUCTURAL_OPERATIONAL_WAIT: operational/authorization facts missing; no author attempt is driven"
                         .to_string(),
                 );
+                self.close_sc_revision_turn_after_rejection(
+                    turn_id,
+                    crate::product::models::UserBudgetReceiptKind::NonstructuralFailureCharge,
+                    "validation_rejected_operational_wait",
+                    false,
+                )
+                .await?;
                 Ok(ScManualRevisionResult::ValidationRejected {
                     diagnostics,
                     claim: None,
                 })
             }
         }
+    }
+
+    /// SG6a.3（复审①②③，plan v1.1 Task SG6a.3）：无 claim 拒收 arm 与
+    /// 耗尽停点的 turn 终态收口——Failed(validation_reject) 落账（幂等：
+    /// 已终态零写）+ 用户预算 hold→终态 receipt 结算
+    /// （`settle_structural_user_budget` 单源幂等：同 receipt 重放零写；
+    /// released_structural 恢复快照可用预算、nonstructural_failure_charge
+    /// 不退）+ 耗尽证据时 grant 终态化 SystemFault（`finalize_structural_
+    /// revision_grant` 幂等）。断点幂等：receipt/grant 按 durable 证据重
+    /// 放零二次；settle/finalize 的 CAS 失败上抛（release CAS 失败不能
+    /// 假通知成功）；旧记录无聚合状态/无 hold 不凭空造账（零结算跳过，
+    /// 不追溯，`settle` 的 InvalidRecord 容忍为已结算/legacy 形态）。
+    async fn close_sc_revision_turn_after_rejection(
+        &mut self,
+        turn_id: &str,
+        receipt_kind: crate::product::models::UserBudgetReceiptKind,
+        reason: &str,
+        finalize_exhausted: bool,
+    ) -> Result<(), String> {
+        use crate::product::models::HumanGateTurnFailureClass;
+
+        let store = self
+            .lifecycle_store
+            .clone()
+            .ok_or_else(|| "lifecycle_store unavailable".to_string())?;
+        // 失败分类落账：唯一一次终态 failure 写（同 turn 幂等，二次调用
+        // 零写），并收口修订 author 载体节点。
+        self.fail_human_gate_turn(turn_id, HumanGateTurnFailureClass::ValidationReject)
+            .await?;
+        // 预算结算：fresh expected 上 CAS；无聚合状态的旧记录零结算跳过。
+        let expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        if expected.structural_governance_state.is_some() {
+            let turn = store
+                .get_human_gate_turn(&self.session.session_id, turn_id)
+                .map_err(|error| error.to_string())?;
+            let receipt = crate::product::models::UserBudgetReceipt {
+                kind: receipt_kind,
+                turn_id: turn.turn_id.clone(),
+                command_id: turn.command_id.clone(),
+                attempt_reason: Some(
+                    crate::product::models::StructuralAttemptReason::HumanRevision,
+                ),
+                source_revision_ref: None,
+                plan_candidate_ir_ref: None,
+                structure_report_ref: None,
+                context_digest: None,
+                reason: Some(reason.to_string()),
+                settled_at: chrono::Utc::now().to_rfc3339(),
+            };
+            match store.settle_structural_user_budget(&expected, turn_id, receipt) {
+                Ok(_) => {}
+                Err(crate::product::json_store::ProductStoreError::InvalidRecord { .. }) => {
+                    // 无活动 hold（他路已结算/legacy hold 缺席）：durable
+                    // 账本为准，不凭空造账也不上抛假错。
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        if !finalize_exhausted {
+            return Ok(());
+        }
+        // 耗尽证据终态化 grant（同 grant 幂等；无 grant/未绑本 turn 跳过）。
+        let expected = store
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| error.to_string())?;
+        let Some(grant_id) = expected
+            .structural_governance_state
+            .as_ref()
+            .and_then(|state| state.current_grant.as_ref())
+            .filter(|grant| grant.turn_id.as_deref() == Some(turn_id))
+            .map(|grant| grant.grant_id.clone())
+        else {
+            return Ok(());
+        };
+        let turn = store
+            .get_human_gate_turn(&self.session.session_id, turn_id)
+            .map_err(|error| error.to_string())?;
+        store
+            .finalize_structural_revision_grant(&expected, turn, &grant_id, None, None)
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 }
 
@@ -512,6 +731,32 @@ fn sc_revision_digest_json<T: serde::Serialize>(value: &T) -> String {
     hex::encode(Sha256::digest(
         serde_json::to_string(value).unwrap_or_default().as_bytes(),
     ))
+}
+
+/// SG6a.3（REQ-SG-04/REQ-CG-03「修订成功回呈」）：交付代次的评审
+/// scope digest——绑定同代 source/IR/report refs 与 context digest，作
+/// 为 `finalize_structural_revision_grant`（Completed→Resolved）的
+/// review 证据与 checkpoint `review_scope` 回填值（与
+/// `structural_checkpoint_id` 同代身份域，不另立第二候选权威）。
+fn sc_revision_review_scope_digest(
+    source_revision_ref: &str,
+    plan_candidate_ir_ref: &str,
+    structure_report_ref: &str,
+    context_digest: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = [
+        "structural_review_scope",
+        source_revision_ref,
+        plan_candidate_ir_ref,
+        structure_report_ref,
+        context_digest,
+    ]
+    .join("\0");
+    format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(canonical.as_bytes()))
+    )
 }
 
 /// 未解析候选的结构上下文（「未解析先修格式，不猜 IR 图」）：图事实
@@ -793,6 +1038,16 @@ impl super::WorkspaceEngine {
             ));
         }
         let delivery = prepare_revision_delivery_for_compile(output);
+        // SG6a.3（SG6a.2 复审范围外登记项处置）：失败候选身份绑定原始
+        // provider 输出（REQ-SG-02「失败原始输出」）——claim 的
+        // grant.failing_source_hash 与冻结 prompt 内嵌候选以 raw 为单源，
+        // join 面的「基线==绑定」恒等成立（不再依赖「原始==归一化」前
+        // 提）；编译/IR/结构上下文证据仍以归一化基（SG6a.1 单源不变），
+        // 逐行归一化不改行号，typed 行引用对原始文本仍有效。
+        let raw_source_hash = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(output.as_bytes()))
+        };
         let source = delivery.source;
         let plan = lifecycle
             .get_issue_work_item_plan(
@@ -896,7 +1151,7 @@ impl super::WorkspaceEngine {
             })?;
 
         // —— 编译与结构门（与 author 系统门同源：SG3a.1 单源装载/纯评估）——
-        let failure_set;
+        let mut failure_set;
         let rejection_context;
         let mut ir_for_instructions: Option<
             crate::product::work_item_plan_compiler::PlanCandidateIr,
@@ -1058,6 +1313,12 @@ impl super::WorkspaceEngine {
                 // 单源重投影（纯确定性，与评估报告恒等——复用
                 // planning_structure_items_from_ir/project_effective_
                 // planning_graph 同源函数，不建第二图权威）。
+                // SG6a.3：失败/指令的 source_hash 统一重绑原始输出 hash
+                //（claim 绑定与 join 前提单源，见 assess 头注）；typed
+                // kind/witness/行号载荷不动。
+                for failure in failure_set.failures.iter_mut() {
+                    failure.source_hash = raw_source_hash.clone();
+                }
                 let instruction_report = match &ir_for_instructions {
                     None => sc_revision_pre_compile_report(&rejection_context, failure_set.clone()),
                     Some(ir) => {
@@ -1101,7 +1362,7 @@ impl super::WorkspaceEngine {
                     accepted: None,
                     rejection: Some(ScRevisionRejectionFacts {
                         context: rejection_context,
-                        failed_source: source,
+                        failed_source: output.to_string(),
                     }),
                 })
             }

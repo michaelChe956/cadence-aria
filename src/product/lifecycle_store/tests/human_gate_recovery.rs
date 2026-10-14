@@ -702,17 +702,11 @@ fn sg_04a_claim_guards_running_same_grant_and_shared_attempt_cap() {
     ));
 
     // ③ grant 无 turn 绑定 → Waiting（无 claim 权，零写）。
-    let unbound = sg_04a_session(
-        &store,
-        "sg4a_claim_unbound",
-        Some(sg_04a_governance_state(Some(sg_04a_grant(
-            None,
-            None,
-            0,
-            Some(StructuralGrantPhase::AuthorRunning),
-        )))),
-        3,
-    );
+    // SG6a.3（Main 预授权迁移 2026-10-14）：复审④ grant producer 落地后
+    // 真实 reserve 恒创建绑定本 turn 的 grant——未绑 grant 的 legacy 形
+    // 态以 reserve 后 fixture 直写回置（SG4b 直写先例），Waiting 分支覆
+    // 盖保持不变。
+    let unbound = sg_04a_session(&store, "sg4a_claim_unbound", None, 3);
     let unbound_turn = sg_04a_make_turn(
         &unbound.id,
         "turn_sg4a_unbound",
@@ -726,6 +720,28 @@ fn sg_04a_claim_guards_running_same_grant_and_shared_attempt_cap() {
             sg_04a_reservation(&unbound_turn),
         )
         .unwrap();
+    let unbound_reserved = {
+        let mut record = unbound_reserved.clone();
+        record
+            .structural_governance_state
+            .get_or_insert_with(crate::product::models::StructuralGovernanceState::default)
+            .current_grant = Some(sg_04a_grant(
+            None,
+            None,
+            0,
+            Some(StructuralGrantPhase::AuthorRunning),
+        ));
+        crate::product::json_store::write_json(
+            &store
+                .app_paths()
+                .issue_lifecycle_root(&record.project_id, &record.issue_id)
+                .join("workspace-sessions")
+                .join(format!("{}.json", record.id)),
+            &record,
+        )
+        .expect("persist unbound-grant fixture");
+        record
+    };
     assert!(matches!(
         store.claim_structural_attempt(
             &unbound_reserved,

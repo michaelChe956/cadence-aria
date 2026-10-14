@@ -544,14 +544,20 @@ async fn sg_06a_1_untyped_failure_goes_existing_gate_and_category_cannot_license
         result,
         crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected { .. }
     ));
-    // 原门语义：turn 仍 Running、grant 未被 claim 推进（零 L1 授权）、
-    // 零 provider 启动。
+    // 原门语义（SG6a.3 迁移，复审①）：机器不可修的失败回原门=turn 收口
+    // Failed(validation_reject)+nonstructural_failure_charge——门重新可接
+    // 新反馈；grant 未被 claim 推进（零 L1 授权）、零 provider 启动。
     let turn_after = lifecycle
         .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
         .expect("turn after existing-gate outcome");
     assert_eq!(
         turn_after.status,
-        crate::product::models::HumanGateTurnStatus::Running
+        crate::product::models::HumanGateTurnStatus::Failed,
+        "SG6a.3: existing-gate rejection closes the turn (unlocks the Busy face)"
+    );
+    assert_eq!(
+        turn_after.failure_class,
+        Some(crate::product::models::HumanGateTurnFailureClass::ValidationReject)
     );
     let grant = sg61_current_grant(&lifecycle, engine.session().session_id.as_str())
         .expect("seeded grant untouched");
@@ -615,9 +621,10 @@ async fn sg_06a_1_operational_waits_without_claim_and_l1_multi_solution_keeps_us
     assert_eq!(
         lifecycle
             .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
-            .expect("turn after wait")
+            .expect("turn after budget closure")
             .status,
-        crate::product::models::HumanGateTurnStatus::Running
+        crate::product::models::HumanGateTurnStatus::Failed,
+        "SG6a.3（复审①）：预算拒收口 turn——零 claim arm 不留 Running 死锁"
     );
 
     // —— L1 多解不用户拓扑：同一环失败的指令是 Candidates 候选族（无
@@ -729,10 +736,33 @@ async fn sg_06a_1_attempts_exhausted_typed_system_fault_and_terminal_replay_stab
     assert_eq!(
         lifecycle
             .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
-            .expect("turn after exhausted stop")
+            .expect("turn after exhausted closure")
             .status,
-        crate::product::models::HumanGateTurnStatus::Running,
-        "SG6a.1 does not terminalize; the exhaustion closure belongs to SG6a.3"
+        crate::product::models::HumanGateTurnStatus::Failed,
+        "SG6a.3（复审②③）：耗尽停点终结写——Failed(validation_reject)+release 恰一次"
+    );
+    let closed = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session after exhausted closure");
+    let closed_state = closed
+        .structural_governance_state
+        .as_ref()
+        .expect("state after exhausted closure");
+    assert_eq!(
+        closed_state
+            .user_receipts
+            .iter()
+            .filter(|receipt| receipt.turn_id == turn_id
+                && receipt.kind
+                    == crate::product::models::UserBudgetReceiptKind::ReleasedStructural)
+            .count(),
+        1,
+        "release hold exactly once on typed structural exhaustion"
+    );
+    assert_eq!(
+        closed_state.current_grant.as_ref().expect("grant").phase,
+        Some(crate::product::models::workspace::StructuralGrantPhase::SystemFault),
+        "耗尽证据终态化 grant（SystemFault）"
     );
 
     // —— terminal replay 稳定拒收（既有语义回归守卫）：成功完成后同
@@ -772,4 +802,155 @@ async fn sg_06a_1_attempts_exhausted_typed_system_fault_and_terminal_replay_stab
         ledger_before_replay,
         "terminal replay is zero-side-effect on the provider ledger"
     );
+}
+
+/// SG6a.3 验收①（复审点名）：无 claim 的 in-band 拒收 arm 的 turn 收口
+/// ——ExistingGate（业务事实缺少/未 typed）与预算拒（冻结 prompt 超
+/// provider 硬限）都把 turn 终态化为 Failed(validation_reject) 并把
+/// held 结转 nonstructural_failure_charge（REQ-CG-02「其他非结构终态
+/// 维持原预约扣次不退」），`handle_human_gate_feedback` 对非终态恒
+/// Busy 的面随之解锁（同 command 重放转终态 typed 拒收）。
+#[tokio::test]
+async fn sg_06a_3_unclaimed_rejections_close_turn_and_unlock_gate() {
+    use crate::product::models::HumanGateTurnFailureClass;
+    use crate::product::models::UserBudgetReceiptKind;
+
+    // —— ExistingGate：untyped section 候选（类别/class_hint 不能许可）。
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("sg06a3_existing_close", 3);
+    let turn_id = open_running_revision_turn(&mut engine, "sg06a3_existing_command").await;
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, sg61_untyped_section_candidate())
+        .await
+        .expect("existing-gate escalation is in-band");
+    assert!(matches!(
+        &result,
+        crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
+            diagnostics,
+            claim: None,
+        } if diagnostics
+            .iter()
+            .any(|line| line.contains("STRUCTURAL_EXISTING_GATE"))
+    ));
+    let turn = lifecycle
+        .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+        .expect("turn after closure");
+    assert_eq!(
+        turn.status,
+        crate::product::models::HumanGateTurnStatus::Failed,
+        "SG6a.3（复审①）：无 claim 拒收 arm 必须收口 turn，否则 Busy 面死锁"
+    );
+    assert_eq!(
+        turn.failure_class,
+        Some(HumanGateTurnFailureClass::ValidationReject)
+    );
+    let session = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session after closure");
+    let state = session
+        .structural_governance_state
+        .as_ref()
+        .expect("state after closure");
+    assert_eq!(
+        state
+            .user_receipts
+            .iter()
+            .filter(|receipt| receipt.turn_id == turn_id
+                && receipt.kind == UserBudgetReceiptKind::NonstructuralFailureCharge)
+            .count(),
+        1,
+        "非结构失败扣次恰一次（不退）"
+    );
+    assert_eq!(state.active_hold_count(), 0);
+    assert_eq!(state.available_user_budget(), 2);
+    assert_eq!(
+        session
+            .human_gate_snapshot
+            .as_ref()
+            .expect("snapshot")
+            .manual_repairs_remaining,
+        2,
+        "非结构失败不恢复快照预算"
+    );
+
+    // Busy 解锁：新反馈开新 turn；同 command 重放转终态 typed 拒收。
+    let reopened = engine
+        .handle_human_gate_feedback(HumanGateFeedbackInput {
+            command_id: "sg06a3_existing_command_next".to_string(),
+            feedback: "按诊断重新反馈".to_string(),
+        })
+        .await
+        .expect("gate must accept new feedback after closure");
+    assert!(matches!(
+        reopened,
+        HumanGateCommandOutcome::TurnOpened { .. }
+    ));
+    let replay = engine
+        .handle_human_gate_feedback(HumanGateFeedbackInput {
+            command_id: "sg06a3_existing_command".to_string(),
+            feedback: "重放已收口命令".to_string(),
+        })
+        .await
+        .expect("replay outcome is in-band");
+    assert!(matches!(
+        replay,
+        HumanGateCommandOutcome::Rejected { ref code, .. }
+            if code == HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN_CODE
+    ));
+
+    // —— 预算拒：L1 拒收但冻结 prompt 超 author 硬限（SG5.2 裁决
+    // fail-closed）→ 同款收口（charge，不退）。
+    let (_root2, lifecycle2, mut engine2) = durable_revision_fixture("sg06a3_budget_close", 3);
+    let turn2_id = open_running_revision_turn(&mut engine2, "sg06a3_budget_command").await;
+    let mut oversized = sg61_cycle_candidate();
+    while oversized.len() < 320_000 {
+        oversized.push_str("- 超限填充行：冻结 prompt 超 provider 硬限的收口面。\n");
+    }
+    let result2 = engine2
+        .run_sc_manual_revision_turn(&turn2_id, oversized)
+        .await
+        .expect("budget adjudication rejection is in-band");
+    assert!(matches!(
+        &result2,
+        crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
+            diagnostics,
+            claim: None,
+        } if diagnostics.iter().any(|line| line.contains("OVER_HARD_LIMIT"))
+    ));
+    let turn2 = lifecycle2
+        .get_human_gate_turn(engine2.session().session_id.as_str(), &turn2_id)
+        .expect("turn after budget closure");
+    assert_eq!(
+        turn2.status,
+        crate::product::models::HumanGateTurnStatus::Failed
+    );
+    assert_eq!(
+        turn2.failure_class,
+        Some(HumanGateTurnFailureClass::ValidationReject)
+    );
+    let session2 = lifecycle2
+        .get_workspace_session(engine2.session().session_id.as_str())
+        .expect("session after budget closure");
+    assert_eq!(
+        session2
+            .structural_governance_state
+            .as_ref()
+            .expect("state")
+            .user_receipts
+            .iter()
+            .filter(|receipt| receipt.turn_id == turn2_id)
+            .count(),
+        1,
+        "预算拒收口结转 nonstructural_failure_charge 恰一次"
+    );
+    let reopened2 = engine2
+        .handle_human_gate_feedback(HumanGateFeedbackInput {
+            command_id: "sg06a3_budget_command_next".to_string(),
+            feedback: "缩短候选后重新反馈".to_string(),
+        })
+        .await
+        .expect("gate must accept new feedback after budget closure");
+    assert!(matches!(
+        reopened2,
+        HumanGateCommandOutcome::TurnOpened { .. }
+    ));
 }

@@ -698,25 +698,28 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
     assert_eq!(resumed.created_at, turn_b.created_at);
 
     // —— provider 故障 flavor：transport death 与 validation reject 后，
-    // 同 command 重发均不二次扣预算/不新建 turn。重放形态随 SG6a.1 契约
-    // 分流（REQ-CG-03「修订不过校验」×REQ-CG-05 恢复语义）：
-    // - transport_death：handler Err 分支落终态 Failed(provider_err)——
-    //   终态 turn 的重放仍 typed 拒收回显（蒸发链修法②不变）；
-    // - validation_reject：SG6a.1 起判定拒收不提前终态化（turn 保持
-    //   in-flight，机器修复窗口/恢复面承接）——同 command 重放回归
-    //   非终态幂等 Replayed（同 turn，零增量）。
-    for (scenario, script, expected_class, replay_is_terminal_reject) in [
+    // 同 command 重发均不二次扣预算/不新建 turn。重放形态按 SG6a.3 契约
+    // 收敛（REQ-CG-03「修订不过校验·到顶收口」×REQ-CG-05 恢复语义）：
+    // - transport_death：handler Err 分支落终态 Failed(provider_err)；
+    // - validation_reject：SG6a.3 起 untyped 判定拒收（无 claim 的
+    //   ExistingGate arm）收口 Failed(validation_reject)+扣次结转——回显
+    //   面仍是 in-band ProtocolError 稳定码（不冒充终态帧），但 turn 已
+    //   终态（Busy 面解锁，Main 预授权迁移 2026-10-14）。
+    // 两 flavor 的同 command 重放均为终态 typed 拒收（蒸发链修法②不变）。
+    for (scenario, script, expected_frame, expected_code, expected_class) in [
         (
             "crash_transport_death",
             vec![RevisionScriptStep::TransportDeath],
+            "human_gate_turn_failed",
+            "",
             "provider_err",
-            true,
         ),
         (
             "crash_validation_reject",
             vec![RevisionScriptStep::ValidationReject],
+            "protocol_error",
+            "SC_MANUAL_REVISION_VALIDATION_REJECTED",
             "validation_reject",
-            false,
         ),
     ] {
         let harness = campaign_stage3_fixture(2, script).await;
@@ -727,30 +730,33 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
             })
             .await;
         let open = harness.await_gate_event("human_gate_turn_open").await;
-        let WsOutMessage::HumanGateTurnOpen { turn_id, .. } = open else {
+        let WsOutMessage::HumanGateTurnOpen { .. } = open else {
             panic!("expected turn open, got {open:?}");
         };
-        if replay_is_terminal_reject {
-            // transport_death：handler Err 分支落终态 Failed(provider_err)
-            // ——HumanGateTurnFailed 回显（蒸发链修法②不变）。
-            let failed = harness.await_gate_event("human_gate_turn_failed").await;
-            let WsOutMessage::HumanGateTurnFailed { failure_class, .. } = failed else {
-                panic!("expected turn failed, got {failed:?}");
-            };
-            assert_eq!(failure_class, expected_class);
-        } else {
-            // SG6a.2（REQ-CG-03「修订不过校验」）：判定拒收不终态化
-            // （turn 保持 in-flight）——in-band 回显走 ProtocolError 稳定
-            // 码，不冒充 HumanGateTurnFailed 终态帧；机器修复窗口/原门
-            // /等待面承接。
-            let rejected = harness.await_gate_event("protocol_error").await;
-            let WsOutMessage::ProtocolError { code, .. } = rejected else {
-                panic!("expected protocol error, got {rejected:?}");
-            };
-            assert_eq!(
-                code, "SC_MANUAL_REVISION_VALIDATION_REJECTED",
-                "validation reject must surface the in-band stable code, not a terminal turn failure"
-            );
+        match expected_frame {
+            "human_gate_turn_failed" => {
+                // transport_death：handler Err 分支落终态 Failed(provider_err)
+                // ——HumanGateTurnFailed 回显（蒸发链修法②不变）。
+                let failed = harness.await_gate_event("human_gate_turn_failed").await;
+                let WsOutMessage::HumanGateTurnFailed { failure_class, .. } = failed else {
+                    panic!("expected turn failed, got {failed:?}");
+                };
+                assert_eq!(failure_class, expected_class);
+            }
+            _ => {
+                // SG6a.2/6a.3（REQ-CG-03）：判定拒收的 in-band 回显走
+                // ProtocolError 稳定码，不冒充 HumanGateTurnFailed 终态帧；
+                // SG6a.3 起 untyped 无 claim 拒收 arm 同步收口 turn
+                // （Failed(validation_reject)+扣次结转，Busy 面解锁）。
+                let rejected = harness.await_gate_event("protocol_error").await;
+                let WsOutMessage::ProtocolError { code, .. } = rejected else {
+                    panic!("expected protocol error, got {rejected:?}");
+                };
+                assert_eq!(
+                    code, expected_code,
+                    "validation reject must surface the in-band stable code, not a terminal turn failure"
+                );
+            }
         }
         let replay = {
             let mut engine = harness.engine.lock().await;
@@ -762,22 +768,14 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
                 .await
                 .expect("replay")
         };
-        if replay_is_terminal_reject {
-            // 终态 turn 上的同 command 重发：typed Rejected 且零增量
-            //（蒸发链修法②——旧 Replayed 语义在此场景即无声蒸发）。
-            assert!(matches!(
-                replay,
-                HumanGateCommandOutcome::Rejected { ref code, .. }
-                    if code == "HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN"
-            ));
-        } else {
-            // SG6a.1：判定拒收不终态化——同 command 重放是非终态 in-flight
-            // 幂等（同 turn_id 回显，REQ-CG-05），零二次扣预算/零新 turn。
-            assert!(matches!(
-                replay,
-                HumanGateCommandOutcome::Replayed { ref turn } if turn.turn_id == turn_id
-            ));
-        }
+        // SG6a.3 收口后两 flavor 的 turn 均终态：同 command 重发统一为
+        // typed Rejected 且零增量（蒸发链修法②——旧 Replayed 语义在
+        // validation_reject 场景已随收口终结）。
+        assert!(matches!(
+            replay,
+            HumanGateCommandOutcome::Rejected { ref code, .. }
+                if code == "HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN"
+        ));
         assert_eq!(harness.budget_remaining(), 1, "预算恰减一次");
         assert_eq!(harness.durable_turns().len(), 1, "不新建 turn");
         assert_eq!(harness.provider_start_keys().len(), 1);

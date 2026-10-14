@@ -131,14 +131,18 @@ async fn conversational_gate_revision_result_validation_reject_preserves_candida
     let turn = lifecycle
         .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
         .expect("turn after rejection");
-    // SG6a.1（REQ-CG-03「修订不过校验」）：未 typed 编译失败不再把
-    // turn 提前写成终态 Failed——同 turn 仍 Running（回原门/恢复面承
-    // 接），failure_class 不落。
+    // SG6a.3（复审①，契约迁移）：未 typed 编译失败走原门＝turn 收口
+    // Failed(validation_reject)+nonstructural_failure_charge（不退），
+    // 门重新可接新反馈；refs/版本/预算零提升语义不变。
     assert_eq!(
         turn.status,
-        crate::product::models::HumanGateTurnStatus::Running
+        crate::product::models::HumanGateTurnStatus::Failed,
+        "SG6a.3: untyped rejection closes the turn (Busy face unlocked)"
     );
-    assert_eq!(turn.failure_class, None);
+    assert_eq!(
+        turn.failure_class,
+        Some(crate::product::models::HumanGateTurnFailureClass::ValidationReject)
+    );
     let current_candidate_hash = {
         use sha2::{Digest, Sha256};
         let markdown = engine
@@ -975,8 +979,10 @@ async fn sg_06a_1_same_turn_claim_attempt2_exactly_once() {
     assert_eq!(turn_after.turn_id, turn.turn_id);
     assert_eq!(turn_after.command_id, turn.command_id);
 
-    // 同失败重放：同 prompt 指令身份重复 claim → Replayed（恰一次），
-    // attempt 不推进、ledger 零新增、turn 仍 Running。
+    // 同失败重放（SG6a.3 迁移，复审②③）：claim 在案后 grant.attempt_no=2
+    // 已到顶——再驱动同失败是耗尽停点，终结写收口 turn
+    // （Failed(validation_reject)+release 恰 1+grant SystemFault）；
+    // attempt 仍 2、prompt 身份保留、ledger 零新增、无第三次。
     let result = engine
         .run_sc_manual_revision_turn(&turn_id, output)
         .await
@@ -993,7 +999,8 @@ async fn sg_06a_1_same_turn_claim_attempt2_exactly_once() {
     );
     assert_eq!(
         grant_replay.phase,
-        Some(StructuralGrantPhase::Attempt2Claimed)
+        Some(StructuralGrantPhase::SystemFault),
+        "SG6a.3: cap-reached replay terminalizes the grant with exhaustion evidence"
     );
     assert_eq!(grant_replay.prompt_ref, grant.prompt_ref);
     assert_eq!(grant_replay.prompt_digest, grant.prompt_digest);
@@ -1011,6 +1018,423 @@ async fn sg_06a_1_same_turn_claim_attempt2_exactly_once() {
         .expect("turn after replay");
     assert_eq!(
         turn_replay.status,
-        crate::product::models::HumanGateTurnStatus::Running
+        crate::product::models::HumanGateTurnStatus::Failed,
+        "SG6a.3: exhaustion closure replaces the SG6a.1 in-flight hold"
+    );
+    let replay_state = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session for replay state")
+        .structural_governance_state
+        .expect("state for replay");
+    assert_eq!(
+        replay_state
+            .user_receipts
+            .iter()
+            .filter(|receipt| receipt.turn_id == turn_id)
+            .count(),
+        1,
+        "release settles exactly once across the replay breakpoint"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SG6a.3（plan v1.1 Task SG6a.3）：grant 创建 producer、三连撞有界收口、
+// 交付/复评/耗尽分离（REQ-CG-02/03/04/05、REQ-SG-04/07）。
+// ---------------------------------------------------------------------------
+
+use crate::product::models::{HumanGateTurnFailureClass, UserBudgetReceiptKind};
+
+/// 读取 durable 聚合 state（无则 None）。
+fn sg63_state(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    session_id: &str,
+) -> Option<StructuralGovernanceState> {
+    lifecycle
+        .get_workspace_session(session_id)
+        .expect("load session record")
+        .structural_governance_state
+}
+
+/// SG6a.3 验收④（复审点名）：turn reserve 是结构授权窗口
+/// （`current_grant`）的唯一生产 producer——接受真实反馈的同一 session
+/// CAS 原子创建 grant（REQ-CG-05「预算 receipt、attempt reason…及 grant
+/// phase SHALL 同 session CAS 绑定」），不再依赖测试注入。下一合法业务
+/// 轮次的 reserve 轮换授权窗口（绑新 turn/command），history
+/// （receipt/checkpoint/resolved）不清理。
+#[tokio::test]
+async fn sg_06a_3_reserve_creates_and_rotates_structural_grant() {
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("sg06a3_grant_producer", 3);
+    let turn_id = open_running_revision_turn(&mut engine, "sg06a3_grant_command").await;
+    let turn = lifecycle
+        .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+        .expect("turn after open");
+    let record = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session after open");
+    let state = record
+        .structural_governance_state
+        .as_ref()
+        .expect("reserve materializes the structural governance state");
+    let grant = state
+        .current_grant
+        .as_ref()
+        .expect("SG6a.3: turn reserve must produce the structural grant");
+    assert_eq!(grant.turn_id.as_deref(), Some(turn.turn_id.as_str()));
+    assert_eq!(grant.command_id.as_deref(), Some(turn.command_id.as_str()));
+    assert_eq!(grant.phase, Some(StructuralGrantPhase::AuthorRunning));
+    assert_eq!(
+        grant.attempt_no, 0,
+        "fresh grant carries no consumed physical attempt"
+    );
+    assert_eq!(grant.grant_id, format!("structural_grant_{}", turn.turn_id));
+    assert!(
+        grant.authorization_hash.starts_with("sha256:"),
+        "authorization hash binds the accepted feedback turn identity"
+    );
+    assert!(state.active_hold_for_turn(&turn.turn_id).is_some());
+
+    // 轮换：第一轮合法交付终态后，新反馈 turn 的 reserve 轮换授权窗口；
+    // history（delivered receipt/checkpoint）不清理。
+    engine
+        .run_sc_manual_revision_turn(&turn_id, handoff_clean_rep4_v2())
+        .await
+        .expect("first delivery completes");
+    let second_turn_id = open_running_revision_turn(&mut engine, "sg06a3_grant_command_2").await;
+    let state2 = sg63_state(&lifecycle, engine.session().session_id.as_str())
+        .expect("state after second reserve");
+    let grant2 = state2
+        .current_grant
+        .as_ref()
+        .expect("second reserve rotates a fresh grant window");
+    assert_eq!(grant2.turn_id.as_deref(), Some(second_turn_id.as_str()));
+    assert_ne!(grant2.grant_id, grant.grant_id);
+    assert_eq!(grant2.attempt_no, 0);
+    assert!(
+        state2
+            .user_receipts
+            .iter()
+            .any(|receipt| receipt.turn_id == turn_id
+                && receipt.kind == UserBudgetReceiptKind::DeliveredCharge),
+        "grant rotation must not clear delivery history"
+    );
+    assert!(!state2.structure_checkpoints.is_empty());
+}
+
+/// SG6a.3 主验收（REQ-SG-07 三连撞 + REQ-CG-02/03 有界预算）：
+/// - R1：同 turn 2 物理 attempt 到顶 → typed 系统故障收口
+///   （Failed(validation_reject) + released_structural 恰 1 + grant
+///   SystemFault），预算 3 全额恢复可用、last-valid 三 refs 保持、
+///   第 3 次 start 恒 0；
+/// - R2：合法交付 settle/Reviewing 与终态分离（delivered receipt 恰 1、
+///   checkpoint Active、refs 唯一在合法交付时提升）；
+/// - R3：回归风险同失败历史（同 failing_source_hash）保存，不为执行第
+///   三错误开 turn；跨合法业务轮次继承 checkpoint；accepted 只计真实
+///   用户反馈（无新 turn）；
+/// - 断点幂等：终态后重放同失败零二次 release/零新启动。
+#[tokio::test]
+async fn sg_06a_3_three_collisions_bounded() {
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("sg06a3_three_collisions", 3);
+    let session_id = engine.session().session_id.clone();
+    let session = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("baseline session");
+    let baseline_refs = (
+        session.work_item_plan_source_revision_ref.clone(),
+        session.plan_candidate_ir_ref.clone(),
+        session.mechanical_report_ref.clone(),
+    );
+
+    // —— R1（合法业务轮次 1）：同 turn 2 attempt 到顶，typed 系统故障 ——
+    let turn1 = open_running_revision_turn(&mut engine, "sg06a3_r1_command").await;
+    let cycle = sg61_cycle_candidate();
+    let failed_hash = sg61_source_hash(&cycle);
+    let r1_attempt1 = engine
+        .run_sc_manual_revision_turn(&turn1, cycle.clone())
+        .await
+        .expect("L1 cycle rejection is in-band");
+    assert!(
+        matches!(
+            &r1_attempt1,
+            crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
+                claim: Some(_),
+                ..
+            }
+        ),
+        "attempt1 typed rejection must claim the same-turn attempt2"
+    );
+    let grant1 = sg61_current_grant(&lifecycle, &session_id).expect("grant after claim");
+    assert_eq!(grant1.attempt_no, 2);
+    assert_eq!(
+        grant1.failing_source_hash.as_deref(),
+        Some(failed_hash.as_str())
+    );
+    // 复审②对端：claim 在案（Attempt2Claimed）+ provider dead → 恢复车道
+    // 等待结构终结写，不 resume 原反馈 prompt。
+    let turn1_claimed = lifecycle
+        .get_human_gate_turn(&session_id, &turn1)
+        .expect("turn after claim");
+    assert_eq!(
+        crate::product::workspace_engine::conversational_gate_recovery::recover_human_gate_turn(
+            &turn1_claimed,
+            false,
+            true,
+        )
+        .expect("recovery classification"),
+        crate::product::workspace_engine::conversational_gate_recovery::HumanGateRecoveryAction::AwaitingStructuralClosure
+    );
+
+    // attempt2 输出同族失败 → 物理上限到顶：typed 系统故障终结写。
+    let ledger_before_exhaustion = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session before exhaustion")
+        .provider_start_ledger
+        .len();
+    let r1_attempt2 = engine
+        .run_sc_manual_revision_turn(&turn1, cycle.clone())
+        .await
+        .expect("exhaustion stop is in-band");
+    assert!(
+        matches!(
+            &r1_attempt2,
+            crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
+                diagnostics,
+                claim: None,
+            } if diagnostics
+                .iter()
+                .any(|line| line.contains("STRUCTURAL_ATTEMPTS_EXHAUSTED"))
+        ),
+        "cap-reached rejection must surface the typed system fault without a claim"
+    );
+    let turn1_final = lifecycle
+        .get_human_gate_turn(&session_id, &turn1)
+        .expect("turn after exhaustion closure");
+    assert_eq!(
+        turn1_final.status,
+        crate::product::models::HumanGateTurnStatus::Failed
+    );
+    assert_eq!(
+        turn1_final.failure_class,
+        Some(HumanGateTurnFailureClass::ValidationReject)
+    );
+    let state1 = sg63_state(&lifecycle, &session_id).expect("state after R1 closure");
+    assert_eq!(
+        state1
+            .user_receipts
+            .iter()
+            .filter(|receipt| receipt.turn_id == turn1
+                && receipt.kind == UserBudgetReceiptKind::ReleasedStructural)
+            .count(),
+        1,
+        "复审③：结构耗尽 release 恰 1（typed structural_exhausted_before_delivery）"
+    );
+    assert_eq!(state1.active_hold_count(), 0);
+    assert_eq!(
+        state1.available_user_budget(),
+        3,
+        "未交付结构耗尽恢复全部可用预算"
+    );
+    let session1 = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session after R1 closure");
+    assert_eq!(
+        session1
+            .human_gate_snapshot
+            .as_ref()
+            .expect("snapshot")
+            .manual_repairs_remaining,
+        3,
+        "快照可用预算同 CAS 恢复"
+    );
+    let grant1_final = state1
+        .current_grant
+        .as_ref()
+        .expect("grant survives closure");
+    assert_eq!(grant1_final.phase, Some(StructuralGrantPhase::SystemFault));
+    assert!(
+        grant1_final.prompt_ref.is_some() && grant1_final.prompt_digest.is_some(),
+        "terminal grant keeps the frozen prompt identity for audit"
+    );
+    let refs1 = (
+        session1.work_item_plan_source_revision_ref.clone(),
+        session1.plan_candidate_ir_ref.clone(),
+        session1.mechanical_report_ref.clone(),
+    );
+    assert_eq!(
+        refs1, baseline_refs,
+        "last-valid 三 refs 保持：坏候选零提升"
+    );
+    assert_eq!(
+        session1.provider_start_ledger.len(),
+        ledger_before_exhaustion,
+        "第 3 start 恒 0：耗尽收口零 provider 启动"
+    );
+
+    // 断点幂等：终态 turn 再驱动同失败 → 稳定 Err，零二次 release/零新启动。
+    let replay = engine
+        .run_sc_manual_revision_turn(&turn1, cycle.clone())
+        .await;
+    assert!(replay.is_err(), "terminal turn must refuse re-drive");
+    let session1_replay = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session after terminal replay");
+    assert_eq!(
+        session1_replay.provider_start_ledger.len(),
+        ledger_before_exhaustion
+    );
+    assert_eq!(
+        session1_replay
+            .structural_governance_state
+            .as_ref()
+            .expect("state")
+            .user_receipts
+            .iter()
+            .filter(|receipt| receipt.turn_id == turn1)
+            .count(),
+        1,
+        "release 断点重放零二次结算"
+    );
+
+    // —— Busy 解锁（复审①）：R1 终态后新反馈开轮 ——
+    let turn2 = open_running_revision_turn(&mut engine, "sg06a3_r2_command").await;
+
+    // —— R2（合法业务轮次 2）：合法交付 settle/Reviewing 与终态分离 ——
+    let delivered = handoff_clean_rep4_v2();
+    let r2 = engine
+        .run_sc_manual_revision_turn(&turn2, delivered.clone())
+        .await
+        .expect("legal delivery completes");
+    assert!(matches!(
+        r2,
+        crate::product::workspace_engine::ScManualRevisionResult::Accepted { .. }
+    ));
+    let state2 = sg63_state(&lifecycle, &session_id).expect("state after R2 delivery");
+    assert_eq!(
+        state2
+            .user_receipts
+            .iter()
+            .filter(|receipt| receipt.turn_id == turn2
+                && receipt.kind == UserBudgetReceiptKind::DeliveredCharge)
+            .count(),
+        1,
+        "合法交付 settle 恰一次"
+    );
+    let grant2 = state2.current_grant.as_ref().expect("grant after delivery");
+    assert_eq!(
+        grant2.phase,
+        Some(StructuralGrantPhase::Resolved),
+        "synthetic Pass 收口后 grant 终态 Resolved（携 review 证据）"
+    );
+    assert!(grant2.review_identity.is_some());
+    assert_eq!(state2.structure_checkpoints.len(), 1);
+    assert_eq!(
+        state2.structure_checkpoints[0].status,
+        crate::product::models::workspace::StructuralCheckpointStatus::Active
+    );
+    assert_eq!(
+        state2.available_user_budget(),
+        2,
+        "delivered 计费：3 总额 − 1 delivered"
+    );
+    let turn2_final = lifecycle
+        .get_human_gate_turn(&session_id, &turn2)
+        .expect("turn after delivery");
+    assert_eq!(
+        turn2_final.status,
+        crate::product::models::HumanGateTurnStatus::Completed
+    );
+    assert!(turn2_final.result_artifact_ref.is_some());
+    let session2 = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session after R2 delivery");
+    let refs2 = (
+        session2.work_item_plan_source_revision_ref.clone(),
+        session2.plan_candidate_ir_ref.clone(),
+        session2.mechanical_report_ref.clone(),
+    );
+    assert_ne!(refs2, baseline_refs, "refs 唯在合法交付时提升");
+
+    // —— R3（合法业务轮次 3）：回归风险同失败历史，不开第三错误 turn ——
+    let turn3 = open_running_revision_turn(&mut engine, "sg06a3_r3_command").await;
+    let state3_pre = sg63_state(&lifecycle, &session_id).expect("state before R3");
+    assert_eq!(
+        state3_pre.structure_checkpoints.len(),
+        1,
+        "跨合法业务轮次继承 checkpoint（不重置）"
+    );
+    let grant3_pre = state3_pre.current_grant.as_ref().expect("R3 grant");
+    assert_eq!(grant3_pre.attempt_no, 0);
+    let r3_attempt1 = engine
+        .run_sc_manual_revision_turn(&turn3, cycle.clone())
+        .await
+        .expect("R3 reintroduces the same cycle family in-band");
+    assert!(matches!(
+        &r3_attempt1,
+        crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
+            claim: Some(_),
+            ..
+        }
+    ));
+    let grant3_claimed = sg61_current_grant(&lifecycle, &session_id).expect("grant3");
+    assert_eq!(
+        grant3_claimed.failing_source_hash.as_deref(),
+        Some(failed_hash.as_str()),
+        "R3 回归风险绑定同失败历史（同 failing_source_hash）"
+    );
+    let r3_attempt2 = engine
+        .run_sc_manual_revision_turn(&turn3, cycle)
+        .await
+        .expect("R3 exhaustion stop is in-band");
+    assert!(matches!(
+        &r3_attempt2,
+        crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
+            diagnostics,
+            claim: None,
+        } if diagnostics
+            .iter()
+            .any(|line| line.contains("STRUCTURAL_ATTEMPTS_EXHAUSTED"))
+    ));
+    let turn3_final = lifecycle
+        .get_human_gate_turn(&session_id, &turn3)
+        .expect("turn3 final");
+    assert_eq!(
+        turn3_final.status,
+        crate::product::models::HumanGateTurnStatus::Failed
+    );
+    let state3 = sg63_state(&lifecycle, &session_id).expect("state after R3");
+    assert_eq!(
+        state3
+            .user_receipts
+            .iter()
+            .filter(|receipt| receipt.kind == UserBudgetReceiptKind::ReleasedStructural)
+            .count(),
+        2,
+        "R1/R3 两轮未交付结构耗尽各 release 恰 1"
+    );
+    assert_eq!(
+        state3.available_user_budget(),
+        2,
+        "R3 release 恢复：3 − 1 delivered(R2)"
+    );
+    assert_eq!(
+        state3.structure_checkpoints.len(),
+        1,
+        "R3 未交付不新增 checkpoint；R2 的合法交付 checkpoint 保持 Active"
+    );
+    let session3 = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session after R3");
+    let refs3 = (
+        session3.work_item_plan_source_revision_ref.clone(),
+        session3.plan_candidate_ir_ref.clone(),
+        session3.mechanical_report_ref.clone(),
+    );
+    assert_eq!(refs3, refs2, "R3 坏候选零提升：refs 保持 last-valid");
+    assert_eq!(
+        lifecycle
+            .list_human_gate_turns(&session_id)
+            .expect("list turns")
+            .len(),
+        3,
+        "accepted 只真实用户：恰 3 个真实反馈 turn，机器 attempt2 不新开 turn"
     );
 }

@@ -697,6 +697,27 @@ async fn sg_05_3_frozen_subprompt_delivery_without_state_keeps_original_builder_
     let (_root, lifecycle, mut engine) = super::conversational_gate::gate_fixture(3);
     let (turn, opened_prompt) = sg53_open_turn(&mut engine, "sg53_none").await;
     let session_id = engine.session().session_id.clone();
+    // SG6a.3（Main 预授权迁移 2026-10-14）：复审④ grant producer 落地后
+    // 真实 reserve 恒创建 current_grant——本用例锁定的「无 grant 记录」
+    // legacy 形态以 fixture 直写清空 current_grant 模拟（SG4b 直写先
+    // 例），fallback 分支（无 grant 记录的 join 面）覆盖保持不变。
+    {
+        let mut legacy = lifecycle
+            .get_workspace_session(&session_id)
+            .expect("load session record for legacy shape");
+        if let Some(state) = legacy.structural_governance_state.as_mut() {
+            state.current_grant = None;
+        }
+        crate::product::json_store::write_json(
+            &lifecycle
+                .app_paths()
+                .issue_lifecycle_root(&legacy.project_id, &legacy.issue_id)
+                .join("workspace-sessions")
+                .join(format!("{}.json", legacy.id)),
+            &legacy,
+        )
+        .expect("persist legacy no-grant fixture");
+    }
 
     // durable 结构面观察：reserve 已物化聚合 state（SG4a hold），但无
     // current_grant＝无结构授权窗口（fresh None resume 的真实前置）。

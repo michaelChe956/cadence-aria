@@ -220,6 +220,22 @@ impl LifecycleStore {
                 {
                     state.user_holds.push(hold);
                 }
+                // SG6a.3（复审④/REQ-SG-05「…grant phase SHALL 同 session
+                // CAS 绑定」）：turn reserve 是结构授权窗口（current_grant）
+                // 的唯一生产 producer——接受真实反馈的同一 CAS 原子创建
+                // 绑定本 turn/command 的 grant（attempt 0，机器 claim 推
+                // 进）。前一窗口绑定的 turn 必已终态（reservation 单飞已
+                // 拒非终态前驱），轮换不清理 history（receipt/checkpoint/
+                // resolved facts 保留）；已绑本 turn 的既有 grant（测试
+                // 注入/claim 进度）原样保留，不被 reserve 重放覆盖。
+                if state
+                    .current_grant
+                    .as_ref()
+                    .and_then(|grant| grant.turn_id.as_deref())
+                    != Some(turn.turn_id.as_str())
+                {
+                    state.current_grant = Some(structural_revision_grant_for_turn(&turn));
+                }
             }
             next.human_gate_reservation = Some(reservation.clone());
             next.provider_start_ledger.push(
@@ -745,5 +761,46 @@ impl LifecycleStore {
             write_json(&session_path, &next)?;
             Ok(next)
         })
+    }
+}
+
+/// SG6a.3（plan v1.1 Task SG6a.3 / REQ-SG-05）：reserve 原子创建的结构
+/// 修订授权窗口。授权摘要对已接受 typed feedback 的 turn 身份全量内容
+/// 寻址（turn/command/feedback/基线 source hash）；attempt 从 0 起，物
+/// 理 attempt 消费由 `claim_structural_attempt` 推进（claim 与真实 start
+/// 分账）；phase=AuthorRunning 是唯一合法初相（无评审/终态授权）。
+fn structural_revision_grant_for_turn(
+    turn: &HumanGateTurn,
+) -> crate::product::models::workspace::StructuralRevisionGrant {
+    use sha2::{Digest, Sha256};
+    let authorization_hash = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            [
+                turn.turn_id.as_str(),
+                turn.command_id.as_str(),
+                turn.feedback_text.as_str(),
+                turn.source_hash.as_str(),
+            ]
+            .join("\0")
+            .as_bytes(),
+        ))
+    );
+    crate::product::models::workspace::StructuralRevisionGrant {
+        grant_id: format!("structural_grant_{}", turn.turn_id),
+        authorization_hash,
+        turn_id: Some(turn.turn_id.clone()),
+        command_id: Some(turn.command_id.clone()),
+        candidate_source_revision_ref: None,
+        plan_candidate_ir_ref: None,
+        mechanical_report_ref: None,
+        phase: Some(StructuralGrantPhase::AuthorRunning),
+        attempt_no: 0,
+        prompt_ref: None,
+        prompt_digest: None,
+        instruction_digest: None,
+        failing_source_hash: None,
+        review_identity: None,
+        granted_at: Utc::now().to_rfc3339(),
     }
 }
