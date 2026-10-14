@@ -163,43 +163,43 @@ async fn sc_delegated_rerun_relay_is_not_drained_by_gate_node_kind_collision() {
     drain_engine.abort();
 }
 
-/// F2 红锚2（spawn 失败可见性）：委托态（SC phase=Generate、无在途 run、durable
-/// running）会话的接力 spawn 失败必须有可见结果——回落人工门（durable
-/// WaitingForHuman + 门节点摘要携带原因），不得静默滞留 running（0018 卡
-/// 20+ 分钟实证）。
+/// F2 红锚2（spawn 失败可见性）：委托态（SC phase=Generate、无在途 run、
+/// durable running）会话的接力 spawn 失败必须有可见结果——回落人工门
+/// （durable WaitingForHuman + 门节点摘要携带原因），不得静默滞留 running
+/// （0018 卡 20+ 分钟实证）。SG6b 起人工修订链的复评 revise 改道原人工门
+/// （part_07 `sg_06b_review_revise_routes_gate_without_third_author_start`
+/// 钉死：EnterHumanGate 原门、零 author start），委托态改由无结构授权窗的
+/// 首轮 revise 路径到达；回落守卫按态（phase=Generate + 无在途 run +
+/// durable running）不按到达路径，0018 的「失败不可见即卡死」语义保持。
 #[tokio::test]
 async fn sc_delegated_rerun_relay_failure_falls_back_to_human_gate_durable() {
     let (fixture, engine_rx) =
         ProviderRunFixture::new_with_engine_rx(WorkItemPlanFlowKind::SingleCandidate);
     persist_review_rounds(&fixture, 1);
+    // 只 drain 不接力：委托接力由本测试用缺 author 的 registry 手动发起，
+    // 确定性复现「run 未启动且错误不可见」输入形态。
     let mut engine_rx = engine_rx;
     let drain_engine = tokio::spawn(async move { while engine_rx.recv().await.is_some() {} });
 
     let author_starts = Arc::new(AtomicUsize::new(0));
     let author = Arc::new(ScSequenceAuthorProvider {
-        outputs: vec![
-            single_candidate_markdown(&fixture.story_id, &fixture.design_id),
-            // 修订候选必须与首轮不同（candidate 哈希变更），否则复评落回同一
-            // review cycle 触发 scope 违规（真实链的 provider 输出天然不同）。
-            single_candidate_markdown(&fixture.story_id, &fixture.design_id).replacen(
-                "### Notes",
-                "### Notes\n- 修订轮：收紧验证计划。",
-                1,
-            ),
-        ],
+        outputs: vec![single_candidate_markdown(
+            &fixture.story_id,
+            &fixture.design_id,
+        )],
         starts: author_starts.clone(),
         held: Mutex::new(Vec::new()),
     });
     let review_starts = Arc::new(AtomicUsize::new(0));
     let reviewer = Arc::new(ScSequenceReviewProvider {
-        outputs: vec![sc_pass_review_output(), sc_repairable_revise_output()],
+        outputs: vec![sc_repairable_revise_output()],
         starts: review_starts.clone(),
         held: Mutex::new(Vec::new()),
     });
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, author);
     registry.register(ProviderName::Codex, reviewer);
-    let (context, _outbound_rx, run_context, outbound_tx) =
+    let (context, _outbound_rx, _run_context, _outbound_tx) =
         sc_context_with_registry(&fixture, registry);
 
     handle_workspace_inbound_message(
@@ -212,45 +212,9 @@ async fn sc_delegated_rerun_relay_failure_falls_back_to_human_gate_durable() {
     )
     .await;
 
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let stage = {
-                let engine = fixture.engine.lock().await;
-                engine.session().stage.clone()
-            };
-            if stage == WorkspaceStage::HumanConfirm {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("SC approval gate must open after the passing review");
-
-    let effect = apply_human_gate_feedback(
-        fixture.engine.clone(),
-        HumanGateFeedbackInput {
-            command_id: "f2-red-fallback".to_string(),
-            feedback: "请修订当前候选的验证计划".to_string(),
-        },
-    )
-    .await;
-    let HumanGateFeedbackEffect::TurnOpened { turn, prompt, .. } = effect else {
-        panic!("human gate feedback must open a revision turn");
-    };
-    spawn_provider_run_from_handler(
-        run_context,
-        ProviderRunKind::HumanGateScManualRevision {
-            turn_id: turn.turn_id,
-            prompt,
-        },
-        outbound_tx,
-    )
-    .await
-    .expect("revision run spawn must succeed");
-
-    // 修订完成 → 复评 revise → policy 委托 → phase=Generate；修订 run 退场。
-    // 这就是 0018 的卡死前置态：durable (running, generate)、无在途 run、门未开。
+    // 首轮 review revise → policy 委托 → phase=Generate；author run 的
+    // followups 让位退场。这就是委托态前置：durable (running, generate)、
+    // 无在途 run、接力是唯一接续路径。
     let delegation_landed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let (phase, status, has_run) = {
