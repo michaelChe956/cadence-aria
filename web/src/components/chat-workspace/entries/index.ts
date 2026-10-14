@@ -6,7 +6,7 @@ export { ExecutionEventEntry } from "./ExecutionEventEntry";
 export { GatePromptEntry } from "./GatePromptEntry";
 export { HumanDecisionEntry } from "./HumanDecisionEntry";
 export { PermissionRequestEntry } from "./PermissionRequestEntry";
-export { PermissionResponseEntry } from "./PermissionResponseEntry";
+export { DeliveryFactsEntry } from "./DeliveryFactsEntry";
 export { ProviderStreamEntry } from "./ProviderStreamEntry";
 export { ReviewVerdictEntry } from "./ReviewVerdictEntry";
 export { StageChangeEntry } from "./StageChangeEntry";

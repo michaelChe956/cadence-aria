@@ -26,6 +26,9 @@ function chatEntryTypeFromCodingEntry(entry: CodingChatEntry): ChatEntryType {
     case "tool_call":
     case "tool_result":
     case "system_event":
+      if (entry.entry_type.event_type === "delivery_facts") {
+        return "delivery_facts";
+      }
       return "execution_event";
   }
 }

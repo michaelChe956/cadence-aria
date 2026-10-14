@@ -3,7 +3,7 @@ import type { ChatEntry } from "../../state/chat-entries";
 import { ArtifactUpdateEntry } from "./entries/ArtifactUpdateEntry";
 import { ChoiceRequestEntry } from "./entries/ChoiceRequestEntry";
 import { ChoiceResponseEntry } from "./entries/ChoiceResponseEntry";
-import { ErrorEntry } from "./entries/ErrorEntry";
+import { DeliveryFactsEntry } from "./entries/DeliveryFactsEntry";
 import { ExecutionEventEntry } from "./entries/ExecutionEventEntry";
 import { GatePromptEntry } from "./entries/GatePromptEntry";
 import { HumanDecisionEntry } from "./entries/HumanDecisionEntry";
@@ -42,8 +42,8 @@ export function ChatEntryRenderer({
       return <StartGenerationEntry entry={entry} />;
     case "provider_stream":
       return <ProviderStreamEntry entry={entry} />;
-    case "execution_event":
-      return <ExecutionEventEntry entry={entry} />;
+    case "delivery_facts":
+      return <DeliveryFactsEntry entry={entry} />;
     case "permission_request":
       return <PermissionRequestEntry entry={entry} onRespond={onPermissionResponse} />;
     case "permission_response":

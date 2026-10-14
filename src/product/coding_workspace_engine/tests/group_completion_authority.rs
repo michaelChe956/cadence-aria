@@ -1035,6 +1035,171 @@ async fn rework_render_failure_keeps_instruction_unconsumed() {
     );
 }
 
+#[tokio::test]
+async fn group_unit_completion_appends_platform_delivery_facts_chat_entry() {
+    let fixture = group_completion_fixture(false, false);
+    fs::write(fixture.worktree.join("unit1.txt"), "coder-owned change\n").expect("coder change");
+    run_test_git(&fixture.worktree, &["add", "unit1.txt"]);
+    run_test_git(&fixture.worktree, &["commit", "-m", "coder completes unit"]);
+    let coder_head = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let source_run = create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Running,
+        None,
+        None,
+    );
+    fixture
+        .store
+        .save_code_review_report(
+            &fixture.attempt,
+            &CodeReviewReport {
+                id: "code_review_report_0001".to_string(),
+                attempt_id: fixture.attempt.id.clone(),
+                round: 1,
+                verdict: ReviewVerdict::Approve,
+                findings: Vec::new(),
+                tested_evidence_refs: vec!["evidence://tests/cargo-test".to_string()],
+                diff_refs: Vec::new(),
+                summary: "code review 通过".to_string(),
+                created_at: "2026-10-14T00:00:00Z".to_string(),
+                raw_provider_output_ref: None,
+                role_run_id: None,
+                run_no: None,
+                unit_run_id: Some(source_run.id.clone()),
+            },
+        )
+        .expect("seed review report");
+
+    let updated = fixture
+        .engine
+        .complete_group_unit_after_code_review(&fixture.attempt)
+        .await
+        .expect("complete group unit");
+
+    let entries = fixture
+        .store
+        .list_chat_entries(&updated.project_id, &updated.issue_id, &updated.id)
+        .expect("chat entries");
+    let frame = entries
+        .iter()
+        .find(|entry| entry.id == format!("{}_delivery_facts", source_run.id))
+        .expect("platform delivery facts frame");
+    assert_eq!(frame.attempt_id, updated.id);
+    assert_eq!(frame.role, CodingAgentRole::System);
+    assert!(frame.node_id.is_none());
+    assert!(matches!(
+        &frame.entry_type,
+        CodingEntryType::SystemEvent { event_type, .. } if event_type == "delivery_facts"
+    ));
+    let metadata = frame.metadata.as_ref().expect("frame metadata");
+    assert_eq!(metadata["source"], json!("platform_delivery_facts"));
+    assert_eq!(metadata["unit_id"], json!(source_run.unit_id));
+    assert_eq!(metadata["unit_run_id"], json!(source_run.id));
+    assert_eq!(metadata["logical_work_item_id"], json!("work_item_0001"));
+    assert_eq!(metadata["start_commit"], json!(fixture.original_head));
+    assert_eq!(metadata["completion_commit"], json!(coder_head));
+    assert_eq!(metadata["changed_files"], json!(["unit1.txt"]));
+    assert_eq!(
+        metadata["verification"]["review_report_id"],
+        json!("code_review_report_0001")
+    );
+    assert_eq!(metadata["verification"]["verdict"], json!("approve"));
+    assert_eq!(
+        metadata["verification"]["tested_evidence_refs"],
+        json!(["evidence://tests/cargo-test"])
+    );
+    let units = fixture
+        .store
+        .list_coding_units(&updated.project_id, &updated.issue_id, &updated.id)
+        .expect("units");
+    let completed_unit = units
+        .iter()
+        .find(|unit| unit.id == source_run.unit_id)
+        .expect("completed unit");
+    assert_eq!(
+        metadata["handoff_revision_id"],
+        json!(
+            completed_unit
+                .latest_handoff_revision_id
+                .clone()
+                .expect("handoff pointer")
+        )
+    );
+    // 尾帧:完成时点平台事实帧位于 chat 末尾,且内容只由平台字段拼装。
+    assert_eq!(
+        entries.last().map(|entry| entry.id.as_str()),
+        Some(frame.id.as_str())
+    );
+    let content = frame.content.as_deref().expect("platform content");
+    assert!(content.contains(&coder_head));
+    assert!(content.contains("unit1.txt"));
+    assert!(content.contains("handoff_revision_coding_unit_run_0001"));
+}
+
+#[tokio::test]
+async fn completed_retry_recovery_appends_platform_delivery_facts_frame() {
+    let fixture = group_completion_fixture(true, true);
+    run_test_git(&fixture.worktree, &["add", "."]);
+    run_test_git(
+        &fixture.worktree,
+        &["commit", "-m", "feat: complete work_item_0001"],
+    );
+    let completion_commit = git_stdout(&fixture.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let source_run = create_authoritative_active_run(
+        &fixture,
+        "coding_unit_run_0001",
+        1,
+        CodingUnitRunStatus::Completed,
+        Some(completion_commit.clone()),
+        None,
+    );
+    let revision_store = WorkItemRevisionStore::new(fixture.store.paths());
+    let lineage = revision_store
+        .get_plan_lineage(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            "work_item_plan_0001",
+        )
+        .expect("lineage");
+    let existing_handoff =
+        expected_handoff_revision(&source_run, &completion_commit, "2026-07-19T00:00:00Z");
+    revision_store
+        .put_handoff_revision(&lineage, &existing_handoff)
+        .expect("partial canonical handoff");
+
+    let updated = fixture
+        .engine
+        .complete_group_unit_after_code_review(&fixture.attempt)
+        .await
+        .expect("recover partial completion");
+
+    let entries = fixture
+        .store
+        .list_chat_entries(&updated.project_id, &updated.issue_id, &updated.id)
+        .expect("chat entries");
+    let matching: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.id == format!("{}_delivery_facts", source_run.id))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "deterministic frame id keeps re-entry idempotent"
+    );
+    let frame = matching[0];
+    let metadata = frame.metadata.as_ref().expect("frame metadata");
+    assert_eq!(metadata["source"], json!("platform_delivery_facts"));
+    assert_eq!(metadata["completion_commit"], json!(completion_commit));
+    assert_eq!(metadata["changed_files"], json!(["unit1.txt"]));
+    assert_eq!(metadata["handoff_revision_id"], json!(existing_handoff.id));
+}
+
 include!("group_completion_recovery.rs");
 include!("runtime_handoff_group_completion.rs");
 include!("runner_fallback_commit.rs");

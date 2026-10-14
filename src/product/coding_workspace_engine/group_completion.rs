@@ -114,6 +114,7 @@ impl CodingWorkspaceEngine {
             self.store
                 .complete_coding_unit_run(&attempt, &facts.run.id, completion_commit)?;
         let handoff = self.publish_group_unit_handoff_revision(&attempt, &facts, &completed_run)?;
+        let handoff_id = handoff.id.clone();
         let transition = self.authoritative_handoff_transition(
             &attempt,
             facts.previous_handoff.clone(),
@@ -121,6 +122,8 @@ impl CodingWorkspaceEngine {
         )?;
         self.apply_authoritative_handoff_transition(&attempt, transition)
             .await?;
+        self.emit_group_unit_delivery_facts(&attempt, &facts, &completed_run, &handoff_id)
+            .await;
         // S2b（N5 步暂停移除）：完成事实（completion commit/权威 run/handoff）
         // 落定后显式落定当前 unit Completed（原 complete_current_group_unit
         // 的前半段），随即自动推进——不写默认步暂停；推进保持独立 pub 入口
@@ -144,6 +147,129 @@ impl CodingWorkspaceEngine {
         // 非首 unit 完成时 from≠锁 owner 而 `issue_worktree_active` 失败。
         // 旧路径（complete_current_group_unit→advance）同样传调用方内存对象。
         self.advance_to_next_group_unit(&attempt).await
+    }
+
+    /// S7 平台确定性交付摘要(Q4③):unit 完成后用平台事实生成「交付事实(平台生成)」
+    /// chat 尾帧——completion_commit、`start..completion` 变更文件、验证证据、handoff id。
+    /// 帧内容只来自平台记录,不依赖 agent 汇报 prose;帧 id 取自 unit run,
+    /// CompletedRetry 重入时按同一 id 覆写,不产生重复帧。写入失败不阻断完成主链路
+    /// (与 `emit_code_review_chat_entry` 同语义)。
+    async fn emit_group_unit_delivery_facts(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        facts: &GroupUnitCompletionFacts,
+        completed_run: &CodingUnitRun,
+        handoff_id: &str,
+    ) {
+        let Some(completion_commit) = completed_run.completion_commit.as_deref() else {
+            return;
+        };
+        let mut changed_files: Vec<String> = Vec::new();
+        let mut changed_files_note: Option<String> = None;
+        match (
+            attempt.worktree_path.as_deref(),
+            completed_run.start_commit.as_deref(),
+        ) {
+            (Some(worktree_path), Some(start_commit)) => {
+                match self
+                    ._git_service
+                    .git_commit_range_changed_files(worktree_path, start_commit, completion_commit)
+                    .await
+                {
+                    Ok(files) => changed_files = files,
+                    Err(error) => changed_files_note = Some(error.to_string()),
+                }
+            }
+            (None, _) => changed_files_note = Some("worktree_missing".to_string()),
+            (Some(_), None) => changed_files_note = Some("start_commit_missing".to_string()),
+        }
+        let report = self
+            .store
+            .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .ok()
+            .and_then(|reports| {
+                reports
+                    .into_iter()
+                    .filter(|report| {
+                        report.unit_run_id.as_deref() == Some(completed_run.id.as_str())
+                    })
+                    .max_by(|left, right| {
+                        left.created_at
+                            .cmp(&right.created_at)
+                            .then_with(|| left.round.cmp(&right.round))
+                            .then_with(|| left.id.cmp(&right.id))
+                    })
+            });
+        let verification = match &report {
+            Some(report) => json!({
+                "review_report_id": report.id,
+                "verdict": report.verdict,
+                "tested_evidence_refs": report.tested_evidence_refs,
+            }),
+            None => json!({
+                "review_report_id": serde_json::Value::Null,
+                "verdict": serde_json::Value::Null,
+                "tested_evidence_refs": Vec::<String>::new(),
+            }),
+        };
+        let verdict_label = match report.as_ref().map(|report| &report.verdict) {
+            Some(ReviewVerdict::Approve) => "approve",
+            Some(ReviewVerdict::RequestChanges) => "request_changes",
+            Some(ReviewVerdict::Blocked) => "blocked",
+            None => "无记录",
+        };
+        let content = format!(
+            "Work Item {} 交付完成(平台生成)\n提交: {}\n变更文件({}): {}\n验证证据: {}\nhandoff: {}",
+            facts.active.logical_work_item_id,
+            completion_commit,
+            changed_files.len(),
+            if changed_files.is_empty() {
+                "无".to_string()
+            } else {
+                changed_files.join(", ")
+            },
+            match &report {
+                Some(report) => format!(
+                    "code review {} · {} 条证据({})",
+                    verdict_label,
+                    report.tested_evidence_refs.len(),
+                    report.id
+                ),
+                None => "无 code review 记录".to_string(),
+            },
+            handoff_id,
+        );
+        let mut metadata = json!({
+            "source": "platform_delivery_facts",
+            "unit_id": facts.active.id,
+            "unit_run_id": completed_run.id,
+            "logical_work_item_id": facts.active.logical_work_item_id,
+            "start_commit": completed_run.start_commit,
+            "completion_commit": completion_commit,
+            "changed_files": changed_files,
+            "verification": verification,
+            "handoff_revision_id": handoff_id,
+        });
+        if let Some(note) = changed_files_note {
+            metadata["changed_files_unavailable_reason"] = json!(note);
+        }
+        let entry = CodingChatEntry {
+            id: format!("{}_delivery_facts", completed_run.id),
+            attempt_id: attempt.id.clone(),
+            node_id: None,
+            role: CodingAgentRole::System,
+            entry_type: CodingEntryType::SystemEvent {
+                event_type: "delivery_facts".to_string(),
+                message: format!(
+                    "Work Item {} 交付事实(平台生成)",
+                    facts.active.logical_work_item_id
+                ),
+            },
+            content: Some(content),
+            metadata: Some(metadata),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        self.save_and_emit_chat_entry(attempt, entry).await;
     }
 
     fn publish_group_unit_handoff_revision(

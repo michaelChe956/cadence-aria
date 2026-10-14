@@ -409,6 +409,38 @@ describe("chat workspace entries", () => {
 
     expect(onRespond).toHaveBeenCalledWith(entry, false);
   });
+  it("renders platform delivery facts frames with commit, files, evidence and handoff", () => {
+    const entry = makeEntry({
+      type: "delivery_facts",
+      role: "system",
+      content: "Work Item work_item_0001 交付完成",
+      metadata: {
+        source: "platform_delivery_facts",
+        logical_work_item_id: "work_item_0001",
+        start_commit: "startsha0000000000000000000000000000000000000000",
+        completion_commit: "completionsha0000000000000000000000000000000000",
+        changed_files: ["src/lib.rs", "src/lib2.rs"],
+        verification: {
+          review_report_id: "code_review_report_0001",
+          verdict: "approve",
+          tested_evidence_refs: ["evidence://tests/cargo-test"],
+        },
+        handoff_revision_id: "handoff_revision_coding_unit_run_0001",
+      },
+    } as Partial<ChatEntry>);
+
+    render(<ChatEntryRenderer entry={entry} />);
+
+    expect(screen.getByText("交付事实(平台生成)")).toBeInTheDocument();
+    expect(
+      screen.getByText("completionsha0000000000000000000000000000000000"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("src/lib.rs")).toBeInTheDocument();
+    expect(screen.getByText("src/lib2.rs")).toBeInTheDocument();
+    expect(screen.getByText(/code_review_report_0001/)).toBeInTheDocument();
+    expect(screen.getByText(/evidence:\/\/tests\/cargo-test/)).toBeInTheDocument();
+    expect(screen.getByText("handoff_revision_coding_unit_run_0001")).toBeInTheDocument();
+  });
 });
 
 function makeEntry(overrides: Partial<ChatEntry>): ChatEntry {
