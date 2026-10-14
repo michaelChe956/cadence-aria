@@ -201,6 +201,23 @@ impl super::CodingAttemptStore {
         &self,
         input: CreateGroupCodingAttemptInput,
     ) -> Result<CodingExecutionAttempt, ProductStoreError> {
+        // D2.1c：owning Plan scope 共享准入在唯一性/单 active 检查与 attempt
+        // 落盘外层（REQ-DEL-05/06 删除竞态；purging/deleted 墓碑稳定拒绝，
+        // 创建在途时删除独占 entity_busy）。原检查/CAS/落盘语义不变。
+        let (project_id, issue_id, plan_id) = (
+            input.project_id.clone(),
+            input.issue_id.clone(),
+            input.plan_id.clone(),
+        );
+        self.with_plan_live_write(&project_id, &issue_id, &plan_id, move || {
+            self.create_group_attempt_inner(input)
+        })
+    }
+
+    fn create_group_attempt_inner(
+        &self,
+        input: CreateGroupCodingAttemptInput,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         validate_relative_id(&input.project_id)?;
         validate_relative_id(&input.issue_id)?;
         validate_relative_id(&input.plan_id)?;
