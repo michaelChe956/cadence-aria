@@ -218,7 +218,14 @@ impl IntoResponse for ApiError {
             | "coding_plan_run_plan_not_confirmed" => StatusCode::UNPROCESSABLE_ENTITY,
             // P1 修复轮：族内未逐一登记的 kind（如后续新增）按前缀默认 409
             //（run 冻结状态拒绝），显式 422 清单优先——不再落 500。
-            c if c.starts_with("coding_plan_run_") => StatusCode::CONFLICT,
+            // P2 修复轮：`coding_plan_run_target` 除外——repo_lease_state 的
+            // 完整性错误（target 非法 UUID），owner 设计 §B「真实 IO/JSON/
+            // 损坏身份不是 409」，保留 500 故障信号。
+            c if c.starts_with("coding_plan_run_")
+                && c != "coding_plan_run_target" =>
+            {
+                StatusCode::CONFLICT
+            }
             // T11 gateway 稳定码表收口：政策门/复验拒绝为 4xx 业务阻断，禁止回退 500。
             // policy/target/registry/drift/resume/managed_settings 一律 409；capability 与
             // Codex danger-full-access 为 403；provider 不可用为 503；系统未接线为 500(防御)。
@@ -970,13 +977,27 @@ mod tests {
             );
         }
         // P1 修复轮：族内未逐一登记 kind 按前缀默认 409（显式 422 清单优先）。
-        for code in ["coding_plan_run_target", "coding_plan_run_future_kind"] {
-            let response = ApiError::runtime(code, "plan coding run", json!({})).into_response();
-            assert_eq!(
-                response.status(),
-                StatusCode::CONFLICT,
-                "{code} prefix fallback"
-            );
-        }
+        let fallback_response =
+            ApiError::runtime("coding_plan_run_future_kind", "plan coding run", json!({}))
+                .into_response();
+        assert_eq!(
+            fallback_response.status(),
+            StatusCode::CONFLICT,
+            "unlisted coding_plan_run_ kind prefix fallback"
+        );
+        // P2 修复轮（Main 审查派回）：`coding_plan_run_target` 是 repo_lease_state
+        // 的完整性错误（target repository id 非法 UUID，InvalidRecord）——owner
+        // 设计 §B「真实 IO/JSON/损坏身份不是 409」，前缀兜底须排除、保留 500。
+        let target_response = ApiError::runtime(
+            "coding_plan_run_target",
+            "target repository id is not a logical UUID",
+            json!({}),
+        )
+        .into_response();
+        assert_eq!(
+            target_response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "coding_plan_run_target must stay 500 (integrity signal)"
+        );
     }
 }

@@ -223,8 +223,10 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
         // 级联删除 D2.3 P1 修复轮（Main 审查派回）：N2 冻结错误族跨三变体生产
         //——InvalidRecord（plan_revision/selection_unit）前缀直通稳定码，
         // details 保留 kind/reason；须先于下方 routing InvalidRecord 臂匹配。
+        // P2 修复轮：`coding_plan_run_target` 除外——repo_lease_state 完整性
+        // 错误（target 非法 UUID），落 other 兜底 500 保留 {kind,reason} 信号。
         ProductStoreError::InvalidRecord { kind, reason }
-            if kind.starts_with("coding_plan_run_") =>
+            if kind.starts_with("coding_plan_run_") && kind != "coding_plan_run_target" =>
         {
             ApiError::runtime(
                 kind,
