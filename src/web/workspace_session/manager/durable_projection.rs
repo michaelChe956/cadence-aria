@@ -1068,7 +1068,9 @@ mod sg_07a_tests {
                 .expect("grant after claim")
                 .phase = Some(StructuralGrantPhase::Reviewing);
         });
-        let bytes_before = sg_07a_durable_bytes(&store.paths);
+        // P3 修复（审查）：零写断言收缩到纯读段——基线在 settle 写完成
+        // 后、assert_chain（manager 纯投影+引擎构造+sync+reload 全链）
+        // 前，窗口比较完整 (name, bytes) 向量相等。
         let settled = store
             .lifecycle
             .settle_structural_user_budget(
@@ -1090,6 +1092,7 @@ mod sg_07a_tests {
                 },
             )
             .expect("settle delivered charge");
+        let bytes_baseline = sg_07a_durable_bytes(&store.paths);
         let delivered_snapshot = sg_07a_assert_chain(&store, &settled);
         assert_eq!(
             delivered_snapshot.available_user_budget, 2,
@@ -1108,9 +1111,8 @@ mod sg_07a_tests {
         );
         let bytes_after = sg_07a_durable_bytes(&store.paths);
         assert_eq!(
-            bytes_before.len(),
-            bytes_after.len(),
-            "settle 后纯投影窗口零额外写"
+            bytes_baseline, bytes_after,
+            "纯读窗口（assert_chain 全链）durable 字节必须零写"
         );
 
         // 态③：结构耗尽 released_structural——预算全额恢复（不实扣）。
