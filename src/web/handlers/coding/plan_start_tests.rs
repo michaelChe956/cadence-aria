@@ -9,7 +9,8 @@ use crate::product::advance_store::AdvanceInput;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionUnitStatus, CodingStartOrigin, CodingStartPhase,
+    CodingAttemptStatus, CodingExecutionStage, CodingExecutionUnitStatus, CodingStartOrigin,
+    CodingStartPhase,
 };
 use crate::product::coding_plan_run::{
     CodingPlanRunPhase, CodingPlanRunStore, CodingPlanSelection, CodingPlanStartOutcome,
@@ -762,6 +763,45 @@ async fn plan_coding_n3_one_click_binds_all_and_starts_selected_once() {
         1,
         "selected attempt crossed the start barrier exactly once"
     );
+
+    // 受控 provider 进入（穿过真实 Coding 阶段 admission）：事故现场
+    // Accepted／claim barrier／runner_count 三者全绿而 runner 实际死于
+    // admission（兄弟仓预绑定锁被 issue 级租约分类误判 already-running，
+    // 回 AwaitingManualRecovery）——故必须以 durable provider 进入事实
+    // 为准：Coding 阶段 coder role run 存在，且期间不落人工恢复态。
+    let coding_store = fixture.coding_store();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let attempt = coding_store
+                .get_attempt(PROJECT_ID, ISSUE_ID, &busi_attempt.id)
+                .expect("poll busi attempt");
+            let coder_run = coding_store
+                .latest_role_run(
+                    PROJECT_ID,
+                    ISSUE_ID,
+                    &busi_attempt.id,
+                    CodingExecutionStage::Coding,
+                    crate::product::coding_models::CodingProviderRole::Coder,
+                )
+                .expect("poll coder role runs");
+            if coder_run.is_some() {
+                assert!(
+                    attempt.stage.order() >= CodingExecutionStage::Coding.order(),
+                    "provider entry must follow the Coding-stage admission: {:?}",
+                    attempt.stage
+                );
+                return;
+            }
+            assert_ne!(
+                attempt.status,
+                CodingAttemptStatus::AwaitingManualRecovery,
+                "首项 runner 不得死于 Coding 阶段 admission（多仓兄弟仓预绑定锁误杀现场）"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("selected attempt must cross the real Coding-stage admission and enter the provider");
 
     // 未 selected target：零 claim、零 runner。
     for target in [fixture.web, fixture.gateway, fixture.frontend] {

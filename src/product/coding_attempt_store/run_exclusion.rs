@@ -31,8 +31,10 @@ struct CodingAttemptCommandLedger {
     records: Vec<CodingAttemptCommandRecord>,
 }
 
-/// C2 Task 2：admission 互斥判定。三态证据全部来自 C1
-/// `classify_worktree_lease`（不新建判定）：
+/// C2 Task 2：admission 互斥判定。三态证据来自 C1 租约三态判定的
+/// attempt 作用域入口 `classify_worktree_lease_for_attempt`（多仓热修：
+/// 只看 attempt 自身路由的锁记录；issue 级 `classify_worktree_lease`
+/// 保留为显式聚合观察 API）：
 /// - `Allowed`：无租约事实（legacy/未启锁）、自持活跃租约的合法续跑，或
 ///   接管清出后的继续请求——经既有 admission 校验后放行。
 /// - `AlreadyRunning`：活跃租约由其他持有者持有（ActiveWait）——拒绝并
@@ -173,8 +175,7 @@ impl super::CodingAttemptStore {
                     // 冲突已解除（如经 confirm_takeover 清出）时按当前请求
                     // 继续——既有校验通过后推进同 command 的账本相位为
                     // Accepted（同 command 同 payload）。
-                    let lease =
-                        self.classify_worktree_lease(&attempt.project_id, &attempt.issue_id);
+                    let lease = self.classify_worktree_lease_for_attempt(attempt);
                     if let Some(exclusion) = self.lease_exclusion_option(&lease, attempt) {
                         return Ok(exclusion);
                     }
@@ -194,7 +195,7 @@ impl super::CodingAttemptStore {
             // ② 租约三态（复用 C1 判定）：活跃他人 → AlreadyRunning；
             //    死亡 → TakeoverRequired；未知 → LeaseUnknown。无租约事实
             //    与自持活跃租约不拦截（合法续跑）。
-            let lease = self.classify_worktree_lease(&attempt.project_id, &attempt.issue_id);
+            let lease = self.classify_worktree_lease_for_attempt(attempt);
             if let Some(exclusion) = self.lease_exclusion_option(&lease, attempt) {
                 let record = CodingAttemptCommandRecord {
                     command_id: command_id.to_string(),
@@ -339,6 +340,103 @@ impl super::CodingAttemptStore {
                 last_activity_at: None,
                 evidence: vec![format!("issue worktree read failed: {error}")],
             },
+        }
+    }
+
+    /// attempt 作用域租约分类（多仓热修）：只看 attempt 自身路由的锁
+    /// 记录，不跨仓扫描。有冻结 `target_snapshot` → 只分类该 logical
+    /// repository 的仓维记录；无 snapshot 且 issue 路由为 Legacy → 只读
+    /// 旧 issue 维记录（不落入仓扫描回退）；无 snapshot 但路由为
+    /// Logical/FailClosed → fail-closed；新旧 worktree 记录混在场 →
+    /// fail-closed。兄弟仓的合法预绑定锁不构成本 attempt 的冲突事实；
+    /// 同仓异主活跃仍按 `ActiveWait` 停等。
+    pub fn classify_worktree_lease_for_attempt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> LeaseDecision {
+        use crate::product::lifecycle_store::LifecycleStore;
+        use crate::product::logical_codebase::RepositoryRouting;
+
+        let unknown = |messages: Vec<String>| LeaseDecision {
+            disposition: LeaseDisposition::UnknownNeedsHuman,
+            lease_id: String::new(),
+            last_activity_at: None,
+            evidence: messages,
+        };
+        let lifecycle = LifecycleStore::new(self.paths());
+
+        if let Some(snapshot) = &attempt.target_snapshot {
+            // 仓维路由（§4.2.6 preflight 语义）：旧 issue 维记录混在场 →
+            // fail-closed，绝不从异质记录推导租约事实。
+            return match lifecycle.get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+            {
+                Ok(Some(_)) => unknown(vec![format!(
+                    "legacy_shared_worktree_present: {}/{}",
+                    attempt.project_id, attempt.issue_id
+                )]),
+                Ok(None) => {
+                    match lifecycle.get_repo_shared_worktree(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        snapshot.logical_repository_id,
+                    ) {
+                        Ok(Some(record)) => self.classify_worktree_record(&record),
+                        Ok(None) => unknown(vec![
+                            "worktree record not found for attempt route".to_string(),
+                        ]),
+                        Err(error) => unknown(vec![format!(
+                            "repo worktree {} read failed: {error}",
+                            snapshot.logical_repository_id.0
+                        )]),
+                    }
+                }
+                Err(error) => {
+                    unknown(vec![format!("issue worktree read failed: {error}")])
+                }
+            };
+        }
+
+        match RepositoryRouting::load_for_issue(
+            &self.paths(),
+            &attempt.project_id,
+            &attempt.issue_id,
+        ) {
+            Ok(RepositoryRouting::Legacy { .. }) => {
+                // 单仓老路径只读旧 issue 维记录，不落入仓扫描回退；仓维
+                // 记录混在场 → fail-closed（新旧冲突）。
+                match lifecycle.list_repo_shared_worktrees(&attempt.project_id, &attempt.issue_id)
+                {
+                    Ok(repos) if !repos.is_empty() => unknown(vec![format!(
+                        "repo_shared_worktree_present_for_legacy_route: {}/{}",
+                        attempt.project_id, attempt.issue_id
+                    )]),
+                    Ok(_) => match lifecycle
+                        .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+                    {
+                        Ok(Some(record)) => self.classify_worktree_record(&record),
+                        Ok(None) => unknown(vec![
+                            "worktree record not found for issue".to_string(),
+                        ]),
+                        Err(error) => {
+                            unknown(vec![format!("issue worktree read failed: {error}")])
+                        }
+                    },
+                    Err(error) => unknown(vec![format!(
+                        "list repo worktrees failed: {error}"
+                    )]),
+                }
+            }
+            Ok(RepositoryRouting::Logical { .. }) => unknown(vec![
+                "target_snapshot_missing_for_logical".to_string(),
+                format!("{}/{}", attempt.project_id, attempt.issue_id),
+            ]),
+            Ok(RepositoryRouting::FailClosed { .. }) => unknown(vec![
+                "target_snapshot_identity_drifted".to_string(),
+                format!("{}/{}", attempt.project_id, attempt.issue_id),
+            ]),
+            Err(error) => unknown(vec![format!(
+                "repository routing load failed: {error}"
+            )]),
         }
     }
 

@@ -499,3 +499,466 @@
             CodingRunExclusionDecision::Allowed(ref admitted) if admitted.id == running.id
         ));
     }
+
+    // ─── 多仓热修：租约分类收窄 attempt 作用域 ───
+    //
+    // 事故：多仓 plan 一键启动，advance 为各仓建 attempt 并预绑定
+    // shared-worktree 锁；首项 runner 在 Coding 阶段 admission 被 issue 级
+    // `classify_worktree_lease` 的跨仓扫描误杀（UUID 升序首个有 owner 的
+    // 仓恰是兄弟仓的合法预绑定锁）。修复语义：admission 只按 attempt
+    // 自身路由（target_snapshot→仓维）分类——异仓合法预绑定不构成冲突，
+    // 同仓异主活跃仍 `AlreadyRunning`，证据异常 fail-closed 停等。
+
+    struct MultiRepoLeaseFixture {
+        _temp: tempfile::TempDir,
+        store: CodingAttemptStore,
+        lifecycle: crate::product::lifecycle_store::LifecycleStore,
+        own: CodingExecutionAttempt,
+        sibling: CodingExecutionAttempt,
+        own_repo: LogicalRepositoryId,
+        sibling_repo: LogicalRepositoryId,
+    }
+
+    fn multi_repo_snapshot(repo: LogicalRepositoryId, suffix: &str) -> AttemptTargetSnapshot {
+        AttemptTargetSnapshot {
+            logical_repository_id: repo,
+            checkout_id: RepositoryCheckoutId(Uuid::new_v4()),
+            physical_repository_id: format!("repository_{suffix}"),
+            canonical_path: PathBuf::from(format!("/tmp/repository_{suffix}")),
+            git_dir_identity: format!("sha256:{suffix}"),
+            revision: Some("abcdef".to_string()),
+            policy_digest: "policy_digest".to_string(),
+            membership_revision: 1,
+            captured_at: "2026-10-14T00:00:00Z".to_string(),
+            capture_source: "test".to_string(),
+        }
+    }
+
+    /// 事故现场最小化：同 issue 双 logical 仓（own=busi、sibling=api）。
+    /// `sibling_repo` UUID 恒小于 `own_repo`——旧 issue 级 classify 按 UUID
+    /// 升序扫仓取首个有 owner 的记录，必然先撞 sibling 的预绑定锁。两仓
+    /// worktree 记录均已建（advance 语义），锁绑定由各用例自行完成。
+    fn multi_repo_lease_fixture() -> MultiRepoLeaseFixture {
+        use crate::product::lifecycle_store::{LifecycleStore, UpsertRepoSharedWorktreeInput};
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join(".aria"));
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "project".to_string(),
+                description: None,
+            })
+            .unwrap();
+        let own_repo = LogicalRepositoryId(Uuid::from_u128(2));
+        let sibling_repo = LogicalRepositoryId(Uuid::from_u128(1));
+        let authority = LogicalCodebaseStore::new(paths.clone());
+        let manifest = LogicalCodebaseManifest::new(
+            PROJECT_ID,
+            temp.path().join("aggregate-root"),
+            vec![own_repo, sibling_repo],
+        );
+        authority.save_manifest(PROJECT_ID, &manifest).unwrap();
+        for (repo, physical, ordinal) in [
+            (own_repo, "repository_0001", 1u32),
+            (sibling_repo, "repository_0002", 2),
+        ] {
+            let repository_path = temp.path().join(physical);
+            authority
+                .save_member(
+                    PROJECT_ID,
+                    &CodebaseMemberRecord {
+                        logical_repository_id: repo,
+                        physical_repository_id: physical.to_string(),
+                        alias: physical.to_string(),
+                        role: "repository".to_string(),
+                        ordinal,
+                        source_identity: RepositorySourceIdentity::from_git_parts(
+                            &repository_path,
+                            repository_path.join(".git"),
+                            None,
+                        ),
+                        repo_type: RepositoryType::Unknown,
+                        tech_stack: Vec::new(),
+                        owner: None,
+                        tags: Vec::new(),
+                        default_ref: None,
+                        checkout_ids: Vec::new(),
+                        status: MemberStatus::Active,
+                        created_at: "2026-10-14T00:00:00Z".to_string(),
+                        updated_at: "2026-10-14T00:00:00Z".to_string(),
+                    },
+                )
+                .unwrap();
+        }
+        IssueCodebaseSelectionStore::new(paths.clone())
+            .save(&IssueCodebaseSelection::explicit(
+                PROJECT_ID,
+                ISSUE_ID,
+                vec![own_repo, sibling_repo],
+                Vec::new(),
+                vec![own_repo, sibling_repo],
+                None,
+            ))
+            .unwrap();
+        AggregatePolicyArtifactStore::new(paths.clone())
+            .ensure_bootstrap(&manifest)
+            .unwrap();
+        let store = CodingAttemptStore::new(paths.clone());
+        let own = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: WORK_ITEM_ID.to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/attempt-own".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: provider_snapshot(),
+                target_snapshot: Some(multi_repo_snapshot(own_repo, "0001")),
+                max_auto_rework: 0,
+            })
+            .unwrap();
+        let sibling = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_0002".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/attempt-sibling".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: provider_snapshot(),
+                target_snapshot: Some(multi_repo_snapshot(sibling_repo, "0002")),
+                max_auto_rework: 0,
+            })
+            .unwrap();
+        let lifecycle = LifecycleStore::new(paths.clone());
+        for (repo, name) in [(own_repo, "own"), (sibling_repo, "sibling")] {
+            std::fs::create_dir_all(temp.path().join(name)).unwrap();
+            lifecycle
+                .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
+                    project_id: PROJECT_ID.to_string(),
+                    issue_id: ISSUE_ID.to_string(),
+                    repository_id: repo,
+                    branch_name: "main".to_string(),
+                    worktree_path: temp.path().join(name),
+                    base_branch: "main".to_string(),
+                })
+                .unwrap();
+        }
+        MultiRepoLeaseFixture {
+            _temp: temp,
+            store,
+            lifecycle,
+            own,
+            sibling,
+            own_repo,
+            sibling_repo,
+        }
+    }
+
+    /// 仓维锁获取并绑定到 attempt（advance 预绑定语义）。
+    fn bind_repo_lock_to_attempt(
+        fixture: &MultiRepoLeaseFixture,
+        repo: LogicalRepositoryId,
+        work_item_id: &str,
+        attempt_id: &str,
+    ) {
+        let lease = fixture
+            .lifecycle
+            .try_acquire_repo_worktree_lock(
+                PROJECT_ID,
+                ISSUE_ID,
+                repo,
+                work_item_id,
+                &format!("repo_worktree_lease_{attempt_id}"),
+            )
+            .unwrap();
+        assert!(lease.acquired, "seed repo lease must acquire");
+        fixture
+            .lifecycle
+            .bind_repo_worktree_lock_to_attempt(
+                PROJECT_ID,
+                ISSUE_ID,
+                repo,
+                work_item_id,
+                attempt_id,
+            )
+            .unwrap();
+    }
+
+    /// 事故回归：兄弟仓预绑定锁（异仓、异 attempt、Created 亦是活跃态）
+    /// 不得拦本 attempt 的 admission——首项 runner 必须放行进入 provider；
+    /// 兄弟仓锁事实原样保留；同 command 重放幂等放行。
+    #[test]
+    fn multi_repo_admission_ignores_sibling_repo_prebound_lock() {
+        use crate::product::coding_attempt_store::CodingRunExclusionDecision;
+
+        let fixture = multi_repo_lease_fixture();
+        // 事故形态：两仓锁均在场——own 仓自持（首项合法自绑），sibling
+        // 仓预绑定到尚未启动的兄弟 attempt。
+        bind_repo_lock_to_attempt(&fixture, fixture.own_repo, WORK_ITEM_ID, &fixture.own.id);
+        bind_repo_lock_to_attempt(
+            &fixture,
+            fixture.sibling_repo,
+            "work_item_0002",
+            &fixture.sibling.id,
+        );
+        let running = fixture
+            .store
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &fixture.own.id)
+            .unwrap();
+
+        let decision = fixture
+            .store
+            .admit_coding_run_exclusive(&running, "cmd-multi-own-1", "digest-own-1")
+            .expect("sibling repo prebound lock must not block own admission");
+        assert!(matches!(
+            &decision,
+            CodingRunExclusionDecision::Allowed(admitted) if admitted.id == running.id
+        ));
+        // 兄弟仓锁事实不被触碰（不抢、不改）。
+        let sibling_record = fixture
+            .lifecycle
+            .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, fixture.sibling_repo)
+            .unwrap()
+            .expect("sibling repo worktree record");
+        assert_eq!(
+            sibling_record.current_lock_owner_id.as_deref(),
+            Some(fixture.sibling.id.as_str())
+        );
+        // 同 command 同 payload 重放仍放行（账本 Accepted 重放）。
+        let replay = fixture
+            .store
+            .admit_coding_run_exclusive(&running, "cmd-multi-own-1", "digest-own-1")
+            .unwrap();
+        assert!(matches!(
+            &replay,
+            CodingRunExclusionDecision::Allowed(admitted) if admitted.id == running.id
+        ));
+    }
+
+    /// 同仓真冲突语义保留：同仓异主活跃 → `AlreadyRunning`（命令账本
+    /// NeedsHuman 恰一条；同 command 重放同一结论；异 payload
+    /// fail-closed；锁事实不被抢占）。
+    #[test]
+    fn multi_repo_admission_same_repo_foreign_active_holder_is_already_running() {
+        use crate::product::coding_attempt_store::CodingRunExclusionDecision;
+        use crate::product::models::automation::{LeaseDisposition, OperationState};
+
+        let fixture = multi_repo_lease_fixture();
+        // 同仓第三方 attempt C（活跃）持有本 attempt 路由的 own 仓锁。
+        let holder = fixture
+            .store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_0003".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/attempt-holder".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: provider_snapshot(),
+                target_snapshot: Some(multi_repo_snapshot(fixture.own_repo, "0001")),
+                max_auto_rework: 0,
+            })
+            .unwrap();
+        let holder = fixture
+            .store
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &holder.id)
+            .unwrap();
+        bind_repo_lock_to_attempt(&fixture, fixture.own_repo, "work_item_0003", &holder.id);
+        let running = fixture
+            .store
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &fixture.own.id)
+            .unwrap();
+
+        let decision = fixture
+            .store
+            .admit_coding_run_exclusive(&running, "cmd-multi-conflict-1", "digest-c-1")
+            .expect("admission must classify instead of failing");
+        match &decision {
+            CodingRunExclusionDecision::AlreadyRunning { lease } => {
+                assert_eq!(lease.disposition, LeaseDisposition::ActiveWait);
+                assert_eq!(lease.lease_id, holder.id);
+            }
+            other => panic!("expected AlreadyRunning, got {other:?}"),
+        }
+        // 命令账本：首次 durable 结果恰一条 NeedsHuman。
+        let records = fixture
+            .store
+            .list_attempt_command_records(PROJECT_ID, ISSUE_ID, &running.id)
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].state, OperationState::NeedsHuman);
+        // 同 command 同 payload 重放同一结论；异 payload fail-closed。
+        let replay = fixture
+            .store
+            .admit_coding_run_exclusive(&running, "cmd-multi-conflict-1", "digest-c-1")
+            .unwrap();
+        assert!(matches!(
+            replay,
+            CodingRunExclusionDecision::AlreadyRunning { .. }
+        ));
+        let conflict = fixture
+            .store
+            .admit_coding_run_exclusive(&running, "cmd-multi-conflict-1", "digest-OTHER")
+            .unwrap_err();
+        assert!(matches!(
+            conflict,
+            crate::product::json_store::ProductStoreError::Conflict { .. }
+        ));
+        // 锁事实未被抢占：own 仓 owner 仍是持有者 C。
+        let own_record = fixture
+            .lifecycle
+            .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, fixture.own_repo)
+            .unwrap()
+            .expect("own repo worktree record");
+        assert_eq!(
+            own_record.current_lock_owner_id.as_deref(),
+            Some(holder.id.as_str())
+        );
+    }
+
+    /// 同仓异主死亡/未知：死亡他人 → `TakeoverRequired`（确认接管面），
+    /// 不可解析 owner（瞬态 lease 残留）→ `LeaseUnknown` 停等——两者都
+    /// 不抢占锁事实。
+    #[test]
+    fn multi_repo_admission_same_repo_dead_or_unknown_holder_never_preempts() {
+        use crate::product::coding_attempt_store::CodingRunExclusionDecision;
+
+        // a) 死亡他人：owner 是终态 attempt。
+        let fixture = multi_repo_lease_fixture();
+        let mut dead_holder = fixture
+            .store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_0004".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/attempt-dead".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: provider_snapshot(),
+                target_snapshot: Some(multi_repo_snapshot(fixture.own_repo, "0001")),
+                max_auto_rework: 0,
+            })
+            .unwrap();
+        dead_holder.status = CodingAttemptStatus::Aborted;
+        fixture
+            .store
+            .write_coding_attempt_for_test(&dead_holder)
+            .unwrap();
+        bind_repo_lock_to_attempt(&fixture, fixture.own_repo, "work_item_0004", &dead_holder.id);
+        let running = fixture
+            .store
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &fixture.own.id)
+            .unwrap();
+        let decision = fixture
+            .store
+            .admit_coding_run_exclusive(&running, "cmd-multi-dead-1", "digest-d-1")
+            .unwrap();
+        match &decision {
+            CodingRunExclusionDecision::TakeoverRequired { lease } => {
+                assert_eq!(lease.lease_id, dead_holder.id);
+            }
+            other => panic!("expected TakeoverRequired, got {other:?}"),
+        }
+
+        // b) 未知 owner：瞬态 lease 残留（acquire 后未 bind）。
+        let fixture = multi_repo_lease_fixture();
+        let lease = fixture
+            .lifecycle
+            .try_acquire_repo_worktree_lock(
+                PROJECT_ID,
+                ISSUE_ID,
+                fixture.own_repo,
+                WORK_ITEM_ID,
+                "repo_worktree_lease_transient_seed",
+            )
+            .unwrap();
+        assert!(lease.acquired);
+        let running = fixture
+            .store
+            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &fixture.own.id)
+            .unwrap();
+        let decision = fixture
+            .store
+            .admit_coding_run_exclusive(&running, "cmd-multi-unknown-1", "digest-u-1")
+            .unwrap();
+        match &decision {
+            CodingRunExclusionDecision::LeaseUnknown { lease } => {
+                assert_eq!(lease.lease_id, "repo_worktree_lease_transient_seed");
+            }
+            other => panic!("expected LeaseUnknown, got {other:?}"),
+        }
+    }
+
+    /// fail-closed 收紧面：无 snapshot 的 Logical 路由 attempt、仓维路由
+    /// 下 legacy issue 维记录混在——一律 `LeaseUnknown` 停等，绝不从异
+    /// 质记录推导租约事实。
+    #[test]
+    fn multi_repo_scoped_classification_fails_closed_on_missing_snapshot_or_mixed_records() {
+        use crate::product::coding_attempt_store::CodingRunExclusionDecision;
+        use crate::product::lifecycle_store::UpsertIssueSharedWorktreeInput;
+        use crate::product::models::automation::LeaseDisposition;
+
+        let fixture = multi_repo_lease_fixture();
+        // a) 无 snapshot + Logical 路由 → target_snapshot_missing_for_logical。
+        let snapshotless = fixture
+            .store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_0005".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/attempt-snapshotless".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: provider_snapshot(),
+                target_snapshot: None,
+                max_auto_rework: 0,
+            })
+            .unwrap();
+        let decision = fixture
+            .store
+            .classify_worktree_lease_for_attempt(&snapshotless);
+        assert_eq!(decision.disposition, LeaseDisposition::UnknownNeedsHuman);
+        assert!(
+            decision
+                .evidence
+                .iter()
+                .any(|fact| fact.contains("target_snapshot_missing_for_logical")),
+            "evidence: {:?}",
+            decision.evidence
+        );
+        let decision = fixture
+            .store
+            .admit_coding_run_exclusive(&snapshotless, "cmd-multi-fc-1", "digest-f-1")
+            .unwrap();
+        assert!(matches!(
+            decision,
+            CodingRunExclusionDecision::LeaseUnknown { .. }
+        ));
+
+        // b) snapshot attempt + legacy issue 维记录混在 → legacy present。
+        let legacy = fixture
+            .lifecycle
+            .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: "repository_0001".to_string(),
+                branch_name: "main".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/legacy-worktree"),
+                base_branch: "main".to_string(),
+            })
+            .unwrap();
+        drop(legacy);
+        let decision = fixture
+            .store
+            .classify_worktree_lease_for_attempt(&fixture.own);
+        assert_eq!(decision.disposition, LeaseDisposition::UnknownNeedsHuman);
+        assert!(
+            decision
+                .evidence
+                .iter()
+                .any(|fact| fact.contains("legacy_shared_worktree_present")),
+            "evidence: {:?}",
+            decision.evidence
+        );
+    }

@@ -61,7 +61,7 @@ impl CodingWorkspaceEngine {
 
         let lifecycle = LifecycleStore::new(self.store.paths());
         let route = self.route_issue_shared_worktree(attempt)?;
-        let lease = self.store.classify_worktree_lease(&attempt.project_id, &attempt.issue_id);
+        let lease = self.store.classify_worktree_lease_for_attempt(attempt);
         match lease.disposition {
             LeaseDisposition::ActiveWait => {
                 if lease.lease_id == attempt.id {

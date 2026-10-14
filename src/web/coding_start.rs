@@ -283,7 +283,7 @@ pub async fn restart_coding_attempt(
     }
 
     // 租约非活跃：活跃他人 → 停等（已在运行／请等待）；未知 → 停等。
-    let lease = coding_store.classify_worktree_lease(project_id, issue_id);
+    let lease = coding_store.classify_worktree_lease_for_attempt(&attempt);
     if lease.disposition == LeaseDisposition::ActiveWait && lease.lease_id != attempt.id {
         let result = needs_human(format!(
             "coding_run_already_running: lease {} 已在运行，请等待",

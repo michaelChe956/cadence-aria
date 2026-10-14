@@ -811,6 +811,291 @@ async fn restart_after_abort_readmits_attempt_in_same_process() {
     assert_eq!(after.status, CodingAttemptStatus::Running);
 }
 
+/// 多仓热修：restart 租约预检按 attempt 路由收窄——兄弟仓预绑定锁
+///（异仓、活跃异主）不得把本 attempt 的显式 restart 误判为
+/// `coding_run_already_running` 停等；本仓自持终态残留按 G5 释放+重绑。
+#[tokio::test]
+async fn restart_multi_repo_attempt_passes_precheck_despite_sibling_prebound_lock() {
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::CodingAttemptStore;
+    use crate::product::coding_models::{
+        AttemptTargetSnapshot, CodingAttemptStatus,
+    };
+    use crate::product::lifecycle_store::{LifecycleStore, UpsertRepoSharedWorktreeInput};
+    use crate::product::logical_codebase::{
+        IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
+        LogicalCodebaseStore, LogicalRepositoryId, RepositoryCheckoutId,
+    };
+    use crate::product::models::automation::OperationState;
+    use crate::web::coding_start::{RestartCodingAttemptRequest, restart_coding_attempt};
+    use uuid::Uuid;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().to_path_buf();
+    let state = crate::web::state::WebAppState::new(
+        root.clone(),
+        crate::web::runtime::WebRuntime::new_fake(root.clone()),
+    );
+    let paths = ProductAppPaths::new(root.join(".aria"));
+    // sibling UUID 恒小于 own：旧 issue 级 classify 按 UUID 升序必然先取
+    // 兄弟仓预绑定锁（事故形态）。
+    let own_repo = LogicalRepositoryId(Uuid::from_u128(2));
+    let sibling_repo = LogicalRepositoryId(Uuid::from_u128(1));
+    // 真实工件链（durable 重开 admission 重验快照身份与 policy）：
+    // project → manifest → member/checkout → repos.json → policy。
+    crate::product::project_store::ProjectStore::new(paths.clone())
+        .create(crate::product::project_store::CreateProjectInput {
+            name: "project".to_string(),
+            description: None,
+        })
+        .expect("project");
+    let authority = LogicalCodebaseStore::new(paths.clone());
+    let manifest = LogicalCodebaseManifest::new(
+        "project_0001",
+        root.join("aggregate-root"),
+        vec![own_repo, sibling_repo],
+    );
+    authority
+        .save_manifest("project_0001", &manifest)
+        .expect("manifest");
+    let mut members = Vec::new();
+    let mut snapshots = std::collections::HashMap::new();
+    for (ordinal, (repo, physical)) in [
+        (own_repo, "repository_0001"),
+        (sibling_repo, "repository_0002"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let repository_path = root.join(physical);
+        let source_identity = crate::product::logical_codebase::RepositorySourceIdentity::from_git_parts(
+            &repository_path,
+            repository_path.join(".git"),
+            None,
+        );
+        let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+        authority
+            .save_member(
+                "project_0001",
+                &crate::product::logical_codebase::CodebaseMemberRecord {
+                    logical_repository_id: repo,
+                    physical_repository_id: physical.to_string(),
+                    alias: physical.to_string(),
+                    role: "repository".to_string(),
+                    ordinal: ordinal as u32 + 1,
+                    source_identity: source_identity.clone(),
+                    repo_type: crate::product::logical_codebase::RepositoryType::Unknown,
+                    tech_stack: Vec::new(),
+                    owner: None,
+                    tags: Vec::new(),
+                    default_ref: None,
+                    checkout_ids: vec![checkout_id],
+                    status: crate::product::logical_codebase::MemberStatus::Active,
+                    created_at: "2026-10-14T00:00:00Z".to_string(),
+                    updated_at: "2026-10-14T00:00:00Z".to_string(),
+                },
+            )
+            .expect("member");
+        authority
+            .save_checkout(
+                "project_0001",
+                &crate::product::logical_codebase::RepositoryCheckoutRecord {
+                    checkout_id,
+                    logical_repository_id: repo,
+                    physical_repository_id: physical.to_string(),
+                    kind: crate::product::logical_codebase::CheckoutKind::Main,
+                    canonical_path: repository_path.clone(),
+                    checkout_path_hash: "sha256:checkout".to_string(),
+                    git_dir_identity: source_identity.git_dir_identity(),
+                    revision: Some("abcdef".to_string()),
+                    availability: crate::product::logical_codebase::CheckoutAvailability::Available,
+                    observed_at: "2026-10-14T00:00:00Z".to_string(),
+                    created_at: "2026-10-14T00:00:00Z".to_string(),
+                    updated_at: "2026-10-14T00:00:00Z".to_string(),
+                },
+            )
+            .expect("checkout");
+        members.push(crate::product::models::RepositoryRecord {
+            id: physical.to_string(),
+            project_id: "project_0001".to_string(),
+            name: physical.to_string(),
+            path: repository_path.clone(),
+            repo_hash: format!("sha256:{physical}"),
+            runtime_root: std::path::PathBuf::from("runtime"),
+            default_policy_preset: "manual-write".to_string(),
+            default_provider_mode: "fake".to_string(),
+            created_at: "2026-10-14T00:00:00Z".to_string(),
+            updated_at: "2026-10-14T00:00:00Z".to_string(),
+            logical_repository_id: Some(repo),
+            primary_checkout_id: Some(checkout_id),
+            identity_schema_version: 1,
+        });
+        snapshots.insert(
+            repo,
+            (
+                checkout_id,
+                repository_path,
+                physical.to_string(),
+                source_identity.git_dir_identity(),
+            ),
+        );
+    }
+    crate::product::json_store::write_json(
+        &paths.project_root("project_0001").join("repos.json"),
+        &members,
+    )
+    .expect("repos.json");
+    IssueCodebaseSelectionStore::new(paths.clone())
+        .save(&IssueCodebaseSelection::explicit(
+            "project_0001",
+            "issue_0001",
+            vec![own_repo, sibling_repo],
+            Vec::new(),
+            vec![own_repo, sibling_repo],
+            None,
+        ))
+        .expect("selection");
+    let policy_store = crate::product::logical_codebase::AggregatePolicyArtifactStore::new(
+        paths.clone(),
+    );
+    policy_store
+        .ensure_bootstrap(&manifest)
+        .expect("policy bootstrap");
+    let policy_digest = policy_store
+        .get("project_0001")
+        .expect("policy")
+        .expect("policy present")
+        .digest;
+    let snapshot = |repo: LogicalRepositoryId| AttemptTargetSnapshot {
+        logical_repository_id: repo,
+        checkout_id: snapshots[&repo].0,
+        physical_repository_id: snapshots[&repo].2.clone(),
+        canonical_path: snapshots[&repo].1.clone(),
+        git_dir_identity: snapshots[&repo].3.clone(),
+        revision: Some("abcdef".to_string()),
+        policy_digest: policy_digest.clone(),
+        membership_revision: manifest.membership_revision,
+        captured_at: "2026-10-14T00:00:00Z".to_string(),
+        capture_source: "test".to_string(),
+    };
+    let lifecycle = LifecycleStore::new(paths.clone());
+    for (repo, name) in [(own_repo, "own-worktree"), (sibling_repo, "sibling-worktree")] {
+        let worktree = root.join(name);
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        lifecycle
+            .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                repository_id: repo,
+                branch_name: "main".to_string(),
+                worktree_path: worktree,
+                base_branch: "main".to_string(),
+            })
+            .expect("repo shared worktree");
+    }
+    let store = CodingAttemptStore::new(paths.clone());
+    let provider = crate::web::workspace_ws_types::ProviderConfigSnapshot {
+        author: crate::product::models::ProviderName::Fake,
+        reviewer: None,
+        review_rounds: 0,
+        permission_modes: Default::default(),
+    };
+    let own = store
+        .create_attempt(crate::product::coding_attempt_store::CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/restart-multi-own".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider.clone(),
+            target_snapshot: Some(snapshot(own_repo)),
+            max_auto_rework: 0,
+        })
+        .expect("own attempt");
+    let sibling = store
+        .create_attempt(crate::product::coding_attempt_store::CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0002".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/restart-multi-sibling".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider,
+            target_snapshot: Some(snapshot(sibling_repo)),
+            max_auto_rework: 0,
+        })
+        .expect("sibling attempt");
+    // 本仓自持（后随 abort 成为终态残留）；兄弟仓预绑定到未启动的
+    // sibling attempt（Created 亦是活跃态）。
+    for (repo, work_item_id, attempt_id) in [
+        (own_repo, "work_item_0001", own.id.clone()),
+        (sibling_repo, "work_item_0002", sibling.id.clone()),
+    ] {
+        let lease = lifecycle
+            .try_acquire_repo_worktree_lock(
+                "project_0001",
+                "issue_0001",
+                repo,
+                work_item_id,
+                &format!("repo_worktree_lease_{attempt_id}"),
+            )
+            .expect("acquire repo lease");
+        assert!(lease.acquired);
+        lifecycle
+            .bind_repo_worktree_lock_to_attempt(
+                "project_0001",
+                "issue_0001",
+                repo,
+                work_item_id,
+                &attempt_id,
+            )
+            .expect("bind repo lease");
+    }
+    let mut aborted = own.clone();
+    aborted.status = CodingAttemptStatus::Aborted;
+    aborted.admission_ticket_consumed_at = None;
+    store
+        .write_coding_attempt_for_test(&aborted)
+        .expect("aborted own");
+
+    let result = restart_coding_attempt(
+        &state,
+        "project_0001",
+        "issue_0001",
+        RestartCodingAttemptRequest {
+            command_id: "cmd-restart-multi-1".to_string(),
+            attempt_id: own.id.clone(),
+            expected_attempt_version: aborted.version,
+        },
+    )
+    .await
+    .expect("restart service");
+    assert_eq!(
+        result.state,
+        OperationState::Accepted,
+        "sibling repo prebound lock must not stall restart: {:?}",
+        result.reason
+    );
+    // 兄弟仓锁事实原样保留；本仓重绑回重启的 attempt。
+    let sibling_record = lifecycle
+        .get_repo_shared_worktree("project_0001", "issue_0001", sibling_repo)
+        .expect("sibling record")
+        .expect("sibling record present");
+    assert_eq!(
+        sibling_record.current_lock_owner_id.as_deref(),
+        Some(sibling.id.as_str())
+    );
+    let own_record = lifecycle
+        .get_repo_shared_worktree("project_0001", "issue_0001", own_repo)
+        .expect("own record")
+        .expect("own record present");
+    assert_eq!(
+        own_record.current_lock_owner_id.as_deref(),
+        Some(own.id.as_str())
+    );
+}
+
 /// lcg_t13(计划 Task 13 Step 1):plan 到 durable Ready 后不得自动为
 /// 其他 target 派工——显式 StartCoding 是唯一 provider 启动入口。
 /// ready 时不发任何命令:attempt 集合不增(other target 零新 attempt)、

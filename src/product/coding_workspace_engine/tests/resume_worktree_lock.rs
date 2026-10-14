@@ -396,3 +396,179 @@ fn resume_without_worktree_record_is_noop_for_legacy_attempt() {
         .ensure_issue_worktree_lock_for_resumed_attempt(&attempt)
         .expect("legacy attempt without lock record");
 }
+
+// ─── 多仓热修：恢复锁复位按 attempt 路由收窄 ───
+//
+// 事故推演（WI-001 AMR 恢复死循环）：issue 级 classify 扫到兄弟仓
+// 预绑定锁（活跃异主）→ `coding_run_already_running` → RecoverCoding
+// 必然失败。修复后 scoped 分类只看本 attempt 路由的仓：自持 AMR 死亡
+// 残留 → 释放+重绑本仓，兄弟仓锁事实原样保留。
+
+fn multi_repo_snapshot_for(
+    repo: crate::product::logical_codebase::LogicalRepositoryId,
+    suffix: &str,
+) -> crate::product::coding_models::AttemptTargetSnapshot {
+    crate::product::coding_models::AttemptTargetSnapshot {
+        logical_repository_id: repo,
+        checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(uuid::Uuid::new_v4()),
+        physical_repository_id: format!("repository_{suffix}"),
+        canonical_path: std::path::PathBuf::from(format!("/tmp/repository_{suffix}")),
+        git_dir_identity: format!("sha256:{suffix}"),
+        revision: Some("abcdef".to_string()),
+        policy_digest: "policy_digest".to_string(),
+        membership_revision: 1,
+        captured_at: "2026-10-14T00:00:00Z".to_string(),
+        capture_source: "test".to_string(),
+    }
+}
+
+#[test]
+fn resume_multi_repo_amr_self_held_residue_rebinds_own_repo_and_keeps_sibling_lock() {
+    use crate::product::coding_models::CodingAttemptStatus;
+    use crate::product::lifecycle_store::UpsertRepoSharedWorktreeInput;
+    use crate::product::logical_codebase::{
+        IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
+        LogicalCodebaseStore, LogicalRepositoryId,
+    };
+    use uuid::Uuid;
+
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // sibling UUID 恒小于 own：旧 issue 级 classify 按 UUID 升序必然先取
+    // 兄弟仓预绑定锁（事故形态）。
+    let own_repo = LogicalRepositoryId(Uuid::from_u128(2));
+    let sibling_repo = LogicalRepositoryId(Uuid::from_u128(1));
+    let authority = LogicalCodebaseStore::new(paths.clone());
+    let manifest = LogicalCodebaseManifest::new(
+        PROJECT_ID,
+        root.path().join("aggregate-root"),
+        vec![own_repo, sibling_repo],
+    );
+    authority.save_manifest(PROJECT_ID, &manifest).expect("manifest");
+    IssueCodebaseSelectionStore::new(paths.clone())
+        .save(&IssueCodebaseSelection::explicit(
+            PROJECT_ID,
+            ISSUE_ID,
+            vec![own_repo, sibling_repo],
+            Vec::new(),
+            vec![own_repo, sibling_repo],
+            None,
+        ))
+        .expect("selection");
+    let lifecycle = LifecycleStore::new(paths.clone());
+    for (repo, name) in [(own_repo, "own-worktree"), (sibling_repo, "sibling-worktree")] {
+        let worktree = root.path().join(name);
+        fs::create_dir_all(&worktree).expect("worktree dir");
+        lifecycle
+            .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: repo,
+                branch_name: "main".to_string(),
+                worktree_path: worktree,
+                base_branch: "main".to_string(),
+            })
+            .expect("repo shared worktree");
+    }
+    let store = CodingAttemptStore::new(paths.clone());
+    let provider = ProviderConfigSnapshot {
+        author: ProviderName::Codex,
+        reviewer: Some(ProviderName::ClaudeCode),
+        review_rounds: 1,
+        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+    };
+    let own = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            work_item_id: WORK_ITEM_ID.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001/own".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider.clone(),
+            target_snapshot: Some(multi_repo_snapshot_for(own_repo, "0001")),
+            max_auto_rework: 2,
+        })
+        .expect("own attempt");
+    let sibling = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            work_item_id: OTHER_WORK_ITEM_ID.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001/sibling".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider,
+            target_snapshot: Some(multi_repo_snapshot_for(sibling_repo, "0002")),
+            max_auto_rework: 2,
+        })
+        .expect("sibling attempt");
+    // own 仓自持（首项合法自绑）；sibling 仓预绑定到未启动的兄弟 attempt
+    //（Created 亦是活跃态）。
+    for (repo, work_item_id, attempt) in [
+        (own_repo, WORK_ITEM_ID, &own),
+        (sibling_repo, OTHER_WORK_ITEM_ID, &sibling),
+    ] {
+        let lease = lifecycle
+            .try_acquire_repo_worktree_lock(
+                PROJECT_ID,
+                ISSUE_ID,
+                repo,
+                work_item_id,
+                &format!("repo_worktree_lease_{}", attempt.id),
+            )
+            .expect("acquire repo lease");
+        assert!(lease.acquired);
+        lifecycle
+            .bind_repo_worktree_lock_to_attempt(
+                PROJECT_ID,
+                ISSUE_ID,
+                repo,
+                work_item_id,
+                &attempt.id,
+            )
+            .expect("bind repo lease");
+    }
+    // 事故收尾形态：own runner 死亡回 AMR，锁未释放（自持死亡残留）。
+    let mut amr = store
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &own.id)
+        .expect("running own");
+    amr.status = CodingAttemptStatus::AwaitingManualRecovery;
+    amr.manual_recovery_reason = Some("coding_runner_failed_while_running".to_string());
+    store.write_coding_attempt_for_test(&amr).expect("amr own");
+
+    // 恢复锁复位必须只看 own 仓：自持残留释放+重绑成功，不再被兄弟仓
+    // 预绑定锁误判为 already-running。
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    engine
+        .ensure_issue_worktree_lock_for_resumed_attempt(&amr)
+        .expect("multi-repo AMR self-held residue must rebind own repo lock");
+
+    // own 仓：重绑回本 attempt。
+    let own_record = lifecycle
+        .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, own_repo)
+        .expect("own record")
+        .expect("own record present");
+    assert_eq!(
+        own_record.current_lock_owner_id.as_deref(),
+        Some(own.id.as_str())
+    );
+    assert_eq!(
+        own_record.current_active_work_item_id.as_deref(),
+        Some(WORK_ITEM_ID)
+    );
+    // 兄弟仓锁事实原样保留。
+    let sibling_record = lifecycle
+        .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, sibling_repo)
+        .expect("sibling record")
+        .expect("sibling record present");
+    assert_eq!(
+        sibling_record.current_lock_owner_id.as_deref(),
+        Some(sibling.id.as_str())
+    );
+    assert_eq!(
+        sibling_record.current_active_work_item_id.as_deref(),
+        Some(OTHER_WORK_ITEM_ID)
+    );
+}
