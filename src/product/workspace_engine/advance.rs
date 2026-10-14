@@ -237,14 +237,12 @@ impl AdvancePlanAdmission {
             command_id,
         ) {
             return Err(match error {
-                ProductStoreError::Conflict { ref kind, .. }
-                    if *kind == "coding_plan_workspace_clearing" =>
+                ProductStoreError::Conflict { kind, .. }
+                    if kind == "coding_plan_workspace_clearing" =>
                 {
                     AdvanceRoundGuardFailure::Round(AdvanceRoundRejection::WorkspaceClearing)
                 }
-                ProductStoreError::Conflict { ref kind, .. }
-                    if *kind == "coding_plan_run_retired" =>
-                {
+                ProductStoreError::Conflict { kind, .. } if kind == "coding_plan_run_retired" => {
                     AdvanceRoundGuardFailure::Round(AdvanceRoundRejection::CommandRetired)
                 }
                 other => AdvanceRoundGuardFailure::Store(other),
@@ -431,7 +429,7 @@ impl WorkspaceEngine {
             .app_paths();
         // D2.1d/H3：purging/deleted 身份守卫与执行轮退役围栏先于下方
         // command_id/plan_id 旧幂等命中——旧 Ready record 不因幂等回放成
-        /// AdvanceCompleted 旧入口；真实 IO/JSON 错误 fail-closed 上抛。
+        // AdvanceCompleted 旧入口；真实 IO/JSON 错误 fail-closed 上抛。
         if let Err(failure) = admission.guard_round_admission(&app_paths, &input.command_id) {
             return match failure {
                 AdvanceRoundGuardFailure::Round(rejection) => {
