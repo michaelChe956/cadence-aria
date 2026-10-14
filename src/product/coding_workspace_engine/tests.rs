@@ -517,6 +517,7 @@ mod advance_ready_only;
 pub(crate) mod campaign_stage3_amendment;
 #[path = "tests/campaign_stage3_dependency.rs"]
 mod campaign_stage3_dependency;
+mod cross_attempt_handoff;
 mod code_review_triage;
 mod coder_resume_recovery;
 mod coding_output_teaching_reredrive;

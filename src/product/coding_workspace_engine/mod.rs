@@ -56,6 +56,7 @@ use crate::web::workspace_ws_types::{
 mod amendment;
 mod code_review;
 mod coding;
+mod cross_attempt_handoff;
 mod cross_target_check;
 mod failed_review_recovery;
 mod gates;

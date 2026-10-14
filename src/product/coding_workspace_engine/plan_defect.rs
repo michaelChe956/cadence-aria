@@ -1,7 +1,5 @@
 use super::*;
-use crate::product::coding_models::{
-    CodingExecutionUnit, CodingExecutionUnitStatus, CodingUnitRun, CodingUnitRunStatus,
-};
+use crate::product::coding_models::{CodingExecutionUnit, CodingUnitRun, CodingUnitRunStatus};
 use crate::product::models::{
     PlanDefectClass, PlanDefectRoute, RepairTargetKind, WorkItemPlanLineage,
     WorkItemProjectionBundle,
@@ -459,54 +457,10 @@ impl CodingWorkspaceEngine {
         let units =
             self.store
                 .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
-        let revision_store = WorkItemRevisionStore::new(self.store.paths());
         unit.dependency_logical_work_item_ids
             .iter()
             .map(|dependency_id| {
-                let mut matches = units
-                    .iter()
-                    .filter(|candidate| candidate.logical_work_item_id == *dependency_id);
-                let dependency = matches.next().ok_or_else(|| {
-                    CodingWorkspaceEngineError::WorkItemHandoffMissing(dependency_id.clone())
-                })?;
-                if matches.next().is_some() {
-                    return Err(ProductStoreError::Ambiguous {
-                        kind: "coding_execution_unit",
-                        id: dependency_id.clone(),
-                    }
-                    .into());
-                }
-                let handoff_id = dependency
-                    .latest_handoff_revision_id
-                    .as_deref()
-                    .ok_or_else(|| {
-                        CodingWorkspaceEngineError::WorkItemHandoffMissing(dependency_id.clone())
-                    })?;
-                let handoff =
-                    revision_store.get_handoff_revision(lineage, dependency_id, handoff_id)?;
-                let source_run = self
-                    .store
-                    .list_coding_unit_runs(attempt, &dependency.id)?
-                    .into_iter()
-                    .max_by_key(|run| run.execution_no);
-                if dependency.status != CodingExecutionUnitStatus::Completed
-                    || dependency.completion_commit.as_deref() != Some(handoff.commit_sha.as_str())
-                    || handoff.id != format!("handoff_revision_{}", handoff.coding_unit_run_id)
-                    || handoff.logical_work_item_id != dependency.logical_work_item_id
-                    || handoff.work_item_revision_id != dependency.work_item_revision_id
-                    || !source_run.is_some_and(|run| {
-                        run.id == handoff.coding_unit_run_id
-                            && run.unit_id == dependency.id
-                            && run.work_item_revision_id == dependency.work_item_revision_id
-                            && run.status == CodingUnitRunStatus::Completed
-                            && run.completion_commit.as_deref() == Some(handoff.commit_sha.as_str())
-                    })
-                {
-                    return Err(CodingWorkspaceEngineError::ProviderStream(format!(
-                        "unit_run_handoff_binding_mismatch: {handoff_id}"
-                    )));
-                }
-                Ok(handoff_id.to_string())
+                self.resolve_dependency_handoff_id(attempt, &units, dependency_id, lineage)
             })
             .collect()
     }
