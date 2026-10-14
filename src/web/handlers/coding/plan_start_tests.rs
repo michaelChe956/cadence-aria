@@ -2019,6 +2019,243 @@ async fn plan_coding_h4_group_delete_end_to_end_then_new_round() {
     );
 }
 
+/// 等待/物化 busi 成员 worktree 至可种 review journal 的稳定态：post_start
+/// 的异步 runner 与本测试可能并发跑同一 prepare（journal 幂等但
+/// create_branch 双跑会撞 already exists）——轮询 attempt.worktree_path 落盘
+/// 且 WorktreePrepare journal 终态（Completed/Compensated/缺省）；未就绪则
+/// 幂等 prepare 并按竞态退避重试。
+async fn amr_ready_busi_attempt(
+    fixture: &N3Fixture,
+) -> crate::product::coding_models::CodingExecutionAttempt {
+    use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
+    use crate::product::git_workspace_service::GitWorkspaceService;
+
+    let store = fixture.coding_store();
+    let busi_repo = fixture._root.path().join("n3-busi");
+    for _ in 0..100 {
+        let busi = fixture.busi_attempt();
+        let worktree_ready = busi
+            .worktree_path
+            .as_ref()
+            .is_some_and(|worktree| worktree.exists());
+        let journal_ready = match store.get_coding_git_operation(&busi) {
+            Ok(None) => true,
+            Ok(Some(journal)) => journal.is_terminal(),
+            Err(_) => false,
+        };
+        if worktree_ready && journal_ready {
+            return busi;
+        }
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        match CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx)
+            .execute_worktree_prepare(&busi, &busi_repo)
+            .await
+        {
+            Ok(prepared) => return prepared,
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+        }
+    }
+    panic!("busi worktree not materialized in time");
+}
+
+/// 复刻 2026-10-14 现场（组删 500 coding_workspace_engine_failed）：AMR
+/// attempt 死在 review_request/push_started，而仓库无任何远端
+///（journal.remote 是 push 启动默认 origin）。组删终止链必须把该 journal
+/// 确定性收敛（SkippedNotConfigured）后整组清空，而不是撞 ls-remote fatal。
+#[tokio::test]
+async fn plan_coding_group_delete_converges_push_started_journal_without_remote() {
+    use crate::product::coding_attempt_store::{
+        CodingGitOperationKind, CodingGitOperationPhase, PrepareCodingGitOperationInput,
+    };
+
+    fn git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
+        String::from_utf8(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git stdout probe")
+                .stdout,
+        )
+        .expect("utf8 git output")
+    }
+
+    let fixture = n3_fixture().await;
+    post_start(&fixture.state, "cmd_amr_round1", PLAN_REVISION_ID)
+        .await
+        .expect("round start");
+    let store = fixture.coding_store();
+    let busi_repo = fixture._root.path().join("n3-busi");
+    let prepared = amr_ready_busi_attempt(&fixture).await;
+    let worktree = prepared.worktree_path.clone().expect("worktree path");
+    let head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let journal = store
+        .prepare_coding_git_operation(
+            &prepared,
+            PrepareCodingGitOperationInput {
+                kind: CodingGitOperationKind::ReviewRequest,
+                repo_path: busi_repo.canonicalize().expect("canonical repo"),
+                worktree_path: worktree.canonicalize().expect("canonical worktree"),
+                branch_name: prepared.branch_name.clone(),
+                base_branch: prepared.base_branch.clone(),
+                before_head: head.clone(),
+                remote: Some("origin".to_string()),
+                commit_message: Some("feat: implement work item".to_string()),
+            },
+        )
+        .expect("seed review journal");
+    let journal = store
+        .advance_coding_git_operation(
+            &prepared,
+            &journal,
+            CodingGitOperationPhase::CommitStarted,
+            None,
+        )
+        .expect("commit started");
+    let journal = store
+        .advance_coding_git_operation(
+            &prepared,
+            &journal,
+            CodingGitOperationPhase::CommitCreated,
+            Some(head.clone()),
+        )
+        .expect("commit created");
+    let journal = store
+        .advance_coding_git_operation(
+            &prepared,
+            &journal,
+            CodingGitOperationPhase::PushStarted,
+            None,
+        )
+        .expect("push started");
+    assert_eq!(journal.phase, CodingGitOperationPhase::PushStarted);
+
+    // 确认组删：收敛 + 整组四成员全清（修复前此调用 500）。
+    let receipt = delete_workspaces(&fixture.state, "plan_delete_ui_amr_1", Some(1), true)
+        .await
+        .expect("group delete converges AMR residue");
+    assert_eq!(receipt.operation_state, "accepted");
+    assert!(receipt.remaining_attempt_ids.is_empty());
+    assert!(receipt.deleted_attempt_ids.contains(&prepared.id));
+    assert!(!worktree.exists(), "busi worktree removed");
+    assert!(
+        git_stdout(&busi_repo, &["branch", "--list", &prepared.branch_name])
+            .trim()
+            .is_empty(),
+        "busi branch removed"
+    );
+    assert!(
+        !fixture
+            .paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("coding-attempts")
+            .join(&prepared.id)
+            .join("git-operation.json")
+            .exists(),
+        "journal purged with attempt dir"
+    );
+    assert_eq!(h4_member_ids(&fixture).len(), 0);
+}
+
+/// 已配置但不可达的远端（探测失败）保持 fail-closed：组删以稳定 409
+/// `review_push_indeterminate` 拒绝，不得 500；残留成员与 journal 原样保留。
+#[tokio::test]
+async fn plan_coding_group_delete_maps_unreachable_remote_probe_to_409() {
+    use crate::product::coding_attempt_store::{
+        CodingGitOperationKind, CodingGitOperationPhase, PrepareCodingGitOperationInput,
+    };
+
+    fn git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
+        String::from_utf8(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git stdout probe")
+                .stdout,
+        )
+        .expect("utf8 git output")
+    }
+
+    let fixture = n3_fixture().await;
+    post_start(&fixture.state, "cmd_probe_round1", PLAN_REVISION_ID)
+        .await
+        .expect("round start");
+    let store = fixture.coding_store();
+    let busi_repo = fixture._root.path().join("n3-busi");
+    let prepared = amr_ready_busi_attempt(&fixture).await;
+    let worktree = prepared.worktree_path.clone().expect("worktree path");
+    let head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    run_git(
+        &busi_repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "/nonexistent/unreachable-remote.git",
+        ],
+    );
+    let journal = store
+        .prepare_coding_git_operation(
+            &prepared,
+            PrepareCodingGitOperationInput {
+                kind: CodingGitOperationKind::ReviewRequest,
+                repo_path: busi_repo.canonicalize().expect("canonical repo"),
+                worktree_path: worktree.canonicalize().expect("canonical worktree"),
+                branch_name: prepared.branch_name.clone(),
+                base_branch: prepared.base_branch.clone(),
+                before_head: head.clone(),
+                remote: Some("origin".to_string()),
+                commit_message: Some("feat: implement work item".to_string()),
+            },
+        )
+        .expect("seed review journal");
+    let journal = store
+        .advance_coding_git_operation(
+            &prepared,
+            &journal,
+            CodingGitOperationPhase::CommitStarted,
+            None,
+        )
+        .expect("commit started");
+    let journal = store
+        .advance_coding_git_operation(
+            &prepared,
+            &journal,
+            CodingGitOperationPhase::CommitCreated,
+            Some(head.clone()),
+        )
+        .expect("commit created");
+    store
+        .advance_coding_git_operation(
+            &prepared,
+            &journal,
+            CodingGitOperationPhase::PushStarted,
+            None,
+        )
+        .expect("push started");
+
+    let rejected = delete_workspaces(&fixture.state, "plan_delete_ui_probe_1", Some(1), true).await;
+    let error = rejected.expect_err("unreachable remote probe must block delete");
+    assert_eq!(error.code, "review_push_indeterminate");
+    assert_eq!(
+        error.into_response().status(),
+        StatusCode::CONFLICT,
+        "probe failure must surface as stable 409, not engine 500"
+    );
+    // fail-closed：残留成员与 push_started journal 原样保留。
+    assert!(h4_member_ids(&fixture).contains(&prepared.id));
+    let journal = store
+        .get_coding_git_operation(&prepared)
+        .expect("journal read")
+        .expect("journal retained");
+    assert_eq!(journal.phase, CodingGitOperationPhase::PushStarted);
+}
+
 /// H4 部分删除（验收矩阵 2）：单成员删除 → GET 投影 incomplete/缺失计数 →
 /// 清剩余入口整组收口（deleted=剩余成员、generation 切换）。
 #[tokio::test]

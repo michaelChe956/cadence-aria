@@ -644,3 +644,112 @@ async fn abort_reconciles_unjournaled_worktree_side_effect_before_aborted_status
     assert_eq!(journal.phase, CodingGitOperationPhase::BranchCreated);
     assert_eq!(reconciled.phase, CodingGitOperationPhase::Compensated);
 }
+
+/// 现场形态（2026-10-14 组删 500，coding_attempt_8d1183a5…）：仓库无任何
+/// 远端（journal.remote 是 push 启动时的默认 origin），runner 死在
+/// review_request/push_started。远端未配置 = push 确定未发生——终止
+/// reconcile 不得跑 ls-remote（无远端仓必 fatal → CommandFailed 500），应按
+/// S2a 本地交付同模式以 SkippedNotConfigured 确定性收完 journal。
+#[tokio::test]
+async fn termination_reconcile_completes_push_started_journal_when_remote_not_configured() {
+    use crate::product::coding_models::PushStatus;
+
+    let root = tempdir().expect("root");
+    let repo = root.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    init_test_git_repo(&repo);
+    let base_branch = git_stdout(&repo, &["branch", "--show-current"])
+        .trim()
+        .to_string();
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_attempt(CreateCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            base_branch,
+            branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            target_snapshot: None,
+            max_auto_rework: 2,
+        })
+        .expect("attempt");
+    let (prepare_tx, _prepare_rx) = tokio::sync::mpsc::channel(8);
+    let prepared =
+        CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), prepare_tx)
+            .execute_worktree_prepare(&attempt, &repo)
+            .await
+            .expect("prepare worktree");
+    let worktree = prepared.worktree_path.clone().expect("worktree path");
+    let head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    // 模拟 runner 死在 push_started：journal 停在 push_started（现场
+    // commit_sha == before_head 同形），无 push 终态。
+    let journal = store
+        .prepare_coding_git_operation(
+            &prepared,
+            PrepareCodingGitOperationInput {
+                kind: CodingGitOperationKind::ReviewRequest,
+                repo_path: repo.canonicalize().expect("canonical repo"),
+                worktree_path: worktree.canonicalize().expect("canonical worktree"),
+                branch_name: prepared.branch_name.clone(),
+                base_branch: prepared.base_branch.clone(),
+                before_head: head.clone(),
+                remote: Some("origin".to_string()),
+                commit_message: Some("feat: implement work item".to_string()),
+            },
+        )
+        .expect("seed review journal");
+    let journal = store
+        .advance_coding_git_operation(
+            &prepared,
+            &journal,
+            CodingGitOperationPhase::CommitStarted,
+            None,
+        )
+        .expect("advance commit started");
+    let journal = store
+        .advance_coding_git_operation(
+            &prepared,
+            &journal,
+            CodingGitOperationPhase::CommitCreated,
+            Some(head.clone()),
+        )
+        .expect("advance commit created");
+    let journal = store
+        .advance_coding_git_operation(
+            &prepared,
+            &journal,
+            CodingGitOperationPhase::PushStarted,
+            None,
+        )
+        .expect("advance push started");
+    assert_eq!(journal.phase, CodingGitOperationPhase::PushStarted);
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let reconciled =
+        CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx)
+            .reconcile_coding_git_operation_for_termination(&prepared)
+            .await
+            .expect("termination reconcile converges unconfigured push journal");
+    assert_eq!(reconciled.id, prepared.id);
+
+    let journal = store
+        .get_coding_git_operation(&reconciled)
+        .expect("journal read")
+        .expect("journal persisted");
+    assert_eq!(journal.phase, CodingGitOperationPhase::Completed);
+    assert_eq!(journal.push_status, Some(PushStatus::SkippedNotConfigured));
+    assert_eq!(journal.push_error, None);
+    assert!(journal.review_request_id.is_some());
+    // 收敛只补 journal 终态，不动本地：head 保持原位。
+    assert_eq!(git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(), head);
+}

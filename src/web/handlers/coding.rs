@@ -862,7 +862,7 @@ pub(crate) async fn delete_coding_attempt(
     let attempt = coding_workspace_engine_with_dummy_events(coding_store.clone())
         .reconcile_coding_git_operation_for_termination(&attempt)
         .await
-        .map_err(coding_workspace_api_error)?;
+        .map_err(coding_termination_reconcile_api_error)?;
     let _group_initialization_guard = if matches!(attempt.scope, CodingAttemptScope::WorkItemGroup)
     {
         Some(

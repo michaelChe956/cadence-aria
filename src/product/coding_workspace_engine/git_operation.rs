@@ -252,6 +252,25 @@ impl CodingWorkspaceEngine {
                     id: journal.attempt_id.clone(),
                 })?;
         let git = GitWorkspaceService::new();
+        // S2a 同模式（本地交付判定，internal_pr_review）：远端「未配置」
+        //（git remote 列表无该名）意味着 push 确定未发生——不跑 ls-remote
+        //（无远端仓必 fatal → CommandFailed），终止 reconcile 以
+        // SkippedNotConfigured 确定性收完 journal；已配置但不可达/结果不
+        // 可判定仍走下方原 fail-closed 路径（PushIndeterminate 语义不变）。
+        if !git
+            .git_remote_configured(&journal.worktree_path, remote)
+            .await?
+        {
+            return self
+                .finish_review_git_operation(
+                    attempt,
+                    journal,
+                    PushStatus::SkippedNotConfigured,
+                    None,
+                )
+                .await
+                .map(Some);
+        }
         if git
             .git_remote_branch_head(&journal.worktree_path, remote, &journal.branch_name)
             .await?

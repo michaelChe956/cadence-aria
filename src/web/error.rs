@@ -172,6 +172,9 @@ impl IntoResponse for ApiError {
             | "repository_already_registered"
             | "repository_initialization_in_progress"
             | "shared_worktree_dirty_manual_gate"
+            // 终止链（组删/N7 单删）reconcile 的远端探测失败/推送结果不可
+            // 判定：可操作人工阻断（核对远端后重删/手动收敛），稳定 409。
+            | "review_push_indeterminate"
             | "coding_workspace_exists"
             // 级联删除 D2.2（fix-cascade-deletion）：三类 DELETE 稳定 409 码——
             // 分级确认必答 / 存活引用拒删 / 同 scope 运行或资源 writer 竞态。

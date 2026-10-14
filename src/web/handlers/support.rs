@@ -565,6 +565,28 @@ pub(crate) fn coding_workspace_api_error(error: CodingWorkspaceEngineError) -> A
     }
 }
 
+/// 终止链（组删 teardown / N7 单删）reconcile 的 REST 面：远端已配置但
+/// 探测失败（`CommandFailed`）或推送结果不可判定（`PushIndeterminate`）
+/// 是可操作的人工阻断——稳定 409 `review_push_indeterminate`（核对远端
+/// 分支后重删，或先手动收敛该 coding workspace），不得以 generic
+/// `coding_workspace_engine_failed` 500 兜底；其余引擎错误仍走
+/// [`coding_workspace_api_error`] 原映射。
+pub(crate) fn coding_termination_reconcile_api_error(
+    error: CodingWorkspaceEngineError,
+) -> ApiError {
+    if let CodingWorkspaceEngineError::Git(
+        GitWorkspaceError::CommandFailed { .. } | GitWorkspaceError::PushIndeterminate { .. },
+    ) = &error
+    {
+        return ApiError::runtime(
+            "review_push_indeterminate",
+            "无法判定 review push 是否已到达远端；请核对远端分支状态后重试删除，或先手动收敛该 coding workspace",
+            json!({ "details": error.to_string() }),
+        );
+    }
+    coding_workspace_api_error(error)
+}
+
 pub(crate) fn git_workspace_diff_api_error(error: GitWorkspaceError) -> ApiError {
     ApiError::runtime(
         "git_workspace_diff_failed",
@@ -1054,6 +1076,40 @@ mod tests {
         assert_eq!(error.code, "coding_workspace_engine_failed");
         assert_eq!(
             error.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn coding_termination_reconcile_api_error_maps_git_probe_failures_to_409() {
+        let cases = [
+            CodingWorkspaceEngineError::Git(GitWorkspaceError::PushIndeterminate {
+                remote: "origin".to_string(),
+                branch: "aria/issues/issue_0001/member".to_string(),
+                commit_sha: "20b298be".to_string(),
+            }),
+            CodingWorkspaceEngineError::Git(GitWorkspaceError::CommandFailed {
+                args: "ls-remote --heads origin refs/heads/aria/issues/issue_0001/member"
+                    .to_string(),
+                cwd: "/tmp/repo/.worktrees/aria-issues/issue_0001/member".to_string(),
+                stderr: "fatal: 'origin' does not appear to be a git repository".to_string(),
+            }),
+        ];
+
+        for error in cases {
+            let api_error = coding_termination_reconcile_api_error(error);
+            assert_eq!(api_error.code, "review_push_indeterminate");
+            assert_eq!(api_error.into_response().status(), StatusCode::CONFLICT);
+        }
+    }
+
+    #[test]
+    fn coding_termination_reconcile_api_error_keeps_other_engine_mappings() {
+        let api_error = coding_termination_reconcile_api_error(CodingWorkspaceEngineError::Aborted);
+
+        assert_eq!(api_error.code, "coding_workspace_engine_failed");
+        assert_eq!(
+            api_error.into_response().status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
     }
