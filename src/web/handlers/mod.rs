@@ -118,7 +118,7 @@ pub(crate) use coding::{
     get_verification_triage_records, post_coding_policy_reauthorization,
     post_rerun_planned_command, post_verification_triage_decision,
     post_verification_triage_enter,
-    request_work_item_execution_plan_change,
+    request_work_item_execution_plan_change, drive_ready_units_for_plan,
 };
 pub use automation_enrollment::{
     get_automation_enrollment, post_automation_enrollment_binding,

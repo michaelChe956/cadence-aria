@@ -323,8 +323,11 @@ impl CodingPlanRunStore {
 
     /// REQ-CS-02：显式授权冻结入口。confirmed/当前 authoritative 身份校验并
     /// 冻结 graph；同 plan/revision 第二 command 返回原 run（原 command/
-    /// selection 不漂移）；异 revision/graph 拒绝；Paused/Invalidated 不再
-    /// 返回 active run（无旧数据补授权）。Plan 稳定锁内重读/写入。
+    /// selection 不漂移）；异 revision/graph 拒绝；Invalidated 不再返回
+    /// active run。S2a（owner 2026-10-14）语义反转：Paused run 不再以
+    /// `coding_plan_run_not_active` 拒绝——返回原 run 交由入口
+    /// `resume_from_pause` 续跑（无旧数据补授权边界不变）。Plan 稳定锁内
+    /// 重读/写入。
     pub fn prepare(
         &self,
         project_id: &str,
@@ -404,15 +407,13 @@ impl CodingPlanRunStore {
                             id: authoritative.dependency_graph_revision_id,
                         });
                     }
-                    if matches!(
-                        stored.phase,
-                        CodingPlanRunPhase::Paused | CodingPlanRunPhase::Invalidated
-                    ) {
+                    if matches!(stored.phase, CodingPlanRunPhase::Invalidated) {
                         return Err(ProductStoreError::Conflict {
                             kind: "coding_plan_run_not_active",
                             id: stored.command_id.clone(),
                         });
                     }
+                    // S2a：Paused 原样返回——resume 由入口/续跑核心显式落。
                     return Ok(stored);
                 }
                 let now = Utc::now().to_rfc3339();
@@ -961,6 +962,132 @@ impl CodingPlanRunStore {
                         Ok(updated)
                     }
                 }
+            })
+        })
+    }
+
+    /// S2a 续跑全自动化（owner 2026-10-14 直批）：Paused run 的显式恢复。
+    /// 相位回到首启回执落定的相位（Started/AlreadyStarted/NeedsHuman）并
+    /// 清除暂停原因；幂等（非 Paused 原样返回）；Invalidated 拒绝；无回执
+    /// 的 Paused（生产不可达的半残形态）fail-closed 保持 not_active。
+    pub fn resume_from_pause(
+        &self,
+        run: &CodingPlanRun,
+    ) -> Result<CodingPlanRun, ProductStoreError> {
+        let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
+        self.with_plan_live_write(&run.project_id, &run.issue_id, &run.plan_id, || {
+            with_exclusive_lock(&run_path, || {
+                // H2a 退役围栏：clearing/退役 command 的 run 更新一律拒绝。
+                self.verify_workspace_round_admission(
+                    &run.project_id,
+                    &run.issue_id,
+                    &run.plan_id,
+                    &run.command_id,
+                )?;
+                let stored =
+                    self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
+                self.verify_same_identity(&stored, run)?;
+                match stored.phase {
+                    CodingPlanRunPhase::Paused => {
+                        let phase = match stored.start_outcome.as_ref() {
+                            Some(CodingPlanStartOutcome::Started { .. }) => {
+                                CodingPlanRunPhase::Started
+                            }
+                            Some(CodingPlanStartOutcome::AlreadyStarted { .. }) => {
+                                CodingPlanRunPhase::AlreadyStarted
+                            }
+                            Some(CodingPlanStartOutcome::NeedsHuman { .. }) => {
+                                CodingPlanRunPhase::NeedsHuman
+                            }
+                            None => {
+                                return Err(ProductStoreError::Conflict {
+                                    kind: "coding_plan_run_not_active",
+                                    id: run.plan_id.clone(),
+                                });
+                            }
+                        };
+                        let mut updated = stored.clone();
+                        updated.phase = phase;
+                        updated.pause_reason = None;
+                        updated.updated_at = Utc::now().to_rfc3339();
+                        write_json(&run_path, &updated)?;
+                        Ok(updated)
+                    }
+                    CodingPlanRunPhase::Invalidated => Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_invalidated",
+                        id: run.plan_id.clone(),
+                    }),
+                    _ => Ok(stored),
+                }
+            })
+        })
+    }
+
+    /// S2a 续跑：selection 轮换（可观察性投影）——续跑每轮把冻结 selection
+    /// 轮换到本轮确定性首个新启 unit。仅回执落定相位（Started/
+    /// AlreadyStarted/NeedsHuman）可轮换；selection 合法性与首启同源
+    ///（冻结绑定集内 attempt/target/unit 一致 + 确定性 command + 非终态）。
+    /// 首启窗口（Prepared/ReadyBound/StartRequested/Paused）不得轮换——
+    /// 首启重放语义（不重选、不漂移）保持不变。
+    pub fn rotate_selection(
+        &self,
+        run: &CodingPlanRun,
+        selection: CodingPlanSelection,
+    ) -> Result<CodingPlanRun, ProductStoreError> {
+        for id in [
+            selection.unit_id.as_str(),
+            selection.logical_work_item_id.as_str(),
+            selection.attempt_id.as_str(),
+            selection.target_repository_id.as_str(),
+            selection.start_command_id.as_str(),
+        ] {
+            validate_relative_id(id)?;
+        }
+        let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
+        self.with_plan_live_write(&run.project_id, &run.issue_id, &run.plan_id, || {
+            with_exclusive_lock(&run_path, || {
+                // H2a 退役围栏：clearing/退役 command 的 run 更新一律拒绝。
+                self.verify_workspace_round_admission(
+                    &run.project_id,
+                    &run.issue_id,
+                    &run.plan_id,
+                    &run.command_id,
+                )?;
+                let stored =
+                    self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
+                self.verify_same_identity(&stored, run)?;
+                if matches!(stored.phase, CodingPlanRunPhase::Invalidated) {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_invalidated",
+                        id: run.plan_id.clone(),
+                    });
+                }
+                if !matches!(
+                    stored.phase,
+                    CodingPlanRunPhase::Started
+                        | CodingPlanRunPhase::AlreadyStarted
+                        | CodingPlanRunPhase::NeedsHuman
+                ) {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_run_phase",
+                        id: format!("{:?}", stored.phase),
+                    });
+                }
+                if stored.selection.as_ref() == Some(&selection) {
+                    return Ok(stored);
+                }
+                let attempt_store = CodingAttemptStore::new(self.paths.clone());
+                self.verify_selection_locked(
+                    &stored,
+                    &stored.target_attempts,
+                    &selection,
+                    &attempt_store,
+                )?;
+                let mut updated = stored.clone();
+                updated.selection = Some(selection);
+                updated.updated_at = Utc::now().to_rfc3339();
+                write_json(&run_path, &updated)?;
+                Ok(updated)
             })
         })
     }
@@ -2066,8 +2193,10 @@ mod tests {
         assert_eq!(replayed.selection.as_ref(), Some(&core_selection));
     }
 
-    /// 匹配 Completed 首项可 Blocked+CodeReview 空指针/空 actions，integrity
-    /// 认可合法 pause 且 provider 拒绝；无本 run 的同形状坏指针仍拒绝。
+    /// N2/S2a（P5 撤除，语义反转）：首项完成清指针的中断窗口不再默认
+    /// 安全暂停——provider 准入放行（完成链自动推进在同一 run 授权下
+    /// 启动后续 unit）；run 保持 Started、零暂停事实（Paused 仅 legacy
+    /// 数据可达，恢复走入口 resume 语义）。
     #[tokio::test]
     async fn plan_coding_n2_pause_pointer_and_provider_admission() {
         let fixture = n2_fixture().await;
@@ -2177,97 +2306,25 @@ mod tests {
             "completion cleared the pointer"
         );
 
-        // 清指针后、pause 写回前的中断窗口：provider 必须拒绝（不进 selector/
-        // provider/push）。
-        let error = coding_store
+        // S2a 语义反转（P5 撤除）：中断窗口 provider 准入放行——完成链在
+        // 同一 run 授权下自动推进后续 unit，不再以暂停阻断。
+        coding_store
             .ensure_provider_run_allowed(&running)
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("plan_coding_first_unit_completed"),
-            "unexpected admission result: {error}"
-        );
+            .expect("completed-pointer window admits provider runs");
 
-        // 首项完成安全暂停：Blocked+CodeReview/清指针/空 actions gate/run Paused。
-        let paused = coding_store
-            .pause_completed_plan_first_unit(&running, &unit.id)
-            .unwrap()
-            .expect("matched first ready unit pauses");
-        assert_eq!(paused.status, CodingAttemptStatus::Blocked);
-        assert_eq!(paused.stage, CodingExecutionStage::CodeReview);
-        assert!(paused.active_unit_id.is_none());
-        assert!(paused.current_work_item_id.is_none());
-
-        let gates = coding_store
-            .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &paused.id)
-            .unwrap();
-        assert_eq!(gates.len(), 1, "exactly one pause gate");
-        assert_eq!(
-            gates[0].reason_code.as_deref(),
-            Some(PLAN_CODING_CONTINUATION_NOT_ENABLED)
-        );
-        assert!(
-            gates[0].available_actions.is_empty(),
-            "pause gate has no actions"
-        );
-
+        // run 保持 Started、零暂停事实：续跑推进由入口/完成链挂点重估。
         let run = run_store
             .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
             .unwrap()
             .expect("run present");
-        assert_eq!(run.phase, CodingPlanRunPhase::Paused);
-        assert_eq!(
-            run.pause_reason.as_deref(),
-            Some(PLAN_CODING_CONTINUATION_NOT_ENABLED)
-        );
-
-        // 合法 pause 分支：integrity 认可（严格匹配 first_ready selected 完成身份）。
-        coding_store
-            .validate_group_attempt_integrity(&paused)
-            .expect("legal plan-coding pause passes pointer validation");
-
-        // provider 准入拒绝（暂停不可被普通 retry/StartCoding/gate response 绕行）。
-        let error = coding_store
-            .ensure_provider_run_allowed(&paused)
-            .unwrap_err();
+        assert_eq!(run.phase, CodingPlanRunPhase::Started);
+        assert_eq!(run.pause_reason, None);
         assert!(
-            error.to_string().contains("plan_coding_paused"),
-            "unexpected admission result: {error}"
-        );
-
-        // 幂等：重复 pause 不再新增 gate、不改 run。
-        let paused_again = coding_store
-            .pause_completed_plan_first_unit(&paused, &unit.id)
-            .unwrap()
-            .expect("idempotent pause");
-        assert_eq!(paused_again.status, CodingAttemptStatus::Blocked);
-        assert_eq!(
             coding_store
-                .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &paused.id)
+                .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &running.id)
                 .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            run_store
-                .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
-                .unwrap()
-                .unwrap()
-                .phase,
-            CodingPlanRunPhase::Paused
-        );
-
-        // 无本 run 的同形状仍是坏指针：purge 后 integrity 回到失败关闭。
-        run_store.purge_plan(PROJECT_ID, ISSUE_ID, PLAN_ID).unwrap();
-        let error = coding_store
-            .validate_group_attempt_integrity(&paused)
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("attempt has no legal active or resume target"),
-            "bad pointer without a matching run must stay rejected: {error}"
+                .is_empty(),
+            "no pause gate is created after the selected unit completes"
         );
     }
 
@@ -2481,21 +2538,57 @@ mod tests {
         );
     }
 
-    /// P1（审查修复轮）：Invalidated run 不构成暂停身份——完成首项在场也
-    /// 不得写 attempt（半执行：attempt Blocked 后 run 补记必败）。
+    /// S2a store 相位支持：resume/rotate 语义——带回执 Paused 可 resume
+    ///（幂等）、无回执 Paused fail-closed、Invalidated 拒绝、首启窗口
+    /// 不得轮换 selection（首启不重选冻结不变）。
     #[tokio::test]
-    async fn plan_coding_n2_pause_rejects_invalidated_run() {
+    async fn plan_coding_n2_resume_and_selection_rotation_phases() {
         let fixture = n2_fixture().await;
         let run_store = fixture.run_store();
-        let coding_store = fixture.coding_store();
 
-        let selection = fixture.core_selection("cmd_n2_pause_invalid");
+        let selection = fixture.core_selection("cmd_n2_resume");
         let run = run_store
             .prepare(
                 PROJECT_ID,
                 ISSUE_ID,
                 PLAN_ID,
-                "cmd_n2_pause_invalid",
+                "cmd_n2_resume",
+                &fixture.revision_id,
+            )
+            .unwrap();
+
+        // 首启窗口：rotate 拒绝（不重选、不漂移）。
+        let error = run_store
+            .rotate_selection(&run, selection.clone())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("coding_plan_run_phase"),
+            "first-start window must not rotate selection: {error}"
+        );
+
+        // 无回执 Paused（生产不可达的半残形态）：resume fail-closed。
+        run_store.mark_paused(&run).unwrap();
+        let paused = run_store
+            .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(paused.phase, CodingPlanRunPhase::Paused);
+        let error = run_store.resume_from_pause(&paused).unwrap_err();
+        assert!(
+            error.to_string().contains("coding_plan_run_not_active"),
+            "outcome-less pause must stay fail-closed: {error}"
+        );
+
+        // 半残 run 整体清掉后以第二 command 重来（回执落定路径）。
+        run_store.purge_plan(PROJECT_ID, ISSUE_ID, PLAN_ID).unwrap();
+        let command_id = "cmd_n2_resume_2";
+        let selection = fixture.core_selection(command_id);
+        let run = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                command_id,
                 &fixture.revision_id,
             )
             .unwrap();
@@ -2503,7 +2596,7 @@ mod tests {
             .bind_ready(&run, &fixture.bindings, Some(selection.clone()))
             .unwrap();
         let requested = run_store.mark_start_requested(&bound).unwrap();
-        run_store
+        let started = run_store
             .record_start_outcome(
                 &requested,
                 CodingPlanStartOutcome::Started {
@@ -2511,117 +2604,53 @@ mod tests {
                 },
             )
             .unwrap();
+        let paused = run_store.mark_paused(&started).unwrap();
+        assert_eq!(paused.phase, CodingPlanRunPhase::Paused);
+        assert!(paused.pause_reason.is_some());
 
-        coding_store
-            .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &selection.attempt_id)
-            .unwrap();
-        let attempt = coding_store
-            .get_attempt(PROJECT_ID, ISSUE_ID, &selection.attempt_id)
-            .unwrap();
-        let unit = fixture.core_unit(&attempt);
-        let now = Utc::now().to_rfc3339();
-        coding_store
-            .create_coding_unit_run(
-                &attempt,
-                &CodingUnitRun {
-                    id: "coding_unit_run_n2_invalid_0001".to_string(),
-                    unit_id: unit.id.clone(),
-                    execution_no: 1,
-                    work_item_revision_id: unit.work_item_revision_id.clone(),
-                    resolved_handoff_revision_ids: Vec::new(),
-                    canonical_contract_hash: "n2_invalid_hash".to_string(),
-                    projection_bundle_id: "projection_bundle_n2_invalid".to_string(),
-                    projection_compiler_version: "n2-compiler".to_string(),
-                    coder_provider_renderer_version: "n2-coder".to_string(),
-                    reviewer_provider_renderer_version: "n2-reviewer".to_string(),
-                    internal_reviewer_provider_renderer_version: None,
-                    coder_projection_hash: "n2-coder-hash".to_string(),
-                    reviewer_projection_hash: "n2-reviewer-hash".to_string(),
-                    coder_execution_context_hash: None,
-                    reviewer_execution_context_hash: None,
-                    internal_reviewer_execution_context_hash: None,
-                    status: CodingUnitRunStatus::Running,
-                    unit_rework_count: 0,
-                    verification_retry_count: 0,
-                    operational_retry_count: 0,
-                    plan_repair_count: 0,
-                    start_commit: None,
-                    completion_commit: None,
-                    created_at: now.clone(),
-                    updated_at: now,
-                },
-            )
-            .unwrap();
-        coding_store
-            .complete_coding_unit_run(
-                &attempt,
-                "coding_unit_run_n2_invalid_0001",
-                "n2_invalid_commit",
-            )
-            .unwrap();
-        coding_store
-            .update_coding_unit_status(
-                PROJECT_ID,
-                ISSUE_ID,
-                &attempt.id,
-                &unit.id,
-                crate::product::coding_models::CodingExecutionUnitStatus::Completed,
-                Some("wi_core completed".to_string()),
-            )
-            .unwrap();
-        coding_store
-            .update_coding_unit_latest_handoff_revision_id(
-                PROJECT_ID,
-                ISSUE_ID,
-                &attempt.id,
-                &unit.id,
-                Some("handoff_revision_n2_invalid".to_string()),
-            )
-            .unwrap();
-        coding_store
-            .update_coding_unit_completion_commit(
-                PROJECT_ID,
-                ISSUE_ID,
-                &attempt.id,
-                &unit.id,
-                Some("n2_invalid_commit".to_string()),
-            )
-            .unwrap();
-        let running = coding_store
-            .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
-            .unwrap();
+        let resumed = run_store.resume_from_pause(&paused).unwrap();
+        assert_eq!(resumed.phase, CodingPlanRunPhase::Started);
+        assert_eq!(resumed.pause_reason, None);
+        let replayed = run_store.resume_from_pause(&resumed).unwrap();
+        assert_eq!(replayed.phase, CodingPlanRunPhase::Started);
 
-        // 成员删除使 run Invalidated：pause 不匹配（None），不得触碰 attempt。
+        // 回执相位可轮换：同值幂等；漂移（异 unit/attempt/command）拒绝。
+        run_store
+            .rotate_selection(&resumed, selection.clone())
+            .unwrap();
+        let rotated = run_store
+            .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rotated.selection.as_ref(), Some(&selection));
+        let mut drifted = selection.clone();
+        drifted.unit_id = "coding_unit_unknown".to_string();
+        let error = run_store.rotate_selection(&rotated, drifted).unwrap_err();
+        assert!(
+            error.to_string().contains("coding_plan_run_selection_unit"),
+            "rotation must validate the target selection: {error}"
+        );
+
+        // Invalidated：resume/rotate 双拒绝（终局不可推进）。
         run_store
             .invalidate_for_deleted_attempt(&fixture.web_attempt())
             .unwrap();
-        let outcome = coding_store
-            .pause_completed_plan_first_unit(&running, &unit.id)
+        let invalidated = run_store
+            .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
             .unwrap();
+        assert_eq!(invalidated.phase, CodingPlanRunPhase::Invalidated);
+        let error = run_store.resume_from_pause(&invalidated).unwrap_err();
         assert!(
-            outcome.is_none(),
-            "invalidated run must not be treated as a pause identity"
+            error.to_string().contains("coding_plan_run_invalidated"),
+            "invalidated run must reject resume: {error}"
         );
-
-        let untouched = coding_store
-            .get_attempt(PROJECT_ID, ISSUE_ID, &running.id)
-            .unwrap();
-        assert_eq!(untouched.status, CodingAttemptStatus::Running);
+        let error = run_store
+            .rotate_selection(&invalidated, selection)
+            .unwrap_err();
         assert!(
-            coding_store
-                .list_open_blocked_gates(PROJECT_ID, ISSUE_ID, &running.id)
-                .unwrap()
-                .is_empty(),
-            "no pause gate may be created for an invalidated run"
-        );
-        assert_eq!(
-            run_store
-                .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
-                .unwrap()
-                .unwrap()
-                .phase,
-            CodingPlanRunPhase::Invalidated,
-            "run stays invalidated, never paused"
+            error.to_string().contains("coding_plan_run_invalidated"),
+            "invalidated run must reject rotation: {error}"
         );
     }
 

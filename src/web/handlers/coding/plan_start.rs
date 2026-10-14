@@ -48,11 +48,13 @@ use crate::web::types::{
 };
 
 /// POST 推进结果分类：区分“本次新冻结的首启回执 / 无 ready 等待 / 已有
-/// 事实按原样返回”，用于 `operation_state` 投影。
+/// 事实按原样返回 / 续跑推进了新就绪 unit”，用于 `operation_state` 投影。
 enum PostFlow {
     Recorded(CodingPlanStartOutcome),
     WaitingBound,
     Existing(CodingPlanRunPhase),
+    /// S2a 续跑：本请求推动了至少一个新就绪 unit（start 或跨桶桥 resume）。
+    Continued,
 }
 
 /// REQ-CS-01：多仓 plan 一键显式首启。稳定 `command_id` +
@@ -110,6 +112,33 @@ pub async fn post_plan_coding_start(
         .map_err(product_store_api_error)?;
     let (final_run, flow) = drive_plan_coding_start(&state, &run_store, &app_paths, run).await?;
 
+    // S2a 续跑全自动化（owner 2026-10-14）：回执相位上的再点击 → 全局
+    // 就绪集重估推进（就绪=直接依赖全部 Completed 且未启动；就绪集>1
+    // 并行 start；失败链停、独立链继续）。仅当已存在终态 unit（完成/失败
+    // 等）才推进——纯重放/首启窗口保持零新启（REQ-CS-01 单选首启冻结，
+    // n3 族回归）。本请求内完成的首启不重估。
+    let (final_run, flow) = match flow {
+        PostFlow::Existing(phase) => {
+            if plan_has_terminal_coding_unit(&app_paths, &final_run)
+                .map_err(product_store_api_error)?
+            {
+                let drive =
+                    drive_ready_units_for_plan(&state, &project_id, &issue_id, &plan_id).await?;
+                if drive.started_attempt_ids.is_empty() && drive.resumed_attempt_ids.is_empty() {
+                    (final_run, PostFlow::Existing(phase))
+                } else {
+                    let reloaded = run_store
+                        .get(&project_id, &issue_id, &plan_id)
+                        .map_err(product_store_api_error)?;
+                    (reloaded.unwrap_or(final_run), PostFlow::Continued)
+                }
+            } else {
+                (final_run, PostFlow::Existing(phase))
+            }
+        }
+        other => (final_run, other),
+    };
+
     let operation_state = match &flow {
         PostFlow::Recorded(
             CodingPlanStartOutcome::Started { .. } | CodingPlanStartOutcome::AlreadyStarted { .. },
@@ -118,6 +147,7 @@ pub async fn post_plan_coding_start(
         PostFlow::WaitingBound => OperationState::Accepted,
         PostFlow::Existing(CodingPlanRunPhase::NeedsHuman) => OperationState::NeedsHuman,
         PostFlow::Existing(_) => OperationState::Replayed,
+        PostFlow::Continued => OperationState::Accepted,
     };
 
     let progress = build_plan_coding_progress(
@@ -745,14 +775,421 @@ async fn drive_plan_coding_start(
                 .map_err(product_store_api_error)?;
             Ok((recorded, PostFlow::Recorded(outcome)))
         }
-        // prepare 已拒绝 Paused/Invalidated（coding_plan_run_not_active）。
-        CodingPlanRunPhase::Paused | CodingPlanRunPhase::Invalidated => {
+        // S2a（owner 2026-10-14）语义反转：Paused 不再 409 not_enabled——
+        // resume 回执相位后按既有事实返回，续跑推进由入口统一核心重估。
+        CodingPlanRunPhase::Paused => {
+            let resumed = run_store
+                .resume_from_pause(&run)
+                .map_err(product_store_api_error)?;
+            let phase = resumed.phase;
+            Ok((resumed, PostFlow::Existing(phase)))
+        }
+        // prepare 已拒绝 Invalidated（coding_plan_run_not_active）。
+        CodingPlanRunPhase::Invalidated => {
             Err(product_store_api_error(ProductStoreError::Conflict {
                 kind: "coding_plan_run_not_active",
                 id: run.command_id.clone(),
             }))
         }
     }
+}
+
+/// S2a 续跑驱动结果：本轮全局重估后的推进事实（纯 ID，供入口/引擎
+/// 挂点观察；不做第二调度账本——启动事实权威仍是 attempt claim/runner）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PlanContinuationDriveOutcome {
+    /// 本轮新 start 的 target attempt（冻结确定性 command 首次消费）。
+    pub started_attempt_ids: Vec<String>,
+    /// 本轮跨桶桥续跑（物化就绪 unit + 重启 runner）的 attempt。
+    pub resumed_attempt_ids: Vec<String>,
+    /// 未推进的 attempt：忙（已启动/在册 runner/claim 已消费）、人控或
+    /// 终态事实（失败链按事实停，不误报为错误）。
+    pub busy_attempt_ids: Vec<String>,
+}
+
+/// S2a 续跑全自动化核心（owner 2026-10-14 直批，自动化编排器引擎种子）：
+/// 按权威 plan binding 全 units + 各 attempt 完成事实做**全局**就绪重估
+///（就绪=直接依赖全部 Completed 且未启动；与 `select_first_ready_unit`
+/// 同源的全图完成证据），就绪集>1 并行 start；幂等（已启动跳过）；失败
+/// 链（依赖未 Completed）不启动，独立链继续。
+///
+/// 跨桶桥：桶内 SC 依赖门只见本 attempt units（桶外上游恒 Waiting），
+/// 本核心以全图完成事实补全该视角——Created attempt 的根 unit 就绪即开桶
+///（`start_coding_once` 单发幂等，command=冻结 run.command_id 的确定性
+/// 派生）；Running 无 active unit 的 parked attempt 物化确定性首个就绪
+/// Pending unit 并重启 runner。人控/终态 attempt 零动作。
+///
+/// 作用域与锁：按单 (project,issue,plan) 设计，无跨 plan 全局串行假设；
+/// **本函数不自取** per-plan 串行键 `work_item_group:{project}:{issue}:
+/// {plan}`（非重入）——HTTP 入口已持有；engine 完成链挂点（S2b）调用前
+/// 须先取同键。相位语义：无 run/首启窗口（Prepared/ReadyBound/
+/// StartRequested）零动作（首启编排归 POST 重放链）；Paused 先 resume；
+/// Invalidated fail-closed。
+pub(crate) async fn drive_ready_units_for_plan(
+    state: &WebAppState,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+) -> Result<PlanContinuationDriveOutcome, ApiError> {
+    let app_paths = product_app_paths(state);
+    let run_store = CodingPlanRunStore::new(app_paths.clone());
+    let Some(mut run) = run_store
+        .get(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?
+    else {
+        // 无授权 run：零动作（completion 挂点对未走 plan 入口的组零推进）。
+        return Ok(PlanContinuationDriveOutcome::default());
+    };
+    if matches!(run.phase, CodingPlanRunPhase::Invalidated) {
+        return Err(product_store_api_error(ProductStoreError::Conflict {
+            kind: "coding_plan_run_not_active",
+            id: run.command_id.clone(),
+        }));
+    }
+    if matches!(run.phase, CodingPlanRunPhase::Paused) {
+        run = run_store
+            .resume_from_pause(&run)
+            .map_err(product_store_api_error)?;
+    }
+    if !matches!(
+        run.phase,
+        CodingPlanRunPhase::Started
+            | CodingPlanRunPhase::AlreadyStarted
+            | CodingPlanRunPhase::NeedsHuman
+    ) {
+        // 首启窗口（含无回执 Paused 的 fail-closed 残留）：零动作。
+        return Ok(PlanContinuationDriveOutcome::default());
+    }
+
+    let store = CodingAttemptStore::new(app_paths.clone());
+    let authoritative = store
+        .resolve_authoritative_group_plan_binding_for_revision(
+            project_id,
+            issue_id,
+            plan_id,
+            &run.bound_plan_revision_id,
+        )
+        .map_err(product_store_api_error)?;
+    let ranks = global_topological_ranks(&authoritative.units);
+
+    // 冻结绑定集事实采集（成员删除场景 run 已 Invalidated，此处 NotFound
+    // 为防御性跳过）；全局完成集跨桶累计。
+    let bindings = sorted_target_bindings(run.target_attempts.clone());
+    let mut facts = Vec::new();
+    let mut completed: BTreeSet<String> = BTreeSet::new();
+    for binding in &bindings {
+        let attempt = match store.get_attempt(project_id, issue_id, &binding.attempt_id) {
+            Ok(attempt) => attempt,
+            Err(ProductStoreError::NotFound { .. }) => continue,
+            Err(error) => return Err(product_store_api_error(error)),
+        };
+        let units = store
+            .list_coding_units(project_id, issue_id, &binding.attempt_id)
+            .map_err(product_store_api_error)?;
+        for unit in &units {
+            if unit.status == CodingExecutionUnitStatus::Completed {
+                completed.insert(unit.logical_work_item_id.clone());
+            }
+        }
+        facts.push((binding.clone(), attempt, units));
+    }
+
+    let mut outcome = PlanContinuationDriveOutcome::default();
+    let mut rotated: Option<(usize, CodingPlanSelection)> = None;
+    for (binding, attempt, units) in facts {
+        let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
+        let runner_live = state
+            .coding_runs
+            .attempt_is_reserved_or_running(&attempt_key);
+        // 就绪判定（全图）：非终态且直接依赖全部 Completed。
+        let unit_globally_ready = |unit: &CodingExecutionUnit| {
+            !matches!(
+                unit.status,
+                CodingExecutionUnitStatus::Completed
+                    | CodingExecutionUnitStatus::Failed
+                    | CodingExecutionUnitStatus::Superseded
+                    | CodingExecutionUnitStatus::Skipped
+            ) && unit
+                .dependency_logical_work_item_ids
+                .iter()
+                .all(|dependency| completed.contains(dependency))
+        };
+        let rank_of = |unit: &CodingExecutionUnit| {
+            ranks
+                .get(&unit.logical_work_item_id)
+                .copied()
+                .unwrap_or(usize::MAX)
+        };
+        match attempt.status {
+            CodingAttemptStatus::Created => {
+                // 开桶条件：桶根（建组物化的 order_index 0）全局就绪。
+                let Some(root) = units.iter().min_by_key(|unit| unit.order_index) else {
+                    continue;
+                };
+                if !unit_globally_ready(root) {
+                    continue;
+                }
+                let command_id = CodingPlanSelection::deterministic_start_command_id(
+                    project_id,
+                    issue_id,
+                    plan_id,
+                    &run.command_id,
+                    &binding.target_repository_id,
+                );
+                match start_coding_once(
+                    state,
+                    project_id,
+                    issue_id,
+                    StartCodingCommand {
+                        attempt_id: attempt.id.clone(),
+                        command_id,
+                        origin: CodingStartOrigin::Manual,
+                    },
+                )
+                .await
+                {
+                    Ok(StartCodingOutcome::Started { attempt_id }) => {
+                        outcome.started_attempt_ids.push(attempt_id);
+                        let selection = CodingPlanSelection {
+                            unit_id: root.id.clone(),
+                            logical_work_item_id: root.logical_work_item_id.clone(),
+                            attempt_id: binding.attempt_id.clone(),
+                            target_repository_id: binding.target_repository_id.clone(),
+                            start_command_id: CodingPlanSelection::deterministic_start_command_id(
+                                project_id,
+                                issue_id,
+                                plan_id,
+                                &run.command_id,
+                                &binding.target_repository_id,
+                            ),
+                        };
+                        rotated = Some(better_rotation(rotated, (rank_of(root), selection)));
+                    }
+                    // 已启动/人控事实：幂等跳过，不阻断其余链。
+                    Ok(
+                        StartCodingOutcome::AlreadyStarted { attempt_id }
+                        | StartCodingOutcome::NeedsHuman { attempt_id, .. },
+                    ) => {
+                        outcome.busy_attempt_ids.push(attempt_id);
+                    }
+                    Err(error) => {
+                        return Err(ApiError::runtime(
+                            "plan_coding_continuation_start_failed",
+                            format!("continuation start for plan coding failed: {error}"),
+                            serde_json::json!({ "code": error.code() }),
+                        ));
+                    }
+                }
+            }
+            CodingAttemptStatus::Running => {
+                if runner_live || attempt.active_unit_id.is_some() {
+                    // 忙：桶内推进归在册 runner（single-active-unit 不变量）。
+                    outcome.busy_attempt_ids.push(attempt.id.clone());
+                    continue;
+                }
+                // 跨桶 parked：物化确定性首个就绪 Pending unit 并重启 runner。
+                let candidate = units
+                    .iter()
+                    .filter(|unit| {
+                        unit.status == CodingExecutionUnitStatus::Pending
+                            && unit_globally_ready(unit)
+                    })
+                    .min_by(|left, right| {
+                        rank_of(left)
+                            .cmp(&rank_of(right))
+                            .then_with(|| left.order_index.cmp(&right.order_index))
+                            .then_with(|| left.id.cmp(&right.id))
+                    });
+                let Some(unit) = candidate else {
+                    continue;
+                };
+                if resume_parked_plan_attempt(state, &app_paths, &store, &attempt, unit).await? {
+                    outcome.resumed_attempt_ids.push(attempt.id.clone());
+                    let selection = CodingPlanSelection {
+                        unit_id: unit.id.clone(),
+                        logical_work_item_id: unit.logical_work_item_id.clone(),
+                        attempt_id: binding.attempt_id.clone(),
+                        target_repository_id: binding.target_repository_id.clone(),
+                        start_command_id: CodingPlanSelection::deterministic_start_command_id(
+                            project_id,
+                            issue_id,
+                            plan_id,
+                            &run.command_id,
+                            &binding.target_repository_id,
+                        ),
+                    };
+                    rotated = Some(better_rotation(rotated, (rank_of(unit), selection)));
+                }
+            }
+            // Blocked/WaitingForHuman/AwaitingManualRecovery/终态：人工/终局
+            // 事实，零动作（失败链按事实停）。
+            _ => outcome.busy_attempt_ids.push(attempt.id.clone()),
+        }
+    }
+    if let Some((_rank, selection)) = rotated {
+        run = run_store
+            .rotate_selection(&run, selection)
+            .map_err(product_store_api_error)?;
+    }
+    Ok(outcome)
+}
+
+/// 确定性 selection 轮换：取本轮新启 unit 中（全图拓扑位置 → logical
+/// WI ID → target UUID）最小者（多桶并行启动时的稳定投影）。
+fn better_rotation(
+    current: Option<(usize, CodingPlanSelection)>,
+    candidate: (usize, CodingPlanSelection),
+) -> (usize, CodingPlanSelection) {
+    match current {
+        None => candidate,
+        Some(current) => {
+            let candidate_key = (
+                candidate.0,
+                candidate.1.logical_work_item_id.clone(),
+                candidate.1.target_repository_id.clone(),
+            );
+            let current_key = (
+                current.0,
+                current.1.logical_work_item_id.clone(),
+                current.1.target_repository_id.clone(),
+            );
+            if candidate_key < current_key {
+                candidate
+            } else {
+                current
+            }
+        }
+    }
+}
+
+/// 入口续跑门：冻结绑定集内是否已存在终态 unit（Completed/Failed/
+/// Superseded/Skipped）——有推进诱因（完成/失败）才重估，纯重放/首启
+/// 窗口保持零新启（n3 族单选首启冻结）。
+fn plan_has_terminal_coding_unit(
+    paths: &ProductAppPaths,
+    run: &CodingPlanRun,
+) -> Result<bool, ProductStoreError> {
+    let store = CodingAttemptStore::new(paths.clone());
+    for binding in &run.target_attempts {
+        for unit in store.list_coding_units(&run.project_id, &run.issue_id, &binding.attempt_id)? {
+            if matches!(
+                unit.status,
+                CodingExecutionUnitStatus::Completed
+                    | CodingExecutionUnitStatus::Failed
+                    | CodingExecutionUnitStatus::Superseded
+                    | CodingExecutionUnitStatus::Skipped
+            ) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// 跨桶桥 parked 续跑（Running 且无 active unit 的 attempt）：物化就绪
+/// unit（Running+指针对齐）、stage 回 PrepareContext、worktree 锁转移、
+/// 重启 runner——与 `advance_to_next_group_unit` 的 next 分支同源，但就绪
+/// 判定按全图完成事实。返回 false=registry 拒绝（已有 runner，幂等）。
+#[allow(clippy::too_many_arguments)]
+async fn resume_parked_plan_attempt(
+    state: &WebAppState,
+    app_paths: &ProductAppPaths,
+    store: &CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    unit: &CodingExecutionUnit,
+) -> Result<bool, ApiError> {
+    let unit = store
+        .update_coding_unit_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &unit.id,
+            CodingExecutionUnitStatus::Running,
+            Some("续跑：进入下一个 Work Item".to_string()),
+        )
+        .map_err(product_store_api_error)?;
+    let mut updated = store
+        .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .map_err(product_store_api_error)?;
+    let from_work_item_id = updated
+        .current_work_item_id
+        .clone()
+        .unwrap_or_else(|| unit.logical_work_item_id.clone());
+    updated.current_work_item_id = Some(unit.logical_work_item_id.clone());
+    updated.active_unit_id = Some(unit.id.clone());
+    updated.stage = crate::product::coding_models::CodingExecutionStage::PrepareContext;
+    updated.updated_at = chrono::Utc::now().to_rfc3339();
+    store
+        .update_attempt_non_status_fields(&updated)
+        .map_err(product_store_api_error)?;
+
+    // worktree 锁转移（与 advance_to_next_group_unit 同源；锁事实在
+    // repo 维三元键，缺转移会让后续 completion 的 owner 校验 fail-closed）。
+    let attempt_key = CodingAttemptRunKey::from_attempt(&updated);
+    let event_tx = state.coding_sockets.hub_sender(&attempt_key);
+    let engine = crate::product::coding_workspace_engine::CodingWorkspaceEngine::new(
+        store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        event_tx.clone(),
+    );
+    let route = engine
+        .route_issue_shared_worktree(&updated)
+        .map_err(|error| {
+            ApiError::runtime(
+                "plan_coding_continuation_resume_failed",
+                format!("route shared worktree for continuation resume failed: {error}"),
+                serde_json::json!({}),
+            )
+        })?;
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    let transfer_result: Result<(), ProductStoreError> = match route {
+        crate::product::coding_workspace_engine::IssueSharedWorktreeRoute::Legacy => {
+            if lifecycle
+                .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
+                .map_err(product_store_api_error)?
+                .is_some()
+            {
+                lifecycle
+                    .transfer_issue_worktree_lock(
+                        &attempt.project_id,
+                        &attempt.issue_id,
+                        &from_work_item_id,
+                        &unit.logical_work_item_id,
+                        &attempt.id,
+                    )
+                    .map(|_| ())
+            } else {
+                Ok(())
+            }
+        }
+        crate::product::coding_workspace_engine::IssueSharedWorktreeRoute::Repository {
+            repository_id,
+        } => lifecycle
+            .transfer_repo_worktree_lock(
+                &attempt.project_id,
+                &attempt.issue_id,
+                repository_id,
+                &from_work_item_id,
+                &unit.logical_work_item_id,
+                &attempt.id,
+            )
+            .map(|_| ()),
+    };
+    transfer_result.map_err(|error| {
+        ApiError::runtime(
+            "plan_coding_continuation_resume_failed",
+            format!("transfer shared worktree lock for continuation resume failed: {error}"),
+            serde_json::json!({}),
+        )
+    })?;
+
+    Ok(crate::web::coding_ws_handler::spawn_coding_runner(
+        state.clone(),
+        store.clone(),
+        event_tx,
+        updated,
+    )
+    .is_some())
 }
 
 /// plan scope 删除准入：try-shared 争用/墓碑一律立即

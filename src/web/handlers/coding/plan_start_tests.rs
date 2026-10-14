@@ -13,7 +13,8 @@ use crate::product::coding_models::{
     CodingStartPhase,
 };
 use crate::product::coding_plan_run::{
-    CodingPlanRunPhase, CodingPlanRunStore, CodingPlanSelection, CodingPlanStartOutcome,
+    CodingPlanRun, CodingPlanRunPhase, CodingPlanRunStore, CodingPlanSelection,
+    CodingPlanStartOutcome,
 };
 use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
 use crate::product::entity_operation_store::EntityOperationStore;
@@ -2034,4 +2035,324 @@ async fn plan_coding_h4_start_resumes_clearing_before_new_round() {
     let new_ids = h4_member_ids(&fixture);
     assert_eq!(new_ids.len(), 4);
     assert!(new_ids.iter().all(|id| !member_ids.contains(id)));
+}
+
+// ===== S2a 续跑全自动化（owner 2026-10-14 直批）：unit 完成/失败 → 全局
+// 重估就绪集（就绪=直接依赖全部 Completed 且未启动）→ 就绪集>1 并行
+// start；失败链停、独立链继续；幂等重试；legacy Paused run 由入口 resume
+// 不再 409 not enabled。种子不走 HTTP 首启（零 live runner 消除竞态），
+// 直接落「首启已 Started」的 durable 事实集。 =====
+
+/// S2 种子：Manual advance 到 durable Ready → run 冻结（selection=wi_core，
+/// busi 桶）→ start_requested → Started 回执。busi attempt 保持 Created
+///（claim/admission 不影响续跑面；驱动只按 unit 完成事实重估）。
+async fn s2_seed_first_start_started(fixture: &N3Fixture, command_id: &str) -> CodingPlanRun {
+    use crate::product::advance_store::AdvanceOutcome;
+    let outcome = advance_plan(
+        &fixture.state,
+        AdvanceInput {
+            command_id: command_id.to_string(),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: PLAN_ID.to_string(),
+        },
+        AdvancePlanOrigin::Manual,
+    )
+    .await
+    .expect("manual advance to durable Ready");
+    let AdvanceOutcome::Completed {
+        target_attempts, ..
+    } = outcome
+    else {
+        panic!("s2 seed advance must complete with full target bindings");
+    };
+    let mut bindings = target_attempts;
+    bindings.sort_by(|left, right| {
+        left.target_repository_id
+            .cmp(&right.target_repository_id)
+            .then_with(|| left.attempt_id.cmp(&right.attempt_id))
+    });
+    assert_eq!(bindings.len(), 4, "four per-target attempts bound");
+
+    let run_store = fixture.run_store();
+    let run = run_store
+        .prepare(PROJECT_ID, ISSUE_ID, PLAN_ID, command_id, PLAN_REVISION_ID)
+        .expect("prepare run");
+    let selection = fixture.busi_selection(command_id);
+    let bound = run_store
+        .bind_ready(&run, &bindings, Some(selection))
+        .expect("bind ready set with frozen selection");
+    let requested = run_store
+        .mark_start_requested(&bound)
+        .expect("mark start requested");
+    run_store
+        .record_start_outcome(
+            &requested,
+            CodingPlanStartOutcome::Started {
+                attempt_id: bound
+                    .selection
+                    .as_ref()
+                    .expect("frozen selection")
+                    .attempt_id
+                    .clone(),
+            },
+        )
+        .expect("record started outcome")
+}
+
+/// 首启 unit（wi_core）落终态事实：unit Completed/Failed（attempt 指针随
+/// store 同步清空）。完成证据=unit 状态（与 select_first_ready_unit 同源）。
+fn s2_finish_first_unit(fixture: &N3Fixture, status: CodingExecutionUnitStatus) {
+    let attempt = fixture.busi_attempt();
+    let unit = fixture
+        .coding_store()
+        .list_coding_units(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .unwrap()
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == "wi_core")
+        .expect("wi_core unit materialized");
+    fixture
+        .coding_store()
+        .update_coding_unit_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &attempt.id,
+            &unit.id,
+            status,
+            Some("s2 first unit finished".to_string()),
+        )
+        .expect("finish first unit");
+}
+
+/// ①：wi_core 完成后新点击 → 就绪集 {wi_registration, wi_unrelated} 并行
+/// start（各自冻结确定性 command、barrier 恰一次），未就绪 frontend 不动，
+/// selection 轮换到本轮确定性首个新启 unit，run 保持 Started。
+#[tokio::test]
+async fn plan_coding_s2_continuation_starts_all_ready_units_in_parallel() {
+    let fixture = n3_fixture().await;
+    let run_command_id = "cmd_n3_s2_0001";
+    s2_seed_first_start_started(&fixture, run_command_id).await;
+    s2_finish_first_unit(&fixture, CodingExecutionUnitStatus::Completed);
+
+    let result = post_start(&fixture.state, "cmd_n3_s2_0002", PLAN_REVISION_ID)
+        .await
+        .expect("continuation click must advance ready units, not 409");
+    assert_eq!(result.operation_state, OperationState::Accepted);
+    assert_eq!(
+        result.command_id, run_command_id,
+        "run command stays frozen"
+    );
+
+    let web = fixture.target_attempt(fixture.web);
+    let gateway = fixture.target_attempt(fixture.gateway);
+    for (attempt, target) in [
+        (web.clone(), fixture.web),
+        (gateway.clone(), fixture.gateway),
+    ] {
+        let claim = attempt.start_claim.as_ref().expect("ready unit started");
+        assert_eq!(
+            claim.command_id,
+            CodingPlanSelection::deterministic_start_command_id(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                run_command_id,
+                &target.0.to_string()
+            ),
+            "continuation start uses the frozen deterministic command"
+        );
+        assert_eq!(
+            fixture
+                .state
+                .coding_runs
+                .runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
+            1,
+            "each started target crossed the barrier exactly once"
+        );
+    }
+    // wi_service 依赖 wi_unrelated 尚未完成：frontend 不启动。
+    assert!(
+        fixture
+            .target_attempt(fixture.frontend)
+            .start_claim
+            .is_none()
+    );
+
+    let run = fixture
+        .run_store()
+        .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.phase, CodingPlanRunPhase::Started);
+    let selection = run.selection.expect("selection rotated");
+    assert_eq!(selection.logical_work_item_id, "wi_registration");
+    assert_eq!(selection.attempt_id, web.id);
+    assert_eq!(
+        result.selected_unit_id.as_deref(),
+        Some(selection.unit_id.as_str())
+    );
+}
+
+/// ②：续跑后再点（新 command）幂等——已启动 attempt 零新 claim/零二次
+/// barrier，selection 不漂移，回执 Replayed。
+#[tokio::test]
+async fn plan_coding_s2_continuation_retry_is_idempotent() {
+    let fixture = n3_fixture().await;
+    let run_command_id = "cmd_n3_s2_0001";
+    s2_seed_first_start_started(&fixture, run_command_id).await;
+    s2_finish_first_unit(&fixture, CodingExecutionUnitStatus::Completed);
+    let first = post_start(&fixture.state, "cmd_n3_s2_0002", PLAN_REVISION_ID)
+        .await
+        .expect("first continuation click starts ready set");
+    assert_eq!(first.operation_state, OperationState::Accepted);
+
+    let web_before = fixture.target_attempt(fixture.web);
+    let gateway_before = fixture.target_attempt(fixture.gateway);
+    let selection_before = fixture
+        .run_store()
+        .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+        .unwrap()
+        .selection
+        .clone()
+        .expect("rotated selection");
+
+    let retry = post_start(&fixture.state, "cmd_n3_s2_0003", PLAN_REVISION_ID)
+        .await
+        .expect("retry must not fail");
+    assert_eq!(retry.operation_state, OperationState::Replayed);
+
+    let web_after = fixture.target_attempt(fixture.web);
+    let gateway_after = fixture.target_attempt(fixture.gateway);
+    assert_eq!(
+        web_after
+            .start_claim
+            .as_ref()
+            .map(|claim| claim.command_id.clone()),
+        web_before
+            .start_claim
+            .as_ref()
+            .map(|claim| claim.command_id.clone()),
+        "no second claim on started attempt"
+    );
+    assert_eq!(
+        gateway_after
+            .start_claim
+            .as_ref()
+            .map(|claim| claim.command_id.clone()),
+        gateway_before
+            .start_claim
+            .as_ref()
+            .map(|claim| claim.command_id.clone())
+    );
+    for attempt in [web_after, gateway_after] {
+        assert_eq!(
+            fixture
+                .state
+                .coding_runs
+                .runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
+            1,
+            "no second barrier crossing"
+        );
+    }
+    let run = fixture
+        .run_store()
+        .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.selection.clone().expect("selection"), selection_before);
+    assert_eq!(run.phase, CodingPlanRunPhase::Started);
+}
+
+/// ③：wi_core 失败 → 依赖链（wi_registration）不启动、保持等待依赖事实；
+/// 独立链（wi_unrelated）继续启动。
+#[tokio::test]
+async fn plan_coding_s2_failed_unit_stops_dependents_and_starts_independent_chain() {
+    let fixture = n3_fixture().await;
+    let run_command_id = "cmd_n3_s2_0001";
+    s2_seed_first_start_started(&fixture, run_command_id).await;
+    s2_finish_first_unit(&fixture, CodingExecutionUnitStatus::Failed);
+
+    let result = post_start(&fixture.state, "cmd_n3_s2_0002", PLAN_REVISION_ID)
+        .await
+        .expect("independent chains must still advance");
+    assert_eq!(result.operation_state, OperationState::Accepted);
+
+    let gateway = fixture.target_attempt(fixture.gateway);
+    assert!(
+        gateway.start_claim.is_some(),
+        "independent chain (wi_unrelated) starts"
+    );
+    assert!(
+        fixture.target_attempt(fixture.web).start_claim.is_none(),
+        "failed dependency chain (wi_registration) must not start"
+    );
+    assert!(
+        fixture
+            .target_attempt(fixture.frontend)
+            .start_claim
+            .is_none()
+    );
+
+    // 失败链按事实可见：wi_registration 仍在等 wi_core（不是天书暂停文案）。
+    let registration = unit_dto(&result.progress, "wi_registration");
+    assert_eq!(registration.execution_state, "waiting_dependency");
+    assert_eq!(
+        registration.unsatisfied_dependency_ids,
+        vec!["wi_core".to_string()]
+    );
+    assert_ne!(
+        registration.waiting_reason.as_deref(),
+        Some(crate::product::coding_plan_run::PLAN_CODING_CONTINUATION_NOT_ENABLED)
+    );
+}
+
+/// ④：legacy N5 暂停（run Paused）后新点击 → resume 续跑，不再 409
+/// `coding_plan_run_not_active`；横幅不出现 not enabled 天书。
+#[tokio::test]
+async fn plan_coding_s2_paused_run_resumes_and_drives_instead_of_409() {
+    let fixture = n3_fixture().await;
+    let run_command_id = "cmd_n3_s2_0001";
+    let started = s2_seed_first_start_started(&fixture, run_command_id).await;
+    s2_finish_first_unit(&fixture, CodingExecutionUnitStatus::Completed);
+    let paused = fixture
+        .run_store()
+        .mark_paused(&started)
+        .expect("legacy pause");
+    assert_eq!(paused.phase, CodingPlanRunPhase::Paused);
+
+    let result = post_start(&fixture.state, "cmd_n3_s2_0002", PLAN_REVISION_ID)
+        .await
+        .expect("paused run must resume and continue, not 409");
+    assert_eq!(result.operation_state, OperationState::Accepted);
+
+    let run = fixture
+        .run_store()
+        .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.phase, CodingPlanRunPhase::Started);
+    assert_eq!(run.pause_reason, None, "resume clears the pause reason");
+    assert!(
+        fixture.target_attempt(fixture.web).start_claim.is_some(),
+        "wi_registration starts after resume"
+    );
+    assert!(
+        fixture
+            .target_attempt(fixture.gateway)
+            .start_claim
+            .is_some(),
+        "wi_unrelated starts after resume"
+    );
+
+    let progress = get_progress(&fixture.state).await.expect("progress");
+    assert_eq!(progress.phase.as_deref(), Some("started"));
+    for unit in &progress.units {
+        assert_ne!(
+            unit.waiting_reason.as_deref(),
+            Some(crate::product::coding_plan_run::PLAN_CODING_CONTINUATION_NOT_ENABLED),
+            "no continuation-not-enabled banner during normal advance: {}",
+            unit.logical_work_item_id
+        );
+    }
 }
