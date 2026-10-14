@@ -19,8 +19,22 @@
 ## 3. D2：协调、运行隔离与一次确认
 
 - [ ] 3.1 D2.1a/b/c/d manager/REST/provider/compile/advance/retry恢复真实入口持共享run lease；coding创建与删除互斥，Deleted advance/retry拒绝且旧Ready false，旧Arc/晚写无权；写面点名双向SG移交（REQ-GRP-01、REQ-DEL-05/06/07）。
+  - 进度注记（2026-10-14，ImplD21c）：D2.1c coding 创建/删除互斥已红→绿→回归（`cascade_d2_1c_coding_create_delete_race`——红=实现回退 HEAD 后 (a) 删除独占未被创建准入阻挡；绿=guard 于 creation 锁外层持 owning Plan 共享准入随生命周期到 attempt 持久化；回归 attempt_creation_concurrency 3/0、coding_attempt_store 全族 203/0、group_split_target 11/0、group_uniqueness 2/0、advance_attempt_isolation 4/0）。接线：guard（sync/async）scope→creation 锁固定序＋WI→Plan 归属解析（source_work_item_plan_id→plan refs 反查，无归属 legacy 保持原行为）；`create_group_attempt`/`prepare_group_initialization_with_admission_for_target`（含重放读）/`mark_group_initialization_error`/`advance_group_initialization_phase` 套 `with_plan_live_write`；`ensure_group_initialization_attempt` 消费 guard 已持准入、legacy guard 由 journal.plan_id 兜底。purging/deleted 一律 `Conflict{entity_deleting}`（N2 P2 同族）；guard identity/active uniqueness/admission/不自动 abort 零变化；group_validation/advance_split 零修改。D2.1a/b/d 未含（并行/后行），复选框按规约待独立审查后勾。
 - [ ] 3.2 D2.2 三类DELETE统一门禁/manifest及服务端分级确认：coding/ref/busy/未确认拒删零副作用，两Plan路径含advance完整purge、target专属清理只读消费现worktree helper；失败重入与单条事实（REQ-GRP-01、REQ-DEL-01/02/03/04/05/07）。
   - 进度注记（2026-10-14，ImplD22）：三类 DELETE 统一编排 `cascade_delete_entity` 已红→绿→回归（`cascade_d2_2_full_closure`/`cascade_d2_2_late_child_attempt_zero_mutation`/`cascade_d2_2_failure_reentry` 3/0；N7 4/0、D1.1/D1.4 2/2、finalize/cleanup 3/2、it_web `delete_work_item_plan` 8/0）。墓碑/try-delete/资源 cleanup lease 排序/关系短锁内三道门禁（coding→entity_referenced→deletion_confirmation_required 409 稳定码，error.rs Main 授权三行）→pending+owned-index+purging→manager 失效→子依赖 purge（D1.1 children＋`purge_plan_sources` 新原语〔Main 裁定 source_store 独占，仅新增该原语〕＋plan-store/revision 既有 helper＋attempt 残留锁＋`cleanup_plan_shared_worktrees`〔D1.3c resolve 归属复核，他 Plan 保留/半残锁 owner 孤儿清〕＋`purge_plan_with_lease`＋advance checkpoint 按 session 纯索引）→根最后→残留复核→remove pending→complete；Deleted 幂等 200、根缺不 404、failpoint 重入一次收口。清单外 4 测试文件按新契约迁移（N7 helper confirmed=true/3A 幂等/3C 安全窗清锁、it_web part_13/14 confirmed、part_01 design confirmed、part_05 部分失败语义→零破坏更名迁移）登记待复核；404 映射缺与 D1.1 引用判据窄两缺口登记（报告 `cadence/reports/D2.2-report.md`）。复选框按本文件规约待独立审查后勾。
 - [ ] 3.3 D2.3 所有既有 Story/Design/Plan 删除入口消费服务端确认分类，Draft 零弹窗、Confirmed/未知旧历史恰一次，取消零删除、错误提示先删后置对象（REQ-DEL-04、REQ-DEL-05）。
   - 进度注记（2026-10-14，ImplD23）：前端单次确认流已红→绿→回归（`cascade_d2_3_single_confirmation`＋client `cascade_d2_3:*` 两件 2/0/2；crud+client 全量 33/0；前端全量 213 文件 2163/0；`npm run build`+tsc EXIT=0）。三 delete 函数第 4 参 `options?:{confirmed?:boolean}`（默认 URL 无 query、true 经 URLSearchParams 编码）；Workbench 删除改显式二次调用（非预创建 Promise），`deletion_confirmation_required` 为唯一弹窗分支（完整中文警告「永久清除内容、工作项、会话和 review，且不可恢复」），取消零出站第二请求/无刷新/退场/清选；group drawer 旧无条件确认移除（不双弹）；独立 WI 保原确认行为、文案不再声称自动删除 Coding Workspace；coding/reference/busy 零确认、服务端 message 先删后置直达错误面；普通错误不自动重试。web/errors 面（Main 授权）：error.rs 族分派补全 `entity_deleting`/`entity_deleted` 409＋N2 冻结族（`coding_plan_run_*` 19 码 409、4 码 422；`plan_coding_paused`/`invalidated`/`first_unit_completed` 409）；product_store_error 直通臂保留 details.kind/id（N3 断言兼容）；D2.2 登记 1 裁定：无墓碑无 root 的 Story/Design DELETE 经 NotFound{spec}→`spec_not_found` 404（Plan 分支为 `get_issue_work_item_plan` Io 形态、需 lifecycle_store 面 NotFound 语义改造，留 D2.4 终审登记）。清单外触碰登记：`IssueLifecycleWorkbench.drawer.test.tsx` 两处旧 drawer 确认断言机械迁移（新契约下 confirm 0 次）。
+  - 修复轮注记（2026-10-14，ImplD23，Main 审查派回 P1＋P2）：P1 族分派补变体——
+    `IdentityMismatch`/`InvalidRecord` 前缀臂（revision/graph/replay_drift/selection
+    族/attempt_binding 族/target_attempts/purge_scope 走 IdentityMismatch、
+    plan_revision/selection_unit 走 InvalidRecord，原先只匹配 Conflict 致 14 码落
+    other 兜底 500 不可达；单测改真实变体），error.rs 加族前缀兜底（未登记 kind
+    默认 409）；提交 `40f889e9`。P2 完整性码保留——`coding_plan_run_target`
+    （repo_lease_state 的 target 非法 UUID InvalidRecord）从前缀臂排除回 500
+    （owner 设计 §B「真实 IO/JSON/损坏身份不是 409」）；提交 `3c619c62`。两轮均
+    红→绿＋`plan_coding_n3_revision_deleting_and_needs_human_fail_closed`（真实
+    POST 路径）1/0 族复跑。观察项：族前缀兜底对后续新增 `coding_plan_run_*` 码
+    默认 409，新增完整性语义码时须像 target 一样显式排除；主树彼时被兄弟在途
+    编辑两度打断（E0596/E0061 等，非本包面），P1/P2 红绿证据在隔离树 HEAD＋
+    本包文件取证（D2.2 先例）。
 - [ ] 3.4 D2.4 Main 统一执行端到端与无误伤回归、独立终审、owner 审阅；仅在全部契约满足后更新主规格/归档，不把 strict 格式通过当实现已完成（REQ-GRP-01、REQ-DEL-01 至 REQ-DEL-07）。
