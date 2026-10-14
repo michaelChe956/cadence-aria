@@ -51,6 +51,7 @@ export function CodingWorkspaceGroupProgress({
   refreshKey,
   onDeleteAllCodingWorkspaces,
   groupDeleteBusy = false,
+  deleteBusy = false,
 }: {
   planId: string | null;
   currentWorkItemId: string | null;
@@ -63,6 +64,8 @@ export function CodingWorkspaceGroupProgress({
   onDeleteAllCodingWorkspaces?: () => void;
   /** 整组删除请求进行中：禁重复点击（设计 C：请求中禁重复点击）。 */
   groupDeleteBusy?: boolean;
+  /** P3：单删请求在途——互斥语义同步到入口可见态（与 groupDeleteBusy 取或）。 */
+  deleteBusy?: boolean;
 }) {
   const aggregateDto = usePlanCodingProgress({ projectId, issueId, planId, refreshKey });
   const aggregate = useMemo(
@@ -79,7 +82,7 @@ export function CodingWorkspaceGroupProgress({
       <button
         type="button"
         data-testid="plan-coding-delete-all"
-        disabled={groupDeleteBusy}
+        disabled={groupDeleteBusy || deleteBusy}
         onClick={() => onDeleteAllCodingWorkspaces()}
         className="inline-flex h-7 shrink-0 items-center rounded-md border border-[var(--aria-danger)] bg-white px-2 text-[11px] font-semibold text-[var(--aria-danger)] hover:bg-red-50 disabled:opacity-50"
       >

@@ -559,6 +559,8 @@ describe("CodingWorkspacePage H5 P2 修复轮:双删除 busy 互斥与地址复�
 
       await userEvent.click(topBar);
       expect(topBar).toBeDisabled();
+      // P3：互斥语义反映到控件可见态——单删在途时组删入口同步禁用。
+      expect(groupEntry).toBeDisabled();
 
       // 互斥：单删在途时整组入口零出站（现实现会顶号发起组删）。
       await userEvent.click(groupEntry);
@@ -615,6 +617,10 @@ describe("CodingWorkspacePage H5 P2 修复轮:双删除 busy 互斥与地址复�
       await screen.findByTestId("plan-coding-progress");
       await userEvent.click(screen.getByTestId("plan-coding-delete-all"));
       expect(screen.getByTestId("plan-coding-delete-all")).toBeDisabled();
+      // P3：互斥语义反映到控件可见态——组删在途时单删入口同步禁用。
+      expect(
+        screen.getByRole("button", { name: "仅删除当前 Coding 工作区" }),
+      ).toBeDisabled();
 
       // 互斥：整组在途时单删入口直接返回（不弹确认、零出站）。
       await userEvent.click(

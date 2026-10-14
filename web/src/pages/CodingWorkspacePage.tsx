@@ -782,7 +782,7 @@ export function CodingWorkspacePage({
         <div className="flex shrink-0 items-center gap-2">
           <button
             type="button"
-            disabled={deleteBusy || !storeMatchesAddress}
+            disabled={deleteBusy || groupDeleteBusy || !storeMatchesAddress}
             onClick={() => void handleDeleteCodingWorkspace()}
             className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--aria-danger)] bg-white px-2 text-xs font-semibold text-[var(--aria-danger)] hover:bg-red-50 disabled:opacity-50"
           >
@@ -910,6 +910,7 @@ export function CodingWorkspacePage({
           refreshKey={`${store.status ?? "-"}-${store.stage ?? "-"}-${store.units.length}`}
           onDeleteAllCodingWorkspaces={() => void handleDeleteAllCodingWorkspaces()}
           groupDeleteBusy={groupDeleteBusy}
+          deleteBusy={deleteBusy}
         />
       ) : null}
       <CodingDashboard projectId={address.projectId} issueId={address.issueId} />
