@@ -205,6 +205,7 @@ async fn campaign_stage3_recovery_matrix_amendment_context_window_reconnect_resu
     // 同 command：重开后的 worker 上 typed feedback 受理，turn 恰一次。
     let command_id = "cmd-campaign-matrix-amend-context";
     let turn_id = open_amendment_turn_and_run_fake_revision(&fixture, command_id).await;
+    close_amendment_review_verdict(&fixture, "matrix-context-verdict").await;
     let turns = fixture
         .lifecycle
         .list_human_gate_turns(&fixture.plan_session_id)
@@ -525,6 +526,7 @@ async fn campaign_stage3_recovery_matrix_amendment_binding_window_resumes_from_j
             &format!("cmd-campaign-matrix-amend-binding-{label}"),
         )
         .await;
+        close_amendment_review_verdict(&fixture, "matrix-binding-verdict").await;
         assert_eq!(matrix_plan_session_budget(&fixture), 1);
         assert_eq!(matrix_provider_ledger_len(&fixture), 1);
         let manifest = publish_real_amendment(&fixture).await;
@@ -616,6 +618,7 @@ async fn campaign_stage3_recovery_matrix_amendment_application_delivery_recovers
             &format!("cmd-campaign-matrix-amend-delivery-{label}"),
         )
         .await;
+        close_amendment_review_verdict(&fixture, "matrix-delivery-verdict").await;
         let manifest = publish_real_amendment(&fixture).await;
         let failpoint = if socket_write_succeeds {
             Some(register_plan_amendment_delivery_mark_failpoint(

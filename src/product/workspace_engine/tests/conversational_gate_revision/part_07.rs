@@ -613,3 +613,47 @@ async fn sg_06b_explicit_fresh_delivers_frozen_subprompt_same_attempt() {
         .expect("turn after drifted fresh");
     assert_eq!(turn_after.status, HumanGateTurnStatus::Running);
 }
+
+/// SG6b P2 修复轮（Main 审查派回）：claim→冻结件落盘的崩溃窗——
+/// 置位 hook 模拟「claim 已落、冻结件写点丢失」；冻结证据必须已在
+/// durable claim **之前**内容寻址持久化，否则 fresh 恢复链 load 不到→
+/// CANDIDATE_DRIFTED 0 start、turn 永卡 Running+Attempt2Claimed。
+#[tokio::test]
+async fn sg_06b_claim_persist_crash_window_keeps_frozen_evidence() {
+    use crate::product::models::workspace::StructuralGrantPhase;
+    use crate::product::workspace_engine::conversational_gate::SG6B_CLAIM_PERSIST_CRASH;
+
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("sg06b_persist_crash_window", 3);
+    let session_id = engine.session().session_id.clone();
+    let turn_id = open_running_revision_turn(&mut engine, "sg06b_crash_command").await;
+    let cycle = sg61_cycle_candidate();
+
+    SG6B_CLAIM_PERSIST_CRASH.store(true, std::sync::atomic::Ordering::SeqCst);
+    let rejected = engine
+        .run_sc_manual_revision_turn(&turn_id, cycle)
+        .await
+        .expect("claim 崩溃窗内仍 in-band 拒收");
+    assert!(matches!(
+        rejected,
+        crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected { .. }
+    ));
+
+    let grant = sg61_current_grant(&lifecycle, &session_id).expect("claim 已落");
+    assert_eq!(grant.phase, Some(StructuralGrantPhase::Attempt2Claimed));
+    let prompt_ref = grant.prompt_ref.as_deref().expect("claim 绑定 prompt 身份");
+    let digest_hex = prompt_ref.trim_start_matches("structural-prompt://");
+    let record = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("session");
+    let frozen_path = lifecycle
+        .app_paths()
+        .issue_lifecycle_root(&record.project_id, &record.issue_id)
+        .join("workspace-sessions")
+        .join(&session_id)
+        .join("structural-prompts")
+        .join(format!("{digest_hex}.json"));
+    assert!(
+        frozen_path.is_file(),
+        "P2：冻结证据必须在 durable claim 之前已持久化（崩溃窗不丢唯一写点）：{frozen_path:?}"
+    );
+}

@@ -527,6 +527,34 @@ pub(crate) async fn open_amendment_turn_and_run_fake_revision(
     turn.turn_id
 }
 
+/// SG6b（REQ-CG-03:74 消费方迁移，Main 裁定）：合法交付后 turn 仍
+/// Running/gate_busy，原 reviewer verdict 收口才 Completed/grant Resolved
+/// ——消费方按新契约驱动 verdict 收口，保持原终态链断言（crash 恢复/
+/// 预算恰减/终态回显意图不变）。
+pub(crate) async fn close_amendment_review_verdict(
+    fixture: &CampaignAmendmentFixture,
+    checkpoints: &str,
+) {
+    let mut engine = fixture.plan_session_engine(checkpoints);
+    engine
+        .complete_review(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "review pass".to_string(),
+                None,
+            ),
+            crate::web::workspace_ws_types::ReviewVerdict {
+                verdict: crate::web::workspace_ws_types::ReviewVerdictType::Pass,
+                comments: "review pass".to_string(),
+                summary: "review pass".to_string(),
+                findings: Vec::new(),
+                review_gate: crate::web::workspace_ws_types::ReviewGate::UserConfirmAllowed,
+                work_item_plan_review: None,
+                structured_output_diagnostic: None,
+            },
+        )
+        .await;
+}
+
 /// 真实 prepare/publish/approve 链：guidance-only 修订（图校验保持合法的
 /// 契约增量）→ `PlanRepairEngine` 出版 amendment → child session
 /// AwaitingConfirmation → `confirm_and_publish_plan_amendment`。
@@ -795,6 +823,7 @@ async fn campaign_stage3_amendment_returns_to_same_attempt_via_original_plan_ses
         .expect("sessions")
         .len();
     let turn_id = open_amendment_turn_and_run_fake_revision(&fixture, "cmd-campaign-amend-1").await;
+    close_amendment_review_verdict(&fixture, "campaign-amend-verdict").await;
     let durable_turns = fixture
         .lifecycle
         .list_human_gate_turns(&fixture.plan_session_id)

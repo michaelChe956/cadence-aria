@@ -434,6 +434,20 @@ impl super::WorkspaceEngine {
                                 let expected_for_claim = lifecycle
                                     .get_workspace_session(&self.session.session_id)
                                     .map_err(|error| error.to_string())?;
+                                // SG6b P2 修复轮（Main 审查派回）：冻结件
+                                // 内容寻址落盘先于 durable claim（幂等覆
+                                // 写）——claim 与落盘两 durable 动作间崩溃
+                                // 时重试链恒有冻结证据可读，fresh 恢复不
+                                // 至 CANDIDATE_DRIFTED 0 start、attempt2
+                                // 通道不静默丢失（REQ-SG-05「显式 fresh
+                                // 同 attempt None-resume/子 prompt」）。
+                                Self::persist_frozen_structural_prompt(
+                                    &lifecycle.app_paths(),
+                                    &self.session.project_id,
+                                    &self.session.issue_id,
+                                    &self.session.session_id,
+                                    &frozen,
+                                )?;
                                 match lifecycle.claim_structural_attempt(
                                     &expected_for_claim,
                                     turn_id,
@@ -449,21 +463,6 @@ impl super::WorkspaceEngine {
                                             provider_start_key,
                                         },
                                     ) => {
-                                        // SG6b（REQ-SG-05「显式 fresh 同
-                                        // attempt None-resume/子 prompt」）：
-                                        // claim 成功即把冻结件内容寻址持久
-                                        // 化——跨 spawn 的显式 fresh 重入据此
-                                        // 读回交付，不依赖 in-flight run 的
-                                        // 内存携带；持久化失败上抛（claim
-                                        // 事实已落，冻结证据缺席时 fresh
-                                        // join 会稳定码拒绝，0 start）。
-                                        Self::persist_frozen_structural_prompt(
-                                            &lifecycle.app_paths(),
-                                            &self.session.project_id,
-                                            &self.session.issue_id,
-                                            &self.session.session_id,
-                                            &frozen,
-                                        )?;
                                         diagnostics.push(format!(
                                             "STRUCTURAL_ATTEMPT_CLAIMED: attempt {attempt_no} binds frozen prompt {prompt_ref} on the same turn"
                                         ));
@@ -1441,3 +1440,10 @@ impl super::WorkspaceEngine {
         }
     }
 }
+
+/// SG6b P2 修复轮（Main 审查派回）：claim 成功后、冻结件落盘前的崩溃窗
+/// 模拟开关（仅测试）。开启时该窗内 panic，消费方断言冻结证据在 claim
+/// 前已持久化（内容寻址幂等）。
+#[cfg(test)]
+pub(crate) static SG6B_CLAIM_PERSIST_CRASH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);

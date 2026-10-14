@@ -39,8 +39,9 @@ use crate::product::coding_models::{
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
 use crate::product::coding_workspace_engine::tests::campaign_stage3_amendment::{
-    CampaignAmendmentFixture, campaign_amendment_fixture, confirm_real_amendment_publication,
-    open_amendment_turn_and_run_fake_revision, publish_real_amendment, stage_amendment_candidate,
+    CampaignAmendmentFixture, campaign_amendment_fixture, close_amendment_review_verdict,
+    confirm_real_amendment_publication, open_amendment_turn_and_run_fake_revision,
+    publish_real_amendment, stage_amendment_candidate,
 };
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::product::models::{
