@@ -1213,6 +1213,15 @@ pub struct PlanCodingStartRequest {
 
 /// N3（REQ-CS-06）：plan 聚合中的 target 仓投影。`lease_state` 沿现 repo
 /// worktree lock 事实（`absent|held|contested`），不造 provider_running 猜测。
+///
+/// S3（Q5 逐仓 PR 面板数据源 A）：九个 additive 字段承载逐仓交付事实，
+/// 类型均 `string | null`——`None` = 无对应事实（成员 attempt 已删/attempt
+/// 面字段缺失、无 ReviewRequest、无人工恢复记录）。`stage`/`push_status`
+/// 为 snake_case 文本（`coding_execution_stage_text`/`push_status_text`
+/// 值域，`push_status` 含 `skipped_not_configured`）；`repository_name`
+/// 解析自 checkout 路径末段（`resolve_plan_target_repository_name` 同款，
+/// 回落 id 字符串）；`manual_recovery_reason` 为开放值集原样透传（如
+/// `coding_runner_failed_while_running`）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PlanCodingTargetDto {
@@ -1221,14 +1230,28 @@ pub struct PlanCodingTargetDto {
     pub attempt_status: crate::product::coding_models::CodingAttemptStatus,
     pub worktree_path: Option<PathBuf>,
     pub lease_state: String,
+    pub repository_name: Option<String>,
+    pub branch_name: Option<String>,
+    pub base_branch: Option<String>,
+    pub stage: Option<String>,
+    pub head_commit: Option<String>,
+    pub push_status: Option<String>,
+    pub push_error: Option<String>,
+    pub review_request_id: Option<String>,
+    pub manual_recovery_reason: Option<String>,
 }
 
 /// N3（REQ-CS-06）：plan 聚合中的 WI 进度投影。`execution_state` 值域
 /// `initialized|running|waiting_dependency|waiting_slot|paused|completed|invalidated`
 ///（invalidated=run 授权失效，完成事实仍投影 completed），provider 事实
-/// （claim 相位 ≥ ProviderMayHaveStarted）与初始化 unit Running 区分；
-/// `waiting_reason` 值域
-/// `dependency_not_ready|execution_slot_occupied|plan_coding_continuation_not_enabled`。
+///（claim 相位 ≥ ProviderMayHaveStarted）与初始化 unit Running 区分；
+/// S3（Q3 投影真实化，additive）：`provider_started` 需 attempt.status==
+/// Running 才投影 `running`；attempt 级屏幕优先于 unit 级等待投影——
+/// `awaiting_manual_recovery`（AMR 现场 unit 仍 Running，不改写底层事实）、
+/// `waiting_human`（Blocked/WaitingForHuman）、`failed`、`aborted`。
+/// `waiting_reason` 编排等待子集值域
+/// `dependency_not_ready|execution_slot_occupied|plan_coding_continuation_not_enabled`；
+/// `awaiting_manual_recovery` 时为 `manual_recovery_reason` 开放值集透传。
 /// Slice B（仪表盘跨仓依赖投影）：另带全量直接依赖（权威绑定，跨桶不失真）、
 /// 全图拓扑序 `order_index` 与桶内 `summary`，前端据此重建 plan 全图拓扑/依赖链。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

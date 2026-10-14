@@ -846,7 +846,10 @@ async fn plan_coding_n3_one_click_binds_all_and_starts_selected_once() {
     );
 
     let core = unit_dto(&result.progress, "wi_core");
-    assert_eq!(core.execution_state, "running");
+    // S3（投影真实化）：POST 回执窗口 runner 已放行但 admission 尚未跨过
+    //（attempt 仍 Created），provider_started 需 attempt.status==Running——
+    // 回执投影 initialized，admission 跨过后的 GET 轮询转 running。
+    assert_eq!(core.execution_state, "initialized");
     assert_eq!(core.target_repository_id, fixture.busi.0.to_string());
     assert_eq!(core.attempt_id, busi_attempt.id);
     assert!(core.unsatisfied_dependency_ids.is_empty());
@@ -882,6 +885,300 @@ async fn plan_coding_n3_one_click_binds_all_and_starts_selected_once() {
     );
     assert_eq!(panel.target_repository_id, fixture.frontend.0.to_string());
     assert_eq!(panel.attempt_id, frontend_attempt.id);
+}
+// ─── S3（投影真实化，设计 DesignPushLocal2 Q3）：attempt 状态守卫 ───
+
+/// 手工确定性构造 busi 首启场景（无 runner 竞态）：prepare → advance →
+/// bind(selection=wi_core) → claim → 相位推进到 ProviderMayHaveStarted；
+/// `executable=true` 时再走生产 admission CAS 到 Running。
+async fn manually_provider_claimed_busi(
+    fixture: &N3Fixture,
+    command_id: &str,
+    executable: bool,
+) -> crate::product::coding_models::CodingExecutionAttempt {
+    let run_store = fixture.run_store();
+    let coding_store = fixture.coding_store();
+    let run = run_store
+        .prepare(PROJECT_ID, ISSUE_ID, PLAN_ID, command_id, PLAN_REVISION_ID)
+        .unwrap();
+    let outcome = advance_plan(
+        &fixture.state,
+        AdvanceInput {
+            command_id: run.command_id.clone(),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: PLAN_ID.to_string(),
+        },
+        AdvancePlanOrigin::Manual,
+    )
+    .await
+    .unwrap();
+    let AdvanceOutcome::Completed {
+        target_attempts, ..
+    } = outcome
+    else {
+        panic!("expected advance Completed, got {outcome:?}");
+    };
+    let selection = fixture.busi_selection(command_id);
+    let bound = run_store
+        .bind_ready(&run, &target_attempts, Some(selection.clone()))
+        .unwrap();
+    run_store.mark_start_requested(&bound).unwrap();
+    let busi_attempt = fixture.busi_attempt();
+    let crate::product::coding_attempt_store::ClaimCodingStartOutcome::Claimed(claimed) =
+        coding_store
+            .claim_coding_start(
+                &busi_attempt,
+                &selection.start_command_id,
+                &CodingStartOrigin::Manual,
+            )
+            .unwrap()
+    else {
+        panic!("expected fresh claim");
+    };
+    for phase in [
+        CodingStartPhase::RunnerRegistered,
+        CodingStartPhase::ProviderMayHaveStarted,
+    ] {
+        coding_store
+            .advance_coding_start_phase(&claimed, &selection.start_command_id, phase)
+            .unwrap();
+    }
+    if executable {
+        coding_store
+            .admit_and_transition_attempt_to_executable(PROJECT_ID, ISSUE_ID, &busi_attempt.id)
+            .unwrap();
+    }
+    fixture.busi_attempt()
+}
+
+/// S3 红绿判据：AMR 且 unit Running 且 claim≥ProviderMayHaveStarted →
+/// `awaiting_manual_recovery`（waiting_reason 透传 manual_recovery_reason），
+/// 不得再投影 `running`；同条件 Running 仍为 `running`。
+#[tokio::test]
+async fn plan_coding_s3_amr_attempt_projects_recovery_not_provider_running() {
+    let fixture = n3_fixture().await;
+    let attempt = manually_provider_claimed_busi(&fixture, "cmd_s3_amr", true).await;
+    assert_eq!(attempt.status, CodingAttemptStatus::Running);
+
+    // 同条件 Running 仍 running（守卫不误伤真实执行）。
+    let progress = get_progress(&fixture.state).await.unwrap();
+    assert_eq!(unit_dto(&progress, "wi_core").execution_state, "running");
+
+    // 事故形态：runner 死亡转 AMR——unit 仍 Running、claim 仍 ≥Provider、
+    // active_unit_id 对齐，旧投影会谎报 provider running。
+    fixture
+        .coding_store()
+        .transition_to_awaiting_manual_recovery(&attempt.id, "coding_runner_failed_while_running")
+        .unwrap();
+    let progress = get_progress(&fixture.state).await.unwrap();
+    let core = unit_dto(&progress, "wi_core");
+    assert_eq!(core.execution_state, "awaiting_manual_recovery");
+    assert_eq!(
+        core.waiting_reason.as_deref(),
+        Some("coding_runner_failed_while_running")
+    );
+    // unit 底层事实不被投影层改写（恢复复用 Running unit）。
+    assert_eq!(core.unit_status, CodingExecutionUnitStatus::Running);
+}
+
+/// S3：claim≥Provider 但 admission 未跨（attempt 仍 Created）不构成 provider
+/// running——POST 回执窗口/手工相位推进现场回落 initialized。
+#[tokio::test]
+async fn plan_coding_s3_created_claim_provider_window_is_not_provider_running() {
+    let fixture = n3_fixture().await;
+    let attempt = manually_provider_claimed_busi(&fixture, "cmd_s3_window", false).await;
+    assert_eq!(attempt.status, CodingAttemptStatus::Created);
+    let progress = get_progress(&fixture.state).await.unwrap();
+    let core = unit_dto(&progress, "wi_core");
+    assert_eq!(core.unit_status, CodingExecutionUnitStatus::Running);
+    assert_eq!(
+        core.execution_state, "initialized",
+        "claim≥Provider 但 attempt 未 Running 不得投影 provider running"
+    );
+}
+
+/// S3：attempt 级人控/终态屏幕——Blocked/WaitingForHuman → waiting_human，
+/// Failed → failed，Aborted → aborted（unit 级事实不回滚，仅投影层屏幕）。
+#[tokio::test]
+async fn plan_coding_s3_attempt_statuses_screen_execution_state() {
+    let cases: &[(&str, CodingAttemptStatus, &str)] = &[
+        (
+            "cmd_s3_wfh",
+            CodingAttemptStatus::WaitingForHuman,
+            "waiting_human",
+        ),
+        (
+            "cmd_s3_blocked",
+            CodingAttemptStatus::Blocked,
+            "waiting_human",
+        ),
+        ("cmd_s3_failed", CodingAttemptStatus::Failed, "failed"),
+        ("cmd_s3_aborted", CodingAttemptStatus::Aborted, "aborted"),
+    ];
+    for (command_id, status, expected) in cases {
+        let fixture = n3_fixture().await;
+        let attempt = manually_provider_claimed_busi(&fixture, command_id, true).await;
+        fixture
+            .coding_store()
+            .update_attempt_status(PROJECT_ID, ISSUE_ID, &attempt.id, status.clone())
+            .unwrap();
+        let progress = get_progress(&fixture.state).await.unwrap();
+        assert_eq!(
+            unit_dto(&progress, "wi_core").execution_state,
+            *expected,
+            "attempt {status:?} must screen the unit projection"
+        );
+    }
+}
+
+/// S3（Q5 逐仓 PR 面板）：target 行九字段含 review request 数据——attempt
+/// 面（branch/base/stage/head_commit/manual_recovery_reason）+ 最新
+/// ReviewRequest 推送面（push_status 含 `skipped_not_configured`、
+/// push_error、review_request_id）+ 仓名解析；未启 target 的无事实面为 None。
+#[tokio::test]
+async fn plan_coding_s3_target_attempt_rows_expose_repository_and_review_facts() {
+    use crate::product::coding_models::{
+        PushStatus, RemoteKind, ReviewRequest, ReviewRequestKind, ReviewRequestOwnerKind,
+    };
+
+    fn s3_review_request(
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+        id: &str,
+        push_status: PushStatus,
+        push_error: Option<&str>,
+        created_at: &str,
+    ) -> ReviewRequest {
+        ReviewRequest {
+            id: id.to_string(),
+            attempt_id: attempt.id.clone(),
+            kind: ReviewRequestKind::GitBranchOnly,
+            remote_kind: RemoteKind::GenericGit,
+            remote: "origin".to_string(),
+            base_branch: attempt.base_branch.clone(),
+            branch_name: attempt.branch_name.clone(),
+            commit_sha: "deadbeef0001".to_string(),
+            push_status,
+            external_url: None,
+            manual_instructions: Vec::new(),
+            push_error: push_error.map(str::to_string),
+            owner_kind: ReviewRequestOwnerKind::Attempt,
+            pointer_publication_id: None,
+            revoked: false,
+            created_at: created_at.to_string(),
+            updated_at: created_at.to_string(),
+        }
+    }
+
+    let fixture = n3_fixture().await;
+    let coding_store = fixture.coding_store();
+    let attempt = manually_provider_claimed_busi(&fixture, "cmd_s3_dto", true).await;
+
+    // 推送窗口现场：ReviewRequest 阶段 + head_commit + 推送失败记录。
+    let mut updated = coding_store
+        .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .unwrap();
+    updated.stage = CodingExecutionStage::ReviewRequest;
+    updated.head_commit = Some("deadbeef0001".to_string());
+    updated.review_request_id = Some("review_request_s3_0001".to_string());
+    coding_store
+        .update_attempt_non_status_fields(&updated)
+        .unwrap();
+    coding_store
+        .save_review_request(
+            &updated,
+            &s3_review_request(
+                &updated,
+                "review_request_s3_0001",
+                PushStatus::Failed,
+                Some("remote push rejected"),
+                CREATED_AT,
+            ),
+        )
+        .unwrap();
+    coding_store
+        .transition_to_awaiting_manual_recovery(&attempt.id, "coding_runner_failed_while_running")
+        .unwrap();
+
+    let progress = get_progress(&fixture.state).await.unwrap();
+    let busi_row = progress
+        .target_attempts
+        .iter()
+        .find(|row| row.target_repository_id == fixture.busi.0.to_string())
+        .unwrap();
+    assert_eq!(busi_row.repository_name.as_deref(), Some("n3-busi"));
+    assert_eq!(
+        busi_row.branch_name.as_deref(),
+        Some(attempt.branch_name.as_str())
+    );
+    assert_eq!(
+        busi_row.base_branch.as_deref(),
+        Some(attempt.base_branch.as_str())
+    );
+    assert_eq!(busi_row.stage.as_deref(), Some("review_request"));
+    assert_eq!(busi_row.head_commit.as_deref(), Some("deadbeef0001"));
+    assert_eq!(busi_row.push_status.as_deref(), Some("failed"));
+    assert_eq!(busi_row.push_error.as_deref(), Some("remote push rejected"));
+    assert_eq!(
+        busi_row.review_request_id.as_deref(),
+        Some("review_request_s3_0001")
+    );
+    assert_eq!(
+        busi_row.manual_recovery_reason.as_deref(),
+        Some("coding_runner_failed_while_running")
+    );
+    assert_eq!(
+        busi_row.attempt_status,
+        CodingAttemptStatus::AwaitingManualRecovery
+    );
+
+    // 最新 ReviewRequest 胜出 + skipped_not_configured 透传（S2a 值域）。
+    let latest = coding_store
+        .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .unwrap();
+    coding_store
+        .save_review_request(
+            &latest,
+            &s3_review_request(
+                &latest,
+                "review_request_s3_0002",
+                PushStatus::SkippedNotConfigured,
+                None,
+                "2026-10-13T01:00:00Z",
+            ),
+        )
+        .unwrap();
+    let progress = get_progress(&fixture.state).await.unwrap();
+    let busi_row = progress
+        .target_attempts
+        .iter()
+        .find(|row| row.target_repository_id == fixture.busi.0.to_string())
+        .unwrap();
+    assert_eq!(
+        busi_row.push_status.as_deref(),
+        Some("skipped_not_configured")
+    );
+    assert_eq!(busi_row.push_error, None);
+    assert_eq!(
+        busi_row.review_request_id.as_deref(),
+        Some("review_request_s3_0002")
+    );
+
+    // 未启 target：attempt 事实在（Created），无 review/恢复事实 → null 面。
+    let web_row = progress
+        .target_attempts
+        .iter()
+        .find(|row| row.target_repository_id == fixture.web.0.to_string())
+        .unwrap();
+    assert_eq!(web_row.repository_name.as_deref(), Some("n3-web"));
+    assert!(web_row.branch_name.is_some());
+    assert!(web_row.base_branch.is_some());
+    assert_eq!(web_row.stage.as_deref(), Some("prepare_context"));
+    assert_eq!(web_row.head_commit, None);
+    assert_eq!(web_row.push_status, None);
+    assert_eq!(web_row.push_error, None);
+    assert_eq!(web_row.review_request_id, None);
+    assert_eq!(web_row.manual_recovery_reason, None);
 }
 
 /// REQ-CS-02：同 command 重放与服务重启（第二 command）都复用同一冻结
@@ -1465,8 +1762,13 @@ async fn plan_coding_n3_deleted_member_aggregates_invalidated_not_500() {
             .iter()
             .all(|unit| unit.logical_work_item_id != "wi_registration")
     );
-    // 未受影响成员的事实保持：busi 首项 provider 执行中。
-    assert_eq!(unit_dto(&progress, "wi_core").execution_state, "running");
+    // 未受影响成员的事实保持：busi 首项 claim≥Provider + unit Running，
+    // 但 attempt 未跨 admission（手工相位推进现场 status 仍 Created）——
+    // S3 守卫下回 initialized（同条件 Running 才是 running）。
+    assert_eq!(
+        unit_dto(&progress, "wi_core").execution_state,
+        "initialized"
+    );
 
     // 成员删除授权失效（N2 invalidate，N7 接线后的事实）→ 整体失效文案。
     run_store

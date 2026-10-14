@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::super::dto::{coding_execution_stage_text, push_status_text};
 use super::super::support::*;
 use super::super::*;
 use crate::product::advance_store::{
@@ -35,9 +36,12 @@ use crate::product::coding_plan_run::{
 };
 use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
 use crate::product::entity_operation_store::EntityOperationStore;
+use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::automation::OperationState;
+use crate::product::project_store::ProjectStore;
+use crate::product::repository_store::RepositoryStore;
 use crate::web::advance_plan::{AdvancePlanOrigin, advance_plan};
 use crate::web::coding_start::{StartCodingCommand, StartCodingOutcome, start_coding_once};
 use crate::web::state::CodingAttemptRunKey;
@@ -1464,6 +1468,33 @@ fn repo_lease_state(
     }
 }
 
+/// S3（Q5）：plan target 仓展示名（`resolve_plan_target_repository_name`
+/// 同款解析）：logical id 按 issue 归属 codebase 走 strict/per-LC 权威解析，
+/// 取 checkout 路径末段目录名；解析不出末段回落 logical id 字符串。
+fn plan_target_repository_display_name(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    issue_lc_id: Option<&str>,
+    target_repository_id: &str,
+) -> Result<String, ProductStoreError> {
+    let Ok(repository_id) = uuid::Uuid::parse_str(target_repository_id) else {
+        return Ok(target_repository_id.to_string());
+    };
+    let project = ProjectStore::new(paths.clone()).get(project_id)?;
+    let (_, checkout, _) = RepositoryStore::for_project(paths.clone(), &project)
+        .resolve_logical_repository_for_issue_codebase(
+            project_id,
+            issue_lc_id,
+            LogicalRepositoryId(repository_id),
+        )?;
+    Ok(checkout
+        .canonical_path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| target_repository_id.to_string()))
+}
+
 struct PlanCodingTargetFacts {
     binding: AdvanceTargetAttemptBinding,
     /// `None` = 冻结成员 attempt 已被独立删除（REQ-CS-07 失效窗口）。
@@ -1561,6 +1592,9 @@ pub(crate) fn build_plan_coding_progress(
     let invalidated = run.is_some_and(|run| run.phase == CodingPlanRunPhase::Invalidated);
 
     let lifecycle = LifecycleStore::new(paths.clone());
+    // S3（Q5）：仓展示名解析按 issue 归属 codebase（同 plan_group_projection
+    // 口径，逐 target 只读派生）。
+    let issue = IssueStore::new(paths.clone()).get(project_id, issue_id)?;
     let mut target_attempts = Vec::new();
     for facts in &facts {
         let lease_state = repo_lease_state(
@@ -1576,12 +1610,55 @@ pub(crate) fn build_plan_coding_progress(
             // 删除闭包按真实事实清理，此处不猜测资源）。
             None => (CodingAttemptStatus::Aborted, None),
         };
+        // S3（Q5 逐仓 PR 面板）：attempt 面事实 + 最新 ReviewRequest 推送面；
+        // 成员已删（attempt None）或无对应事实时逐字段为 None。
+        let repository_name = plan_target_repository_display_name(
+            paths,
+            project_id,
+            issue.logical_codebase_id.as_deref(),
+            &facts.binding.target_repository_id,
+        )?;
+        let latest_review_request = match &facts.attempt {
+            Some(attempt) => store
+                .list_review_requests(project_id, issue_id, &attempt.id)?
+                .into_iter()
+                .next_back(),
+            None => None,
+        };
+        let (branch_name, base_branch, stage, head_commit, manual_recovery_reason) =
+            match &facts.attempt {
+                Some(attempt) => (
+                    Some(attempt.branch_name.clone()),
+                    Some(attempt.base_branch.clone()),
+                    Some(coding_execution_stage_text(&attempt.stage).to_string()),
+                    attempt.head_commit.clone(),
+                    attempt.manual_recovery_reason.clone(),
+                ),
+                None => (None, None, None, None, None),
+            };
+        let (push_status, push_error, review_request_id) = match latest_review_request.as_ref() {
+            Some(review) => (
+                Some(push_status_text(&review.push_status).to_string()),
+                review.push_error.clone(),
+                Some(review.id.clone()),
+            ),
+            None => (None, None, None),
+        };
         target_attempts.push(PlanCodingTargetDto {
             target_repository_id: facts.binding.target_repository_id.clone(),
             attempt_id: facts.binding.attempt_id.clone(),
             attempt_status,
             worktree_path,
             lease_state,
+            repository_name: Some(repository_name),
+            branch_name,
+            base_branch,
+            stage,
+            head_commit,
+            push_status,
+            push_error,
+            review_request_id,
+            manual_recovery_reason,
         });
     }
 
@@ -1619,6 +1696,10 @@ pub(crate) fn build_plan_coding_progress(
         // provider 事实（durable claim 相位 ≥ ProviderMayHaveStarted + active
         // 指针 + unit Running）与初始化桶首 unit Running（物化事实）严格分开
         //（REQ-CS-04）：Claimed/RunnerRegistered 回落 initialized。
+        // S3（Q3 投影真实化）：provider running 还需 attempt.status==Running——
+        // AMR/人控/终态现场的 unit 仍 Running、claim 仍 ≥Provider，但 attempt
+        // 已不在执行（POST 回执窗口 admission 亦未跨），不得投影 running。
+        let attempt_status = facts.attempt.as_ref().map(|attempt| attempt.status.clone());
         let provider_started = facts
             .attempt
             .as_ref()
@@ -1633,6 +1714,7 @@ pub(crate) fn build_plan_coding_progress(
                 .attempt
                 .as_ref()
                 .is_some_and(|attempt| attempt.active_unit_id.as_deref() == Some(unit.id.as_str()))
+            && attempt_status == Some(CodingAttemptStatus::Running)
             && unit.status == CodingExecutionUnitStatus::Running;
         let (execution_state, waiting_reason): (&str, Option<&str>) =
             if unit.status == CodingExecutionUnitStatus::Completed {
@@ -1641,6 +1723,27 @@ pub(crate) fn build_plan_coding_progress(
             } else if invalidated {
                 // run Invalidated：整体失效文案（成员删除授权失效）。
                 ("invalidated", None)
+            } else if attempt_status == Some(CodingAttemptStatus::AwaitingManualRecovery) {
+                // S3（Q3）：attempt 级屏幕优先于 unit 级等待/执行投影——AMR
+                // 现场 unit 仍 Running（恢复复用，不改写底层事实），真实事实
+                // 是等待人工恢复；waiting_reason 原样透传 manual_recovery_reason
+                //（开放值集）。
+                (
+                    "awaiting_manual_recovery",
+                    facts
+                        .attempt
+                        .as_ref()
+                        .and_then(|attempt| attempt.manual_recovery_reason.as_deref()),
+                )
+            } else if attempt_status == Some(CodingAttemptStatus::Failed) {
+                ("failed", None)
+            } else if attempt_status == Some(CodingAttemptStatus::Aborted) {
+                ("aborted", None)
+            } else if matches!(
+                attempt_status,
+                Some(CodingAttemptStatus::Blocked | CodingAttemptStatus::WaitingForHuman)
+            ) {
+                ("waiting_human", None)
             } else if !unsatisfied_dependency_ids.is_empty() {
                 ("waiting_dependency", Some("dependency_not_ready"))
             } else if provider_started {
