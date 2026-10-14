@@ -19,9 +19,20 @@ pub(crate) use super::types::{ConfirmationTrustContext, ConfirmationTrustWaiting
 
 mod story_terminate;
 
+#[derive(Debug)]
 pub(crate) enum ScManualRevisionResult {
-    Accepted { artifact_ref: String },
-    ValidationRejected { diagnostics: Vec<String> },
+    Accepted {
+        artifact_ref: String,
+    },
+    ValidationRejected {
+        diagnostics: Vec<String>,
+        /// SG6a.2（Main 裁定(a)）：`Some` = 本次拒收已同 turn claim
+        /// attempt2（冻结机器指令 prompt 身份/全文与 provider start key
+        /// 随案），handler 消费唯一 claim/冻结 prompt 驱动 attempt2；
+        /// `None` = 无结构授权窗口（原门/operational 等待/耗尽），turn
+        /// 不因拒收终态化。
+        claim: Option<ScRevisionClaimCarry>,
+    },
 }
 pub(crate) const HUMAN_GATE_COMMAND_ID_MAX_BYTES: usize = 256;
 pub(crate) const HUMAN_GATE_BUDGET_EXHAUSTED_CODE: &str = "HUMAN_GATE_BUDGET_EXHAUSTED";

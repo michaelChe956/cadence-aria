@@ -74,6 +74,18 @@ pub(crate) async fn fail_cancelled_human_gate_revision_turn(
     }
 }
 
+/// SG6a.2（REQ-CG-03「修订不过校验」）：SC 修订 turn 的 in-band 结构
+/// 拒收回显稳定码——engine 侧 turn 不因拒收终态化，本帧不冒充
+/// `HumanGateTurnFailed` 终态（机器修复窗口/原门/等待面承接）。
+const SC_MANUAL_REVISION_VALIDATION_REJECTED_CODE: &str = "SC_MANUAL_REVISION_VALIDATION_REJECTED";
+/// SG6a.2：attempt2 冻结交付 join 拒绝（SG5.3 稳定码族以 message 携带）
+/// ——零 provider start、turn 不终态、typed 等待。
+const SC_MANUAL_ATTEMPT2_DELIVERY_REJECTED_CODE: &str = "SC_MANUAL_ATTEMPT2_DELIVERY_REJECTED";
+/// SG6a.2：durable 已 claim 的结构 attempt2 跨 spawn 等待——冻结机器
+/// 指令 prompt 由 claim 时的 in-flight run 内联消费，跨 spawn 不可重建
+/// （P2 修复 aa823108 恢复车道语义的 spawn 侧防线）。
+const SC_MANUAL_STRUCTURAL_CLAIM_PENDING_CODE: &str = "SC_MANUAL_STRUCTURAL_CLAIM_PENDING";
+
 pub(super) async fn spawn_provider_run_with_start_mode(
     run_context: ProviderRunContext,
     run_kind: ProviderRunKind,
@@ -997,7 +1009,53 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             }
                         }
                     }
-                    let prompt = if manual_fresh_recovery || prompt.is_empty() {
+                    // SG6a.2：durable 活动 grant（phase=Attempt2Claimed）＝
+                    // 本 turn 的 attempt2 已被唯一 claim（冻结机器指令
+                    // prompt 身份在案）。冻结全文只随 claim 时的 in-flight
+                    // run 内联交付，跨 spawn 不可重建——原反馈 prompt 重入
+                    // 会错消费唯一 attempt2（REQ-CG-03 机器指令驱动；P2
+                    // 修复 aa823108 恢复车道语义的 spawn 侧防线）。读取
+                    // 失败按 pending 处理（fail-closed 等待，零 start），
+                    // 终结收口归 SG6a.3。
+                    let structural_claim_pending = LifecycleStore::new(
+                        run_context_clone.app_paths.clone(),
+                    )
+                    .get_workspace_session(&engine.session().session_id)
+                    .map(|record| {
+                        record
+                            .structural_governance_state
+                            .as_ref()
+                            .and_then(|state| state.current_grant.as_ref())
+                            .is_some_and(|grant| {
+                                grant.turn_id.as_deref() == Some(turn_id.as_str())
+                                    && grant.phase
+                                        == Some(crate::product::models::workspace::StructuralGrantPhase::Attempt2Claimed)
+                            })
+                    })
+                    .unwrap_or(true);
+                    if structural_claim_pending {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        drop(provider_drive_guard.take());
+                        manager_for_task.finish_run(run_token).await;
+                        let _ = send_json_outbound(
+                            &outbound_tx_for_task,
+                            &WsOutMessage::ProtocolError {
+                                code: SC_MANUAL_STRUCTURAL_CLAIM_PENDING_CODE.to_string(),
+                                message: format!(
+                                    "sc manual revision turn {turn_id} has a claimed structural attempt2 \
+                                     (frozen machine-instruction prompt identity on record); the frozen \
+                                     delivery is consumed by the in-flight run and cannot be reassembled \
+                                     by a new spawn; no provider was started and the turn/gate/budget \
+                                     are preserved; waiting for structural closure"
+                                ),
+                                context: None,
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                    let mut attempt_prompt = if manual_fresh_recovery || prompt.is_empty() {
                         let turn = match LifecycleStore::new(run_context_clone.app_paths.clone())
                             .get_human_gate_turn(&engine.session().session_id, &turn_id)
                         {
@@ -1094,72 +1152,12 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                     // AuthorRun / 新建）见 `begin_work_item_plan_human_gate_revision_run`。
                     let node_id = engine.begin_work_item_plan_human_gate_revision_run().await;
                     let author_provider = engine.session().author_provider.clone();
-                    engine
-                        .emit_provider_prompt_event(
-                            &node_id,
-                            prompt.clone(),
-                            "发送给 SC human-gate revision provider 的完整修订提示词",
-                            Some(author_provider.clone()),
-                        )
-                        .await;
-                    let worktree_path = engine
-                        .session()
-                        .repository_path
-                        .as_ref()
-                        .cloned()
-                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-                    // B2d：fresh 重入全新 native（resume_provider_session_id=None
-                    // 结构保证——`build_work_item_plan_streaming_input_fresh`）；
-                    // Ordinary 保持既有 resume 语义（行为不变）。
-                    let provider_input = if manual_fresh_recovery {
-                        engine.build_work_item_plan_streaming_input_fresh(
-                            crate::product::work_item_split_engine::types::provider_name_to_type(
-                                &author_provider,
-                            ),
-                            prompt.clone(),
-                            worktree_path.to_string_lossy().to_string(),
-                            author_provider.clone(),
-                            PlanAuthorOutputContract::Structured,
-                        )
-                    } else {
-                        engine.build_work_item_plan_streaming_input(
-                            crate::product::work_item_split_engine::types::provider_name_to_type(
-                                &author_provider,
-                            ),
-                            prompt.clone(),
-                            worktree_path.to_string_lossy().to_string(),
-                            author_provider.clone(),
-                            PlanAuthorOutputContract::Structured,
-                        )
-                    };
-                    let provider_input = match provider_input {
-                        Ok(provider_input) => provider_input,
-                        Err(message) => {
-                            // REQ-PIB-02（T2.3）：基线不可解析 → 门内轮次失败（可观测）。
-                            let _ = engine
-                                .fail_human_gate_turn(
-                                    &turn_id,
-                                    HumanGateTurnFailureClass::ProviderErr,
-                                )
-                                .await;
-                            engine.mark_active_run_finished(&run_label);
-                            drop(engine);
-                            let _ = send_json_outbound(
-                                &outbound_tx_for_task,
-                                &WsOutMessage::HumanGateTurnFailed {
-                                    turn_id,
-                                    failure_class: "provider_err".to_string(),
-                                    message,
-                                },
-                            )
-                            .await;
-                            return;
-                        }
-                    };
                     // B2b1(Task 5.2,REQ-PLN-08):修订 turn 与 fresh 轮的
                     // envelope target 同源恒聚合根锚(E native anchor 消费面
                     // 已收敛进 `resolve_plan_author_launch`,成员锚参数移除
-                    // ——r27 的锚漂移机制在 root 锚下结构性消失)。
+                    // ——r27 的锚漂移机制在 root 锚下结构性消失)。SG6a.2:
+                    // sameauthor/gateway key——launch 循环外解析一次,两次
+                    // 物理 attempt 共用同一 gateway 启动身份。
                     let launch = resolve_plan_author_launch(&engine);
                     let launch = match launch {
                         Ok(launch) => launch,
@@ -1185,127 +1183,321 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             return;
                         }
                     };
-                    let provider_input = engine.attach_tool_policy_audit(provider_input);
-                    // Task 1b 段②生产臂:门修订轮单次 provider run 同样绑定
-                    // split run 身份;Markdown 修订产物按原文存档收口。
-                    let plan_split_run = match begin_plan_split_run_if_logical(
-                        &launch,
-                        &crate::product::lifecycle_store::LifecycleStore::new(
-                            run_context_clone.app_paths.clone(),
-                        ),
-                        &run_context_clone.session_record.project_id,
-                        &run_context_clone.session_record.issue_id,
-                        &author_provider,
-                        &engine.session().session_id,
-                    ) {
-                        Ok(run) => run,
-                        Err(message) => {
-                            let _ = engine
-                                .fail_human_gate_turn(
-                                    &turn_id,
-                                    HumanGateTurnFailureClass::ProviderErr,
-                                )
-                                .await;
-                            engine.mark_active_run_finished(&run_label);
-                            drop(engine);
-                            let _ = send_json_outbound(
-                                &outbound_tx_for_task,
-                                &WsOutMessage::HumanGateTurnFailed {
-                                    turn_id,
-                                    failure_class: "provider_err".to_string(),
-                                    message,
-                                },
+                    // SG6a.2(REQ-CG-03):同 turn 物理 attempt 循环——含原
+                    // 调用最多 2,claim 与真实 start 分账。attempt1=原反馈
+                    // prompt;attempt1 结构拒收携案 claim 时以冻结机器指令
+                    // prompt 内联驱动 attempt2(冻结交付 join 拒→零 start)。
+                    let mut structural_claim_consumed = false;
+                    loop {
+                        engine
+                            .emit_provider_prompt_event(
+                                &node_id,
+                                attempt_prompt.clone(),
+                                "发送给 SC human-gate revision provider 的完整修订提示词",
+                                Some(author_provider.clone()),
                             )
                             .await;
-                            return;
-                        }
-                    };
-                    // T6 fix-loop r2：trust 分类已下沉
-                    // start_work_item_plan_author 的 Logical 分支共享口。
-                    let provider_session = start_work_item_plan_author(
-                        launch,
-                        provider_for_run.clone(),
-                        provider_input,
-                        run_cancel.clone(),
-                        plan_split_run.as_ref(),
-                    )
-                    .await;
-                    let full_output = match engine
-                        .drive_work_item_plan_provider_session_to_output(
-                            provider_session,
-                            &mut command_rx,
-                            node_id,
-                            author_provider,
+                        let worktree_path = engine
+                            .session()
+                            .repository_path
+                            .as_ref()
+                            .cloned()
+                            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                        // B2d：fresh 重入全新 native（resume_provider_session_id=None
+                        // 结构保证——`build_work_item_plan_streaming_input_fresh`）；
+                        // Ordinary 保持既有 resume 语义（行为不变）。
+                        let provider_input = if manual_fresh_recovery {
+                            engine.build_work_item_plan_streaming_input_fresh(
+                            crate::product::work_item_split_engine::types::provider_name_to_type(
+                                &author_provider,
+                            ),
+                            attempt_prompt.clone(),
+                            worktree_path.to_string_lossy().to_string(),
+                            author_provider.clone(),
+                            PlanAuthorOutputContract::Structured,
                         )
+                        } else {
+                            engine.build_work_item_plan_streaming_input(
+                            crate::product::work_item_split_engine::types::provider_name_to_type(
+                                &author_provider,
+                            ),
+                            attempt_prompt.clone(),
+                            worktree_path.to_string_lossy().to_string(),
+                            author_provider.clone(),
+                            PlanAuthorOutputContract::Structured,
+                        )
+                        };
+                        let provider_input = match provider_input {
+                            Ok(provider_input) => provider_input,
+                            Err(message) => {
+                                // REQ-PIB-02（T2.3）：基线不可解析 → 门内轮次失败（可观测）。
+                                let _ = engine
+                                    .fail_human_gate_turn(
+                                        &turn_id,
+                                        HumanGateTurnFailureClass::ProviderErr,
+                                    )
+                                    .await;
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let _ = send_json_outbound(
+                                    &outbound_tx_for_task,
+                                    &WsOutMessage::HumanGateTurnFailed {
+                                        turn_id,
+                                        failure_class: "provider_err".to_string(),
+                                        message,
+                                    },
+                                )
+                                .await;
+                                return;
+                            }
+                        };
+                        let provider_input = engine.attach_tool_policy_audit(provider_input);
+                        // Task 1b 段②生产臂:门修订轮单次 provider run 同样绑定
+                        // split run 身份;Markdown 修订产物按原文存档收口。
+                        let plan_split_run = match begin_plan_split_run_if_logical(
+                            &launch,
+                            &crate::product::lifecycle_store::LifecycleStore::new(
+                                run_context_clone.app_paths.clone(),
+                            ),
+                            &run_context_clone.session_record.project_id,
+                            &run_context_clone.session_record.issue_id,
+                            &author_provider,
+                            &engine.session().session_id,
+                        ) {
+                            Ok(run) => run,
+                            Err(message) => {
+                                let _ = engine
+                                    .fail_human_gate_turn(
+                                        &turn_id,
+                                        HumanGateTurnFailureClass::ProviderErr,
+                                    )
+                                    .await;
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let _ = send_json_outbound(
+                                    &outbound_tx_for_task,
+                                    &WsOutMessage::HumanGateTurnFailed {
+                                        turn_id,
+                                        failure_class: "provider_err".to_string(),
+                                        message,
+                                    },
+                                )
+                                .await;
+                                return;
+                            }
+                        };
+                        // T6 fix-loop r2：trust 分类已下沉
+                        // start_work_item_plan_author 的 Logical 分支共享口。
+                        let provider_session = start_work_item_plan_author(
+                            launch.clone(),
+                            provider_for_run.clone(),
+                            provider_input,
+                            run_cancel.clone(),
+                            plan_split_run.as_ref(),
+                        )
+                        .await;
+                        let full_output = match engine
+                            .drive_work_item_plan_provider_session_to_output(
+                                provider_session,
+                                &mut command_rx,
+                                node_id.clone(),
+                                author_provider.clone(),
+                            )
+                            .await
+                        {
+                            Ok(output) => output,
+                            Err(message) => {
+                                fail_plan_split_run(
+                                    plan_split_run.as_ref(),
+                                    &format!("provider session drive failed: {message}"),
+                                );
+                                let _ = engine
+                                    .fail_human_gate_turn(
+                                        &turn_id,
+                                        HumanGateTurnFailureClass::ProviderErr,
+                                    )
+                                    .await;
+                                engine.mark_active_run_finished(&run_label);
+                                drop(engine);
+                                let _ = send_json_outbound(
+                                    &outbound_tx_for_task,
+                                    &WsOutMessage::HumanGateTurnFailed {
+                                        turn_id,
+                                        failure_class: "provider_err".to_string(),
+                                        message,
+                                    },
+                                )
+                                .await;
+                                return;
+                            }
+                        };
+                        close_plan_split_run_with_markdown(
+                            plan_split_run.as_ref(),
+                            &attempt_prompt,
+                            &full_output,
+                        );
+                        match engine
+                        .run_sc_manual_revision_turn(&turn_id, full_output.clone())
                         .await
                     {
-                        Ok(output) => output,
-                        Err(message) => {
-                            fail_plan_split_run(
-                                plan_split_run.as_ref(),
-                                &format!("provider session drive failed: {message}"),
+                        Ok(crate::product::workspace_engine::ScManualRevisionResult::Accepted { artifact_ref }) => {
+                            let _ = send_json_outbound(
+                                &outbound_tx_for_task,
+                                &WsOutMessage::HumanGateTurnCompleted { turn_id: turn_id.clone(), artifact_ref },
+                            ).await;
+                            break;
+                        }
+                        Ok(crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected { diagnostics, claim }) => {
+                            let message = diagnostics.join("; ");
+                            let carry = match claim {
+                                // 唯一 claim 恰消费一次：attempt2 的再拒收
+                                // 恒不携案（Replayed/Exhausted 零新 claim）。
+                                Some(carry) if !structural_claim_consumed => carry,
+                                _ => {
+                                    // SG6a.2 in-band 回显：turn 非终态
+                                    // （REQ-CG-03「修订不过校验」），不冒充
+                                    // HumanGateTurnFailed 终态帧；机器修复
+                                    // 窗口/原门/等待面承接，终结收口归
+                                    // SG6a.3。
+                                    let _ = send_json_outbound(
+                                        &outbound_tx_for_task,
+                                        &WsOutMessage::ProtocolError {
+                                            code: SC_MANUAL_REVISION_VALIDATION_REJECTED_CODE.to_string(),
+                                            message,
+                                            context: None,
+                                        },
+                                    ).await;
+                                    break;
+                                }
+                            };
+                            // 冻结交付精确 join（SG5.3）：input/fingerprint
+                            // 拒绝在任何真实 start 之前稳定码回显——零
+                            // start、turn 不终态、typed 等待。
+                            let turn_now = match LifecycleStore::new(run_context_clone.app_paths.clone())
+                                .get_human_gate_turn(&engine.session().session_id, &turn_id)
+                            {
+                                Ok(turn) => turn,
+                                Err(error) => {
+                                    let message = format!("load human gate turn failed: {error}");
+                                    let _ = engine.fail_human_gate_turn(&turn_id, HumanGateTurnFailureClass::ProviderErr).await;
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    let _ = send_json_outbound(
+                                        &outbound_tx_for_task,
+                                        &WsOutMessage::HumanGateTurnFailed {
+                                            turn_id: turn_id.clone(),
+                                            failure_class: "provider_err".to_string(),
+                                            message,
+                                        },
+                                    ).await;
+                                    return;
+                                }
+                            };
+                            // 交付 join 的候选对账口径（SG5.3）：claim 绑定
+                            // 的失败候选=合法中间 hash——「当前修订候选」
+                            // 在 attempt2 交付窗口即该中间候选（内存修订
+                            // 基线；refs/版本/评审不提升，REQ-CG-03 坏
+                            // source 零提升不受影响）。
+                            engine.session.artifact = Some(
+                                crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+                                    markdown: full_output.clone(),
+                                    diff: None,
+                                },
                             );
-                            let _ = engine
-                                .fail_human_gate_turn(
-                                    &turn_id,
-                                    HumanGateTurnFailureClass::ProviderErr,
+                            let frozen_prompt = match engine
+                                .build_sc_revision_delivery_for_resume(
+                                    &turn_now.command_id,
+                                    &turn_now,
+                                    Some(&carry.frozen),
                                 )
-                                .await;
-                            engine.mark_active_run_finished(&run_label);
-                            drop(engine);
+                            {
+                                Ok(frozen_prompt) => frozen_prompt,
+                                Err(message) => {
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    drop(provider_drive_guard.take());
+                                    manager_for_task.finish_run(run_token).await;
+                                    let _ = send_json_outbound(
+                                        &outbound_tx_for_task,
+                                        &WsOutMessage::ProtocolError {
+                                            code: SC_MANUAL_ATTEMPT2_DELIVERY_REJECTED_CODE.to_string(),
+                                            message,
+                                            context: None,
+                                        },
+                                    ).await;
+                                    return;
+                                }
+                            };
+                            // 实际 launch observation 落 ledger（REQ-SG-05
+                            // claim 与真实 start 分账；claim 已保证 key 缺
+                            // 席，watchdog 同款 serde 投影＋内存同步）。
+                            // 登记失败 fail-closed：零 start、typed 等待。
+                            let provider_text = serde_json::to_value(&author_provider)
+                                .ok()
+                                .and_then(|value| value.as_str().map(ToString::to_string))
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let started_at = chrono::Utc::now().to_rfc3339();
+                            match LifecycleStore::new(run_context_clone.app_paths.clone())
+                                .claim_provider_start_with_details(
+                                    &engine.session().session_id,
+                                    &carry.provider_start_key,
+                                    Some(provider_text.as_str()),
+                                    Some(started_at.clone()),
+                                )
+                            {
+                                Ok(true) => {
+                                    engine.session.provider_start_ledger.push(
+                                        crate::product::work_item_plan_policy::ProviderStartLedgerEntry {
+                                            provider_start_idempotency_key: carry.provider_start_key.clone(),
+                                            started: true,
+                                            provider: Some(provider_text),
+                                            started_at: Some(started_at),
+                                        },
+                                    );
+                                }
+                                Ok(false) => {
+                                    // 崩溃重放：实际 launch 观察已在案
+                                    // ——幂等续跑同 attempt，不二次计。
+                                }
+                                Err(error) => {
+                                    engine.mark_active_run_finished(&run_label);
+                                    drop(engine);
+                                    drop(provider_drive_guard.take());
+                                    manager_for_task.finish_run(run_token).await;
+                                    let _ = send_json_outbound(
+                                        &outbound_tx_for_task,
+                                        &WsOutMessage::ProtocolError {
+                                            code: SC_MANUAL_ATTEMPT2_DELIVERY_REJECTED_CODE.to_string(),
+                                            message: format!(
+                                                "STRUCTURAL_ATTEMPT2_LAUNCH_REGISTRATION_FAILED: {error}; no provider was started and the turn/gate/budget are preserved"
+                                            ),
+                                            context: None,
+                                        },
+                                    ).await;
+                                    return;
+                                }
+                            }
+                            structural_claim_consumed = true;
+                            attempt_prompt = frozen_prompt;
+                            continue;
+                        }
+                        Err(message) => {
+                            let _ = engine.fail_human_gate_turn(
+                                &turn_id,
+                                HumanGateTurnFailureClass::ProviderErr,
+                            ).await;
                             let _ = send_json_outbound(
                                 &outbound_tx_for_task,
                                 &WsOutMessage::HumanGateTurnFailed {
-                                    turn_id,
+                                    turn_id: turn_id.clone(),
                                     failure_class: "provider_err".to_string(),
                                     message,
                                 },
-                            )
-                            .await;
-                            return;
+                            ).await;
+                            break;
                         }
-                    };
-                    close_plan_split_run_with_markdown(
-                        plan_split_run.as_ref(),
-                        &prompt,
-                        &full_output,
-                    );
-                    match engine
-                    .run_sc_manual_revision_turn(&turn_id, full_output)
-                    .await
-                {
-                    Ok(crate::product::workspace_engine::ScManualRevisionResult::Accepted { artifact_ref }) => {
-                        let _ = send_json_outbound(
-                            &outbound_tx_for_task,
-                            &WsOutMessage::HumanGateTurnCompleted { turn_id, artifact_ref },
-                        ).await;
                     }
-                    Ok(crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected { diagnostics }) => {
-                        let message = diagnostics.join("; ");
-                        let _ = send_json_outbound(
-                            &outbound_tx_for_task,
-                            &WsOutMessage::HumanGateTurnFailed {
-                                turn_id,
-                                failure_class: "validation_reject".to_string(),
-                                message,
-                            },
-                        ).await;
-                    }
-                    Err(message) => {
-                        let _ = engine.fail_human_gate_turn(
-                            &turn_id,
-                            HumanGateTurnFailureClass::ProviderErr,
-                        ).await;
-                        let _ = send_json_outbound(
-                            &outbound_tx_for_task,
-                            &WsOutMessage::HumanGateTurnFailed {
-                                turn_id,
-                                failure_class: "provider_err".to_string(),
-                                message,
-                            },
-                        ).await;
-                    }
-                }
+                    } // SG6a.2：同 turn attempt 循环收口（恰一次 claim 消费）
                 }
             }
             workspace_ws_provider_run_followups!(

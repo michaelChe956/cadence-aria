@@ -113,6 +113,7 @@ impl super::WorkspaceEngine {
                 if failure.stable_code() == "STRUCTURAL_ATTEMPTS_EXHAUSTED" {
                     return Ok(ScManualRevisionResult::ValidationRejected {
                         diagnostics: vec![render_sc_revision_compile_failure(&failure)],
+                        claim: None,
                     });
                 }
                 return Err(render_sc_revision_compile_failure(&failure));
@@ -292,6 +293,10 @@ impl super::WorkspaceEngine {
                 let inputs = outcome
                     .rejection
                     .expect("rejected assessment carries claim facts");
+                // SG6a.2：claim 成功时冻结件随案返回（handler 消费唯一
+                // claim/冻结 prompt 驱动 attempt2；Replayed/Waiting/Exhausted
+                // 均不携案——唯一 claim 已归首次返回）。
+                let mut claim_carry: Option<ScRevisionClaimCarry> = None;
                 match instructions.first() {
                     Some(instruction) => {
                         let resolved = expected
@@ -318,6 +323,7 @@ impl super::WorkspaceEngine {
                                         .push(render_structural_prompt_rejection(&rejection));
                                     return Ok(ScManualRevisionResult::ValidationRejected {
                                         diagnostics,
+                                        claim: None,
                                     });
                                 }
                                 let expected_for_claim = lifecycle
@@ -334,12 +340,18 @@ impl super::WorkspaceEngine {
                                         crate::product::models::workspace::StructuralClaimOutcome::Claimed {
                                             attempt_no,
                                             prompt_ref,
-                                            ..
+                                            prompt_digest: _,
+                                            provider_start_key,
                                         },
                                     ) => {
                                         diagnostics.push(format!(
                                             "STRUCTURAL_ATTEMPT_CLAIMED: attempt {attempt_no} binds frozen prompt {prompt_ref} on the same turn"
                                         ));
+                                        claim_carry = Some(ScRevisionClaimCarry {
+                                            frozen,
+                                            attempt_no,
+                                            provider_start_key,
+                                        });
                                     }
                                     Ok(crate::product::models::workspace::StructuralClaimOutcome::Replayed) => {
                                         diagnostics.push(
@@ -353,12 +365,13 @@ impl super::WorkspaceEngine {
                                         ));
                                     }
                                     Ok(crate::product::models::workspace::StructuralClaimOutcome::Exhausted) => {
-                                        return Ok(ScManualRevisionResult::ValidationRejected {
-                                            diagnostics: vec![
-                                                "STRUCTURAL_ATTEMPTS_EXHAUSTED: physical attempt cap consumed (L0/L1 share the same turn attempt key); typed system fault, no third start"
-                                                    .to_string(),
-                                            ],
-                                        });
+                                    return Ok(ScManualRevisionResult::ValidationRejected {
+                                        diagnostics: vec![
+                                            "STRUCTURAL_ATTEMPTS_EXHAUSTED: physical attempt cap consumed (L0/L1 share the same turn attempt key); typed system fault, no third start"
+                                                .to_string(),
+                                        ],
+                                        claim: None,
+                                    });
                                     }
                                     Err(error) => return Err(error.to_string()),
                                 }
@@ -379,7 +392,10 @@ impl super::WorkspaceEngine {
                         );
                     }
                 }
-                Ok(ScManualRevisionResult::ValidationRejected { diagnostics })
+                Ok(ScManualRevisionResult::ValidationRejected {
+                    diagnostics,
+                    claim: claim_carry,
+                })
             }
             crate::product::workspace_engine::types::StructuralAssessment::ExistingGate(set) => {
                 // 业务事实缺少/未 typed 失败：回原门（REQ-SG-01「真实业务
@@ -389,7 +405,10 @@ impl super::WorkspaceEngine {
                     "STRUCTURAL_EXISTING_GATE: failure requires the original human gate; no machine repair is licensed"
                         .to_string(),
                 );
-                Ok(ScManualRevisionResult::ValidationRejected { diagnostics })
+                Ok(ScManualRevisionResult::ValidationRejected {
+                    diagnostics,
+                    claim: None,
+                })
             }
             crate::product::workspace_engine::types::StructuralAssessment::Operational(set) => {
                 // operational/授权等待：沿原安全等待，不驱 author。
@@ -398,15 +417,38 @@ impl super::WorkspaceEngine {
                     "STRUCTURAL_OPERATIONAL_WAIT: operational/authorization facts missing; no author attempt is driven"
                         .to_string(),
                 );
-                Ok(ScManualRevisionResult::ValidationRejected { diagnostics })
+                Ok(ScManualRevisionResult::ValidationRejected {
+                    diagnostics,
+                    claim: None,
+                })
             }
         }
     }
 }
 
 // ============================================================================
+
 // SG6a.1：SC 修订轮判定面（assess）——四分支分类 + 同 turn claim 驱动事实。
 // ============================================================================
+
+/// SG6a.2（Main 裁定(a)）：结构拒收后同 turn 已 claim 的 attempt2 交付
+/// 载体——`run_sc_manual_revision_turn` 返回面的最小扩展，handler 消费
+/// 唯一 claim/冻结 prompt 的全部事实（claim 与真实 start 分账的 claim 侧；
+/// `provider_start_key` 由真实启动路径登记 provider_start_ledger）。
+/// 纯数据：不启动 provider、不做 turn CAS；判定/claim 内部零改动。
+#[derive(Debug, Clone)]
+pub(crate) struct ScRevisionClaimCarry {
+    /// claim 绑定的冻结机器指令 prompt（完整内容寻址身份 + 全文）。
+    pub(crate) frozen: super::prompts::FrozenStructuralPrompt,
+    /// claim 分配的同 turn 物理 attempt 号（L0/L1 共用同一 turn attempt
+    /// key 下的下一个 attempt）。生产读者为审计/终结收口面（SG6a.3）；
+    /// 当前合同消费见 sg_06a_2 用例——沿 SG6a.1「尚未接线」先例门控。
+    #[allow(dead_code)]
+    pub(crate) attempt_no: u32,
+    /// 真实启动路径登记 provider_start_ledger 的幂等键
+    /// （`human_gate:{turn_id}:attempt:{n}`；claim 已保证其缺席）。
+    pub(crate) provider_start_key: String,
+}
 
 /// 判定面的富载体：四分支评估 + 驱动面所需同代事实。公开签名
 /// `assess_sc_revision_output`（plan §0.5）只投影 `assessment`；`accepted`

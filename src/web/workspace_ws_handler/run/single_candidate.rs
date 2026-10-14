@@ -90,25 +90,11 @@ fn is_teachable_parse_failure(code: &str) -> bool {
     TEACHABLE_PARSE_FAILURE_CODES.contains(&code)
 }
 
-/// lowering 结构错误中的「缺席类」（必需字段/行缺失，message 以 lower 的
-/// 缺席措辞标记）：与 `missing_section` 同族——必需元素缺席、无自动返修面，
-/// 教学重驱是其唯一自愈机会。
-///
-/// Task 3.5 E2E 现场（session_0004 node_004/006，真实 claude_code 稳定复现）：
-/// 「Traceability 多 source_type + 批量 requirement_id」的合法语义形态触发
-/// 首个 source flush 缺 requirement_id（`traceability 缺少 requirement_id`）。
-/// 不入教学面则确定性终态失败且无重驱（两轮同形态失败、execution_events 无
-/// reredrive 条目佐证）。值域类（枚举值非法等「必须是…」措辞）维持 F-48 的
-/// 零重驱裁决不动。
-fn is_lowering_absence_message(message: &str) -> bool {
-    message.contains("缺少") || message.contains("缺失")
-}
-
-/// 该 compile 诊断是否可教学重驱（parse 语法类 ∪ lowering 缺席类）。
-fn is_teachable_compile_failure(code: &str, message: &str) -> bool {
-    is_teachable_parse_failure(code)
-        || (code == "lowering_error" && is_lowering_absence_message(message))
-}
+// SG6a.2（REQ-SG-05 SC 初轮行×F1.2 typed 口径）：SC 初轮教学重驱资格
+// 只认共享 parse 语法码白名单（TEACHABLE_PARSE_FAILURE_CODES）；原
+// `is_lowering_absence_message`（message 含「缺少/缺失」措辞即授重驱
+// 资格）属字符串资格旁路，已删除——lowering 类（缺席与值域统一）零
+// 教学重驱，确定性终态失败由 typed 诊断回显承载。
 
 /// 丢弃 provider 在 markdown 文档标题前输出的前言，保留既有 parser 的失败语义。
 ///
@@ -1132,19 +1118,23 @@ pub(crate) async fn run_single_candidate_author(
     emit_author_ears_normalized_event(engine, &node_id, &full_output, &delivery, &author_provider)
         .await;
     let full_output = delivery.source;
-    // F2-B：SC compile 失败教学重驱（同 candidate 恰一次）。parse 语法类
-    // （见 TEACHABLE_PARSE_FAILURE_CODES：missing_section / invalid_ears /
-    // invalid_work_item_id）compile 失败不再直接终态：先在 handler 预检查中复用
-    // 与引擎落盘路径同源的 contract_autorepair 收敛器；收敛成功的机械 lowering
-    // 缺口（当前为重复 trusted command）直接带着修复后的 source 进入 complete，
-    // 后者再次经过同一收敛入口并落盘。收敛失败则保留原诊断，parse 语法类继续
-    // 教学重驱。重驱产物重新进入本循环，因此同样不能绕过收敛器；重驱槽与收敛轮
-    // 彼此独立，每 candidate 仍至多一次额外 provider 驱动。
+    // F2-B：SC compile 失败教学重驱（同 candidate 恰一次）。SG6a.2（REQ-SG-05
+    // SC 初轮行）：教学重驱资格只认 parse 语法类共享码白名单
+    // （TEACHABLE_PARSE_FAILURE_CODES：missing_section / invalid_ears /
+    // invalid_work_item_id）——lowering 类（缺席/值域统一）零重驱资格，
+    // 原 message「缺少/缺失」措辞分流（is_lowering_absence_message）已按
+    // F1.2 typed 口径删除。compile 失败不再直接终态：先在 handler 预检查
+    // 中复用与引擎落盘路径同源的 contract_autorepair 收敛器；收敛成功的
+    // 机械 lowering 缺口（当前为重复 trusted command）直接带着修复后的
+    // source 进入 complete，后者再次经过同一收敛入口并落盘。收敛失败则
+    // 保留原诊断，parse 语法类继续教学重驱。重驱产物重新进入本循环，因此
+    // 同样不能绕过收敛器；重驱槽与收敛轮彼此独立，每 candidate 仍至多
+    // 一次额外 provider 驱动。
     // 3.6 弱模型基线加固：IR 校验失败（validate plan candidate IR failed 类，
     // 如 unknown_requirement_ref / acceptance_criterion_without_reviewer_check）
     // 同样享有恰一次教学重驱——在持久化前预跑同源 validate_plan_candidate_ir
     // 分类，重驱 prompt 附错误原文与修正引用/补齐字段指令；重驱再败→终态含
-    // 两轮；非 IR/非 missing_section 的其他失败（如内部错误）不触发重驱。
+    // 两轮；非 IR/非白名单的其他失败（如内部错误/lowering 类）不触发重驱。
     // 重驱机会在 compile/IR 两类间共享（first_round_failure 单槽）。
     let compile_context = crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
         target_repository_id: repository.id.clone(),
@@ -1162,9 +1152,9 @@ pub(crate) async fn run_single_candidate_author(
                 Err(diagnostics) => {
                     let reasons = format_compile_failure_reasons(&diagnostics);
                     if first_round_failure.is_none()
-                        && diagnostics.iter().any(|diagnostic| {
-                            is_teachable_compile_failure(&diagnostic.code, &diagnostic.message)
-                        })
+                        && diagnostics
+                            .iter()
+                            .any(|diagnostic| is_teachable_parse_failure(&diagnostic.code))
                     {
                         first_round_failure = Some(reasons.join("; "));
                         let reredrive_prompt =
@@ -1463,33 +1453,26 @@ mod tests {
         );
     }
 
-    /// Task 3.5 E2E 现场裁决的代码化:lowering 结构错误按「缺席类 vs 值域类」
-    /// 分流——缺席类（必需字段/行缺失,如 Traceability 多源 triple 缺
-    /// requirement_id,node_004/006 真实链稳定复现）与 missing_section 同族,
-    /// 可教学重驱;值域类（枚举值非法等）维持 F-48 零重驱裁决。
+    /// SG6a.2（原 Task 3.5 分流契约迁移）：lowering 类教学资格整体取消
+    /// ——缺席/值域统一零重驱（资格只认 parse 白名单码；message 措辞
+    /// 不构成资格源，F1.2 口径）。
     #[test]
-    fn teachable_lowering_failures_split_absence_from_value_domain() {
-        use super::is_teachable_compile_failure;
+    fn teachable_lowering_failures_have_zero_repair_once_eligibility() {
+        use super::is_teachable_parse_failure;
 
+        for (code, message) in [
+            ("lowering_error", "traceability 缺少 requirement_id。"),
+            ("lowering_error", "必填 markdown 字段缺失。"),
+            ("lowering_error", "intent 必须是 create 或 existing。"),
+        ] {
+            assert!(
+                !is_teachable_parse_failure(code),
+                "lowering 类不再有教学重驱资格（message 措辞不构成资格源）: {message}"
+            );
+        }
         assert!(
-            is_teachable_compile_failure("lowering_error", "traceability 缺少 requirement_id。"),
-            "缺席类 lowering 错误必须可教学重驱"
-        );
-        assert!(
-            is_teachable_compile_failure("lowering_error", "必填 markdown 字段缺失。"),
-            "缺席类 lowering 错误必须可教学重驱"
-        );
-        assert!(
-            !is_teachable_compile_failure("lowering_error", "intent 必须是 create 或 existing。"),
-            "值域类 lowering 错误维持 F-48 零重驱裁决"
-        );
-        assert!(
-            !is_teachable_compile_failure("lowering_error", "字段必须是 true 或 false。"),
-            "值域类 lowering 错误维持 F-48 零重驱裁决"
-        );
-        assert!(
-            is_teachable_compile_failure("missing_section", "文档必须包含固定一级标题。"),
-            "parse 语法类不受分流影响"
+            is_teachable_parse_failure("missing_section"),
+            "parse 语法类白名单资格不受影响"
         );
     }
 

@@ -730,11 +730,28 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
         let WsOutMessage::HumanGateTurnOpen { turn_id, .. } = open else {
             panic!("expected turn open, got {open:?}");
         };
-        let failed = harness.await_gate_event("human_gate_turn_failed").await;
-        let WsOutMessage::HumanGateTurnFailed { failure_class, .. } = failed else {
-            panic!("expected turn failed, got {failed:?}");
-        };
-        assert_eq!(failure_class, expected_class);
+        if replay_is_terminal_reject {
+            // transport_death：handler Err 分支落终态 Failed(provider_err)
+            // ——HumanGateTurnFailed 回显（蒸发链修法②不变）。
+            let failed = harness.await_gate_event("human_gate_turn_failed").await;
+            let WsOutMessage::HumanGateTurnFailed { failure_class, .. } = failed else {
+                panic!("expected turn failed, got {failed:?}");
+            };
+            assert_eq!(failure_class, expected_class);
+        } else {
+            // SG6a.2（REQ-CG-03「修订不过校验」）：判定拒收不终态化
+            // （turn 保持 in-flight）——in-band 回显走 ProtocolError 稳定
+            // 码，不冒充 HumanGateTurnFailed 终态帧；机器修复窗口/原门
+            // /等待面承接。
+            let rejected = harness.await_gate_event("protocol_error").await;
+            let WsOutMessage::ProtocolError { code, .. } = rejected else {
+                panic!("expected protocol error, got {rejected:?}");
+            };
+            assert_eq!(
+                code, "SC_MANUAL_REVISION_VALIDATION_REJECTED",
+                "validation reject must surface the in-band stable code, not a terminal turn failure"
+            );
+        }
         let replay = {
             let mut engine = harness.engine.lock().await;
             engine

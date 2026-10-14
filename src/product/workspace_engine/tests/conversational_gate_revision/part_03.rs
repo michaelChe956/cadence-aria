@@ -597,7 +597,8 @@ async fn sg_06a_1_operational_waits_without_claim_and_l1_multi_solution_keeps_us
     assert!(matches!(
         result,
         crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
-            ref diagnostics
+            ref diagnostics,
+            ..
         } if diagnostics.iter().any(|line| line.contains("OVER_HARD_LIMIT"))
     ));
     let grant = sg61_current_grant(&lifecycle, engine.session().session_id.as_str())
@@ -711,7 +712,8 @@ async fn sg_06a_1_attempts_exhausted_typed_system_fault_and_terminal_replay_stab
     assert!(matches!(
         result,
         crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
-            ref diagnostics
+            ref diagnostics,
+            ..
         } if diagnostics
             .iter()
             .any(|line| line.contains("STRUCTURAL_ATTEMPTS_EXHAUSTED"))

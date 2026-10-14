@@ -515,6 +515,7 @@ pub(crate) async fn open_amendment_turn_and_run_fake_revision(
         }
         crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
             diagnostics,
+            ..
         } => {
             panic!("fake revision must pass the real compiler/validator, rejected: {diagnostics:?}")
         }

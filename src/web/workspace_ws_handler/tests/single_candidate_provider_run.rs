@@ -947,12 +947,14 @@ async fn single_candidate_mixed_duplicate_and_missing_section_uses_one_teaching_
     .await;
 }
 
-/// Task 3.5 E2E 现场的回归网：lowering 结构错误（Traceability 多源批量
-/// requirement_id）与 parse 语法错误同为「输出形态不合规」，教学重驱是其
-/// 唯一自愈面；不进白名单则真实链确定性终态失败且无重驱事件（现场实证：
-/// node_004/node_006 两轮同形态失败、execution_events 无 reredrive 条目）。
+/// SG6a.2（原 Task 3.5 现场回归网迁移）：lowering 结构错误（Traceability
+/// 多源批量 requirement_id 的「缺席类」）不再有教学重驱资格——按
+/// REQ-SG-05 SC 初轮行与 F1.2 typed 口径，资格只认 parse 语法类共享码
+/// 白名单，message 措辞（缺少/缺失）不构成资格源（原
+/// `is_lowering_absence_message` 分流已删除）。本用例锁新契约：零重驱、
+/// 一轮确定性终态失败、失败原因原文回显。
 #[tokio::test]
-async fn single_candidate_batched_traceability_lowering_error_uses_one_teaching_reredrive() {
+async fn single_candidate_batched_traceability_lowering_error_fails_terminal_without_reredrive() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let output =
@@ -977,28 +979,14 @@ async fn single_candidate_batched_traceability_lowering_error_uses_one_teaching_
         .await
         .expect("full author provider must receive input")
         .expect("full author provider input");
-    let reredrive_input = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
-        .await
-        .expect("lowering_error must receive one teaching re-drive")
-        .expect("teaching re-drive input");
-    assert!(
-        reredrive_input
-            .prompt
-            .contains("立即输出完整 work-item-plan markdown source")
-    );
-    assert!(
-        reredrive_input
-            .prompt
-            .contains("traceability 缺少 requirement_id"),
-        "teaching re-drive must carry the lowering error verbatim: {}",
-        reredrive_input.prompt
-    );
+    // 零重驱：lowering 类（缺席/值域统一）资格取消——不再有第二次
+    // provider 输入（初轮机会纪律归 L1 同池，非独立教学池）。
     assert!(
         !matches!(
             tokio::time::timeout(std::time::Duration::from_millis(100), input_rx.recv()).await,
             Ok(Some(_))
         ),
-        "lowering_error must consume at most one teaching re-drive"
+        "lowering_error must not trigger any teaching re-drive (eligibility is the parse-code whitelist; message wording is not a license source)"
     );
 
     let error = tokio::time::timeout(std::time::Duration::from_secs(1), async {

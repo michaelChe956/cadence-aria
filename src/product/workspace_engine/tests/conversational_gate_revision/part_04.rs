@@ -1,4 +1,3 @@
-
 /// 把 rep4 的结构标题翻成两份现场事故的中文变体(混合括号注记与裸中文,
 /// 覆盖 pi-full rep1 与矩阵 r1 rep2 两种抖动形态)。
 fn with_field_chinese_heading_translations(markdown: &str) -> String {
@@ -408,6 +407,7 @@ async fn conversational_gate_revision_result_rejects_unknown_chinese_heading() {
     match result {
         crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
             diagnostics,
+            ..
         } => assert!(
             diagnostics
                 .iter()
