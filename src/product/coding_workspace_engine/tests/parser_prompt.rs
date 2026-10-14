@@ -844,3 +844,157 @@ fn prompt_git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
     }
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
+
+// ---------------------------------------------------------------------------
+// S6（DesignPushLocal2 Q6/Q4②）：平台指令段红绿测。
+//
+// Q6 裁定：仓库文件（AGENTS.md / CLAUDE.md）的「不自动提交」类规则会压过
+// 投影的 commit_responsibility，coder 借此漏交。修法不动 render.rs 的
+// commit_responsibility 投影本体（那会牵动 renderer_version 与执行上下文
+// 哈希），改为在最终 prompt 组装后统一追加 platform_directives_section。
+// Q4② 同段承载汇报契约：交付摘要只含四类事实，环境异常只许末尾
+// 「环境备注」一行。本组测试钉住：渲染路径与回落路径的最终 prompt 文本
+// 都必须同时携带两段（哈希计算之后追加，绑定哈希面不动）。
+// ---------------------------------------------------------------------------
+
+fn assert_platform_directives(prompt: &str) {
+    // 段落①：提交责任声明——优先于仓库文件「不自动提交」类规则。
+    assert!(
+        prompt.contains("[platform_directives]"),
+        "S6:最终 prompt 必须携带平台指令段:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("本 Work Item 的提交责任归你"),
+        "S6:提交责任声明必须在场:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("优先于仓库文件"),
+        "S6:提交责任必须声明优先于 AGENTS.md / CLAUDE.md 类仓库规则:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("AGENTS.md / CLAUDE.md"),
+        "S6:提交责任声明必须点名仓库规则文件:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("禁止执行 git push"),
+        "S6:手动 git push 禁令必须在场:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("推送由平台执行"),
+        "S6:push 责任必须归平台:\n{prompt}"
+    );
+    // 段落②：汇报契约——交付摘要事实面 + 环境备注末尾一行 + 命名空间权威。
+    assert!(
+        prompt.contains("交付摘要只包含四类事实"),
+        "S6:汇报契约必须钉住交付摘要事实面:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("「环境备注」"),
+        "S6:环境异常只允许写入末尾固定小节「环境备注」:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("不得占据摘要主体"),
+        "S6:环境备注不得占据摘要主体:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("不得借此省略任何交付事实"),
+        "S6:不得借环境异常省略交付事实:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("以本 prompt 给定的 Worktree Path 为准"),
+        "S6:文件工具与 shell 路径命名空间必须以 Worktree Path 为准:\n{prompt}"
+    );
+}
+
+#[test]
+fn platform_directives_section_carries_commit_responsibility_and_reporting_contract() {
+    assert_platform_directives(&platform_directives_section());
+}
+
+#[tokio::test]
+async fn rendered_coding_prompt_carries_platform_directives() {
+    // 渲染路径：组 attempt 物化 unit run 投影，render_coder_unit_run_context
+    // 渲染 envelope 并绑定执行上下文哈希；平台指令段在渲染合并后的最终
+    // prompt 上追加，两段必须在场且不触碰绑定哈希面。
+    let root = tempdir().unwrap();
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(&worktree).unwrap();
+    init_test_git_repo(&worktree);
+    let head = git_stdout(&worktree, &["rev-parse", "HEAD"]);
+    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let attempt = store
+        .create_group_attempt(CreateGroupCodingAttemptInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "work_item_plan_0001".to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: head.clone(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: Some(worktree),
+            provider_config_snapshot: ProviderConfigSnapshot {
+                author: ProviderName::Codex,
+                reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 1,
+                permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            },
+            target_snapshot: None,
+            max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        })
+        .unwrap();
+    seed_group_attempt_fixture(&store, &attempt, true, false);
+    let mut attempt = store
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .unwrap();
+    attempt.head_commit = Some(head);
+    attempt.stage = CodingExecutionStage::Coding;
+    store.write_coding_attempt_for_test(&attempt).unwrap();
+    let (tx, _rx) = mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let coder = super::provider_execution_context::CapturingProjectionProvider::new(
+        super::provider_execution_context::current_plan_defect_output(),
+    );
+
+    let coded = engine
+        .execute_coding(&attempt, &coder, &CodingExecutionContext::default())
+        .await
+        .unwrap();
+
+    // 渲染路径成立佐证：unit run 落盘且执行上下文哈希已绑定。
+    let run = store.get_active_unit_run(&coded).expect("rendered unit run");
+    assert!(
+        run.coder_execution_context_hash.is_some(),
+        "渲染路径必须绑定执行上下文哈希"
+    );
+    assert_platform_directives(&coder.input().prompt);
+}
+
+#[tokio::test]
+async fn fallback_coding_prompt_carries_platform_directives() {
+    // 回落路径：非组 attempt 无 unit run 投影，render_coder_unit_run_context
+    // 返回 None，build_coding_prompt 组装最终 prompt——平台指令段同样
+    // 必须在场（S6 注入不设 LC/group 门槛）。
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let (tx, _rx) = mpsc::channel(64);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let coder = super::provider_execution_context::CapturingProjectionProvider::new(
+        super::provider_execution_context::current_plan_defect_output(),
+    );
+
+    let coded = engine
+        .execute_coding(&attempt, &coder, &CodingExecutionContext::default())
+        .await
+        .unwrap();
+
+    // 回落路径成立佐证：无 active unit run（渲染路径未触发）。
+    assert!(
+        store.get_active_unit_run(&coded).is_err(),
+        "回落路径不应物化 unit run"
+    );
+    let prompt = coder.input().prompt;
+    assert!(
+        prompt.starts_with("Coding Workspace"),
+        "回落路径必须以 build_coding_prompt 头部开头:\n{prompt}"
+    );
+    assert_platform_directives(&prompt);
+}

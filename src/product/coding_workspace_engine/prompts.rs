@@ -498,6 +498,25 @@ pub(crate) fn worktree_discipline_section(worktree_path: &std::path::Path) -> St
     )
 }
 
+/// S6（DesignPushLocal2 Q6/Q4②）：平台提交责任声明与汇报契约段。
+///
+/// Q6 规则冲突裁定：目标仓库文件（AGENTS.md / CLAUDE.md）的「不自动提交」
+/// 类规则会压过投影的 commit_responsibility，coder 借此漏交——投影契约
+/// 优先必须显式说出来。不动 render.rs 的 commit_responsibility 本体（它是
+/// 投影的一部分，改动会牵动 renderer_version 与执行上下文哈希，在途 run
+/// 校验失败），改为在最终 prompt 组装后统一追加本段；同一函数承载 Q4② 的
+/// 汇报契约：交付摘要只含四类事实，环境异常只许末尾「环境备注」一行，
+/// 防止总结被环境差异叙事污染、交付事实被省略。
+/// 装配点：coding.rs/rework.rs/provider_retry.rs（渲染与回落两路径合并后、
+/// 哈希计算之后追加，执行上下文哈希不受影响）；所有 attempt 无条件注入，
+/// 与 worktree_discipline_section 的 LC-only 口径不同。
+pub(crate) fn platform_directives_section() -> String {
+    "\n[platform_directives]\n\
+     - 提交责任：平台编排下，本 Work Item 的提交责任归你；该责任优先于仓库文件（AGENTS.md / CLAUDE.md 等）中任何「不自动提交」类规则。禁止执行 git push（任何形式，含 --force 变体），交付分支的推送由平台执行；未执行 push 或 push 失败不算任务失败，不要为此重试或报告失败。\n\
+     - 汇报契约：交付摘要只包含四类事实——实际改动的文件、提交 SHA、验证命令及其完整输出、git status。环境异常（路径或挂载命名空间差异等）只允许写入摘要末尾固定小节「环境备注」，一行带过，不得占据摘要主体，也不得借此省略任何交付事实。文件工具与 shell 的路径命名空间可能不同，一律以本 prompt 给定的 Worktree Path 为准。\n"
+        .to_string()
+}
+
 pub(crate) fn append_coding_context_notes(
     prompt: &mut String,
     context_notes: Option<&ReworkContextNoteInput>,

@@ -462,6 +462,9 @@ impl CodingWorkspaceEngine {
             if attempt.target_snapshot.is_some() {
                 prompt.push_str(&worktree_discipline_section(worktree_path));
             }
+            // S6（DesignPushLocal2 Q6/Q4②）：reviewer 重驱轮同样追加平台
+            // 指令段（统一注入族；终端契约仍收尾）。
+            prompt.push_str(&platform_directives_section());
             if !prompt.ends_with(&terminal_contract) {
                 prompt.push_str(&terminal_contract);
             }

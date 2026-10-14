@@ -219,6 +219,10 @@ impl CodingWorkspaceEngine {
         if updated.target_snapshot.is_some() {
             full_prompt.push_str(&worktree_discipline_section(&worktree_path));
         }
+        // S6（DesignPushLocal2 Q6/Q4②）：同 coding.rs——渲染与回落两路径
+        // 合并后的最终 prompt 统一追加平台指令段（提交责任声明+汇报契约），
+        // 哈希计算之后追加，所有 attempt 无条件注入。
+        full_prompt.push_str(&platform_directives_section());
         let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
         } else {
@@ -231,6 +235,8 @@ impl CodingWorkspaceEngine {
                 if updated.target_snapshot.is_some() {
                     delta_prompt.push_str(&worktree_discipline_section(&worktree_path));
                 }
+                // S6:delta/rework 变体同样携带平台指令段（当前轮直接可见）。
+                delta_prompt.push_str(&platform_directives_section());
                 delta_prompt
             }
         };
