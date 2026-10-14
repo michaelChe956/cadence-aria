@@ -1,7 +1,39 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
-import type { IssueDeliverySummaryDto } from "../../api/types";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import type { DeliveryEntryDto, IssueDeliverySummaryDto } from "../../api/types";
 import { DeliveryStatusPanel } from "./DeliveryStatusPanel";
+
+// owner 直批（2026-10-14）：5 个 Work Item 按 target 仓展开导致 frontend 重复两次；
+// 期望去重为 4 个唯一仓（busi/api/gateway/frontend），per-WI 状态下沉为副行。
+function deliveryEntry(
+  repositoryName: string,
+  workItemId: string,
+  pushStatus: DeliveryEntryDto["push_status"],
+): DeliveryEntryDto {
+  return {
+    repository_name: repositoryName,
+    work_item_id: workItemId,
+    attempt_status: "completed",
+    branch_name: `feat/${workItemId}`,
+    commit_sha: `${workItemId}sha`,
+    push_status: pushStatus,
+    push_error: pushStatus === "failed" ? "remote rejected" : null,
+  };
+}
+
+const dedupedSummary: IssueDeliverySummaryDto = {
+  project_id: "project_0001",
+  issue_id: "issue_0001",
+  overall: "partial",
+  entries: [
+    deliveryEntry("busi", "work_item_busi", "pushed"),
+    deliveryEntry("api", "work_item_api", "pushed"),
+    deliveryEntry("gateway", "work_item_gateway", "pushed"),
+    deliveryEntry("frontend", "work_item_frontend_a", "pushed"),
+    deliveryEntry("frontend", "work_item_frontend_b", "not_pushed"),
+  ],
+};
 
 const allPushedSummary: IssueDeliverySummaryDto = {
   project_id: "project_0001",
@@ -137,5 +169,72 @@ describe("DeliveryStatusPanel", () => {
       "none",
     );
     expect(screen.queryAllByTestId("delivery-entry-row")).toHaveLength(0);
+  });
+
+  it("按仓库去重：同一仓库的多个 Work Item 合并为一张仓卡并标注 WI 数", () => {
+    render(<DeliveryStatusPanel summary={dedupedSummary} />);
+
+    const rows = screen.getAllByTestId("delivery-entry-row");
+    expect(rows).toHaveLength(4);
+    // 仓名唯一：frontend 只出现一次。
+    expect(screen.getAllByText("frontend")).toHaveLength(1);
+    const frontend = rows.find(
+      (row) => row.getAttribute("data-work-item-count") === "2",
+    );
+    expect(frontend).toBeDefined();
+    expect(frontend).toHaveTextContent("2 个 Work Item");
+    // 仓内出现未推送 -> 聚合状态取未推送，不误报已推送。
+    expect(frontend).toHaveAttribute("data-status", "pending");
+    expect(frontend).toHaveTextContent("已推送 1 · 未推送 1");
+    // 单 WI 仓卡不渲染 WI 数副行。
+    expect(rows.filter((row) => row.getAttribute("data-work-item-count") === "1"))
+      .toHaveLength(3);
+    expect(screen.queryAllByTestId("delivery-entry-work-item-count")).toHaveLength(1);
+  });
+
+  it("未传折叠控件时不渲染切换按钮（显式详情面常驻展开）", () => {
+    render(<DeliveryStatusPanel summary={dedupedSummary} />);
+
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getAllByTestId("delivery-entry-row")).toHaveLength(4);
+  });
+
+  it("折叠受控：collapsed 时只保留徽标与收起摘要，仓卡不渲染", () => {
+    render(
+      <DeliveryStatusPanel
+        summary={dedupedSummary}
+        collapsed
+        onToggleCollapsed={() => {}}
+      />,
+    );
+
+    expect(screen.getByTestId("delivery-status-badge")).toHaveTextContent(
+      "部分交付",
+    );
+    expect(screen.queryAllByTestId("delivery-entry-row")).toHaveLength(0);
+    expect(screen.getByTestId("delivery-status-collapsed-summary")).toHaveTextContent(
+      "4 个仓库 · 5 个 Work Item",
+    );
+    expect(
+      screen.getByRole("button", { name: /^展开交付明细/u }),
+    ).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("展开态渲染仓卡明细，切换按钮可回调收起", async () => {
+    const onToggleCollapsed = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <DeliveryStatusPanel
+        summary={dedupedSummary}
+        collapsed={false}
+        onToggleCollapsed={onToggleCollapsed}
+      />,
+    );
+
+    expect(screen.getAllByTestId("delivery-entry-row")).toHaveLength(4);
+    const toggle = screen.getByRole("button", { name: "收起交付明细" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await user.click(toggle);
+    expect(onToggleCollapsed).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,7 +1,11 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { WorkItemRepositoryGroup } from "../../api/types";
+import type {
+  DeliveryEntryDto,
+  IssueDeliverySummaryDto,
+  WorkItemRepositoryGroup,
+} from "../../api/types";
 import type { LifecycleCard as LifecycleCardData } from "../../state/lifecycle-workbench-store";
 import { IssueLifecycleWorkbench } from "./IssueLifecycleWorkbench";
 import {
@@ -72,6 +76,11 @@ describe("IssueLifecycleWorkbenchParts work item repository grouping (REQ-TGT-05
       await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
     );
 
+    // owner 直批（2026-10-14）：仓库分组明细默认收起，先展开再断言内容。
+    await user.click(
+      screen.getByRole("button", { name: /^展开 2 个仓库分组/u }),
+    );
+
     const workItemRegion = screen.getByRole("region", {
       name: "Work Item 内容",
     });
@@ -115,6 +124,11 @@ describe("IssueLifecycleWorkbenchParts work item repository grouping (REQ-TGT-05
 
     await user.click(
       await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+    );
+
+    // owner 直批（2026-10-14）：仓库分组明细默认收起，先展开再断言内容。
+    await user.click(
+      screen.getByRole("button", { name: /^展开 1 个仓库分组/u }),
     );
 
     const workItemRegion = screen.getByRole("region", {
@@ -202,6 +216,7 @@ function renderDetail({
   designSpecs = [],
   workItems = [],
   workItemRepositoryGroups = [],
+  deliverySummary,
   onGenerateForStage = vi.fn(),
 }: {
   issue?: LifecycleCardData | null;
@@ -211,6 +226,7 @@ function renderDetail({
   workItemRepositoryGroups?: Parameters<
     typeof IssueLifecycleDetail
   >[0]["workItemRepositoryGroups"];
+  deliverySummary?: IssueDeliverySummaryDto;
   onGenerateForStage?: (stage: WorkbenchStageKey) => void;
 } = {}) {
   const callbacks = {
@@ -226,6 +242,7 @@ function renderDetail({
       designSpecs={designSpecs}
       workItems={workItems}
       workItemRepositoryGroups={workItemRepositoryGroups}
+      deliverySummary={deliverySummary}
       selectedKey={null}
       deletingKey={null}
       {...callbacks}
@@ -466,6 +483,10 @@ describe("IssueLifecycleDetail 阶段标签工作区 (Task 6)", () => {
     );
 
     await user.click(screen.getByTestId("stage-tab-work_item"));
+    // owner 直批（2026-10-14）：仓库分组明细默认收起，先展开再断言分组内容。
+    await user.click(
+      screen.getByRole("button", { name: /^展开 1 个仓库分组/u }),
+    );
     expect(
       screen.getByTestId("work-item-repository-group-repo_api"),
     ).toBeInTheDocument();
@@ -502,5 +523,188 @@ describe("IssueLifecycleDetail 阶段面板 id 关联", () => {
     await user.click(screen.getByTestId("stage-tab-story"));
     expect(view.container.querySelector("#stage-panel-story")).not.toBeNull();
     expect(view.container.querySelector("#stage-panel-design")).toBeNull();
+  });
+});
+
+// owner 直批（2026-10-14）：issue 详情页「部分交付」区与「Work Item」区改为可折叠
+// 抽屉、默认收起；收起后 plan 分组卡与清晰展开提示仍在，用户展开后本次会话保持。
+function groupedWorkItemRepositoryGroups(): WorkItemRepositoryGroup[] {
+  return [
+    workItemRepositoryGroupRecord({
+      target_repository_id: "repo_api",
+      alias: "api",
+      status: "pending",
+      items: [
+        workItemRecord({
+          work_item_id: "work_item_backend",
+          issue_id: "issue_0001",
+          title: "后端 API 实现",
+        }),
+      ],
+    }) as unknown as WorkItemRepositoryGroup,
+    workItemRepositoryGroupRecord({
+      target_repository_id: "repo_web",
+      alias: "web",
+      status: "completed",
+      items: [
+        workItemRecord({
+          work_item_id: "work_item_frontend",
+          issue_id: "issue_0001",
+          title: "前端 UI 实现",
+        }),
+      ],
+    }) as unknown as WorkItemRepositoryGroup,
+  ];
+}
+
+function deliveryEntryRecord(
+  repositoryName: string,
+  workItemId: string,
+  pushStatus: DeliveryEntryDto["push_status"],
+): DeliveryEntryDto {
+  return {
+    repository_name: repositoryName,
+    work_item_id: workItemId,
+    attempt_status: "completed",
+    branch_name: `feat/${workItemId}`,
+    commit_sha: `${workItemId}sha`,
+    push_status: pushStatus,
+    push_error: null,
+  };
+}
+
+const ownerDeliverySummary: IssueDeliverySummaryDto = {
+  project_id: "project_0001",
+  issue_id: "issue_0001",
+  overall: "partial",
+  entries: [
+    deliveryEntryRecord("busi", "work_item_busi", "pushed"),
+    deliveryEntryRecord("api", "work_item_api", "pushed"),
+    deliveryEntryRecord("gateway", "work_item_gateway", "pushed"),
+    deliveryEntryRecord("frontend", "work_item_frontend_a", "pushed"),
+    deliveryEntryRecord("frontend", "work_item_frontend_b", "not_pushed"),
+  ],
+};
+
+function renderOwnerIssueDetail() {
+  return renderDetail({
+    storySpecs: [stageSpecCard("story_spec", "issue_0001")],
+    designSpecs: [stageSpecCard("design_spec", "issue_0001")],
+    workItems: [stageWorkItemGroupCard("issue_0001")],
+    workItemRepositoryGroups: groupedWorkItemRepositoryGroups(),
+    deliverySummary: ownerDeliverySummary,
+  });
+}
+
+describe("IssueLifecycleDetail 两段抽屉默认收起 (owner 直批 2026-10-14)", () => {
+  it("默认收起：交付明细与仓库分组明细都不渲染，plan 卡与展开提示常驻", () => {
+    renderOwnerIssueDetail();
+
+    // 交付区：只剩徽标 + 收起摘要，5 个 Work Item 按仓去重后可一眼数清。
+    expect(screen.getByTestId("delivery-status-badge")).toHaveTextContent(
+      "部分交付",
+    );
+    expect(screen.queryAllByTestId("delivery-entry-row")).toHaveLength(0);
+    expect(
+      screen.getByTestId("delivery-status-collapsed-summary"),
+    ).toHaveTextContent("4 个仓库 · 5 个 Work Item");
+    expect(
+      screen.getByRole("button", { name: /^展开交付明细/u }),
+    ).toHaveAttribute("aria-expanded", "false");
+
+    // Work Item 区：仓库分组明细收起，plan 分组卡（主要交互入口）仍在。
+    const workItemRegion = screen.getByRole("region", {
+      name: "Work Item 内容",
+    });
+    expect(
+      within(workItemRegion).queryByTestId("work-item-repository-group-repo_api"),
+    ).toBeNull();
+    expect(workItemRegion).toHaveTextContent("Work Item Group");
+    expect(
+      screen.getByTestId("work-item-groups-collapsed-hint"),
+    ).toHaveTextContent("已收起 2 个仓库分组");
+    expect(
+      screen.getByRole("button", { name: /^展开 2 个仓库分组/u }),
+    ).toHaveAttribute("aria-expanded", "false");
+
+    // onboarding 双门锚点在收起态仍可达（引导卡不要求用户先展开）。
+    const reviewGate = screen.getByTestId("onboarding-anchor-plan-review-gate");
+    expect(
+      within(reviewGate).getByTestId("onboarding-anchor-plan-final-gate"),
+    ).toBeInTheDocument();
+  });
+
+  it("点击展开后两区明细可见，再次点击收起", async () => {
+    const user = userEvent.setup();
+    renderOwnerIssueDetail();
+
+    await user.click(screen.getByRole("button", { name: /^展开交付明细/u }));
+    expect(screen.getAllByTestId("delivery-entry-row")).toHaveLength(4);
+
+    const workItemRegion = screen.getByRole("region", {
+      name: "Work Item 内容",
+    });
+    await user.click(
+      within(workItemRegion).getByRole("button", {
+        name: /^展开 2 个仓库分组/u,
+      }),
+    );
+    expect(
+      within(workItemRegion).getByTestId("work-item-repository-group-repo_api"),
+    ).toBeInTheDocument();
+    expect(workItemRegion).toHaveTextContent("后端 API 实现");
+    expect(screen.queryByTestId("work-item-groups-collapsed-hint")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "收起交付明细" }));
+    expect(screen.queryAllByTestId("delivery-entry-row")).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "收起仓库分组明细" }));
+    expect(
+      within(workItemRegion).queryByTestId("work-item-repository-group-repo_api"),
+    ).toBeNull();
+    expect(
+      screen.getByTestId("work-item-groups-collapsed-hint"),
+    ).toBeInTheDocument();
+  });
+
+  it("会话内保持：展开后切换阶段再切回仍为展开，且交付明细不随阶段切换重置", async () => {
+    const user = userEvent.setup();
+    renderOwnerIssueDetail();
+
+    await user.click(screen.getByRole("button", { name: /^展开交付明细/u }));
+    await user.click(screen.getByRole("button", { name: /^展开 2 个仓库分组/u }));
+
+    await user.click(screen.getByTestId("stage-tab-story"));
+    expect(
+      screen.queryByTestId("work-item-repository-group-repo_api"),
+    ).toBeNull();
+    // 交付区在阶段面板之外：展开态跨阶段切换保持。
+    expect(screen.getAllByTestId("delivery-entry-row")).toHaveLength(4);
+
+    await user.click(screen.getByTestId("stage-tab-work_item"));
+    expect(
+      screen.getByTestId("work-item-repository-group-repo_api"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "收起仓库分组明细" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByRole("button", { name: "收起交付明细" }),
+    ).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("单仓扁平兼容路径（无仓库分组）保持既有展开形态，不引入第二套折叠约定", () => {
+    renderDetail({
+      storySpecs: [stageSpecCard("story_spec", "issue_0001")],
+      designSpecs: [stageSpecCard("design_spec", "issue_0001")],
+      workItems: [stageWorkItemGroupCard("issue_0001")],
+    });
+
+    const workItemRegion = screen.getByRole("region", {
+      name: "Work Item 内容",
+    });
+    expect(workItemRegion).toHaveTextContent("Work Item Group");
+    expect(
+      within(workItemRegion).queryByRole("button", { name: /仓库分组/u }),
+    ).toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CodingAttempt, IssueLifecycleResponse, LifecycleWorkItem } from "../../api/types";
 import { IssueLifecycleWorkbench } from "./IssueLifecycleWorkbench";
@@ -50,6 +50,15 @@ function singleWorkItemFetch(
 describe("IssueLifecycleWorkbench single work item coding", () => {
   installIssueLifecycleWorkbenchTestHooks();
 
+  // owner 直批（2026-10-14）：Work Item 区仓库分组明细默认收起，单 Work Item 卡在
+  // 分组内——打开它的抽屉前必须先展开分组。
+  async function openSingleWorkItemDrawer(user: UserEvent) {
+    await user.click(
+      await screen.findByRole("button", { name: /^展开 1 个仓库分组/u }),
+    );
+    await user.click(screen.getByRole("button", { name: "实现提示组件" }));
+  }
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -62,7 +71,7 @@ describe("IssueLifecycleWorkbench single work item coding", () => {
     const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
-    await user.click(await screen.findByRole("button", { name: "实现提示组件" }));
+    await openSingleWorkItemDrawer(user);
 
     expect(screen.getByRole("button", { name: "打开 Workspace" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "开始 Coding" })).toBeInTheDocument();
@@ -79,7 +88,7 @@ describe("IssueLifecycleWorkbench single work item coding", () => {
     const user = userEvent.setup();
 
     render(<IssueLifecycleWorkbench />);
-    await user.click(await screen.findByRole("button", { name: "实现提示组件" }));
+    await openSingleWorkItemDrawer(user);
 
     const drawer = screen.getByTestId("lifecycle-card-drawer");
     expect(drawer).toHaveTextContent("实现提示组件");
@@ -108,9 +117,7 @@ describe("IssueLifecycleWorkbench single work item coding", () => {
       <IssueLifecycleWorkbench onOpenCodingWorkspace={onOpenCodingWorkspace} />,
     );
 
-    await user.click(
-      await screen.findByRole("button", { name: "实现提示组件" }),
-    );
+    await openSingleWorkItemDrawer(user);
     await user.click(screen.getByTestId("drawer-open-coding-workspace"));
 
     await waitFor(() =>
@@ -148,9 +155,7 @@ describe("IssueLifecycleWorkbench single work item coding", () => {
       <IssueLifecycleWorkbench onOpenCodingWorkspace={onOpenCodingWorkspace} />,
     );
 
-    await user.click(
-      await screen.findByRole("button", { name: "实现提示组件" }),
-    );
+    await openSingleWorkItemDrawer(user);
     await user.click(screen.getByTestId("drawer-open-coding-workspace"));
 
     await waitFor(() =>

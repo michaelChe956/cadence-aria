@@ -20,6 +20,7 @@ import type { StagePipState } from "./issue-queue-derivation";
 import { DeliveryStatusPanel } from "./DeliveryStatusPanel";
 import { LifecycleCard } from "./LifecycleCard";
 import type { DrawerEntity } from "./LifecycleCardDrawer";
+import { SectionCollapseToggle } from "./SectionCollapseToggle";
 import {
   StageStepper,
   type StageStepperStage,
@@ -111,6 +112,10 @@ export function IssueLifecycleDetail({
     // props 派生 state 的 render 阶段调整（React 推荐写法，无额外提交）。
     setStageSelection({ issueId, stage: defaultStage });
   }
+  // owner 直批（2026-10-14）：两段抽屉默认收起；用户展开后本次会话保持。
+  // 状态放在详情容器（跨阶段切换、跨 Issue 切换都不重置），按 owner 要求不落盘。
+  const [deliveryCollapsed, setDeliveryCollapsed] = useState(true);
+  const [workItemGroupsCollapsed, setWorkItemGroupsCollapsed] = useState(true);
   const activeStage =
     stageSelection.issueId === issueId ? stageSelection.stage : defaultStage;
 
@@ -234,7 +239,13 @@ export function IssueLifecycleDetail({
           切换消失、不依赖「查看完整 Issue」抽屉入口；与抽屉内面板同组件
           同数据（后端 delivery_summary 缺失时不渲染，向后兼容）。 */}
       {deliverySummary ? (
-        <DeliveryStatusPanel summary={deliverySummary} />
+        <DeliveryStatusPanel
+          summary={deliverySummary}
+          collapsed={deliveryCollapsed}
+          onToggleCollapsed={() =>
+            setDeliveryCollapsed((existing) => !existing)
+          }
+        />
       ) : null}
       {/* Task 6：单阶段面板——同一时刻只渲染当前阶段区域，内容占满工作区宽度。 */}
       <div id={`stage-panel-${activeStage}`} className="flex min-h-0 flex-1 flex-col p-3">
@@ -281,6 +292,10 @@ export function IssueLifecycleDetail({
               onDelete={onDelete}
               sectionTestId="onboarding-anchor-plan-review-gate"
               bodyTestId="onboarding-anchor-plan-final-gate"
+              collapsed={workItemGroupsCollapsed}
+              onToggleCollapsed={() =>
+                setWorkItemGroupsCollapsed((existing) => !existing)
+              }
             />
           ) : (
             <LifecycleContentSection
@@ -371,6 +386,10 @@ export function lifecycleWorkItemCard(
 // REQ-TGT-05：按 target_repository_id 分组展示 Work Item（前端独立 TS 实现，
 // 语义对齐后端 group_work_items_by_target）：每组标注仓库名（alias）、聚合状态，
 // 遗留/未指定仓库组标注“兼容投影”。
+//
+// owner 直批（2026-10-14）：该区（4 个仓库分组面板）改为可折叠抽屉、默认收起。
+// 收起只折叠仓库分组明细：plan 分组卡（主要交互入口）与展开提示仍在，且
+// onboarding 的「计划最终确认」锚点（bodyTestId）保持在常驻元素上。
 function WorkItemRepositoryGroupSection({
   planCard,
   groups,
@@ -380,6 +399,8 @@ function WorkItemRepositoryGroupSection({
   onDelete,
   sectionTestId,
   bodyTestId,
+  collapsed,
+  onToggleCollapsed,
 }: {
   planCard: LifecycleCardData | undefined;
   groups: WorkItemRepositoryGroup[];
@@ -390,7 +411,15 @@ function WorkItemRepositoryGroupSection({
   // onboarding 引导锚点（仅新增属性）：容器代表计划审阅区，内容体代表计划最终确认区。
   sectionTestId?: string;
   bodyTestId?: string;
+  // 折叠受控值由 issue 详情页持有（会话内状态，不落盘）。
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 }) {
+  const groupedWorkItemCount = groups.reduce(
+    (total, group) => total + (group.items?.length ?? 0),
+    0,
+  );
+
   return (
     <section
       role="region"
@@ -402,9 +431,17 @@ function WorkItemRepositoryGroupSection({
         <h3 className="text-sm font-semibold text-[var(--aria-ink)]">
           Work Item
         </h3>
-        <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
-          {groups.length} 个仓库分组
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
+            {groups.length} 个仓库分组
+          </span>
+          <SectionCollapseToggle
+            expanded={!collapsed}
+            expandLabel={`展开 ${groups.length} 个仓库分组的 Work Item 明细`}
+            collapseLabel="收起仓库分组明细"
+            onToggle={onToggleCollapsed}
+          />
+        </div>
       </div>
       {planCard ? (
         <div className="mb-3 shrink-0">
@@ -416,16 +453,23 @@ function WorkItemRepositoryGroupSection({
           />
         </div>
       ) : null}
-      {groups.length === 0 ? (
-        <div
-          data-testid={bodyTestId}
-          className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]"
-        >
-          暂无内容
-        </div>
-      ) : (
-        <div data-testid={bodyTestId} className="min-h-0 flex-1 space-y-3 overflow-y-auto">
-          {groups.map((group) => {
+      <div
+        data-testid={bodyTestId}
+        className={
+          collapsed
+            ? "rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-3 text-sm text-[var(--aria-ink-muted)]"
+            : "min-h-0 flex-1 space-y-3 overflow-y-auto"
+        }
+      >
+        {collapsed ? (
+          <span data-testid="work-item-groups-collapsed-hint">
+            已收起 {groups.length} 个仓库分组（{groupedWorkItemCount} 个 Work Item）·
+            展开查看各仓库明细
+          </span>
+        ) : groups.length === 0 ? (
+          <span>暂无内容</span>
+        ) : (
+          groups.map((group) => {
             const groupKey =
               group.target_repository_id ?? "unassigned";
             const groupItems = group.items ?? [];
@@ -478,9 +522,9 @@ function WorkItemRepositoryGroupSection({
                 )}
               </div>
             );
-          })}
-        </div>
-      )}
+          }))
+        }
+      </div>
     </section>
   );
 }

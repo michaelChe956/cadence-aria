@@ -218,6 +218,10 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     );
 
     const region = await screen.findByRole("region", { name: "Work Item 内容" });
+    // owner 直批（2026-10-14）：仓库分组明细默认收起，先展开再断言分组内 Work Item。
+    await user.click(
+      within(region).getByRole("button", { name: /^展开 2 个仓库分组/u }),
+    );
     const planCards = within(region).getAllByRole("button", { name: "Work Item Group" });
     expect(planCards).toHaveLength(1);
     expect(within(region).getAllByTestId(/^lifecycle-card-(?:work_item|work_item_group)$/u)[0])
@@ -453,6 +457,10 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
 
     await user.click(
       await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+    );
+    // owner 直批（2026-10-14）：仓库分组明细默认收起，先展开再点击分组内 Work Item。
+    await user.click(
+      screen.getByRole("button", { name: /^展开 1 个仓库分组/u }),
     );
     await user.click(screen.getByRole("button", { name: "实现提示组件" }));
 
