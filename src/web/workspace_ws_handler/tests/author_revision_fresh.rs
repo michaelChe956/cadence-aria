@@ -156,6 +156,7 @@ fn t19_review_verdict() -> ReviewVerdict {
             category: None,
             class_hint: None,
             contract_field: None,
+            machine_repair: None,
         }],
         review_gate: ReviewGate::RequiresRevision,
         work_item_plan_review: None,

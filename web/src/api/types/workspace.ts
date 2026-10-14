@@ -139,6 +139,128 @@ export type PlanningCompileFailurePresentation = {
   }>;
 };
 
+/** SG7（Rust `workspace_ws_types::review::MachineRepairStatus` 镜像）：
+ * 服务端已证 L1 且显式配对时唯一生产值 `offered`；执行态沿结构治理
+ * snapshot 的 grant/receipt 投影，不在 DTO 复制第二状态机。 */
+export type MachineRepairStatus = "offered";
+
+/** SG7（Rust `workspace_ws_types::review::MachineRepairDto` 镜像）：机器
+ * 修复 finding 的服务端只读投影——identity 字段逐字来自已证 L1 的
+ * `StructuralRepairInstruction`，`instruction_ref` 按 instruction digest
+ * 内容寻址。只读呈现用，不构成入站许可；Raw provider 输出恒不携带。 */
+export type MachineRepairPresentation = {
+  repair_id: string;
+  failure_id: string;
+  source_hash: string;
+  context_digest: string;
+  status: MachineRepairStatus;
+  instruction_ref: string;
+};
+
+/** SG7（Rust `workspace_ws_types::out::PlanningFailurePresentation` 镜像）：
+ * 单条 typed 结构失败的完整 wire presentation；与失败结果/snapshot 同
+ * failure_id 家族，机器修复仅在显式配对时携带。 */
+export type PlanningFailurePresentation = {
+  failure_id: string;
+  code: string;
+  category:
+    | "grammar"
+    | "dependency"
+    | "attribution"
+    | "regression"
+    | "operational"
+    | "unknown";
+  origin:
+    | "compiler"
+    | "canonical_contract"
+    | "split_preflight"
+    | "target_attribution"
+    | "effective_graph"
+    | "projection"
+    | "system";
+  stage: "story" | "design" | "plan" | "coding" | "review";
+  affected_ids?: Array<string>;
+  details?: Record<string, string>;
+  diagnostic_ref: string;
+  source_ref: string;
+  source_hash: string;
+  machine_repair?: MachineRepairPresentation | null;
+};
+
+/** SG7/SG7a（Rust `workspace_ws_types::out::StructuralGrantSnapshot` 镜像）：
+ * 结构修订授权窗口摘要（只读投影；缺字段 null/Unknown 无阶段权）。 */
+export type StructuralGrantSnapshot = {
+  grant_id: string;
+  authorization_hash: string;
+  turn_id?: string | null;
+  command_id?: string | null;
+  candidate_source_revision_ref?: string | null;
+  plan_candidate_ir_ref?: string | null;
+  mechanical_report_ref?: string | null;
+  phase?: string | null;
+  attempt_no: number;
+  prompt_ref?: string | null;
+  prompt_digest?: string | null;
+  instruction_digest?: string | null;
+  failing_source_hash?: string | null;
+  review_identity?: string | null;
+  granted_at: string;
+};
+
+
+/** SG7（Rust `models::UserBudgetHold` 镜像）：活动用户预算 hold
+ * （按 turn 幂等；不含 home/secret）。 */
+export type UserBudgetHold = {
+  turn_id: string;
+  command_id: string;
+  source_hash: string;
+  held_at: string;
+};
+
+/** SG7/SG7a（Rust `models::UserBudgetReceipt`＝out.rs `UserBudgetReceiptDto`
+ * 镜像）：三终态用户预算 receipt——delivered/nonstructural_failure 计费、
+ * released_structural 不实扣，按 turn 幂等互斥。 */
+export type UserBudgetReceipt = {
+  kind: "delivered_charge" | "nonstructural_failure_charge" | "released_structural";
+  turn_id: string;
+  command_id: string;
+  attempt_reason?:
+    | "human_revision"
+    | "mechanical_recovery"
+    | "structural_repair"
+    | "explicit_fresh"
+    | null;
+  source_revision_ref?: string | null;
+  plan_candidate_ir_ref?: string | null;
+  structure_report_ref?: string | null;
+  context_digest?: string | null;
+  reason?: string | null;
+  settled_at: string;
+};
+/** SG7/SG7a（Rust `workspace_ws_types::out::StructuralGovernanceSnapshot`
+ * 镜像）：结构治理只读快照——accepted 单源沿 gate 快照、actual start
+ * 单源沿 provider ledger，receipt/launch 摘要不含 home/secret；本快照
+ * 不构成任何启动/授权。 */
+export type StructuralGovernanceSnapshot = {
+  current_grant?: StructuralGrantSnapshot | null;
+  user_budget_total: number;
+  available_user_budget: number;
+  active_hold_count: number;
+  user_holds?: Array<UserBudgetHold>;
+  user_receipts?: Array<UserBudgetReceipt>;
+  structure_checkpoints?: Array<unknown>;
+  resolved_structure_facts?: Array<unknown>;
+  source_ref?: string | null;
+  plan_candidate_ir_ref?: string | null;
+  structure_report_ref?: string | null;
+  context_digest?: string | null;
+  accepted_feedback_turns?: number | null;
+  actual_provider_starts: number;
+  current_turn_summary?: string | null;
+  launch_reason?: string | null;
+  launch_evidence?: unknown | null;
+};
+
 export type WorkItemPlanProviderStartLedgerEntry = {
   provider_start_idempotency_key: string;
   started: boolean;
@@ -476,6 +598,9 @@ export type WorkspaceReviewFinding = {
   message: string;
   evidence: string;
   required_action: string;
+  /** SG7：服务端已证 L1 且同 source/context 显式配对的机器修复投影；
+   * 旧记录/provider Raw 输出恒缺省（wire 不携带）。 */
+  machine_repair?: MachineRepairPresentation | null;
 };
 
 export type StructuredOutputDiagnostic = {
@@ -907,6 +1032,10 @@ export type WsOutMessage = WithEventSeq<
        * fresh_running/resolved 主状态＋last_operation）；空/旧 wire 缺省
        * 省略；resolved 保留证据供 Replay，allowed_actions 由后端权威下发。 */
       lc_resume_recovery?: LcResumeRecoveryDto | null;
+      /** SG7/SG7a（§0.6.1）：结构治理只读快照（durable 聚合状态＋同
+       * record gate/ledger/三 refs 的纯投影）；旧记录无聚合状态时省略，
+       * 不构成任何启动/授权。 */
+      structural_governance?: StructuralGovernanceSnapshot | null;
     }
   | {
       /** C1（Task 6.1）：显式 fresh operation 的 typed 受理/回放结果（设计

@@ -231,5 +231,6 @@ fn finding(
         category,
         class_hint,
         contract_field: contract_field.map(ToString::to_string),
+        machine_repair: None,
     }
 }

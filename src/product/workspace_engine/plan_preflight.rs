@@ -21,7 +21,8 @@ use crate::product::work_item_split_validator::{
     INTEGRATION_WORK_ITEM_REQUIRED_REPAIR_ACTION,
 };
 use crate::web::workspace_ws_types::{
-    ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
+    MachineRepairDto, ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict,
+    ReviewVerdictType,
 };
 /// 机械 preflight verdict 的确定性可读全文（`complete_review` 的
 /// `record_review_message` 载体，进 timeline 消息流供人审阅）。
@@ -63,7 +64,7 @@ pub(crate) fn preflight_review_verdict(
     }
     let findings = preflight
         .iter()
-        .map(|finding| preflight_finding_to_review_finding(finding))
+        .map(|finding| preflight_finding_to_review_finding(finding, None))
         .collect::<Vec<_>>();
     let error_count = findings
         .iter()
@@ -262,7 +263,10 @@ fn preflight_required_action(code: &str) -> String {
 /// - Error → MustFix + category=ContractGap + class_hint=Repairable（policy 侧
 ///   归入自动返修通道，与 reviewer 契约缺口同池消费预算）；
 /// - Warning → Suggestion + class_hint=Advisory（仅在已有 verdict 时搭车）。
-fn preflight_finding_to_review_finding(finding: &WorkItemSplitFinding) -> ReviewFinding {
+fn preflight_finding_to_review_finding(
+    finding: &WorkItemSplitFinding,
+    machine_repair: Option<MachineRepairDto>,
+) -> ReviewFinding {
     use crate::product::models::WorkItemSplitFindingSeverity;
     let is_error = finding.severity == WorkItemSplitFindingSeverity::Error;
     ReviewFinding {
@@ -292,6 +296,10 @@ fn preflight_finding_to_review_finding(finding: &WorkItemSplitFinding) -> Review
             crate::product::work_item_plan_policy::FindingClassHint::Advisory
         }),
         contract_field: Some(preflight_contract_field(&finding.code)),
+        // SG7（§0.6.3）：preflight 族当前无 L1 指令 producer（F2b 授权
+        // 排除），生产恒 None；签名沿 §0.6.3 定案保留显式配对入口，
+        // Some 只能由已证同 source/context 绑定的服务端指令产生。
+        machine_repair,
     }
 }
 
@@ -587,5 +595,50 @@ mod tests {
         let tree = plan_baseline_tree(&lifecycle, "project_0001", "issue_0001")
             .expect("repoless issue must not fail");
         assert!(tree.is_none());
+    }
+
+    /// SG7 Step1：preflight 适配签名按 §0.6.3 定案收 `machine_repair`
+    /// Option——生产路径恒 None（preflight 族无 L1 指令 producer，F2b
+    /// 授权排除），业务面 severity/category/class_hint/contract_field
+    /// 逐字段不变；显式配对值只透传、不自行生成资格。
+    #[test]
+    fn sg_07_machine_repair_preflight_adapter_none_by_default_and_passthrough() {
+        let report = report_with(
+            "integration_work_item_required",
+            "include_integration_tests is enabled but the plan does not contain an integration work item",
+        );
+        let finding = &report.findings[0];
+
+        let adapted = preflight_finding_to_review_finding(finding, None);
+        assert_eq!(adapted.machine_repair, None);
+        assert_eq!(adapted.severity, ReviewFindingSeverity::MustFix);
+        assert_eq!(
+            adapted.category,
+            Some(crate::product::work_item_plan_policy::ReviewFindingCategory::ContractGap)
+        );
+        assert_eq!(
+            adapted.class_hint,
+            Some(crate::product::work_item_plan_policy::FindingClassHint::Repairable)
+        );
+        assert_eq!(
+            adapted.contract_field.as_deref(),
+            Some("plan_options.include_integration_tests")
+        );
+
+        // 显式配对值只透传（不产生/不改写资格），None 输出与旧形状逐字段相等。
+        let paired_dto = crate::web::workspace_ws_types::MachineRepairDto {
+            repair_id: "structural-repair/0123456789abcdef/integration_work_item_required#0"
+                .to_string(),
+            failure_id: "plan-preflight/ref-1#0".to_string(),
+            source_hash: "a".repeat(64),
+            context_digest: "b".repeat(64),
+            status: crate::web::workspace_ws_types::MachineRepairStatus::Offered,
+            instruction_ref: format!("structural-repair-instruction/{}", "c".repeat(64)),
+        };
+        let paired = preflight_finding_to_review_finding(finding, Some(paired_dto.clone()));
+        assert_eq!(paired.machine_repair, Some(paired_dto));
+        assert_eq!(paired.message, adapted.message);
+        assert_eq!(paired.evidence, adapted.evidence);
+        assert_eq!(paired.required_action, adapted.required_action);
     }
 }

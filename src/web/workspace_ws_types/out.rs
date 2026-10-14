@@ -328,6 +328,69 @@ pub struct PlanningCompileStructureFindingDto {
     pub affected_ids: Vec<String>,
 }
 
+/// SG7（plan v1.1 §0.5）：单条 typed 结构失败的完整 wire presentation——
+/// 由服务端从 `PlanningFailure` 纯投影，供失败结果/详情面消费（与
+/// snapshot/失败结果同 failure_id 家族）。安全可读详情（code/定位/受影响
+/// ID/证据键值）与机器修复绑定（`machine_repair` 仅显式配对时 Some）分层，
+/// 中文人话诊断仍由 `diagnostic_ref` 指向的持久记录承载，不在 DTO 复制。
+/// 未知 kind/origin/stage 由封闭枚举反序列化拒收。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanningFailurePresentation {
+    /// 与机器指令 `StructuralRepairInstruction::failure_id` 同族的身份。
+    pub failure_id: String,
+    /// 稳定 diagnostic code（kind 单源映射）。
+    pub code: String,
+    /// 稳定 category（统计/呈现分组，非资格）。
+    pub category: crate::product::planning_failure::PlanningFailureCategory,
+    /// 检出来源层（保留事实，不改资格）。
+    pub origin: crate::product::planning_failure::PlanningFailureOrigin,
+    /// 五阶段载体。
+    pub stage: crate::product::planning_failure::PlanningStage,
+    /// 受影响逻辑 WI/target ID（producer 真实顺序）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_ids: Vec<String>,
+    /// 结构化关联事实（稳定 key→value；无则省略）。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub details: std::collections::BTreeMap<String, String>,
+    /// 持久诊断记录 ref（含中文人话详情）。
+    pub diagnostic_ref: String,
+    /// 不可变 source 绑定。
+    pub source_ref: String,
+    pub source_hash: String,
+    /// 已证 L1 且同 source/context 显式配对的机器修复投影；无配对省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_repair: Option<crate::web::workspace_ws_types::review::MachineRepairDto>,
+}
+
+/// SG7：`PlanningFailure` → wire presentation 的纯投影（零 I/O、零资格
+/// 推断）。`failure_id` 由持有两侧身份的调用方给定（与配对指令同族，
+/// 如 `<diagnostic_ref>#<index>`）；`machine_repair` 只透传显式配对结果。
+pub fn project_planning_failure_presentation(
+    failure: &crate::product::planning_failure::PlanningFailure,
+    failure_id: &str,
+    machine_repair: Option<crate::web::workspace_ws_types::review::MachineRepairDto>,
+) -> PlanningFailurePresentation {
+    PlanningFailurePresentation {
+        failure_id: failure_id.to_string(),
+        code: failure.kind.stable_code().to_string(),
+        category: failure.kind.category(),
+        origin: failure.origin,
+        stage: failure.stage,
+        affected_ids: failure.evidence.affected_ids.clone(),
+        details: failure.evidence.details.clone(),
+        diagnostic_ref: failure.diagnostic_ref.clone(),
+        source_ref: failure.source_ref.clone(),
+        source_hash: failure.source_hash.clone(),
+        machine_repair,
+    }
+}
+
+/// SG7（plan v1.1 §0.5）：用户预算 receipt 的 wire 名。快照与失败详情共用
+/// 同一耐久模型形状（`models::UserBudgetReceipt`，SG7a 快照已直接内嵌）——
+/// 不为同字段集立第二 wire 形状，别名即 §0.5 名字绑定；模型 serde
+/// deny_unknown_fields 封闭性对 wire 同样成立。
+pub type UserBudgetReceiptDto = crate::product::models::UserBudgetReceipt;
+
 /// SG3b：engine typed 失败载体（本次 close 捕获）→ 本 DTO 的纯投影由
 /// `conversational_gate::HumanGateCloseCompileFailure::wire_presentation`
 /// 单源完成（engine 私有 types 不对 web 层开放），此处只承载 wire 合同。

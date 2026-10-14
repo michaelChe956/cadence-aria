@@ -341,6 +341,7 @@ fn work_item_plan_outline_revision_feedback_assembles_review_and_context() {
             category: None,
             class_hint: None,
             contract_field: None,
+            machine_repair: None,
         }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
@@ -388,6 +389,7 @@ fn work_item_plan_outline_revision_feedback_skips_contract_for_optional_only_fin
             category: None,
             class_hint: None,
             contract_field: None,
+            machine_repair: None,
         }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
@@ -830,11 +832,7 @@ pub(crate) fn init_fixture_git_repo(repo: &std::path::Path) {
             .current_dir(repo)
             .status()
             .unwrap_or_else(|error| panic!("git {} failed to start: {error}", args.join(" ")));
-        assert!(
-            status.success(),
-            "git {} failed",
-            args.join(" ")
-        );
+        assert!(status.success(), "git {} failed", args.join(" "));
     }
 }
 
@@ -880,10 +878,7 @@ async fn drive_work_item_plan_provider_session_idle_watchdog_aborts_silent_provi
     // (test 150ms)触发,秒级返回带稳定原因码的 Err。
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), drive).await;
     let result = outcome.expect("看门狗必须在有界时间内收口(修前=永挂 90min)");
-    assert!(
-        result.is_err(),
-        "静默 provider 必须按失败收口,不得返回输出"
-    );
+    assert!(result.is_err(), "静默 provider 必须按失败收口,不得返回输出");
     let message = result.expect_err("watchdog failure");
     assert!(
         message.contains("provider_idle_watchdog"),
@@ -1021,8 +1016,9 @@ fn anchor_t14_plan_resume_without_trusted_map_waits_not_fresh() {
             worktree.clone(),
             Vec::new(),
         );
-        let policy_store =
-            crate::product::logical_codebase::AggregatePolicyArtifactStore::new(lifecycle.app_paths());
+        let policy_store = crate::product::logical_codebase::AggregatePolicyArtifactStore::new(
+            lifecycle.app_paths(),
+        );
         policy_store
             .ensure_bootstrap(&manifest)
             .expect("bootstrap aggregate policy");

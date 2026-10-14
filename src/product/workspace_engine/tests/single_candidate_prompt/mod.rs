@@ -168,6 +168,7 @@ fn repairable_verdict_for_field(message: &str, contract_field: &str) -> ReviewVe
             category: Some(ReviewFindingCategory::ContractGap),
             class_hint: None,
             contract_field: Some(contract_field.to_string()),
+            machine_repair: None,
         }],
         review_gate: ReviewGate::RequiresRevision,
         work_item_plan_review: None,

@@ -358,6 +358,7 @@ fn single_candidate_review_prompt_injects_previous_round_finding_identities() {
         category: Some(ReviewFindingCategory::ContractGap),
         class_hint: None,
         contract_field: Some("WI-001.output_contracts[CT-001].capabilities".to_string()),
+        machine_repair: None,
     };
     let previous_verdict = ReviewVerdict {
         verdict: ReviewVerdictType::Revise,

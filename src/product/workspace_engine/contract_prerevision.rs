@@ -41,7 +41,8 @@ use crate::product::work_item_contract::{
 use crate::product::work_item_plan_compiler::PlanCandidateIr;
 use crate::product::work_item_plan_policy::{FindingClassHint, ReviewFindingCategory};
 use crate::web::workspace_ws_types::{
-    ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
+    MachineRepairDto, MachineRepairStatus, ReviewFinding, ReviewFindingSeverity, ReviewGate,
+    ReviewVerdict, ReviewVerdictType,
 };
 
 /// 对 SC 本轮 IR 的 canonical 契约跑 approval 同源机械校验；存在 Error 级
@@ -86,7 +87,7 @@ fn verdict_from_report(
     let findings = report
         .findings
         .iter()
-        .map(|finding| contract_finding_to_review_finding(finding, graph))
+        .map(|finding| contract_finding_to_review_finding(finding, graph, None))
         .collect::<Vec<_>>();
     let error_count = findings
         .iter()
@@ -144,6 +145,7 @@ pub(crate) fn contract_prerevision_readable_output(verdict: &ReviewVerdict) -> S
 fn contract_finding_to_review_finding(
     finding: &ContractValidationFinding,
     graph: Option<&DependencyContractGraph>,
+    machine_repair: Option<MachineRepairDto>,
 ) -> ReviewFinding {
     let logical_id = finding.logical_work_item_id.as_deref();
     let contract_ref = finding.contract_ref.as_deref();
@@ -173,7 +175,40 @@ fn contract_finding_to_review_finding(
         category,
         class_hint,
         contract_field: contract_field_text(finding),
+        // SG7（§0.6.3）：machine_repair 只由服务端已证 L1 的同 source/
+        // context 显式配对产生（`machine_repair_dto_for_instruction`），
+        // 不从 message/class_hint/severity 猜资格；无配对恒 None。
+        machine_repair,
     }
+}
+
+/// SG7（plan v1.1 §0.6.3）：服务端 L1 指令 → wire `MachineRepairDto` 的
+/// 纯投影兼显式配对闸——仅当指令与当前候选的 source hash/context
+/// digest 完全一致时返回 Some（identity 字段逐字取自指令；`instruction_ref`
+/// 按 `instruction_digest` 内容寻址，与冻结件 `structural-prompts/` 同
+/// 约定，纯派生零 I/O）。漂移/缺指令一律 None：本函数不从 finding 文本
+/// 反查指令，配对由持有两侧身份的调用方显式完成。
+pub(crate) fn machine_repair_dto_for_instruction(
+    instruction: &StructuralRepairInstruction,
+    current_source_hash: &str,
+    current_context_digest: &str,
+) -> Option<MachineRepairDto> {
+    if instruction.source_hash != current_source_hash
+        || instruction.context_digest != current_context_digest
+    {
+        return None;
+    }
+    Some(MachineRepairDto {
+        repair_id: instruction.repair_id.clone(),
+        failure_id: instruction.failure_id.clone(),
+        source_hash: instruction.source_hash.clone(),
+        context_digest: instruction.context_digest.clone(),
+        status: MachineRepairStatus::Offered,
+        instruction_ref: format!(
+            "structural-repair-instruction/{}",
+            instruction.instruction_digest
+        ),
+    })
 }
 
 /// 定位三元组拼进 evidence（确定性键值对，机械可识别）。
@@ -1035,7 +1070,7 @@ pub(crate) fn seal_structural_repair_instruction(
 mod tests {
     use super::*;
 
-    fn compiled_gap_ir() -> PlanCandidateIr {
+    fn gap_source_and_ir() -> (String, PlanCandidateIr) {
         // rep4 基线：终端 WI-003 的 handoff 提供行按 campaign 口径清空
         // （unconsumed_required_handoff 是 Error 级，混入会干扰缺口断言），
         // 再给 WI-002 的 require_all 塞一个 WI-001 未提供的 capability。
@@ -1051,14 +1086,19 @@ mod tests {
             "- required_capabilities: api.levels.read\n",
             "- required_capabilities: api.levels.read, api.levels.write\n",
         );
-        crate::product::work_item_plan_compiler::compile_work_item_plan(
+        let ir = crate::product::work_item_plan_compiler::compile_work_item_plan(
             &source,
             &crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
                 target_repository_id: "repo_fixture".to_string(),
                 member_targets: None,
             },
         )
-        .expect("compile gap fixture")
+        .expect("compile gap fixture");
+        (source, ir)
+    }
+
+    fn compiled_gap_ir() -> PlanCandidateIr {
+        gap_source_and_ir().1
     }
 
     fn compiled_clean_ir() -> PlanCandidateIr {
@@ -1181,7 +1221,7 @@ mod tests {
             message: "acceptance criterion AC-001 must describe an observable result".to_string(),
             kind: None,
         };
-        let finding = contract_finding_to_review_finding(&warning, Some(&graph));
+        let finding = contract_finding_to_review_finding(&warning, Some(&graph), None);
         assert_eq!(finding.severity, ReviewFindingSeverity::Suggestion);
         assert_eq!(finding.class_hint, Some(FindingClassHint::Advisory));
         assert_eq!(finding.category, None);
@@ -1719,5 +1759,152 @@ mod tests {
                 "Operational/Unknown 不产机器指令（fail-closed）"
             );
         }
+    }
+
+    /// SG7 Step1 `sg_07_machine_repair_optional_literal_cutover`（producer→
+    /// wire 完整绑定臂）：真实 SG2 producer（`build_contract_autorepair_
+    /// instructions`，同 source/IR/context）产出 L1 指令，经显式配对闸投影
+    /// 为 `MachineRepairDto` 后由真实 contract 适配进 ReviewFinding——wire
+    /// JSON 携带与指令逐字同源的 source/context/repair/instruction_ref。
+    #[test]
+    fn sg_07_machine_repair_contract_pairing_binds_wire_identity() {
+        let (source, ir) = gap_source_and_ir();
+        let context = crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
+            target_repository_id: "repo_fixture".to_string(),
+            member_targets: None,
+        };
+        let instructions =
+            super::super::contract_autorepair::build_contract_autorepair_instructions(
+                &source, &ir, &context,
+            );
+        assert_eq!(
+            instructions.len(),
+            1,
+            "capability gap fixture must produce exactly one L1 instruction"
+        );
+        let instruction = &instructions[0];
+
+        let dto = machine_repair_dto_for_instruction(
+            instruction,
+            &instruction.source_hash,
+            &instruction.context_digest,
+        )
+        .expect("same source/context pairing must project Some");
+        assert_eq!(dto.repair_id, instruction.repair_id);
+        assert_eq!(dto.failure_id, instruction.failure_id);
+        assert_eq!(dto.source_hash, instruction.source_hash);
+        assert_eq!(dto.context_digest, instruction.context_digest);
+        assert_eq!(dto.status, MachineRepairStatus::Offered);
+        assert_eq!(
+            dto.instruction_ref,
+            format!(
+                "structural-repair-instruction/{}",
+                instruction.instruction_digest
+            )
+        );
+
+        // 真实 contract 适配：Some 只附加 machine_repair，业务面
+        // category/class_hint/severity/required_action 原样保留。
+        let contracts = ir
+            .items
+            .iter()
+            .map(|item| item.contract.clone())
+            .collect::<Vec<_>>();
+        let graph = build_dependency_contract_graph(&contracts).expect("graph");
+        let report = validate_dependency_contract_graph(&graph);
+        let gap_finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.code == "required_capability_missing")
+            .expect("capability gap finding");
+        let paired = contract_finding_to_review_finding(gap_finding, Some(&graph), Some(dto));
+        let baseline = contract_finding_to_review_finding(gap_finding, Some(&graph), None);
+        assert_eq!(paired.severity, baseline.severity);
+        assert_eq!(paired.category, baseline.category);
+        assert_eq!(paired.class_hint, baseline.class_hint);
+        assert_eq!(paired.required_action, baseline.required_action);
+        assert_eq!(paired.message, baseline.message);
+        assert_ne!(paired.machine_repair, None);
+
+        // 到 wire 的完整绑定：ReviewVerdict 序列化后 machine_repair 可达。
+        let verdict = ReviewVerdict {
+            verdict: ReviewVerdictType::Revise,
+            comments: "mechanical".to_string(),
+            summary: "gap".to_string(),
+            findings: vec![paired],
+            review_gate: ReviewGate::RequiresRevision,
+            work_item_plan_review: None,
+            structured_output_diagnostic: None,
+        };
+        let wire = serde_json::to_value(&verdict).expect("wire json");
+        assert!(
+            wire["findings"][0]["machine_repair"]["repair_id"]
+                .as_str()
+                .is_some_and(|value| value == instruction.repair_id),
+            "machine repair must reach the wire bound to the instruction identity: {wire}"
+        );
+    }
+
+    /// SG7 Step1：配对闸 fail-closed——source hash 或 context digest 任一
+    /// 漂移即 None（不从 message/class_hint 猜资格）；干净候选零指令、
+    /// Warning finding 无指令可配恒 None。
+    #[test]
+    fn sg_07_machine_repair_pairing_is_none_on_drift_or_missing_instruction() {
+        let (source, ir) = gap_source_and_ir();
+        let context = crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
+            target_repository_id: "repo_fixture".to_string(),
+            member_targets: None,
+        };
+        let instructions =
+            super::super::contract_autorepair::build_contract_autorepair_instructions(
+                &source, &ir, &context,
+            );
+        let instruction = &instructions[0];
+
+        let drifted_source = machine_repair_dto_for_instruction(
+            instruction,
+            &"0f".repeat(64),
+            &instruction.context_digest,
+        );
+        assert_eq!(drifted_source, None, "source hash drift must not pair");
+        let drifted_context = machine_repair_dto_for_instruction(
+            instruction,
+            &instruction.source_hash,
+            &"1f".repeat(64),
+        );
+        assert_eq!(drifted_context, None, "context digest drift must not pair");
+
+        // 干净候选：SG2 producer 零指令 → 无可配对，Some 不存在。
+        let clean_source = source.replace(
+            "- required_capabilities: api.levels.read, api.levels.write\n",
+            "- required_capabilities: api.levels.read\n",
+        );
+        let clean_ir = crate::product::work_item_plan_compiler::compile_work_item_plan(
+            &clean_source,
+            &context,
+        )
+        .expect("clean compile");
+        assert!(
+            super::super::contract_autorepair::build_contract_autorepair_instructions(
+                &clean_source,
+                &clean_ir,
+                &context
+            )
+            .is_empty(),
+            "clean candidate must carry no L1 instruction to pair"
+        );
+
+        // Warning finding：不产指令（仅 Error 级缺口进 producer），适配恒 None。
+        let warning = ContractValidationFinding {
+            code: "process_evidence_acceptance_criterion".to_string(),
+            severity: ContractFindingSeverity::Warning,
+            logical_work_item_id: Some("WI-001".to_string()),
+            contract_ref: Some("AC-001".to_string()),
+            capability_ref: None,
+            message: "acceptance criterion must describe an observable result".to_string(),
+            kind: None,
+        };
+        let finding = contract_finding_to_review_finding(&warning, None, None);
+        assert_eq!(finding.machine_repair, None);
     }
 }

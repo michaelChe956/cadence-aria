@@ -110,6 +110,7 @@ fn t17_revise_verdict() -> crate::web::workspace_ws_types::ReviewVerdict {
             category: None,
             class_hint: None,
             contract_field: None,
+            machine_repair: None,
         }],
         review_gate: crate::web::workspace_ws_types::ReviewGate::RequiresRevision,
         work_item_plan_review: None,
