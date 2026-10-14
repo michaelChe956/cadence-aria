@@ -2,7 +2,7 @@
 
 - 切片：S6（DesignPushLocal2 Q4②/Q6/切片 S6）
 - 日期：2026-10-14
-- 提交：`fix: S6 prompt汇报契约与提交声明`
+- 提交：`fix: S6 prompt汇报契约与提交声明`（9e6b0ffa）；审查处置 `fix: S6 认领摘要部署边界登记与断言加强`
 
 ## 改动文件
 
@@ -13,7 +13,7 @@
 | `src/product/coding_workspace_engine/rework.rs` | 同构：full_prompt 与 delta 分支追加（rework.rs:~206 回落构建点之后） |
 | `src/product/coding_workspace_engine/provider_retry.rs` | reviewer 重驱轮 prompt 追加（终端契约仍收尾，插在 terminal contract 检查之前） |
 | `src/product/coding_workspace_engine/tests/parser_prompt.rs` | 红绿测 ×3：单元（段落内容）＋渲染路径（组 attempt，unit run 哈希绑定在场）＋回落路径（非组 attempt，无 unit run，`Coding Workspace` 头部） |
-| `src/product/coding_workspace_engine/tests/provider_execution_context.rs` | 回归修正：coder prompt 精确相等断言改为「前缀=渲染 envelope + 尾段=platform_directives」，并保留 `coder_execution_context_hash == 渲染 content_hash` 断言（追加不动冻结哈希面） |
+| `src/product/coding_workspace_engine/tests/provider_execution_context.rs` | 回归修正＋审查加强：coder prompt 断言升级为 `format!("{}{}", expected_coder.text, platform_directives_section())` 精确拼接相等（前缀零改写、中段零插入），并保留 `coder_execution_context_hash == 渲染 content_hash` 断言（追加不动冻结哈希面） |
 
 ## 红线核验
 
@@ -25,11 +25,20 @@
 
 - **红**：`cargo test --lib platform_directives` → 单元 ok；`fallback_coding_prompt_carries_platform_directives` FAILED、`rendered_coding_prompt_carries_platform_directives` FAILED（"S6:最终 prompt 必须携带平台指令段"）——接线前证据。
 - **绿**：接线五处注入点后同命令 → `3 passed; 0 failed`。
-- **回归**：
-  - `cargo test --lib product::coding_workspace_engine` → `593 passed; 0 failed`。
-  - `cargo test --lib web::coding_ws_handler` → `131 passed; 0 failed`。
-  - `provider_matrix` / `work_item_projection` 模块回归被并行切片 S3 的在途编译错误（`plan_start.rs:1484/1610`，S3 文件）阻断；两模块无 prompt 形状断言，且 `render.rs` 零改动，不受本切片影响。
+- **回归**（审查处置轮，断言加强后干净树复跑）：
+  - `cargo test --lib product::coding_workspace_engine` → `601 passed; 0 failed`。
+  - `cargo test --lib web::coding_ws_handler` → `132 passed; 0 failed`。
+  - `cargo test --lib platform_directives` → `3 passed; 0 failed`。
+  - 首轮回归（593/131）同理全绿；`provider_matrix` / `work_item_projection` 无 prompt 形状断言且 `render.rs` 零改动，交由 P3 整仓验证覆盖。
+
+## 部署边界（P2 处置，审查 2026-10-14）
+
+注入段推高 `rework-claims.json` 的 `rendered_prompt_digest` 冻结绑定：Window A'（认领 journal 已落盘、消费标记未落盘）的 in-flight attempt 跨本构建重放会恒 IdentityMismatch → AMR 死循环。现场暴露为零（两 AMR attempt `rework_count=0`、无 claims），但真实链路会写该 journal。处置：
+
+1. **部署前清点（本报告登记）**：逐 attempt 取 `rework-claims.json` 认领记录 × 未消费 rework instruction（`consumed_at` 为空）交集；命中者显式清认领（删除该 claim 记录或整 journal 重写，保持 instruction 可读可重试），再部署新构建。
+2. **恢复预案执行**：controller（Main）在恢复演练前执行同款清点。
+3. **耐久修法（后续包，不在本轮）**：claim 增加 scheme 标识／旧 digest 规范化（追加段不进 digest 基面或按 scheme 迁移），消除跨构建重放失配类。
 
 ## 环境备注
 
-并行切片 S3（plan_start.rs/web/types.rs）同 worktree 在途编辑导致当前树暂不可整仓编译；本切片全部验证采集自含本切片最终代码的可编译树。
+首轮验证时并行切片 S3 在途编辑曾致树暂不可整仓编译；S3 落地后已在干净树复跑（见回归记录）。

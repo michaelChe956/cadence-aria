@@ -153,14 +153,17 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
             },
         )
         .unwrap();
-    // S6（DesignPushLocal2 Q6/Q4②）：平台指令段在绑定渲染 envelope 之后
-    // 追加——前缀保持渲染文本，尾段为 platform_directives；执行上下文
-    // 哈希仍等于渲染 content_hash（追加不动冻结哈希面）。
-    assert!(coder.input().prompt.starts_with(&expected_coder.text));
-    assert!(coder
-        .input()
-        .prompt
-        .ends_with(&platform_directives_section()));
+    // S6（DesignPushLocal2 Q6/Q4②，审查加强）：最终 prompt 是绑定渲染
+    // envelope 与 platform_directives 段的精确拼接（前缀零改写、中段零
+    // 插入）；执行上下文哈希仍等于渲染 content_hash（追加不动冻结哈希面）。
+    assert_eq!(
+        coder.input().prompt,
+        format!(
+            "{}{}",
+            expected_coder.text,
+            platform_directives_section()
+        )
+    );
     assert_eq!(
         run.coder_provider_renderer_version,
         expected_coder.renderer_version
