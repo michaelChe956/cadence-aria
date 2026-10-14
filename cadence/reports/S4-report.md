@@ -41,10 +41,20 @@
 
 **缺口**:`fail_/supersede_` 无差别收尾会打穿 failed-code-review 恢复 journal 持有的 retry role run——它必须保持 `Running + reason=recovery_key` 才能被 `ensure_failed_code_review_retry_role_run` 的 reason 匹配与 `validate_retry_role_run` 识别复用;打穿后 retry_review 通道永久关死(gate 悬挂无动作)。
 
-**修复**(role_run.rs):新增 `incomplete_failed_review_recovery_exemption`——journal 未 completed 时返回 `(retry_role_run_id, recovery_key)`,两个收尾/清场方法对「id 登记命中 **或** `reason_code==recovery_key`」的 Running run 跳过不收尾。reason 匹配覆盖「retry run 已建而 journal 尚未登记 id」的窗口,与 store 自身恢复/回滚逻辑(rollback 的双路识别)同源,宽于审查建议的纯 id 匹配,属同根因的完备化。
+**修复**(role_run.rs):新增 journal 豁免——journal 未 completed 时返回 `(retry_role_run_id, recovery_key)`,两个收尾/清场方法对「id 登记命中 **或** `reason_code==recovery_key`」的 Running run 跳过不收尾。reason 匹配覆盖「retry run 已建而 journal 尚未登记 id」的窗口,与 store 自身恢复/回滚逻辑(rollback 的双路识别)同源,宽于审查建议的纯 id 匹配,属同根因的完备化。
 
 **裁定取舍(登记)**:接受豁免 run 在 AMR 态投影为 running 的已知单例投影瑕疵(<恢复通道永久死);若要消此瑕疵,走「恢复流程重开 journal run」另立切片。
 
 **红绿**:红已观察——`runner_death_and_recovery_sweeps_exempt_incomplete_journal_retry_run`(failed_review_recovery/runner.rs,fixture 构建 journal 至 AttemptRunning 前缀 + 空 registry runner 前段死亡)`left: Failed, right: Running`;修复后全绿。断言面:死亡后 journal retry run 仍 Running+reason 原样、对照 decoy run 照常 Failed;RecoverCoding 清场后 retry run 仍 Running、残留 run 照常 Superseded;`recover_failed_code_review` 仍收敛(引擎侧至 GateResolved——Completed 由 reserved spawn 的 runner 在 provider 进入前完成,先例 reserved_spawn_* 事件序)。
 
-**回归(修复轮)**:`runner_recovery` 10 passed 0 failed;`coding_ws_handler::tests::` 全量 **122 passed; 0 failed**(121+1 新);`coding_attempt_store::admission` 40 passed 0 failed;`failed_review_recovery` 全族 **31 passed; 0 failed**。
+**回归(修复轮,按过滤器口径)**:filter `coding_ws_handler::tests::failed_review_recovery::`(**ws_handler 侧 31** passed 0 failed);filter `coding_attempt_store::tests::failed_review_recovery`(**store 侧 15** passed 0 failed,含 rollback 2);filter `provider_failure_recovery::reviewer_recovery`(engine 侧 6 passed 0 failed);另有 `runner_recovery` 10/0、`coding_ws_handler::tests::` 全量 122/0(121+1 新)、`admission` 40/0。裸 filter `failed_review_recovery` 共 53 项=ws_handler 32+store 15+engine 4+web 其他 2(修复轮 2 后统计)。
+
+## 修复轮 2(复审残余观察①裁定必修:豁免补 completed-未 spawn 窗口 + 格式清偿)
+
+**缺口**:reserved spawn 把 journal 推到 Completed 之后、retry run attach node 之前的死亡窗口——retry run 仍 `Running+node_id.is_none()` 是 `completed_journal_waits_for_retry_node` 的等待凭据(completed journal 不再可走未完成恢复路径);收尾打穿它则该判定永久 false,retry_review 通道死。
+
+**修复**(role_run.rs):豁免 helper 更名 `recovery_journal_retry_exemption` 并放宽——「journal 未 completed **或**(completed 且 `retry_role_run_id` 的 run 仍 `node_id.is_none()`)」均返回豁免凭据;已 spawn(node_id 有值)的 retry run 按普通 run 收尾。同轮 rustfmt 清偿 role_run.rs 三处行宽偏差,`rustfmt --edition 2024 --check` 该文件与 runner.rs 测试文件零 diff。
+
+**红绿**:红已观察——`runner_death_sweep_exempts_completed_journal_unspawned_retry_run`(journal 前缀 AttemptRunning 后直接 advance 至 Completed、retry 节点不 spawn,空 registry runner 死亡)`left: Failed, right: Running`;修复后全绿。断言面:前置 `recoverable_failed_code_review` 为 Some;死亡后 retry run 仍 Running+node_id None+reason 原样、decoy 照常 Failed;RecoverCoding 清场后仍 Running;`recoverable_failed_code_review` 复检仍 Some。
+
+**回归(修复轮 2)**:ws_handler 侧 failed_review_recovery **32/0**(31+1 新);store 侧 **15/0**;engine `provider_failure_recovery::reviewer_recovery` **6/0**;`runner_recovery` **10/0**;`coding_ws_handler::tests::` 全量 **123/0**(122+1 新);`admission` **40/0**;`rustfmt --edition 2024 --check` role_run.rs 与 runner.rs 零 diff。

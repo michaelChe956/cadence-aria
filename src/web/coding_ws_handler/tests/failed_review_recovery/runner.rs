@@ -6,12 +6,12 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::product::coding_attempt_store::FailedCodeReviewRecoveryPhase;
-use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage, CodingProviderRole,
     CodingRoleRunStatus, CodingRoleRunTrigger,
 };
 use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
+use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::coding_ws_handler::socket::{
     CodingMessagePreparation, CodingRecoveryPreparationProbe, failed_code_review_recovery_request,
@@ -854,14 +854,13 @@ async fn runner_death_and_recovery_sweeps_exempt_incomplete_journal_retry_run() 
     state.test_provider_enabled = true;
     let (event_tx, _event_rx) = mpsc::channel(64);
     let attempt_key = CodingAttemptRunKey::from_attempt(&running_attempt);
-    let command_tx =
-        crate::web::coding_ws_handler::runner::spawn_coding_runner(
-            state.clone(),
-            fixture.store.clone(),
-            event_tx.clone(),
-            running_attempt,
-        )
-        .expect("runner spawned for journal-bearing attempt");
+    let command_tx = crate::web::coding_ws_handler::runner::spawn_coding_runner(
+        state.clone(),
+        fixture.store.clone(),
+        event_tx.clone(),
+        running_attempt,
+    )
+    .expect("runner spawned for journal-bearing attempt");
     let _ = command_tx
         .send(CodingRunnerCommand::StageGateConfirm {
             stage: CodingExecutionStage::CodeReview,
@@ -1003,6 +1002,228 @@ async fn runner_death_and_recovery_sweeps_exempt_incomplete_journal_retry_run() 
     assert_eq!(
         journal_final.phase,
         FailedCodeReviewRecoveryPhase::GateResolved
+    );
+}
+
+/// S4 修复轮 2（复审残余观察①，裁定必修）：journal 已 Completed 但 retry
+/// 节点尚未 spawn（reserved spawn 把 journal 推到 Completed 之后、retry
+/// run attach node 之前的死亡窗口）——retry run 仍 Running+node_id.is_none()
+/// 是 `completed_journal_waits_for_retry_node` 的等待凭据；死亡收尾/恢复
+/// 清场打穿它会让该判定永久 false，retry_review 通道死（completed journal
+/// 不再可走未完成恢复路径）。豁免必须放宽覆盖此窗口；已 spawn（有
+/// node_id）的 retry run 则按普通 run 收尾。
+#[tokio::test]
+async fn runner_death_sweep_exempts_completed_journal_unspawned_retry_run() {
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItemGroup).await;
+    let gate_id = fixture
+        .dirty_gate
+        .as_ref()
+        .expect("dirty gate")
+        .gate_id
+        .clone();
+
+    // 前缀至 AttemptRunning 后直接推 journal 到 Completed：复刻 reserved
+    // spawn 在 provider 进入前完成 journal、而 retry 节点尚未 attach 的窗口。
+    let mut journal = fixture
+        .store
+        .prepare_failed_code_review_recovery_journal(
+            &fixture.attempt,
+            &gate_id,
+            FAILED_NODE_ID,
+            &fixture.stale_role_run_id,
+        )
+        .expect("prepare recovery journal");
+    journal = fixture
+        .store
+        .advance_failed_code_review_recovery_journal(
+            &journal,
+            FailedCodeReviewRecoveryPhase::AttemptReopened,
+            None,
+        )
+        .expect("persist attempt-reopened prefix");
+    let retry = fixture
+        .store
+        .ensure_failed_code_review_retry_role_run(&fixture.attempt, &journal)
+        .expect("persist retry role run prefix");
+    journal = fixture
+        .store
+        .advance_failed_code_review_recovery_journal(
+            &journal,
+            FailedCodeReviewRecoveryPhase::RetryRunCreated,
+            Some(&retry.id),
+        )
+        .expect("record retry role run prefix");
+    fixture
+        .store
+        .admit_and_transition_attempt_to_executable(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("persist running attempt prefix");
+    journal = fixture
+        .store
+        .advance_failed_code_review_recovery_journal(
+            &journal,
+            FailedCodeReviewRecoveryPhase::AttemptRunning,
+            journal.retry_role_run_id.as_deref(),
+        )
+        .expect("record running attempt prefix");
+    journal = fixture
+        .store
+        .advance_failed_code_review_recovery_journal(
+            &journal,
+            FailedCodeReviewRecoveryPhase::Completed,
+            journal.retry_role_run_id.as_deref(),
+        )
+        .expect("complete journal before retry node spawn");
+    assert!(journal.is_completed());
+    let running_attempt = fixture
+        .store
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("running attempt at code review");
+    assert_eq!(running_attempt.status, CodingAttemptStatus::Running);
+
+    // 前置：该窗口下通道判定必须活着（completed_journal_waits_for_retry_node
+    // 识别未 spawn 的 retry run）。
+    assert!(
+        crate::product::coding_workspace_engine::recoverable_failed_code_review(
+            &fixture.store,
+            &running_attempt,
+        )
+        .expect("recoverable check before death")
+        .is_some(),
+        "前置：completed-未 spawn 窗口下 retry_review 通道判定必须存活"
+    );
+
+    // 对照面：非 journal 持有的在途 coder run 必须照常收尾。
+    let decoy = fixture
+        .store
+        .create_role_run(
+            &running_attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("seed decoy in-flight coder run");
+
+    // 空 registry：runner 前段死亡。
+    let mut state = WebAppState::with_provider_registry(
+        fixture._tmp.path().to_path_buf(),
+        WebRuntime::new_fake(fixture._tmp.path().to_path_buf()),
+        ProviderRegistry::new(),
+    );
+    state.test_provider_enabled = true;
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let attempt_key = CodingAttemptRunKey::from_attempt(&running_attempt);
+    let command_tx = crate::web::coding_ws_handler::runner::spawn_coding_runner(
+        state.clone(),
+        fixture.store.clone(),
+        event_tx,
+        running_attempt,
+    )
+    .expect("runner spawned for completed-journal attempt");
+    let _ = command_tx
+        .send(CodingRunnerCommand::StageGateConfirm {
+            stage: CodingExecutionStage::CodeReview,
+        })
+        .await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while state.coding_runs.runner_count(&attempt_key) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed runner must exit and clear its registration");
+
+    let after_death = fixture
+        .store
+        .get_attempt(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("attempt after death");
+    assert_eq!(
+        after_death.status,
+        CodingAttemptStatus::AwaitingManualRecovery,
+        "S4 前置：runner 死亡仍必须 fail-closed 转人工恢复"
+    );
+
+    let runs = fixture
+        .store
+        .list_role_runs(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("role runs after death");
+    let retry_after_death = runs
+        .iter()
+        .find(|run| run.id == retry.id)
+        .expect("journal retry run persisted");
+    assert_eq!(
+        retry_after_death.status,
+        CodingRoleRunStatus::Running,
+        "残余观察①：completed-未 spawn 窗口的 retry run 同样必须豁免（否则 completed_journal_waits_for_retry_node 永久 false）"
+    );
+    assert!(retry_after_death.node_id.is_none());
+    assert_eq!(
+        retry_after_death.reason_code.as_deref(),
+        Some(journal.recovery_key.as_str())
+    );
+    assert_eq!(
+        runs.iter()
+            .find(|run| run.id == decoy.id)
+            .expect("decoy run persisted")
+            .status,
+        CodingRoleRunStatus::Failed,
+        "豁免只覆盖 journal 等待凭据 run，非持有 run 照常收尾"
+    );
+
+    // RecoverCoding 清场同款组合后，通道判定仍存活（attempt 回 Running）。
+    let recovered = fixture
+        .store
+        .recover_attempt_from_manual_recovery(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("explicit recovery channel");
+    assert_eq!(recovered.status, CodingAttemptStatus::Running);
+    fixture
+        .store
+        .supersede_residual_running_role_runs_for_attempt(&recovered)
+        .expect("supersede residual running role runs on recovery");
+    assert!(
+        crate::product::coding_workspace_engine::recoverable_failed_code_review(
+            &fixture.store,
+            &recovered,
+        )
+        .expect("recoverable check after recovery sweep")
+        .is_some(),
+        "死亡+清场后 retry_review 通道判定必须仍存活"
+    );
+    let runs = fixture
+        .store
+        .list_role_runs(
+            &fixture.attempt.project_id,
+            &fixture.attempt.issue_id,
+            &fixture.attempt.id,
+        )
+        .expect("role runs after recovery sweep");
+    assert_eq!(
+        runs.iter()
+            .find(|run| run.id == retry.id)
+            .expect("journal retry run persisted")
+            .status,
+        CodingRoleRunStatus::Running,
+        "清场同样必须豁免 completed-未 spawn 窗口的 retry run"
     );
 }
 
