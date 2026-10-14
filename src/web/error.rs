@@ -216,6 +216,9 @@ impl IntoResponse for ApiError {
             | "coding_plan_run_purge_scope"
             | "coding_plan_run_active_amendment"
             | "coding_plan_run_plan_not_confirmed" => StatusCode::UNPROCESSABLE_ENTITY,
+            // P1 修复轮：族内未逐一登记的 kind（如后续新增）按前缀默认 409
+            //（run 冻结状态拒绝），显式 422 清单优先——不再落 500。
+            c if c.starts_with("coding_plan_run_") => StatusCode::CONFLICT,
             // T11 gateway 稳定码表收口：政策门/复验拒绝为 4xx 业务阻断，禁止回退 500。
             // policy/target/registry/drift/resume/managed_settings 一律 409；capability 与
             // Codex danger-full-access 为 403；provider 不可用为 503；系统未接线为 500(防御)。
@@ -964,6 +967,15 @@ mod tests {
                 response.status(),
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "{code} status mapping"
+            );
+        }
+        // P1 修复轮：族内未逐一登记 kind 按前缀默认 409（显式 422 清单优先）。
+        for code in ["coding_plan_run_target", "coding_plan_run_future_kind"] {
+            let response = ApiError::runtime(code, "plan coding run", json!({})).into_response();
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "{code} prefix fallback"
             );
         }
     }

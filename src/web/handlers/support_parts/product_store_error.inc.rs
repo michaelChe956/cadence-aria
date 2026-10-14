@@ -220,6 +220,18 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             "repository routing authority is inconsistent",
             json!({"kind": kind, "id": id}),
         ),
+        // 级联删除 D2.3 P1 修复轮（Main 审查派回）：N2 冻结错误族跨三变体生产
+        //——InvalidRecord（plan_revision/selection_unit）前缀直通稳定码，
+        // details 保留 kind/reason；须先于下方 routing InvalidRecord 臂匹配。
+        ProductStoreError::InvalidRecord { kind, reason }
+            if kind.starts_with("coding_plan_run_") =>
+        {
+            ApiError::runtime(
+                kind,
+                "plan coding run 冻结记录拒绝该操作",
+                json!({ "kind": kind, "reason": reason }),
+            )
+        }
         ProductStoreError::InvalidRecord { kind, reason } => {
             if let Some(code) = routing_error_code_from_reason(kind, &reason) {
                 repository_routing_api_error(
@@ -342,6 +354,18 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             ApiError::runtime(
                 kind,
                 "plan coding run 冻结状态拒绝该操作",
+                json!({ "kind": kind, "id": id }),
+            )
+        }
+        // P1 修复轮续：IdentityMismatch 变体（revision/graph/replay_drift/
+        // selection 族/attempt_binding 族/target_attempts/purge_scope 等 14 码）
+        // 同前缀直通，details 保留 kind/id。
+        ProductStoreError::IdentityMismatch { kind, id }
+            if kind.starts_with("coding_plan_run_") =>
+        {
+            ApiError::runtime(
+                kind,
+                "plan coding run 冻结身份拒绝该操作",
                 json!({ "kind": kind, "id": id }),
             )
         }

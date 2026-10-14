@@ -1064,6 +1064,10 @@ mod tests {
         // 与 N2 冻结错误族（coding_plan_run_*）经 REST 面直达稳定码，不再落
         // product_store_error 500；无墓碑无 root 的 Story/Design 删除以
         // spec_not_found 404 收口（D2.2 登记 1 的 Web 侧裁定）。
+        // P1 修复轮（Main 审查派回）：族内 14 码生产端走 IdentityMismatch/
+        // InvalidRecord（revision/graph/replay_drift/selection 族/attempt_binding
+        // 族/target_attempts/purge_scope 走 IdentityMismatch；plan_revision/
+        // selection_unit 走 InvalidRecord）——用真实变体断言，不用 Conflict 假绿。
         let cases = [
             (
                 ProductStoreError::Conflict {
@@ -1082,7 +1086,7 @@ mod tests {
                 StatusCode::CONFLICT,
             ),
             (
-                ProductStoreError::Conflict {
+                ProductStoreError::IdentityMismatch {
                     kind: "coding_plan_run_revision",
                     id: "issue_plan_0001".to_string(),
                 },
@@ -1090,12 +1094,28 @@ mod tests {
                 StatusCode::CONFLICT,
             ),
             (
-                ProductStoreError::Conflict {
+                ProductStoreError::IdentityMismatch {
                     kind: "coding_plan_run_purge_scope",
                     id: "story_spec_0001".to_string(),
                 },
                 "coding_plan_run_purge_scope",
                 StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                ProductStoreError::InvalidRecord {
+                    kind: "coding_plan_run_plan_revision",
+                    reason: "plan revision not authoritative".to_string(),
+                },
+                "coding_plan_run_plan_revision",
+                StatusCode::CONFLICT,
+            ),
+            (
+                ProductStoreError::Conflict {
+                    kind: "coding_plan_run_not_active",
+                    id: "issue_plan_0001".to_string(),
+                },
+                "coding_plan_run_not_active",
+                StatusCode::CONFLICT,
             ),
             (
                 ProductStoreError::Io("plan_coding_paused: coding_attempt_0001".to_string()),
