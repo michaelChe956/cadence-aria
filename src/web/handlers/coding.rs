@@ -35,6 +35,10 @@ pub use group::create_group_coding_attempt;
 pub use plan_start::{
     delete_plan_coding_workspaces, get_plan_coding_progress, post_plan_coding_start,
 };
+/// S2b/S2a 缝合：完成事件→就绪集推进桥（runner 完成链挂点调用；调用方
+/// 须持 `work_item_group:{project}:{issue}:{plan}` 串行锁——见 plan_start.rs
+/// 顶部锁契约）。
+pub(crate) use plan_start::drive_ready_units_for_plan;
 #[cfg(test)]
 #[path = "coding/advance_tests.rs"]
 mod advance_tests;

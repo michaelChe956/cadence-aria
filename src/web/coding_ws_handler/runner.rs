@@ -866,19 +866,10 @@ pub(crate) async fn execute_start_coding_flow(
                 .complete_group_unit_after_code_review(&current)
                 .await?;
             refresh_runtime_history(&current)?;
-            // N5（REQ-CS-05）：group completion 返回后、任何 ReviewRequest/push
-            // 分支之前识别真实 plan-run 安全暂停（matching first_ready run
-            // phase=Paused，而非任意 Blocked 文本），emit session_state 并立即
-            // return——不依赖 stage 自然停止，内部循环不再获得推进机会。
-            if engine.plan_first_unit_safely_paused(&current)? {
-                return emit_current_session_state(
-                    event_tx,
-                    coding_store,
-                    &current,
-                    engine.cancellation_token(),
-                )
-                .await;
-            }
+            // S2b（N5 暂停移除）：完成链自动推进后无默认步暂停停点——直接
+            // emit session_state；PrepareContext 即继续内循环驱动下一 unit。
+            // 跨桶就绪集推进在完成事件上经入口面 drive 桥重入（编排器复用
+            // 同一 engine 推进入口，本 runner 不引入跨 plan 串行假设）。
             emit_current_session_state(
                 event_tx,
                 coding_store,
@@ -886,6 +877,29 @@ pub(crate) async fn execute_start_coding_flow(
                 engine.cancellation_token(),
             )
             .await?;
+            // S2b 完成事件挂点：跨桶就绪集推进经入口面 drive 桥重入（per-plan
+            // 粒度，无跨 plan 串行假设；runner 任务不在入口 POST 锁内，按锁
+            // 契约自取 work_item_group 串行锁；桥幂等、跳过忙 attempt，失败
+            // 仅告警不阻断本桶执行链）。
+            if let Some(plan_id) = current.work_item_group_id.clone() {
+                let _drive_guard = state
+                    .coding_runs
+                    .lock_named(&format!(
+                        "work_item_group:{}:{}:{}",
+                        current.project_id, current.issue_id, plan_id
+                    ))
+                    .await;
+                if let Err(error) = crate::web::handlers::drive_ready_units_for_plan(
+                    state,
+                    &current.project_id,
+                    &current.issue_id,
+                    &plan_id,
+                )
+                .await
+                {
+                    tracing::warn!(?error, "plan_coding_ready_set_drive_failed");
+                }
+            }
             if current.stage == CodingExecutionStage::PrepareContext {
                 continue 'pipeline;
             }
@@ -1476,13 +1490,37 @@ mod tests {
         .expect("persist plan run");
     }
 
-    /// runner 在 group completion 返回后、任何 ReviewRequest/push 之前识别
-    /// 真实暂停并 return：无下一 unit 启动、无 review request/push、provider
-    /// probe 计数 0；暂停后重入被 N2 provider gate 拒绝。
+    /// S2b（N5 暂停移除）：runner 在 group completion 自动推进后不再停——
+    /// 单 unit plan 完成即 plan_complete：ReviewRequest→review request/push→
+    /// 人工终审准备（FinalConfirm+WaitingForHuman）；run 相位保持 Started、
+    /// 零暂停 gate、全程零 provider start。
     #[tokio::test]
-    async fn plan_coding_n5_retry_and_runner_do_not_push_or_start_next() {
+    async fn plan_coding_s2_runner_flows_to_final_confirm_with_plan_run() {
         let fixture = n5_runner_fixture();
         seed_n5_plan_run(&fixture);
+        // 推送远端：review request push 走真实 bare origin（失败也不阻断，
+        // 此处尽量让 push 成功以贴近真实链）。
+        let worktree = fixture
+            .attempt
+            .worktree_path
+            .clone()
+            .expect("fixture worktree");
+        let remote = fixture._root.path().join("origin.git");
+        let status = std::process::Command::new("git")
+            .args(["init", "--bare", remote.to_str().expect("remote path")])
+            .status()
+            .expect("create bare origin");
+        assert!(status.success(), "create bare origin");
+        run_git(&worktree, &["branch", "aria/issues/issue_0001"]);
+        run_git(
+            &worktree,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path"),
+            ],
+        );
         let provider = CountingProvider::default();
         let mut registry = ProviderRegistry::new();
         registry.register(ProviderName::Codex, Arc::new(provider.clone()));
@@ -1510,66 +1548,68 @@ mod tests {
             &attempt,
         )
         .await
-        .expect("paused runner flow returns without push");
+        .expect("runner completes through final confirmation without pause");
         drop(event_tx);
 
-        let paused = fixture
+        let final_attempt = fixture
             .store
             .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("paused attempt");
-        assert_eq!(paused.status, CodingAttemptStatus::Blocked);
+            .expect("final attempt");
+        assert_eq!(final_attempt.status, CodingAttemptStatus::WaitingForHuman);
         assert_eq!(
-            paused.stage,
-            crate::product::coding_models::CodingExecutionStage::CodeReview
+            final_attempt.stage,
+            crate::product::coding_models::CodingExecutionStage::FinalConfirm
         );
-        assert!(paused.active_unit_id.is_none());
-        assert!(paused.current_work_item_id.is_none());
         assert!(
-            fixture
+            !fixture
                 .store
-                .list_review_requests(&paused.project_id, &paused.issue_id, &paused.id)
+                .list_review_requests(
+                    &final_attempt.project_id,
+                    &final_attempt.issue_id,
+                    &final_attempt.id
+                )
                 .expect("review requests")
                 .is_empty(),
-            "runner must not issue review request/push after the pause"
+            "runner must issue the review request after auto-advance"
         );
         let units = fixture
             .store
-            .list_coding_units(&paused.project_id, &paused.issue_id, &paused.id)
+            .list_coding_units(
+                &final_attempt.project_id,
+                &final_attempt.issue_id,
+                &final_attempt.id,
+            )
             .expect("units");
-        assert_eq!(units.len(), 1, "no next unit may be started");
+        assert_eq!(units.len(), 1);
         assert_eq!(units[0].status, CodingExecutionUnitStatus::Completed);
-        let unit_run = fixture
-            .store
-            .list_coding_unit_runs(&paused, &units[0].id)
-            .expect("unit runs")
-            .into_iter()
-            .find(|run| run.id == "coding_unit_run_n5_0001")
-            .expect("authoritative run preserved");
-        assert_eq!(unit_run.status, CodingUnitRunStatus::Completed);
-        assert_eq!(
-            unit_run.completion_commit.as_deref(),
-            Some(fixture.original_head.as_str())
-        );
-        assert_eq!(
+        assert!(
             fixture
                 .store
-                .list_open_blocked_gates(&paused.project_id, &paused.issue_id, &paused.id)
-                .expect("pause gates")
-                .len(),
-            1
+                .list_open_blocked_gates(
+                    &final_attempt.project_id,
+                    &final_attempt.issue_id,
+                    &final_attempt.id
+                )
+                .expect("blocked gates")
+                .is_empty(),
+            "no pause gate may be created"
         );
         assert_eq!(
             CodingPlanRunStore::new(fixture.paths.clone())
-                .get(&paused.project_id, &paused.issue_id, "work_item_plan_0001")
+                .get(
+                    &final_attempt.project_id,
+                    &final_attempt.issue_id,
+                    "work_item_plan_0001"
+                )
                 .expect("plan run lookup")
                 .expect("plan run present")
                 .phase,
-            CodingPlanRunPhase::Paused
+            CodingPlanRunPhase::Started
         );
         assert_eq!(
             provider.starts(),
             0,
-            "provider probe must not start during the paused flow"
+            "the review-request tail path must not start a provider"
         );
         let mut session_state_events = 0;
         while let Ok(event) = event_rx.try_recv() {
@@ -1582,38 +1622,7 @@ mod tests {
         }
         assert!(
             session_state_events > 0,
-            "runner must emit session_state when it stops at the pause"
-        );
-
-        // 暂停后重入（普通 retry/内部重跑）不得绕行：provider gate 拒绝。
-        let (event_tx2, _event_rx2) = mpsc::channel(16);
-        let (_command_tx2, command_rx2) = mpsc::channel(8);
-        let engine2 = CodingWorkspaceEngine::new(
-            fixture.store.clone(),
-            GitWorkspaceService::new(),
-            event_tx2.clone(),
-        );
-        let error = execute_start_coding_flow(
-            &web_state,
-            &fixture.store,
-            &engine2,
-            &event_tx2,
-            command_rx2,
-            &paused,
-        )
-        .await
-        .expect_err("paused plan run must reject runner re-entry");
-        assert!(
-            error.to_string().contains("plan_coding_paused"),
-            "unexpected re-entry result: {error}"
-        );
-        assert_eq!(provider.starts(), 0);
-        assert!(
-            fixture
-                .store
-                .list_review_requests(&paused.project_id, &paused.issue_id, &paused.id)
-                .expect("review requests after re-entry")
-                .is_empty()
+            "runner must emit session_state while it flows to final confirmation"
         );
     }
 }

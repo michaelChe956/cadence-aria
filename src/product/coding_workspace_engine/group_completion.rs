@@ -50,13 +50,9 @@ impl CodingWorkspaceEngine {
             self.store
                 .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
         self.validate_attempt_issue_shared_worktree_lock_if_present(&attempt)?;
-        // N5（REQ-CS-05）：CompletedRetry 入口先核冻结完成 pause 身份——
-        // pause 写回（清指针+Blocked）后 preflight 会按非 Running 误拒；
-        // 此处以幂等 pause 原语对齐（含 run Paused 补记中断窗口）并保持
-        // 暂停形状返回，不重进完成链。
-        if let Some(paused) = self.reconcile_paused_plan_first_unit(&attempt)? {
-            return Ok(paused);
-        }
+        // S2b（N5 步暂停移除）：完成链不再识别/补写 plan-run 暂停身份——
+        // legacy 暂停形状（Blocked+清指针）重入由 preflight 失败关闭，恢复
+        // 走入口面 resume 语义；新数据完成即自动推进。
         let facts = self.preflight_group_unit_completion(&attempt)?;
         #[cfg(test)]
         crate::product::coding_workspace_engine::mutation_test_pause::pause_coding_mutation_for_test(
@@ -125,11 +121,11 @@ impl CodingWorkspaceEngine {
         )?;
         self.apply_authoritative_handoff_transition(&attempt, transition)
             .await?;
-        // N5（REQ-CS-05）：完成事实（completion commit/权威 run/handoff）落定后、
-        // advance_to_next_group_unit 及其 SC selector 之前先尝试 plan-run
-        // first_ready 安全暂停。Running 分支在此显式落定 selected unit
-        // Completed（原 complete_current_group_unit 的前半段），暂停命中即
-        // 短路返回：不进入下一 unit 选择/推进，也不转 ReviewRequest/push。
+        // S2b（N5 步暂停移除）：完成事实（completion commit/权威 run/handoff）
+        // 落定后显式落定当前 unit Completed（原 complete_current_group_unit
+        // 的前半段），随即自动推进——不写默认步暂停；推进保持独立 pub 入口
+        // （advance_to_next_group_unit，per-unit/per-plan 粒度，无跨 plan
+        // 串行假设），供自动化编排器（入口面 drive 桥）复用同一推进语义。
         if facts.active.status != CodingExecutionUnitStatus::Completed {
             self.store
                 .update_coding_unit_status(
@@ -142,73 +138,14 @@ impl CodingWorkspaceEngine {
                 )
                 .map(|_| ())?;
         }
-        // P2（审查修复）：advance/pause 一律传**更新前**的内存 attempt——
+        // P2（审查修复）：advance 一律传**更新前**的内存 attempt——
         // `update_coding_unit_status` 会同步清空 durable active/current 指针，
         // 重读会使 advance 的锁转移 from 身份回退到创建期 work_item_id，
         // 非首 unit 完成时 from≠锁 owner 而 `issue_worktree_active` 失败。
-        // 旧路径（complete_current_group_unit→advance）同样传调用方内存对象；
-        // `pause_completed_plan_first_unit` 内部 `validate_attempt_lineage`
-        // 会重读磁盘，传旧值安全。
-        if let Some(paused) = self
-            .store
-            .pause_completed_plan_first_unit(&attempt, &facts.active.id)?
-        {
-            return Ok(paused);
-        }
+        // 旧路径（complete_current_group_unit→advance）同样传调用方内存对象。
         self.advance_to_next_group_unit(&attempt).await
     }
 
-    /// N5（REQ-CS-05）：CompletedRetry/恢复入口的暂停身份识别。仅当 attempt
-    /// 已处于 N2 安全暂停形状（Blocked+CodeReview+清指针）且 matching
-    /// first_ready run 未 Invalidated 时，用幂等 pause 原语对齐并返回——
-    /// 否则清指针后的 preflight 会按非 Running 误拒，且 run Paused 补记
-    /// 中断窗口无法恢复。Running 完成链的暂停写在尾部完成事实之后。
-    fn reconcile_paused_plan_first_unit(
-        &self,
-        attempt: &CodingExecutionAttempt,
-    ) -> Result<Option<CodingExecutionAttempt>, CodingWorkspaceEngineError> {
-        if !plan_coding_pause_shape(attempt) {
-            return Ok(None);
-        }
-        let run_store =
-            crate::product::coding_plan_run::CodingPlanRunStore::new(self.store.paths());
-        let Some(run) = run_store.matching_first_ready_run(attempt)? else {
-            return Ok(None);
-        };
-        if matches!(
-            run.phase,
-            crate::product::coding_plan_run::CodingPlanRunPhase::Invalidated
-        ) {
-            return Ok(None);
-        }
-        let Some(selection) = run.selection.clone() else {
-            return Ok(None);
-        };
-        Ok(self
-            .store
-            .pause_completed_plan_first_unit(attempt, &selection.unit_id)?)
-    }
-
-    /// N5（REQ-CS-05）：runner 的第二道停止保险——识别「本 plan first_ready
-    /// run 的真实安全暂停」：attempt 处于暂停形状且 matching run phase=Paused
-    /// （而非任意 Blocked 文本）；无 run/未暂停/Invalidated 均为 false。
-    pub fn plan_first_unit_safely_paused(
-        &self,
-        attempt: &CodingExecutionAttempt,
-    ) -> Result<bool, CodingWorkspaceEngineError> {
-        if !plan_coding_pause_shape(attempt) {
-            return Ok(false);
-        }
-        let run_store =
-            crate::product::coding_plan_run::CodingPlanRunStore::new(self.store.paths());
-        let Some(run) = run_store.matching_first_ready_run(attempt)? else {
-            return Ok(false);
-        };
-        Ok(matches!(
-            run.phase,
-            crate::product::coding_plan_run::CodingPlanRunPhase::Paused
-        ))
-    }
     fn publish_group_unit_handoff_revision(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -579,16 +516,6 @@ impl CodingWorkspaceEngine {
     }
 }
 
-/// N5（REQ-CS-05）：N2 安全暂停落定后的 attempt 持久化形状——Blocked+
-/// CodeReview、active/current 指针清空。仅形状本身不构成暂停证据，还须
-/// matching first_ready run 的相位核验（见 engine 侧两个识别入口）。
-fn plan_coding_pause_shape(attempt: &CodingExecutionAttempt) -> bool {
-    attempt.scope == CodingAttemptScope::WorkItemGroup
-        && attempt.status == CodingAttemptStatus::Blocked
-        && attempt.stage == CodingExecutionStage::CodeReview
-        && attempt.active_unit_id.is_none()
-        && attempt.current_work_item_id.is_none()
-}
 fn validate_group_completion_attempt_state(
     attempt: &CodingExecutionAttempt,
 ) -> Result<(), CodingWorkspaceEngineError> {
