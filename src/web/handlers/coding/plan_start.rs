@@ -282,10 +282,21 @@ pub async fn delete_plan_coding_workspaces(
             || references.initialization_journal.is_some()
             || !journals.is_empty();
         if !members.is_empty() || residue {
-            // 互证先行（零写拒绝）：confirmed=true 不是跨 generation 授权。
-            if query
-                .expected_generation
-                .is_some_and(|generation| generation != current_generation)
+            // 互证先行（零写拒绝）：confirmed=true 不是跨 generation 授权——
+            // expected_generation 漂移即拒；本 command 存在旧轮回执
+            // （to_generation < 当前，其后已发生轮次切换）同样不构成对当前
+            // 轮次成员的授权，与互证同返 409（陈旧回执不判重放也不得整删
+            // 新轮）。零成员 fall-through（清残留/幂等收尾）不进本分支。
+            let stale_receipt = lifecycle.as_ref().is_some_and(|metadata| {
+                metadata.receipts.iter().any(|receipt| {
+                    receipt.command_id == query.command_id
+                        && receipt.to_generation < current_generation
+                })
+            });
+            if stale_receipt
+                || query
+                    .expected_generation
+                    .is_some_and(|generation| generation != current_generation)
             {
                 return Err(ApiError::runtime(
                     "coding_plan_workspace_generation_conflict",

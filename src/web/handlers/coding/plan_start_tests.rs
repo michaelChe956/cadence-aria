@@ -1694,6 +1694,26 @@ async fn plan_coding_h4_group_delete_end_to_end_then_new_round() {
     assert!(stale_receipt.deleted_attempt_ids.is_empty());
     assert!(stale_receipt.remaining_attempt_ids.is_empty());
     assert_eq!(stale_receipt.generation, 3);
+
+    // P1（设计 C「confirmed=true 不是跨 generation 授权」）：陈旧回执的旧
+    // command 在新轮成员在场时不得整删新轮——开 round4（4 成员）后，h4_1
+    // 的旧回执（to=2<当前 3）+expected_generation 缺省+confirmed=true 必须
+    // 409 拒绝（与 expected_generation 互证同码），新轮成员保留。
+    post_start(&fixture.state, "cmd_h4_round4", PLAN_REVISION_ID)
+        .await
+        .expect("round 4 start");
+    let round4_ids = h4_member_ids(&fixture);
+    assert_eq!(round4_ids.len(), 4);
+    let cross_generation =
+        delete_workspaces(&fixture.state, "plan_delete_ui_h4_1", None, true).await;
+    let error =
+        cross_generation.expect_err("stale receipt must not authorize cross-generation delete");
+    assert_eq!(error.code, "coding_plan_workspace_generation_conflict");
+    assert_eq!(
+        h4_member_ids(&fixture),
+        round4_ids,
+        "new round must survive"
+    );
 }
 
 /// H4 部分删除（验收矩阵 2）：单成员删除 → GET 投影 incomplete/缺失计数 →

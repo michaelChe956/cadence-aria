@@ -116,3 +116,28 @@
 
 提交：`fix: H4 回执按轮次限定Replayed与真实remaining`（3 文件显式 add：
 plan_start.rs＋plan_start_tests.rs＋本报告）。
+
+## P1 修复轮（Main 复审 1×P1，按 suggestion 精确落）
+
+P1（P2 轮 fall-through 引入）：陈旧回执的旧 command（to_generation < 当前）
++ `expected_generation` 缺省 + `confirmed=true` + 新轮成员在场 → 走完整破坏
+路径**整删新轮**——设计 C「confirmed=true 不是跨 generation 授权」被破。
+修（plan_start.rs `!members.is_empty() || residue` 分支内）：本 command 存在
+旧轮回执（`to_generation < 当前`）即与 `expected_generation` 互证**同返 409
+`coding_plan_workspace_generation_conflict`**（零写拒绝，不进破坏路径）；
+零成员 fall-through（清残留/幂等收尾）不进本分支，与既有测试相容。
+
+TDD：红＝e2e 尾部新增段——round3 整删（generation 3）后开 round4（4 成员），
+旧 command `plan_delete_ui_h4_1`（回执 to=2）+无 generation+confirmed → 现实现
+**整删 round4**（回执证据：deleted=4 新成员，正是 P1 危害）→ 断言 409 拒绝
+panic；绿＝修复后 409 + round4 成员保留。
+
+证据（隔离树＝`e69f6d65`+本轮 2 文件）：红 1 failed（cross-generation 断言）
+→绿 `plan_coding_h4` **7/0**→回归族 n3 7/n7 4/h2a 7/h2b 11/finalize 3/
+it_web 路由 1 全绿→rustfmt（plan_start.rs）干净。
+
+登记（不修，Main 裁定）：H5 UI 未消费 `operation_state`/`remaining` 即
+`onBack`——服务端语义已对，UI 消费补齐归 H5 收尾轮（验收后）。
+
+提交：`fix: H4 陈旧回执不构成跨代授权`（3 文件显式 add：plan_start.rs＋
+plan_start_tests.rs＋本报告）。
