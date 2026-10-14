@@ -1,15 +1,13 @@
 use std::path::PathBuf;
 
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
-use crate::product::entity_deletion_store::{
-    DeletionEntityKind, EntityDeletionStore, EntityScope,
-};
+use crate::product::entity_deletion_store::{DeletionEntityKind, EntityDeletionStore, EntityScope};
 use crate::product::entity_operation_store::{EntityDeletionLease, EntityOperationStore};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::automation::{RetryInitializationRecord, RetryInitializationRequest};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +58,42 @@ pub struct AdvanceRecord {
 pub struct AdvancePlanArtifacts {
     pub advance_ids: Vec<String>,
     pub retry_command_ids: Vec<String>,
+}
+/// H2b（设计 A 节，整组删除与重启）：零成员/最后成员重置闭包与开始入口的
+/// advance 侧只读交叉核对事实。「全删」判据不是 issue 无 attempts：要按
+/// (project,issue,plan) 枚举真实 group attempts，并与 run、所有该 plan
+/// advance records、外层 journal 交叉核对——本结构承载 advance 侧引用，
+/// attempt 存活集由调用方枚举后经 `classify_stale_references` 判定。
+/// fail-closed：坏 JSON/身份错配/IO 错误原样上抛，不当空集。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvancePlanExecutionReferences {
+    /// 该 plan 全部 advance records（created_at/id 升序；含 legacy 同 plan
+    /// 多 record 形态，不只首条）。
+    pub records: Vec<AdvanceRecord>,
+    /// 外层 initialization journal（`{plan_id}.initialization.json`）；缺失
+    /// 为 `None`。
+    pub initialization_journal: Option<AdvanceInitializationJournal>,
+}
+
+/// 「旧 Ready 指向已死全集」识别结果（设计 A 节状态裁定表/B 节错误族）：
+/// `AllTargetsDead` → 交零成员闭包完整重置后新建；`PartiallyDead` →
+/// Invalidated＋清剩余出口（不缩水全集、不收养）；`Intact` → 正常重放或
+/// 初始化前缀续做；`NoReferences` → 无 advance 执行引用（闭包只清其余
+/// 对象）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdvanceStaleReferenceVerdict {
+    NoReferences,
+    Intact,
+    /// 被引用全集皆缺（旧 Ready 或已越 AttemptPersisted 的外层 journal 指向
+    /// 缺失 attempts）。
+    AllTargetsDead {
+        dead_attempt_ids: Vec<String>,
+    },
+    /// 仅部分被引用 attempt 缺失——剩余成员在，不得自动清。
+    PartiallyDead {
+        dead_attempt_ids: Vec<String>,
+        alive_attempt_ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +150,94 @@ pub struct AdvanceInitializationJournal {
     pub error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl AdvancePlanExecutionReferences {
+    /// 旧 Ready record 绑定的 attempt 全集（单值 `attempt_id` ∪
+    /// `target_attempts`，升序去重）。非 Ready record 不构成「旧 Ready
+    /// 指向」事实。
+    pub fn ready_bound_attempt_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .records
+            .iter()
+            .filter(|record| record.status == AdvanceStatus::Ready)
+            .flat_map(|record| {
+                let mut bound: Vec<String> = record
+                    .target_attempts
+                    .iter()
+                    .map(|binding| binding.attempt_id.clone())
+                    .collect();
+                bound.extend(record.attempt_id.iter().cloned());
+                bound
+            })
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// 外层 journal 绑定的 attempt 全集（`attempt_id` ∪ `target_attempt_ids`，
+    /// 升序去重）；无 journal 为空集。
+    pub fn journal_bound_attempt_ids(&self) -> Vec<String> {
+        let Some(journal) = &self.initialization_journal else {
+            return Vec::new();
+        };
+        let mut ids = journal.target_attempt_ids.clone();
+        ids.push(journal.attempt_id.clone());
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// 按调用方枚举的真实 attempt 存活集分类旧执行引用。断裂引用集 =
+    /// Ready 绑定 ∪（外层 journal 已越 AttemptPersisted 时的 journal 绑定）
+    /// ——journal 未越 AttemptPersisted 的绑定是初始化前缀（attempt 尚未
+    /// 物化属预期缺失），不计断裂（设计 A 节：「不能仅因前缀判零成员重置，
+    /// 正常初始化前缀继续原协议」）。判定只做集合差，不读 attempt 文件
+    ///（权威存活集归闭包/调用方，不复制第二套扫描）。
+    pub fn classify_stale_references(
+        &self,
+        existing_attempt_ids: &[String],
+    ) -> AdvanceStaleReferenceVerdict {
+        if self.records.is_empty() && self.initialization_journal.is_none() {
+            return AdvanceStaleReferenceVerdict::NoReferences;
+        }
+        let mut referenced = self.ready_bound_attempt_ids();
+        let journal_beyond_attempt_persisted =
+            self.initialization_journal.as_ref().is_some_and(|journal| {
+                journal.phase.order_for_engine()
+                    >= AdvanceInitializationPhase::AttemptPersisted.order_for_engine()
+            });
+        if journal_beyond_attempt_persisted {
+            referenced.extend(self.journal_bound_attempt_ids());
+        }
+        referenced.sort();
+        referenced.dedup();
+        if referenced.is_empty() {
+            return AdvanceStaleReferenceVerdict::Intact;
+        }
+        let existing: std::collections::BTreeSet<String> =
+            existing_attempt_ids.iter().cloned().collect();
+        let mut dead_attempt_ids = Vec::new();
+        let mut alive_attempt_ids = Vec::new();
+        for attempt_id in referenced {
+            if existing.contains(&attempt_id) {
+                alive_attempt_ids.push(attempt_id);
+            } else {
+                dead_attempt_ids.push(attempt_id);
+            }
+        }
+        if dead_attempt_ids.is_empty() {
+            AdvanceStaleReferenceVerdict::Intact
+        } else if alive_attempt_ids.is_empty() {
+            AdvanceStaleReferenceVerdict::AllTargetsDead { dead_attempt_ids }
+        } else {
+            AdvanceStaleReferenceVerdict::PartiallyDead {
+                dead_attempt_ids,
+                alive_attempt_ids,
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,36 +431,41 @@ impl AdvanceStore {
         validate_relative_id(&record.plan_revision_id)?;
         let path = self.path_for(&record.project_id, &record.issue_id, &record.id)?;
         let root = self.root(&record.project_id, &record.issue_id)?;
-        self.with_plan_live_write(&record.project_id, &record.issue_id, &record.plan_id, || {
-            with_exclusive_lock(&root, || {
-                if path.exists() {
-                    let existing: AdvanceRecord = read_json(&path)?;
-                    validate_advance_record_identity(&existing)?;
-                    if existing == *record {
-                        return Ok(existing);
+        self.with_plan_live_write(
+            &record.project_id,
+            &record.issue_id,
+            &record.plan_id,
+            || {
+                with_exclusive_lock(&root, || {
+                    if path.exists() {
+                        let existing: AdvanceRecord = read_json(&path)?;
+                        validate_advance_record_identity(&existing)?;
+                        if existing == *record {
+                            return Ok(existing);
+                        }
+                        return Err(ProductStoreError::Conflict {
+                            kind: "advance_record",
+                            id: record.id.clone(),
+                        });
                     }
-                    return Err(ProductStoreError::Conflict {
-                        kind: "advance_record",
-                        id: record.id.clone(),
-                    });
-                }
-                if self
-                    .records(&record.project_id, &record.issue_id)?
-                    .into_iter()
-                    .any(|existing| {
-                        existing.command_id == record.command_id
-                            || existing.plan_id == record.plan_id
-                    })
-                {
-                    return Err(ProductStoreError::Conflict {
-                        kind: "advance_record_identity",
-                        id: record.id.clone(),
-                    });
-                }
-                write_json(&path, record)?;
-                Ok(record.clone())
-            })
-        })
+                    if self
+                        .records(&record.project_id, &record.issue_id)?
+                        .into_iter()
+                        .any(|existing| {
+                            existing.command_id == record.command_id
+                                || existing.plan_id == record.plan_id
+                        })
+                    {
+                        return Err(ProductStoreError::Conflict {
+                            kind: "advance_record_identity",
+                            id: record.id.clone(),
+                        });
+                    }
+                    write_json(&path, record)?;
+                    Ok(record.clone())
+                })
+            },
+        )
     }
 
     /// Persist the first durable anchor for a valid advance. Existing command/plan
@@ -362,51 +489,44 @@ impl AdvanceStore {
         // 全流程持有——删除独占无法在预检与 put 之间插入，purging/deleted
         // 事实在入口即拒；put_record 的 entity_deleting 因此不可能落入下方
         // 身份兜底被改判（REQ-GRP-01 删除身份优先）。
-        self.with_plan_live_write(
-            &input.project_id,
-            &input.issue_id,
-            &input.plan_id,
-            || {
-                if let Some(record) = self.get_advance_by_command_id(
-                    &input.project_id,
-                    &input.issue_id,
-                    &input.command_id,
-                )? {
-                    return Ok(record);
-                }
-                if let Some(record) = self.get_advance_for_plan(
-                    &input.project_id,
-                    &input.issue_id,
-                    &input.plan_id,
-                )? {
-                    return Ok(record);
-                }
-                let record = self.now_record(input, plan_revision_id.to_string());
-                match self.put_record(&record) {
-                    Ok(record) => Ok(record),
-                    Err(ProductStoreError::Conflict { .. }) => self
-                        .get_advance_by_command_id(
+        self.with_plan_live_write(&input.project_id, &input.issue_id, &input.plan_id, || {
+            if let Some(record) = self.get_advance_by_command_id(
+                &input.project_id,
+                &input.issue_id,
+                &input.command_id,
+            )? {
+                return Ok(record);
+            }
+            if let Some(record) =
+                self.get_advance_for_plan(&input.project_id, &input.issue_id, &input.plan_id)?
+            {
+                return Ok(record);
+            }
+            let record = self.now_record(input, plan_revision_id.to_string());
+            match self.put_record(&record) {
+                Ok(record) => Ok(record),
+                Err(ProductStoreError::Conflict { .. }) => self
+                    .get_advance_by_command_id(
+                        &input.project_id,
+                        &input.issue_id,
+                        &input.command_id,
+                    )?
+                    .or_else(|| {
+                        self.get_advance_for_plan(
                             &input.project_id,
                             &input.issue_id,
-                            &input.command_id,
-                        )?
-                        .or_else(|| {
-                            self.get_advance_for_plan(
-                                &input.project_id,
-                                &input.issue_id,
-                                &input.plan_id,
-                            )
-                            .ok()
-                            .flatten()
-                        })
-                        .ok_or(ProductStoreError::Conflict {
-                            kind: "advance_record_identity",
-                            id: record.id,
-                        }),
-                    Err(error) => Err(error),
-                }
-            },
-        )
+                            &input.plan_id,
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .ok_or(ProductStoreError::Conflict {
+                        kind: "advance_record_identity",
+                        id: record.id,
+                    }),
+                Err(error) => Err(error),
+            }
+        })
     }
 
     /// Update only mutable state while enforcing the immutable advance identity.
@@ -464,34 +584,39 @@ impl AdvanceStore {
         validate_relative_id(attempt_id)?;
         let path = self.initialization_path(record)?;
         let root = self.root(&record.project_id, &record.issue_id)?;
-        self.with_plan_live_write(&record.project_id, &record.issue_id, &record.plan_id, || {
-            with_exclusive_lock(&root, || {
-                if path.is_file() {
-                    let journal: AdvanceInitializationJournal = read_json(&path)?;
-                    validate_advance_initialization_journal(&journal, record)?;
-                    if journal.attempt_id != attempt_id {
-                        return Err(ProductStoreError::IdentityMismatch {
-                            kind: "advance_initialization_journal_attempt",
-                            id: record.id.clone(),
-                        });
+        self.with_plan_live_write(
+            &record.project_id,
+            &record.issue_id,
+            &record.plan_id,
+            || {
+                with_exclusive_lock(&root, || {
+                    if path.is_file() {
+                        let journal: AdvanceInitializationJournal = read_json(&path)?;
+                        validate_advance_initialization_journal(&journal, record)?;
+                        if journal.attempt_id != attempt_id {
+                            return Err(ProductStoreError::IdentityMismatch {
+                                kind: "advance_initialization_journal_attempt",
+                                id: record.id.clone(),
+                            });
+                        }
+                        return Ok(journal);
                     }
-                    return Ok(journal);
-                }
-                let now = Utc::now().to_rfc3339();
-                let journal = AdvanceInitializationJournal {
-                    advance_id: record.id.clone(),
-                    plan_id: record.plan_id.clone(),
-                    attempt_id: attempt_id.to_string(),
-                    target_attempt_ids: Vec::new(),
-                    phase: AdvanceInitializationPhase::JournalPrepared,
-                    error: None,
-                    created_at: now.clone(),
-                    updated_at: now,
-                };
-                write_json(&path, &journal)?;
-                Ok(journal)
-            })
-        })
+                    let now = Utc::now().to_rfc3339();
+                    let journal = AdvanceInitializationJournal {
+                        advance_id: record.id.clone(),
+                        plan_id: record.plan_id.clone(),
+                        attempt_id: attempt_id.to_string(),
+                        target_attempt_ids: Vec::new(),
+                        phase: AdvanceInitializationPhase::JournalPrepared,
+                        error: None,
+                        created_at: now.clone(),
+                        updated_at: now,
+                    };
+                    write_json(&path, &journal)?;
+                    Ok(journal)
+                })
+            },
+        )
     }
 
     pub fn mark_advance_initialization_error(
@@ -522,10 +647,15 @@ impl AdvanceStore {
         validate_advance_record_identity(record)?;
         validate_advance_initialization_journal(journal, record)?;
         let path = self.initialization_path(record)?;
-        self.with_plan_live_write(&record.project_id, &record.issue_id, &record.plan_id, || {
-            write_json(&path, journal)?;
-            Ok(journal.clone())
-        })
+        self.with_plan_live_write(
+            &record.project_id,
+            &record.issue_id,
+            &record.plan_id,
+            || {
+                write_json(&path, journal)?;
+                Ok(journal.clone())
+            },
+        )
     }
     /// The group journal is the durable source for this phase; the outer journal only records the
     /// corresponding checkpoint after the group-side write succeeds.
@@ -556,42 +686,47 @@ impl AdvanceStore {
             validate_relative_id(attempt_id)?;
         }
         let path = self.initialization_path(record)?;
-        self.with_plan_live_write(&record.project_id, &record.issue_id, &record.plan_id, || {
-            if path.is_file() {
-                let journal: AdvanceInitializationJournal = read_json(&path)?;
-                validate_advance_initialization_journal(&journal, record)?;
-                if journal.attempt_id != first_attempt_id {
-                    return Err(ProductStoreError::IdentityMismatch {
-                        kind: "advance_initialization_journal_attempt",
-                        id: record.id.clone(),
-                    });
+        self.with_plan_live_write(
+            &record.project_id,
+            &record.issue_id,
+            &record.plan_id,
+            || {
+                if path.is_file() {
+                    let journal: AdvanceInitializationJournal = read_json(&path)?;
+                    validate_advance_initialization_journal(&journal, record)?;
+                    if journal.attempt_id != first_attempt_id {
+                        return Err(ProductStoreError::IdentityMismatch {
+                            kind: "advance_initialization_journal_attempt",
+                            id: record.id.clone(),
+                        });
+                    }
+                    let mut persisted = journal.target_attempt_ids.clone();
+                    let mut expected = target_attempt_ids.to_vec();
+                    persisted.sort_unstable();
+                    expected.sort_unstable();
+                    if persisted != expected {
+                        return Err(ProductStoreError::IdentityMismatch {
+                            kind: "advance_initialization_journal_attempt",
+                            id: record.id.clone(),
+                        });
+                    }
+                    return Ok(journal);
                 }
-                let mut persisted = journal.target_attempt_ids.clone();
-                let mut expected = target_attempt_ids.to_vec();
-                persisted.sort_unstable();
-                expected.sort_unstable();
-                if persisted != expected {
-                    return Err(ProductStoreError::IdentityMismatch {
-                        kind: "advance_initialization_journal_attempt",
-                        id: record.id.clone(),
-                    });
-                }
-                return Ok(journal);
-            }
-            let now = Utc::now().to_rfc3339();
-            let journal = AdvanceInitializationJournal {
-                advance_id: record.id.clone(),
-                plan_id: record.plan_id.clone(),
-                attempt_id: first_attempt_id.to_string(),
-                target_attempt_ids: target_attempt_ids.to_vec(),
-                phase: AdvanceInitializationPhase::JournalPrepared,
-                error: None,
-                created_at: now.clone(),
-                updated_at: now,
-            };
-            write_json(&path, &journal)?;
-            Ok(journal)
-        })
+                let now = Utc::now().to_rfc3339();
+                let journal = AdvanceInitializationJournal {
+                    advance_id: record.id.clone(),
+                    plan_id: record.plan_id.clone(),
+                    attempt_id: first_attempt_id.to_string(),
+                    target_attempt_ids: target_attempt_ids.to_vec(),
+                    phase: AdvanceInitializationPhase::JournalPrepared,
+                    error: None,
+                    created_at: now.clone(),
+                    updated_at: now,
+                };
+                write_json(&path, &journal)?;
+                Ok(journal)
+            },
+        )
     }
 
     pub fn advance_initialization_phase(
@@ -604,32 +739,37 @@ impl AdvanceStore {
         validate_advance_initialization_journal(expected, record)?;
         let path = self.initialization_path(record)?;
         let root = self.root(&record.project_id, &record.issue_id)?;
-        self.with_plan_live_write(&record.project_id, &record.issue_id, &record.plan_id, || {
-            with_exclusive_lock(&root, || {
-                let mut current: AdvanceInitializationJournal = read_json(&path)?;
-                validate_advance_initialization_journal(&current, record)?;
-                if current != *expected {
-                    return Err(ProductStoreError::IdentityMismatch {
-                        kind: "advance_initialization_journal",
-                        id: record.id.clone(),
-                    });
-                }
-                if current.phase == next {
-                    return Ok(current);
-                }
-                if next.order() != current.phase.order() + 1 {
-                    return Err(ProductStoreError::Conflict {
-                        kind: "advance_initialization_phase",
-                        id: record.id.clone(),
-                    });
-                }
-                current.phase = next;
-                current.error = None;
-                current.updated_at = Utc::now().to_rfc3339();
-                write_json(&path, &current)?;
-                Ok(current)
-            })
-        })
+        self.with_plan_live_write(
+            &record.project_id,
+            &record.issue_id,
+            &record.plan_id,
+            || {
+                with_exclusive_lock(&root, || {
+                    let mut current: AdvanceInitializationJournal = read_json(&path)?;
+                    validate_advance_initialization_journal(&current, record)?;
+                    if current != *expected {
+                        return Err(ProductStoreError::IdentityMismatch {
+                            kind: "advance_initialization_journal",
+                            id: record.id.clone(),
+                        });
+                    }
+                    if current.phase == next {
+                        return Ok(current);
+                    }
+                    if next.order() != current.phase.order() + 1 {
+                        return Err(ProductStoreError::Conflict {
+                            kind: "advance_initialization_phase",
+                            id: record.id.clone(),
+                        });
+                    }
+                    current.phase = next;
+                    current.error = None;
+                    current.updated_at = Utc::now().to_rfc3339();
+                    write_json(&path, &current)?;
+                    Ok(current)
+                })
+            },
+        )
     }
 
     fn initialization_path(&self, record: &AdvanceRecord) -> Result<PathBuf, ProductStoreError> {
@@ -711,48 +851,53 @@ impl AdvanceStore {
         state: crate::product::models::automation::OperationState,
     ) -> Result<RetryInitializationRecord, ProductStoreError> {
         validate_relative_id(&request.command_id)?;
-        self.with_plan_live_write(&record.project_id, &record.issue_id, &record.plan_id, || {
-            let journal = self.get_advance_initialization(record)?.ok_or_else(|| {
-                ProductStoreError::NotFound {
-                    kind: "advance_initialization_journal",
-                    id: record.id.clone(),
-                }
-            })?;
-            if journal.attempt_id != request.expected_attempt_id {
-                return Err(ProductStoreError::IdentityMismatch {
-                    kind: "advance_retry_attempt",
-                    id: request.expected_attempt_id.clone(),
-                });
-            }
-            let path =
-                self.retry_path(&record.project_id, &record.issue_id, &request.command_id)?;
-            let root = self.retries_root(&record.project_id, &record.issue_id)?;
-            with_exclusive_lock(&root, || {
-                if path.is_file() {
-                    let existing: RetryInitializationRecord = read_json(&path)?;
-                    if existing.command_id == request.command_id {
-                        return Ok(existing);
+        self.with_plan_live_write(
+            &record.project_id,
+            &record.issue_id,
+            &record.plan_id,
+            || {
+                let journal = self.get_advance_initialization(record)?.ok_or_else(|| {
+                    ProductStoreError::NotFound {
+                        kind: "advance_initialization_journal",
+                        id: record.id.clone(),
                     }
-                    return Err(ProductStoreError::Conflict {
-                        kind: "advance_retry_initialization",
-                        id: request.command_id.clone(),
+                })?;
+                if journal.attempt_id != request.expected_attempt_id {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "advance_retry_attempt",
+                        id: request.expected_attempt_id.clone(),
                     });
                 }
-                let now = Utc::now().to_rfc3339();
-                let retry = RetryInitializationRecord {
-                    retry_id: format!("advance_retry_{}", request.command_id),
-                    command_id: request.command_id.clone(),
-                    advance_id: record.id.clone(),
-                    attempt_id: journal.attempt_id.clone(),
-                    state,
-                    checkpoint: journal.phase,
-                    created_at: now.clone(),
-                    updated_at: now,
-                };
-                write_json(&path, &retry)?;
-                Ok(retry)
-            })
-        })
+                let path =
+                    self.retry_path(&record.project_id, &record.issue_id, &request.command_id)?;
+                let root = self.retries_root(&record.project_id, &record.issue_id)?;
+                with_exclusive_lock(&root, || {
+                    if path.is_file() {
+                        let existing: RetryInitializationRecord = read_json(&path)?;
+                        if existing.command_id == request.command_id {
+                            return Ok(existing);
+                        }
+                        return Err(ProductStoreError::Conflict {
+                            kind: "advance_retry_initialization",
+                            id: request.command_id.clone(),
+                        });
+                    }
+                    let now = Utc::now().to_rfc3339();
+                    let retry = RetryInitializationRecord {
+                        retry_id: format!("advance_retry_{}", request.command_id),
+                        command_id: request.command_id.clone(),
+                        advance_id: record.id.clone(),
+                        attempt_id: journal.attempt_id.clone(),
+                        state,
+                        checkpoint: journal.phase,
+                        created_at: now.clone(),
+                        updated_at: now,
+                    };
+                    write_json(&path, &retry)?;
+                    Ok(retry)
+                })
+            },
+        )
     }
 
     /// 更新 retry 记录状态（续做失败→NeedsHuman 等）；identity 不可变。
@@ -797,28 +942,33 @@ impl AdvanceStore {
         validate_advance_record_identity(record)?;
         let path = self.path_for(&record.project_id, &record.issue_id, &record.id)?;
         let root = self.root(&record.project_id, &record.issue_id)?;
-        self.with_plan_live_write(&record.project_id, &record.issue_id, &record.plan_id, || {
-            with_exclusive_lock(&root, || {
-                let mut current: AdvanceRecord = read_json(&path)?;
-                validate_advance_record_identity(&current)?;
-                if current.id != record.id {
-                    return Err(ProductStoreError::IdentityMismatch {
-                        kind: "advance_record",
-                        id: record.id.clone(),
-                    });
-                }
-                if current.status != AdvanceStatus::Failed {
-                    return Err(ProductStoreError::Conflict {
-                        kind: "advance_retry_reopen",
-                        id: format!("{}: status is {:?}", current.id, current.status),
-                    });
-                }
-                current.status = AdvanceStatus::Initializing;
-                current.updated_at = Utc::now().to_rfc3339();
-                write_json(&path, &current)?;
-                Ok(current)
-            })
-        })
+        self.with_plan_live_write(
+            &record.project_id,
+            &record.issue_id,
+            &record.plan_id,
+            || {
+                with_exclusive_lock(&root, || {
+                    let mut current: AdvanceRecord = read_json(&path)?;
+                    validate_advance_record_identity(&current)?;
+                    if current.id != record.id {
+                        return Err(ProductStoreError::IdentityMismatch {
+                            kind: "advance_record",
+                            id: record.id.clone(),
+                        });
+                    }
+                    if current.status != AdvanceStatus::Failed {
+                        return Err(ProductStoreError::Conflict {
+                            kind: "advance_retry_reopen",
+                            id: format!("{}: status is {:?}", current.id, current.status),
+                        });
+                    }
+                    current.status = AdvanceStatus::Initializing;
+                    current.updated_at = Utc::now().to_rfc3339();
+                    write_json(&path, &current)?;
+                    Ok(current)
+                })
+            },
+        )
     }
 
     // ─── 级联删除 Task D1.2c：Plan 拥有的 advance 闭包 list/purge ───
@@ -1065,10 +1215,7 @@ impl AdvanceStore {
                     });
                 }
                 std::fs::remove_file(&journal_path).map_err(|error| {
-                    ProductStoreError::Io(format!(
-                        "remove {}: {error}",
-                        journal_path.display()
-                    ))
+                    ProductStoreError::Io(format!("remove {}: {error}", journal_path.display()))
                 })?;
             }
             for advance_id in &artifacts.advance_ids {
@@ -1088,6 +1235,59 @@ impl AdvanceStore {
                 })?;
             }
             Ok(())
+        })
+    }
+
+    // ─── H2b（整组删除与重启）：旧执行引用只读交叉核对事实 ───
+
+    /// 读取该 plan 的 advance 执行引用事实（全部 records + 外层
+    /// initialization journal），供零成员/最后成员重置闭包与开始入口交叉
+    /// 核对（设计 A 节「全删判据」）。purging/deleted scope 亦可枚举残留
+    ///（同 `list_plan_artifacts` §0.5 语义）；journal 归属错配/错 join
+    /// fail-closed，不当 `None`。
+    pub fn plan_execution_references(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<AdvancePlanExecutionReferences, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(plan_id)?;
+        let journal_path = self
+            .root(project_id, issue_id)?
+            .join(format!("{plan_id}.initialization.json"));
+        self.with_existing_root(project_id, issue_id, || {
+            let all_records = self.records(project_id, issue_id)?;
+            let initialization_journal = if journal_path.is_file() {
+                let journal: AdvanceInitializationJournal = read_json(&journal_path)?;
+                if journal.plan_id != plan_id {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "advance_initialization_journal",
+                        id: plan_id.to_string(),
+                    });
+                }
+                if all_records
+                    .iter()
+                    .any(|record| record.id == journal.advance_id && record.plan_id != plan_id)
+                {
+                    // journal 绑定到同 issue 他 Plan 的现存 record：错 join。
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "advance_initialization_journal_join",
+                        id: journal.advance_id.clone(),
+                    });
+                }
+                Some(journal)
+            } else {
+                None
+            };
+            Ok(AdvancePlanExecutionReferences {
+                records: all_records
+                    .into_iter()
+                    .filter(|record| record.plan_id == plan_id)
+                    .collect(),
+                initialization_journal,
+            })
         })
     }
 }
@@ -1402,8 +1602,7 @@ mod tests {
     // ─── 级联删除 Task D1.2c：advance record/journal/retry 闭包 ───
 
     use crate::product::entity_deletion_store::{
-        DeletionEntityKind, DeletionPhase, EntityDeletionManifest, EntityDeletionStore,
-        EntityScope,
+        DeletionEntityKind, DeletionPhase, EntityDeletionManifest, EntityDeletionStore, EntityScope,
     };
     use crate::product::entity_operation_store::EntityOperationStore;
     use crate::product::models::automation::OperationState;
@@ -1503,7 +1702,11 @@ mod tests {
             None,
             AdvanceStatus::Aborted,
         );
-        write_json(&store.path_for(p, i, "advance_command_0002").unwrap(), &legacy).unwrap();
+        write_json(
+            &store.path_for(p, i, "advance_command_0002").unwrap(),
+            &legacy,
+        )
+        .unwrap();
         let other = cascade_record(
             "advance_command_0003",
             "command_0003",
@@ -1513,10 +1716,16 @@ mod tests {
         );
         store.put_record(&other).unwrap();
         store
-            .save_advance_initialization(&first, &cascade_journal("advance_command_0001", "plan_0001", "attempt_0001"))
+            .save_advance_initialization(
+                &first,
+                &cascade_journal("advance_command_0001", "plan_0001", "attempt_0001"),
+            )
             .unwrap();
         store
-            .save_advance_initialization(&other, &cascade_journal("advance_command_0003", "plan_0002", "attempt_0002"))
+            .save_advance_initialization(
+                &other,
+                &cascade_journal("advance_command_0003", "plan_0002", "attempt_0002"),
+            )
             .unwrap();
         seed_retry(&store, "retry_cmd_0001", "advance_command_0001");
         seed_retry(&store, "retry_cmd_0002", "advance_command_0003");
@@ -1535,16 +1744,26 @@ mod tests {
         let operations = EntityOperationStore::new(store.app_paths());
         let deletions = EntityDeletionStore::new(store.app_paths());
         let lease = operations.try_acquire_delete(&scope).unwrap();
-        assert_eq!(deletions.begin(&lease).unwrap().phase, DeletionPhase::Purging);
+        assert_eq!(
+            deletions.begin(&lease).unwrap().phase,
+            DeletionPhase::Purging
+        );
         // purging 阶段仍可枚举（§0.5：purging/deleted scope 允许 list 查询）。
-        assert_eq!(store.list_plan_artifacts(p, i, "plan_0001").unwrap(), target);
+        assert_eq!(
+            store.list_plan_artifacts(p, i, "plan_0001").unwrap(),
+            target
+        );
         // pending manifest 捕获 advance/retry 纯 ID 集（重入事实）。
         let mut manifest = EntityDeletionManifest::empty(scope.clone());
         manifest.advance_ids = target.advance_ids.clone();
         manifest.advance_retry_command_ids = target.retry_command_ids.clone();
         deletions.save_pending_manifest(&lease, &manifest).unwrap();
         assert_eq!(
-            deletions.load_pending_manifest(&lease).unwrap().unwrap().advance_ids,
+            deletions
+                .load_pending_manifest(&lease)
+                .unwrap()
+                .unwrap()
+                .advance_ids,
             vec!["advance_command_0001", "advance_command_0002"]
         );
 
@@ -1552,7 +1771,12 @@ mod tests {
         store.purge_plan_artifacts(&lease, &target).unwrap();
         store.purge_plan_artifacts(&lease, &target).unwrap();
 
-        assert!(store.get_advance_for_plan(p, i, "plan_0001").unwrap().is_none());
+        assert!(
+            store
+                .get_advance_for_plan(p, i, "plan_0001")
+                .unwrap()
+                .is_none()
+        );
         assert!(
             store
                 .get_advance_by_command_id(p, i, "command_0001")
@@ -1565,7 +1789,12 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(store.get_retry_initialization(p, i, "retry_cmd_0001").unwrap().is_none());
+        assert!(
+            store
+                .get_retry_initialization(p, i, "retry_cmd_0001")
+                .unwrap()
+                .is_none()
+        );
         assert!(
             !store
                 .root(p, i)
@@ -1582,7 +1811,12 @@ mod tests {
                 .id,
             "advance_command_0003"
         );
-        assert!(store.get_retry_initialization(p, i, "retry_cmd_0002").unwrap().is_some());
+        assert!(
+            store
+                .get_retry_initialization(p, i, "retry_cmd_0002")
+                .unwrap()
+                .is_some()
+        );
         assert!(
             store
                 .root(p, i)
@@ -1596,7 +1830,10 @@ mod tests {
 
         // 真实协调序：清理成功后先移除 pending manifest 再 complete（D1.0 契约）。
         deletions.remove_pending_manifest(&lease).unwrap();
-        assert_eq!(deletions.complete(&lease).unwrap().phase, DeletionPhase::Deleted);
+        assert_eq!(
+            deletions.complete(&lease).unwrap().phase,
+            DeletionPhase::Deleted
+        );
         // Ready 准入：删除事实优先；未删 Plan 原精确 join 不变。
         assert!(
             !store
@@ -1626,7 +1863,9 @@ mod tests {
         );
         store.put_record(&record).unwrap();
         let journal = cascade_journal("advance_command_0001", "plan_0001", "attempt_0001");
-        store.save_advance_initialization(&record, &journal).unwrap();
+        store
+            .save_advance_initialization(&record, &journal)
+            .unwrap();
         seed_retry(&store, "retry_cmd_0001", "advance_command_0001");
 
         let scope = EntityScope::new(p, i, DeletionEntityKind::Plan, "plan_0001");
@@ -1636,7 +1875,10 @@ mod tests {
         deletions.begin(&lease).unwrap();
         let artifacts = store.list_plan_artifacts(p, i, "plan_0001").unwrap();
         store.purge_plan_artifacts(&lease, &artifacts).unwrap();
-        assert_eq!(deletions.complete(&lease).unwrap().phase, DeletionPhase::Deleted);
+        assert_eq!(
+            deletions.complete(&lease).unwrap().phase,
+            DeletionPhase::Deleted
+        );
         drop(lease);
 
         // 模拟完成后全局清理：advance 两根整体移除（根/摘要均缺）。
@@ -1702,7 +1944,11 @@ mod tests {
         assert!(!store.retries_root(p, i).unwrap().is_dir());
 
         // 旧 Ready 残留查询：删除事实优先于残留 record 内容。
-        write_json(&store.path_for(p, i, "advance_command_0001").unwrap(), &record).unwrap();
+        write_json(
+            &store.path_for(p, i, "advance_command_0001").unwrap(),
+            &record,
+        )
+        .unwrap();
         assert!(
             !store
                 .advance_is_ready_for_attempt(p, i, "plan_0001", "attempt_0001")
@@ -1725,7 +1971,10 @@ mod tests {
         );
         store.put_record(&other).unwrap();
         // plan_0001 无 record，仅有孤儿 journal（模拟清理中断残留）。
-        let journal_path = store.root(p, i).unwrap().join("plan_0001.initialization.json");
+        let journal_path = store
+            .root(p, i)
+            .unwrap()
+            .join("plan_0001.initialization.json");
         write_json(
             &journal_path,
             &cascade_journal("advance_command_0001", "plan_0001", "attempt_0001"),
@@ -1745,7 +1994,12 @@ mod tests {
         assert!(!journal_path.is_file());
         // 根与他 Plan 对象不动。
         assert!(store.root(p, i).unwrap().is_dir());
-        assert!(store.get_advance_for_plan(p, i, "plan_0002").unwrap().is_some());
+        assert!(
+            store
+                .get_advance_for_plan(p, i, "plan_0002")
+                .unwrap()
+                .is_some()
+        );
         deletions.complete(&lease).unwrap();
         assert!(
             store
@@ -1779,7 +2033,10 @@ mod tests {
         {
             let (_root, store) = cascade_store();
             write_json(
-                &store.root(p, i).unwrap().join("plan_0001.initialization.json"),
+                &store
+                    .root(p, i)
+                    .unwrap()
+                    .join("plan_0001.initialization.json"),
                 &cascade_journal("advance_command_0001", "plan_0002", "attempt_0001"),
             )
             .unwrap();
@@ -1816,7 +2073,10 @@ mod tests {
             );
             store.put_record(&other).unwrap();
             write_json(
-                &store.root(p, i).unwrap().join("plan_0001.initialization.json"),
+                &store
+                    .root(p, i)
+                    .unwrap()
+                    .join("plan_0001.initialization.json"),
                 &cascade_journal("advance_command_0003", "plan_0001", "attempt_0001"),
             )
             .unwrap();
@@ -1928,5 +2188,288 @@ mod tests {
             assert_eq!(record.plan_id, "plan_0001");
             assert!(deletions.get(&scope).unwrap().is_none());
         }
+    }
+
+    // ─── H2b（设计 A 节，整组删除与重启）：旧 Ready 指向已死全集识别 + 零成员清后新轮绑定 ───
+
+    fn h2b_ready_record(
+        id: &str,
+        command_id: &str,
+        plan_id: &str,
+        targets: &[(&str, &str)],
+    ) -> AdvanceRecord {
+        AdvanceRecord {
+            id: id.into(),
+            command_id: command_id.into(),
+            project_id: "project_0001".into(),
+            issue_id: "issue_0001".into(),
+            plan_id: plan_id.into(),
+            plan_revision_id: "revision_0001".into(),
+            attempt_id: targets.first().map(|(_, attempt)| (*attempt).into()),
+            target_attempts: targets
+                .iter()
+                .map(|(target, attempt)| target_binding(target, attempt))
+                .collect(),
+            status: AdvanceStatus::Ready,
+            workspace_entry: None,
+            error: None,
+            created_at: "2026-10-14T00:00:00Z".into(),
+            updated_at: "2026-10-14T00:00:01Z".into(),
+        }
+    }
+
+    #[test]
+    fn h2b_incident_ready_plus_ready_journal_all_dead_is_all_targets_dead() {
+        // 事故形态：旧 Ready record 与外层 journal（Ready 相位）指向同一四个
+        // 已删 attempts，现存集为空 → AllTargetsDead，交零成员闭包完整重置。
+        let (_root, store) = cascade_store();
+        let (p, i) = ("project_0001", "issue_0001");
+        let dead = [
+            ("repo_a", "attempt_0001"),
+            ("repo_b", "attempt_0002"),
+            ("repo_c", "attempt_0003"),
+            ("repo_d", "attempt_0004"),
+        ];
+        let record = h2b_ready_record("advance_command_0001", "command_0001", "plan_0001", &dead);
+        store.put_record(&record).unwrap();
+        let mut journal = cascade_journal("advance_command_0001", "plan_0001", "attempt_0001");
+        journal.target_attempt_ids = dead
+            .iter()
+            .map(|(_, attempt)| (*attempt).to_string())
+            .collect();
+        journal.phase = AdvanceInitializationPhase::Ready;
+        store
+            .save_advance_initialization(&record, &journal)
+            .unwrap();
+
+        let facts = store.plan_execution_references(p, i, "plan_0001").unwrap();
+        assert_eq!(facts.records, vec![record.clone()]);
+        assert_eq!(facts.initialization_journal.as_ref(), Some(&journal));
+        assert_eq!(
+            facts.ready_bound_attempt_ids(),
+            vec![
+                "attempt_0001".to_string(),
+                "attempt_0002".to_string(),
+                "attempt_0003".to_string(),
+                "attempt_0004".to_string(),
+            ]
+        );
+        assert_eq!(
+            facts.journal_bound_attempt_ids(),
+            vec![
+                "attempt_0001".to_string(),
+                "attempt_0002".to_string(),
+                "attempt_0003".to_string(),
+                "attempt_0004".to_string(),
+            ]
+        );
+        assert_eq!(
+            facts.classify_stale_references(&[]),
+            AdvanceStaleReferenceVerdict::AllTargetsDead {
+                dead_attempt_ids: vec![
+                    "attempt_0001".into(),
+                    "attempt_0002".into(),
+                    "attempt_0003".into(),
+                    "attempt_0004".into(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn h2b_partially_dead_members_keep_partial_verdict() {
+        // 删 2/4：PartiallyDead——不缩水全集、不自动清，走清剩余出口。
+        let (_root, store) = cascade_store();
+        let (p, i) = ("project_0001", "issue_0001");
+        let targets = [
+            ("repo_a", "attempt_0001"),
+            ("repo_b", "attempt_0002"),
+            ("repo_c", "attempt_0003"),
+            ("repo_d", "attempt_0004"),
+        ];
+        let record = h2b_ready_record(
+            "advance_command_0001",
+            "command_0001",
+            "plan_0001",
+            &targets,
+        );
+        store.put_record(&record).unwrap();
+
+        let facts = store.plan_execution_references(p, i, "plan_0001").unwrap();
+        assert_eq!(
+            facts.classify_stale_references(&["attempt_0001".into(), "attempt_0002".into()]),
+            AdvanceStaleReferenceVerdict::PartiallyDead {
+                dead_attempt_ids: vec!["attempt_0003".into(), "attempt_0004".into()],
+                alive_attempt_ids: vec!["attempt_0001".into(), "attempt_0002".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn h2b_prefix_journal_below_attempt_persisted_is_not_a_broken_reference() {
+        // 设计 A 节 line 74：未越 AttemptPersisted 的 journal 绑定是初始化前缀
+        //（attempt 尚未物化属预期缺失）——Initializing record + Prepared
+        // journal 指向缺失 attempts 不判断裂/重置，Intact 续原协议。
+        let (_root, store) = cascade_store();
+        let (p, i) = ("project_0001", "issue_0001");
+        let mut record = h2b_ready_record("advance_command_0001", "command_0001", "plan_0001", &[]);
+        record.status = AdvanceStatus::Initializing;
+        store.put_record(&record).unwrap();
+        let mut journal = cascade_journal("advance_command_0001", "plan_0001", "attempt_0001");
+        journal.target_attempt_ids = vec!["attempt_0001".into(), "attempt_0002".into()];
+        journal.phase = AdvanceInitializationPhase::JournalPrepared;
+        store
+            .save_advance_initialization(&record, &journal)
+            .unwrap();
+
+        let facts = store.plan_execution_references(p, i, "plan_0001").unwrap();
+        assert_eq!(
+            facts.classify_stale_references(&[]),
+            AdvanceStaleReferenceVerdict::Intact
+        );
+    }
+
+    #[test]
+    fn h2b_journal_past_attempt_persisted_alone_qualifies_as_dead_full_set() {
+        // 旧 Ready 缺位的中断变体：record 非 Ready，但外层 journal 已越
+        // AttemptPersisted 且指向缺失 attempts → 同样构成断裂全集。
+        let (_root, store) = cascade_store();
+        let (p, i) = ("project_0001", "issue_0001");
+        let mut record = h2b_ready_record(
+            "advance_command_0001",
+            "command_0001",
+            "plan_0001",
+            &[("repo_a", "attempt_0001")],
+        );
+        record.status = AdvanceStatus::Aborted;
+        store.put_record(&record).unwrap();
+        let mut journal = cascade_journal("advance_command_0001", "plan_0001", "attempt_0001");
+        journal.target_attempt_ids = vec!["attempt_0001".into(), "attempt_0002".into()];
+        journal.phase = AdvanceInitializationPhase::AttemptPersisted;
+        store
+            .save_advance_initialization(&record, &journal)
+            .unwrap();
+
+        let facts = store.plan_execution_references(p, i, "plan_0001").unwrap();
+        assert_eq!(
+            facts.classify_stale_references(&[]),
+            AdvanceStaleReferenceVerdict::AllTargetsDead {
+                dead_attempt_ids: vec!["attempt_0001".into(), "attempt_0002".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn h2b_verdicts_for_alive_references_and_empty_plans() {
+        // 全存活 → Intact；无 record 无 journal → NoReferences；仅非 Ready
+        // records → Intact（在途初始化，不判重置）。
+        let (_root, store) = cascade_store();
+        let (p, i) = ("project_0001", "issue_0001");
+        assert_eq!(
+            store
+                .plan_execution_references(p, i, "plan_0001")
+                .unwrap()
+                .classify_stale_references(&[]),
+            AdvanceStaleReferenceVerdict::NoReferences
+        );
+
+        let mut initializing =
+            h2b_ready_record("advance_command_0001", "command_0001", "plan_0001", &[]);
+        initializing.status = AdvanceStatus::Initializing;
+        store.put_record(&initializing).unwrap();
+        assert_eq!(
+            store
+                .plan_execution_references(p, i, "plan_0001")
+                .unwrap()
+                .classify_stale_references(&[]),
+            AdvanceStaleReferenceVerdict::Intact
+        );
+
+        let ready = h2b_ready_record(
+            "advance_command_0002",
+            "command_0002",
+            "plan_0002",
+            &[("repo_a", "attempt_0001")],
+        );
+        store.put_record(&ready).unwrap();
+        assert_eq!(
+            store
+                .plan_execution_references(p, i, "plan_0002")
+                .unwrap()
+                .classify_stale_references(&["attempt_0001".into()]),
+            AdvanceStaleReferenceVerdict::Intact
+        );
+    }
+
+    #[test]
+    fn h2b_zero_member_purge_then_new_round_binds_new_command() {
+        // 零成员闭包 advance 半边（复用 D1.2c 闭包，不立墓碑）：list → Plan
+        // 独占 lease → purge（retry→journal→record，幂等）→ 新 command 正常
+        // 绑定新轮新 attempts——「正常 advance 绑定新轮」，旧 ID 不复活。
+        let (_root, store) = cascade_store();
+        let (p, i) = ("project_0001", "issue_0001");
+        let stale = h2b_ready_record(
+            "advance_command_0001",
+            "command_0001",
+            "plan_0001",
+            &[("repo_a", "attempt_0001"), ("repo_b", "attempt_0002")],
+        );
+        store.put_record(&stale).unwrap();
+        let mut journal = cascade_journal("advance_command_0001", "plan_0001", "attempt_0001");
+        journal.target_attempt_ids = vec!["attempt_0001".into(), "attempt_0002".into()];
+        journal.phase = AdvanceInitializationPhase::Ready;
+        store.save_advance_initialization(&stale, &journal).unwrap();
+        seed_retry(&store, "retry_cmd_0001", "advance_command_0001");
+
+        let artifacts = store.list_plan_artifacts(p, i, "plan_0001").unwrap();
+        assert_eq!(artifacts.advance_ids, vec!["advance_command_0001"]);
+        assert_eq!(artifacts.retry_command_ids, vec!["retry_cmd_0001"]);
+        let scope = EntityScope::new(p, i, DeletionEntityKind::Plan, "plan_0001");
+        let operations = EntityOperationStore::new(store.app_paths());
+        let lease = operations.try_acquire_delete(&scope).unwrap();
+        // Coding 重置不调用 begin/complete——不给保留的 Plan 立永久墓碑
+        //（设计 A 节注意），租约本身即安全清理窗口。
+        store.purge_plan_artifacts(&lease, &artifacts).unwrap();
+        store.purge_plan_artifacts(&lease, &artifacts).unwrap();
+        drop(lease);
+
+        assert!(
+            store
+                .get_advance_for_plan(p, i, "plan_0001")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_retry_initialization(p, i, "retry_cmd_0001")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !store
+                .root(p, i)
+                .unwrap()
+                .join("plan_0001.initialization.json")
+                .is_file()
+        );
+
+        // 新轮身份：新 command/新 attempt IDs，正常 Ready 放行。
+        let fresh = h2b_ready_record(
+            "advance_command_0002",
+            "command_0002",
+            "plan_0001",
+            &[("repo_a", "attempt_1001"), ("repo_b", "attempt_1002")],
+        );
+        assert_eq!(store.put_record(&fresh).unwrap(), fresh);
+        assert!(
+            store
+                .advance_is_ready_for_attempt(p, i, "plan_0001", "attempt_1001")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .advance_is_ready_for_attempt(p, i, "plan_0001", "attempt_0001")
+                .unwrap()
+        );
     }
 }

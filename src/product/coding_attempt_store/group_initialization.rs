@@ -6,6 +6,8 @@ use crate::product::coding_models::{
     CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnit, CodingExecutionUnitStatus,
     CodingRoleProviderConfigSnapshot,
 };
+use crate::product::entity_deletion_store::DeletionEntityKind;
+use crate::product::entity_operation_store::EntityDeletionLease;
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::RepositoryRouting;
@@ -66,6 +68,37 @@ pub struct CodingGroupInitializationJournal {
 
 pub struct CodingGroupInitializationGuard {
     _lock: ExclusiveFileLock,
+}
+
+/// H2b（设计 A 节「journal 在而 attempts 亡」）：per-target/legacy group
+/// 初始化 journal 的引用分类——前缀（attempt 未物化属预期缺失，续原
+/// 协议）/ 绑定存活 / 已越 AttemptPersisted 而 attempt 缺失（执行引用
+/// 断裂，零成员闭包清理对象；不得用旧 snapshot 复活旧 ID）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodingGroupJournalReference {
+    InitializationPrefix {
+        journal_id: String,
+        attempt_id: String,
+    },
+    BoundToAliveAttempt {
+        journal_id: String,
+        attempt_id: String,
+    },
+    BoundToDeadAttempt {
+        journal_id: String,
+        attempt_id: String,
+    },
+}
+
+impl CodingGroupJournalReference {
+    /// journal 稳定 ID（确定性排序辅助）。
+    pub fn journal_id(&self) -> &str {
+        match self {
+            Self::InitializationPrefix { journal_id, .. }
+            | Self::BoundToAliveAttempt { journal_id, .. }
+            | Self::BoundToDeadAttempt { journal_id, .. } => journal_id,
+        }
+    }
 }
 
 impl super::CodingAttemptStore {
@@ -141,6 +174,29 @@ impl super::CodingAttemptStore {
     /// 全部原 depends（外部 depends 不删，plan gate 消费）。`None` 保持全集
     /// 拓扑序旧语义。
     pub fn prepare_group_initialization_with_admission_for_target(
+        &self,
+        input: &CreateGroupCodingAttemptInput,
+        bound_plan_revision_id: &str,
+        unit_bindings: &[AuthoritativeCodingUnitBinding],
+        admission_kind: CodingAdmissionKind,
+        journal_target: Option<crate::product::logical_codebase::LogicalRepositoryId>,
+    ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
+        // D2.1c：journal 准备/重放入口持 owning Plan scope 共享准入（含读
+        // 重放命中路径——删除窗口内的 journal 恢复不得继续走到 ensure）。
+        // advance 编排在 arbitration 锁内调用时本 try 准入仍 fail-closed
+        // 拒墓碑（D2.1d 将在 advance 入口外层持同 Plan lease）。
+        self.with_plan_live_write(&input.project_id, &input.issue_id, &input.plan_id, || {
+            self.prepare_group_initialization_with_admission_for_target_inner(
+                input,
+                bound_plan_revision_id,
+                unit_bindings,
+                admission_kind,
+                journal_target,
+            )
+        })
+    }
+
+    fn prepare_group_initialization_with_admission_for_target_inner(
         &self,
         input: &CreateGroupCodingAttemptInput,
         bound_plan_revision_id: &str,
@@ -356,6 +412,33 @@ impl super::CodingAttemptStore {
             &journal.issue_id,
             &journal.lock_work_item_id,
         )?;
+        // D2.1c：attempt 持久化消费 guard 已持的 owning Plan 共享准入
+        //（scope 在 creation 锁外层取得，不嵌套重取）；guard 无归属
+        //（legacy lock WI）或归属与 journal plan 不一致时，以 journal.plan_id
+        // 自身的准入兜底——purging/deleted 墓碑后的 journal 恢复创建稳定
+        // 拒绝（REQ-DEL-05：不能检查后另一入口再创建）。
+        let guard_admits_journal_plan = guard.admitted_plan_scope().is_some_and(|scope| {
+            scope.kind == crate::product::entity_deletion_store::DeletionEntityKind::Plan
+                && scope.project_id == journal.project_id
+                && scope.issue_id == journal.issue_id
+                && scope.entity_id == journal.plan_id
+        });
+        if guard_admits_journal_plan {
+            self.ensure_group_initialization_attempt_inner(journal)
+        } else {
+            self.with_plan_live_write(
+                &journal.project_id,
+                &journal.issue_id,
+                &journal.plan_id,
+                || self.ensure_group_initialization_attempt_inner(journal),
+            )
+        }
+    }
+
+    fn ensure_group_initialization_attempt_inner(
+        &self,
+        journal: &CodingGroupInitializationJournal,
+    ) -> Result<CodingExecutionAttempt, ProductStoreError> {
         // REQ-MTG-02（2.2 异 target 并行解禁）：active 检查按 target 桶细化——
         // 本 journal 的桶内必须恰为自身；异 target active（D2.1 A4 无快照亦同）
         // 不阻塞。
@@ -385,6 +468,20 @@ impl super::CodingAttemptStore {
                 ));
             }
         } else {
+            // H2b（设计 A 节「journal 在而 attempts 亡」）：已越
+            // AttemptPersisted 的 journal，其 attempt 曾被耐久物化过——
+            // 此时缺失＝已被删除，不得用旧 snapshot 重建（复活旧 attempt
+            // ID）；未达 AttemptPersisted 的缺失属既有初始化中断前缀，
+            // 保持首物化续做，原协议零变化。
+            if journal
+                .phase
+                .has_reached(CodingGroupInitializationPhase::AttemptPersisted)
+            {
+                return Err(incomplete_group_attempt(
+                    &journal.attempt.id,
+                    "persisted attempt is missing beyond AttemptPersisted; the old attempt id must not be revived",
+                ));
+            }
             if let Some(active) = active_attempts.first() {
                 return Err(incomplete_group_attempt(
                     &journal.attempt.id,
@@ -541,6 +638,20 @@ impl super::CodingAttemptStore {
         journal: &CodingGroupInitializationJournal,
         error: &str,
     ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
+        // D2.1c：失败标记是 journal 写——删除窗口内不得复活已 purge 的
+        // journal（purging/deleted 墓碑稳定拒绝）。
+        self.with_plan_live_write(
+            &journal.project_id,
+            &journal.issue_id,
+            &journal.plan_id,
+            || self.mark_group_initialization_error_inner(journal, error),
+        )
+    }
+    fn mark_group_initialization_error_inner(
+        &self,
+        journal: &CodingGroupInitializationJournal,
+        error: &str,
+    ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
         validate_group_initialization_journal(journal)?;
         let path = self.locate_group_initialization_journal_path(journal)?;
         let mut current: CodingGroupInitializationJournal = read_json(&path)?;
@@ -557,6 +668,20 @@ impl super::CodingAttemptStore {
         Ok(current)
     }
     pub fn advance_group_initialization_phase(
+        &self,
+        expected: &CodingGroupInitializationJournal,
+        next: CodingGroupInitializationPhase,
+    ) -> Result<CodingGroupInitializationJournal, ProductStoreError> {
+        // D2.1c：相位推进是 journal 写——删除窗口内不得复活已 purge 的
+        // journal（purging/deleted 墓碑稳定拒绝）。
+        self.with_plan_live_write(
+            &expected.project_id,
+            &expected.issue_id,
+            &expected.plan_id,
+            || self.advance_group_initialization_phase_inner(expected, next),
+        )
+    }
+    fn advance_group_initialization_phase_inner(
         &self,
         expected: &CodingGroupInitializationJournal,
         next: CodingGroupInitializationPhase,
@@ -626,6 +751,143 @@ impl super::CodingAttemptStore {
                     return super::remove_file_if_exists(&target_path);
                 }
             }
+        }
+        Ok(())
+    }
+
+    // ─── H2b（设计 A 节，整组删除与重启）：journal 引用分类与闭包清理 ───
+
+    /// 按调用方枚举的真实 attempt 存活集分类该 plan 全部初始化 journal
+    ///（原路径 + per-target 子目录；坏 JSON/身份错配 fail-closed 同
+    /// `list_group_initialization_journals_for_plan`）。判定只看 journal
+    /// 相位与存活集成员关系，不读 attempt 文件（权威存活集归闭包/调用方，
+    /// 不复制第二套扫描器）：未达 AttemptPersisted 的 journal 缺 attempt
+    /// 属既有初始化中断前缀（`InitializationPrefix`，续原协议，不当残留
+    /// 清）；已越 AttemptPersisted 按 attempt 存活分 `BoundToAlive` /
+    /// `BoundToDead`（后者为执行引用断裂，零成员闭包清理对象）。
+    pub fn classify_group_initialization_references(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        existing_attempt_ids: &[String],
+    ) -> Result<Vec<CodingGroupJournalReference>, ProductStoreError> {
+        for id in [project_id, issue_id, plan_id] {
+            validate_relative_id(id)?;
+        }
+        let existing: std::collections::BTreeSet<String> =
+            existing_attempt_ids.iter().cloned().collect();
+        Ok(self
+            .list_group_initialization_journals_for_plan(project_id, issue_id, plan_id)?
+            .into_iter()
+            .map(|journal| {
+                let journal_id = journal.id.clone();
+                let attempt_id = journal.attempt.id.clone();
+                if journal
+                    .phase
+                    .has_reached(CodingGroupInitializationPhase::AttemptPersisted)
+                {
+                    if existing.contains(&attempt_id) {
+                        CodingGroupJournalReference::BoundToAliveAttempt {
+                            journal_id,
+                            attempt_id,
+                        }
+                    } else {
+                        CodingGroupJournalReference::BoundToDeadAttempt {
+                            journal_id,
+                            attempt_id,
+                        }
+                    }
+                } else {
+                    CodingGroupJournalReference::InitializationPrefix {
+                        journal_id,
+                        attempt_id,
+                    }
+                }
+            })
+            .collect())
+    }
+
+    /// H2b（设计 A 节完整重置闭包第 4 步）：清该 plan 的 group 初始化
+    /// journal 残留（legacy 原路径 `{plan_id}.json` + per-target 子目录
+    /// `{plan_id}/{target}.json`，含 attempts 已亡的 journal）。持精确
+    /// Plan 独占 lease 消费（同 `coding_plan_run::purge_plan_with_lease`
+    /// 模式）——租约即安全清理窗口，不嵌套重取 scope；missing 幂等；
+    /// journal 身份/归属错配 fail-closed 不误删他 Plan 对象；不删
+    /// `group-initializations` 根与 arbitration 公共锁。
+    pub fn purge_group_initialization_journals_with_lease(
+        &self,
+        lease: &EntityDeletionLease,
+    ) -> Result<(), ProductStoreError> {
+        let scope = lease.scope();
+        scope.validate()?;
+        if scope.kind != DeletionEntityKind::Plan {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_group_initialization_purge_scope",
+                id: scope.entity_id.clone(),
+            });
+        }
+        let (project_id, issue_id, plan_id) = (
+            scope.project_id.as_str(),
+            scope.issue_id.as_str(),
+            scope.entity_id.as_str(),
+        );
+        for id in [project_id, issue_id, plan_id] {
+            validate_relative_id(id)?;
+        }
+        // ① legacy 原路径 `{plan_id}.json`。
+        let original = self.group_initialization_journal_path(project_id, issue_id, plan_id);
+        if super::path_is_regular_file(&original)? {
+            let journal: CodingGroupInitializationJournal = read_json(&original)?;
+            validate_group_initialization_journal(&journal)?;
+            if journal.project_id != project_id
+                || journal.issue_id != issue_id
+                || journal.plan_id != plan_id
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_group_initialization_journal",
+                    id: plan_id.to_string(),
+                });
+            }
+            super::remove_file_if_exists(&original)?;
+        }
+        // ② per-target 子目录 `{plan_id}/{target}.json`（逐一身份核对；非
+        //    json 条目跳过，坏 JSON/归属错配 fail-closed）。
+        let directory = self
+            .coding_attempts_root(project_id, issue_id)
+            .join("group-initializations")
+            .join(plan_id);
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "read {}: {error}",
+                    directory.display()
+                )));
+            }
+        };
+        for entry in entries {
+            let path = entry
+                .map_err(|error| {
+                    ProductStoreError::Io(format!("read {} entry: {error}", directory.display()))
+                })?
+                .path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let journal: CodingGroupInitializationJournal = read_json(&path)?;
+            validate_group_initialization_journal(&journal)?;
+            if journal.project_id != project_id
+                || journal.issue_id != issue_id
+                || journal.plan_id != plan_id
+            {
+                return Err(ProductStoreError::IdentityMismatch {
+                    kind: "coding_group_initialization_journal",
+                    id: plan_id.to_string(),
+                });
+            }
+            super::remove_file_if_exists(&path)?;
         }
         Ok(())
     }
@@ -1070,4 +1332,509 @@ fn same_group_initialization_identity(
         && left.plan_binding == right.plan_binding
         && left.units == right.units
         && left.created_at == right.created_at
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::CodingAttemptStore;
+    use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
+    use crate::product::entity_operation_store::EntityOperationStore;
+    use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
+    use crate::product::models::ProviderName;
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+    use tempfile::TempDir;
+
+    const PROJECT_ID: &str = "project_0001";
+    const ISSUE_ID: &str = "issue_0001";
+
+    fn plain_store() -> (TempDir, ProductAppPaths, CodingAttemptStore) {
+        let tmp = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+        let store = CodingAttemptStore::new(paths.clone());
+        (tmp, paths, store)
+    }
+
+    fn provider_snapshot() -> ProviderConfigSnapshot {
+        ProviderConfigSnapshot {
+            author: ProviderName::Codex,
+            reviewer: Some(ProviderName::ClaudeCode),
+            review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+        }
+    }
+
+    fn legacy_group_input(plan_id: &str) -> CreateGroupCodingAttemptInput {
+        CreateGroupCodingAttemptInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: plan_id.to_string(),
+            current_work_item_id: "work_item_0001".to_string(),
+            base_branch: "main".to_string(),
+            branch_name: "aria/issues/issue_0001".to_string(),
+            worktree_path: None,
+            provider_config_snapshot: provider_snapshot(),
+            target_snapshot: None,
+            max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        }
+    }
+
+    fn legacy_unit(logical_id: &str) -> AuthoritativeCodingUnitBinding {
+        AuthoritativeCodingUnitBinding {
+            logical_work_item_id: logical_id.to_string(),
+            work_item_revision_id: format!("revision_{logical_id}"),
+            verification_plan_revision_id: format!("verification_{logical_id}"),
+            projection_bundle_id: format!("projection_{logical_id}"),
+            target_repository_id: None,
+            source_draft_error: None,
+            dependency_logical_work_item_ids: Vec::new(),
+        }
+    }
+
+    /// Logical 路由 fixture：project + manifest（targets）+ issue + explicit
+    /// selection（同 group_split_target 惯例），使 per-target journal 可经
+    /// `prepare_group_initialization_with_admission_for_target` 准备。
+    fn routing_store(
+        targets: Vec<LogicalRepositoryId>,
+    ) -> (TempDir, ProductAppPaths, CodingAttemptStore, String, String) {
+        let tmp = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+        let project = crate::product::project_store::ProjectStore::new(paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "h2b group initialization".to_string(),
+                description: None,
+            })
+            .unwrap();
+        crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone())
+            .save_manifest(
+                &project.id,
+                &crate::product::logical_codebase::LogicalCodebaseManifest::new(
+                    &project.id,
+                    tmp.path().join("logical-root"),
+                    targets.clone(),
+                ),
+            )
+            .unwrap();
+        let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: project.id.clone(),
+                repo_id: None,
+                logical_codebase_id: None,
+                title: "h2b group initialization issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .unwrap();
+        crate::product::logical_codebase::IssueCodebaseSelectionStore::new(paths.clone())
+            .save(
+                &crate::product::logical_codebase::IssueCodebaseSelection::explicit(
+                    &project.id,
+                    &issue.id,
+                    targets,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                ),
+            )
+            .unwrap();
+        let store = CodingAttemptStore::new(paths.clone());
+        (tmp, paths, store, project.id, issue.id)
+    }
+
+    fn target_snapshot(
+        logical_id: LogicalRepositoryId,
+    ) -> crate::product::coding_models::AttemptTargetSnapshot {
+        crate::product::coding_models::AttemptTargetSnapshot {
+            logical_repository_id: logical_id,
+            checkout_id: RepositoryCheckoutId(uuid::Uuid::nil()),
+            physical_repository_id: "repository_h2b".to_string(),
+            canonical_path: std::path::PathBuf::from("/h2b/repository"),
+            git_dir_identity: "h2b-git-dir".to_string(),
+            revision: Some("h2b-revision".to_string()),
+            policy_digest: "h2b-policy".to_string(),
+            membership_revision: 1,
+            captured_at: "2026-10-14T00:00:00Z".to_string(),
+            capture_source: "test".to_string(),
+        }
+    }
+
+    fn split_unit(target: LogicalRepositoryId, logical_id: &str) -> AuthoritativeCodingUnitBinding {
+        AuthoritativeCodingUnitBinding {
+            target_repository_id: Some(target),
+            ..legacy_unit(logical_id)
+        }
+    }
+
+    fn prepare_for_target(
+        store: &CodingAttemptStore,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        work_item_id: &str,
+        target: LogicalRepositoryId,
+    ) -> CodingGroupInitializationJournal {
+        let input = CreateGroupCodingAttemptInput {
+            project_id: project_id.to_string(),
+            issue_id: issue_id.to_string(),
+            plan_id: plan_id.to_string(),
+            current_work_item_id: work_item_id.to_string(),
+            base_branch: "main".to_string(),
+            branch_name: format!("aria/issues/{issue_id}/{}", target.0),
+            worktree_path: None,
+            provider_config_snapshot: provider_snapshot(),
+            target_snapshot: Some(target_snapshot(target)),
+            max_auto_rework: 2,
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+        };
+        store
+            .prepare_group_initialization_with_admission_for_target(
+                &input,
+                "plan_revision_h2b",
+                &[split_unit(target, work_item_id)],
+                CodingAdmissionKind::ScAdvance,
+                Some(target),
+            )
+            .expect("prepare per-target journal")
+    }
+
+    #[test]
+    fn h2b_beyond_attempt_persisted_journal_must_not_revive_dead_attempt_id() {
+        // 设计 A 节「journal 在而 attempts 亡」：journal 已达
+        // AttemptPersisted 而绑定 attempt 已删（整组删除残留）——ensure 不得
+        // 用旧 snapshot 重建该 attempt（复活旧 ID），fail-closed。
+        let (_tmp, _paths, store) = plain_store();
+        let journal = store
+            .prepare_group_initialization(
+                &legacy_group_input("work_item_plan_0001"),
+                "plan_revision_0001",
+                &[legacy_unit("work_item_0001")],
+            )
+            .expect("prepare legacy journal");
+        let guard = store
+            .acquire_work_item_attempt_creation(PROJECT_ID, ISSUE_ID, &journal.lock_work_item_id)
+            .unwrap();
+        let attempt = store
+            .ensure_group_initialization_attempt(&journal, &guard)
+            .expect("prefix first materialization");
+        let persisted = store
+            .advance_group_initialization_phase(
+                &journal,
+                CodingGroupInitializationPhase::AttemptPersisted,
+            )
+            .expect("checkpoint attempt persistence");
+
+        // 模拟整组删除只删了 attempt 而 journal 残留。
+        let attempt_path = store.attempt_path(PROJECT_ID, ISSUE_ID, &attempt.id);
+        crate::product::coding_attempt_store::remove_file_if_exists(&attempt_path).unwrap();
+
+        let error = store
+            .ensure_group_initialization_attempt(&persisted, &guard)
+            .expect_err("must not rebuild the dead attempt from the stale snapshot");
+        assert!(
+            error.to_string().contains("must not be revived"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !attempt_path.is_file(),
+            "the dead attempt id must stay dead"
+        );
+    }
+
+    #[test]
+    fn h2b_prefix_journal_continues_first_materialization_protocol() {
+        // 设计 A 节：journal 未达 AttemptPersisted、attempt 缺失属既有初始化
+        // 中断前缀——ensure 以原 snapshot 首物化续做（原协议零变化），不得
+        // 误判为删除。
+        let (_tmp, _paths, store) = plain_store();
+        let journal = store
+            .prepare_group_initialization(
+                &legacy_group_input("work_item_plan_0001"),
+                "plan_revision_0001",
+                &[legacy_unit("work_item_0001")],
+            )
+            .expect("prepare legacy journal");
+        let attempt_path = store.attempt_path(PROJECT_ID, ISSUE_ID, &journal.attempt.id);
+        assert!(!attempt_path.is_file());
+
+        let guard = store
+            .acquire_work_item_attempt_creation(PROJECT_ID, ISSUE_ID, &journal.lock_work_item_id)
+            .unwrap();
+        let attempt = store
+            .ensure_group_initialization_attempt(&journal, &guard)
+            .expect("prefix journal first-materializes the attempt");
+        assert_eq!(attempt.id, journal.attempt.id);
+        assert!(attempt_path.is_file());
+    }
+
+    #[test]
+    fn h2b_classify_group_initialization_references_three_forms() {
+        // 三形态：前缀（Prepared，attempt 未物化属预期）/ 绑定存活 /
+        // 已越 AttemptPersisted 而 attempt 缺失（断裂，交零成员闭包）。
+        let targets = vec![
+            LogicalRepositoryId(uuid::Uuid::nil()),
+            LogicalRepositoryId(uuid::Uuid::from_u64_pair(
+                0x2222_2222_2222_2222,
+                0x2222_2222_2222_2222,
+            )),
+            LogicalRepositoryId(uuid::Uuid::from_u64_pair(
+                0x3333_3333_3333_3333,
+                0x3333_3333_3333_3333,
+            )),
+        ];
+        let (_tmp, _paths, store, project_id, issue_id) = routing_store(targets.clone());
+        let plan_id = "work_item_plan_h2b_0001";
+
+        // A：前缀——只 prepare，不物化。
+        let journal_a = prepare_for_target(
+            &store,
+            &project_id,
+            &issue_id,
+            plan_id,
+            "wi_h2b_a",
+            targets[0],
+        );
+        // B：物化 + AttemptPersisted，存活。
+        let journal_b = prepare_for_target(
+            &store,
+            &project_id,
+            &issue_id,
+            plan_id,
+            "wi_h2b_b",
+            targets[1],
+        );
+        let guard_b = store
+            .acquire_work_item_attempt_creation(
+                &project_id,
+                &issue_id,
+                &journal_b.lock_work_item_id,
+            )
+            .unwrap();
+        store
+            .ensure_group_initialization_attempt(&journal_b, &guard_b)
+            .expect("materialize B");
+        let persisted_b = store
+            .advance_group_initialization_phase(
+                &journal_b,
+                CodingGroupInitializationPhase::AttemptPersisted,
+            )
+            .expect("checkpoint B");
+        // C：物化 + AttemptPersisted 后 attempt 被删（残留 journal）。
+        let journal_c = prepare_for_target(
+            &store,
+            &project_id,
+            &issue_id,
+            plan_id,
+            "wi_h2b_c",
+            targets[2],
+        );
+        let guard_c = store
+            .acquire_work_item_attempt_creation(
+                &project_id,
+                &issue_id,
+                &journal_c.lock_work_item_id,
+            )
+            .unwrap();
+        store
+            .ensure_group_initialization_attempt(&journal_c, &guard_c)
+            .expect("materialize C");
+        let persisted_c = store
+            .advance_group_initialization_phase(
+                &journal_c,
+                CodingGroupInitializationPhase::AttemptPersisted,
+            )
+            .expect("checkpoint C");
+        crate::product::coding_attempt_store::remove_file_if_exists(&store.attempt_path(
+            &project_id,
+            &issue_id,
+            &journal_c.attempt.id,
+        ))
+        .unwrap();
+
+        let existing = vec![persisted_b.attempt.id.clone()];
+        let mut references = store
+            .classify_group_initialization_references(&project_id, &issue_id, plan_id, &existing)
+            .unwrap();
+        references.sort_by(|left, right| left.journal_id().cmp(right.journal_id()));
+        let mut expected = vec![
+            CodingGroupJournalReference::InitializationPrefix {
+                journal_id: journal_a.id.clone(),
+                attempt_id: journal_a.attempt.id.clone(),
+            },
+            CodingGroupJournalReference::BoundToAliveAttempt {
+                journal_id: persisted_b.id.clone(),
+                attempt_id: persisted_b.attempt.id.clone(),
+            },
+            CodingGroupJournalReference::BoundToDeadAttempt {
+                journal_id: persisted_c.id.clone(),
+                attempt_id: persisted_c.attempt.id.clone(),
+            },
+        ];
+        expected.sort_by(|left, right| left.journal_id().cmp(right.journal_id()));
+        assert_eq!(references, expected);
+    }
+
+    #[test]
+    fn h2b_purge_journals_with_lease_clears_legacy_path_and_keeps_other_plans() {
+        // 零成员闭包 journal 半边：Plan 独占 lease 内清 legacy 原路径
+        // journal；他 Plan journal 不动；幂等；非 Plan scope 拒绝。
+        let (_tmp, paths, store) = plain_store();
+        store
+            .prepare_group_initialization(
+                &legacy_group_input("work_item_plan_0001"),
+                "plan_revision_0001",
+                &[legacy_unit("work_item_0001")],
+            )
+            .unwrap();
+        store
+            .prepare_group_initialization(
+                &legacy_group_input("work_item_plan_0002"),
+                "plan_revision_0002",
+                &[legacy_unit("work_item_0001")],
+            )
+            .unwrap();
+
+        let scope = EntityScope::new(
+            PROJECT_ID,
+            ISSUE_ID,
+            DeletionEntityKind::Plan,
+            "work_item_plan_0001",
+        );
+        let operations = EntityOperationStore::new(paths.clone());
+        let lease = operations.try_acquire_delete(&scope).unwrap();
+        store
+            .purge_group_initialization_journals_with_lease(&lease)
+            .unwrap();
+        store
+            .purge_group_initialization_journals_with_lease(&lease)
+            .unwrap();
+        drop(lease);
+
+        assert!(
+            store
+                .get_group_initialization(PROJECT_ID, ISSUE_ID, "work_item_plan_0001")
+                .is_err(),
+            "purged plan journal must be gone"
+        );
+        assert_eq!(
+            store
+                .list_group_initialization_journals_for_plan(
+                    PROJECT_ID,
+                    ISSUE_ID,
+                    "work_item_plan_0002"
+                )
+                .unwrap()
+                .len(),
+            1,
+            "other plan journals must survive"
+        );
+
+        let story_scope = EntityScope::new(
+            PROJECT_ID,
+            ISSUE_ID,
+            DeletionEntityKind::Story,
+            "story_0001",
+        );
+        let wrong = operations.try_acquire_delete(&story_scope).unwrap();
+        let error = store
+            .purge_group_initialization_journals_with_lease(&wrong)
+            .expect_err("non-Plan scope must be rejected");
+        assert!(
+            matches!(
+                error,
+                ProductStoreError::IdentityMismatch { ref kind, .. }
+                    if *kind == "coding_group_initialization_purge_scope"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn h2b_purge_journals_clears_per_target_subdir_scoped_to_plan() {
+        // per-target 子目录形态：清 {plan}/{target}.json 全部 journal、不动
+        // 他 Plan；幂等；子目录 journal 文件确实消失。
+        let targets = vec![
+            LogicalRepositoryId(uuid::Uuid::nil()),
+            LogicalRepositoryId(uuid::Uuid::from_u64_pair(
+                0x2222_2222_2222_2222,
+                0x2222_2222_2222_2222,
+            )),
+        ];
+        let (_tmp, paths, store, project_id, issue_id) = routing_store(targets.clone());
+        let journal_a = prepare_for_target(
+            &store,
+            &project_id,
+            &issue_id,
+            "work_item_plan_h2b_purge",
+            "wi_purge_a",
+            targets[0],
+        );
+        let journal_b = prepare_for_target(
+            &store,
+            &project_id,
+            &issue_id,
+            "work_item_plan_h2b_purge",
+            "wi_purge_b",
+            targets[1],
+        );
+        let bystander = prepare_for_target(
+            &store,
+            &project_id,
+            &issue_id,
+            "work_item_plan_h2b_keep",
+            "wi_keep_a",
+            targets[0],
+        );
+
+        let scope = EntityScope::new(
+            &project_id,
+            &issue_id,
+            DeletionEntityKind::Plan,
+            "work_item_plan_h2b_purge",
+        );
+        let lease = EntityOperationStore::new(paths.clone())
+            .try_acquire_delete(&scope)
+            .unwrap();
+        store
+            .purge_group_initialization_journals_with_lease(&lease)
+            .unwrap();
+        store
+            .purge_group_initialization_journals_with_lease(&lease)
+            .unwrap();
+        drop(lease);
+
+        assert!(
+            store
+                .list_group_initialization_journals_for_plan(
+                    &project_id,
+                    &issue_id,
+                    "work_item_plan_h2b_purge"
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !store
+                .group_initialization_journal_path_for_target(
+                    &project_id,
+                    &issue_id,
+                    "work_item_plan_h2b_purge",
+                    &targets[0]
+                )
+                .is_file()
+        );
+        let kept = store
+            .list_group_initialization_journals_for_plan(
+                &project_id,
+                &issue_id,
+                "work_item_plan_h2b_keep",
+            )
+            .unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, bystander.id);
+        assert_ne!(kept[0].attempt.id, journal_a.attempt.id);
+        assert_ne!(kept[0].attempt.id, journal_b.attempt.id);
+    }
 }
