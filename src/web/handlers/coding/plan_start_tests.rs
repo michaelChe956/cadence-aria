@@ -3028,3 +3028,127 @@ async fn plan_coding_s2_parked_resume_transfers_lock_from_pre_advance_identity()
     assert_eq!(selection.logical_work_item_id, "wi_registration");
     let _ = result;
 }
+
+/// S2 切片B:完成链挂点的 in_place 续跑——parked attempt 命中
+/// `in_place_attempt_id` 时不判 runner_live busy、不重复 spawn,只物化
+/// (unit Running/指针对齐/stage PrepareContext/锁转移)并记
+/// continued_in_place;在册 runner 数不变(由在册 runner 重读后继续排程)。
+#[tokio::test]
+async fn plan_coding_s2_parked_attempt_continues_in_place_without_second_runner() {
+    use crate::product::lifecycle_store::{LifecycleStore, UpsertRepoSharedWorktreeInput};
+
+    let fixture = n3_fixture().await;
+    let run_command_id = "cmd_n3_s2_inplace";
+    s2_seed_first_start_started(&fixture, run_command_id).await;
+    // 完成事实:wi_core(busi)/wi_unrelated(gateway)/wi_service(frontend)。
+    s2_finish_first_unit(&fixture, CodingExecutionUnitStatus::Completed);
+    s2_finish_root_unit(
+        &fixture,
+        fixture.gateway,
+        "wi_unrelated",
+        CodingExecutionUnitStatus::Completed,
+    );
+    let frontend = fixture.target_attempt(fixture.frontend);
+    fixture
+        .coding_store()
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &frontend.id)
+        .unwrap();
+    s2_finish_root_unit(
+        &fixture,
+        fixture.frontend,
+        "wi_service",
+        CodingExecutionUnitStatus::Completed,
+    );
+    // 真实 park 形状(advance Waiting 分支):清 active、current 保留完成 unit。
+    let mut parked = fixture.target_attempt(fixture.frontend);
+    parked.active_unit_id = None;
+    parked.current_work_item_id = Some("wi_service".to_string());
+    fixture
+        .coding_store()
+        .update_attempt_non_status_fields(&parked)
+        .unwrap();
+    // repo 维锁事实:owner=frontend attempt、active=wi_service(与 2932 先例
+    // 同款——物化 worktree 后仍在场)。
+    let lifecycle = LifecycleStore::new(fixture.paths.clone());
+    lifecycle
+        .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: fixture.frontend,
+            branch_name: "aria-issues/issue_plan_0001".to_string(),
+            worktree_path: std::env::temp_dir().join("s2-inplace-frontend"),
+            base_branch: "main".to_string(),
+        })
+        .unwrap();
+    lifecycle
+        .try_acquire_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            fixture.frontend,
+            "wi_service",
+            &frontend.id,
+        )
+        .unwrap();
+    // 在册 runner(完成链挂点现场):registry 登记运行中——旧逻辑此处判
+    // busy 跳过,in_place 命中必须穿透。
+    let attempt_key = CodingAttemptRunKey::from_attempt(&parked);
+    let (command_tx, _command_rx) = tokio::sync::mpsc::channel(8);
+    let _live_registration = fixture
+        .state
+        .coding_runs
+        .insert_cancellable(&attempt_key, command_tx)
+        .expect("live runner registration");
+    assert_eq!(fixture.state.coding_runs.runner_count(&attempt_key), 1);
+
+    let outcome = drive_ready_units_for_plan(
+        &fixture.state,
+        PROJECT_ID,
+        ISSUE_ID,
+        PLAN_ID,
+        Some(&parked.id),
+    )
+    .await
+    .expect("in-place continuation drive");
+
+    assert!(
+        outcome.continued_in_place_attempt_ids.contains(&parked.id),
+        "in-place hit must be recorded as continued_in_place: {outcome:?}"
+    );
+    assert!(!outcome.resumed_attempt_ids.contains(&parked.id));
+    assert!(!outcome.busy_attempt_ids.contains(&parked.id));
+    assert_eq!(
+        fixture.state.coding_runs.runner_count(&attempt_key),
+        1,
+        "in-place continuation must not spawn a second runner"
+    );
+    // wi_panel 物化:Running + 指针对齐 + stage 回 PrepareContext。
+    let resumed = fixture.target_attempt(fixture.frontend);
+    assert_eq!(
+        resumed.current_work_item_id.as_deref(),
+        Some("wi_panel"),
+        "parked bucket materializes the next ready unit in place"
+    );
+    assert!(resumed.active_unit_id.is_some());
+    assert_eq!(resumed.stage, CodingExecutionStage::PrepareContext);
+    let wi_panel = fixture
+        .coding_store()
+        .list_coding_units(PROJECT_ID, ISSUE_ID, &resumed.id)
+        .unwrap()
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == "wi_panel")
+        .expect("wi_panel unit");
+    assert_eq!(wi_panel.status, CodingExecutionUnitStatus::Running);
+    // 锁事实:active 转移到 wi_panel,owner 保持本 attempt。
+    let record = lifecycle
+        .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, fixture.frontend)
+        .unwrap()
+        .expect("repo shared worktree record");
+    assert_eq!(
+        record.current_active_work_item_id.as_deref(),
+        Some("wi_panel")
+    );
+    assert_eq!(
+        record.current_lock_owner_id.as_deref(),
+        Some(frontend.id.as_str())
+    );
+}
