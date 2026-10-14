@@ -14,6 +14,7 @@ import {
   deleteStorySpec,
   deleteWorkItem,
   deleteWorkItemPlan,
+  deletePlanCodingWorkspaces,
   getIssueLifecycle,
   getPlanCodingProgress,
   getRepositoryInitialization,
@@ -208,6 +209,9 @@ export function IssueLifecycleWorkbench({
   // N6：多仓 plan 一键启动的幂等 command（同动作重试复用）与在途防抖。
   const planCodingStartRef = useRef<{ planId: string; commandId: string } | null>(null);
   const planCodingStartInFlightRef = useRef(false);
+  // H5（设计 C）：plan 抽屉辅入口整组删除的幂等 command 与在途防抖。
+  const planGroupDeleteRef = useRef<{ planId: string; commandId: string } | null>(null);
+  const [groupCodingDeleteBusy, setGroupCodingDeleteBusy] = useState(false);
   const drawerFocusedEntityKey = useLifecycleWorkbenchStore(
     (state) => state.focusedEntityKey,
   );
@@ -1023,6 +1027,84 @@ export function IssueLifecycleWorkbench({
     void handleDeleteLifecycleCard(card);
   }
 
+  // H5（设计 C，冻结契约先行、H4 端点后行）：plan 抽屉 Coding 区辅入口——与
+  // CodingWorkspacePage 页级入口同一 DELETE …/coding-workspaces 契约：服务端
+  // 分类 → required 409 → 恰一次 confirm → confirmed=true 复删（同 command_id、
+  // GET workspace_lifecycle.generation 冻结重用）；取消零出站破坏请求；typed
+  // 409 直达错误面不弹窗不重试；成功刷新 lifecycle（计划与工作项保留，抽屉不关）。
+  async function handleDeleteAllCodingWorkspacesFromDrawer(card: LifecycleCardData) {
+    if (!selectedProjectId || card.kind !== "work_item_group" || groupCodingDeleteBusy) {
+      return;
+    }
+    const planId = card.id;
+    const previous = planGroupDeleteRef.current;
+    const commandId =
+      previous?.planId === planId
+        ? previous.commandId
+        : `plan_delete_ui_${
+            typeof crypto !== "undefined" && "randomUUID" in crypto
+              ? crypto.randomUUID()
+              : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+          }`;
+    planGroupDeleteRef.current = { planId, commandId };
+    let generation: number | null = null;
+    let generationResolved = false;
+    const resolveGeneration = async () => {
+      if (generationResolved) {
+        return;
+      }
+      generationResolved = true;
+      try {
+        const progress = await getPlanCodingProgress(
+          selectedProjectId,
+          card.issueId,
+          planId,
+        );
+        generation = progress.workspace_lifecycle?.generation ?? null;
+      } catch {
+        // 聚合缺席不阻断服务端预检：省略 generation，服务端分类权威。
+        generation = null;
+      }
+    };
+    const sendDelete = async (confirmed: boolean) => {
+      await resolveGeneration();
+      return deletePlanCodingWorkspaces(selectedProjectId, card.issueId, planId, {
+        command_id: commandId,
+        ...(generation !== null ? { expected_generation: generation } : {}),
+        ...(confirmed ? { confirmed: true } : {}),
+      });
+    };
+    setGroupCodingDeleteBusy(true);
+    setError(null);
+    try {
+      try {
+        await sendDelete(false);
+      } catch (reason) {
+        if (
+          !(
+            reason instanceof ApiRequestError &&
+            reason.code === "deletion_confirmation_required"
+          )
+        ) {
+          throw reason;
+        }
+        const confirmationMessage =
+          reason.message.trim().length > 0
+            ? reason.message
+            : "确定终止并删除本计划全部 Coding 工作区？运行中的成员会先终止，日志、测试输出与 worktree 将被删除且不可恢复。计划与工作项保留。";
+        if (!window.confirm(confirmationMessage)) {
+          return;
+        }
+        await sendDelete(true);
+      }
+      await refresh(selectedProjectId);
+    } catch (reason) {
+      setError(errorMessage(reason, "删除本计划全部 Coding 工作区失败"));
+    } finally {
+      setGroupCodingDeleteBusy(false);
+    }
+  }
+
   const dialogs: ReactNode = (
     <>
       {projectDialogOpen ? (
@@ -1196,6 +1278,10 @@ export function IssueLifecycleWorkbench({
       onOpenCodingWorkspaceFromDrawer={() => void handleOpenCodingWorkspaceFromDrawer(focusedEntity!)}
       onGenerateNext={() => void handleGenerateNext(focusedEntity!)}
       onDeleteFromDrawer={() => handleDeleteLifecycleCardFromDrawer(focusedEntity!)}
+      onDeleteAllCodingWorkspacesFromDrawer={() =>
+        void handleDeleteAllCodingWorkspacesFromDrawer(focusedEntity!)
+      }
+      groupCodingDeleteBusy={groupCodingDeleteBusy}
       dialogs={dialogs}
     />
   );

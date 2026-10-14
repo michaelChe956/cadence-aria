@@ -20,6 +20,8 @@ type IssueLifecycleWorkbenchDrawerProps = {
   onOpenCodingWorkspace: () => void;
   onGenerateNext: () => void;
   onDelete: () => void;
+  onDeleteAllCodingWorkspaces: () => void;
+  groupCodingDeleteBusy: boolean;
 };
 
 /** 生命周期抽屉动作按实体归属启用；v2 单项只读，操作集中在所属计划组。 */
@@ -33,6 +35,8 @@ export function IssueLifecycleWorkbenchDrawer({
   onOpenCodingWorkspace,
   onGenerateNext,
   onDelete,
+  onDeleteAllCodingWorkspaces,
+  groupCodingDeleteBusy,
 }: IssueLifecycleWorkbenchDrawerProps) {
   const isPlanWorkItem = focusedEntity.kind === "work_item" &&
     Boolean(focusedEntity.raw.source_work_item_plan_id);
@@ -53,6 +57,14 @@ export function IssueLifecycleWorkbenchDrawer({
             ? onOpenCodingWorkspace
             : undefined
         }
+        onDeleteAllCodingWorkspaces={
+          // H5（设计 C）：辅入口不要求 confirmed 状态——残留清理对失效 plan
+          // 同样可达（无法进入 attempt 页的用户仍能清剩余）。
+          focusedEntity.kind === "work_item_group"
+            ? onDeleteAllCodingWorkspaces
+            : undefined
+        }
+        groupCodingDeleteBusy={groupCodingDeleteBusy}
         onGenerateNext={
           focusedEntity.status === "confirmed" &&
           (focusedEntity.kind === "story_spec" ||

@@ -230,7 +230,7 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     expect(region).not.toHaveTextContent("issue_plan_old");
     expect(region).toHaveTextContent("后端 API");
     expect(region).toHaveTextContent("前端 UI");
-    expect(within(region).queryByRole("button", { name: /^删除 Work Item Group/u })).toBeNull();
+    expect(within(region).queryByRole("button", { name: /^删除计划及工作项/u })).toBeNull();
     await user.click(planCards[0]);
 
     const drawer = screen.getByTestId("lifecycle-card-drawer");
@@ -242,7 +242,7 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     expect(drawer).toHaveTextContent("work_item_backend -> work_item_frontend");
     expect(within(drawer).getByTestId("drawer-review-status")).toHaveTextContent("Review 已完成");
     expect(within(drawer).getByRole("button", { name: "开始 Coding" })).toBeInTheDocument();
-    expect(within(drawer).getByRole("button", { name: "删除 Work Item Group" })).toBeInTheDocument();
+    expect(within(drawer).getByRole("button", { name: "删除计划及工作项" })).toBeInTheDocument();
     await user.click(within(drawer).getByRole("button", { name: "打开 Workspace" }));
     await waitFor(() => expect(onOpenWorkspace).toHaveBeenCalledWith("workspace_session_plan_group_0001"));
     await user.click(screen.getByTestId("drawer-open-coding-workspace"));
@@ -391,7 +391,7 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     render(<IssueLifecycleWorkbench onOpenWorkspace={onOpenWorkspace} />);
     await user.click(await screen.findByRole("button", { name: "Work Item Group" }));
     await user.click(within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
-      name: "删除 Work Item Group",
+      name: "删除计划及工作项",
     }));
 
     // D2.3 机械迁移：group drawer 旧无条件预确认移除——删除一次直达（本夹具
@@ -628,7 +628,7 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
       name: "Work Item 内容",
     });
     expect(workItemRegion).toHaveTextContent("已确认");
-    expect(within(workItemRegion).queryByRole("button", { name: /^删除 Work Item Group/u })).toBeNull();
+    expect(within(workItemRegion).queryByRole("button", { name: /^删除计划及工作项/u })).toBeNull();
 
     await user.click(
       await screen.findByRole("button", { name: "Work Item Group" }),
@@ -661,7 +661,7 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
       await screen.findByRole("button", { name: "Work Item Group" }),
     );
     await user.click(
-      screen.getByRole("button", { name: "删除 Work Item Group" }),
+      screen.getByRole("button", { name: "删除计划及工作项" }),
     );
 
     // D2.3 机械迁移：drawer 旧无条件确认移除，确认语义由服务端三分类权威。
@@ -964,5 +964,177 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     expect(screen.getByTestId("lifecycle-card-drawer")).toHaveTextContent(
       "work_item_backend -> work_item_frontend",
     );
+  });
+});
+
+// H5（设计 C）：plan 抽屉 Coding 区整组删除辅入口契约——DELETE …/coding-workspaces
+// 消费服务端分类：required 409 → 恰一次 confirm → confirmed=true 复删（同
+// command_id、GET workspace_lifecycle 的 generation）；取消零出站破坏请求。
+const GROUP_DELETE_URL_PREFIX =
+  "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-workspaces";
+const WORKBENCH_LIFECYCLE_URL =
+  "/api/issues/issue_0001/lifecycle?project_id=project_0001";
+
+function withGroupCodingWorkspacesDeleteRoutes(
+  base: LifecycleFetchMock,
+  spec: { requireConfirmation?: boolean } = {},
+) {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (init?.method !== "DELETE" || !url.startsWith(GROUP_DELETE_URL_PREFIX)) {
+      return base(input, init);
+    }
+    if (!url.includes("confirmed=true") && spec.requireConfirmation) {
+      return new Response(
+        JSON.stringify({
+          code: "deletion_confirmation_required",
+          message:
+            "将终止运行并删除本计划全部 2 个 Coding 工作区的日志、测试输出与 worktree，计划与工作项保留，且不可恢复。",
+          details: { plan_id: "issue_plan_0001" },
+        }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      );
+    }
+    return jsonResponse({
+      plan_id: "issue_plan_0001",
+      command_id: new URL(url, "http://aria.test").searchParams.get("command_id"),
+      operation_state: "accepted",
+      generation: 5,
+      deleted_attempt_ids: ["coding_attempt_backend", "coding_attempt_frontend"],
+      remaining_attempt_ids: [],
+    });
+  });
+}
+
+function groupCodingDeleteUrls(fetchMock: LifecycleFetchMock): string[] {
+  return fetchMock.mock.calls
+    .filter(
+      ([input, init]) =>
+        String(input).startsWith(GROUP_DELETE_URL_PREFIX) && init?.method === "DELETE",
+    )
+    .map(([input]) => String(input));
+}
+
+describe("IssueLifecycleWorkbench H5 plan drawer group coding delete", () => {
+  installIssueLifecycleWorkbenchTestHooks();
+
+  it("辅入口整组删除：服务端 required 409 → 恰一次确认 → confirmed 复删同 command 与 generation", async () => {
+    const fetchMock = withGroupCodingWorkspacesDeleteRoutes(
+      withPlanCodingStartRoutes(repositoryGroupedLifecycleFetch(), {
+        getResponse: () =>
+          jsonResponse(
+            planCodingProgressRecord({
+              workspace_lifecycle: {
+                generation: 5,
+                existing_member_count: 2,
+                missing_member_count: 0,
+                state: "clean",
+              },
+            }),
+          ),
+      }),
+      { requireConfirmation: true },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+
+    try {
+      render(<IssueLifecycleWorkbench onOpenWorkspace={vi.fn()} />);
+      await user.click(await screen.findByRole("button", { name: "Work Item Group" }));
+      const drawer = screen.getByTestId("lifecycle-card-drawer");
+      await user.click(within(drawer).getByTestId("drawer-delete-plan-coding-workspaces"));
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(confirmSpy.mock.calls[0]?.[0]).toContain("终止");
+      const urls = groupCodingDeleteUrls(fetchMock);
+      expect(urls).toHaveLength(2);
+      expect(urls[0]).not.toContain("confirmed=true");
+      expect(urls[1]).toContain("confirmed=true");
+      expect(urls[1]).toContain("expected_generation=5");
+      expect(new URL(urls[1] ?? "", "http://aria.test").searchParams.get("command_id")).toBe(
+        new URL(urls[0] ?? "", "http://aria.test").searchParams.get("command_id"),
+      );
+      // 成功后刷新 lifecycle 事实，抽屉仍在（计划保留）。
+      await waitFor(() =>
+        expect(
+          fetchMock.mock.calls.filter(([input]) => String(input) === WORKBENCH_LIFECYCLE_URL)
+            .length,
+        ).toBeGreaterThanOrEqual(2),
+      );
+      expect(screen.getByTestId("lifecycle-card-drawer")).toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it("取消确认：零出站破坏复删，工作台无错误", async () => {
+    const fetchMock = withGroupCodingWorkspacesDeleteRoutes(
+      withPlanCodingStartRoutes(repositoryGroupedLifecycleFetch()),
+      { requireConfirmation: true },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const user = userEvent.setup();
+
+    try {
+      render(<IssueLifecycleWorkbench onOpenWorkspace={vi.fn()} />);
+      await user.click(await screen.findByRole("button", { name: "Work Item Group" }));
+      await user.click(
+        within(screen.getByTestId("lifecycle-card-drawer")).getByTestId(
+          "drawer-delete-plan-coding-workspaces",
+        ),
+      );
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(groupCodingDeleteUrls(fetchMock)).toHaveLength(1);
+      expect(
+        screen.queryByText(/删除本计划全部 Coding 工作区失败/u),
+      ).not.toBeInTheDocument();
+      expect(screen.getByTestId("lifecycle-card-drawer")).toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it("typed 409（资源清理中）直达错误面，不弹确认不重试", async () => {
+    const base = withPlanCodingStartRoutes(repositoryGroupedLifecycleFetch());
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "DELETE" && url.startsWith(GROUP_DELETE_URL_PREFIX)) {
+        return new Response(
+          JSON.stringify({
+            code: "coding_plan_workspace_clearing",
+            message: "目标仓资源正在清理，本次未完成。请稍后重试。",
+            details: { plan_id: "issue_plan_0001" },
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        );
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+
+    try {
+      render(<IssueLifecycleWorkbench onOpenWorkspace={vi.fn()} />);
+      await user.click(await screen.findByRole("button", { name: "Work Item Group" }));
+      await user.click(
+        within(screen.getByTestId("lifecycle-card-drawer")).getByTestId(
+          "drawer-delete-plan-coding-workspaces",
+        ),
+      );
+
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(groupCodingDeleteUrls(fetchMock)).toHaveLength(1);
+      await waitFor(() =>
+        expect(
+          screen.getByText("目标仓资源正在清理，本次未完成。请稍后重试。"),
+        ).toBeInTheDocument(),
+      );
+    } finally {
+      confirmSpy.mockRestore();
+    }
   });
 });

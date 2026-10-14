@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  ApiRequestError,
   abortCodingAttempt,
   confirmWorkItemExecutionPlan,
   createCodingAttempt,
   createGroupCodingAttempt,
   deleteCodingAttempt,
+  deletePlanCodingWorkspaces,
   getCodingAttemptArtifact,
   getCodingAttemptDiff,
   getCodingAttemptSnapshot,
@@ -249,6 +251,72 @@ describe("coding attempts api client", () => {
   });
 });
 
+describe("h5: plan coding workspaces group delete client", () => {
+  it("encodes command_id with optional generation/confirmed query per frozen contract", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Response(JSON.stringify(planCodingWorkspaceDeletionResponse()), {
+          status: 200,
+        });
+      }),
+    );
+
+    await deletePlanCodingWorkspaces("project_0001", "issue_0001", "issue_plan_0001", {
+      command_id: "plan_delete_ui_1",
+      expected_generation: 3,
+    });
+    await deletePlanCodingWorkspaces("project_0001", "issue_0001", "issue_plan_0001", {
+      command_id: "plan_delete_ui_1",
+    });
+    await deletePlanCodingWorkspaces("project/with space", "issue_0001", "plan/with space", {
+      command_id: "plan_delete_ui_2",
+      confirmed: true,
+    });
+
+    expect(calls.map((call) => call.input)).toEqual([
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-workspaces?command_id=plan_delete_ui_1&expected_generation=3",
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-workspaces?command_id=plan_delete_ui_1",
+      "/api/projects/project%2Fwith%20space/issues/issue_0001/work-item-plans/plan%2Fwith%20space/coding-workspaces?command_id=plan_delete_ui_2&confirmed=true",
+    ]);
+    expect(calls.every((call) => call.init?.method === "DELETE")).toBe(true);
+  });
+
+  it("surfaces typed 409 (clearing/resource busy) as ApiRequestError without retry", async () => {
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        return new Response(
+          JSON.stringify({
+            code: "plan_coding_run_resource_busy",
+            message: "目标仓资源正被使用，本次未完成。请稍后重试。",
+            details: { plan_id: "issue_plan_0001" },
+          }),
+          { status: 409 },
+        );
+      }),
+    );
+
+    const rejection: unknown = await deletePlanCodingWorkspaces(
+      "project_0001",
+      "issue_0001",
+      "issue_plan_0001",
+      { command_id: "plan_delete_ui_1" },
+    ).then(
+      () => new Error("expected resource busy rejection"),
+      (reason: unknown) => reason,
+    );
+
+    expect(rejection).toBeInstanceOf(ApiRequestError);
+    expect((rejection as ApiRequestError).code).toBe("plan_coding_run_resource_busy");
+    expect(callCount).toBe(1);
+  });
+});
+
 function codingAttemptResponse() {
   return {
     project_id: "project_0001",
@@ -429,5 +497,16 @@ function planCodingStartResultResponse() {
     },
     waiting_units: [],
     progress,
+  };
+}
+
+function planCodingWorkspaceDeletionResponse() {
+  return {
+    plan_id: "issue_plan_0001",
+    command_id: "plan_delete_ui_1",
+    operation_state: "accepted",
+    generation: 3,
+    deleted_attempt_ids: ["coding_attempt_busi_0001", "coding_attempt_web_0001"],
+    remaining_attempt_ids: [],
   };
 }

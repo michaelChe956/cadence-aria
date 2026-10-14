@@ -629,6 +629,36 @@ export type PlanCodingProgressDto = {
   target_attempts: PlanCodingTargetDto[];
   units: PlanCodingUnitProgressDto[];
   plan_complete: boolean;
+  // H5（设计 C 节冻结，additive）：workspace_lifecycle 事实——generation、现存/
+  // 缺失成员数、状态；数据来自服务端交叉核验，不从 attempt_status 猜物理存在
+  // 性。旧响应缺省（H4 端点后行）。
+  workspace_lifecycle?: PlanWorkspaceLifecycleDto | null;
+};
+
+// workspace_lifecycle.state 值域：clean=无执行内容、complete=整轮完成、
+// incomplete=成员缺失（部分删除后）、clearing=清理进行中（旧 runner 退出中）。
+export type PlanWorkspaceLifecycleState =
+  | "clean"
+  | "complete"
+  | "incomplete"
+  | "clearing";
+
+export type PlanWorkspaceLifecycleDto = {
+  generation: number;
+  existing_member_count: number;
+  missing_member_count: number;
+  state: PlanWorkspaceLifecycleState;
+};
+
+// H5（设计 C 节冻结）：DELETE …/coding-workspaces 成功 200 回执；重复同
+// command 同 generation 返回 replayed，不扫下一代刚创建的 attempts。
+export type PlanCodingWorkspaceDeletionResultDto = {
+  plan_id: string;
+  command_id: string;
+  operation_state: "accepted" | "replayed";
+  generation: number;
+  deleted_attempt_ids: string[];
+  remaining_attempt_ids: string[];
 };
 
 // 一键启动结果：start_outcome 为冻结首启回执；waiting_units 为等待绑定集合。

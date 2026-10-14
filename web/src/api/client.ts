@@ -39,6 +39,7 @@ import type {
   PlanCodingProgressDto,
   PlanCodingStartRequest,
   PlanCodingStartResultDto,
+  PlanCodingWorkspaceDeletionResultDto,
   WorkspaceHumanAction,
   WorkspaceHumanActionStatus,
   WorkspaceSession,
@@ -727,6 +728,36 @@ export function getPlanCodingProgress(
 ): Promise<PlanCodingProgressDto> {
   return requestJson<PlanCodingProgressDto>(
     `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}/coding-start`,
+  );
+}
+
+// H5（设计 C 节冻结契约）：删除 plan 下全部 Coding 工作区——plan-scoped，不收
+// 前端 attempt ID 列表（服务端是范围权威）。query：稳定 command_id（同动作
+// 重试复用）、expected_generation（GET workspace_lifecycle.generation 互证，
+// 未知时省略）、confirmed=true（仅确认弹窗同意后显式携带；query 不是安全
+// 授权，服务端分类才是权威）。typed 409（required/busy/clearing）抛
+// ApiRequestError，由调用方分类消费，不自动重试。
+export function deletePlanCodingWorkspaces(
+  projectId: string,
+  issueId: string,
+  planId: string,
+  query: {
+    command_id: string;
+    expected_generation?: number;
+    confirmed?: boolean;
+  },
+): Promise<PlanCodingWorkspaceDeletionResultDto> {
+  const params = new URLSearchParams();
+  params.set("command_id", query.command_id);
+  if (query.expected_generation !== undefined) {
+    params.set("expected_generation", String(query.expected_generation));
+  }
+  if (query.confirmed === true) {
+    params.set("confirmed", "true");
+  }
+  return requestJson<PlanCodingWorkspaceDeletionResultDto>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}/coding-workspaces?${params.toString()}`,
+    { method: "DELETE" },
   );
 }
 

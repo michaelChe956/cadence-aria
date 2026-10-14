@@ -15,6 +15,8 @@ import {
 vi.mock("../api/client", () => ({
   confirmWorkItemExecutionPlan: vi.fn(),
   deleteCodingAttempt: vi.fn(),
+  deletePlanCodingWorkspaces: vi.fn(),
+  getPlanCodingProgress: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
   requestWorkItemExecutionPlanChange: vi.fn(),
 }));
@@ -70,7 +72,7 @@ describe("CodingWorkspacePage delete request isolation", () => {
           <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={onBackA} />,
         );
         await userEvent.click(
-          screen.getByRole("button", { name: "删除 Coding Workspace" }),
+          screen.getByRole("button", { name: "仅删除当前 Coding 工作区" }),
         );
         setReadyAddress(SAME_ATTEMPT_OTHER_SCOPE);
         view.rerender(
@@ -118,14 +120,14 @@ describe("CodingWorkspacePage delete request isolation", () => {
         <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={onBackA} />,
       );
       await userEvent.click(
-        screen.getByRole("button", { name: "删除 Coding Workspace" }),
+          screen.getByRole("button", { name: "仅删除当前 Coding 工作区" }),
       );
       setReadyAddress(SAME_ATTEMPT_OTHER_SCOPE);
       view.rerender(
         <CodingWorkspacePage address={SAME_ATTEMPT_OTHER_SCOPE} onBack={onBackB} />,
       );
       const deleteButton = screen.getByRole("button", {
-        name: "删除 Coding Workspace",
+        name: "仅删除当前 Coding 工作区",
       });
       await waitFor(() => expect(deleteButton).toBeEnabled());
       await userEvent.click(deleteButton);

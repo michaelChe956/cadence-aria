@@ -57,7 +57,9 @@ export type IssueLifecycleWorkbenchViewProps = {
   onOpenFullIssue: (card: LifecycleCardData) => void; onDeleteCard: (card: LifecycleCardData) => void;
   onGenerateForStage: (stage: WorkbenchStageKey) => void; onCloseDrawer: () => void;
   onOpenWorkspaceFromDrawer: () => void; onOpenCodingWorkspaceFromDrawer: () => void;
-  onGenerateNext: () => void; onDeleteFromDrawer: () => void; dialogs: ReactNode;
+  onGenerateNext: () => void; onDeleteFromDrawer: () => void;
+  onDeleteAllCodingWorkspacesFromDrawer: () => void; groupCodingDeleteBusy: boolean;
+  dialogs: ReactNode;
 };
 /// REQ-MRE-01：issue 创建可用性门——选中项目下有单仓，或存在 active 成员的
 /// 逻辑代码库（LC-only 项目的项目级 repositories 为空，成员经 LC members 投影）。
@@ -91,7 +93,8 @@ export function IssueLifecycleWorkbenchView({
   onRetryRepo, onRevoke, onToggleQueueCollapsed, onToggleQueueGroup, onQueueFilterTextChange,
   onSelectIssue, onGenerateStorySpec, onDeleteIssue, onShowMoreQueueGroup, deletingIssueId, onSelectCard,
   onOpenFullIssue, onDeleteCard, onGenerateForStage, onCloseDrawer, onOpenWorkspaceFromDrawer,
-  onOpenCodingWorkspaceFromDrawer, onGenerateNext, onDeleteFromDrawer, dialogs,
+  onOpenCodingWorkspaceFromDrawer, onGenerateNext, onDeleteFromDrawer,
+  onDeleteAllCodingWorkspacesFromDrawer, groupCodingDeleteBusy, dialogs,
 }: IssueLifecycleWorkbenchViewProps) {
   return <>
     <div data-testid="workbench-shell" className={`grid h-[100dvh] min-h-0 bg-[var(--aria-bg)] text-[var(--aria-ink)] lg:grid-cols-[17rem_minmax(0,1fr)]${isDrawerOpen && focusedEntity ? " lg:pr-[calc(480px+1rem)]" : ""}`}>
@@ -106,7 +109,7 @@ export function IssueLifecycleWorkbenchView({
         </div>
       </div>} />
     </div>
-    {isDrawerOpen && focusedEntity ? <IssueLifecycleWorkbenchDrawer focusedEntity={focusedEntity} workItems={drawerWorkItems as never} codingAttempts={codingAttempts as never} deliverySummary={deliverySummary} onClose={onCloseDrawer} onOpenWorkspace={onOpenWorkspaceFromDrawer} onOpenCodingWorkspace={onOpenCodingWorkspaceFromDrawer} onGenerateNext={onGenerateNext} onDelete={onDeleteFromDrawer} /> : null}
+    {isDrawerOpen && focusedEntity ? <IssueLifecycleWorkbenchDrawer focusedEntity={focusedEntity} workItems={drawerWorkItems as never} codingAttempts={codingAttempts as never} deliverySummary={deliverySummary} onClose={onCloseDrawer} onOpenWorkspace={onOpenWorkspaceFromDrawer} onOpenCodingWorkspace={onOpenCodingWorkspaceFromDrawer} onGenerateNext={onGenerateNext} onDelete={onDeleteFromDrawer} onDeleteAllCodingWorkspaces={onDeleteAllCodingWorkspacesFromDrawer} groupCodingDeleteBusy={groupCodingDeleteBusy} /> : null}
     {selectedProjectId && logicalCodebases.length > 0 ? (
       <LogicalCodebaseManagementDrawer open={lcSummaryExpanded} onClose={onToggleLcSummary}>
         <LogicalCodebaseManagementPanel projectId={selectedProjectId} bootstrapProjection={bootstrapProjection as never} onBootstrapChanged={onBootstrapChanged} logicalCodebases={logicalCodebases} activeLogicalCodebaseId={activeLogicalCodebaseId} onSelectLogicalCodebase={onSelectLogicalCodebase} onOpenRegistration={onOpenRegistration} logicalCodebaseMembers={logicalCodebaseMembers as never} aggregateInitialization={aggregateInitialization as never} aggregateInitializationBusy={aggregateInitializationBusy} onStartAggregateInitialization={onStartAggregateInitialization} onCancelAggregateInitialization={onCancelAggregateInitialization} aggregateIndex={aggregateIndex as never} aggregateIndexRebuilding={aggregateIndexRebuilding} onRebuildAggregateIndex={onRebuildAggregateIndex} latestPointerPublication={latestPointerPublication} pointerPublicationBusy={pointerPublicationBusy} showIncrementalHint={showIncrementalHint} onPublishFull={onPublishFull} onPublishIncremental={onPublishIncremental} onRetryRepo={onRetryRepo} onRevoke={onRevoke} />

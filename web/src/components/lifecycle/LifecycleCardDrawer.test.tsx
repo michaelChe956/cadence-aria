@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { LifecycleCardDrawer } from "./LifecycleCardDrawer";
 import { LifecycleCard } from "./LifecycleCard";
@@ -546,6 +546,98 @@ describe("LifecycleCardDrawer", () => {
       .getByTestId("lifecycle-card-drawer")
       .querySelector("header svg");
     expect(designIcon?.getAttribute("class")).toContain("text-violet-700");
+  });
+
+  it("h5: group 抽屉分离「删除计划及工作项」危险区与 Coding 区整组删除辅入口", () => {
+    const onDelete = vi.fn();
+    const onDeleteAllCodingWorkspaces = vi.fn();
+
+    render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "issue_plan_0001",
+          kind: "work_item_group",
+          title: "分组计划",
+          status: "confirmed",
+          version: null,
+        }}
+        onClose={vi.fn()}
+        onDelete={onDelete}
+        onDeleteAllCodingWorkspaces={onDeleteAllCodingWorkspaces}
+      />,
+    );
+
+    const dangerZone = screen.getByTestId("drawer-danger-zone");
+    expect(
+      within(dangerZone).getByRole("button", { name: "删除计划及工作项" }),
+    ).toBeInTheDocument();
+    const codingDelete = screen.getByTestId("drawer-delete-plan-coding-workspaces");
+    expect(codingDelete).toHaveTextContent("删除本计划全部 Coding 工作区");
+    expect(dangerZone.contains(codingDelete)).toBe(false);
+    fireEvent.click(codingDelete);
+    expect(onDeleteAllCodingWorkspaces).toHaveBeenCalledTimes(1);
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("h5: work_item 抽屉不提供整组 Coding 删除辅入口", () => {
+    render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "work_item_0001",
+          kind: "work_item",
+          title: "单项",
+          status: "confirmed",
+          version: null,
+        }}
+        onClose={vi.fn()}
+        onDelete={vi.fn()}
+        onDeleteAllCodingWorkspaces={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("drawer-delete-plan-coding-workspaces")).toBeNull();
+    expect(screen.getByRole("button", { name: "删除 Work Item" })).toBeInTheDocument();
+    expect(screen.queryByTestId("drawer-danger-zone")).toBeNull();
+  });
+
+  it("h5: 未接线时辅入口缺席且计划删除仍可达", () => {
+    render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "issue_plan_0001",
+          kind: "work_item_group",
+          title: "分组计划",
+          status: "confirmed",
+          version: null,
+        }}
+        onClose={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("drawer-delete-plan-coding-workspaces")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "删除计划及工作项" }),
+    ).toBeInTheDocument();
+  });
+
+  it("h5: 整组删除请求进行中禁用辅入口", () => {
+    render(
+      <LifecycleCardDrawer
+        entity={{
+          id: "issue_plan_0001",
+          kind: "work_item_group",
+          title: "分组计划",
+          status: "confirmed",
+          version: null,
+        }}
+        onClose={vi.fn()}
+        onDeleteAllCodingWorkspaces={vi.fn()}
+        groupCodingDeleteBusy
+      />,
+    );
+
+    expect(screen.getByTestId("drawer-delete-plan-coding-workspaces")).toBeDisabled();
   });
 
 

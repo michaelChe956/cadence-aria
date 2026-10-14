@@ -90,6 +90,10 @@ interface LifecycleCardDrawerProps {
   onOpenCodingWorkspace?: () => void;
   onGenerateNext?: () => void;
   onDelete?: () => void;
+  /** H5（设计 C）：plan 抽屉 Coding 区的整组删除辅入口（仅 work_item_group）。 */
+  onDeleteAllCodingWorkspaces?: () => void;
+  /** 整组删除请求进行中：禁重复点击。 */
+  groupCodingDeleteBusy?: boolean;
   deliverySummary?: IssueDeliverySummaryDto;
 }
 
@@ -120,6 +124,8 @@ export function LifecycleCardDrawer({
   onOpenCodingWorkspace,
   onGenerateNext,
   onDelete,
+  onDeleteAllCodingWorkspaces,
+  groupCodingDeleteBusy = false,
   deliverySummary,
 }: LifecycleCardDrawerProps) {
   const [showAllVersions, setShowAllVersions] = useState(false);
@@ -137,9 +143,12 @@ export function LifecycleCardDrawer({
   const canShowDiff = selectedVersionIndex > 0 && selectedArtifact !== null && latestVersion !== null;
   const nextActionLabel = entity.status === "confirmed" ? NEXT_ACTION_LABELS[entity.kind] : null;
   const codingActionLabel = entity.latestAttempt ? "进入 Coding Workspace" : "开始 Coding";
+  // H5（设计 C）：Plan 本体删除改明确「删除计划及工作项」——它删的是计划与
+  // 工作项（保留 Coding 删除保护），不再误称负责批量删 Coding；整组删 Coding
+  // 由 Coding 区辅入口独立承载。
   const deleteActionLabel =
     entity.kind === "work_item_group"
-      ? "删除 Work Item Group"
+      ? "删除计划及工作项"
       : "删除 Work Item";
   const deleteActionTestId =
     entity.kind === "work_item_group"
@@ -431,17 +440,46 @@ export function LifecycleCardDrawer({
             {codingActionLabel}
           </button>
         ) : null}
-        {(entity.kind === "work_item" || entity.kind === "work_item_group") &&
-        onDelete ? (
+        {entity.kind === "work_item_group" && onDeleteAllCodingWorkspaces ? (
           <button
-            data-testid={deleteActionTestId}
+            data-testid="drawer-delete-plan-coding-workspaces"
             type="button"
-            onClick={onDelete}
-            className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--aria-danger)] bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] hover:bg-red-50"
+            disabled={groupCodingDeleteBusy}
+            onClick={onDeleteAllCodingWorkspaces}
+            className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--aria-danger)] bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] hover:bg-red-50 disabled:opacity-50"
           >
             <Trash2 className="h-4 w-4" />
-            {deleteActionLabel}
+            删除本计划全部 Coding 工作区
           </button>
+        ) : null}
+        {(entity.kind === "work_item" || entity.kind === "work_item_group") &&
+        onDelete ? (
+          entity.kind === "work_item_group" ? (
+            <div
+              data-testid="drawer-danger-zone"
+              className="mt-2 space-y-2 border-t border-dashed border-[var(--aria-danger)] pt-2"
+            >
+              <button
+                data-testid={deleteActionTestId}
+                type="button"
+                onClick={onDelete}
+                className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--aria-danger)] bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] hover:bg-red-50"
+              >
+                <Trash2 className="h-4 w-4" />
+                {deleteActionLabel}
+              </button>
+            </div>
+          ) : (
+            <button
+              data-testid={deleteActionTestId}
+              type="button"
+              onClick={onDelete}
+              className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--aria-danger)] bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] hover:bg-red-50"
+            >
+              <Trash2 className="h-4 w-4" />
+              {deleteActionLabel}
+            </button>
+          )
         ) : null}
       </footer>
     </aside>

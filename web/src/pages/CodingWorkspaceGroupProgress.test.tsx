@@ -1,8 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { CodingExecutionUnit, PlanCodingProgressDto } from "../api/types";
 import { CodingWorkspaceGroupProgress } from "./CodingWorkspaceGroupProgress";
 import {
+  planCodingGroupDeleteEntry,
   planCodingWaitingLabel,
   toPlanCodingProgressView,
 } from "./plan-coding-progress";
@@ -440,6 +441,264 @@ describe("CodingWorkspaceGroupProgress aggregated plan progress", () => {
     );
 
     await waitFor(() => expect(calls).toBe(2));
+
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("h5: plan workspace lifecycle projection and group delete entry copy", () => {
+  it("projects workspace_lifecycle facts verbatim", () => {
+    const view = toPlanCodingProgressView(
+      planCodingProgressDto({
+        workspace_lifecycle: {
+          generation: 3,
+          existing_member_count: 2,
+          missing_member_count: 1,
+          state: "incomplete",
+        },
+      }),
+    );
+    expect(view.workspaceLifecycle).toEqual({
+      generation: 3,
+      existingMemberCount: 2,
+      missingMemberCount: 1,
+      state: "incomplete",
+    });
+  });
+
+  it("derives full-plan copy when no members are missing", () => {
+    const entry = planCodingGroupDeleteEntry(
+      toPlanCodingProgressView(
+        planCodingProgressDto({
+          workspace_lifecycle: {
+            generation: 1,
+            existing_member_count: 4,
+            missing_member_count: 0,
+            state: "clean",
+          },
+        }),
+      ),
+    );
+    expect(entry.label).toBe("删除本计划全部 Coding 工作区(4)");
+    expect(entry.invalidationSummary).toBeNull();
+  });
+
+  it("derives remaining copy and invalidation summary after partial deletion", () => {
+    const entry = planCodingGroupDeleteEntry(
+      toPlanCodingProgressView(
+        planCodingProgressDto({
+          workspace_lifecycle: {
+            generation: 2,
+            existing_member_count: 2,
+            missing_member_count: 1,
+            state: "incomplete",
+          },
+        }),
+      ),
+    );
+    expect(entry.label).toBe("删除剩余 Coding 工作区(2)");
+    expect(entry.invalidationSummary).toBe("本轮授权失效:已删 1/3");
+  });
+
+  it("falls back to target counts when workspace_lifecycle is absent (pre-H4 server)", () => {
+    const legacy = planCodingGroupDeleteEntry(
+      toPlanCodingProgressView(planCodingProgressDto()),
+    );
+    expect(legacy.label).toBe("删除本计划全部 Coding 工作区(4)");
+    expect(legacy.invalidationSummary).toBeNull();
+
+    const empty = planCodingGroupDeleteEntry(
+      toPlanCodingProgressView(planCodingProgressDto({ target_attempts: [] })),
+    );
+    expect(empty.label).toBe("删除本计划全部 Coding 工作区");
+  });
+});
+
+describe("h5: plan-scoped group delete entry reachability", () => {
+  it("renders the entry with full-plan count in the aggregate header and fires one request", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify(
+              planCodingProgressDto({
+                workspace_lifecycle: {
+                  generation: 1,
+                  existing_member_count: 4,
+                  missing_member_count: 0,
+                  state: "clean",
+                },
+              }),
+            ),
+            { status: 200 },
+          ),
+      ),
+    );
+    const onRequest = vi.fn();
+
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="issue_plan_0001"
+        currentWorkItemId="work_item_0001"
+        units={LOCAL_UNITS}
+        projectId="project_0001"
+        issueId="issue_0001"
+        onDeleteAllCodingWorkspaces={onRequest}
+      />,
+    );
+
+    // 聚合分支就绪标记先等 fetch 落地（按钮在局部/slim 分支也立即可见）。
+    await screen.findByTestId("plan-coding-progress");
+    const button = screen.getByTestId("plan-coding-delete-all");
+    expect(button).toHaveTextContent("删除本计划全部 Coding 工作区(4)");
+    expect(screen.queryByTestId("plan-coding-invalidation-summary")).toBeNull();
+    fireEvent.click(button);
+    expect(onRequest).toHaveBeenCalledTimes(1);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("switches to 删除剩余 copy with invalidation summary after partial deletion", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify(
+              planCodingProgressDto({
+                workspace_lifecycle: {
+                  generation: 2,
+                  existing_member_count: 2,
+                  missing_member_count: 1,
+                  state: "incomplete",
+                },
+              }),
+            ),
+            { status: 200 },
+          ),
+      ),
+    );
+
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="issue_plan_0001"
+        currentWorkItemId="work_item_0001"
+        units={LOCAL_UNITS}
+        projectId="project_0001"
+        issueId="issue_0001"
+        onDeleteAllCodingWorkspaces={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("plan-coding-progress");
+    const button = screen.getByTestId("plan-coding-delete-all");
+    expect(button).toHaveTextContent("删除剩余 Coding 工作区(2)");
+    expect(screen.getByTestId("plan-coding-invalidation-summary")).toHaveTextContent(
+      "本轮授权失效:已删 1/3",
+    );
+
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the entry reachable in a slim row when local units are empty and the aggregate fails", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ code: "not_found", message: "no run" }), {
+          status: 404,
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onRequest = vi.fn();
+
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="issue_plan_0001"
+        currentWorkItemId={null}
+        units={[]}
+        projectId="project_0001"
+        issueId="issue_0001"
+        onDeleteAllCodingWorkspaces={onRequest}
+      />,
+    );
+
+    const button = await screen.findByTestId("plan-coding-delete-all");
+    expect(button).toHaveTextContent("删除本计划全部 Coding 工作区");
+    fireEvent.click(button);
+    expect(onRequest).toHaveBeenCalledTimes(1);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("renders nothing when units are empty, the aggregate is absent and no entry handler is wired", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ code: "not_found", message: "no run" }), {
+          status: 404,
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="issue_plan_0001"
+        currentWorkItemId={null}
+        units={[]}
+        projectId="project_0001"
+        issueId="issue_0001"
+      />,
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(screen.queryByTestId("plan-coding-delete-all")).toBeNull();
+    expect(screen.queryByTestId("onboarding-anchor-coding-progress")).toBeNull();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the entry in the legacy local projection branch without counts", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const onRequest = vi.fn();
+
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="issue_plan_0001"
+        currentWorkItemId="work_item_0001"
+        units={LOCAL_UNITS}
+        onDeleteAllCodingWorkspaces={onRequest}
+      />,
+    );
+
+    expect(await screen.findByText("WorkItemGroup")).toBeInTheDocument();
+    const button = screen.getByTestId("plan-coding-delete-all");
+    expect(button).toHaveTextContent("删除本计划全部 Coding 工作区");
+    fireEvent.click(button);
+    expect(onRequest).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("disables the entry while a group delete request is in flight", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(planCodingProgressDto()), { status: 200 })),
+    );
+
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="issue_plan_0001"
+        currentWorkItemId="work_item_0001"
+        units={LOCAL_UNITS}
+        projectId="project_0001"
+        issueId="issue_0001"
+        onDeleteAllCodingWorkspaces={vi.fn()}
+        groupDeleteBusy
+      />,
+    );
+
+    expect(await screen.findByTestId("plan-coding-delete-all")).toBeDisabled();
 
     vi.unstubAllGlobals();
   });

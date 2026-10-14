@@ -484,7 +484,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
     );
     await user.click(
       within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
-        name: "删除 Work Item Group",
+        name: "删除计划及工作项",
       }),
     );
     // D2.3 机械迁移：group drawer 旧无条件确认移除——确认语义由服务端三分类
@@ -795,7 +795,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       await user.click(screen.getByRole("button", { name: "Work Item Group" }));
       await user.click(
         within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
-          name: "删除 Work Item Group",
+          name: "删除计划及工作项",
         }),
       );
       await waitFor(() =>
@@ -922,7 +922,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       await user.click(screen.getByRole("button", { name: "Work Item Group" }));
       await user.click(
         within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
-          name: "删除 Work Item Group",
+          name: "删除计划及工作项",
         }),
       );
 
@@ -994,7 +994,7 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       await user.click(screen.getByRole("button", { name: "Work Item Group" }));
       await user.click(
         within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
-          name: "删除 Work Item Group",
+          name: "删除计划及工作项",
         }),
       );
       expect(

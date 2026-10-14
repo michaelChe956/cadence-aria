@@ -10,9 +10,12 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { deleteCodingAttempt } from "../api/client";
 import {
+  ApiRequestError,
+  deleteCodingAttempt,
+  deletePlanCodingWorkspaces,
   enterVerificationTriage,
+  getPlanCodingProgress,
   listVerificationTriageRecords,
   readCodingPolicyText,
   reauthorizeCodingPolicy,
@@ -126,6 +129,7 @@ export function CodingWorkspacePage({
   // jumpEntryId 先例）。
   const [pendingJumpEntryId, setPendingJumpEntryId] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [groupDeleteBusy, setGroupDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [repairActionError, setRepairActionError] =
@@ -148,6 +152,7 @@ export function CodingWorkspacePage({
   const addressKeyRef = useRef(addressKey);
   const deleteGenerationRef = useRef(0);
   const pendingRepairActionRef = useRef<PendingRepairAction | null>(null);
+  const groupDeleteCommandRef = useRef<{ planId: string; commandId: string } | null>(null);
   const mountedRef = useRef(false);
   if (addressKeyRef.current !== addressKey) {
     addressKeyRef.current = addressKey;
@@ -518,9 +523,22 @@ export function CodingWorkspacePage({
       return;
     }
     const active = ACTIVE_ATTEMPT_STATUSES.has(store.status ?? "created");
-    const message = active
-      ? "运行中的 Attempt 会被终止并删除。本操作会删除 Coding Workspace 的日志、测试输出和 worktree，且无法撤销。"
-      : "本操作会删除 Coding Workspace 的日志、测试输出和 worktree，且无法撤销。";
+    // H5（设计 D）：多仓 group 下单删是防呆确认——明确「仅删当前」会使整轮
+    // 授权失效，其余成员保留且不能用于新一键首启，主恢复出口是整组删除。
+    const groupMemberCount = store.workItemGroupId ? store.units.length : 0;
+    const groupNotice = store.workItemGroupId
+      ? groupMemberCount > 1
+        ? `这是本计划 ${groupMemberCount} 个 Coding 工作区之一；仅删此项会使整轮授权失效，其余 ${groupMemberCount - 1} 个保留且不能用于新一键首启。若要从头开始，请使用「删除本计划全部 Coding 工作区」。`
+        : "这是本计划的 Coding 工作区之一；仅删此项会使整轮授权失效，其余工作区保留且不能用于新一键首启。若要从头开始，请使用「删除本计划全部 Coding 工作区」。"
+      : "";
+    const message = [
+      active
+        ? "运行中的 Attempt 会被终止并删除。本操作会删除当前 Coding Workspace 的日志、测试输出和 worktree，且无法撤销。"
+        : "本操作会删除当前 Coding Workspace 的日志、测试输出和 worktree，且无法撤销。",
+      groupNotice,
+    ]
+      .filter(Boolean)
+      .join("\n");
     if (!window.confirm(message)) {
       return;
     }
@@ -543,6 +561,93 @@ export function CodingWorkspacePage({
     } finally {
       if (isCurrentDeleteRequest(requestAddressKey, requestGeneration)) {
         setDeleteBusy(false);
+      }
+    }
+  }
+
+  // H5（设计 C，冻结契约先行、H4 端点后行）：plan 聚合标题区整组删除——服务端
+  // 分类 → required 409 → 恰一次 window.confirm → confirmed=true 复删；取消零
+  // 出站破坏请求。command_id 同一删除动作稳定复用（失败重试不换 key，服务端
+  // 幂等回执）；expected_generation 取 GET workspace_lifecycle.generation 且同
+  // 一操作内冻结重用（confirmed 复删不跨代授权）；GET 缺席/失败不阻断服务端
+  // 预检（不发送该参数，服务端分类权威）。成功返回工作台（onBack 刷新
+  // lifecycle 与 run facts）；typed 409/500 直达错误面，不自动重试。
+  async function handleDeleteAllCodingWorkspaces() {
+    const planId = store.workItemGroupId;
+    if (!planId || groupDeleteBusy || !storeMatchesAddress) {
+      return;
+    }
+    const requestAddressKey = addressKey;
+    const requestGeneration = deleteGenerationRef.current + 1;
+    deleteGenerationRef.current = requestGeneration;
+    const previous = groupDeleteCommandRef.current;
+    const commandId =
+      previous?.planId === planId
+        ? previous.commandId
+        : newPlanGroupDeleteCommandId();
+    groupDeleteCommandRef.current = { planId, commandId };
+    let generation: number | null = null;
+    let generationResolved = false;
+    const resolveGeneration = async () => {
+      if (generationResolved) {
+        return;
+      }
+      generationResolved = true;
+      try {
+        const progress = await getPlanCodingProgress(
+          address.projectId,
+          address.issueId,
+          planId,
+        );
+        generation = progress.workspace_lifecycle?.generation ?? null;
+      } catch {
+        // 聚合缺席（旧服务端/未建 run）不阻断删除预检：省略 generation，服务端分类。
+        generation = null;
+      }
+    };
+    const sendDelete = async (confirmed: boolean) => {
+      await resolveGeneration();
+      return deletePlanCodingWorkspaces(address.projectId, address.issueId, planId, {
+        command_id: commandId,
+        ...(generation !== null ? { expected_generation: generation } : {}),
+        ...(confirmed ? { confirmed: true } : {}),
+      });
+    };
+    setGroupDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      try {
+        await sendDelete(false);
+      } catch (reason) {
+        if (
+          !(
+            reason instanceof ApiRequestError &&
+            reason.code === "deletion_confirmation_required"
+          )
+        ) {
+          throw reason;
+        }
+        // 服务端分类文案权威（浅/强分级由 required 409 message 给出）；缺失时
+        // 兜底强警告文案。
+        const confirmationMessage =
+          reason.message.trim().length > 0
+            ? reason.message
+            : "确定终止并删除本计划全部 Coding 工作区？运行中的成员会先终止，日志、测试输出与 worktree 将被删除且不可恢复。计划与工作项保留。";
+        if (!window.confirm(confirmationMessage)) {
+          return;
+        }
+        await sendDelete(true);
+      }
+      if (isCurrentDeleteRequest(requestAddressKey, requestGeneration)) {
+        onBack();
+      }
+    } catch (reason) {
+      if (isCurrentDeleteRequest(requestAddressKey, requestGeneration)) {
+        setDeleteError(errorMessage(reason, "删除本计划全部 Coding 工作区失败"));
+      }
+    } finally {
+      if (isCurrentDeleteRequest(requestAddressKey, requestGeneration)) {
+        setGroupDeleteBusy(false);
       }
     }
   }
@@ -679,7 +784,7 @@ export function CodingWorkspacePage({
             className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--aria-danger)] bg-white px-2 text-xs font-semibold text-[var(--aria-danger)] hover:bg-red-50 disabled:opacity-50"
           >
             <Trash2 className="h-3.5 w-3.5" />
-            删除 Coding Workspace
+            仅删除当前 Coding 工作区
           </button>
           <StatusBadge value={store.status ?? "created"} />
           {connected ? (
@@ -790,7 +895,8 @@ export function CodingWorkspacePage({
           ) : null}
         </div>
       ) : null}
-      {store.attemptScope === "work_item_group" && store.units.length > 0 ? (
+      {store.attemptScope === "work_item_group" &&
+      (store.units.length > 0 || store.workItemGroupId) ? (
         <CodingWorkspaceGroupProgress
           planId={store.workItemGroupId}
           currentWorkItemId={store.currentWorkItemId}
@@ -799,6 +905,8 @@ export function CodingWorkspacePage({
           issueId={address.issueId}
           selectedAttemptId={address.attemptId}
           refreshKey={`${store.status ?? "-"}-${store.stage ?? "-"}-${store.units.length}`}
+          onDeleteAllCodingWorkspaces={() => void handleDeleteAllCodingWorkspaces()}
+          groupDeleteBusy={groupDeleteBusy}
         />
       ) : null}
       <CodingDashboard projectId={address.projectId} issueId={address.issueId} />
@@ -1140,4 +1248,13 @@ function displayCodingStage(stage: string) {
     final_confirm: "人工组最终确认",
   };
   return labels[stage] ?? stage;
+}
+
+// H5：整组删除一次用户动作生成一次（同动作失败重试复用，服务端按 command_id
+// 幂等回执；与 workbench 的 plan_start_ui_ 同一约定）。
+function newPlanGroupDeleteCommandId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `plan_delete_ui_${crypto.randomUUID()}`;
+  }
+  return `plan_delete_ui_${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }

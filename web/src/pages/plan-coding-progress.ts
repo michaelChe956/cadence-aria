@@ -4,6 +4,7 @@ import type {
   PlanCodingProgressDto,
   PlanCodingTargetDto,
   PlanCodingUnitProgressDto,
+  PlanWorkspaceLifecycleState,
 } from "../api/types";
 
 /**
@@ -46,7 +47,52 @@ export type PlanCodingProgressView = {
   completedUnitCount: number;
   units: PlanCodingUnitProgressView[];
   targets: PlanCodingTargetProgressView[];
+  /** H5：workspace_lifecycle 只读透传（旧响应无此事实时为 null）。 */
+  workspaceLifecycle: PlanWorkspaceLifecycleView | null;
 };
+
+export type PlanWorkspaceLifecycleView = {
+  generation: number;
+  existingMemberCount: number;
+  missingMemberCount: number;
+  state: PlanWorkspaceLifecycleState;
+};
+
+// H5（设计 C/D）：plan 聚合标题区整组删除入口的文案派生——全部成员在场时
+// 「删除本计划全部 Coding 工作区(N)」；部分删除后切「删除剩余 Coding 工作
+// 区(E)」并给出「本轮授权失效:已删 M/总」；无 workspace_lifecycle 事实
+// （H4 前）按 target attempts 计数兜底，零 target 时无计数（服务端预检权威）。
+export type PlanCodingGroupDeleteEntryView = {
+  label: string;
+  invalidationSummary: string | null;
+};
+
+export function planCodingGroupDeleteEntry(
+  view: PlanCodingProgressView,
+): PlanCodingGroupDeleteEntryView {
+  const lifecycle = view.workspaceLifecycle;
+  if (lifecycle && lifecycle.missingMemberCount > 0) {
+    const total = lifecycle.existingMemberCount + lifecycle.missingMemberCount;
+    return {
+      label: `删除剩余 Coding 工作区(${lifecycle.existingMemberCount})`,
+      invalidationSummary: `本轮授权失效:已删 ${lifecycle.missingMemberCount}/${total}`,
+    };
+  }
+  if (lifecycle) {
+    return {
+      label: `删除本计划全部 Coding 工作区(${lifecycle.existingMemberCount})`,
+      invalidationSummary: null,
+    };
+  }
+  const targetCount = view.targets.length;
+  return {
+    label:
+      targetCount > 0
+        ? `删除本计划全部 Coding 工作区(${targetCount})`
+        : "删除本计划全部 Coding 工作区",
+    invalidationSummary: null,
+  };
+}
 
 // execution_state 值域文案：initialized=初始化桶物化（无 provider 事实），
 // running=provider 真实运行——两者必须可区分；invalidated=plan-run 授权失效
@@ -134,5 +180,13 @@ export function toPlanCodingProgressView(
     ).length,
     units: dto.units.map(unitView),
     targets: dto.target_attempts.map(targetView),
+    workspaceLifecycle: dto.workspace_lifecycle
+      ? {
+          generation: dto.workspace_lifecycle.generation,
+          existingMemberCount: dto.workspace_lifecycle.existing_member_count,
+          missingMemberCount: dto.workspace_lifecycle.missing_member_count,
+          state: dto.workspace_lifecycle.state,
+        }
+      : null,
   };
 }

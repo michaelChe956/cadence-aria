@@ -844,7 +844,7 @@ describe("CodingWorkspacePage shell and actions", () => {
     );
 
     await userEvent.click(
-      screen.getByRole("button", { name: "删除 Coding Workspace" }),
+      screen.getByRole("button", { name: "仅删除当前 Coding 工作区" }),
     );
 
     expect(confirm).toHaveBeenCalledWith(
@@ -876,7 +876,7 @@ describe("CodingWorkspacePage shell and actions", () => {
     );
 
     const deleteButton = screen.getByRole("button", {
-      name: "删除 Coding Workspace",
+      name: "仅删除当前 Coding 工作区",
     });
     expect(deleteButton).toBeDisabled();
     await userEvent.click(deleteButton);
