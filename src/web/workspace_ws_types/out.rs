@@ -148,6 +148,151 @@ impl LcResumeRecoveryDto {
     }
 }
 
+/// SG7/SG7a（plan v1.1 §0.5/§0.6.1）：结构治理只读快照——durable 聚合
+/// 状态＋同 record 的 gate 快照/provider ledger/三 refs 的**纯投影**。
+/// accepted 单源沿现 HumanGateSnapshot、actual start 单源沿
+/// provider_start_ledger（`is_actual_launch_observation`，旧 started 布尔
+/// 不冒充）、refs 沿 session；不从多副本/WS 计算，receipt/launch 摘要
+/// 不含 home/secret，本快照不构成任何启动/授权。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuralGovernanceSnapshot {
+    /// 当前结构修订授权窗口摘要（phase/turn/attempt/指令/失败候选
+    /// hash）；None＝无活动 grant（receipt/checkpoint history 仍保）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_grant: Option<StructuralGrantSnapshot>,
+    /// 用户结构预算总额（沿现 gate 默认 3）。
+    pub user_budget_total: u32,
+    /// 可用预算（总额−三终态计费 receipt−活动 hold；SG4a 数学单源）。
+    pub available_user_budget: u32,
+    /// 活动 hold 数（每 turn 至多一条）。
+    pub active_hold_count: u32,
+    /// 活动 hold（turn 幂等；不含 home/secret）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_holds: Vec<crate::product::models::UserBudgetHold>,
+    /// 三终态 receipt（turn 幂等互斥；delivered/failure 计费与
+    /// released 不实扣分账呈现）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_receipts: Vec<crate::product::models::UserBudgetReceipt>,
+    /// 结构 checkpoint（当前与终态整组历史；grant 结束不清理）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structure_checkpoints: Vec<crate::product::models::StructuralCheckpoint>,
+    /// 已解决结构事实（规则谓词＋证据 refs）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_structure_facts: Vec<crate::product::models::ResolvedStructureFact>,
+    /// 同次 CAS 三 refs（沿 session，不另立第四候选权威）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_candidate_ir_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structure_report_ref: Option<String>,
+    /// 当前结构上下文 digest（聚合状态聚合位，同 mechanical_report_ref 代）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_digest: Option<String>,
+    /// accepted 反馈轮次（单源 HumanGateSnapshot；无 gate 快照＝None 不补）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_feedback_turns: Option<u32>,
+    /// 实际 provider 启动数（单源 ledger actual 观察；预留占位不计）。
+    pub actual_provider_starts: u32,
+    /// 可选 turn 摘要（呈现用，非授权）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_turn_summary: Option<String>,
+    /// 可选 launch reason（启动动机说明，不是启动授权）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_reason: Option<String>,
+    /// launch 实际观察证据（缺字段 Unknown，不映射旧 started 布尔）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_evidence: Option<crate::product::models::StructuralLaunchEvidence>,
+}
+
+/// SG7/SG7a：结构修订授权窗口摘要（§0.5 grant 字段的只读投影）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuralGrantSnapshot {
+    pub grant_id: String,
+    pub authorization_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
+    /// 中间候选身份（同代三 refs；不另立权威）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_source_revision_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_candidate_ir_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanical_report_ref: Option<String>,
+    /// grant phase（缺字段 None＝Unknown，无阶段权）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<crate::product::models::StructuralGrantPhase>,
+    pub attempt_no: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing_source_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_identity: Option<String>,
+    pub granted_at: String,
+}
+
+/// SG7（§0.6.1 定案签名）/SG7a（生产接线）：从 durable 聚合状态＋同
+/// record 的 gate/ledger/三 refs 构造只读快照的纯函数——零 I/O、零
+/// 授权、不重算 accepted/actual（单源透传）。旧 None 聚合状态由调用
+/// 方（build_session_state）直接省略字段，不进本函数。
+pub fn project_structural_governance_snapshot(
+    state: &crate::product::models::StructuralGovernanceState,
+    gate_snapshot: Option<&HumanGateSnapshot>,
+    ledger: &[ProviderStartLedgerEntry],
+    source_ref: Option<&str>,
+    ir_ref: Option<&str>,
+    report_ref: Option<&str>,
+) -> StructuralGovernanceSnapshot {
+    StructuralGovernanceSnapshot {
+        current_grant: state
+            .current_grant
+            .as_ref()
+            .map(|grant| StructuralGrantSnapshot {
+                grant_id: grant.grant_id.clone(),
+                authorization_hash: grant.authorization_hash.clone(),
+                turn_id: grant.turn_id.clone(),
+                command_id: grant.command_id.clone(),
+                candidate_source_revision_ref: grant.candidate_source_revision_ref.clone(),
+                plan_candidate_ir_ref: grant.plan_candidate_ir_ref.clone(),
+                mechanical_report_ref: grant.mechanical_report_ref.clone(),
+                phase: grant.phase,
+                attempt_no: grant.attempt_no,
+                prompt_ref: grant.prompt_ref.clone(),
+                prompt_digest: grant.prompt_digest.clone(),
+                instruction_digest: grant.instruction_digest.clone(),
+                failing_source_hash: grant.failing_source_hash.clone(),
+                review_identity: grant.review_identity.clone(),
+                granted_at: grant.granted_at.clone(),
+            }),
+        user_budget_total: state.user_budget_total,
+        available_user_budget: state.available_user_budget(),
+        active_hold_count: state.active_hold_count(),
+        user_holds: state.user_holds.clone(),
+        user_receipts: state.user_receipts.clone(),
+        structure_checkpoints: state.structure_checkpoints.clone(),
+        resolved_structure_facts: state.resolved_structure_facts.clone(),
+        source_ref: source_ref.map(str::to_string),
+        plan_candidate_ir_ref: ir_ref.map(str::to_string),
+        structure_report_ref: report_ref.map(str::to_string),
+        context_digest: state.current_context_digest.clone(),
+        accepted_feedback_turns: gate_snapshot.and_then(|gate| gate.accepted_feedback_turns),
+        actual_provider_starts: ledger
+            .iter()
+            .filter(|entry| entry.is_actual_launch_observation())
+            .count() as u32,
+        current_turn_summary: state.current_turn_summary.clone(),
+        launch_reason: state.launch_reason.clone(),
+        launch_evidence: state.launch_evidence.clone(),
+    }
+}
+
 /// SG3b（plan 附录A）：Final Compile typed 失败的最低必要 wire 投影——
 /// close→WS/REST 同一 DTO，同一 failure_id/approval/source context 直达
 /// 客户端。只含失败基础字段；机器修复/预算/快照字段由 SG7 在此扩展
@@ -159,7 +304,6 @@ pub struct PlanningCompileFailureDto {
     /// "structure" | "operational"。
     pub kind: String,
     pub stable_code: String,
-    /// 身份字段显式序列化（含 null）：失败身份合同在 wire 上始终可见，
     /// 不因缺事实而静默缺字段。
     pub approval_attempt_id: Option<String>,
     pub source_revision_ref: Option<String>,
@@ -401,6 +545,11 @@ pub enum WsOutMessage {
         /// Replay；allowed_actions 在 B 波接齐前恒空（A/B 发布纪律）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lc_resume_recovery: Option<LcResumeRecoveryDto>,
+        /// SG7a（§0.6.1）：结构治理只读快照——build_session_state 以
+        /// runtime 镜像聚合状态＋同 record 的 gate/ledger/三 refs 调用
+        /// SG7 纯 projection；旧 None/无聚合状态省略（wire 兼容）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structural_governance: Option<StructuralGovernanceSnapshot>,
     },
     /// A1c（Task 2.2）：显式 fresh operation 的 typed 受理/回放结果（设计
     /// §5.1）。接受/回放同形态；operation_state 取 durable 事实，不从客户
@@ -539,6 +688,7 @@ mod tests {
             pending_choice_requests: Vec::new(),
             automation: None,
             lc_resume_recovery: None,
+            structural_governance: None,
         }
     }
 

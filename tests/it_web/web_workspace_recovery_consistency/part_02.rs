@@ -116,7 +116,8 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
                 author: cadence_aria::product::models::ProviderName::Fake,
                 reviewer: Some(cadence_aria::product::models::ProviderName::Codex),
                 review_rounds: 1,
-                permission_modes: cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
+                permission_modes:
+                    cadence_aria::product::models::WorkspaceRolePermissionModes::default(),
             },
             retry: None,
         }],
@@ -151,6 +152,7 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         ),
         // A1c（Task 2.2）：无恢复时省略，roundtrip 保持 None。
         lc_resume_recovery: None,
+        structural_governance: None,
     };
 
     let value = serde_json::to_value(&state).expect("serialize SessionState");
@@ -179,7 +181,6 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         other => panic!("expected SessionState with WorkItemPlanCandidate, got {other:?}"),
     }
 }
-
 
 // 退役留档（T5/REQ-RET-02）：`reconnect_preserves_revert_marks_from_current_artifact_version` 直接驱动已删除的 legacy 决策面
 // （原 #[ignore]：legacy full-candidate revert 恢复已被 WP2 outline 生成取代；本测含 revert_work_item 退役 wire 字面量），

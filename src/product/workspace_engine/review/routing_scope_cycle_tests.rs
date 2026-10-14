@@ -273,10 +273,12 @@ fn single_candidate_policy_invocation_rebuilds_verification_scope_from_durable_r
         logical_launch_fingerprints: Vec::new(),
         superseded_native_sessions: Vec::new(),
         lc_resume_recovery: None,
+        structural_governance_state: None,
         repository_path: None,
     };
     session.workspace_type = crate::product::models::WorkspaceType::WorkItemPlan;
-    session.flow_kind = crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate;
+    session.flow_kind =
+        crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate;
     session.stage = crate::product::workspace_engine::WorkspaceStage::CrossReview;
     session.review_invocation_scope = None;
     session.plan_candidate_ir_ref = Some(ir_ref.to_string());
@@ -304,9 +306,5 @@ fn single_candidate_policy_invocation_rebuilds_verification_scope_from_durable_r
     let scope = engine
         .policy_invocation(ReviewPhase::Verification, &cycle_key)
         .expect("同 key 已初评的 Verification 必须从 durable refs 重建,不得 AbortFatal");
-    assert!(matches!(
-        scope,
-        ReviewInvocationScope::Verification { .. }
-    ));
+    assert!(matches!(scope, ReviewInvocationScope::Verification { .. }));
 }
-

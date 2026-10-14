@@ -111,6 +111,11 @@ pub struct WorkspaceSession {
     pub logical_launch_fingerprints: Vec<crate::product::models::LogicalLaunchFingerprintRecord>,
     pub superseded_native_sessions: Vec<crate::product::models::SupersededNativeSessionRecord>,
     pub lc_resume_recovery: Option<crate::product::models::LcResumeRecoveryRecord>,
+    /// SG7a（plan v1.1 §0.6.1）：结构治理聚合状态的 runtime 只读镜像——
+    /// from_record 显式逐字段移入，成功 CAS 经
+    /// `sync_structural_governance_from_record` 同步；accepted/actual
+    /// 单源仍在 HumanGateSnapshot 与 provider_start_ledger。
+    pub structural_governance_state: Option<crate::product::models::StructuralGovernanceState>,
     pub repository_path: Option<PathBuf>,
 }
 
@@ -168,8 +173,43 @@ impl WorkspaceSession {
             logical_launch_fingerprints: record.logical_launch_fingerprints,
             superseded_native_sessions: record.superseded_native_sessions,
             lc_resume_recovery: record.lc_resume_recovery,
+            structural_governance_state: record.structural_governance_state,
             repository_path: None,
         }
+    }
+
+    /// SG7a（plan v1.1 §0.6.1 Interfaces 定案）：成功 CAS 后的 runtime
+    /// 镜像同步——先核 session/project/issue/entity/workspace_type 同
+    /// scope（错 scope `IdentityMismatch`，镜像保持不变），再复制结构
+    /// 聚合状态、同次 CAS 的 source/IR/report 三 refs 及原
+    /// human_gate_snapshot/provider_start_ledger（accepted/实际 start
+    /// 唯一权威）；不改 stage/active_node/repository_path/anchor/trust，
+    /// 不重算 ledger、不新增 accepted 副本。CAS 失败（调用方拿不到新
+    /// record）不进本方法，镜像自然保持。
+    pub fn sync_structural_governance_from_record(
+        &mut self,
+        record: &WorkspaceSessionRecord,
+    ) -> Result<(), crate::product::json_store::ProductStoreError> {
+        if self.session_id != record.id
+            || self.project_id != record.project_id
+            || self.issue_id != record.issue_id
+            || self.entity_id != record.entity_id
+            || self.workspace_type != record.workspace_type
+        {
+            return Err(
+                crate::product::json_store::ProductStoreError::IdentityMismatch {
+                    kind: "workspace_session",
+                    id: record.id.clone(),
+                },
+            );
+        }
+        self.structural_governance_state = record.structural_governance_state.clone();
+        self.work_item_plan_source_revision_ref = record.work_item_plan_source_revision_ref.clone();
+        self.plan_candidate_ir_ref = record.plan_candidate_ir_ref.clone();
+        self.mechanical_report_ref = record.mechanical_report_ref.clone();
+        self.human_gate_snapshot = record.human_gate_snapshot.clone();
+        self.provider_start_ledger = record.provider_start_ledger.clone();
+        Ok(())
     }
 
     pub(crate) fn replace_messages_from_records(&mut self, messages: Vec<WorkspaceMessageRecord>) {

@@ -294,15 +294,17 @@ async fn workspace_choice_claim_ws_default_binding_uses_current_unique_run() {
 
     // 登记当前 run 的挂起帧后：WS 缺省（不带 command_id/expected_run_id）
     // → 绑定当前唯一 run。
-    manager.register_pending_choice_frame(crate::web::workspace_ws_types::WsOutMessage::ChoiceRequest {
-        id: "choice-ws".to_string(),
-        prompt: "ws default binding".to_string(),
-        options: vec![],
-        allow_multiple: false,
-        allow_free_text: false,
-        questions: vec![],
-        source: "ask_user_question".to_string(),
-    });
+    manager.register_pending_choice_frame(
+        crate::web::workspace_ws_types::WsOutMessage::ChoiceRequest {
+            id: "choice-ws".to_string(),
+            prompt: "ws default binding".to_string(),
+            options: vec![],
+            allow_multiple: false,
+            allow_free_text: false,
+            questions: vec![],
+            source: "ask_user_question".to_string(),
+        },
+    );
     let request = manager
         .bind_current_run_request("choice-ws", claim_two_answers())
         .expect("current run binding");
@@ -417,9 +419,11 @@ fn bound_enrollment(
                 require_execution_plan_confirm: false,
             },
         },
-        target: Some(crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
-            repository_id: "repository_0001".to_string(),
-        }),
+        target: Some(
+            crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                repository_id: "repository_0001".to_string(),
+            },
+        ),
         prepare_intent_id: enrollment_id.to_string(),
         plan_id: Some(plan_id.to_string()),
         session_id: Some("session_auto_live".to_string()),
@@ -486,9 +490,8 @@ async fn automation_generation_does_not_supersede_live_run() {
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
 use crate::product::models::{
-    LcRecoveryBusinessContext, LcRecoveryRunContext, LcResumeRecoveryRecord,
-    LcResumeRecoveryState, ProviderConversationRole, ProviderName, WorkspaceSessionRecord,
-    WorkspaceSessionStatus,
+    LcRecoveryBusinessContext, LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState,
+    ProviderConversationRole, ProviderName, WorkspaceSessionRecord, WorkspaceSessionStatus,
 };
 use crate::product::workspace_engine::{WorkspaceEngine, WorkspaceSession};
 use crate::web::workspace_session::manager::{
@@ -524,10 +527,9 @@ fn anchored_durable_manager(
         .expect("durable session record");
     let (engine_tx, _engine_rx) = mpsc::channel(1);
     let engine = WorkspaceEngine::new(
-        Arc::new(CheckpointStore::new(paths.issue_lifecycle_root(
-            &record.project_id,
-            &record.issue_id,
-        ))),
+        Arc::new(CheckpointStore::new(
+            paths.issue_lifecycle_root(&record.project_id, &record.issue_id),
+        )),
         engine_tx,
         WorkspaceSession::from_record(record.clone()),
     );
@@ -933,4 +935,276 @@ async fn anchor_t05_snapshot_failure_returns_typed_error_without_baseline() {
             .all(|(_, json)| !json.contains("\"session_state\"")),
         "读取失败不得向 journal 发布伪 SessionState：{journal_entries:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SG7a（plan v1.1 Task SG7a Step 1）：manager 纯投影幂等/零写与结构
+// sync 不误覆盖 runtime 锚点。
+// ---------------------------------------------------------------------------
+
+/// SG7a：结构聚合状态经 durable record 注入（SG5.3/SG6a.1 同款
+/// read-modify-write fixture；grant/checkpoint producer 归 SG6a.3）。
+#[tokio::test]
+async fn sg_07a_projection_is_pure_and_preserves_anchor() {
+    use crate::product::json_store::write_json;
+    use crate::product::models::StructuralLaunchEvidence;
+    use crate::product::models::StructuralLaunchState;
+    use crate::product::models::{
+        ResolvedStructureFact, StructuralCheckpoint, StructuralCheckpointStatus,
+        StructuralGovernanceState, StructuralGrantPhase, StructuralRevisionGrant, UserBudgetHold,
+        UserBudgetReceipt, UserBudgetReceiptKind,
+    };
+    use crate::product::work_item_plan_policy::ProviderStartLedgerEntry;
+    use crate::web::workspace_ws_types::project_structural_governance_snapshot;
+
+    let (manager, paths, birth) = anchored_durable_manager("project_anchor_sg07a");
+
+    // durable 前进：结构聚合状态（grant attempt1 + 活动 hold + 历史
+    // receipt/checkpoint/resolved facts + actual start 观察）——出生
+    // record 保持无聚合状态（旧记录）。
+    let mut latest = LifecycleStore::new(paths.clone())
+        .get_workspace_session(&birth.id)
+        .expect("latest record");
+    latest.structural_governance_state = Some(StructuralGovernanceState {
+        current_grant: Some(StructuralRevisionGrant {
+            grant_id: "structural_grant_turn_sg07a_anchor".to_string(),
+            authorization_hash: "sha256:sg07a-authorization".to_string(),
+            turn_id: Some("turn_sg07a_anchor".to_string()),
+            command_id: Some("cmd_sg07a_anchor".to_string()),
+            candidate_source_revision_ref: Some("sg07a-source-ref".to_string()),
+            plan_candidate_ir_ref: Some("sg07a-ir-ref".to_string()),
+            mechanical_report_ref: Some("sg07a-report-ref".to_string()),
+            phase: Some(StructuralGrantPhase::Attempt2Claimed),
+            attempt_no: 2,
+            prompt_ref: Some("sg07a-frozen-prompt-ref".to_string()),
+            prompt_digest: Some("sha256:sg07a-prompt".to_string()),
+            instruction_digest: Some("sha256:sg07a-instruction".to_string()),
+            failing_source_hash: Some("sha256:sg07a-failing-source".to_string()),
+            review_identity: None,
+            granted_at: "2026-10-14T00:00:00Z".to_string(),
+        }),
+        user_budget_total: 3,
+        user_holds: vec![UserBudgetHold {
+            turn_id: "turn_sg07a_anchor".to_string(),
+            command_id: "cmd_sg07a_anchor".to_string(),
+            source_hash: "sha256:sg07a-failing-source".to_string(),
+            held_at: "2026-10-14T00:00:00Z".to_string(),
+        }],
+        user_receipts: vec![UserBudgetReceipt {
+            kind: UserBudgetReceiptKind::ReleasedStructural,
+            turn_id: "turn_sg07a_prev".to_string(),
+            command_id: "cmd_sg07a_prev".to_string(),
+            attempt_reason: None,
+            source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            structure_report_ref: None,
+            context_digest: None,
+            reason: Some("structural exhausted before delivery".to_string()),
+            settled_at: "2026-10-14T00:00:00Z".to_string(),
+        }],
+        structure_checkpoints: vec![StructuralCheckpoint {
+            checkpoint_id: "sg07a-anchor-checkpoint".to_string(),
+            source_revision_ref: Some("sg07a-source-ref".to_string()),
+            plan_candidate_ir_ref: Some("sg07a-ir-ref".to_string()),
+            structure_report_ref: Some("sg07a-report-ref".to_string()),
+            artifact_version: Some(1),
+            source_hash: Some("sha256:sg07a-failing-source".to_string()),
+            context_digest: Some("sha256:sg07a-context".to_string()),
+            authorization_hash: Some("sha256:sg07a-authorization".to_string()),
+            receipt_ref: None,
+            review_scope: Some("sg07a-review-scope".to_string()),
+            status: StructuralCheckpointStatus::Active,
+            recorded_at: "2026-10-14T00:00:00Z".to_string(),
+        }],
+        resolved_structure_facts: vec![ResolvedStructureFact {
+            predicate: "dependency_cycle_resolved".to_string(),
+            evidence_refs: vec!["sg07a-report-ref".to_string()],
+            source_hash: None,
+            resolved_at: "2026-10-14T00:00:00Z".to_string(),
+        }],
+        current_structure_report_ref: Some("sg07a-report-ref".to_string()),
+        current_context_digest: Some("sha256:sg07a-context".to_string()),
+        current_turn_summary: Some("attempt2 机器修复窗口".to_string()),
+        launch_reason: Some("structural repair attempt".to_string()),
+        launch_evidence: Some(StructuralLaunchEvidence {
+            launch_state: StructuralLaunchState::Started,
+            launch_observed_at: Some("2026-10-14T00:00:00Z".to_string()),
+            launch_evidence_ref: Some("sg07a-launch-evidence".to_string()),
+        }),
+    });
+    latest.work_item_plan_source_revision_ref = Some("sg07a-source-ref".to_string());
+    latest.plan_candidate_ir_ref = Some("sg07a-ir-ref".to_string());
+    latest.mechanical_report_ref = Some("sg07a-report-ref".to_string());
+    latest.provider_start_ledger.push(ProviderStartLedgerEntry {
+        provider_start_idempotency_key: "sg07a:start:anchor-actual".to_string(),
+        started: true,
+        provider: Some("fake".to_string()),
+        started_at: Some("2026-10-14T00:00:00Z".to_string()),
+    });
+    write_json(&anchor_session_record_path(&paths, &birth), &latest)
+        .expect("persist structural governance record");
+    let ledger_len = latest.provider_start_ledger.len();
+    let diagnostics_len = latest.policy_diagnostics.len();
+
+    // engine 锁长持（attach 期间的极端形态）——manager Result 出口纯投影
+    // 不得依赖 engine 锁，且前后 durable 字节零写。
+    let mut engine_guard = manager.lock_engine_for_test().await;
+    let bytes_before = durable_tree_snapshot(&paths);
+    let frame = manager
+        .durable_projection()
+        .expect("manager durable projection with structural governance")
+        .session_state;
+    let bytes_after = durable_tree_snapshot(&paths);
+    assert_eq!(bytes_before, bytes_after, "纯投影必须零写 durable");
+    let snapshot = match &frame {
+        WsOutMessage::SessionState {
+            structural_governance: Some(snapshot),
+            ..
+        } => snapshot,
+        WsOutMessage::SessionState {
+            structural_governance: None,
+            ..
+        } => panic!("结构聚合状态必须投影到 SessionState"),
+        other => panic!("expected SessionState, got {other:?}"),
+    };
+    let state = latest.structural_governance_state.as_ref().unwrap();
+    // 与 SG7 纯函数逐字段同值（同一单源输入）。
+    let expected = project_structural_governance_snapshot(
+        state,
+        latest.human_gate_snapshot.as_ref(),
+        &latest.provider_start_ledger,
+        latest.work_item_plan_source_revision_ref.as_deref(),
+        latest.plan_candidate_ir_ref.as_deref(),
+        latest.mechanical_report_ref.as_deref(),
+    );
+    assert_eq!(snapshot, &expected, "manager 投影必须与纯函数同值");
+    assert_eq!(
+        snapshot.available_user_budget, 2,
+        "3 − 0 计费(released 不实扣) − 1 hold"
+    );
+    assert_eq!(snapshot.actual_provider_starts, 1);
+    assert_eq!(snapshot.structure_checkpoints.len(), 1);
+
+    // 幂等：同输入重复投影的结构快照逐字段同值（帧级时间戳字段如
+    // 派生 timeline 节点 started_at 不在结构快照域）；claim/start/预算
+    // 事件计数不变。
+    let again = manager
+        .durable_projection()
+        .expect("repeatable pure projection")
+        .session_state;
+    let again_snapshot = match &again {
+        WsOutMessage::SessionState {
+            structural_governance: Some(snapshot),
+            ..
+        } => snapshot.clone(),
+        other => panic!("expected structural snapshot, got {other:?}"),
+    };
+    assert_eq!(snapshot, &again_snapshot, "结构纯投影幂等");
+    let reloaded_latest = LifecycleStore::new(paths.clone())
+        .get_workspace_session(&birth.id)
+        .expect("latest unchanged");
+    assert_eq!(reloaded_latest.provider_start_ledger.len(), ledger_len);
+    assert_eq!(reloaded_latest.policy_diagnostics.len(), diagnostics_len);
+
+    // 结构 sync 不误覆盖 runtime 锚点：engine 内存 session 先注入非默认
+    // 锚点（repository_path/lc_resume_recovery/fullmap/tombstone/stage），
+    // 再以同 scope record sync——结构镜像更新、锚点原样。
+    {
+        let engine = &mut *engine_guard;
+        engine.session.repository_path = Some(std::path::PathBuf::from("/tmp/sg07a-anchor-repo"));
+        engine.session.lc_resume_recovery =
+            Some(anchor_t04_recovery_record("recovery_sg07a_anchor"));
+        engine.session.logical_launch_fingerprints =
+            vec![crate::product::models::LogicalLaunchFingerprintRecord {
+                schema_version: 1,
+                basis: crate::product::models::LogicalLaunchBasis::FullLcProjectionV2,
+                role: ProviderConversationRole::Author,
+                provider: ProviderName::Fake,
+                role_run_seq: 7,
+                node_id: "node_sg07a_anchor".to_string(),
+                native_session_id: None,
+                fingerprint_digest: "sha256:sg07a-fullmap".to_string(),
+                planning_access_fingerprint: "sha256:sg07a-access".to_string(),
+                state: crate::product::models::LogicalLaunchFingerprintState::Prepared,
+                created_at: "2026-10-14T00:00:00Z".to_string(),
+                updated_at: "2026-10-14T00:00:00Z".to_string(),
+            }];
+        engine.session.superseded_native_sessions =
+            vec![crate::product::models::SupersededNativeSessionRecord {
+                role: ProviderConversationRole::Author,
+                provider: ProviderName::Fake,
+                native_session_id: "native_sg07a_old".to_string(),
+                reason_code: "resume_fingerprint_mismatch".to_string(),
+                recovery_id: "recovery_sg07a_anchor".to_string(),
+                superseded_at: "2026-10-14T00:00:00Z".to_string(),
+            }];
+        engine.session.stage = crate::product::workspace_engine::WorkspaceStage::HumanConfirm;
+
+        engine
+            .session
+            .sync_structural_governance_from_record(&latest)
+            .expect("same-scope structural sync");
+        assert_eq!(
+            engine.session.structural_governance_state, latest.structural_governance_state,
+            "结构镜像必须吸收最新 record 聚合状态"
+        );
+        assert_eq!(
+            engine.session.repository_path,
+            Some(std::path::PathBuf::from("/tmp/sg07a-anchor-repo")),
+            "结构 sync 不得覆盖 repository_path"
+        );
+        assert_eq!(
+            engine
+                .session
+                .lc_resume_recovery
+                .as_ref()
+                .map(|recovery| recovery.recovery_id.as_str()),
+            Some("recovery_sg07a_anchor"),
+            "结构 sync 不得覆盖 lc_resume_recovery"
+        );
+        assert_eq!(
+            engine.session.logical_launch_fingerprints.len(),
+            1,
+            "结构 sync 不得覆盖 fullmap 指纹"
+        );
+        assert_eq!(
+            engine.session.superseded_native_sessions.len(),
+            1,
+            "结构 sync 不得覆盖 tombstone"
+        );
+        assert_eq!(
+            engine.session.stage,
+            crate::product::workspace_engine::WorkspaceStage::HumanConfirm,
+            "结构 sync 不得覆盖 stage"
+        );
+        assert_eq!(
+            engine.session.human_gate_snapshot, latest.human_gate_snapshot,
+            "同 record 原 gate 快照随 sync 对齐"
+        );
+        assert_eq!(
+            engine.session.provider_start_ledger.len(),
+            ledger_len,
+            "ledger 沿 record 原样复制，不重算"
+        );
+
+        // reload_session_from_record：结构镜像随 durable 对齐且保留
+        // repository_path 模式（C-1 集成修复语义不回归）。
+        engine.reload_session_from_record(latest.clone());
+        assert_eq!(
+            engine.session.structural_governance_state, latest.structural_governance_state,
+            "reload 后结构镜像必须对齐"
+        );
+        assert_eq!(
+            engine.session.repository_path,
+            Some(std::path::PathBuf::from("/tmp/sg07a-anchor-repo")),
+            "reload 必须保留 repository_path"
+        );
+    }
+    drop(engine_guard);
+
+    // 出生旧 record（无聚合状态）不产生快照（无新许可）——出生 record
+    // 的 from_record 镜像保持 None；anchor_t04/t05 既有负例不受影响。
+    assert_eq!(birth.structural_governance_state, None);
+    let birth_runtime = WorkspaceSession::from_record(birth.clone());
+    assert_eq!(birth_runtime.structural_governance_state, None);
 }

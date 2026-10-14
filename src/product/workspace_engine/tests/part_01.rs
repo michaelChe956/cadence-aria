@@ -343,6 +343,7 @@ fn make_session(session_id: &str) -> WorkspaceSession {
         logical_launch_fingerprints: Vec::new(),
         superseded_native_sessions: Vec::new(),
         lc_resume_recovery: None,
+        structural_governance_state: None,
         repository_path: None,
     }
 }

@@ -229,6 +229,7 @@ fn workspace_session(repository_path: std::path::PathBuf) -> WorkspaceSession {
         logical_launch_fingerprints: vec![],
         superseded_native_sessions: vec![],
         lc_resume_recovery: None,
+        structural_governance_state: None,
         repository_path: Some(repository_path),
     }
 }
@@ -295,9 +296,7 @@ impl StreamingProviderAdapter for CapturingStreamingAdapter {
 fn t14_logical_fixture_with_gateway_extras(
     gateway_author: Arc<dyn StreamingProviderAdapter>,
 ) -> super::single_candidate_provider_run::ProviderRunFixture {
-    use super::single_candidate_lc_admission::{
-        AliasLcGatewayExtras, LcDialectCapabilitySource,
-    };
+    use super::single_candidate_lc_admission::{AliasLcGatewayExtras, LcDialectCapabilitySource};
 
     super::single_candidate_provider_run::ProviderRunFixture::new_logical_with_gateway_extras(
         true,
@@ -328,9 +327,7 @@ fn t14_canonical_root(
 ///(钉 Task 1a「集中映射防线移到 capability 准入」合同)。
 struct T14ClaudeOnlyCapabilitySource;
 
-impl crate::product::logical_codebase::ProviderCapabilitySource
-    for T14ClaudeOnlyCapabilitySource
-{
+impl crate::product::logical_codebase::ProviderCapabilitySource for T14ClaudeOnlyCapabilitySource {
     fn require_supported(
         &self,
         provider: &crate::product::logical_codebase::ProviderRef,
@@ -343,9 +340,7 @@ impl crate::product::logical_codebase::ProviderCapabilitySource
         use crate::product::logical_codebase::policy::ProviderWireDialect;
         use crate::product::logical_codebase::provider_capability_store::ProviderActionCapability;
 
-        if provider.provider_type
-            != crate::product::logical_codebase::ProviderRefType::ClaudeCode
-        {
+        if provider.provider_type != crate::product::logical_codebase::ProviderRefType::ClaudeCode {
             return Err(
                 crate::product::logical_codebase::ProviderGatewayError::UnsupportedCapability(
                     format!(
@@ -621,7 +616,6 @@ async fn logical_plan_launch_carries_session_author_provider_identity() {
 /// 显式失败(判别码 + provider 名),gateway 零启动。
 #[tokio::test]
 async fn logical_plan_launch_fails_closed_for_unsupported_author_provider() {
-
     for author in [ProviderName::Pi, ProviderName::KimiCode] {
         let fixture =
             super::single_candidate_provider_run::ProviderRunFixture::new_logical_with_gateway_extras(
@@ -671,7 +665,6 @@ async fn logical_plan_launch_fails_closed_for_unsupported_author_provider() {
 /// provider_capability_launch_not_confirmed,且不静默改 Claude 启动。
 #[tokio::test]
 async fn logical_plan_launch_codex_author_hits_req_env05_route_block() {
-
     let fixture =
         super::single_candidate_provider_run::ProviderRunFixture::new_logical_with_gateway_extras(
             true,
@@ -1156,7 +1149,8 @@ fn plan_author_launch_anchor_drifts_target_and_fingerprint_without_member_anchor
         assert!(request.target.logical_repository_id.is_empty());
     }
     assert_eq!(
-        first.validated.fingerprint().digest, second.validated.fingerprint().digest,
+        first.validated.fingerprint().digest,
+        second.validated.fingerprint().digest,
         "同会话两次 resolve 的 envelope 指纹必须恒等——r27 锚漂移恒拒机制已消除"
     );
 }
@@ -1193,12 +1187,8 @@ async fn start_work_item_plan_author_logical_classifies_spawn_trust_failure() {
     );
     // B2b1:E native anchor 消费要求 durable 会话记录——直接复用 fixture
     // 的持久 engine(同 gateway/record),author 改 Kimi(workspace trust 面)。
-    fixture
-        .engine
-        .lock()
-        .await
-        .session
-        .author_provider = crate::product::models::ProviderName::KimiCode;
+    fixture.engine.lock().await.session.author_provider =
+        crate::product::models::ProviderName::KimiCode;
     let plan_launch = {
         let engine = fixture.engine.lock().await;
         resolve_plan_author_launch(&engine).expect("kimi author logical launch")
@@ -1379,9 +1369,7 @@ struct T14NativeProbeAdapter {
     inputs: mpsc::UnboundedSender<StreamingProviderInput>,
     observed_prepared:
         Arc<std::sync::Mutex<Vec<(crate::product::models::LogicalLaunchFingerprintState, u64)>>>,
-    probe: Arc<
-        std::sync::Mutex<Option<(crate::product::lifecycle_store::LifecycleStore, String)>>,
-    >,
+    probe: Arc<std::sync::Mutex<Option<(crate::product::lifecycle_store::LifecycleStore, String)>>>,
 }
 
 #[async_trait::async_trait]
@@ -1444,8 +1432,8 @@ impl StreamingProviderAdapter for T14NativeProbeAdapter {
 #[tokio::test]
 async fn anchor_t14_plan_native_anchor_and_map_are_full_and_durable() {
     use crate::product::models::{
-        LogicalLaunchBasis, LogicalLaunchFingerprintState, LcFreshOperationResult,
-        LcFreshOperationState, LcResumeRecoveryRecord, LcResumeRecoveryState,
+        LcFreshOperationResult, LcFreshOperationState, LcResumeRecoveryRecord,
+        LcResumeRecoveryState, LogicalLaunchBasis, LogicalLaunchFingerprintState,
         ProviderConversationRole,
     };
 
@@ -1503,7 +1491,8 @@ async fn anchor_t14_plan_native_anchor_and_map_are_full_and_durable() {
                     },
                     origin: crate::product::models::LcOutlineRebuildOrigin::LegacyAuthor(
                         crate::product::models::LcLegacyOutlineAuthorPayload {
-                            flow: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+                            flow:
+                                crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
                             original_provider_node_id: None,
                             outline_ref: None,
                         },
@@ -1596,7 +1585,10 @@ async fn anchor_t14_plan_native_anchor_and_map_are_full_and_durable() {
         .await
         .expect("capture adapter input")
         .expect("captured input");
-    assert!(captured.audit_sink.is_some(), "run-bound audit sink 必须绑定");
+    assert!(
+        captured.audit_sink.is_some(),
+        "run-bound audit sink 必须绑定"
+    );
 
     // 3)+4) durable 终态：map Active/native 绑定 + recovery Resolved 对账。
     let record = fixture
@@ -1623,14 +1615,13 @@ async fn anchor_t14_plan_native_anchor_and_map_are_full_and_durable() {
     );
     assert_eq!(binding.node_id, node_id);
     assert_eq!(binding.basis, LogicalLaunchBasis::FullLcProjectionV2);
-    assert!(binding
-        .fingerprint_digest
-        .contains("lc-session-resume-fingerprint/2"));
+    assert!(
+        binding
+            .fingerprint_digest
+            .contains("lc-session-resume-fingerprint/2")
+    );
 
-    let recovery = record
-        .lc_resume_recovery
-        .expect("recovery kept")
-        .clone();
+    let recovery = record.lc_resume_recovery.expect("recovery kept").clone();
     assert_eq!(recovery.state, LcResumeRecoveryState::Resolved);
     assert_eq!(recovery.fresh_role_run_seq, Some(actual_start_seq));
     assert_eq!(

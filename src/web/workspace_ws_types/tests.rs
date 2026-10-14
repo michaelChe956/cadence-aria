@@ -878,6 +878,7 @@ fn session_state_artifact_accepts_markdown_payload() {
         automation: None,
         // A1c（Task 2.2）：无恢复时 wire 省略该字段（旧客户端零变化）。
         lc_resume_recovery: None,
+        structural_governance: None,
     };
     let json = serde_json::to_value(state).unwrap();
     assert_eq!(json["artifact"]["markdown"], "# Story");
@@ -1009,6 +1010,7 @@ fn anchor_t03_recovery_snapshot_and_operation_result_wire() {
             pending_choice_requests: Vec::new(),
             automation: None,
             lc_resume_recovery: Some(dto),
+            structural_governance: None,
         }
     }
 
