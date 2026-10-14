@@ -117,3 +117,23 @@ tsc+build。
   复核；②DTO 字段名自拟待 H4 对齐（见移交①—④）；③全量中途一次未捕获 flaky
   （同代码复跑全绿）；④H4 端点未落，联调前真实请求将 404/405——前端按设计先行
   是任务既定边界
+
+## P2 修复轮（Main 审查 2×P2，按 suggestion 精确落）
+
+两处均在 `CodingWorkspacePage.tsx`（红 4 failed→绿 13/13→目标族 8 文件 127/0→
+全量 **214 文件 2195/0**→build EXIT=0）：
+
+- **P2-1 双删除 busy 顶号卡死**：单删/整组 handler 共用 `deleteGenerationRef`，
+  并发时后发者顶号→先发者 finally 的 `isCurrentDeleteRequest` 永假→`deleteBusy`/
+  `groupDeleteBusy` 永久 true（整组卡死清剩余唯一出口/单删卡死顶栏）；地址切换
+  effect 只复位 `deleteBusy` 同类缺口。修＝①互斥守卫（组删入口加 `deleteBusy`、
+  单删入口加 `groupDeleteBusy`）；②地址切换 effect 补 `setGroupDeleteBusy(false)`。
+  红测三件：单删在途→组删零出站且单删结算后顶栏复位；组删在途→单删不弹确认零
+  出站且结算后复位；地址切换→组删 busy 复位、回组页入口可再发起。
+- **P2-2 单删确认文案计数失真**：`groupMemberCount` 取 `store.units.length`
+  （工作项数）冒充工作区成员数，N×R 失真。修＝删计数三目，恒用泛化句
+  「这是本计划的 Coding 工作区之一；仅删此项会使整轮授权失效…」（成员计数由
+  服务端聚合权威给出）。红测断言泛化句＋`not.toMatch(/这是本计划 \d+ 个/)`。
+
+提交：`280993ed` `fix: H5 双删除busy互斥与文案计数`（2 文件显式 add：
+`CodingWorkspacePage.tsx`＋`CodingWorkspacePage.group-delete.test.tsx`，197+/9-）。
