@@ -449,6 +449,34 @@ impl super::CodingAttemptStore {
         Ok(attempts)
     }
 
+    /// H2a（设计 2026-10-14 A 节「全删」判据）：按 `(project, issue, plan)`
+    /// 枚举真实 group attempts（`work_item_group_id == plan`），不含单 WI
+    /// scope 与他 Plan 成员；零成员判定以本枚举为准，不用 issue 空集或
+    /// run 冻结集代替。
+    pub fn list_attempts_for_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<Vec<CodingExecutionAttempt>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(plan_id)?;
+        let mut attempts: Vec<CodingExecutionAttempt> =
+            super::list_json_records(&self.coding_attempts_root(project_id, issue_id))?
+                .into_iter()
+                .filter(|attempt: &CodingExecutionAttempt| {
+                    attempt.work_item_group_id.as_deref() == Some(plan_id)
+                })
+                .collect();
+        attempts.sort_by(|left, right| {
+            left.attempt_no
+                .cmp(&right.attempt_no)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(attempts)
+    }
+
     pub fn get_active_attempt(
         &self,
         project_id: &str,

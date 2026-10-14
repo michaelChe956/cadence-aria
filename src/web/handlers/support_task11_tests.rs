@@ -340,8 +340,10 @@ fn t11_plan_run(
     }
 }
 
-/// 冻结集合 member 被独立删除：run 必须 Invalidated（冻结集合/selection 保留），
-/// 旧 command 的迟到首启标记必须拒绝——不得用原授权补建/推进不完整集合。
+/// 冻结集合 member 被独立删除（H2a 设计 2026-10-14 行55 partial 分支：仍有
+/// 成员在场）：run 必须 Invalidated（冻结集合/selection 保留），旧 command
+/// 的迟到首启标记必须拒绝——不得用原授权补建/推进不完整集合。「最后成员
+/// →零成员闭包」新语义由 h2a_workspace_reset_tests 覆盖（Main 授权更新）。
 #[test]
 fn plan_coding_n7_member_delete_invalidates_authorization() {
     let root = tempdir().expect("tempdir");
@@ -353,8 +355,21 @@ fn plan_coding_n7_member_delete_invalidates_authorization() {
     coding_store
         .write_coding_attempt_for_test(&group_member)
         .expect("bind member attempt to plan");
+    // 第二成员在场：本测试固定在「部分删除」形态（设计行55），不触发
+    // H2a 最后成员零成员闭包。
+    let survivor = t11_create_attempt(&coding_store, "work_item_0002", None);
+    let mut group_survivor = survivor.clone();
+    group_survivor.work_item_group_id = Some(T11_PLAN_ID.to_string());
+    coding_store
+        .write_coding_attempt_for_test(&group_survivor)
+        .expect("bind survivor attempt to plan");
 
-    let run = t11_plan_run(&group_member);
+    let mut run = t11_plan_run(&group_member);
+    run.target_attempts
+        .push(crate::product::advance_store::AdvanceTargetAttemptBinding {
+            target_repository_id: Uuid::new_v4().to_string(),
+            attempt_id: group_survivor.id.clone(),
+        });
     let runs_root = paths
         .issue_root(T11_PROJECT_ID, T11_ISSUE_ID)
         .join("coding-plan-runs");

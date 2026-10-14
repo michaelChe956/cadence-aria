@@ -481,10 +481,20 @@ async fn plan_coding_n7_missing_resource_reentry_and_late_start() {
 
         finalize_coding_attempt_deletion(&coding_store, &paths, &attempt)
             .expect("delete member workspace");
-        let stale = run_store
-            .get(PROJECT_ID, ISSUE_ID, N7_PLAN_A)
-            .expect("load run")
-            .expect("run invalidated by member deletion");
+        // H2a（Main 授权更新，设计 2026-10-14 行56/160）：唯一真实成员删除接
+        // 零成员闭包——旧执行轮完整关闭（run 清＋generation 切换）；旧 N7
+        // 「Invalidated 留盘」断言由设计取代（最后成员闭包语义由
+        // h2a_workspace_reset_tests 覆盖）。
+        let metadata = run_store
+            .get_workspace_lifecycle(PROJECT_ID, ISSUE_ID, N7_PLAN_A)
+            .expect("load lifecycle metadata")
+            .expect("last-member closure completed the round switch");
+        assert_eq!(metadata.generation, 2);
+        assert!(metadata.clearing.is_none());
+        assert!(
+            !n7_run_file(&paths, N7_PLAN_A).exists(),
+            "last-member closure purges the run"
+        );
         let (status, body) = delete_work_item_plan_request(&app, N7_PLAN_A).await;
         assert_eq!(status, StatusCode::OK, "delete body: {body}");
         assert!(!n7_run_file(&paths, N7_PLAN_A).exists());
@@ -493,7 +503,7 @@ async fn plan_coding_n7_missing_resource_reentry_and_late_start() {
             "D2.2 统一闭包持 delete lease＋purging 墓碑（安全删除窗口）——前导点锁一并清"
         );
 
-        let late = run_store.mark_start_requested(&stale);
+        let late = run_store.mark_start_requested(&run);
         assert!(
             late.is_err(),
             "late write on purged run must be rejected, got {late:?}"

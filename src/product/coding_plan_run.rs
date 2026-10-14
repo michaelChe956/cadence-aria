@@ -34,6 +34,12 @@ pub const PLAN_CODING_CONTINUATION_NOT_ENABLED: &str = "plan_coding_continuation
 /// 今晚唯一模式：一次显式授权只运行全局首个 ready WI。
 pub const PLAN_CODING_MODE_FIRST_READY_UNIT: &str = "first_ready_unit";
 
+/// H2a（设计 2026-10-14 A 节）：plan 执行轮生命周期元数据目录（冻结地址）
+/// `{issue_root}/coding-plan-workspace-lifecycles/`。其锁为同目录前导点
+/// `.{plan_id}.json.lock`（稳定 inode）：workspace 重置清理绝不删除；仅
+/// 真实 Plan 删除闭包（D2.2/H4）负责纳入清理。
+pub const CODING_PLAN_WORKSPACE_LIFECYCLES_DIR: &str = "coding-plan-workspace-lifecycles";
+
 /// run 相位序列：
 /// `prepared→ready_bound→start_requested→started/already_started/needs_human→paused`；
 /// 成员删除→`invalidated`（终局，不再可推进）。
@@ -120,6 +126,71 @@ pub struct CodingPlanRun {
     pub pause_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// H2a（设计 2026-10-14 A 节）：clearing 中的纯 ID pending 清单——冻结的
+/// 本轮清理对象（attempt/advance/retry/target），失败保持可续清的事实源。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingPlanWorkspaceClearing {
+    pub command_id: String,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_attempt_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_advance_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_retry_command_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_target_repository_ids: Vec<String>,
+    pub started_at: String,
+}
+
+/// H2a：重置回执（纯 ID/状态）——同 command 重试据此返回/续做这一次操作，
+/// 不再次清新轮。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingPlanWorkspaceResetReceipt {
+    pub command_id: String,
+    pub from_generation: u64,
+    pub to_generation: u64,
+    pub completed_at: String,
+}
+
+/// H2a：plan 执行轮生命周期元数据（`{issue_root}/coding-plan-workspace-lifecycles/
+/// {plan_id}.json`）。只有身份/状态：单调 generation、已退役 start/advance
+/// command 与 attempt/advance ID、clearing pending 清单与操作回执；无旧日志、
+/// unit 内容、完整 run 归档；不是第二 claim/scheduler 账本。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingPlanWorkspaceLifecycle {
+    pub project_id: String,
+    pub issue_id: String,
+    pub plan_id: String,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_command_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_attempt_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_advance_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearing: Option<CodingPlanWorkspaceClearing>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receipts: Vec<CodingPlanWorkspaceResetReceipt>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// H2a：闭包在 Plan 独占租约内采集后传入 `retire_workspace_round_with_lease`
+/// 的冻结清单（纯 ID）：retired_* 为退役围栏事实，pending_* 为清理对象。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodingPlanWorkspaceResetChecklist {
+    pub command_id: String,
+    pub retired_command_ids: Vec<String>,
+    pub retired_attempt_ids: Vec<String>,
+    pub retired_advance_ids: Vec<String>,
+    pub pending_attempt_ids: Vec<String>,
+    pub pending_advance_ids: Vec<String>,
+    pub pending_retry_command_ids: Vec<String>,
+    pub pending_target_repository_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +345,9 @@ impl CodingPlanRunStore {
         let run_path = self.run_path(project_id, issue_id, plan_id)?;
         self.with_plan_live_write(project_id, issue_id, plan_id, || {
             with_exclusive_lock(&run_path, || {
+                // H2a 退役围栏先行：clearing/退役 command 不能准备新轮
+                // （不能因活动 run 文件缺失重新准备）。
+                self.verify_workspace_round_admission(project_id, issue_id, plan_id, command_id)?;
                 // ① confirmed 权威身份。
                 let lifecycle = LifecycleStore::new(self.paths.clone());
                 let plan = lifecycle.get_issue_work_item_plan(project_id, issue_id, plan_id)?;
@@ -393,6 +467,13 @@ impl CodingPlanRunStore {
         let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
         self.with_plan_live_write(&run.project_id, &run.issue_id, &run.plan_id, || {
             with_exclusive_lock(&run_path, || {
+                // H2a 退役围栏：clearing/退役 command 的 run 更新一律拒绝。
+                self.verify_workspace_round_admission(
+                    &run.project_id,
+                    &run.issue_id,
+                    &run.plan_id,
+                    &run.command_id,
+                )?;
                 let stored =
                     self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
                 self.verify_same_identity(&stored, run)?;
@@ -591,6 +672,13 @@ impl CodingPlanRunStore {
         let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
         self.with_plan_live_write(&run.project_id, &run.issue_id, &run.plan_id, || {
             with_exclusive_lock(&run_path, || {
+                // H2a 退役围栏：clearing/退役 command 的 run 更新一律拒绝。
+                self.verify_workspace_round_admission(
+                    &run.project_id,
+                    &run.issue_id,
+                    &run.plan_id,
+                    &run.command_id,
+                )?;
                 let stored =
                     self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
                 self.verify_same_identity(&stored, run)?;
@@ -644,6 +732,13 @@ impl CodingPlanRunStore {
         let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
         self.with_plan_live_write(&run.project_id, &run.issue_id, &run.plan_id, || {
             with_exclusive_lock(&run_path, || {
+                // H2a 退役围栏：clearing/退役 command 的 run 更新一律拒绝。
+                self.verify_workspace_round_admission(
+                    &run.project_id,
+                    &run.issue_id,
+                    &run.plan_id,
+                    &run.command_id,
+                )?;
                 let stored =
                     self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
                 self.verify_same_identity(&stored, run)?;
@@ -736,24 +831,102 @@ impl CodingPlanRunStore {
         let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
         self.with_plan_live_write(&run.project_id, &run.issue_id, &run.plan_id, || {
             with_exclusive_lock(&run_path, || {
-                let stored =
-                    self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
-                if stored.project_id != attempt.project_id || stored.issue_id != attempt.issue_id {
-                    return Err(ProductStoreError::IdentityMismatch {
-                        kind: "coding_plan_run",
-                        id: run.plan_id.clone(),
-                    });
-                }
-                if matches!(stored.phase, CodingPlanRunPhase::Invalidated) {
-                    return Ok(());
-                }
-                let mut updated = stored.clone();
-                updated.phase = CodingPlanRunPhase::Invalidated;
-                updated.updated_at = Utc::now().to_rfc3339();
-                write_json(&run_path, &updated)?;
-                Ok(())
+                self.invalidate_run_file_locked(
+                    &run_path,
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &run.plan_id,
+                )
             })
         })
+    }
+
+    /// H2a（设计 2026-10-14 A 节）：消费已持 Plan 独占租约的成员删除失效。
+    /// 持租约清理闭包内调用，不二次 try-shared——原公开路径在独占租约下会
+    /// 以 `entity_deleting` 自拒；与公开闭包共用 `invalidate_run_file_locked`。
+    pub fn invalidate_for_deleted_attempt_with_lease(
+        &self,
+        lease: &EntityDeletionLease,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        let Some(plan_id) = attempt.work_item_group_id.clone() else {
+            return Ok(());
+        };
+        Self::verify_plan_lease_identity(lease, &attempt.project_id, &attempt.issue_id, &plan_id)?;
+        let Some(run) = self.scan_runs_for_attempt(attempt, plan_id, RunAttemptMatch::Member)?
+        else {
+            return Ok(());
+        };
+        let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
+        with_exclusive_lock(&run_path, || {
+            self.invalidate_run_file_locked(
+                &run_path,
+                &attempt.project_id,
+                &attempt.issue_id,
+                &run.plan_id,
+            )
+        })
+    }
+
+    /// H2a：闭包冻结清单时把现行 run 标 Invalidated（消费已持 Plan 独占
+    /// 租约；幂等；原授权 Invalidated 阻断新的本轮首启）。
+    pub fn invalidate_run_for_reset_with_lease(
+        &self,
+        lease: &EntityDeletionLease,
+        run: &CodingPlanRun,
+    ) -> Result<(), ProductStoreError> {
+        Self::verify_plan_lease_identity(lease, &run.project_id, &run.issue_id, &run.plan_id)?;
+        let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
+        with_exclusive_lock(&run_path, || {
+            self.invalidate_run_file_locked(&run_path, &run.project_id, &run.issue_id, &run.plan_id)
+        })
+    }
+
+    /// 锁内失效核体：重读 run（NotFound 上抛不吞）、核 (project,issue) 身份、
+    /// 幂等置 Invalidated（终局，冻结集合/selection 保留不抹除）。
+    fn invalidate_run_file_locked(
+        &self,
+        run_path: &Path,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        let stored = self.load_run(run_path, project_id, issue_id, plan_id)?;
+        if stored.project_id != project_id || stored.issue_id != issue_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_plan_run",
+                id: plan_id.to_string(),
+            });
+        }
+        if matches!(stored.phase, CodingPlanRunPhase::Invalidated) {
+            return Ok(());
+        }
+        let mut updated = stored.clone();
+        updated.phase = CodingPlanRunPhase::Invalidated;
+        updated.updated_at = Utc::now().to_rfc3339();
+        write_json(run_path, &updated)
+    }
+
+    /// Plan 独占租约身份核对：scope 必须与 (project,issue,plan) 全等。
+    fn verify_plan_lease_identity(
+        lease: &EntityDeletionLease,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        let scope = lease.scope();
+        scope.validate()?;
+        if scope.kind != DeletionEntityKind::Plan
+            || scope.project_id != project_id
+            || scope.issue_id != issue_id
+            || scope.entity_id != plan_id
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_plan_run_lease_scope",
+                id: plan_id.to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// REQ-CS-05：暂停补记（幂等）。attempt 单文件是停止事实；此处中断可按
@@ -762,6 +935,13 @@ impl CodingPlanRunStore {
         let run_path = self.run_path(&run.project_id, &run.issue_id, &run.plan_id)?;
         self.with_plan_live_write(&run.project_id, &run.issue_id, &run.plan_id, || {
             with_exclusive_lock(&run_path, || {
+                // H2a 退役围栏：clearing/退役 command 的 run 更新一律拒绝。
+                self.verify_workspace_round_admission(
+                    &run.project_id,
+                    &run.issue_id,
+                    &run.plan_id,
+                    &run.command_id,
+                )?;
                 let stored =
                     self.load_run(&run_path, &run.project_id, &run.issue_id, &run.plan_id)?;
                 self.verify_same_identity(&stored, run)?;
@@ -857,6 +1037,299 @@ impl CodingPlanRunStore {
         crate::product::coding_attempt_store::remove_file_if_exists(&lock_path)
     }
 
+    // ─── H2a（设计 2026-10-14 A/C 节）：plan 执行轮生命周期元数据 ───
+
+    /// 生命周期元数据目录（冻结地址）：
+    /// `{issue_root}/coding-plan-workspace-lifecycles/`（模块级
+    /// [`CODING_PLAN_WORKSPACE_LIFECYCLES_DIR`]）。
+
+    fn lifecycles_root(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        Ok(self
+            .paths
+            .issue_root(project_id, issue_id)
+            .join(CODING_PLAN_WORKSPACE_LIFECYCLES_DIR))
+    }
+
+    fn lifecycle_path(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<PathBuf, ProductStoreError> {
+        validate_relative_id(plan_id)?;
+        Ok(self
+            .lifecycles_root(project_id, issue_id)?
+            .join(format!("{plan_id}.json")))
+    }
+
+    /// 身份核对的元数据读取（无锁读：`write_json` 为 temp+rename 原子替换，
+    /// 读见旧或新完整 JSON；坏 JSON/身份错配/IO 错误上抛，不当 None）。
+    fn read_workspace_lifecycle(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<Option<CodingPlanWorkspaceLifecycle>, ProductStoreError> {
+        let path = self.lifecycle_path(project_id, issue_id, plan_id)?;
+        if !path_is_regular_file(&path)? {
+            return Ok(None);
+        }
+        let lifecycle: CodingPlanWorkspaceLifecycle = read_json(&path)?;
+        if lifecycle.project_id != project_id
+            || lifecycle.issue_id != issue_id
+            || lifecycle.plan_id != plan_id
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_plan_workspace_lifecycle",
+                id: plan_id.to_string(),
+            });
+        }
+        Ok(Some(lifecycle))
+    }
+
+    /// H2a：生命周期读取（H3/H4 GET/准入消费）。缺失＝从未重置（generation 1）。
+    pub fn get_workspace_lifecycle(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<Option<CodingPlanWorkspaceLifecycle>, ProductStoreError> {
+        self.read_workspace_lifecycle(project_id, issue_id, plan_id)
+    }
+
+    /// H2a：当前执行轮 generation（未创建过生命周期元数据＝1；单调不减）。
+    pub fn current_workspace_generation(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<u64, ProductStoreError> {
+        Ok(self
+            .read_workspace_lifecycle(project_id, issue_id, plan_id)?
+            .map_or(1, |lifecycle| lifecycle.generation))
+    }
+
+    /// H2a 退役围栏（设计 A 节「必需的退役/中断围栏」）：clearing 进行中或
+    /// 退役 command 一律拒绝（`coding_plan_workspace_clearing` /
+    /// `coding_plan_run_retired`）；IO/JSON 错误上抛 fail-closed。必须在
+    /// `with_plan_live_write` 共享区内调用——生命周期写方（retire/complete）
+    /// 持 Plan 独占租约，与共享区互斥，围栏读与生命周期写不可能并发。
+    pub fn verify_workspace_round_admission(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        command_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        let Some(lifecycle) = self.read_workspace_lifecycle(project_id, issue_id, plan_id)? else {
+            return Ok(());
+        };
+        if lifecycle.clearing.is_some() {
+            return Err(ProductStoreError::Conflict {
+                kind: "coding_plan_workspace_clearing",
+                id: plan_id.to_string(),
+            });
+        }
+        if lifecycle
+            .retired_command_ids
+            .iter()
+            .any(|id| id == command_id)
+        {
+            return Err(ProductStoreError::Conflict {
+                kind: "coding_plan_run_retired",
+                id: command_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// H2a：消费已持 Plan 独占租约的清单冻结——耐久 clearing（纯 ID pending
+    /// 清单）＋合并退役事实（旧 start/advance command、attempt/advance ID）。
+    /// 同 command 重入刷新同一 clearing（续清）；异 command 且 clearing 在位
+    /// 拒绝；clearing 缺失但同 command 回执已存在＝幂等重放，零写入。
+    pub fn retire_workspace_round_with_lease(
+        &self,
+        lease: &EntityDeletionLease,
+        checklist: &CodingPlanWorkspaceResetChecklist,
+    ) -> Result<CodingPlanWorkspaceLifecycle, ProductStoreError> {
+        let scope = lease.scope();
+        scope.validate()?;
+        if scope.kind != DeletionEntityKind::Plan {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_plan_workspace_lease_scope",
+                id: scope.entity_id.clone(),
+            });
+        }
+        let (project_id, issue_id, plan_id) = (
+            scope.project_id.as_str(),
+            scope.issue_id.as_str(),
+            scope.entity_id.as_str(),
+        );
+        for id in std::iter::once(&checklist.command_id)
+            .chain(checklist.retired_command_ids.iter())
+            .chain(checklist.retired_attempt_ids.iter())
+            .chain(checklist.retired_advance_ids.iter())
+            .chain(checklist.pending_attempt_ids.iter())
+            .chain(checklist.pending_advance_ids.iter())
+            .chain(checklist.pending_retry_command_ids.iter())
+            .chain(checklist.pending_target_repository_ids.iter())
+        {
+            validate_relative_id(id)?;
+        }
+        let path = self.lifecycle_path(project_id, issue_id, plan_id)?;
+        with_exclusive_lock(&path, || {
+            let now = Utc::now().to_rfc3339();
+            let mut lifecycle = self
+                .read_workspace_lifecycle(project_id, issue_id, plan_id)?
+                .unwrap_or_else(|| CodingPlanWorkspaceLifecycle {
+                    project_id: project_id.to_string(),
+                    issue_id: issue_id.to_string(),
+                    plan_id: plan_id.to_string(),
+                    generation: 1,
+                    retired_command_ids: Vec::new(),
+                    retired_attempt_ids: Vec::new(),
+                    retired_advance_ids: Vec::new(),
+                    clearing: None,
+                    receipts: Vec::new(),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                });
+            if let Some(clearing) = &lifecycle.clearing
+                && clearing.command_id != checklist.command_id
+            {
+                return Err(ProductStoreError::Conflict {
+                    kind: "coding_plan_workspace_clearing",
+                    id: plan_id.to_string(),
+                });
+            }
+            if lifecycle.clearing.is_none()
+                && lifecycle
+                    .receipts
+                    .iter()
+                    .any(|receipt| receipt.command_id == checklist.command_id)
+            {
+                // 同 command 已完整重置过的幂等重放：不再次冻结清新轮。
+                return Ok(lifecycle);
+            }
+            let merge = |existing: &mut Vec<String>, additions: &[String]| {
+                existing.extend(additions.iter().cloned());
+                existing.sort();
+                existing.dedup();
+            };
+            merge(
+                &mut lifecycle.retired_command_ids,
+                &checklist.retired_command_ids,
+            );
+            merge(
+                &mut lifecycle.retired_attempt_ids,
+                &checklist.retired_attempt_ids,
+            );
+            merge(
+                &mut lifecycle.retired_advance_ids,
+                &checklist.retired_advance_ids,
+            );
+            let sorted = |mut values: Vec<String>| {
+                values.sort();
+                values.dedup();
+                values
+            };
+            lifecycle.clearing = Some(CodingPlanWorkspaceClearing {
+                command_id: checklist.command_id.clone(),
+                generation: lifecycle.generation,
+                pending_attempt_ids: sorted(checklist.pending_attempt_ids.clone()),
+                pending_advance_ids: sorted(checklist.pending_advance_ids.clone()),
+                pending_retry_command_ids: sorted(checklist.pending_retry_command_ids.clone()),
+                pending_target_repository_ids: sorted(
+                    checklist.pending_target_repository_ids.clone(),
+                ),
+                started_at: lifecycle
+                    .clearing
+                    .as_ref()
+                    .map(|clearing| clearing.started_at.clone())
+                    .unwrap_or(now.clone()),
+            });
+            lifecycle.updated_at = now;
+            write_json(&path, &lifecycle)?;
+            Ok(lifecycle)
+        })
+    }
+
+    /// H2a：消费已持 Plan 独占租约的轮次切换收口——复核归零由编排层（同一
+    /// 受保护操作内）负责，此处完成 generation 单调 +1、清 pending、记纯 ID
+    /// 回执。clearing 缺失时同 command 回执幂等重放；异 command 拒绝。
+    pub fn complete_workspace_reset_with_lease(
+        &self,
+        lease: &EntityDeletionLease,
+        command_id: &str,
+    ) -> Result<CodingPlanWorkspaceLifecycle, ProductStoreError> {
+        let scope = lease.scope();
+        scope.validate()?;
+        if scope.kind != DeletionEntityKind::Plan {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "coding_plan_workspace_lease_scope",
+                id: scope.entity_id.clone(),
+            });
+        }
+        validate_relative_id(command_id)?;
+        let (project_id, issue_id, plan_id) = (
+            scope.project_id.as_str(),
+            scope.issue_id.as_str(),
+            scope.entity_id.as_str(),
+        );
+        let path = self.lifecycle_path(project_id, issue_id, plan_id)?;
+        with_exclusive_lock(&path, || {
+            let now = Utc::now().to_rfc3339();
+            let mut lifecycle = self
+                .read_workspace_lifecycle(project_id, issue_id, plan_id)?
+                .ok_or_else(|| ProductStoreError::InvalidRecord {
+                    kind: "coding_plan_workspace_lifecycle",
+                    reason: "cannot complete a workspace reset without lifecycle metadata"
+                        .to_string(),
+                })?;
+            match lifecycle.clearing.clone() {
+                None => {
+                    if lifecycle
+                        .receipts
+                        .iter()
+                        .any(|receipt| receipt.command_id == command_id)
+                    {
+                        return Ok(lifecycle);
+                    }
+                    Err(ProductStoreError::Conflict {
+                        kind: "coding_plan_workspace_clearing",
+                        id: plan_id.to_string(),
+                    })
+                }
+                Some(clearing) => {
+                    if clearing.command_id != command_id {
+                        return Err(ProductStoreError::Conflict {
+                            kind: "coding_plan_workspace_clearing",
+                            id: plan_id.to_string(),
+                        });
+                    }
+                    let from_generation = lifecycle.generation;
+                    lifecycle.generation += 1;
+                    lifecycle.receipts.push(CodingPlanWorkspaceResetReceipt {
+                        command_id: command_id.to_string(),
+                        from_generation,
+                        to_generation: lifecycle.generation,
+                        completed_at: now.clone(),
+                    });
+                    lifecycle.clearing = None;
+                    lifecycle.updated_at = now;
+                    write_json(&path, &lifecycle)?;
+                    Ok(lifecycle)
+                }
+            }
+        })
+    }
+
     fn scan_runs_for_attempt(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -914,13 +1387,14 @@ enum RunAttemptMatch {
     Member,
 }
 
+/// H2a 共享测试夹具（web 层零成员闭包测试与本地 store 测试同源，避免第二
+/// 份 fixture）：PlanRepair 种子 + 两 logical 仓 + per-unit target 草稿 +
+/// Manual advance 到 durable Ready（per-target attempts Created、units
+/// Pending、advance record/外层 journal/per-target journals 在场）。
 #[cfg(test)]
-mod tests {
+pub(crate) mod workspace_reset_fixtures {
     use super::*;
     use crate::product::checkpoint_store::CheckpointStore;
-    use crate::product::coding_models::{CodingExecutionStage, CodingUnitRun, CodingUnitRunStatus};
-    use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
-    use crate::product::entity_operation_store::EntityOperationStore;
     use crate::product::logical_codebase::{
         AggregatePolicyArtifactStore, IssueCodebaseSelection, IssueCodebaseSelectionStore,
         LogicalCodebaseFeature, LogicalCodebaseStore,
@@ -936,9 +1410,9 @@ mod tests {
     };
     use crate::web::test_controls::{PlanRepairFixtureControl, PlanRepairFixtureRuntime};
 
-    const PROJECT_ID: &str = "project_0001";
-    const ISSUE_ID: &str = "issue_plan_0001";
-    const PLAN_ID: &str = "work_item_plan_0001";
+    pub(crate) const PROJECT_ID: &str = "project_0001";
+    pub(crate) const ISSUE_ID: &str = "issue_plan_0001";
+    pub(crate) const PLAN_ID: &str = "work_item_plan_0001";
 
     fn run_git(cwd: &std::path::Path, args: &[&str]) {
         let status = std::process::Command::new("git")
@@ -969,46 +1443,46 @@ mod tests {
         )
     }
 
-    struct N2Fixture {
-        _root: tempfile::TempDir,
-        paths: ProductAppPaths,
-        api: crate::product::logical_codebase::LogicalRepositoryId,
-        web: crate::product::logical_codebase::LogicalRepositoryId,
-        revision_id: String,
-        bindings: Vec<AdvanceTargetAttemptBinding>,
+    pub(crate) struct N2Fixture {
+        pub(crate) _root: tempfile::TempDir,
+        pub(crate) paths: ProductAppPaths,
+        pub(crate) api: crate::product::logical_codebase::LogicalRepositoryId,
+        pub(crate) web: crate::product::logical_codebase::LogicalRepositoryId,
+        pub(crate) revision_id: String,
+        pub(crate) bindings: Vec<AdvanceTargetAttemptBinding>,
     }
 
     impl N2Fixture {
-        fn coding_store(&self) -> CodingAttemptStore {
+        pub(crate) fn coding_store(&self) -> CodingAttemptStore {
             CodingAttemptStore::new(self.paths.clone())
         }
 
-        fn run_store(&self) -> CodingPlanRunStore {
+        pub(crate) fn run_store(&self) -> CodingPlanRunStore {
             CodingPlanRunStore::new(self.paths.clone())
         }
 
-        fn run_file(&self) -> PathBuf {
+        pub(crate) fn run_file(&self) -> PathBuf {
             self.paths
                 .issue_root(PROJECT_ID, ISSUE_ID)
                 .join("coding-plan-runs")
                 .join(format!("{PLAN_ID}.json"))
         }
 
-        fn api_attempt(&self) -> CodingExecutionAttempt {
+        pub(crate) fn api_attempt(&self) -> CodingExecutionAttempt {
             self.coding_store()
                 .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, Some(self.api))
                 .unwrap()
                 .expect("api target attempt")
         }
 
-        fn web_attempt(&self) -> CodingExecutionAttempt {
+        pub(crate) fn web_attempt(&self) -> CodingExecutionAttempt {
             self.coding_store()
                 .get_attempt_for_work_item_group(PROJECT_ID, ISSUE_ID, PLAN_ID, Some(self.web))
                 .unwrap()
                 .expect("web target attempt")
         }
 
-        fn core_unit(
+        pub(crate) fn core_unit(
             &self,
             attempt: &CodingExecutionAttempt,
         ) -> crate::product::coding_models::CodingExecutionUnit {
@@ -1020,7 +1494,7 @@ mod tests {
                 .expect("wi_core unit materialized in the api attempt")
         }
 
-        fn core_selection(&self, command_id: &str) -> CodingPlanSelection {
+        pub(crate) fn core_selection(&self, command_id: &str) -> CodingPlanSelection {
             let attempt = self.api_attempt();
             let unit = self.core_unit(&attempt);
             CodingPlanSelection {
@@ -1039,11 +1513,7 @@ mod tests {
         }
     }
 
-    /// 夹具路线同 workspace_engine::tests::advance_split_targets：PlanRepair
-    /// 种子（confirmed plan + 权威 revision 链）+ 两 logical 仓 + per-unit
-    /// target 草稿，再 Manual advance 到 durable Ready（per-target attempts
-    /// Created、units Pending）。
-    async fn n2_fixture() -> N2Fixture {
+    pub(crate) async fn n2_fixture() -> N2Fixture {
         let root = tempfile::tempdir().unwrap();
         PlanRepairFixtureRuntime::seed(root.path(), PlanRepairFixtureControl::default())
             .await
@@ -1197,6 +1667,15 @@ mod tests {
             bindings: target_attempts,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::workspace_reset_fixtures::{ISSUE_ID, PLAN_ID, PROJECT_ID, n2_fixture};
+    use super::*;
+    use crate::product::coding_models::{CodingExecutionStage, CodingUnitRun, CodingUnitRunStatus};
+    use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
+    use crate::product::entity_operation_store::EntityOperationStore;
 
     /// 同 command/revision 重放冻结身份；异 revision/graph 拒绝且不写。
     #[tokio::test]
@@ -2222,5 +2701,278 @@ mod tests {
             matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "entity_deleting"),
             "no orphan run may be rebuilt after purge: {error}"
         );
+    }
+
+    // ─── H2a（设计 2026-10-14 A 节）：退役围栏/生命周期元数据/持租约失效 ───
+
+    fn h2a_checklist(
+        command_id: &str,
+        run: Option<&CodingPlanRun>,
+    ) -> CodingPlanWorkspaceResetChecklist {
+        let mut retired_command_ids = vec![command_id.to_string()];
+        let mut retired_attempt_ids = Vec::new();
+        if let Some(run) = run {
+            retired_command_ids.push(run.command_id.clone());
+            for binding in &run.target_attempts {
+                retired_attempt_ids.push(binding.attempt_id.clone());
+            }
+        }
+        CodingPlanWorkspaceResetChecklist {
+            command_id: command_id.to_string(),
+            retired_command_ids,
+            retired_attempt_ids: retired_attempt_ids.clone(),
+            retired_advance_ids: Vec::new(),
+            pending_attempt_ids: retired_attempt_ids,
+            pending_advance_ids: Vec::new(),
+            pending_retry_command_ids: Vec::new(),
+            pending_target_repository_ids: Vec::new(),
+        }
+    }
+
+    /// H2a T1：全删关闭旧执行轮后，退役 command 不能因 run 文件缺失重新
+    /// 准备（清 run 绝不是完整重置）；旧 run 快照迟到写被拒；新 command
+    /// 正常开新轮；generation 单调 +1 且回执/退役事实在位。
+    #[tokio::test]
+    async fn plan_workspace_h2a_retired_command_cannot_reprepare() {
+        let fixture = n2_fixture().await;
+        let run_store = fixture.run_store();
+        let run = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_h2a_round1",
+                &fixture.revision_id,
+            )
+            .unwrap();
+        let bound = run_store.bind_ready(&run, &fixture.bindings, None).unwrap();
+
+        let scope = EntityScope::new(PROJECT_ID, ISSUE_ID, DeletionEntityKind::Plan, PLAN_ID);
+        let lease = EntityOperationStore::new(fixture.paths.clone())
+            .try_acquire_delete(&scope)
+            .unwrap();
+        run_store
+            .retire_workspace_round_with_lease(
+                &lease,
+                &h2a_checklist("cmd_h2a_reset_0001", Some(&bound)),
+            )
+            .unwrap();
+        run_store.purge_plan_with_lease(&lease).unwrap();
+        let completed = run_store
+            .complete_workspace_reset_with_lease(&lease, "cmd_h2a_reset_0001")
+            .unwrap();
+        drop(lease);
+        assert_eq!(completed.generation, 2);
+        assert!(completed.clearing.is_none());
+        assert_eq!(completed.receipts.len(), 1);
+        assert_eq!(completed.receipts[0].from_generation, 1);
+        assert_eq!(completed.receipts[0].to_generation, 2);
+        assert!(
+            completed
+                .retired_command_ids
+                .contains(&"cmd_h2a_round1".to_string())
+        );
+
+        // 旧 command 复跑必须被退役围栏拒绝（run 文件已清也不得重建孤儿）。
+        let error = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_h2a_round1",
+                &fixture.revision_id,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "coding_plan_run_retired"),
+            "retired command must not re-prepare: {error}"
+        );
+        // 旧 run 快照的迟到 run 更新同样被拒。
+        let error = run_store.mark_start_requested(&bound).unwrap_err();
+        assert!(
+            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "coding_plan_run_retired"),
+            "late run writes must hit the retirement fence: {error}"
+        );
+        // 新 command 在新 generation 上正常开轮。
+        let fresh = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_h2a_round2",
+                &fixture.revision_id,
+            )
+            .unwrap();
+        assert_eq!(fresh.command_id, "cmd_h2a_round2");
+        assert!(matches!(fresh.phase, CodingPlanRunPhase::Prepared));
+    }
+
+    /// H2a T2：clearing 耐久阻断本轮首启/run 更新；异 command retire/
+    /// complete 拒绝穿越；同 command 续清与幂等重放零副作用。
+    #[tokio::test]
+    async fn plan_workspace_h2a_clearing_fences_and_completes() {
+        let fixture = n2_fixture().await;
+        let run_store = fixture.run_store();
+        let run = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_h2a_c_round1",
+                &fixture.revision_id,
+            )
+            .unwrap();
+
+        let scope = EntityScope::new(PROJECT_ID, ISSUE_ID, DeletionEntityKind::Plan, PLAN_ID);
+        let lease = EntityOperationStore::new(fixture.paths.clone())
+            .try_acquire_delete(&scope)
+            .unwrap();
+        run_store
+            .retire_workspace_round_with_lease(
+                &lease,
+                &h2a_checklist("cmd_h2a_c_reset", Some(&run)),
+            )
+            .unwrap();
+        drop(lease); // 模拟清理中断：clearing 耐久、租约已释放。
+
+        // clearing 阻断新首启与 run 更新。
+        for error in [
+            run_store
+                .prepare(
+                    PROJECT_ID,
+                    ISSUE_ID,
+                    PLAN_ID,
+                    "cmd_h2a_c_new",
+                    &fixture.revision_id,
+                )
+                .unwrap_err(),
+            run_store
+                .bind_ready(&run, &fixture.bindings, None)
+                .unwrap_err(),
+            run_store.mark_paused(&run).unwrap_err(),
+        ] {
+            assert!(
+                matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "coding_plan_workspace_clearing"),
+                "clearing must fence run writes: {error}"
+            );
+        }
+        // GET 可投影 clearing 事实。
+        let lifecycle = run_store
+            .get_workspace_lifecycle(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
+            .expect("durable clearing");
+        assert_eq!(
+            lifecycle.clearing.as_ref().unwrap().command_id,
+            "cmd_h2a_c_reset"
+        );
+
+        let lease = EntityOperationStore::new(fixture.paths.clone())
+            .try_acquire_delete(&scope)
+            .unwrap();
+        // 异 command retire/complete 拒绝穿越。
+        assert!(matches!(
+            run_store
+                .retire_workspace_round_with_lease(&lease, &h2a_checklist("cmd_h2a_c_other", None))
+                .unwrap_err(),
+            ProductStoreError::Conflict { ref kind, .. }
+                if *kind == "coding_plan_workspace_clearing"
+        ));
+        assert!(matches!(
+            run_store
+                .complete_workspace_reset_with_lease(&lease, "cmd_h2a_c_other")
+                .unwrap_err(),
+            ProductStoreError::Conflict { ref kind, .. }
+                if *kind == "coding_plan_workspace_clearing"
+        ));
+        // 同 command 重入 retire 刷新同一 clearing（续清），complete 完成轮次切换。
+        run_store
+            .retire_workspace_round_with_lease(
+                &lease,
+                &h2a_checklist("cmd_h2a_c_reset", Some(&run)),
+            )
+            .unwrap();
+        let completed = run_store
+            .complete_workspace_reset_with_lease(&lease, "cmd_h2a_c_reset")
+            .unwrap();
+        assert_eq!(completed.generation, 2);
+        assert!(completed.clearing.is_none());
+        // complete 幂等重放（clearing 已清、同 command 回执在）。
+        let replay = run_store
+            .complete_workspace_reset_with_lease(&lease, "cmd_h2a_c_reset")
+            .unwrap();
+        assert_eq!(replay, completed);
+        // retire 幂等重放：同 command 回执在，不再冻结新 clearing。
+        let after = run_store
+            .retire_workspace_round_with_lease(&lease, &h2a_checklist("cmd_h2a_c_reset", None))
+            .unwrap();
+        assert!(after.clearing.is_none());
+        assert_eq!(after.receipts.len(), 1);
+    }
+
+    /// H2a T3：持 Plan 独占租约时公开成员失效路径自拒 `entity_deleting`；
+    /// 消费已持租约的内部入口与原闭包共用实现，正常失效且冻结集保留；
+    /// 租约身份错配拒绝。
+    #[tokio::test]
+    async fn plan_workspace_h2a_invalidate_consumes_held_lease() {
+        let fixture = n2_fixture().await;
+        let run_store = fixture.run_store();
+        let run = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_h2a_l_round1",
+                &fixture.revision_id,
+            )
+            .unwrap();
+        let bound = run_store.bind_ready(&run, &fixture.bindings, None).unwrap();
+        let attempt = fixture.api_attempt();
+
+        let scope = EntityScope::new(PROJECT_ID, ISSUE_ID, DeletionEntityKind::Plan, PLAN_ID);
+        let lease = EntityOperationStore::new(fixture.paths.clone())
+            .try_acquire_delete(&scope)
+            .unwrap();
+        // 公开路径在独占租约下自拒（try-shared → entity_deleting）。
+        let error = run_store
+            .invalidate_for_deleted_attempt(&attempt)
+            .unwrap_err();
+        assert!(
+            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "entity_deleting"),
+            "public path must self-reject under the exclusive lease: {error}"
+        );
+        // 持租约内部入口不二次取 scope：成员失效成功且幂等。
+        run_store
+            .invalidate_for_deleted_attempt_with_lease(&lease, &attempt)
+            .unwrap();
+        run_store
+            .invalidate_for_deleted_attempt_with_lease(&lease, &attempt)
+            .unwrap();
+        let stored = run_store
+            .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
+            .expect("run still on disk");
+        assert!(matches!(stored.phase, CodingPlanRunPhase::Invalidated));
+        assert_eq!(stored.target_attempts, bound.target_attempts);
+        // run 维度重置失效入口同核（已 Invalidated 幂等）。
+        run_store
+            .invalidate_run_for_reset_with_lease(&lease, &bound)
+            .unwrap();
+        // 租约身份错配拒绝（异 plan scope）。
+        let other_scope = EntityScope::new(
+            PROJECT_ID,
+            ISSUE_ID,
+            DeletionEntityKind::Plan,
+            "work_item_plan_9999",
+        );
+        let other_lease = EntityOperationStore::new(fixture.paths.clone())
+            .try_acquire_delete(&other_scope)
+            .unwrap();
+        assert!(matches!(
+            run_store
+                .invalidate_run_for_reset_with_lease(&other_lease, &bound)
+                .unwrap_err(),
+            ProductStoreError::IdentityMismatch { ref kind, .. }
+                if *kind == "coding_plan_run_lease_scope"
+        ));
     }
 }

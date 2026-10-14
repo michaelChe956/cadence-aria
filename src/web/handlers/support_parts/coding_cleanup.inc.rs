@@ -208,6 +208,30 @@ fn shared_resource_cleanup_api_error(
     }
 }
 
+/// H2a 稳定码直通（设计 2026-10-14 B 节）：闭包自身的执行轮状态冲突码
+/// （`coding_plan_workspace_clearing` / `coding_plan_run_retired` /
+/// `coding_plan_workspace_generation_conflict` /
+/// `coding_plan_workspace_members_present`）原样透出给调用方/前端；
+/// HTTP 409 映射归 H1 白名单（error.rs）。其余 store 错误归既有通用映射。
+fn workspace_reset_api_error(error: crate::product::json_store::ProductStoreError) -> ApiError {
+    if let crate::product::json_store::ProductStoreError::Conflict { ref kind, .. } = error
+        && matches!(
+            kind.as_ref(),
+            "coding_plan_workspace_clearing"
+                | "coding_plan_run_retired"
+                | "coding_plan_workspace_generation_conflict"
+                | "coding_plan_workspace_members_present"
+        )
+    {
+        return ApiError::runtime(
+            *kind,
+            "coding workspace round reset rejected the request",
+            json!({}),
+        );
+    }
+    product_store_api_error(error)
+}
+
 /// 完成 attempt 删除的尾部清理（worktree/handoff 清理之后）。
 ///
 /// 顺序（spec `harden-coding-attempt-deletion` + N7 REQ-CS-07）：
@@ -246,15 +270,398 @@ pub(crate) fn finalize_coding_attempt_deletion(
     // 缺陷 #13 层2 存量出口：组入口路由分流修复前，Logical 路由的 group
     // create 会误写 issue 维 legacy 布局（与运行期 preflight 契约相反，恢复/
     // 完成门 fail-closed legacy_shared_worktree_present）。删除该 issue 的
-    // attempt 后条件清理 issue 维布局文件，恢复迁移契约一致性；正常仓维
-    // 布局下该文件不存在，清理幂等（NotFound=OK）。
     cleanup_issue_shared_worktree_if_no_attempts(
         coding_store,
         app_paths,
         &attempt.project_id,
         &attempt.issue_id,
     )?;
+    // H2a（设计 2026-10-14 D 节）：最后一个成员删除完成时接同一零成员闭包
+    // ——成功即清活动执行引用（run/advance 引用/初始化引用/专属资源，保留
+    // Plan/WI/revisions）；清理 IO/资源 busy 失败保持 clearing 耐久并如实
+    // 上抛，下一次产品动作同 command 续清（missing=OK 不重复副作用）。
+    if let Some(plan_id) = attempt.work_item_group_id.as_deref()
+        && coding_store
+            .list_attempts_for_plan(&attempt.project_id, &attempt.issue_id, plan_id)
+            .map_err(product_store_api_error)?
+            .is_empty()
+    {
+        let generation =
+            crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone())
+                .current_workspace_generation(&attempt.project_id, &attempt.issue_id, plan_id)
+                .map_err(product_store_api_error)?;
+        let command_id = format!("plan_workspace_close_{plan_id}_g{generation}");
+        close_plan_coding_workspace_round(
+            app_paths,
+            &attempt.project_id,
+            &attempt.issue_id,
+            plan_id,
+            &command_id,
+            None,
+            false,
+        )?;
+    }
     Ok(())
+}
+
+// ─── H2a（设计 2026-10-14 A/C/D 节）：零成员执行轮完整关闭闭包 ───
+
+/// 零成员闭包的分类/执行结果。
+#[derive(Debug)]
+pub(crate) enum PlanCodingWorkspaceResetOutcome {
+    /// 完整重置完成（或同 command 幂等重放）；`generation` 为重置后的新轮次。
+    Reset { generation: u64 },
+    /// 仅存在未越 AttemptPersisted 的初始化前缀——继续原协议，不重置
+    /// （设计 A 节：不能仅因 Prepared.target_attempts 为空便重置）。
+    InitializationPrefix,
+    /// 无任何执行引用（run/advance/journal 均无）——零变更。
+    Clean,
+}
+
+/// plan 执行引用分类（设计 A 节「journal 在而 attempts 亡」）：断裂证明 =
+/// run 冻结集非空（零存活即全亡）∪ H2b `classify_stale_references` 的
+/// advance 侧 `AllTargetsDead`（Ready record 绑定 ∪ 已越 AttemptPersisted
+/// 的外层 journal 绑定，全缺）∪ 已越 AttemptPersisted 的 per-target
+/// journal；仅 Prepared 前缀不计入断裂集（继续原协议）。存活集由闭包预检
+/// 枚举（零成员是闭包前置），此处恒以空集判定 advance 侧。
+struct PlanExecutionReferenceState {
+    run: Option<crate::product::coding_plan_run::CodingPlanRun>,
+    references: crate::product::advance_store::AdvancePlanExecutionReferences,
+    journals: Vec<crate::product::coding_attempt_store::CodingGroupInitializationJournal>,
+    broken: bool,
+    any_reference: bool,
+}
+
+fn classify_plan_execution_references(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+) -> ApiResult<PlanExecutionReferenceState> {
+    use crate::product::advance_store::AdvanceStaleReferenceVerdict;
+
+    let run = crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone())
+        .get(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?;
+    let references = crate::product::advance_store::AdvanceStore::new(app_paths.clone())
+        .plan_execution_references(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?;
+    let journals = CodingAttemptStore::new(app_paths.clone())
+        .list_group_initialization_journals_for_plan(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?;
+    let run_broken = run
+        .as_ref()
+        .is_some_and(|run| !run.target_attempts.is_empty());
+    let advance_broken = matches!(
+        references.classify_stale_references(&[]),
+        AdvanceStaleReferenceVerdict::AllTargetsDead { .. }
+    );
+    let journal_broken = journals.iter().any(|journal| {
+        journal.phase.has_reached(
+            crate::product::coding_attempt_store::CodingGroupInitializationPhase::AttemptPersisted,
+        )
+    });
+    Ok(PlanExecutionReferenceState {
+        any_reference: run.is_some()
+            || !references.records.is_empty()
+            || references.initialization_journal.is_some()
+            || !journals.is_empty(),
+        broken: run_broken || advance_broken || journal_broken,
+        run,
+        references,
+        journals,
+    })
+}
+
+/// H2a（设计 2026-10-14 A/C/D 节）：零成员执行轮完整关闭闭包——检测、耐久
+/// clearing、重新准入是同一受保护操作（Plan 独占租约经 `try_acquire_delete`
+/// 取得，**不立 Plan 墓碑**：不得给仍保留的 Plan 立永久删除事实）。
+///
+/// 顺序（设计「完整重置闭包」）：只读预检（零成员/分类/Plan 删除互斥）→
+/// 独占租约内复核 → 冻结纯 ID 清单＋耐久 clearing＋退役围栏事实＋原授权
+/// Invalidated → 清 group 初始化 journal（含 attempts 已亡的 journal）与
+/// WI 孤儿锁 → 目标仓专属资源清理（他人仍持有保留）→ advance retry →
+/// 外层 journal → AdvanceRecords → 活动 run → 复核归零 → 轮次切换
+/// （generation 单调 +1，纯 ID 回执）。任一步失败保持 clearing，同 command
+/// 重入续清（missing=OK），异 command 409 `coding_plan_workspace_clearing`。
+///
+/// `require_broken_proof=true`（自动补清，如开始动作零成员路径）仅已证旧
+/// 执行引用断裂才重置；`=false`（显式整组删除/最后成员删除尾部）零成员即
+/// 关闭。Planning 会话、Plan/WI/revision/source/compile、上游 Story/Design
+/// 不删（保留 plan/WI/revisions）。
+pub(crate) fn close_plan_coding_workspace_round(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+    command_id: &str,
+    expected_generation: Option<u64>,
+    require_broken_proof: bool,
+) -> ApiResult<PlanCodingWorkspaceResetOutcome> {
+    use crate::product::entity_deletion_store::{
+        DeletionEntityKind, EntityDeletionStore, EntityScope,
+    };
+    use crate::product::entity_operation_store::EntityOperationStore;
+    use crate::product::json_store::ProductStoreError;
+
+    // H2a 稳定码直通：本函数内全部 store 错误经 workspace_reset_api_error
+    // 映射（执行轮状态冲突码原样透出，其余归通用映射）。
+    fn product_store_api_error(error: ProductStoreError) -> ApiError {
+        workspace_reset_api_error(error)
+    }
+
+    let run_store = crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone());
+    let lifecycle = run_store
+        .get_workspace_lifecycle(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?;
+    let current_generation = lifecycle.as_ref().map_or(1, |metadata| metadata.generation);
+    let mut resuming = false;
+    if let Some(clearing) = lifecycle
+        .as_ref()
+        .and_then(|metadata| metadata.clearing.as_ref())
+    {
+        // 清理失败保持 clearing：同 command 重入续清；异 command 拒绝穿越。
+        if clearing.command_id != command_id {
+            return Err(product_store_api_error(ProductStoreError::Conflict {
+                kind: "coding_plan_workspace_clearing",
+                id: plan_id.to_string(),
+            }));
+        }
+        if expected_generation.is_some_and(|generation| generation != clearing.generation) {
+            return Err(product_store_api_error(ProductStoreError::Conflict {
+                kind: "coding_plan_workspace_generation_conflict",
+                id: plan_id.to_string(),
+            }));
+        }
+        resuming = true;
+    } else {
+        if let Some(to_generation) = lifecycle.as_ref().and_then(|metadata| {
+            metadata
+                .receipts
+                .iter()
+                .find(|receipt| receipt.command_id == command_id)
+                .map(|receipt| receipt.to_generation)
+        }) {
+            // 同 command 幂等重放：返回这一次操作已完成的轮次切换，不再次清。
+            return Ok(PlanCodingWorkspaceResetOutcome::Reset {
+                generation: to_generation,
+            });
+        }
+        if expected_generation.is_some_and(|generation| generation != current_generation) {
+            return Err(product_store_api_error(ProductStoreError::Conflict {
+                kind: "coding_plan_workspace_generation_conflict",
+                id: plan_id.to_string(),
+            }));
+        }
+    }
+
+    let scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
+    // Plan 真删除闭包（REQ-CS-07/D2）own 本清理——墓碑在位时不越权重置。
+    if EntityDeletionStore::new(app_paths.clone())
+        .get(&scope)
+        .map_err(product_store_api_error)?
+        .is_some()
+    {
+        return Err(ApiError::runtime(
+            "plan_coding_run_resource_unavailable",
+            "plan deletion closure owns this cleanup; coding workspace reset is unavailable",
+            json!({ "plan_id": plan_id }),
+        ));
+    }
+
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    if !coding_store
+        .list_attempts_for_plan(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?
+        .is_empty()
+    {
+        // 部分删除状态走 Invalidated＋显式清剩余出口，不由本闭包缩水收养。
+        return Err(product_store_api_error(ProductStoreError::Conflict {
+            kind: "coding_plan_workspace_members_present",
+            id: plan_id.to_string(),
+        }));
+    }
+    if !resuming {
+        let state = classify_plan_execution_references(app_paths, project_id, issue_id, plan_id)?;
+        if !state.any_reference {
+            return Ok(PlanCodingWorkspaceResetOutcome::Clean);
+        }
+        if !state.broken && require_broken_proof {
+            return Ok(PlanCodingWorkspaceResetOutcome::InitializationPrefix);
+        }
+    }
+
+    let lease = EntityOperationStore::new(app_paths.clone())
+        .try_acquire_delete(&scope)
+        .map_err(shared_resource_cleanup_api_error)?;
+    close_plan_coding_workspace_round_with_lease(
+        app_paths,
+        &lease,
+        plan_id,
+        command_id,
+        require_broken_proof,
+        resuming,
+    )
+}
+
+/// 闭包执行体：调用方持 Plan 独占租约（全临界区），每步幂等（missing=OK）。
+#[allow(clippy::too_many_arguments)]
+fn close_plan_coding_workspace_round_with_lease(
+    app_paths: &ProductAppPaths,
+    lease: &crate::product::entity_operation_store::EntityDeletionLease,
+    plan_id: &str,
+    command_id: &str,
+    require_broken_proof: bool,
+    resuming: bool,
+) -> ApiResult<PlanCodingWorkspaceResetOutcome> {
+    use crate::product::advance_store::{AdvancePlanArtifacts, AdvanceStore};
+    use crate::product::coding_plan_run::{CodingPlanRunStore, CodingPlanWorkspaceResetChecklist};
+    use crate::product::json_store::ProductStoreError;
+
+    // H2a 稳定码直通：本函数内全部 store 错误经 workspace_reset_api_error
+    // 映射（执行轮状态冲突码原样透出，其余归通用映射）。
+    fn product_store_api_error(error: ProductStoreError) -> ApiError {
+        workspace_reset_api_error(error)
+    }
+
+    let scope = lease.scope();
+    let (project_id, issue_id) = (scope.project_id.as_str(), scope.issue_id.as_str());
+    let lifecycle_store = LifecycleStore::new(app_paths.clone());
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let run_store = CodingPlanRunStore::new(app_paths.clone());
+    let advance_store = AdvanceStore::new(app_paths.clone());
+
+    // ① 锁内复核：plan 仍在、零成员、分类成立（预检与取租约之间的变更在此收敛）。
+    lifecycle_store
+        .get_issue_work_item_plan(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?;
+    if !coding_store
+        .list_attempts_for_plan(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?
+        .is_empty()
+    {
+        return Err(product_store_api_error(ProductStoreError::Conflict {
+            kind: "coding_plan_workspace_members_present",
+            id: plan_id.to_string(),
+        }));
+    }
+    let state = classify_plan_execution_references(app_paths, project_id, issue_id, plan_id)?;
+    if !resuming {
+        if !state.any_reference {
+            return Ok(PlanCodingWorkspaceResetOutcome::Clean);
+        }
+        if !state.broken && require_broken_proof {
+            return Ok(PlanCodingWorkspaceResetOutcome::InitializationPrefix);
+        }
+    }
+
+    // ② 冻结纯 ID 清单＋耐久 clearing＋退役围栏事实（merge 不覆盖既有退役）。
+    let manifest = lifecycle_store
+        .collect_entity_deletion_manifest(scope)
+        .map_err(product_store_api_error)?;
+    let mut retired_command_ids: Vec<String> = Vec::new();
+    let mut retired_attempt_ids: Vec<String> = Vec::new();
+    let mut pending_target_repository_ids: Vec<String> = manifest.target_repository_ids.clone();
+    if let Some(run) = &state.run {
+        retired_command_ids.push(run.command_id.clone());
+        for binding in &run.target_attempts {
+            retired_attempt_ids.push(binding.attempt_id.clone());
+            pending_target_repository_ids.push(binding.target_repository_id.clone());
+        }
+        if let Some(selection) = &run.selection {
+            retired_attempt_ids.push(selection.attempt_id.clone());
+            pending_target_repository_ids.push(selection.target_repository_id.clone());
+        }
+    }
+    for record in &state.references.records {
+        retired_command_ids.push(record.command_id.clone());
+    }
+    for journal in &state.journals {
+        retired_attempt_ids.push(journal.attempt.id.clone());
+    }
+    let checklist = CodingPlanWorkspaceResetChecklist {
+        command_id: command_id.to_string(),
+        retired_command_ids: retired_command_ids.clone(),
+        retired_attempt_ids: retired_attempt_ids.clone(),
+        retired_advance_ids: manifest.advance_ids.clone(),
+        pending_attempt_ids: retired_attempt_ids,
+        pending_advance_ids: manifest.advance_ids.clone(),
+        pending_retry_command_ids: manifest.advance_retry_command_ids.clone(),
+        pending_target_repository_ids,
+    };
+    run_store
+        .retire_workspace_round_with_lease(lease, &checklist)
+        .map_err(product_store_api_error)?;
+    // 原授权 Invalidated（幂等；阻断清理窗口内的本轮首启；run 已清则跳过）。
+    if let Some(run) = &state.run
+        && run_store
+            .get(project_id, issue_id, plan_id)
+            .map_err(product_store_api_error)?
+            .is_some()
+    {
+        run_store
+            .invalidate_run_for_reset_with_lease(lease, run)
+            .map_err(product_store_api_error)?;
+    }
+
+    // ③ 清 group 初始化 journal（含 attempts 已亡的 journal；H2b 租约消费
+    //    闭包：legacy 原路径 + per-target 子目录）＋WI 孤儿锁。
+    for journal in &state.journals {
+        purge_coding_attempt_lock_residue(
+            app_paths,
+            &journal.attempt,
+            std::slice::from_ref(&journal.lock_work_item_id),
+        );
+    }
+    coding_store
+        .purge_group_initialization_journals_with_lease(lease)
+        .map_err(product_store_api_error)?;
+
+    // ④ 目标仓专属资源清理（真实 owner 复核：他人仍持有保留；缺失=已清）。
+    cleanup_plan_shared_worktrees(app_paths, lease, &manifest, state.run.as_ref(), &[])?;
+
+    // ⑤ advance retry → 外层初始化 journal → AdvanceRecords → 活动 run。
+    advance_store
+        .purge_plan_artifacts(
+            lease,
+            &AdvancePlanArtifacts {
+                advance_ids: manifest.advance_ids.clone(),
+                retry_command_ids: manifest.advance_retry_command_ids.clone(),
+            },
+        )
+        .map_err(product_store_api_error)?;
+    run_store
+        .purge_plan_with_lease(lease)
+        .map_err(product_store_api_error)?;
+
+    // ⑥ 复核本轮活动执行引用归零（专属资源可能因他人保留，不在复核列）。
+    let residue = advance_store
+        .list_plan_artifacts(project_id, issue_id, plan_id)
+        .map_err(product_store_api_error)?;
+    if !residue.advance_ids.is_empty()
+        || !residue.retry_command_ids.is_empty()
+        || !coding_store
+            .list_group_initialization_journals_for_plan(project_id, issue_id, plan_id)
+            .map_err(product_store_api_error)?
+            .is_empty()
+        || run_store
+            .get(project_id, issue_id, plan_id)
+            .map_err(product_store_api_error)?
+            .is_some()
+    {
+        return Err(product_store_api_error(ProductStoreError::Conflict {
+            kind: "coding_plan_workspace_clearing",
+            id: plan_id.to_string(),
+        }));
+    }
+
+    // ⑦ 轮次切换：generation 单调 +1、清 pending、纯 ID 回执。
+    let metadata = run_store
+        .complete_workspace_reset_with_lease(lease, command_id)
+        .map_err(product_store_api_error)?;
+    Ok(PlanCodingWorkspaceResetOutcome::Reset {
+        generation: metadata.generation,
+    })
 }
 
 // ─── D2.2（fix-cascade-deletion Task 3.2）：三类 DELETE 的目标仓资源清理 ───
@@ -492,4 +899,395 @@ fn shared_worktree_has_other_live_owner(
         }
     }
     Ok(false)
+}
+
+// ─── H2a（设计 2026-10-14 A/C/D 节）：零成员闭包与最后成员钩子测试 ───
+
+#[cfg(test)]
+mod h2a_workspace_reset_tests {
+    use super::*;
+    use crate::product::coding_plan_run::workspace_reset_fixtures::{
+        ISSUE_ID, PLAN_ID, PROJECT_ID, n2_fixture,
+    };
+    use crate::product::coding_plan_run::{CodingPlanRunPhase, CodingPlanRunStore};
+    use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
+    use crate::product::entity_operation_store::EntityOperationStore;
+
+    fn plan_scope() -> EntityScope {
+        EntityScope::new(PROJECT_ID, ISSUE_ID, DeletionEntityKind::Plan, PLAN_ID)
+    }
+
+    fn advance_root(paths: &ProductAppPaths) -> std::path::PathBuf {
+        paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("advance-records")
+    }
+
+    fn attempt_file(paths: &ProductAppPaths, attempt_id: &str) -> std::path::PathBuf {
+        paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("coding-attempts")
+            .join(format!("{attempt_id}.json"))
+    }
+
+    fn per_target_journal_file(
+        paths: &ProductAppPaths,
+        target_repository_id: &str,
+    ) -> std::path::PathBuf {
+        paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("coding-attempts")
+            .join("group-initializations")
+            .join(PLAN_ID)
+            .join(format!("{target_repository_id}.json"))
+    }
+
+    /// H2a T4（设计 E 节验收 1/2 的存储面）：全删后完整关闭旧执行轮——
+    /// 最后成员删除自动接零成员闭包；run/advance/初始化引用清、
+    /// Plan/WI/revisions 保留；轮次切换（generation 2、回执、退役围栏）；
+    /// 同 command 幂等重放不再次清新轮。
+    #[tokio::test]
+    async fn h2a_last_member_delete_closes_old_round_completely() {
+        let fixture = n2_fixture().await;
+        let run_store = fixture.run_store();
+        let run = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_h2a_w_round1",
+                &fixture.revision_id,
+            )
+            .unwrap();
+        run_store.bind_ready(&run, &fixture.bindings, None).unwrap();
+        let coding_store = fixture.coding_store();
+        let api = fixture.api_attempt();
+        let web = fixture.web_attempt();
+
+        // 部分删除：run Invalidated、闭包不触发、剩余成员保留（partial 拒收养）。
+        finalize_coding_attempt_deletion(&coding_store, &fixture.paths, &api).unwrap();
+        let stored = run_store
+            .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
+            .expect("run kept for the partial state");
+        assert!(matches!(stored.phase, CodingPlanRunPhase::Invalidated));
+        assert!(
+            run_store
+                .get_workspace_lifecycle(PROJECT_ID, ISSUE_ID, PLAN_ID)
+                .unwrap()
+                .is_none(),
+            "partial delete must not start clearing"
+        );
+        assert_eq!(
+            coding_store
+                .list_attempts_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // 最后成员删除：接同一零成员闭包，完整关闭旧执行轮。
+        finalize_coding_attempt_deletion(&coding_store, &fixture.paths, &web).unwrap();
+
+        assert!(
+            run_store
+                .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+                .unwrap()
+                .is_none()
+        );
+        let artifacts = crate::product::advance_store::AdvanceStore::new(fixture.paths.clone())
+            .list_plan_artifacts(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap();
+        assert!(artifacts.advance_ids.is_empty());
+        assert!(artifacts.retry_command_ids.is_empty());
+        assert!(
+            !advance_root(&fixture.paths)
+                .join(format!("{PLAN_ID}.initialization.json"))
+                .exists()
+        );
+        assert!(
+            coding_store
+                .list_group_initialization_journals_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+                .unwrap()
+                .is_empty()
+        );
+        let lifecycle = run_store
+            .get_workspace_lifecycle(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
+            .expect("lifecycle metadata after reset");
+        assert_eq!(lifecycle.generation, 2);
+        assert!(lifecycle.clearing.is_none());
+        assert_eq!(lifecycle.receipts.len(), 1);
+        assert_eq!(lifecycle.receipts[0].to_generation, 2);
+        assert!(
+            lifecycle
+                .retired_command_ids
+                .contains(&"cmd_h2a_w_round1".to_string())
+        );
+        // 保留 Plan/WI/revisions。
+        LifecycleStore::new(fixture.paths.clone())
+            .get_issue_work_item_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap();
+        let lineage = crate::product::work_item_revision_store::WorkItemRevisionStore::new(
+            fixture.paths.clone(),
+        )
+        .get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap();
+        assert_eq!(
+            lineage.active_revision_id.as_deref(),
+            Some(fixture.revision_id.as_str())
+        );
+        // 旧 command 复跑拒绝；新 command 开新轮。
+        let error = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_h2a_w_round1",
+                &fixture.revision_id,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                crate::product::json_store::ProductStoreError::Conflict { ref kind, .. }
+                    if *kind == "coding_plan_run_retired"
+            ),
+            "retired command must not re-prepare after full reset: {error}"
+        );
+        run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_h2a_w_round2",
+                &fixture.revision_id,
+            )
+            .unwrap();
+
+        // 同 command 幂等重放：返回已完成的轮次切换，不再次清新轮
+        //（新 run 已存在且不得被触碰）。
+        let replay_command = format!("plan_workspace_close_{PLAN_ID}_g1");
+        match close_plan_coding_workspace_round(
+            &fixture.paths,
+            PROJECT_ID,
+            ISSUE_ID,
+            PLAN_ID,
+            &replay_command,
+            None,
+            false,
+        )
+        .unwrap()
+        {
+            PlanCodingWorkspaceResetOutcome::Reset { generation } => assert_eq!(generation, 2),
+            other => panic!("expected idempotent replay, got {other:?}"),
+        }
+        assert!(
+            run_store
+                .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+                .unwrap()
+                .is_some(),
+            "replay must not clear the fresh round"
+        );
+    }
+
+    /// H2a T5（设计 A 节「journal 在而 attempts 亡」）：仅 Prepared 前缀
+    /// journal 时自动补清不重置（前缀继续原协议、零变更）；显式关闭
+    ///（require_broken_proof=false）清前缀 journal 并完成轮次切换。
+    #[tokio::test]
+    async fn h2a_initialization_prefix_is_not_reset_automatically() {
+        let fixture = n2_fixture().await;
+        let coding_store = fixture.coding_store();
+        let journals = coding_store
+            .list_group_initialization_journals_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap();
+        assert_eq!(journals.len(), 2);
+        let mut prefix_journals = Vec::new();
+        for journal in &journals {
+            let mut prefix = journal.clone();
+            prefix.phase =
+                crate::product::coding_attempt_store::CodingGroupInitializationPhase::Prepared;
+            let target_repository_id = prefix
+                .attempt
+                .target_snapshot
+                .as_ref()
+                .expect("target snapshot")
+                .logical_repository_id
+                .0
+                .to_string();
+            prefix_journals.push((target_repository_id, prefix));
+        }
+
+        // 半残现场：attempt JSON 已亡（外部路径删除）、run/advance 全清，
+        // 仅回放一个 Prepared 前缀 journal。
+        for attempt in [fixture.api_attempt(), fixture.web_attempt()] {
+            std::fs::remove_file(attempt_file(&fixture.paths, &attempt.id)).unwrap();
+        }
+        let scope = plan_scope();
+        let lease = EntityOperationStore::new(fixture.paths.clone())
+            .try_acquire_delete(&scope)
+            .unwrap();
+        let advance_store = crate::product::advance_store::AdvanceStore::new(fixture.paths.clone());
+        let artifacts = advance_store
+            .list_plan_artifacts(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap();
+        advance_store
+            .purge_plan_artifacts(&lease, &artifacts)
+            .unwrap();
+        drop(lease);
+        for (target_repository_id, prefix) in &prefix_journals {
+            let path = per_target_journal_file(&fixture.paths, target_repository_id);
+            crate::product::json_store::write_json(&path, prefix).unwrap();
+        }
+        let journal_path = per_target_journal_file(&fixture.paths, &prefix_journals[0].0);
+
+        // 自动补清（require_broken_proof=true）：前缀保护，零变更。
+        match close_plan_coding_workspace_round(
+            &fixture.paths,
+            PROJECT_ID,
+            ISSUE_ID,
+            PLAN_ID,
+            "cmd_h2a_prefix_auto",
+            None,
+            true,
+        )
+        .unwrap()
+        {
+            PlanCodingWorkspaceResetOutcome::InitializationPrefix => {}
+            other => panic!("expected prefix protection, got {other:?}"),
+        }
+        assert!(journal_path.is_file());
+        assert!(
+            CodingPlanRunStore::new(fixture.paths.clone())
+                .get_workspace_lifecycle(PROJECT_ID, ISSUE_ID, PLAN_ID)
+                .unwrap()
+                .is_none()
+        );
+
+        // 显式关闭（require_broken_proof=false）：清前缀 journal + 轮次切换。
+        match close_plan_coding_workspace_round(
+            &fixture.paths,
+            PROJECT_ID,
+            ISSUE_ID,
+            PLAN_ID,
+            "cmd_h2a_prefix_close",
+            None,
+            false,
+        )
+        .unwrap()
+        {
+            PlanCodingWorkspaceResetOutcome::Reset { generation } => assert_eq!(generation, 2),
+            other => panic!("expected explicit close, got {other:?}"),
+        }
+        assert!(!journal_path.is_file());
+    }
+
+    /// H2a T6（设计 A 节状态表「重置清理中断」）：清单已冻结、run 已单独
+    /// 清掉的中断形态——同 command 重入续清补完（advance/journal 残留清、
+    /// generation 切换），异 command 409 `coding_plan_workspace_clearing`
+    /// 拒绝穿越。
+    #[tokio::test]
+    async fn h2a_clearing_resume_and_command_exclusivity() {
+        let fixture = n2_fixture().await;
+        let run_store = fixture.run_store();
+        let run = run_store
+            .prepare(
+                PROJECT_ID,
+                ISSUE_ID,
+                PLAN_ID,
+                "cmd_h2a_r_round1",
+                &fixture.revision_id,
+            )
+            .unwrap();
+        run_store.bind_ready(&run, &fixture.bindings, None).unwrap();
+        let coding_store = fixture.coding_store();
+
+        // 半残现场（原事故形态）：attempt JSON 已亡、journals/advance 残留、
+        // 清单冻结后中断、run 文件已被单独清掉。
+        for attempt in [fixture.api_attempt(), fixture.web_attempt()] {
+            std::fs::remove_file(attempt_file(&fixture.paths, &attempt.id)).unwrap();
+        }
+        let scope = plan_scope();
+        let lease = EntityOperationStore::new(fixture.paths.clone())
+            .try_acquire_delete(&scope)
+            .unwrap();
+        let advance_store = crate::product::advance_store::AdvanceStore::new(fixture.paths.clone());
+        let artifacts = advance_store
+            .list_plan_artifacts(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap();
+        assert_eq!(artifacts.advance_ids.len(), 1);
+        use crate::product::coding_plan_run::CodingPlanWorkspaceResetChecklist;
+        let checklist = CodingPlanWorkspaceResetChecklist {
+            command_id: "cmd_h2a_r_close".to_string(),
+            retired_command_ids: vec!["cmd_h2a_r_round1".to_string()],
+            retired_attempt_ids: fixture
+                .bindings
+                .iter()
+                .map(|binding| binding.attempt_id.clone())
+                .collect(),
+            retired_advance_ids: artifacts.advance_ids.clone(),
+            pending_attempt_ids: fixture
+                .bindings
+                .iter()
+                .map(|binding| binding.attempt_id.clone())
+                .collect(),
+            pending_advance_ids: artifacts.advance_ids.clone(),
+            pending_retry_command_ids: artifacts.retry_command_ids.clone(),
+            pending_target_repository_ids: fixture
+                .bindings
+                .iter()
+                .map(|binding| binding.target_repository_id.clone())
+                .collect(),
+        };
+        run_store
+            .retire_workspace_round_with_lease(&lease, &checklist)
+            .unwrap();
+        run_store.purge_plan_with_lease(&lease).unwrap();
+        drop(lease);
+
+        // 异 command 拒绝穿越 clearing。
+        let error = close_plan_coding_workspace_round(
+            &fixture.paths,
+            PROJECT_ID,
+            ISSUE_ID,
+            PLAN_ID,
+            "cmd_h2a_r_other",
+            None,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "coding_plan_workspace_clearing");
+
+        // 同 command 续清：journal/advance 残留清完 + 轮次切换。
+        match close_plan_coding_workspace_round(
+            &fixture.paths,
+            PROJECT_ID,
+            ISSUE_ID,
+            PLAN_ID,
+            "cmd_h2a_r_close",
+            None,
+            false,
+        )
+        .unwrap()
+        {
+            PlanCodingWorkspaceResetOutcome::Reset { generation } => assert_eq!(generation, 2),
+            other => panic!("expected resume completion, got {other:?}"),
+        }
+        let artifacts_after = advance_store
+            .list_plan_artifacts(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap();
+        assert!(artifacts_after.advance_ids.is_empty());
+        assert!(
+            coding_store
+                .list_group_initialization_journals_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+                .unwrap()
+                .is_empty()
+        );
+        let lifecycle = run_store
+            .get_workspace_lifecycle(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
+            .expect("lifecycle after resume");
+        assert_eq!(lifecycle.generation, 2);
+        assert!(lifecycle.clearing.is_none());
+    }
 }
