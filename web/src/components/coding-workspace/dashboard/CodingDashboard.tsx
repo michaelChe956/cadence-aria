@@ -3,19 +3,34 @@ import { useEffect, useMemo, useState } from "react";
 import { Activity, ChevronDown, ChevronUp } from "lucide-react";
 import {
   selectCodingBudgetGates,
+  selectCodingDashboardUnits,
   selectCodingDependencyChain,
   selectCodingTopology,
 } from "../../../state/coding-dashboard-projection";
 import { useCodingWorkspaceStore } from "../../../state/coding-workspace-store";
+import { usePlanCodingProgress } from "../../../hooks/usePlanCodingProgress";
 import { CodingBudgetGates } from "./CodingBudgetGates";
 import { CodingDependencyChainView } from "./CodingDependencyChain";
 import { CodingLogConsole } from "./CodingLogConsole";
 import { CodingTopologyGraph } from "./CodingTopologyGraph";
 
-export function CodingDashboard() {
+// Slice B（仪表盘跨仓依赖投影）：group attempt 且地址在场时拉取 plan 聚合，
+// 拓扑/依赖链改用 plan 全图 units（跨桶 WI=等待灰卡，跨仓下游边自动出现）；
+// 无聚合（GET 缺席/失败）或 v1 单 attempt 由纯投影回落桶内 session units。
+export function CodingDashboard({
+  projectId,
+  issueId,
+}: {
+  projectId?: string;
+  issueId?: string;
+}) {
   const units = useCodingWorkspaceStore((state) => state.units);
   const timelineNodes = useCodingWorkspaceStore((state) => state.timelineNodes);
   const currentWorkItemId = useCodingWorkspaceStore((state) => state.currentWorkItemId);
+  const attemptScope = useCodingWorkspaceStore((state) => state.attemptScope);
+  const workItemGroupId = useCodingWorkspaceStore((state) => state.workItemGroupId);
+  const attemptStatus = useCodingWorkspaceStore((state) => state.status);
+  const attemptStage = useCodingWorkspaceStore((state) => state.stage);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [selectedWorkItemId, setSelectedWorkItemId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(false);
@@ -25,11 +40,22 @@ export function CodingDashboard() {
     return () => window.clearInterval(timer);
   }, []);
 
+  const aggregate = usePlanCodingProgress({
+    projectId,
+    issueId,
+    planId: workItemGroupId,
+    refreshKey: `${attemptStatus ?? "-"}-${attemptStage ?? "-"}-${units.length}`,
+    enabled: attemptScope === "work_item_group",
+  });
   const focusWorkItemId = selectedWorkItemId ?? currentWorkItemId;
-  const topology = useMemo(() => selectCodingTopology(units), [units]);
+  const topologyUnits = useMemo(
+    () => selectCodingDashboardUnits(units, aggregate),
+    [units, aggregate],
+  );
+  const topology = useMemo(() => selectCodingTopology(topologyUnits), [topologyUnits]);
   const chain = useMemo(
-    () => (focusWorkItemId ? selectCodingDependencyChain(units, focusWorkItemId) : null),
-    [focusWorkItemId, units],
+    () => (focusWorkItemId ? selectCodingDependencyChain(topologyUnits, focusWorkItemId) : null),
+    [focusWorkItemId, topologyUnits],
   );
   const gates = useMemo(() => selectCodingBudgetGates(timelineNodes, nowMs), [timelineNodes, nowMs]);
 

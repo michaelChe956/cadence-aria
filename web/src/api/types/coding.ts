@@ -608,6 +608,11 @@ export type PlanCodingUnitProgressDto = {
   execution_state: PlanCodingExecutionState;
   unsatisfied_dependency_ids: string[];
   waiting_reason: PlanCodingWaitingReason | null;
+  // Slice B（仪表盘跨仓依赖投影）：全量直接依赖（权威绑定，跨桶不失真）、
+  // 全图拓扑序与桶内摘要，供前端重建 plan 全图拓扑/依赖链。
+  dependency_logical_work_item_ids: string[];
+  order_index: number;
+  summary: string | null;
 };
 
 // 按 bound target attempts 聚合的 plan 进度；primary 仅打开入口，不代表整 plan

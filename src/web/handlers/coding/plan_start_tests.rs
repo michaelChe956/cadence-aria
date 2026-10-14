@@ -1120,7 +1120,7 @@ async fn plan_coding_n3_get_aggregation_primary_is_not_completion() {
             &selection.attempt_id,
             &selection.unit_id,
             CodingExecutionUnitStatus::Completed,
-            None,
+            Some("wi_core 首轮完成".to_string()),
         )
         .unwrap();
     let paused = run_store.mark_paused(&started).unwrap();
@@ -1181,6 +1181,34 @@ async fn plan_coding_n3_get_aggregation_primary_is_not_completion() {
         panel.unsatisfied_dependency_ids,
         vec!["wi_service".to_string(), "wi_unrelated".to_string()]
     );
+    // Slice B（仪表盘跨仓依赖投影）：聚合 DTO 携带全量直接依赖、全图拓扑
+    // 序与桶内摘要——前端才能以 plan 全图重建拓扑/依赖链（跨桶 WI 不再被
+    // 桶内 session units 口径吞掉）。
+    assert_eq!(core.dependency_logical_work_item_ids, Vec::<String>::new());
+    assert_eq!(core.order_index, 0);
+    assert_eq!(core.summary.as_deref(), Some("wi_core 首轮完成"));
+    // wi_registration 在 web 桶，其上游 wi_core 在 busi 桶：全量依赖必须跨桶投影。
+    assert_eq!(
+        registration.dependency_logical_work_item_ids,
+        vec!["wi_core".to_string()]
+    );
+    assert_eq!(registration.order_index, 1);
+    assert_eq!(registration.summary, None);
+    assert_eq!(
+        unrelated.dependency_logical_work_item_ids,
+        Vec::<String>::new()
+    );
+    assert_eq!(unrelated.order_index, 2);
+    assert_eq!(
+        service.dependency_logical_work_item_ids,
+        vec!["wi_unrelated".to_string()]
+    );
+    assert_eq!(service.order_index, 3);
+    assert_eq!(
+        panel.dependency_logical_work_item_ids,
+        vec!["wi_service".to_string(), "wi_unrelated".to_string()]
+    );
+    assert_eq!(panel.order_index, 4);
 }
 
 /// REQ-CS-08：旧 group coding POST 的响应形状与准入结果不变——多 target

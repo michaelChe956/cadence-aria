@@ -1229,6 +1229,8 @@ pub struct PlanCodingTargetDto {
 /// （claim 相位 ≥ ProviderMayHaveStarted）与初始化 unit Running 区分；
 /// `waiting_reason` 值域
 /// `dependency_not_ready|execution_slot_occupied|plan_coding_continuation_not_enabled`。
+/// Slice B（仪表盘跨仓依赖投影）：另带全量直接依赖（权威绑定，跨桶不失真）、
+/// 全图拓扑序 `order_index` 与桶内 `summary`，前端据此重建 plan 全图拓扑/依赖链。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PlanCodingUnitProgressDto {
@@ -1240,6 +1242,9 @@ pub struct PlanCodingUnitProgressDto {
     pub execution_state: String,
     pub unsatisfied_dependency_ids: Vec<String>,
     pub waiting_reason: Option<String>,
+    pub dependency_logical_work_item_ids: Vec<String>,
+    pub order_index: usize,
+    pub summary: Option<String>,
 }
 
 /// N3（REQ-CS-06）：按 bound target attempts 聚合的 plan 进度（GET/POST 共用

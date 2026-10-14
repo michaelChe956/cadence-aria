@@ -702,6 +702,12 @@ pub(crate) fn build_plan_coding_progress(
             .cloned()
             .collect();
         unsatisfied_dependency_ids.sort();
+        // Slice B（仪表盘跨仓依赖投影）：全量直接依赖取权威绑定（跨桶边
+        // 不因本 attempt 桶缺席而丢失），与全图拓扑序一并供前端重建 plan
+        // 全图拓扑/依赖链。
+        let mut dependency_logical_work_item_ids =
+            auth_unit.dependency_logical_work_item_ids.clone();
+        dependency_logical_work_item_ids.sort();
         // provider 事实（durable claim 相位 ≥ ProviderMayHaveStarted + active
         // 指针 + unit Running）与初始化桶首 unit Running（物化事实）严格分开
         //（REQ-CS-04）：Claimed/RunnerRegistered 回落 initialized。
@@ -750,6 +756,12 @@ pub(crate) fn build_plan_coding_progress(
             execution_state: execution_state.to_string(),
             unsatisfied_dependency_ids,
             waiting_reason: waiting_reason.map(str::to_string),
+            dependency_logical_work_item_ids,
+            order_index: ranks
+                .get(&auth_unit.logical_work_item_id)
+                .copied()
+                .unwrap_or(usize::MAX),
+            summary: unit.summary.clone(),
         });
     }
     units.sort_by(|left, right| {

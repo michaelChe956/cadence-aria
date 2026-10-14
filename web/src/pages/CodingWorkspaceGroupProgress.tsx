@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { getPlanCodingProgress } from "../api/client";
+import { useMemo } from "react";
 import type { CodingExecutionUnit } from "../api/types";
+import { usePlanCodingProgress } from "../hooks/usePlanCodingProgress";
 import { toPlanCodingProgressView, type PlanCodingProgressView } from "./plan-coding-progress";
 
 function currentUnitIndex(
@@ -48,32 +48,11 @@ export function CodingWorkspaceGroupProgress({
   selectedAttemptId?: string;
   refreshKey?: string | number | null;
 }) {
-  const [aggregate, setAggregate] = useState<PlanCodingProgressView | null>(null);
-  const aggregateEligible = Boolean(projectId && issueId && planId);
-
-  useEffect(() => {
-    if (!aggregateEligible || !projectId || !issueId || !planId) {
-      setAggregate(null);
-      return;
-    }
-    let cancelled = false;
-    getPlanCodingProgress(projectId, issueId, planId)
-      .then((dto) => {
-        if (!cancelled) {
-          setAggregate(toPlanCodingProgressView(dto));
-        }
-      })
-      .catch(() => {
-        // 聚合不可用（如 v1 旧 group 无 confirmed plan run）不阻塞局部展示。
-        if (!cancelled) {
-          setAggregate(null);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aggregateEligible, projectId, issueId, planId, refreshKey]);
+  const aggregateDto = usePlanCodingProgress({ projectId, issueId, planId, refreshKey });
+  const aggregate = useMemo(
+    () => (aggregateDto ? toPlanCodingProgressView(aggregateDto) : null),
+    [aggregateDto],
+  );
 
   if (!planId || units.length === 0) {
     return null;

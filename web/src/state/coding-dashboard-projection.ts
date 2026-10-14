@@ -2,6 +2,7 @@ import type {
   CodingExecutionUnit,
   CodingExecutionUnitStatus,
   CodingTimelineNode,
+  PlanCodingProgressDto,
 } from "../api/types";
 import type { CockpitFlowState } from "./workspace-cockpit-projection";
 
@@ -71,10 +72,51 @@ function isRevisionShadowed(status: CodingExecutionUnitStatus): boolean {
   return status === "superseded" || status === "stale";
 }
 
+// 拓扑建图所需的 unit 最小结构面：session units（CodingExecutionUnit）与
+// plan 聚合投影（selectCodingDashboardUnits）都结构化满足。
+export type CodingTopologyUnitInput = Pick<
+  CodingExecutionUnit,
+  | "unit_id"
+  | "logical_work_item_id"
+  | "dependency_logical_work_item_ids"
+  | "order_index"
+  | "status"
+  | "summary"
+  | "completion_commit"
+>;
+
+/**
+ * Slice B（仪表盘跨仓依赖投影）：group attempt 的拓扑/依赖链数据源切换。
+ * plan 聚合可用（绑定 ≥2 target attempt）时以 plan 全图 units 建图——跨桶
+ * WI 以桶内 unit_status 走既有 12→六态投影（等待依赖=灰 pending 卡），全量
+ * 直接依赖建边（跨仓下游自动出现）；无聚合或 v1 单 attempt 原样回落
+ * session units，桶内口径零变化。
+ */
+export function selectCodingDashboardUnits(
+  sessionUnits: readonly CodingExecutionUnit[],
+  aggregate: PlanCodingProgressDto | null,
+): readonly CodingTopologyUnitInput[] {
+  if (!aggregate || aggregate.target_attempts.length <= 1) {
+    return sessionUnits;
+  }
+  return aggregate.units.map((unit) => ({
+    unit_id: unit.unit_id,
+    logical_work_item_id: unit.logical_work_item_id,
+    dependency_logical_work_item_ids: unit.dependency_logical_work_item_ids,
+    order_index: unit.order_index,
+    status: unit.unit_status,
+    summary: unit.summary,
+    completion_commit: null,
+  }));
+}
+
 // 同一 logical_work_item_id 的多 unit = 同一 work item 的多轮修订。
 // session_state.units 中修订新者居后：有效（非 superseded/stale）条目里取最后一条；
 // 全部被取代时取最后一条（拓扑仍可见，状态为 pending）。
-function latestRevision(current: CodingExecutionUnit | undefined, next: CodingExecutionUnit): CodingExecutionUnit {
+function latestRevision(
+  current: CodingTopologyUnitInput | undefined,
+  next: CodingTopologyUnitInput,
+): CodingTopologyUnitInput {
   if (!current) return next;
   const currentShadowed = isRevisionShadowed(current.status);
   const nextShadowed = isRevisionShadowed(next.status);
@@ -83,8 +125,8 @@ function latestRevision(current: CodingExecutionUnit | undefined, next: CodingEx
   return next;
 }
 
-export function selectCodingTopology(units: readonly CodingExecutionUnit[]): CodingTopology {
-  const representative = new Map<string, CodingExecutionUnit>();
+export function selectCodingTopology(units: readonly CodingTopologyUnitInput[]): CodingTopology {
+  const representative = new Map<string, CodingTopologyUnitInput>();
   for (const item of units) {
     representative.set(item.logical_work_item_id, latestRevision(representative.get(item.logical_work_item_id), item));
   }
@@ -129,7 +171,7 @@ export interface CodingDependencyChain {
 }
 
 export function selectCodingDependencyChain(
-  units: readonly CodingExecutionUnit[],
+  units: readonly CodingTopologyUnitInput[],
   workItemId: string,
 ): CodingDependencyChain | null {
   const { nodes, edges } = selectCodingTopology(units);

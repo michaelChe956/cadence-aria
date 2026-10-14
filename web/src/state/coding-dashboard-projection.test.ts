@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { CodingExecutionUnit, CodingTimelineNode } from "../api/types";
+import type {
+  CodingExecutionUnit,
+  CodingTimelineNode,
+  PlanCodingProgressDto,
+  PlanCodingTargetDto,
+  PlanCodingUnitProgressDto,
+} from "../api/types";
 import {
   CODING_BUDGET_CODING_TOTAL_MS,
   CODING_BUDGET_NEAR_EXHAUSTION_MS,
@@ -7,6 +13,7 @@ import {
   CODING_UNIT_STATE_LABELS,
   codingUnitState,
   selectCodingBudgetGates,
+  selectCodingDashboardUnits,
   selectCodingDependencyChain,
   selectCodingTopology,
 } from "./coding-dashboard-projection";
@@ -137,6 +144,163 @@ describe("selectCodingDependencyChain", () => {
 
   it("returns null for an unknown work item", () => {
     expect(selectCodingDependencyChain(units, "wi_missing")).toBeNull();
+  });
+});
+
+function planUnit(
+  overrides: Partial<PlanCodingUnitProgressDto> = {},
+): PlanCodingUnitProgressDto {
+  return {
+    unit_id: "coding_unit_0001",
+    logical_work_item_id: "WI-001",
+    target_repository_id: "repo_busi",
+    attempt_id: "coding_attempt_busi_0001",
+    unit_status: "pending",
+    execution_state: "waiting_slot",
+    unsatisfied_dependency_ids: [],
+    waiting_reason: null,
+    dependency_logical_work_item_ids: [],
+    order_index: 0,
+    summary: null,
+    ...overrides,
+  };
+}
+
+function planTarget(repositoryId: string, attemptId: string): PlanCodingTargetDto {
+  return {
+    target_repository_id: repositoryId,
+    attempt_id: attemptId,
+    attempt_status: "created",
+    worktree_path: null,
+    lease_state: "absent",
+  };
+}
+
+// owner 场景（issue_work_item_plan_0001）：busi 桶 session units 只有 WI-001，
+// plan 全图 5 WI/4 仓；WI-002@api 依赖 busi 桶的 WI-001（跨桶）。
+function multiRepoPlanProgressDto(): PlanCodingProgressDto {
+  return {
+    plan_id: "issue_work_item_plan_0001",
+    bound_plan_revision_id: "plan_revision_0002",
+    command_id: "plan_start_abc123",
+    mode: "first_ready_unit",
+    phase: "paused",
+    primary_attempt_id: "coding_attempt_busi_0001",
+    selected_unit_id: "coding_unit_0001",
+    selected_attempt_id: "coding_attempt_busi_0001",
+    target_attempts: [
+      planTarget("repo_busi", "coding_attempt_busi_0001"),
+      planTarget("repo_api", "coding_attempt_api_0001"),
+      planTarget("repo_gateway", "coding_attempt_gateway_0001"),
+      planTarget("repo_frontend", "coding_attempt_frontend_0001"),
+    ],
+    units: [
+      planUnit({
+        unit_id: "coding_unit_0001",
+        logical_work_item_id: "WI-001",
+        unit_status: "running",
+        execution_state: "running",
+        dependency_logical_work_item_ids: [],
+        order_index: 0,
+        summary: "busi 首个单元",
+      }),
+      planUnit({
+        unit_id: "coding_unit_0002",
+        logical_work_item_id: "WI-002",
+        target_repository_id: "repo_api",
+        attempt_id: "coding_attempt_api_0001",
+        unit_status: "pending",
+        execution_state: "waiting_dependency",
+        unsatisfied_dependency_ids: ["WI-001"],
+        waiting_reason: "dependency_not_ready",
+        dependency_logical_work_item_ids: ["WI-001"],
+        order_index: 1,
+      }),
+      planUnit({
+        unit_id: "coding_unit_0003",
+        logical_work_item_id: "WI-003",
+        target_repository_id: "repo_gateway",
+        attempt_id: "coding_attempt_gateway_0001",
+        order_index: 2,
+      }),
+      planUnit({
+        unit_id: "coding_unit_0004",
+        logical_work_item_id: "WI-004",
+        target_repository_id: "repo_frontend",
+        attempt_id: "coding_attempt_frontend_0001",
+        dependency_logical_work_item_ids: ["WI-003"],
+        unsatisfied_dependency_ids: ["WI-003"],
+        execution_state: "waiting_dependency",
+        waiting_reason: "dependency_not_ready",
+        order_index: 3,
+      }),
+      planUnit({
+        unit_id: "coding_unit_0005",
+        logical_work_item_id: "WI-005",
+        target_repository_id: "repo_frontend",
+        attempt_id: "coding_attempt_frontend_0001",
+        dependency_logical_work_item_ids: ["WI-003", "WI-004"],
+        unsatisfied_dependency_ids: ["WI-003", "WI-004"],
+        execution_state: "waiting_dependency",
+        waiting_reason: "dependency_not_ready",
+        order_index: 4,
+      }),
+    ],
+    plan_complete: false,
+  };
+}
+
+describe("selectCodingDashboardUnits", () => {
+  const busiSessionUnits = [
+    unit({
+      unit_id: "coding_unit_0001",
+      logical_work_item_id: "WI-001",
+      status: "running",
+      summary: "登录",
+    }),
+  ];
+
+  it("falls back to session units when no plan aggregate is available", () => {
+    expect(selectCodingDashboardUnits(busiSessionUnits, null)).toBe(busiSessionUnits);
+  });
+
+  it("keeps session units for a single-target plan (v1 group attempt)", () => {
+    const dto = multiRepoPlanProgressDto();
+    dto.target_attempts = [dto.target_attempts[0]!];
+    expect(selectCodingDashboardUnits(busiSessionUnits, dto)).toBe(busiSessionUnits);
+  });
+
+  it("projects the whole plan graph so cross-bucket WI appear as waiting cards with full edges", () => {
+    const planUnits = selectCodingDashboardUnits(busiSessionUnits, multiRepoPlanProgressDto());
+
+    expect(planUnits).toHaveLength(5);
+    const topology = selectCodingTopology(planUnits);
+    expect(topology.nodes.map((node) => node.workItemId)).toEqual([
+      "WI-001",
+      "WI-002",
+      "WI-003",
+      "WI-004",
+      "WI-005",
+    ]);
+    // 跨桶 WI-002 不在本 attempt 桶内：以桶内 unit_status 投影为 pending 灰卡。
+    expect(topology.nodes[1]).toMatchObject({ state: "pending", unitId: "coding_unit_0002" });
+    // summary 回落标题；全量直接依赖建边，跨仓下游边自动出现。
+    expect(topology.nodes[0]).toMatchObject({ title: "busi 首个单元", state: "running" });
+    expect(topology.edges).toEqual([
+      { fromWorkItemId: "WI-001", toWorkItemId: "WI-002", state: "blocking" },
+      { fromWorkItemId: "WI-003", toWorkItemId: "WI-004", state: "blocking" },
+      { fromWorkItemId: "WI-003", toWorkItemId: "WI-005", state: "blocking" },
+      { fromWorkItemId: "WI-004", toWorkItemId: "WI-005", state: "blocking" },
+    ]);
+
+    // 依赖链跨仓语义：WI-001 的下游消费方现在包含跨桶 WI-002。
+    const chain = selectCodingDependencyChain(planUnits, "WI-001");
+    expect(chain?.downstream.map((node) => node.workItemId)).toEqual(["WI-002"]);
+    expect(chain?.blockingSources).toEqual([]);
+    // 反向：WI-002 的阻塞源是跨仓上游 WI-001。
+    const downstreamChain = selectCodingDependencyChain(planUnits, "WI-002");
+    expect(downstreamChain?.upstream.map((node) => node.workItemId)).toEqual(["WI-001"]);
+    expect(downstreamChain?.blockingSources.map((node) => node.workItemId)).toEqual(["WI-001"]);
   });
 });
 
