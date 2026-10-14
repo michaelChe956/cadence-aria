@@ -187,86 +187,8 @@ pub(crate) fn cleanup_shared_worktree_by_routing(
     Ok(())
 }
 
-/// N7（REQ-CS-07）：plan-run 冻结 target 集合的精确仓维资源清理包装。
-///
-/// 供 plan 删除闭包（存在新 plan-run 时）在 purge run 前按冻结 target 集合
-/// 逐仓清理 repo shared worktree——**只清本 run 冻结的仓**，不走旧
-/// issue-wide helper（不扫其它仓，`cleanup_shared_worktree_by_routing` 的
-/// 其它 caller 语义不变）。每仓先取 `try_acquire_shared_resource_cleanup`
-/// 短 lease（与资源写者互斥，争用 fail-closed 上抛），锁内复核记录真实
-/// owner：记录身份必须仍属本 (project, issue, target)；活动锁 owner 为他人
-/// （不属本 run 冻结 attempt 集/selection）时保留不删。NotFound=OK（缺失
-/// 视为已清理），IO/JSON 错误上抛不吞。D2.2 后行统一消费本包装，不重复实现。
-pub(crate) fn cleanup_plan_run_shared_worktrees(
-    app_paths: &ProductAppPaths,
-    run: &crate::product::coding_plan_run::CodingPlanRun,
-) -> ApiResult<()> {
-    let operations =
-        crate::product::entity_operation_store::EntityOperationStore::new(app_paths.clone());
-    let lifecycle = LifecycleStore::new(app_paths.clone());
-    for binding in &run.target_attempts {
-        let Ok(repository_uuid) = uuid::Uuid::parse_str(&binding.target_repository_id) else {
-            return Err(ApiError::runtime(
-                "plan_coding_run_target_invalid",
-                "plan run frozen target is not a logical repository id",
-                json!({
-                    "plan_id": run.plan_id,
-                    "target_repository_id": binding.target_repository_id,
-                }),
-            ));
-        };
-        let repository_id = LogicalRepositoryId(repository_uuid);
-        let key = crate::product::entity_operation_store::SharedResourceKey {
-            project_id: run.project_id.clone(),
-            issue_id: run.issue_id.clone(),
-            repository_id: Some(repository_id),
-        };
-        // 清理短 lease：与写者互斥；争用（Busy）fail-closed 上抛，客户端可
-        // 重试，绝不静默跳过留下孤儿授权资源。
-        let _cleanup_lease = operations
-            .try_acquire_shared_resource_cleanup(&key)
-            .map_err(shared_resource_cleanup_api_error)?;
-        let Some(record) = lifecycle
-            .get_repo_shared_worktree(&run.project_id, &run.issue_id, repository_id)
-            .map_err(product_store_api_error)?
-        else {
-            continue;
-        };
-        // 复核真实 owner（记录身份）：路径派生读回的记录若身份漂移则
-        // fail-closed，绝不删除无法归属的记录。
-        if record.project_id != run.project_id
-            || record.issue_id != run.issue_id
-            || record.target_repository_id != Some(repository_id)
-        {
-            return Err(product_store_api_error(
-                ProductStoreError::IdentityMismatch {
-                    kind: "repo_shared_worktree",
-                    id: binding.target_repository_id.clone(),
-                },
-            ));
-        }
-        // 复核活动锁 owner：他人（另一 plan 的 attempt）持有的活动锁保留；
-        // 空主或本 run 冻结 attempt 集/selection 内的残留 owner 才可清。
-        let owner_within_run = record.current_lock_owner_id.is_none_or(|owner| {
-            run.target_attempts
-                .iter()
-                .any(|frozen| frozen.attempt_id == owner)
-                || run
-                    .selection
-                    .as_ref()
-                    .is_some_and(|selection| selection.attempt_id == owner)
-        });
-        if !owner_within_run {
-            continue;
-        }
-        lifecycle
-            .delete_repo_shared_worktree(&run.project_id, &run.issue_id, repository_id)
-            .map_err(product_store_api_error)?;
-    }
-    Ok(())
-}
-
-/// `try_acquire_shared_resource_cleanup` 的稳定错误映射（N7 包装专用）。
+/// `try_acquire_shared_resource_cleanup` 的稳定错误映射（资源清理 lease 争用：
+/// D2.2 `with_held_or_acquired_cleanup_lease` 现取通道消费）。
 fn shared_resource_cleanup_api_error(
     error: crate::product::entity_operation_store::EntityOperationError,
 ) -> ApiError {
