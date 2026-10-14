@@ -80,7 +80,7 @@
 
 - **H5 对齐（移交①—④收口）**：①回执字段名按 H5 冻结名原样落地（`deleted_attempt_ids`/`remaining_attempt_ids`/`operation_state: accepted|replayed`），**client+视图零改动即可对上**；DELETE 回执 additive 多带 `workspace_lifecycle`（H5 可选消费）②GET `workspace_lifecycle` 四字段与值域原样落地③`expected_generation` 定为 OPTIONAL（未知时省略，不阻断；已知而漂移→typed 409）④清理中/资源 busy 稳定码：`coding_plan_workspace_clearing`、`plan_coding_run_resource_busy/unavailable`、`coding_plan_workspace_generation_conflict`、`coding_plan_workspace_members_present`（全部 409）。**请 Main 转告 H5：无需反向改名。**
 - `PlanCodingStartRequest` 未加 REQUIRED `expected_generation`（设计 C 行135 拟新增）：不在本包 brief 任务清单，POST 请求契约零变化；如需切换归 Main 另行调度（所有 caller/tests 同次切换）
-- 组删的逐成员 teardown 不走 `finalize_coding_attempt_deletion`（其最后成员钩子以确定性命令闭包，会吞掉 DELETE command 的回执/续清身份）：N7 各步骤（abort/git/workspace/handoff/删除/失效/锁残留）按同序复用既有 helper，仓维/issue 维 shared worktree 清理并入闭包 manifest 面（D2.2 owner 复核语义）
+- 组删的逐成员 teardown 不走 `finalize_coding_attempt_deletion`（其最后成员钩子以确定性命令闭包，会吞掉 DELETE command 的回执/续清身份）：N7 各步骤（abort/git/workspace/handoff/删除/失效/锁残留）按同序复用既有 helper；仓维/issue 维 shared worktree 清理**由 H2a 闭包 step④（`cleanup_plan_shared_worktrees`，D2.2 owner 复核语义）承担**，不在逐成员面重复
 - v1 单 attempt 端点/确认/导航零改动；组删范围=服务端枚举的真实 group attempts，不收前端 ID 列表
 - error.rs（H1 面）与 coding_plan_run.rs（H2a 面）各一处最小加法（五码白名单/purge 方法），已在报告登记，供 H1/H1 后续 owner 知悉
 
@@ -88,5 +88,31 @@
 
 - **状态**：DONE
 - **提交**：`fix: H4 组删端点与重启收敛`（12 文件显式 add）
-- **验证**：红 0/7→绿 7/0→回归六族全绿→全量 lib **4672/0**→it_web 路由 1/0→rustfmt（限本包文件）干净
+- **验证**：红 0/7→绿 7/0→回归六族全绿→全量 lib **4672/0**→it_web 路由 1/0→rustfmt（限本包文件）干净；P2 修复轮后 h4 族 7/0＋回归族复跑全绿（见下节）
 - **关切**：①主树整体编译被兄弟在途文件阻塞，本包主树红绿待 Main 收口后统一回归（隔离树证据完整）②error.rs/coding_plan_run.rs 跨面最小加法两处（登记）③POST REQUIRED `expected_generation` 契约切换未做（不在 brief）④验收矩阵 8 浏览器真实路径归 Main 统一调度
+
+## P2 修复轮（Main 审查 1×P2，按建议精确落）
+
+两处均在 `delete_plan_coding_workspaces`（plan_start.rs）：
+
+- **P2-① remaining 硬编码空集**：回执 `remaining_attempt_ids` 改为服务端
+  枚举当前存活集（`list_attempts_for_plan`，排序去重）——设计 C「前端不
+  假装全删/失败展示剩余数」；Replayed 于新轮成员在场时亦如实报告（新内容
+  非本 command 范围，不删不瞒）。
+- **P2-② Replayed 不限轮次**：同 command 回执仅当 `to_generation == 当前
+  generation` 才判 replayed；更旧回执（其后又经历轮次切换）不按旧 command
+  判重放，按当前状态走分类路径（新成员按新操作门禁/generation 互证先行，
+  不删新轮、返回当前事实）。顺带消除 else 分支内重复的 generation 绑定。
+- 测试同步（e2e）：`late_same` 断言补 `generation==2`＋`remaining==round2_ids`
+  （新轮 4 成员在场）；新增「更旧回执 fall-through」段——round2 再整删
+  （generation 3）后，h4_1 的回执（to=2）过期→accepted 幂等成功（零成员零
+  残留）、deleted/remaining 空、generation 3。
+
+证据（隔离树 /tmp/h4-iso＝`d1d862f9`＋本轮 2 文件）：`plan_coding_h4` **7/0**
+→回归族 `plan_coding_n3_` 7/0、`plan_coding_n7_` 4/0、`h2a` 6/0、`h2b` 11/0、
+`finalize_coding_attempt_deletion` 3/0、it_web 路由 1/0→rustfmt（2 文件）干净。
+其间一次 lib 编译失败为本轮编辑中间态（`operation_state` 声明被覆盖，立即
+修复后全绿），非交付缺陷。
+
+提交：`fix: H4 回执按轮次限定Replayed与真实remaining`（3 文件显式 add：
+plan_start.rs＋plan_start_tests.rs＋本报告）。

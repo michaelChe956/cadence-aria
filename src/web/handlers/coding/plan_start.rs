@@ -194,8 +194,9 @@ pub async fn get_plan_coding_progress(
 ///
 /// 顺序：删除准入（Plan 真删除互斥，闭包 own 本清理）→ 组串行键 →
 /// clearing 在案以 `clearing.command_id` 身份续清（删除动作是中断态的产品
-/// 续清出口；pending 冻结清单即本次回执 deleted 集）→ 同 command 回执
-/// 幂等重放（Replayed，不扫下一代刚创建的 attempts）→ 服务端分类确认
+/// 续清出口；pending 冻结清单即本次回执 deleted 集）→ 同 command 回执且其
+/// 轮次仍为当前轮次的幂等重放（Replayed，不扫下一代刚创建的 attempts；
+/// 更旧回执不判重放，按当前状态走分类门禁）→ 服务端分类确认
 /// （无对象无残留零弹窗；浅/强恰一次 409 `deletion_confirmation_required`，
 /// 文案权威）→ `expected_generation` 互证（≠当前 409，零写，晚到删除不删
 /// 新轮）→ 逐成员复用 N7 清理（abort runner→mutation lease→Git 终止协调→
@@ -232,6 +233,7 @@ pub async fn delete_plan_coding_workspaces(
     let lifecycle = run_store
         .get_workspace_lifecycle(&project_id, &issue_id, &plan_id)
         .map_err(product_store_api_error)?;
+    let current_generation = lifecycle.as_ref().map_or(1, |metadata| metadata.generation);
     let mut operation_state = "accepted";
     let mut deleted_attempt_ids: Vec<String> = Vec::new();
     if let Some(clearing) = lifecycle
@@ -251,10 +253,13 @@ pub async fn delete_plan_coding_workspaces(
             false,
         )?;
     } else if lifecycle.as_ref().is_some_and(|metadata| {
-        metadata
-            .receipts
-            .iter()
-            .any(|receipt| receipt.command_id == query.command_id)
+        metadata.receipts.iter().any(|receipt| {
+            receipt.command_id == query.command_id
+                    // Replayed 仅当回执轮次仍是当前轮次（其后无新轮切换）；
+                    // 更旧的回执只描述旧轮事实——不按旧 command 判重放，
+                    // 继续按当前状态走分类路径（新成员按新操作门禁，不删新轮）。
+                    && receipt.to_generation == current_generation
+        })
     }) {
         // 同 command 已完整删除过的幂等重放：不再次清、不扫下一代 attempts。
         operation_state = "replayed";
@@ -278,7 +283,6 @@ pub async fn delete_plan_coding_workspaces(
             || !journals.is_empty();
         if !members.is_empty() || residue {
             // 互证先行（零写拒绝）：confirmed=true 不是跨 generation 授权。
-            let current_generation = lifecycle.as_ref().map_or(1, |metadata| metadata.generation);
             if query
                 .expected_generation
                 .is_some_and(|generation| generation != current_generation)
@@ -317,6 +321,17 @@ pub async fn delete_plan_coding_workspaces(
     }
     deleted_attempt_ids.sort();
     deleted_attempt_ids.dedup();
+    // remaining 报权威事实（设计 C：前端不假装全删/失败展示剩余数）——服务端
+    // 枚举当前存活集；Replayed 于新轮成员在场时亦如实报告（新内容非本
+    // command 范围，不删不瞒）。
+    let mut remaining_attempt_ids: Vec<String> = CodingAttemptStore::new(app_paths.clone())
+        .list_attempts_for_plan(&project_id, &issue_id, &plan_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .map(|attempt| attempt.id)
+        .collect();
+    remaining_attempt_ids.sort();
+    remaining_attempt_ids.dedup();
     let run = run_store
         .get(&project_id, &issue_id, &plan_id)
         .map_err(product_store_api_error)?;
@@ -329,7 +344,6 @@ pub async fn delete_plan_coding_workspaces(
     )
     .map_err(product_store_api_error)?;
     let generation = workspace_lifecycle.generation;
-    let remaining_attempt_ids = Vec::new();
     Ok(Json(PlanCodingWorkspaceDeletionResultDto {
         plan_id,
         command_id: query.command_id,

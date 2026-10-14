@@ -1662,11 +1662,15 @@ async fn plan_coding_h4_group_delete_end_to_end_then_new_round() {
     assert_eq!(progress2.workspace_lifecycle.state, "complete");
     assert_eq!(progress2.command_id.as_deref(), Some("cmd_h4_round2"));
 
-    // 晚到旧 DELETE（同 command 回执）：Replayed，不扫下一代。
+    // 晚到旧 DELETE（同 command 回执、回执轮次==当前轮次）：Replayed 不扫
+    // 下一代；remaining 如实报当前事实（新轮 4 成员在场）。
     let late_same = delete_workspaces(&fixture.state, "plan_delete_ui_h4_1", None, true)
         .await
         .expect("late same-command delete replays");
     assert_eq!(late_same.operation_state, "replayed");
+    assert_eq!(late_same.generation, 2);
+    assert!(late_same.deleted_attempt_ids.is_empty());
+    assert_eq!(late_same.remaining_attempt_ids, round2_ids);
     assert_eq!(h4_member_ids(&fixture), round2_ids);
 
     // 过期 generation（新 command）：typed 409，零删除。
@@ -1674,6 +1678,22 @@ async fn plan_coding_h4_group_delete_end_to_end_then_new_round() {
     let error = stale.expect_err("stale generation must be rejected");
     assert_eq!(error.code, "coding_plan_workspace_generation_conflict");
     assert_eq!(h4_member_ids(&fixture), round2_ids);
+
+    // 更旧回执不判重放（回执轮次≠当前轮次）：round2 再整删（generation 3）
+    // 后，h4_1 的回执（to=2）过期——不按旧 command 重放，按当前状态走分类
+    // 路径（此刻零成员零残留→幂等成功 accepted）。
+    let round3 = delete_workspaces(&fixture.state, "plan_delete_ui_h4_3", None, true)
+        .await
+        .expect("delete round 2 workspaces");
+    assert_eq!(round3.generation, 3);
+    assert_eq!(round3.deleted_attempt_ids, round2_ids);
+    let stale_receipt = delete_workspaces(&fixture.state, "plan_delete_ui_h4_1", None, true)
+        .await
+        .expect("stale-receipt command falls through to classification");
+    assert_eq!(stale_receipt.operation_state, "accepted");
+    assert!(stale_receipt.deleted_attempt_ids.is_empty());
+    assert!(stale_receipt.remaining_attempt_ids.is_empty());
+    assert_eq!(stale_receipt.generation, 3);
 }
 
 /// H4 部分删除（验收矩阵 2）：单成员删除 → GET 投影 incomplete/缺失计数 →
