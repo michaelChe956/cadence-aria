@@ -96,6 +96,7 @@ impl CodingWorkspaceEngine {
             final_diff,
             final_commit,
             completion_commit_in_final,
+            scope_member_prefix: self.scope_member_prefix(attempt)?,
         })
     }
 }

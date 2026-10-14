@@ -417,6 +417,7 @@ impl CodingWorkspaceEngine {
         let changed_files = self.changed_files_for_attempt(attempt, &work_item).await?;
         let worktree_path = self.attempt_worktree_path(attempt).await.ok();
         self.validate_changed_files_for_work_item(
+            attempt,
             &work_item,
             &changed_files,
             worktree_path.as_ref(),
@@ -465,6 +466,7 @@ impl CodingWorkspaceEngine {
                     .changed_files_for_unit_completion_range(attempt, &facts.run)
                     .await?;
                 self.validate_changed_files_for_runtime(
+                    attempt,
                     &facts.runtime,
                     &changed_files,
                     worktree_path.as_ref(),
@@ -494,6 +496,7 @@ impl CodingWorkspaceEngine {
                     .changed_files_for_unit_completion_range(attempt, &run)
                     .await?;
                 self.validate_changed_files_for_work_item(
+                    attempt,
                     work_item,
                     &changed_files,
                     worktree_path.as_ref(),
@@ -522,34 +525,85 @@ impl CodingWorkspaceEngine {
 
     fn validate_changed_files_for_work_item(
         &self,
+        attempt: &CodingExecutionAttempt,
         work_item: &LifecycleWorkItemRecord,
         changed_files: &[String],
         worktree_path: Option<&PathBuf>,
     ) -> Result<(), CodingWorkspaceEngineError> {
-        for relative_path in changed_files {
-            let candidate = std::path::Path::new(relative_path);
-            if work_item
-                .forbidden_write_scopes
-                .iter()
-                .any(|scope| scope_allows_path(scope, relative_path, true))
-            {
-                return Err(CodingWorkspaceEngineError::WorkItemDiffScopeViolation(
-                    relative_path.clone(),
-                ));
-            }
-            if !work_item.exclusive_write_scopes.is_empty()
-                && let Some(base) = worktree_path
-            {
-                let _ =
-                    validate_write_path(base, &work_item.exclusive_write_scopes, candidate, true)
-                        .map_err(|_| {
-                        CodingWorkspaceEngineError::WorkItemDiffScopeViolation(
-                            relative_path.clone(),
-                        )
-                    })?;
-            }
+        if changed_files.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let member_prefix = self.scope_member_prefix(attempt)?;
+        validate_changed_files_in_scope(
+            &work_item.exclusive_write_scopes,
+            &work_item.forbidden_write_scopes,
+            changed_files,
+            worktree_path,
+            member_prefix.as_deref(),
+        )
+    }
+
+    /// 多仓 attempt 的 scope 路径域前缀：目标成员 checkout 相对聚合根
+    /// （manifest `provider_context_root`）的目录，如 `busi`。
+    ///
+    /// 多仓 Work Item 的 scope 以聚合根为基准书写（`busi/src/a.ts`），而 git 事实是
+    /// 仓内相对路径（`src/a.ts`）。`target_snapshot == None`（单仓）与成员即聚合根
+    /// 时返回 `None`（行为不变）；manifest 缺失或 checkout 不在聚合根下一律
+    /// fail-closed，绝不退回无前缀比较。
+    pub(crate) fn scope_member_prefix(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Option<String>, CodingWorkspaceEngineError> {
+        let Some(snapshot) = attempt.target_snapshot.as_ref() else {
+            return Ok(None);
+        };
+        let unresolved = |reason: String| {
+            CodingWorkspaceEngineError::WorkItemScopeDomainUnresolved(format!(
+                "{}: {reason}",
+                attempt.id
+            ))
+        };
+        let paths = self.store.paths();
+        let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            &paths,
+            &attempt.project_id,
+            &attempt.issue_id,
+        )
+        .map_err(|error| unresolved(error.to_string()))?;
+        let authority = match lc_id.as_deref() {
+            Some(lc_id) => {
+                crate::product::logical_codebase::LogicalCodebaseStore::for_lc(paths.clone(), lc_id)
+            }
+            None => crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone()),
+        };
+        let manifest = authority
+            .load_manifest(&attempt.project_id)
+            .map_err(|error| unresolved(error.to_string()))?
+            .ok_or_else(|| unresolved("logical codebase manifest missing".to_string()))?;
+        let root = &manifest.provider_context_root;
+        let member = &snapshot.canonical_path;
+        let relative = member
+            .strip_prefix(root)
+            .ok()
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                let root = root.canonicalize().ok()?;
+                let member = member.canonicalize().ok()?;
+                member.strip_prefix(&root).ok().map(Path::to_path_buf)
+            })
+            .ok_or_else(|| {
+                unresolved(format!(
+                    "member checkout {} is outside provider_context_root {}",
+                    member.display(),
+                    root.display()
+                ))
+            })?;
+        let prefix = relative.to_string_lossy().replace('\\', "/");
+        let prefix = prefix.trim_matches('/');
+        if prefix.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(prefix.to_string()))
     }
 
     pub(crate) async fn changed_files_for_attempt(
@@ -615,6 +669,50 @@ include!("gates_parts/worktree_lock.inc.rs");
 include!("gates_parts/blocked_gate.inc.rs");
 
 include!("gates_parts/verification_triage.inc.rs");
+
+/// final_confirm 写入范围门禁（单仓 legacy 与 schema v2 共用）。
+///
+/// forbidden：仓内相对与「根相对带成员前缀」两种写法任一命中即违规；
+/// exclusive：非空且有 worktree 时，任一写法命中才放行。路径卫生
+/// （`.git`/`.aria` 禁写、symlink 逃逸）沿用 `validate_write_path`。
+/// 报错 payload 保持仓内相对路径。
+pub(super) fn validate_changed_files_in_scope(
+    exclusive_scopes: &[String],
+    forbidden_scopes: &[String],
+    changed_files: &[String],
+    worktree_path: Option<&PathBuf>,
+    member_prefix: Option<&str>,
+) -> Result<(), CodingWorkspaceEngineError> {
+    let hygiene_scope = ["*".to_string()];
+    for relative_path in changed_files {
+        let violation =
+            || CodingWorkspaceEngineError::WorkItemDiffScopeViolation(relative_path.clone());
+        if forbidden_scopes
+            .iter()
+            .any(|scope| scope_allows_member_path(scope, relative_path, member_prefix, true))
+        {
+            return Err(violation());
+        }
+        if !exclusive_scopes.is_empty()
+            && let Some(base) = worktree_path
+        {
+            let normalized = validate_write_path(
+                base,
+                &hygiene_scope,
+                std::path::Path::new(relative_path),
+                true,
+            )
+            .map_err(|_| violation())?;
+            if !exclusive_scopes
+                .iter()
+                .any(|scope| scope_allows_member_path(scope, &normalized, member_prefix, true))
+            {
+                return Err(violation());
+            }
+        }
+    }
+    Ok(())
+}
 
 /// C1 Task 6：接管链上的身份不匹配（过期 binding/lease/attempt）统一
 /// `IdentityMismatch`——迟到旧 owner 写入不改 current owner。

@@ -354,6 +354,28 @@ pub(crate) fn scope_allows_path(scope: &str, relative_path: &str, case_sensitive
     path == pattern.base
 }
 
+/// 多仓（LC）scope 的路径域兼容匹配。
+///
+/// 多仓 Work Item 的 scope 以聚合根为基准书写（`busi/src/a.ts`），而 git 事实
+/// 给出的是仓内相对路径（`src/a.ts`）。`member_prefix` 为成员 checkout 相对聚合根
+/// 的目录（如 `busi`）：仓内相对与「根相对带前缀」两种写法任一命中即视为命中；
+/// 无前缀（单仓）时与 `scope_allows_path` 完全等价。
+pub(crate) fn scope_allows_member_path(
+    scope: &str,
+    repo_relative_path: &str,
+    member_prefix: Option<&str>,
+    case_sensitive: bool,
+) -> bool {
+    scope_allows_path(scope, repo_relative_path, case_sensitive)
+        || member_prefix.is_some_and(|prefix| {
+            scope_allows_path(
+                scope,
+                &format!("{prefix}/{repo_relative_path}"),
+                case_sensitive,
+            )
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScopePattern {
     base: String,
@@ -442,7 +464,7 @@ fn now_iso() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::scope_allows_path;
+    use super::{scope_allows_member_path, scope_allows_path};
 
     /// F-25（kimi author 方言，现场 attempt 9298fe0b）：author 把
     /// exclusive_scopes 产成顿号单串（"server/**、data/levels.json、
@@ -482,5 +504,64 @@ mod tests {
             true
         ));
         assert!(!scope_allows_path("、server/**", "web/x.rs", true));
+    }
+
+    /// 多仓现场形态：scope 以聚合根为基准（`busi/src/notifications.ts`），
+    /// git 事实是仓内相对（`src/notifications.ts`）。带成员前缀时两种写法任一命中即放行。
+    #[test]
+    fn member_prefixed_scope_matches_repo_relative_path() {
+        assert!(!scope_allows_path(
+            "busi/src/notifications.ts",
+            "src/notifications.ts",
+            true
+        ));
+        assert!(scope_allows_member_path(
+            "busi/src/notifications.ts",
+            "src/notifications.ts",
+            Some("busi"),
+            true
+        ));
+        assert!(scope_allows_member_path(
+            "busi/test/**",
+            "test/notifications.test.ts",
+            Some("busi"),
+            true
+        ));
+        // 仓内相对写法的 scope 仍然命中。
+        assert!(scope_allows_member_path(
+            "src/**",
+            "src/a.ts",
+            Some("busi"),
+            true
+        ));
+        // 他仓前缀的 scope 不会命中本仓路径。
+        assert!(!scope_allows_member_path(
+            "api/src/**",
+            "src/a.ts",
+            Some("busi"),
+            true
+        ));
+        // 顿号单串在前缀域同样逐段生效。
+        assert!(scope_allows_member_path(
+            "api/src/**、busi/src/**",
+            "src/a.ts",
+            Some("busi"),
+            true
+        ));
+    }
+
+    /// 单仓（无前缀）与 `scope_allows_path` 等价，不放宽也不收紧。
+    #[test]
+    fn member_matcher_without_prefix_is_identical_to_plain_matcher() {
+        for (scope, path) in [
+            ("src/**", "src/a.ts"),
+            ("busi/src/**", "src/a.ts"),
+            ("src/a.ts", "src/b.ts"),
+        ] {
+            assert_eq!(
+                scope_allows_member_path(scope, path, None, true),
+                scope_allows_path(scope, path, true)
+            );
+        }
     }
 }

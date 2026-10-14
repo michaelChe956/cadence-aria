@@ -18,7 +18,7 @@ use crate::cross_cutting::streaming_provider::{
     ProviderPermissionMode, ProviderStatus, ProviderToolCall, ProviderToolPolicy,
     ProviderToolResult, RiskLevel, StreamChunk, StreamingProviderAdapter, StreamingProviderInput,
 };
-use crate::cross_cutting::worktree::{scope_allows_path, validate_write_path};
+use crate::cross_cutting::worktree::{scope_allows_member_path, validate_write_path};
 use crate::product::coding_attempt_store::{
     CodingAttemptStore, CodingGitOperationJournal, CodingGitOperationKind, CodingGitOperationPhase,
     CompleteReviewGitOperationInput, CreateBlockedGateInput, CreateChoiceGateInput,

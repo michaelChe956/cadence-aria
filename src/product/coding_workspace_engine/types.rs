@@ -67,6 +67,10 @@ pub enum CodingWorkspaceEngineError {
     VerificationGateFailed(String),
     #[error("work_item_diff_scope_violation: {0}")]
     WorkItemDiffScopeViolation(String),
+    /// 多仓 attempt 的 scope 路径域前缀（成员 checkout 相对聚合根 `provider_context_root`）
+    /// 无法解析：fail-closed，绝不退回无前缀比较（那会让合法改动被拒或 forbidden 空转）。
+    #[error("work_item_scope_domain_unresolved: {0}")]
+    WorkItemScopeDomainUnresolved(String),
     /// 交付前统一门（Task 15）：任一 provider run 的越界检测基线被破坏（他仓主
     /// checkout HEAD/工作区变更或基线缺失）时阻断 commit/push，稳定码经
     /// `StableCode::as_str()` 转字符串填充。

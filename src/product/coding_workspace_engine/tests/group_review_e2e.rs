@@ -258,6 +258,7 @@ fn e2e_facts(bindings: &[AuthoritativeGroupReviewerBinding]) -> GroupGitFacts {
             .iter()
             .filter_map(|binding| binding.run.completion_commit.clone())
             .collect(),
+        scope_member_prefix: None,
     }
 }
 

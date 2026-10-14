@@ -523,6 +523,7 @@ mod coder_resume_recovery;
 mod coding_output_teaching_reredrive;
 mod gate_coder_feedback;
 mod gate_rework;
+mod gates_scope_domain;
 mod gates_worktree_routing;
 mod git_operation_reconcile;
 mod group_amendment_chain;
