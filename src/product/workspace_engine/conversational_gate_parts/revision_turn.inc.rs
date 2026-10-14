@@ -1152,7 +1152,7 @@ impl super::WorkspaceEngine {
 
         // —— 编译与结构门（与 author 系统门同源：SG3a.1 单源装载/纯评估）——
         let mut failure_set;
-        let rejection_context;
+        let mut rejection_context;
         let mut ir_for_instructions: Option<
             crate::product::work_item_plan_compiler::PlanCandidateIr,
         > = None;
@@ -1319,7 +1319,15 @@ impl super::WorkspaceEngine {
                 for failure in failure_set.failures.iter_mut() {
                     failure.source_hash = raw_source_hash.clone();
                 }
-                let instruction_report = match &ir_for_instructions {
+                // SG6a.3 P2（续）：指令身份载体是（context,report）对——
+                // prompt 构建器 join instruction.source_hash 与
+                // context.source_hash（SG5.2 失配分支），context 同步重绑
+                // raw 并按单源配方重算 context_digest，指令/上下文/claim
+                // 绑定三者同源；编译/IR/refs 证据仍归一化基。
+                rejection_context.source_hash = raw_source_hash.clone();
+                rejection_context.context_digest =
+                    super::plan_projection::compute_planning_context_digest(&rejection_context);
+                let mut instruction_report = match &ir_for_instructions {
                     None => sc_revision_pre_compile_report(&rejection_context, failure_set.clone()),
                     Some(ir) => {
                         let mut items =
@@ -1335,6 +1343,13 @@ impl super::WorkspaceEngine {
                         )
                     }
                 };
+                // SG6a.3 P2（Main 审查）：指令身份载体（report→instruction
+                // →claim 的 grant.failing_source_hash）同样重绑原始输出
+                // hash——否则非 canonical 候选（前言/归一化差异）join 以
+                // raw 基线对归一化绑定恒 CANDIDATE_DRIFTED 假拒。report
+                // 仅作本指令构建的纯输入，不落盘、不影响 refs/freshness
+                //（编译/IR/结构上下文证据仍归一化基）。
+                instruction_report.source_hash = raw_source_hash.clone();
                 let protected = sc_revision_protected_business_facts(
                     &lifecycle,
                     &plan,

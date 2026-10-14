@@ -889,3 +889,59 @@ async fn sg_06a_3_legal_delivery_settles_reviewing_separately_from_terminal() {
         crate::product::models::HumanGateTurnStatus::Completed
     );
 }
+
+/// SG6a.3 P2 修复轮（Main 审查派回）：非 canonical 候选（带 provider
+/// 前言——raw≠归一化）的 claim 绑定与冻结交付 join 必须以原始输出为
+/// 单源——指令身份（report→instruction→grant.failing_source_hash）重绑
+/// raw 后，resume join 对 raw 基线恒等通过（attempt2 可启动），不再以
+/// 「原始==归一化」为前提（否则 CANDIDATE_DRIFTED 假拒、attempt2 零启
+/// 动、门 Busy）。
+#[tokio::test]
+async fn sg_06a_3_noncanonical_candidate_claim_binds_raw_hash_and_join_passes() {
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("sg06a3_p2_rawbind", 3);
+    let turn_id = open_running_revision_turn(&mut engine, "sg06a3_p2_command").await;
+    let turn = lifecycle
+        .get_human_gate_turn(engine.session().session_id.as_str(), &turn_id)
+        .expect("turn after open");
+    // 非 canonical 候选：provider 前言 + 环候选——raw≠归一化（前言被
+    // 修剪后才编译），失败仍为 typed DependencyCycle（L1 可 claim）。
+    let raw_output = format!("provider preamble\n{}", sg61_cycle_candidate());
+    let raw_hash = sg61_source_hash(&raw_output);
+    let result = engine
+        .run_sc_manual_revision_turn(&turn_id, raw_output.clone())
+        .await
+        .expect("L1 rejection is in-band");
+    let claim = match result {
+        crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected {
+            claim: Some(carry),
+            ..
+        } => carry,
+        other => panic!("expected claimed attempt2 carry, got {other:?}"),
+    };
+    // claim 绑定单源：grant.failing_source_hash==原始输出 hash（红：归一
+    // 化 hash——前言修剪后≠raw）。
+    let grant = lifecycle
+        .get_workspace_session(engine.session().session_id.as_str())
+        .expect("session after claim")
+        .structural_governance_state
+        .and_then(|state| state.current_grant)
+        .expect("grant after claim");
+    assert_eq!(
+        grant.failing_source_hash.as_deref(),
+        Some(raw_hash.as_str()),
+        "P2: claim must bind the raw provider output hash, not the normalized compile basis"
+    );
+    // resume join（arm 同款基线窗口）：以原始输出为 join 基线必须精确
+    // 通过（红：CANDIDATE_DRIFTED 假拒——attempt2 零启动、门 Busy）。
+    let delivered = crate::web::workspace_ws_handler::deliver_attempt2_frozen_prompt(
+        &mut engine,
+        &turn,
+        raw_output.as_str(),
+        &claim,
+    )
+    .expect("P2: non-canonical candidate join must pass on the raw identity");
+    assert_eq!(
+        delivered, claim.frozen.full_prompt,
+        "join delivers the frozen prompt verbatim"
+    );
+}
