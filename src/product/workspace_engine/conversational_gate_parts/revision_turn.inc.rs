@@ -463,6 +463,21 @@ impl super::WorkspaceEngine {
                                             provider_start_key,
                                         },
                                     ) => {
+                                        #[cfg(test)]
+                                        if SG6B_CLAIM_PERSIST_CRASH.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                                            // P2 复审（Main 审查 suggestion）：崩溃窗读回判别
+                                            //——claim 已落而冻结件缺失（旧序：persist 在 claim 后）
+                                            // 在此 panic；新序（persist 先于 durable claim）恒有
+                                            // 内容寻址证据可读回。
+                                            Self::load_frozen_structural_prompt(
+                                                &lifecycle.app_paths(),
+                                                &self.session.project_id,
+                                                &self.session.issue_id,
+                                                &self.session.session_id,
+                                                &prompt_ref,
+                                            )
+                                            .expect("sg6b_claim_persist_crash_window: frozen evidence must be readable after the durable claim (persist must precede claim)");
+                                        }
                                         diagnostics.push(format!(
                                             "STRUCTURAL_ATTEMPT_CLAIMED: attempt {attempt_no} binds frozen prompt {prompt_ref} on the same turn"
                                         ));
