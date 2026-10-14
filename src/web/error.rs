@@ -208,7 +208,6 @@ impl IntoResponse for ApiError {
             | "coding_plan_run_selected_unit"
             | "plan_coding_paused"
             | "plan_coding_invalidated"
-            | "plan_coding_first_unit_completed"
             // H4（设计 2026-10-14 B 节,H2a 码透出 + H5 移交④清理中/资源
             // busy 稳定码):执行轮生命周期状态冲突与目标仓资源占用统一
             // 409——clearing 续清/退役围栏/generation 互证/成员在场/资源
@@ -961,7 +960,6 @@ mod tests {
             "coding_plan_run_selected_unit",
             "plan_coding_paused",
             "plan_coding_invalidated",
-            "plan_coding_first_unit_completed",
         ];
         for code in conflict_cases {
             let response = ApiError::runtime(code, "plan coding run", json!({})).into_response();

@@ -2356,3 +2356,136 @@ async fn plan_coding_s2_paused_run_resumes_and_drives_instead_of_409() {
         );
     }
 }
+
+/// 指定 target 桶的根 unit（建组物化 Running 的 order_index 0）落终态。
+fn s2_finish_root_unit(
+    fixture: &N3Fixture,
+    target: LogicalRepositoryId,
+    logical_work_item_id: &str,
+    status: CodingExecutionUnitStatus,
+) {
+    let attempt = fixture.target_attempt(target);
+    let unit = fixture
+        .coding_store()
+        .list_coding_units(PROJECT_ID, ISSUE_ID, &attempt.id)
+        .unwrap()
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == logical_work_item_id)
+        .unwrap_or_else(|| panic!("{logical_work_item_id} unit materialized"));
+    fixture
+        .coding_store()
+        .update_coding_unit_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &attempt.id,
+            &unit.id,
+            status,
+            Some("s2 root unit finished".to_string()),
+        )
+        .unwrap();
+}
+
+/// P1 修复轮：跨桶 parked 续跑——frontend 桶 Running 无 active unit
+///（wi_service 已完成、current 保留完成 unit 的真实 park 形状），
+/// wi_panel 跨桶依赖全部完成→续跑物化新 unit 时，worktree 锁转移 from
+/// 必须取**推进前**身份（上一完成 unit），不得撞 repo_worktree_active。
+#[tokio::test]
+async fn plan_coding_s2_parked_resume_transfers_lock_from_pre_advance_identity() {
+    use crate::product::lifecycle_store::{LifecycleStore, UpsertRepoSharedWorktreeInput};
+
+    let fixture = n3_fixture().await;
+    let run_command_id = "cmd_n3_s2_p1";
+    s2_seed_first_start_started(&fixture, run_command_id).await;
+    // 完成事实：wi_core（busi）/wi_unrelated（gateway）/wi_service（frontend）。
+    s2_finish_first_unit(&fixture, CodingExecutionUnitStatus::Completed);
+    s2_finish_root_unit(
+        &fixture,
+        fixture.gateway,
+        "wi_unrelated",
+        CodingExecutionUnitStatus::Completed,
+    );
+    let frontend = fixture.target_attempt(fixture.frontend);
+    fixture
+        .coding_store()
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &frontend.id)
+        .unwrap();
+    s2_finish_root_unit(
+        &fixture,
+        fixture.frontend,
+        "wi_service",
+        CodingExecutionUnitStatus::Completed,
+    );
+    // 真实 park 形状（advance Waiting 分支）：清 active、current 保留完成 unit。
+    let mut parked = fixture.target_attempt(fixture.frontend);
+    parked.active_unit_id = None;
+    parked.current_work_item_id = Some("wi_service".to_string());
+    fixture
+        .coding_store()
+        .update_attempt_non_status_fields(&parked)
+        .unwrap();
+    // repo 维锁事实：owner=frontend attempt、active=wi_service（执行 wi_service
+    // 期间的锁记录，物化 worktree 后仍在场）。
+    let lifecycle = LifecycleStore::new(fixture.paths.clone());
+    lifecycle
+        .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: fixture.frontend,
+            branch_name: "aria-issues/issue_plan_0001".to_string(),
+            worktree_path: std::env::temp_dir().join("s2-parked-frontend"),
+            base_branch: "main".to_string(),
+        })
+        .unwrap();
+    lifecycle
+        .try_acquire_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            fixture.frontend,
+            "wi_service",
+            &frontend.id,
+        )
+        .unwrap();
+
+    let result = post_start(&fixture.state, "cmd_n3_s2_p1_b", PLAN_REVISION_ID)
+        .await
+        .expect("parked resume must transfer the lock, not fail on it");
+
+    // wi_panel 物化 Running + 指针对齐 + runner 重启。
+    let resumed = fixture.target_attempt(fixture.frontend);
+    assert_eq!(
+        resumed.current_work_item_id.as_deref(),
+        Some("wi_panel"),
+        "parked bucket advances to the next ready unit"
+    );
+    assert!(resumed.active_unit_id.is_some());
+    assert_eq!(
+        fixture
+            .state
+            .coding_runs
+            .runner_count(&CodingAttemptRunKey::from_attempt(&resumed)),
+        1,
+        "parked attempt gets a fresh runner"
+    );
+    // 锁事实：active 转移到 wi_panel，owner 保持本 attempt。
+    let record = lifecycle
+        .get_repo_shared_worktree(PROJECT_ID, ISSUE_ID, fixture.frontend)
+        .unwrap()
+        .expect("repo shared worktree record");
+    assert_eq!(
+        record.current_active_work_item_id.as_deref(),
+        Some("wi_panel")
+    );
+    assert_eq!(
+        record.current_lock_owner_id.as_deref(),
+        Some(frontend.id.as_str())
+    );
+    // selection 轮换到本轮确定性首个新启 unit（wi_registration 拓扑在前）。
+    let run = fixture
+        .run_store()
+        .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+        .unwrap();
+    let selection = run.selection.expect("rotated selection");
+    assert_eq!(selection.logical_work_item_id, "wi_registration");
+    let _ = result;
+}

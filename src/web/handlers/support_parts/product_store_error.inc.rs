@@ -372,11 +372,10 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             )
         }
         // N2 provider 准入边界（gate.rs Io 形态 `plan_coding_*: {attempt_id}`）：
-        // 安全暂停/失效/完成窗口拒绝 provider 进入，直达 409 稳定码。
+        // 安全暂停/失效拒绝 provider 进入，直达 409 稳定码。
         ProductStoreError::Io(message)
             if message.starts_with("plan_coding_paused:")
-                || message.starts_with("plan_coding_invalidated:")
-                || message.starts_with("plan_coding_first_unit_completed:") =>
+                || message.starts_with("plan_coding_invalidated:") =>
         {
             let (code, attempt_id) = message.split_once(':').unwrap_or((message.as_str(), ""));
             ApiError::runtime(

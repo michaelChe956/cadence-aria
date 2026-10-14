@@ -1098,6 +1098,15 @@ async fn resume_parked_plan_attempt(
     attempt: &crate::product::coding_models::CodingExecutionAttempt,
     unit: &CodingExecutionUnit,
 ) -> Result<bool, ApiError> {
+    // 锁转移 from 取**推进前**身份（与引擎 advance_to_next_group_unit 同款
+    // 先例）：park 形状的 current 指针仍是上一完成 unit（真实锁记录的
+    // active 端）；先物化再读会把 from 同步成新 unit（from==to 自转移），
+    // 撞真实记录的 repo/issue_worktree_active。缺 current 时回落桶根
+    // work_item_id。
+    let from_work_item_id = attempt
+        .current_work_item_id
+        .clone()
+        .unwrap_or_else(|| attempt.work_item_id.clone());
     let unit = store
         .update_coding_unit_status(
             &attempt.project_id,
@@ -1111,10 +1120,6 @@ async fn resume_parked_plan_attempt(
     let mut updated = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
-    let from_work_item_id = updated
-        .current_work_item_id
-        .clone()
-        .unwrap_or_else(|| unit.logical_work_item_id.clone());
     updated.current_work_item_id = Some(unit.logical_work_item_id.clone());
     updated.active_unit_id = Some(unit.id.clone());
     updated.stage = crate::product::coding_models::CodingExecutionStage::PrepareContext;
