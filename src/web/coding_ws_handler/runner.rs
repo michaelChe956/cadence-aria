@@ -1625,4 +1625,570 @@ mod tests {
             "runner must emit session_state while it flows to final confirmation"
         );
     }
+    struct N5ParkedRunnerFixture {
+        _root: TempDir,
+        paths: ProductAppPaths,
+        store: CodingAttemptStore,
+        attempt: CodingExecutionAttempt,
+        unit_a: crate::product::coding_models::CodingExecutionUnit,
+        unit_b: crate::product::coding_models::CodingExecutionUnit,
+        original_head: String,
+    }
+
+    /// 2-unit sc_advance 桶 parked 夹具(S2 切片C):桶内 wi_a/wi_b,wi_b
+    /// 依赖桶外 wi_x——wi_x 只进 plan 权威图/绑定,不落桶内 unit,SC 桶内
+    /// 依赖门对桶外上游恒 Waiting(n5 单 unit 夹具按三工作项推广)。
+    fn n5_sc_advance_parked_fixture() -> N5ParkedRunnerFixture {
+        let root = TempDir::new().expect("temp dir");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let worktree = root.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree directory");
+        run_git(&worktree, &["init", "--quiet"]);
+        run_git(&worktree, &["config", "user.email", "n5@example.test"]);
+        run_git(&worktree, &["config", "user.name", "N5 Runner"]);
+        std::fs::write(worktree.join("README.md"), "# n5 parked\n").expect("readme");
+        run_git(&worktree, &["add", "README.md"]);
+        run_git(&worktree, &["commit", "--quiet", "-m", "initial commit"]);
+        let original_head = git_head(&worktree);
+
+        let store = CodingAttemptStore::new(paths.clone());
+        let attempt = store
+            .create_group_attempt(CreateGroupCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                plan_id: "work_item_plan_0001".to_string(),
+                current_work_item_id: "wi_a".to_string(),
+                base_branch: original_head.clone(),
+                branch_name: "aria/issues/issue_0001".to_string(),
+                worktree_path: Some(worktree.clone()),
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Codex,
+                    reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                    permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(
+                    ),
+                },
+                target_snapshot: None,
+                max_auto_rework: 2,
+                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            })
+            .expect("group attempt");
+
+        let revision_store = WorkItemRevisionStore::new(paths.clone());
+        let plan = WorkItemPlanLineage {
+            id: "work_item_plan_0001".to_string(),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            story_spec_refs: Vec::new(),
+            design_spec_refs: Vec::new(),
+            active_revision_id: None,
+            active_amendment_id: None,
+            created_at: "2026-10-13T00:00:00Z".to_string(),
+            updated_at: "2026-10-13T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_plan_lineage(&plan)
+            .expect("plan lineage");
+        let logical_ids = ["wi_a", "wi_b", "wi_x"];
+        let mut revisions = BTreeMap::new();
+        let mut bundles = BTreeMap::new();
+        let mut plan_bindings = BTreeMap::new();
+        let mut human_summaries = Vec::new();
+        let mut coder_scopes = BTreeMap::new();
+        let mut reviewer_rows = Vec::new();
+        let mut history_entries = Vec::new();
+        for logical_id in logical_ids {
+            let current_item = LogicalWorkItem {
+                id: logical_id.to_string(),
+                plan_id: plan.id.clone(),
+                title: logical_id.to_string(),
+                active_revision_id: None,
+                created_at: "2026-10-13T00:00:00Z".to_string(),
+                updated_at: "2026-10-13T00:00:00Z".to_string(),
+            };
+            revision_store
+                .put_logical_work_item(&plan, &current_item)
+                .expect("logical work item");
+            let contract = minimal_contract(logical_id);
+            let revision = WorkItemRevision {
+                id: format!("work_item_revision_{logical_id}"),
+                logical_work_item_id: logical_id.to_string(),
+                source_draft_revision_id: format!("draft_work_item_revision_{logical_id}"),
+                canonical_contract_hash: canonical_contract_hash(&contract).unwrap(),
+                canonical_contract: contract,
+                work_item_projection_bundle_id: format!("projection_bundle_{logical_id}"),
+                verification_plan_revision_id: format!(
+                    "verification_work_item_revision_{logical_id}"
+                ),
+                created_at: "2026-10-13T00:00:00Z".to_string(),
+            };
+            revision_store
+                .put_verification_plan_revision(
+                    &plan,
+                    &VerificationPlanRevision {
+                        id: revision.verification_plan_revision_id.clone(),
+                        logical_work_item_id: revision.logical_work_item_id.clone(),
+                        source_draft_revision_id: revision.source_draft_revision_id.clone(),
+                        verification_checks: Vec::new(),
+                        created_at: "2026-10-13T00:00:00Z".to_string(),
+                    },
+                )
+                .expect("verification plan revision");
+            revision_store
+                .put_work_item_revision(&plan, &revision)
+                .expect("work item revision");
+            let compiled = WorkItemProjectionCompiler
+                .compile(&revision.canonical_contract, &revision.id)
+                .unwrap();
+            let hashes = projection_hashes(&compiled).unwrap();
+            let bundle = WorkItemProjectionBundle {
+                id: revision.work_item_projection_bundle_id.clone(),
+                work_item_revision_id: revision.id.clone(),
+                canonical_contract_hash: revision.canonical_contract_hash.clone(),
+                projection_schema_version: 1,
+                compiler_version: "work-item-projection-compiler-v1".to_string(),
+                human_projection: compiled.human.clone(),
+                coder_projection: compiled.coder.clone(),
+                reviewer_projection: compiled.reviewer.clone(),
+                human_projection_hash: hashes.human,
+                coder_projection_hash: hashes.coder.clone(),
+                reviewer_projection_hash: hashes.reviewer.clone(),
+                created_at: "2026-10-13T00:00:00Z".to_string(),
+            };
+            revision_store
+                .put_work_item_projection_bundle(&plan, &bundle)
+                .expect("work item projection bundle");
+            revision_store
+                .set_active_work_item_revision(&plan, &current_item, None, &revision.id)
+                .expect("active work item revision");
+            plan_bindings.insert(logical_id.to_string(), revision.id.clone());
+            human_summaries.push(HumanGroupWorkItemSummary {
+                logical_work_item_id: logical_id.to_string(),
+                title: compiled.human.title.clone(),
+                goal: compiled.human.goal.clone(),
+                depends_on: if logical_id == "wi_b" {
+                    vec!["wi_x".to_string()]
+                } else {
+                    Vec::new()
+                },
+                provides: Vec::new(),
+                scope_summary: compiled.human.scope_summary.clone(),
+            });
+            coder_scopes.insert(logical_id.to_string(), compiled.coder.write_policy.clone());
+            reviewer_rows.push(ReviewerGroupMatrixEntry {
+                logical_work_item_id: logical_id.to_string(),
+                criterion_refs: compiled.reviewer.criterion_refs.clone(),
+                input_contract_refs: Vec::new(),
+                output_contract_refs: Vec::new(),
+            });
+            history_entries.push((revision.id.clone(), logical_id.to_string()));
+            revisions.insert(logical_id.to_string(), revision);
+            bundles.insert(logical_id.to_string(), bundle);
+        }
+        // 权威依赖图:wi_x -> wi_b(桶外上游;SC 门 N1 同源校验按全图)。
+        let dependency_graph = DependencyGraphRevision {
+            id: "dependency_graph_revision_n5_parked".to_string(),
+            plan_id: plan.id.clone(),
+            edges: vec![crate::product::work_item_contract::DependencyContractEdge {
+                from: "wi_x".to_string(),
+                to: "wi_b".to_string(),
+                required_contracts: Vec::new(),
+            }],
+            created_at: "2026-10-13T00:00:00Z".to_string(),
+        };
+        revision_store
+            .put_dependency_graph_revision(&plan, &dependency_graph)
+            .expect("dependency graph revision");
+        let plan_revision = WorkItemPlanRevision {
+            id: "plan_revision_n5_parked".to_string(),
+            plan_id: plan.id.clone(),
+            revision_no: 1,
+            supersedes: None,
+            reason: PlanRevisionReason::InitialCompile,
+            work_item_bindings: plan_bindings,
+            dependency_graph_revision_id: dependency_graph.id.clone(),
+            validation_report_ref: "validation_report_n5_parked".to_string(),
+            plan_projection_bundle_id: "plan_projection_bundle_n5_parked".to_string(),
+            publication_provenance_ref: None,
+            created_at: "2026-10-13T00:00:00Z".to_string(),
+        };
+        let compiled_plan = CompiledPlanProjections {
+            human: HumanGroupProjection {
+                plan_id: plan.id.clone(),
+                goal: "n5 parked fixture".to_string(),
+                split_reason: "n5 parked fixture".to_string(),
+                work_items: human_summaries,
+                contract_flow: Vec::new(),
+                risks: Vec::new(),
+                source_refs: Vec::new(),
+                normative: false,
+                used_by_provider: false,
+            },
+            coder: CoderGroupContext {
+                plan_id: plan.id.clone(),
+                ordered_logical_work_item_ids: logical_ids
+                    .iter()
+                    .map(|logical_id| (*logical_id).to_string())
+                    .collect(),
+                dependency_edges: dependency_graph.edges.clone(),
+                group_write_scopes: coder_scopes,
+            },
+            reviewer: ReviewerGroupMatrix {
+                plan_id: plan.id.clone(),
+                work_items: reviewer_rows,
+                dependency_edges: dependency_graph.edges.clone(),
+                design_traceability_refs: Vec::new(),
+            },
+        };
+        let plan_hashes = plan_projection_hashes(&compiled_plan).unwrap();
+        revision_store
+            .put_plan_projection_bundle(
+                &plan,
+                &PlanProjectionBundle {
+                    id: plan_revision.plan_projection_bundle_id.clone(),
+                    plan_revision_id: plan_revision.id.clone(),
+                    dependency_graph_revision_id: plan_revision
+                        .dependency_graph_revision_id
+                        .clone(),
+                    work_item_projection_bundle_refs: bundles
+                        .values()
+                        .map(|bundle| bundle.id.clone())
+                        .collect(),
+                    human_group_projection: compiled_plan.human,
+                    coder_group_context: compiled_plan.coder,
+                    reviewer_group_matrix: compiled_plan.reviewer,
+                    human_group_projection_hash: plan_hashes.human,
+                    coder_group_context_hash: plan_hashes.coder,
+                    reviewer_group_matrix_hash: plan_hashes.reviewer,
+                    compiler_version: "plan-projection-compiler-v1".to_string(),
+                    created_at: "2026-10-13T00:00:00Z".to_string(),
+                },
+            )
+            .expect("plan projection bundle");
+        revision_store
+            .put_plan_revision(&plan, &plan_revision)
+            .expect("plan revision");
+        revision_store
+            .set_active_plan_revision(&plan, &plan_revision.id)
+            .expect("active plan revision");
+        store
+            .save_plan_binding(
+                &attempt,
+                &CodingAttemptPlanBinding {
+                    attempt_id: attempt.id.clone(),
+                    plan_id: plan.id.clone(),
+                    bound_plan_revision_id: plan_revision.id.clone(),
+                    applied_amendment_ids: Vec::new(),
+                    updated_at: "2026-10-13T00:00:00Z".to_string(),
+                },
+            )
+            .expect("plan binding");
+        let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(paths.clone());
+        let plan_session = lifecycle
+            .create_workspace_session(
+                crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                    project_id: attempt.project_id.clone(),
+                    issue_id: attempt.issue_id.clone(),
+                    entity_id: plan.id.clone(),
+                    workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+                    author_provider: ProviderName::Codex,
+                    reviewer_provider: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                    superpowers_enabled: true,
+                    openspec_enabled: true,
+                    work_item_plan_options: None,
+                },
+            )
+            .expect("plan workspace session");
+        lifecycle
+            .save_artifact_versions(
+                &plan_session.id,
+                &[crate::web::workspace_ws_types::ArtifactVersion {
+                    version: 1,
+                    payload:
+                        crate::web::workspace_ws_types::ArtifactPayload::WorkItemRevisionHistory {
+                            history: Box::new(
+                                crate::web::workspace_ws_types::WorkItemRevisionHistoryDto {
+                                    entries: history_entries
+                                        .into_iter()
+                                        .map(|(revision_id, logical_work_item_id)| {
+                                            crate::web::workspace_ws_types::WorkItemHistoryEntryDto {
+                                                kind: crate::web::workspace_ws_types::WorkItemHistoryEntryKind::WorkItemRevision,
+                                                id: revision_id,
+                                                logical_work_item_id,
+                                                related_revision_id: None,
+                                                summary: "Compiled WorkItem revision".to_string(),
+                                                created_at: "2026-10-13T00:00:00Z".to_string(),
+                                            }
+                                        })
+                                        .collect(),
+                                },
+                            ),
+                        },
+                    generated_by: ProviderName::Codex,
+                    reviewed_by: None,
+                    review_verdict: None,
+                    confirmed_by: None,
+                    is_current: false,
+                    created_at: "2026-10-13T00:00:00Z".to_string(),
+                    source_node_id: "timeline_node_compile".to_string(),
+                }],
+            )
+            .expect("plan history artifact");
+
+        let unit_a = store
+            .create_coding_unit(CreateCodingExecutionUnitInput {
+                attempt_id: attempt.id.clone(),
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                plan_id: plan.id.clone(),
+                logical_work_item_id: "wi_a".to_string(),
+                work_item_revision_id: revisions["wi_a"].id.clone(),
+                dependency_logical_work_item_ids: Vec::new(),
+                order_index: 1,
+                status: CodingExecutionUnitStatus::Running,
+            })
+            .expect("coding unit a");
+        let unit_b = store
+            .create_coding_unit(CreateCodingExecutionUnitInput {
+                attempt_id: attempt.id.clone(),
+                project_id: attempt.project_id.clone(),
+                issue_id: attempt.issue_id.clone(),
+                plan_id: plan.id.clone(),
+                logical_work_item_id: "wi_b".to_string(),
+                work_item_revision_id: revisions["wi_b"].id.clone(),
+                dependency_logical_work_item_ids: vec!["wi_x".to_string()],
+                order_index: 2,
+                status: CodingExecutionUnitStatus::Pending,
+            })
+            .expect("coding unit b");
+        let mut seeded = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap();
+        seeded.status = CodingAttemptStatus::Running;
+        seeded.admission_ticket_consumed_at = Some(chrono::Utc::now().to_rfc3339());
+        seeded.admission_kind = crate::product::coding_models::CodingAdmissionKind::ScAdvance;
+        seeded.stage = crate::product::coding_models::CodingExecutionStage::ReviewRequest;
+        seeded.active_unit_id = Some(unit_a.id.clone());
+        seeded.current_work_item_id = Some("wi_a".to_string());
+        store
+            .write_coding_attempt_for_test(&seeded)
+            .expect("seeded running sc advance attempt");
+        store
+            .create_coding_unit_run(
+                &seeded,
+                &CodingUnitRun {
+                    id: "coding_unit_run_n5_parked_0001".to_string(),
+                    unit_id: unit_a.id.clone(),
+                    execution_no: 1,
+                    work_item_revision_id: revisions["wi_a"].id.clone(),
+                    resolved_handoff_revision_ids: Vec::new(),
+                    canonical_contract_hash: bundles["wi_a"].canonical_contract_hash.clone(),
+                    projection_bundle_id: bundles["wi_a"].id.clone(),
+                    projection_compiler_version: bundles["wi_a"].compiler_version.clone(),
+                    coder_provider_renderer_version: renderer_for(&ProviderName::Codex)
+                        .renderer_version()
+                        .to_string(),
+                    reviewer_provider_renderer_version: renderer_for(&ProviderName::ClaudeCode)
+                        .renderer_version()
+                        .to_string(),
+                    internal_reviewer_provider_renderer_version: None,
+                    coder_projection_hash: bundles["wi_a"].coder_projection_hash.clone(),
+                    reviewer_projection_hash: bundles["wi_a"].reviewer_projection_hash.clone(),
+                    coder_execution_context_hash: None,
+                    reviewer_execution_context_hash: None,
+                    internal_reviewer_execution_context_hash: None,
+                    status: CodingUnitRunStatus::Running,
+                    unit_rework_count: 0,
+                    verification_retry_count: 0,
+                    operational_retry_count: 0,
+                    plan_repair_count: 0,
+                    start_commit: Some(original_head.clone()),
+                    completion_commit: None,
+                    created_at: "2026-10-13T00:00:00Z".to_string(),
+                    updated_at: "2026-10-13T00:00:00Z".to_string(),
+                },
+            )
+            .expect("running unit run");
+
+        N5ParkedRunnerFixture {
+            _root: root,
+            paths,
+            store,
+            attempt: seeded,
+            unit_a,
+            unit_b,
+            original_head,
+        }
+    }
+
+    fn seed_n5_parked_plan_run(fixture: &N5ParkedRunnerFixture) {
+        // 空 target_attempts:完成挂点 drive 桥可运行但零推进(wi_x 完成事实
+        // 不在任何绑定桶)——runner 对本 attempt 必须 park 而非穿到终审。
+        let selection = CodingPlanSelection {
+            unit_id: fixture.unit_a.id.clone(),
+            logical_work_item_id: fixture.unit_a.logical_work_item_id.clone(),
+            attempt_id: fixture.attempt.id.clone(),
+            target_repository_id: "repository_0001".to_string(),
+            start_command_id: CodingPlanSelection::deterministic_start_command_id(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                "work_item_plan_0001",
+                "cmd_n5_parked_plan_run",
+                "repository_0001",
+            ),
+        };
+        let run = CodingPlanRun {
+            project_id: fixture.attempt.project_id.clone(),
+            issue_id: fixture.attempt.issue_id.clone(),
+            plan_id: "work_item_plan_0001".to_string(),
+            command_id: "cmd_n5_parked_plan_run".to_string(),
+            bound_plan_revision_id: "plan_revision_n5_parked".to_string(),
+            dependency_graph_revision_id: "dependency_graph_revision_n5_parked".to_string(),
+            target_attempts: Vec::new(),
+            mode: PLAN_CODING_MODE_FIRST_READY_UNIT.to_string(),
+            selection: Some(selection),
+            phase: CodingPlanRunPhase::Started,
+            start_outcome: None,
+            pause_reason: None,
+            created_at: "2026-10-13T00:00:00Z".to_string(),
+            updated_at: "2026-10-13T00:00:00Z".to_string(),
+        };
+        let runs_dir = fixture
+            .paths
+            .issue_root(&fixture.attempt.project_id, &fixture.attempt.issue_id)
+            .join("coding-plan-runs");
+        std::fs::create_dir_all(&runs_dir).expect("coding-plan-runs directory");
+        std::fs::write(
+            runs_dir.join("work_item_plan_0001.json"),
+            serde_json::to_string(&run).expect("serialize plan run"),
+        )
+        .expect("persist plan run");
+    }
+
+    /// S2 parked 红测(切片C):2-unit sc_advance 桶,wi_b 依赖桶外 wi_x。
+    /// 完成 wi_a 后:无 review_request 发出、无 git journal 写入、attempt
+    /// 非 AMR(保持 Running park 形状:active 清空/stage 保持)、wi_b 物化
+    /// 在场,上游未完成(wi_x 完成事实不在任何绑定桶)→ runner 干净退出。
+    #[tokio::test]
+    async fn sc_advance_completion_parks_cleanly_when_next_unit_waits_on_out_of_bucket_work_item()
+    {
+        let fixture = n5_sc_advance_parked_fixture();
+        seed_n5_parked_plan_run(&fixture);
+        let provider = CountingProvider::default();
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::Codex, Arc::new(provider.clone()));
+        let mut web_state = WebAppState::new(
+            fixture._root.path().to_path_buf(),
+            WebRuntime::new_fake(fixture._root.path().to_path_buf()),
+        );
+        web_state.provider_registry = Arc::new(registry);
+        web_state.test_provider_enabled = true;
+
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let engine = CodingWorkspaceEngine::new(
+            fixture.store.clone(),
+            GitWorkspaceService::new(),
+            event_tx.clone(),
+        );
+        let attempt = fixture.attempt.clone();
+        execute_start_coding_flow(
+            &web_state,
+            &fixture.store,
+            &engine,
+            &event_tx,
+            command_rx,
+            &attempt,
+        )
+        .await
+        .expect("parked completion must exit cleanly instead of dying at final confirm");
+        drop(event_tx);
+
+        let final_attempt = fixture
+            .store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("final attempt");
+        assert_ne!(
+            final_attempt.status,
+            CodingAttemptStatus::AwaitingManualRecovery,
+            "parked attempt must not land in manual recovery"
+        );
+        assert_eq!(
+            final_attempt.status,
+            CodingAttemptStatus::Running,
+            "park keeps the attempt running for the entry-face continuation drive"
+        );
+        assert_eq!(
+            final_attempt.stage,
+            crate::product::coding_models::CodingExecutionStage::ReviewRequest,
+            "park preserves the completion-chain entry stage"
+        );
+        assert!(
+            final_attempt.active_unit_id.is_none(),
+            "park clears the execution-authority pointer"
+        );
+        assert!(
+            fixture
+                .store
+                .list_review_requests(
+                    &final_attempt.project_id,
+                    &final_attempt.issue_id,
+                    &final_attempt.id
+                )
+                .expect("review requests")
+                .is_empty(),
+            "no review request may be issued for a parked attempt"
+        );
+        assert!(
+            fixture
+                .store
+                .get_coding_git_operation(&final_attempt)
+                .expect("git operation journal")
+                .is_none(),
+            "parked completion must not write a review-request git journal"
+        );
+        let units = fixture
+            .store
+            .list_coding_units(
+                &final_attempt.project_id,
+                &final_attempt.issue_id,
+                &final_attempt.id,
+            )
+            .expect("units");
+        assert_eq!(units.len(), 2, "both bucket units stay materialized");
+        let unit_a = units
+            .iter()
+            .find(|unit| unit.id == fixture.unit_a.id)
+            .expect("unit a");
+        let unit_b = units
+            .iter()
+            .find(|unit| unit.id == fixture.unit_b.id)
+            .expect("unit b");
+        assert_eq!(unit_a.status, CodingExecutionUnitStatus::Completed);
+        assert_eq!(
+            unit_b.status,
+            CodingExecutionUnitStatus::Pending,
+            "waiting unit stays materialized and pending"
+        );
+        assert_eq!(unit_b.dependency_logical_work_item_ids, vec!["wi_x"]);
+        assert_eq!(
+            provider.starts(),
+            0,
+            "the parked exit path must not start a provider"
+        );
+        let mut session_state_events = 0;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(
+                event,
+                crate::web::coding_ws_handler::CodingWsOutMessage::CodingSessionState { .. }
+            ) {
+                session_state_events += 1;
+            }
+        }
+        assert!(
+            session_state_events > 0,
+            "runner must emit session_state for the parked shape before exiting"
+        );
+    }
 }

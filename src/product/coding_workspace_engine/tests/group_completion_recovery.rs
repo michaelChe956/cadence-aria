@@ -1539,3 +1539,79 @@ async fn plan_coding_n5_second_unit_advance_keeps_worktree_lock_transfer() {
         Some(third.id.as_str())
     );
 }
+
+/// S2 切片C(CompletedRetry 恢复):`complete_coding_unit_run` 幂等——已完成
+/// run 同 completion_commit 重放返回权威事实,异 commit fail-closed;清指针
+/// CompletedRetry 重入后 handoff 重建逐字段相等(确定性重建,不产生第二
+/// 事实)。
+#[tokio::test]
+async fn completed_retry_completion_is_idempotent_and_rebuilds_handoff_field_equal() {
+    let (fixture, partial, lineage, canonical) = cleared_active_recovery_fixture();
+
+    // ① store 级幂等:同 commit 重放 → 原样返回权威 run。
+    let replayed = fixture
+        .store
+        .complete_coding_unit_run(
+            &partial,
+            &canonical.coding_unit_run_id,
+            &canonical.commit_sha,
+        )
+        .expect("idempotent replay returns the authoritative completed run");
+    assert_eq!(replayed.status, CodingUnitRunStatus::Completed);
+    assert_eq!(
+        replayed.completion_commit.as_deref(),
+        Some(canonical.commit_sha.as_str())
+    );
+    // 异 commit 重放 → fail-closed(identity mismatch),不得改写完成事实。
+    let divergent = fixture
+        .store
+        .complete_coding_unit_run(&partial, &canonical.coding_unit_run_id, "deadbeef0000")
+        .expect_err("divergent completion commit must fail closed");
+    assert!(
+        divergent
+            .to_string()
+            .contains("product_store_identity_mismatch"),
+        "unexpected divergent replay result: {divergent}"
+    );
+
+    // ② CompletedRetry 重入(清指针恢复形状):完成链重建 handoff。
+    let advanced = fixture
+        .engine
+        .complete_group_unit_after_code_review(&partial)
+        .await
+        .expect("completed retry re-entry rebuilds the completion facts");
+    assert_eq!(advanced.status, CodingAttemptStatus::Running);
+    let unit = fixture
+        .store
+        .list_coding_units(&advanced.project_id, &advanced.issue_id, &advanced.id)
+        .expect("units after retry")
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == canonical.logical_work_item_id)
+        .expect("completed unit after retry");
+    let rebuilt = WorkItemRevisionStore::new(fixture.store.paths())
+        .get_handoff_revision(
+            &lineage,
+            &canonical.logical_work_item_id,
+            unit.latest_handoff_revision_id
+                .as_deref()
+                .expect("handoff pointer after retry"),
+        )
+        .expect("rebuilt handoff");
+    // 逐字段相等:整结构相等 + 关键字段显式对拍。
+    assert_eq!(rebuilt, canonical);
+    assert_eq!(rebuilt.id, canonical.id);
+    assert_eq!(rebuilt.logical_work_item_id, canonical.logical_work_item_id);
+    assert_eq!(rebuilt.work_item_revision_id, canonical.work_item_revision_id);
+    assert_eq!(rebuilt.coding_unit_run_id, canonical.coding_unit_run_id);
+    assert_eq!(rebuilt.commit_sha, canonical.commit_sha);
+    assert_eq!(rebuilt.contract_hash, canonical.contract_hash);
+    assert_eq!(rebuilt.created_at, canonical.created_at);
+    assert_eq!(
+        rebuilt.provided_contracts, canonical.provided_contracts,
+        "rebuilt handoff must keep the provided contract set stable"
+    );
+    assert_eq!(
+        rebuilt.provided_capabilities, canonical.provided_capabilities,
+        "rebuilt handoff must keep the provided capability map stable"
+    );
+}

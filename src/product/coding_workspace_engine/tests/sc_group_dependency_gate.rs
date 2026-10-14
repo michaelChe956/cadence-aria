@@ -211,6 +211,31 @@ mod tests {
     async fn sc_group_dependency_waiting_clears_active_unit_and_writes_no_provider_ledger() {
         let fixture = fixture();
         complete_unit_without_handoff(&fixture, "work_item_0003");
+        // 空断言修复(S2 切片C):seed 停在 PrepareContext 时下方 stage 断言
+        // 恒真。生产完成链进入 advance 时 stage 已在 ReviewRequest
+        // (ContinueAfterApprove/完成链前置),先落生产形状再断言。
+        let seeded = fixture
+            .store
+            .get_attempt(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("attempt before stage seed");
+        assert_eq!(
+            seeded.stage,
+            CodingExecutionStage::PrepareContext,
+            "fixture seed starts at PrepareContext (vacuous-assertion premise)"
+        );
+        fixture
+            .store
+            .update_attempt_stage(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                CodingExecutionStage::ReviewRequest,
+            )
+            .expect("seed completion-chain entry stage");
         let current = fixture
             .store
             .get_attempt(
@@ -228,7 +253,9 @@ mod tests {
             .expect("waiting advance");
 
         assert!(updated.active_unit_id.is_none());
-        assert_ne!(updated.stage, CodingExecutionStage::ReviewRequest);
+        // Waiting park 不推进 stage:保持完成链进入时的 ReviewRequest(执行
+        // 权威由 active_unit_id 表达;stage 推进属 Ready/Complete 分支)。
+        assert_eq!(updated.stage, CodingExecutionStage::ReviewRequest);
         // This fallback deliberately pins caller-view continuity, not byte-for-byte preservation
         // of the prior durable pointer: completion-side store synchronization may clear it first.
         assert_eq!(
