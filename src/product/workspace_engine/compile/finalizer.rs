@@ -101,6 +101,14 @@ impl WorkspaceEngine {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
+        // D2.1b 探针：legacy resume 恢复重放位点（resume 还在跑同样 busy）。
+        #[cfg(test)]
+        probe_work_item_plan_compile_admission(
+            &tx.project_id,
+            &tx.issue_id,
+            &tx.plan_id,
+            "legacy_publication_resumed",
+        );
         tx.step_cursor = "publication_resumed".to_string();
         tx.updated_at = tx.created_at.clone();
         store
@@ -536,6 +544,14 @@ impl WorkspaceEngine {
             WorkItemPlanCompileFinalizerCheckpoint::CompileReportPersisted,
         )?;
 
+        // D2.1b 探针：final 提交位点（commit 段终点，lease 仍持）。
+        #[cfg(test)]
+        probe_work_item_plan_compile_admission(
+            &tx.project_id,
+            &tx.issue_id,
+            &tx.plan_id,
+            "committed",
+        );
         tx.status = WorkItemPlanCompileStatus::Committed;
         tx.plan_commit_state = WorkItemPlanCommitState::Committed;
         tx.committed_at = Some(tx.created_at.clone());

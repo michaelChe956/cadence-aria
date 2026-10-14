@@ -327,3 +327,503 @@ fn sg_03b_planning_compile_failure_identity_seal_is_deterministic() {
     let structure = PlanningCompileFailure::structure(Default::default());
     assert_eq!(structure.stable_code(), "final_compile_structure_rejected");
 }
+
+// ─── fix-cascade-deletion Task D2.1b：compile及恢复lease完整覆盖 ───
+//
+// REQ-DEL-06（plan D2.1b Step 1）：Final Compile（legacy/SC）与恢复入口持
+// owning Plan run lease——preparing→commit 各 checkpoint 删除独占立即 Busy、
+// 零墓碑（无 attempt 也不能清运行中 compile）；resume 还在跑同样 Busy；
+// 删除赢（purging）后恢复动作先于任何 durable 读/写稳定拒绝（不写
+// transaction/WorkItems/source/provenance）；正常链路 published refs/
+// hash/CAS 仍同代。
+
+use std::sync::{Arc, Mutex};
+
+use super::{WorkItemPlanCompileAdmission, WorkItemPlanCompileFinalizerCheckpoint};
+use crate::product::app_paths::ProductAppPaths;
+use crate::product::entity_deletion_store::{
+    DeletionEntityKind, DeletionPhase, EntityDeletionStore, EntityScope,
+};
+use crate::product::entity_operation_store::{EntityOperationError, EntityOperationStore};
+use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::models::{
+    SingleCandidatePhase, WorkItemPlanCommitState, WorkItemPlanCompileStatus,
+};
+use crate::product::work_item_plan_policy::RunPolicy;
+use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
+use crate::product::workspace_engine::WorkspaceEngine;
+use crate::product::workspace_engine::tests::make_work_item_plan_engine_with_accepted_contract_drafts;
+use crate::product::workspace_engine::tests::single_candidate_recovery::single_candidate_recovery_record;
+use crate::web::workspace_ws_types::WorkItemPlanCompileRecoveryActionDto;
+
+type D21bProbeViolations = Arc<Mutex<Vec<String>>>;
+type D21bProbeFired = Arc<Mutex<std::collections::BTreeSet<String>>>;
+
+/// 注册「运行中 compile 该 checkpoint 删除必须 Busy 且零墓碑」探针。
+fn d21b_register_delete_busy_probe(
+    app_paths: &ProductAppPaths,
+    plan_id: &str,
+    checkpoint: &str,
+    violations: &D21bProbeViolations,
+    fired: &D21bProbeFired,
+) -> super::WorkItemPlanCompileAdmissionProbeGuard {
+    let app_paths_capture = app_paths.clone();
+    let plan_capture = plan_id.to_string();
+    let checkpoint_capture = checkpoint.to_string();
+    let violations = violations.clone();
+    let fired = fired.clone();
+    super::register_work_item_plan_compile_admission_probe(
+        "project_0001",
+        "issue_0001",
+        plan_id,
+        checkpoint,
+        move || {
+            let scope = EntityScope::new(
+                "project_0001",
+                "issue_0001",
+                DeletionEntityKind::Plan,
+                &plan_capture,
+            );
+            let operations = EntityOperationStore::new(app_paths_capture.clone());
+            match operations.try_acquire_delete(&scope) {
+                Err(EntityOperationError::Busy) => {}
+                Err(other) => violations.lock().unwrap().push(format!(
+                    "{checkpoint_capture}: 运行中 compile 期间删除必须 Busy，got Err({other:?})"
+                )),
+                Ok(_) => violations.lock().unwrap().push(format!(
+                    "{checkpoint_capture}: 运行中 compile 期间删除不得成功（必须 Busy）"
+                )),
+            }
+            if EntityDeletionStore::new(app_paths_capture.clone())
+                .get(&scope)
+                .unwrap()
+                .is_some()
+            {
+                violations
+                    .lock()
+                    .unwrap()
+                    .push(format!("{checkpoint_capture}: busy 拒绝必须零墓碑"));
+            }
+            fired.lock().unwrap().insert(checkpoint_capture.clone());
+        },
+    )
+}
+
+fn d21b_snapshot_tree(root: &std::path::Path) -> Vec<(String, u64)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<(String, u64)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                out.push((
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    len,
+                ));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn cascade_d2_1b_compile_and_recovery_lease() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let app_paths = lifecycle.app_paths();
+    let operations = EntityOperationStore::new(app_paths.clone());
+    let deletions = EntityDeletionStore::new(app_paths.clone());
+    let scope = EntityScope::new(
+        "project_0001",
+        "issue_0001",
+        DeletionEntityKind::Plan,
+        &plan_id,
+    );
+
+    // (a) 准入契约面：compile admission 在持 → 删除独占立即 Busy、零墓碑
+    //     （删除拒绝是零破坏拒绝）。
+    let admission =
+        WorkItemPlanCompileAdmission::acquire(&app_paths, "project_0001", "issue_0001", &plan_id)
+            .expect("live plan compile admission");
+    match operations.try_acquire_delete(&scope) {
+        Err(EntityOperationError::Busy) => {}
+        Err(other) => panic!("expected Busy, got: {other:?}"),
+        Ok(_) => panic!("delete must be busy while the compile admission is held"),
+    }
+    assert!(
+        deletions.get(&scope).unwrap().is_none(),
+        "busy 拒绝必须零墓碑"
+    );
+    drop(admission);
+
+    // (b) 无 attempt 前提 + 全 checkpoint 探针：legacy preparing→commit 各
+    //     checkpoint 删除 Busy 且零墓碑。
+    assert!(
+        crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone())
+            .list_attempts_for_issue("project_0001", "issue_0001")
+            .unwrap()
+            .is_empty(),
+        "夹具必须零 coding attempts（无 attempt 也不能清运行中 compile）"
+    );
+    let violations: D21bProbeViolations = Arc::new(Mutex::new(Vec::new()));
+    let fired: D21bProbeFired = Arc::new(Mutex::new(Default::default()));
+    let checkpoints = [
+        "preparing",
+        "validating",
+        "committing",
+        "PlanSummaryPrepared",
+        "WorkItemRecordsPersisted",
+        "FirstChildSessionEnsured",
+        "FirstChildBindingEnsured",
+        "FirstChildContextPrepared",
+        "CompileReportPersisted",
+        "committed",
+    ];
+    let guards: Vec<_> = checkpoints
+        .iter()
+        .map(|checkpoint| {
+            d21b_register_delete_busy_probe(&app_paths, &plan_id, checkpoint, &violations, &fired)
+        })
+        .collect();
+    let outcome = engine
+        .run_work_item_plan_compile()
+        .await
+        .expect("live plan compile must succeed");
+    drop(guards);
+    assert!(
+        violations.lock().unwrap().is_empty(),
+        "{:?}",
+        violations.lock().unwrap()
+    );
+    let fired_set = fired.lock().unwrap().clone();
+    let expected: std::collections::BTreeSet<String> =
+        checkpoints.iter().map(|cp| cp.to_string()).collect();
+    assert_eq!(
+        fired_set, expected,
+        "每个 checkpoint 都必须在 run lease 在持时被真实编译触发"
+    );
+
+    // (c) 正常 published refs/hash/CAS 仍同代：committed tx + active lineage
+    //     + plan_revision refs 一致；final 提交后 lease 随帧释放（删除不再
+    //     Busy，不泄漏）。
+    let plan_store = engine.work_item_plan_store().unwrap();
+    let transactions = plan_store
+        .list_compile_transactions("project_0001", "issue_0001", &plan_id)
+        .unwrap();
+    assert_eq!(transactions.len(), 1);
+    let tx = &transactions[0];
+    assert_eq!(tx.status, WorkItemPlanCompileStatus::Committed);
+    assert_eq!(tx.plan_commit_state, WorkItemPlanCommitState::Committed);
+    let lineage = engine
+        .revision_store()
+        .get_plan_lineage("project_0001", "issue_0001", &plan_id)
+        .unwrap();
+    assert_eq!(
+        lineage.active_revision_id.as_deref(),
+        Some(outcome.plan_revision.id.as_str())
+    );
+    let delete_probe = operations
+        .try_acquire_delete(&scope)
+        .expect("compile 完成后删除独占可行（lease 已随帧释放）");
+    drop(delete_probe);
+}
+
+#[tokio::test]
+async fn cascade_d2_1b_single_candidate_compile_lease_and_same_generation_publication() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    single_candidate_recovery_record(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Approval,
+        RunPolicy::Interactive,
+    );
+    let app_paths = lifecycle.app_paths();
+    assert!(
+        crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone())
+            .list_attempts_for_issue("project_0001", "issue_0001")
+            .unwrap()
+            .is_empty(),
+        "无 attempt 前提：运行中 SC compile 同样不可清"
+    );
+
+    let violations: D21bProbeViolations = Arc::new(Mutex::new(Vec::new()));
+    let fired: D21bProbeFired = Arc::new(Mutex::new(Default::default()));
+    let checkpoints = [
+        "ApprovalPersisted",
+        "ReservationPersisted",
+        "ProvenancePersisted",
+        "preparing",
+        "validating",
+        "committing",
+        "PlanSummaryPrepared",
+        "WorkItemRecordsPersisted",
+        "FirstChildSessionEnsured",
+        "FirstChildBindingEnsured",
+        "FirstChildContextPrepared",
+        "CompileReportPersisted",
+        "committed",
+    ];
+    let guards: Vec<_> = checkpoints
+        .iter()
+        .map(|checkpoint| {
+            d21b_register_delete_busy_probe(&app_paths, &plan_id, checkpoint, &violations, &fired)
+        })
+        .collect();
+    let outcome = engine
+        .run_work_item_plan_compile()
+        .await
+        .expect("SC compile must succeed");
+    drop(guards);
+    assert!(
+        violations.lock().unwrap().is_empty(),
+        "{:?}",
+        violations.lock().unwrap()
+    );
+    let fired_set = fired.lock().unwrap().clone();
+    let expected: std::collections::BTreeSet<String> =
+        checkpoints.iter().map(|cp| cp.to_string()).collect();
+    assert_eq!(fired_set, expected);
+
+    // 正常 SC 发布同代：tx committed、provenance 内容 hash 与 CAS 身份一致、
+    // lineage active revision 与 plan_revision 同 refs。
+    let plan_store = engine.work_item_plan_store().unwrap();
+    let transactions = plan_store
+        .list_compile_transactions("project_0001", "issue_0001", &plan_id)
+        .unwrap();
+    assert_eq!(transactions.len(), 1);
+    let tx = &transactions[0];
+    assert_eq!(tx.status, WorkItemPlanCompileStatus::Committed);
+    assert_eq!(tx.plan_commit_state, WorkItemPlanCommitState::Committed);
+    let provenance_ref = tx
+        .publication_provenance_ref
+        .as_deref()
+        .expect("SC tx durable provenance ref");
+    let source_scope = SourceStoreScope {
+        project_id: "project_0001".to_string(),
+        issue_id: "issue_0001".to_string(),
+        plan_id: plan_id.clone(),
+    };
+    let provenance = WorkItemPlanSourceStore::new(app_paths.clone())
+        .get_publication_provenance(&source_scope, provenance_ref)
+        .unwrap();
+    assert_eq!(provenance.plan_revision_id, outcome.plan_revision.id);
+    assert_eq!(
+        provenance.content_hash,
+        provenance.content_hash().expect("provenance content hash")
+    );
+    let lineage = engine
+        .revision_store()
+        .get_plan_lineage("project_0001", "issue_0001", &plan_id)
+        .unwrap();
+    assert_eq!(
+        lineage.active_revision_id.as_deref(),
+        Some(outcome.plan_revision.id.as_str())
+    );
+}
+
+/// 构造 SC RecoveryRequired 现场：阶段一 provenance 边界固定确定性
+/// compile_id（tx 产生前中断），阶段二 finalizer Commit 段中断 →
+/// mark_recovery + 恢复节点 Active。
+async fn d21b_single_candidate_recovery_required_fixture() -> (
+    tempfile::TempDir,
+    LifecycleStore,
+    String,
+    WorkspaceEngine,
+    String,
+) {
+    let (tmp, lifecycle, plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    single_candidate_recovery_record(
+        &lifecycle,
+        &mut engine,
+        SingleCandidatePhase::Approval,
+        RunPolicy::Interactive,
+    );
+    let failpoint = engine.register_single_candidate_compile_failpoint(
+        super::SingleCandidateCompileCheckpoint::ProvenancePersisted,
+    );
+    let error = engine
+        .run_work_item_plan_compile()
+        .await
+        .expect_err("provenance 边界必须先中断");
+    drop(failpoint);
+    assert!(error.contains("ProvenancePersisted"), "{error}");
+    let record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .unwrap();
+    let compile_id = record
+        .compile_reservation
+        .as_ref()
+        .expect("provenance 后 durable reservation")
+        .compile_id
+        .clone();
+
+    let failpoint = engine.register_work_item_plan_compile_finalizer_failpoint(
+        &compile_id,
+        WorkItemPlanCompileFinalizerCheckpoint::CompileReportPersisted,
+    );
+    let error = engine
+        .run_work_item_plan_compile()
+        .await
+        .expect_err("finalizer checkpoint 必须中断");
+    drop(failpoint);
+    assert!(error.contains("CompileReportPersisted"), "{error}");
+    assert!(engine.mark_latest_compile_transaction_recovery_required(&error));
+    engine
+        .enter_work_item_plan_compile_recovery(Some(error))
+        .await;
+    (tmp, lifecycle, plan_id, engine, compile_id)
+}
+
+#[tokio::test]
+async fn cascade_d2_1b_recovery_resume_busy_while_running() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, lifecycle, plan_id, mut engine, _compile_id) =
+        d21b_single_candidate_recovery_required_fixture().await;
+    let app_paths = lifecycle.app_paths();
+
+    // resume 还在跑：恢复 Continue 在真实 resume 重放位点删除必须 Busy。
+    let violations: D21bProbeViolations = Arc::new(Mutex::new(Vec::new()));
+    let fired: D21bProbeFired = Arc::new(Mutex::new(Default::default()));
+    let _probe = d21b_register_delete_busy_probe(
+        &app_paths,
+        &plan_id,
+        "single_candidate_publication_resumed",
+        &violations,
+        &fired,
+    );
+    let outcome = engine
+        .handle_work_item_plan_compile_recovery_action(
+            WorkItemPlanCompileRecoveryActionDto::Continue,
+            None,
+        )
+        .await
+        .expect("live plan recovery continue");
+    assert_eq!(
+        outcome,
+        crate::product::workspace_engine::WorkItemPlanCompileRecoveryOutcome::HumanConfirm
+    );
+    assert!(
+        violations.lock().unwrap().is_empty(),
+        "{:?}",
+        violations.lock().unwrap()
+    );
+    assert!(
+        fired
+            .lock()
+            .unwrap()
+            .contains("single_candidate_publication_resumed")
+    );
+
+    // resume 完成后 committed（正常恢复语义不回退）。
+    let transactions = engine
+        .work_item_plan_store()
+        .unwrap()
+        .list_compile_transactions("project_0001", "issue_0001", &plan_id)
+        .unwrap();
+    let tx = transactions
+        .iter()
+        .find(|tx| tx.status == WorkItemPlanCompileStatus::Committed)
+        .expect("resumed transaction committed");
+    assert_eq!(tx.plan_commit_state, WorkItemPlanCommitState::Committed);
+}
+
+#[tokio::test]
+async fn cascade_d2_1b_delete_winner_recovery_writes_nothing() {
+    let _serial = crate::product::workspace_engine::single_candidate_compile_test_lock().await;
+    let (_tmp, lifecycle, plan_id, mut engine, _compile_id) =
+        d21b_single_candidate_recovery_required_fixture().await;
+    let app_paths = lifecycle.app_paths();
+    let operations = EntityOperationStore::new(app_paths.clone());
+    let deletions = EntityDeletionStore::new(app_paths.clone());
+    let scope = EntityScope::new(
+        "project_0001",
+        "issue_0001",
+        DeletionEntityKind::Plan,
+        &plan_id,
+    );
+
+    // 存面快照（删除赢之前）。
+    let plan_store = engine.work_item_plan_store().unwrap();
+    let tx_before: Vec<(String, WorkItemPlanCompileStatus, String, Option<String>)> = plan_store
+        .list_compile_transactions("project_0001", "issue_0001", &plan_id)
+        .unwrap()
+        .into_iter()
+        .map(|tx| (tx.compile_id, tx.status, tx.step_cursor, tx.failure_reason))
+        .collect();
+    let work_items_before = lifecycle
+        .count_work_items("project_0001", "issue_0001")
+        .unwrap();
+    let source_root = app_paths
+        .issue_root("project_0001", "issue_0001")
+        .join("work-item-plan-sources")
+        .join(&plan_id);
+    let source_before = d21b_snapshot_tree(&source_root);
+
+    // 删除赢：purging 墓碑在位（删除独占 lease 已释放，仅墓碑事实）。
+    let delete_lease = operations
+        .try_acquire_delete(&scope)
+        .expect("恢复待决的 live plan 删除独占可行");
+    deletions.begin(&delete_lease).expect("purging tombstone");
+    drop(delete_lease);
+    assert_eq!(
+        deletions.get(&scope).unwrap().map(|record| record.phase),
+        Some(DeletionPhase::Purging)
+    );
+
+    // 恢复动作三类全部先于 durable 写稳定拒绝，零 transaction 新写。
+    let journal = crate::product::work_item_plan_store::observe_compile_transaction_writes();
+    for action in [
+        WorkItemPlanCompileRecoveryActionDto::Continue,
+        WorkItemPlanCompileRecoveryActionDto::HumanTriage,
+        WorkItemPlanCompileRecoveryActionDto::AbortAndRollback,
+    ] {
+        let rejected = engine
+            .handle_work_item_plan_compile_recovery_action(action, None)
+            .await
+            .expect_err("删除赢后恢复动作必须稳定拒绝");
+        assert!(rejected.contains("entity_deleting"), "{rejected}");
+    }
+    assert!(
+        journal.snapshots().is_empty(),
+        "拒绝路径不得写 compile transaction"
+    );
+    drop(journal);
+
+    // 存面零变化：transaction/WorkItems/source/provenance 均未被触碰。
+    let tx_after: Vec<(String, WorkItemPlanCompileStatus, String, Option<String>)> = plan_store
+        .list_compile_transactions("project_0001", "issue_0001", &plan_id)
+        .unwrap()
+        .into_iter()
+        .map(|tx| (tx.compile_id, tx.status, tx.step_cursor, tx.failure_reason))
+        .collect();
+    assert_eq!(tx_after, tx_before, "拒绝路径不得改写 compile transaction");
+    assert_eq!(
+        lifecycle
+            .count_work_items("project_0001", "issue_0001")
+            .unwrap(),
+        work_items_before,
+        "拒绝路径不得增删 WorkItems"
+    );
+    assert_eq!(
+        d21b_snapshot_tree(&source_root),
+        source_before,
+        "拒绝路径不得写 source/provenance"
+    );
+    assert!(
+        crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone())
+            .list_attempts_for_issue("project_0001", "issue_0001")
+            .unwrap()
+            .is_empty()
+    );
+}

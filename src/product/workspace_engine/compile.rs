@@ -1,4 +1,8 @@
 use super::*;
+use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
+use crate::product::entity_operation_store::{
+    EntityOperationError, EntityOperationStore, EntityRunLease,
+};
 use crate::product::lifecycle_store::{
     CompileReservationError, PolicyRoutePersist, single_candidate_approval_attempt_id,
     single_candidate_compile_id,
@@ -120,6 +124,53 @@ pub struct PreparedInitialPlanCompile {
 pub struct CompileStores {
     pub plan_store: WorkItemPlanStore,
     pub revision_store: WorkItemRevisionStore,
+}
+
+/// D2.1b（fix-cascade-deletion Task 3.1；REQ-DEL-06，plan §0.4）：Final
+/// Compile 及恢复入口的 owning Plan run lease。
+///
+/// 在任何 durable 写之前取得（try-shared＋锁内墓碑复核，由
+/// `EntityOperationStore::acquire_run` 在 scope 锁内精确分类），整个
+/// preparing→validating→committing→finalizer 提交段持有到 final 提交/失败
+/// 返回才释放；准入在持期间删除独占立即 Busy——无 attempt 也不能清运行中
+/// compile。外层已持同 scope lease（D2.1a spawn 全周期 run lease／enter
+/// 状态机帧）时，flock 共享锁跨 open file description 幂等可重入，重取只
+/// 做锁内墓碑复核，等价消费，不引入锁序倒置；内层各 store 写沿用
+/// D1.2/D1.3 已准入 helper，不在 engine/session/object 锁内首次取 scope。
+pub struct WorkItemPlanCompileAdmission {
+    _lease: EntityRunLease,
+}
+
+impl WorkItemPlanCompileAdmission {
+    /// 入口准入（try-shared＋锁内墓碑复核）：purging/deleted/争用由
+    /// `EntityOperationStore::acquire_run` 在 scope 锁内精确分类。
+    pub fn acquire(
+        paths: &crate::product::app_paths::ProductAppPaths,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<Self, EntityOperationError> {
+        let scope = EntityScope::new(project_id, issue_id, DeletionEntityKind::Plan, plan_id);
+        scope.validate().map_err(EntityOperationError::Store)?;
+        Ok(Self {
+            _lease: EntityOperationStore::new(paths.clone()).acquire_run(&scope)?,
+        })
+    }
+}
+
+/// D2.1b：准入失败的稳定错误串（engine Err 通道；message 前缀携带稳定
+/// store kind，D2.1a/D2.1d 同惯例）。
+pub fn work_item_plan_compile_admission_error(
+    error: EntityOperationError,
+    plan_id: &str,
+) -> String {
+    let code = match &error {
+        EntityOperationError::Deleting => "entity_deleting",
+        EntityOperationError::Deleted => "entity_deleted",
+        EntityOperationError::Busy => "entity_busy",
+        EntityOperationError::Store(_) => "entity_admission_failed",
+    };
+    format!("{code}: work item plan {plan_id} compile admission rejected: {error}")
 }
 
 /// 将 legacy/IR adapter 已读取的值变成确定性的 initial compile 草稿。
@@ -305,6 +356,15 @@ pub fn execute_initial_plan_compile(
         .put_compile_transaction(&transaction)
         .map_err(|error| format!("save compile transaction failed: {error}"))?;
 
+    // D2.1b 探针：preparing 首次落盘位点（运行中 compile 的删除 busy 证据）。
+    #[cfg(test)]
+    probe_work_item_plan_compile_admission(
+        &transaction.project_id,
+        &transaction.issue_id,
+        &transaction.plan_id,
+        "preparing",
+    );
+
     transaction.status = WorkItemPlanCompileStatus::Validating;
     transaction.step_cursor = "validating".to_string();
     transaction.outline_to_work_item_id = prepared
@@ -343,6 +403,15 @@ pub fn execute_initial_plan_compile(
         .put_compile_transaction(&transaction)
         .map_err(|error| format!("save validating compile transaction failed: {error}"))?;
 
+    // D2.1b 探针：validating 位点。
+    #[cfg(test)]
+    probe_work_item_plan_compile_admission(
+        &transaction.project_id,
+        &transaction.issue_id,
+        &transaction.plan_id,
+        "validating",
+    );
+
     transaction.validator_findings = prepared.validation_report.findings.clone();
     if prepared.validation_report.has_errors() {
         transaction.status = WorkItemPlanCompileStatus::Failed;
@@ -366,6 +435,15 @@ pub fn execute_initial_plan_compile(
         .plan_store
         .put_compile_transaction(&transaction)
         .map_err(|error| format!("save committing compile transaction failed: {error}"))?;
+
+    // D2.1b 探针：committing 位点。
+    #[cfg(test)]
+    probe_work_item_plan_compile_admission(
+        &transaction.project_id,
+        &transaction.issue_id,
+        &transaction.plan_id,
+        "committing",
+    );
     // SC 链的 source draft 必须先于 publication 落盘:任何 durable work item
     // revision 一旦可见,其 source_draft_revision_id 必须可在草稿库解析。
     // legacy 链同样重写一份同 id 同内容记录(幂等覆盖)。
@@ -420,6 +498,78 @@ static WORK_ITEM_PLAN_COMPILE_FINALIZER_FAILPOINTS: std::sync::OnceLock<
 #[cfg(test)]
 static NEXT_WORK_ITEM_PLAN_COMPILE_FINALIZER_FAILPOINT_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
+
+// ── D2.1b 测试探针（cfg(test)，plan Step 1「各 checkpoint 删除 busy」）──
+//
+// 在真实 compile/恢复的各 durable checkpoint 处回调，供测试验证运行中
+// compile 持 run lease 期间删除独占立即 Busy 且零墓碑。线程级注册表：探针
+// 与被测 compile 同线程（#[tokio::test] current_thread），并行测试线程的
+// 编译互不可见，无跨夹具串扰；guard 撤销注册。
+#[cfg(test)]
+pub(crate) type WorkItemPlanCompileAdmissionProbeFn = std::rc::Rc<dyn Fn()>;
+
+#[cfg(test)]
+thread_local! {
+    static WORK_ITEM_PLAN_COMPILE_ADMISSION_PROBES: std::cell::RefCell<
+        std::collections::HashMap<String, WorkItemPlanCompileAdmissionProbeFn>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[cfg(test)]
+pub(crate) struct WorkItemPlanCompileAdmissionProbeGuard {
+    key: String,
+    probe: WorkItemPlanCompileAdmissionProbeFn,
+}
+
+#[cfg(test)]
+impl Drop for WorkItemPlanCompileAdmissionProbeGuard {
+    fn drop(&mut self) {
+        WORK_ITEM_PLAN_COMPILE_ADMISSION_PROBES.with(|probes| {
+            let mut probes = probes.borrow_mut();
+            if probes
+                .get(&self.key)
+                .is_some_and(|registered| std::rc::Rc::ptr_eq(registered, &self.probe))
+            {
+                probes.remove(&self.key);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn register_work_item_plan_compile_admission_probe(
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+    checkpoint: &str,
+    probe: impl Fn() + 'static,
+) -> WorkItemPlanCompileAdmissionProbeGuard {
+    let key = format!("{project_id}|{issue_id}|{plan_id}|{checkpoint}");
+    let probe: WorkItemPlanCompileAdmissionProbeFn = std::rc::Rc::new(probe);
+    WORK_ITEM_PLAN_COMPILE_ADMISSION_PROBES.with(|probes| {
+        let previous = probes.borrow_mut().insert(key.clone(), probe.clone());
+        assert!(
+            previous.is_none(),
+            "work item plan compile admission probe already registered: {key}"
+        );
+    });
+    WorkItemPlanCompileAdmissionProbeGuard { key, probe }
+}
+
+#[cfg(test)]
+fn probe_work_item_plan_compile_admission(
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+    checkpoint: &str,
+) {
+    let key = format!("{project_id}|{issue_id}|{plan_id}|{checkpoint}");
+    WORK_ITEM_PLAN_COMPILE_ADMISSION_PROBES.with(|probes| {
+        if let Some(probe) = probes.borrow().get(&key).cloned() {
+            probe();
+        }
+    });
+}
 
 pub(crate) fn next_compile_id() -> String {
     format!("compile_{}", chrono::Utc::now().format("%Y%m%d%H%M%S%3f"))
@@ -494,6 +644,24 @@ impl WorkspaceEngine {
     }
 
     async fn enter_work_item_plan_compile_with_auto_confirmation(&mut self, auto_confirm: bool) {
+        // D2.1b：compile 状态机帧的 run admission——覆盖 compile 前的门
+        // 收口/timeline 写、compile 本体与失败后的 mark_recovery/恢复
+        // 节点写入（「无 attempt 也不能清运行中 compile」的完整窗口）；
+        // compile 本体自取 admission 时共享 flock 幂等可重入（等价消费）。
+        // 删除已赢（purging/deleted/争用）时不启动任何 durable 面，错误
+        // 经事件通道上抛。
+        let _admission = match self.acquire_work_item_plan_compile_admission() {
+            Ok(admission) => admission,
+            Err(message) => {
+                let _ = self
+                    .event_tx
+                    .send(EngineEvent::Error {
+                        message: format!("work item plan compile admission rejected: {message}"),
+                    })
+                    .await;
+                return;
+            }
+        };
         self.close_active_human_confirm_node("已确认通过").await;
         self.transition_stage(WorkspaceStage::Running).await;
         self.create_timeline_node(TimelineNodeDraft {
@@ -770,6 +938,14 @@ impl WorkspaceEngine {
             compile_id: tx.compile_id.clone(),
             checkpoint,
         };
+        // D2.1b 探针：finalizer 各 checkpoint 位点（与 failpoint 同位，无
+        // failpoint 注册也触发）。
+        probe_work_item_plan_compile_admission(
+            &tx.project_id,
+            &tx.issue_id,
+            &tx.plan_id,
+            &format!("{checkpoint:?}"),
+        );
         if work_item_plan_compile_finalizer_failpoints()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -783,9 +959,35 @@ impl WorkspaceEngine {
         Ok(())
     }
 
+    /// D2.1b：按 session 身份取 owning Plan run admission；无 lifecycle_store
+    /// 的退化引擎保持原行为返回 None（无 durable 面可保护，后续路径自行
+    /// 报 lifecycle_store unavailable）。
+    fn acquire_work_item_plan_compile_admission(
+        &self,
+    ) -> Result<Option<WorkItemPlanCompileAdmission>, String> {
+        let Some(lifecycle) = &self.lifecycle_store else {
+            return Ok(None);
+        };
+        WorkItemPlanCompileAdmission::acquire(
+            &lifecycle.app_paths(),
+            &self.session.project_id,
+            &self.session.issue_id,
+            &self.session.entity_id,
+        )
+        .map(Some)
+        .map_err(|error| work_item_plan_compile_admission_error(error, &self.session.entity_id))
+    }
+
     pub(crate) async fn run_work_item_plan_compile(
         &mut self,
     ) -> Result<InitialPlanCompileOutcome, String> {
+        // D2.1b（fix-cascade-deletion Task 3.1；REQ-DEL-06，plan §0.4）：
+        // Final Compile 的最外层 run admission——任何 durable 写之前取得
+        // owning Plan run lease（try-shared＋锁内墓碑复核），SC initial 与
+        // legacy execute/finalizer 全提交段共享同一 admission，final 提交/
+        // 失败返回才释放。外层状态机帧（enter_*）已持同 scope lease 时
+        // 共享 flock 幂等可重入（等价消费，不引入锁序倒置）。
+        let _admission = self.acquire_work_item_plan_compile_admission()?;
         if self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate {
             // SG3b：SC 链 typed PlanningCompileFailure 在 engine 内经
             // `last_gate_close_compile_failure` stash 直达 close/WS/REST；
@@ -931,6 +1133,12 @@ impl WorkspaceEngine {
             );
         }
 
+        // D2.1b（plan §0.4）：恢复动作的最外层 run admission——删除已赢
+        // （purging/deleted）时先于任何 durable 读/写稳定拒绝：Continue/
+        // HumanTriage 不写 transaction/WorkItems/source/provenance，
+        // AbortAndRollback 不复活已删内容；resume 运行中（同 scope run
+        // lease 在持）删除独占立即 Busy。
+        let _compile_admission = self.acquire_work_item_plan_compile_admission()?;
         let lifecycle = self
             .lifecycle_store
             .clone()

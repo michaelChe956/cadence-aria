@@ -114,6 +114,14 @@ impl WorkspaceEngine {
             plan_id: self.session.entity_id.clone(),
             checkpoint,
         };
+        // D2.1b 探针：SC initial 各 checkpoint 位点（与 failpoint 同位，
+        // 无 failpoint 注册也触发）。
+        probe_work_item_plan_compile_admission(
+            &key.project_id,
+            &key.issue_id,
+            &key.plan_id,
+            &format!("{:?}", key.checkpoint),
+        );
         if single_candidate_compile_failpoints()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -905,6 +913,14 @@ impl WorkspaceEngine {
                 Ok((outline_id, verification_plan.id.clone()))
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
+        // D2.1b 探针：SC resume 恢复重放位点（resume 还在跑同样 busy）。
+        #[cfg(test)]
+        probe_work_item_plan_compile_admission(
+            &tx.project_id,
+            &tx.issue_id,
+            &tx.plan_id,
+            "single_candidate_publication_resumed",
+        );
         tx.step_cursor = "publication_resumed".to_string();
         tx.updated_at = tx.created_at.clone();
         store
