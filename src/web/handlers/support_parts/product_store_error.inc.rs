@@ -97,7 +97,8 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             )
         }
         ProductStoreError::NotFound {
-            kind: "registration_preflight", ..
+            kind: "registration_preflight",
+            ..
         } => ApiError::runtime(
             "registration_preflight_not_found",
             "registration preflight not found or expired",
@@ -141,7 +142,8 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             json!({"operation_id": id}),
         ),
         ProductStoreError::NotFound {
-            kind: "logical_codebase", ..
+            kind: "logical_codebase",
+            ..
         } => ApiError::runtime(
             "logical_codebase_not_found",
             "logical codebase not found",
@@ -314,6 +316,54 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
         ),
         ProductStoreError::PathEscape(_) => {
             ApiError::validation("invalid_project_id", "invalid project id")
+        }
+        // 级联删除 D2.3：删除窗口迟到写（with_live_write）与已删身份直通稳定
+        // 409 码（error.rs 族分派），不再落 product_store_error 500。
+        ProductStoreError::Conflict {
+            kind: "entity_deleting",
+            id,
+        } => ApiError::runtime(
+            "entity_deleting",
+            "实体删除进行中，该操作已被拒绝，请稍后重试",
+            json!({ "kind": "entity_deleting", "id": id }),
+        ),
+        ProductStoreError::Conflict {
+            kind: "entity_deleted",
+            id,
+        } => ApiError::runtime(
+            "entity_deleted",
+            "实体已删除，操作对象不复存在",
+            json!({ "kind": "entity_deleted", "id": id }),
+        ),
+        // N2 冻结错误族（fix-multi-repo-group-coding-start REQ-CS-02/05/07）：
+        // coding_plan_run_* Conflict kind 直通稳定码，details 保留 kind/id
+        //（plan_start_tests 以 details.kind 断言）。只做映射面，不改语义。
+        ProductStoreError::Conflict { kind, id } if kind.starts_with("coding_plan_run_") => {
+            ApiError::runtime(
+                kind,
+                "plan coding run 冻结状态拒绝该操作",
+                json!({ "kind": kind, "id": id }),
+            )
+        }
+        // N2 provider 准入边界（gate.rs Io 形态 `plan_coding_*: {attempt_id}`）：
+        // 安全暂停/失效/完成窗口拒绝 provider 进入，直达 409 稳定码。
+        ProductStoreError::Io(message)
+            if message.starts_with("plan_coding_paused:")
+                || message.starts_with("plan_coding_invalidated:")
+                || message.starts_with("plan_coding_first_unit_completed:") =>
+        {
+            let (code, attempt_id) = message.split_once(':').unwrap_or((message.as_str(), ""));
+            ApiError::runtime(
+                code,
+                "plan coding 安全暂停边界拒绝 provider 进入",
+                json!({ "attempt_id": attempt_id.trim() }),
+            )
+        }
+        // 级联删除 D2.3 裁定（D2.2 登记 1 的 Web 侧收口）：无墓碑无 root 的
+        // Story/Design DELETE 在 classify 命中 NotFound{spec}——按 plan D2.2
+        // Step 3「无墓碑无root404」映射 spec_not_found（error.rs 既有 404）。
+        ProductStoreError::NotFound { kind: "spec", id } => {
+            ApiError::runtime("spec_not_found", "spec not found", json!({ "id": id }))
         }
         other => {
             let details = match &other {

@@ -1,12 +1,13 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type {
   ProviderHealthResponse,
   RepositoryInitializationOperationSnapshot,
 } from "../../api/types";
 import { useLifecycleWorkbenchStore } from "../../state/lifecycle-workbench-store";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
+import { cascadeDeleteConfirmationFetch } from "./IssueLifecycleWorkbench.test-data";
 import {
   defaultLaunchTitle,
   IssueLifecycleWorkbench,
@@ -486,7 +487,10 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
         name: "删除 Work Item Group",
       }),
     );
-    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("删除 Work Item Group"));
+    // D2.3 机械迁移：group drawer 旧无条件确认移除——确认语义由服务端三分类
+    // 权威给出（本夹具 200=Draft 语义，confirm 0 次；确认流见
+    // cascade_d2_3_single_confirmation）。
+    expect(confirmSpy).toHaveBeenCalledTimes(0);
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001",
       expect.objectContaining({ method: "DELETE" }),
@@ -741,6 +745,270 @@ describe("IssueLifecycleWorkbench project and lifecycle CRUD", () => {
       screen.getByRole("button", { name: "重复 ID Story" }),
     ).toHaveAttribute("aria-pressed", "false");
   });
+
+  it("cascade_d2_3_single_confirmation", async () => {
+    // 级联删除 D2.3（REQ-DEL-04/05）：Draft 零弹窗；required 409 恰一次确认、
+    // 同意后第二 delete 带 confirmed=true；取消只发第一非破坏请求、无刷新/
+    // 退场；旧未知 reason 同一次确认流；drawer group 不双弹；coding/
+    // reference/busy 零确认、提示先删后置。
+    const user = userEvent.setup();
+    // 三类实体 DELETE 的出站请求（story-specs/design-specs/work-item-plans）。
+    const entityDeleteCalls = (fetchMock: Mock) =>
+      fetchMock.mock.calls.filter(
+        ([input, init]) =>
+          init?.method === "DELETE" &&
+          /\/(?:story-specs|design-specs|work-item-plans)\//.test(String(input)),
+      );
+
+    // —— 场景 A：三类 Draft 200 → confirm 0 次 / delete 各 1 次、URL 无 query ——
+    {
+      const fetchMock = vi.fn(
+        cascadeDeleteConfirmationFetch(
+          lifecycleFetch({ storyDraftInitially: true, designDraftInitially: true }),
+        ),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+      render(<IssueLifecycleWorkbench />);
+      await user.click(
+        await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+      );
+      await user.click(screen.getByTestId("stage-tab-story"));
+      await user.click(
+        within(screen.getByRole("region", { name: "Story Spec 内容" })).getByRole(
+          "button",
+          { name: "删除 Story Spec 会话过期提示" },
+        ),
+      );
+      await user.click(screen.getByTestId("stage-tab-design"));
+      await user.click(
+        within(screen.getByRole("region", { name: "Design Spec 内容" })).getByRole(
+          "button",
+          { name: "删除 Design Spec 前端提示设计" },
+        ),
+      );
+      await waitFor(() =>
+        expect(entityDeleteCalls(fetchMock)).toHaveLength(2),
+      );
+      await user.click(screen.getByTestId("stage-tab-work_item"));
+      await user.click(screen.getByRole("button", { name: "Work Item Group" }));
+      await user.click(
+        within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
+          name: "删除 Work Item Group",
+        }),
+      );
+      await waitFor(() =>
+        expect(entityDeleteCalls(fetchMock)).toHaveLength(3),
+      );
+
+      expect(confirmSpy).toHaveBeenCalledTimes(0);
+      expect(
+        entityDeleteCalls(fetchMock).every(([input]) => !String(input).includes("?")),
+      ).toBe(true);
+      confirmSpy.mockRestore();
+      cleanup();
+    }
+
+    // —— 场景 B：required(previously_confirmed) 409 → confirm 恰 1 次，同意后
+    //    第二 delete 带 confirmed=true，成功后沿原刷新模式收口 ——
+    {
+      const fetchMock = vi.fn(
+        cascadeDeleteConfirmationFetch(lifecycleFetch(), {
+          requiredReasonByEntityId: { story_spec_0001: "previously_confirmed" },
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+      render(<IssueLifecycleWorkbench />);
+      await user.click(
+        await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+      );
+      await user.click(screen.getByTestId("stage-tab-story"));
+      await user.click(
+        within(screen.getByRole("region", { name: "Story Spec 内容" })).getByRole(
+          "button",
+          { name: "删除 Story Spec 会话过期提示" },
+        ),
+      );
+
+      await waitFor(() =>
+        expect(
+          entityDeleteCalls(fetchMock).map(([input]) => String(input)),
+        ).toEqual([
+          "/api/projects/project_0001/issues/issue_0001/story-specs/story_spec_0001",
+          "/api/projects/project_0001/issues/issue_0001/story-specs/story_spec_0001?confirmed=true",
+        ]),
+      );
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(confirmSpy).toHaveBeenCalledWith(
+        expect.stringContaining("永久清除内容、工作项、会话和 review"),
+      );
+      expect(confirmSpy).toHaveBeenCalledWith(
+        expect.stringContaining("不可恢复"),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole("region", { name: "Story Spec 内容" }),
+        ).not.toHaveTextContent("会话过期提示"),
+      );
+      confirmSpy.mockRestore();
+      cleanup();
+    }
+
+    // —— 场景 C：取消 → 只发第一非破坏请求、无刷新/退场，卡片保留 ——
+    // —— 场景 C 同时覆盖旧未知 reason（legacy_history_unknown）恰一次确认 ——
+    {
+      const fetchMock = vi.fn(
+        cascadeDeleteConfirmationFetch(lifecycleFetch(), {
+          requiredReasonByEntityId: {
+            design_spec_0001: "legacy_history_unknown",
+          },
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+      render(<IssueLifecycleWorkbench />);
+      await user.click(
+        await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+      );
+      await user.click(screen.getByTestId("stage-tab-design"));
+      await user.click(
+        within(screen.getByRole("region", { name: "Design Spec 内容" })).getByRole(
+          "button",
+          { name: "删除 Design Spec 前端提示设计" },
+        ),
+      );
+
+      await waitFor(() => expect(confirmSpy).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        // 退场动画窗口（220ms）过后复核：无第二请求、无刷新清卡。
+        // tsconfig lib 低于 es2024（Promise.withResolvers 不可用），executor
+        // 形式为目标库约束下的例外。
+        await new Promise((resolve) => {
+          setTimeout(resolve, 320);
+        });
+      });
+      expect(entityDeleteCalls(fetchMock)).toHaveLength(1);
+      expect(entityDeleteCalls(fetchMock)[0]?.[0]).toBe(
+        "/api/projects/project_0001/issues/issue_0001/design-specs/design_spec_0001",
+      );
+      expect(
+        screen.getByRole("region", { name: "Design Spec 内容" }),
+      ).toHaveTextContent("前端提示设计");
+      confirmSpy.mockRestore();
+      cleanup();
+    }
+
+    // —— 场景 D：drawer group 不双弹——服务端 required 恰一次确认 ——
+    {
+      const fetchMock = vi.fn(
+        cascadeDeleteConfirmationFetch(lifecycleFetch(), {
+          requiredReasonByEntityId: {
+            issue_plan_0001: "previously_confirmed",
+          },
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+      render(<IssueLifecycleWorkbench />);
+      await user.click(
+        await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+      );
+      await user.click(screen.getByTestId("stage-tab-work_item"));
+      await user.click(screen.getByRole("button", { name: "Work Item Group" }));
+      await user.click(
+        within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
+          name: "删除 Work Item Group",
+        }),
+      );
+
+      await waitFor(() =>
+        expect(
+          entityDeleteCalls(fetchMock).map(([input]) => String(input)),
+        ).toEqual([
+          "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001",
+          "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001?confirmed=true",
+        ]),
+      );
+      // 旧 drawer 无条件预确认会叠加本地+服务端两次弹窗；新契约恰一次。
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      await waitFor(() =>
+        expect(
+          screen.queryByTestId("lifecycle-card-drawer"),
+        ).not.toBeInTheDocument(),
+      );
+      confirmSpy.mockRestore();
+      cleanup();
+    }
+
+    // —— 场景 E：coding/reference/busy 错误 confirm 0 次、提示先删后置 ——
+    {
+      const fetchMock = vi.fn(
+        cascadeDeleteConfirmationFetch(lifecycleFetch(), {
+          rejectedCodeByEntityId: {
+            story_spec_0001: "entity_referenced",
+            design_spec_0001: "entity_busy",
+            issue_plan_0001: "coding_workspace_exists",
+          },
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+      render(<IssueLifecycleWorkbench />);
+      await user.click(
+        await screen.findByRole("button", { name: "选择 Issue 登录会话过期" }),
+      );
+      await user.click(screen.getByTestId("stage-tab-story"));
+      await user.click(
+        within(screen.getByRole("region", { name: "Story Spec 内容" })).getByRole(
+          "button",
+          { name: "删除 Story Spec 会话过期提示" },
+        ),
+      );
+      expect(
+        await screen.findByText(
+          "实体仍被存活后置对象引用，请先删除引用它的对象",
+        ),
+      ).toBeInTheDocument();
+      expect(entityDeleteCalls(fetchMock)).toHaveLength(1);
+
+      await user.click(screen.getByTestId("stage-tab-design"));
+      await user.click(
+        within(screen.getByRole("region", { name: "Design Spec 内容" })).getByRole(
+          "button",
+          { name: "删除 Design Spec 前端提示设计" },
+        ),
+      );
+      expect(
+        await screen.findByText(
+          "实体存在进行中的运行或并发写入，请等待收口后重试删除",
+        ),
+      ).toBeInTheDocument();
+
+      await user.click(screen.getByTestId("stage-tab-work_item"));
+      await user.click(screen.getByRole("button", { name: "Work Item Group" }));
+      await user.click(
+        within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
+          name: "删除 Work Item Group",
+        }),
+      );
+      expect(
+        await screen.findByText(
+          "存在 coding workspace，请先删除 coding workspace 再删除 work item group",
+        ),
+      ).toBeInTheDocument();
+
+      expect(confirmSpy).toHaveBeenCalledTimes(0);
+      expect(entityDeleteCalls(fetchMock)).toHaveLength(3);
+      confirmSpy.mockRestore();
+      cleanup();
+    }
+  }, 30_000);
 
   it("opens drawer from derived lifecycle cards and opens full screen workspace from drawer CTA", async () => {
     const fetchMock = lifecycleFetch();

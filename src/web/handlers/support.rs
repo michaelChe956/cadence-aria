@@ -1058,6 +1058,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn product_store_api_error_maps_cascade_d2_3_family_to_stable_codes() {
+        // 级联删除 D2.3：删除窗口迟到写（entity_deleting）/已删身份（entity_deleted）
+        // 与 N2 冻结错误族（coding_plan_run_*）经 REST 面直达稳定码，不再落
+        // product_store_error 500；无墓碑无 root 的 Story/Design 删除以
+        // spec_not_found 404 收口（D2.2 登记 1 的 Web 侧裁定）。
+        let cases = [
+            (
+                ProductStoreError::Conflict {
+                    kind: "entity_deleting",
+                    id: "issue_plan_0001".to_string(),
+                },
+                "entity_deleting",
+                StatusCode::CONFLICT,
+            ),
+            (
+                ProductStoreError::Conflict {
+                    kind: "entity_deleted",
+                    id: "story_spec_0001".to_string(),
+                },
+                "entity_deleted",
+                StatusCode::CONFLICT,
+            ),
+            (
+                ProductStoreError::Conflict {
+                    kind: "coding_plan_run_revision",
+                    id: "issue_plan_0001".to_string(),
+                },
+                "coding_plan_run_revision",
+                StatusCode::CONFLICT,
+            ),
+            (
+                ProductStoreError::Conflict {
+                    kind: "coding_plan_run_purge_scope",
+                    id: "story_spec_0001".to_string(),
+                },
+                "coding_plan_run_purge_scope",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                ProductStoreError::Io("plan_coding_paused: coding_attempt_0001".to_string()),
+                "plan_coding_paused",
+                StatusCode::CONFLICT,
+            ),
+            (
+                ProductStoreError::NotFound {
+                    kind: "spec",
+                    id: "story_spec_0001".to_string(),
+                },
+                "spec_not_found",
+                StatusCode::NOT_FOUND,
+            ),
+        ];
+
+        for (error, expected_code, expected_status) in cases {
+            let api_error = product_store_api_error(error);
+            assert_eq!(api_error.code, expected_code);
+            assert_eq!(
+                api_error.into_response().status(),
+                expected_status,
+                "{expected_code} status mapping"
+            );
+        }
+    }
+
     // Task 11 删除调用链改造测试拆分到独立文件（large_file_guard 1200 行红线）。
     include!("support_task11_tests.rs");
 }

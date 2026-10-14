@@ -534,6 +534,83 @@ describe("api client", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("cascade_d2_3: lifecycle entity deletes default to no query and encode confirmed option", async () => {
+    // 级联删除 D2.3（plan §0.2）：三类实体删除第 4 参 options——默认 URL 无
+    // query；仅确认弹窗同意后显式携带 confirmed=true。
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Response(JSON.stringify({ status: "deleted" }), {
+          status: 200,
+        });
+      }),
+    );
+
+    await deleteStorySpec("project_0001", "issue_0001", "story_spec_0001");
+    await deleteDesignSpec("project_0001", "issue_0001", "design_spec_0001");
+    await deleteWorkItemPlan("project_0001", "issue_0001", "issue_plan_0001");
+
+    expect(calls.map((call) => call.input)).toEqual([
+      "/api/projects/project_0001/issues/issue_0001/story-specs/story_spec_0001",
+      "/api/projects/project_0001/issues/issue_0001/design-specs/design_spec_0001",
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001",
+    ]);
+
+    await deleteStorySpec("project/with space", "issue_0001", "story/with space", {
+      confirmed: true,
+    });
+    await deleteDesignSpec("project_0001", "issue_0001", "design/with space", {
+      confirmed: true,
+    });
+    await deleteWorkItemPlan("project_0001", "issue_0001", "plan/with space", {
+      confirmed: true,
+    });
+
+    expect(calls.slice(3).map((call) => call.input)).toEqual([
+      "/api/projects/project%2Fwith%20space/issues/issue_0001/story-specs/story%2Fwith%20space?confirmed=true",
+      "/api/projects/project_0001/issues/issue_0001/design-specs/design%2Fwith%20space?confirmed=true",
+      "/api/projects/project_0001/issues/issue_0001/work-item-plans/plan%2Fwith%20space?confirmed=true",
+    ]);
+  });
+
+  it("cascade_d2_3: delete errors surface ApiRequestError code without automatic retry", async () => {
+    // ApiRequestError code/details 为权威；普通 4xx/5xx 不自动重试（二次删除
+    // 只能来自用户确认，不来自客户端自动循环）。
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        return new Response(
+          JSON.stringify({
+            code: "entity_busy",
+            message: "实体存在进行中的运行或并发写入，请等待收口后重试删除",
+            details: { entity_kind: "work_item_plan", entity_id: "issue_plan_0001" },
+          }),
+          { status: 409 },
+        );
+      }),
+    );
+
+    const error: ApiRequestError = await deleteWorkItemPlan(
+      "project_0001",
+      "issue_0001",
+      "issue_plan_0001",
+    ).then(
+      () => {
+        throw new Error("expected entity_busy rejection");
+      },
+      (reason: ApiRequestError) => reason,
+    );
+
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect(error.code).toBe("entity_busy");
+    expect(error.details.entity_id).toBe("issue_plan_0001");
+    expect(callCount).toBe(1);
+  });
+
   it("posts takeover with an encoded workspace session id", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(

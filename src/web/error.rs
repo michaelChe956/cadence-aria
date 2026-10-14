@@ -175,10 +175,47 @@ impl IntoResponse for ApiError {
             | "coding_workspace_exists"
             // 级联删除 D2.2（fix-cascade-deletion）：三类 DELETE 稳定 409 码——
             // 分级确认必答 / 存活引用拒删 / 同 scope 运行或资源 writer 竞态。
+            // D2.3 族分派补全：删除窗口迟到写（with_live_write）与已删身份
+            //（身份准入/反查）同族 409，不再经 product_store_error 默认 500。
             | "deletion_confirmation_required"
             | "entity_referenced"
             | "entity_busy"
+            | "entity_deleting"
+            | "entity_deleted"
             | "aggregate_root_ownership_conflict" => StatusCode::CONFLICT,
+            // 级联删除 D2.3：N2 冻结错误族（fix-multi-repo-group-coding-start
+            // REQ-CS-02/05/07）REST 面直达——冻结身份/revision/graph/相位/集合/
+            // selection 冲突 409（post_plan_coding_start 等 product_store_error
+            // 直通 kind）；provider 准入边界（安全暂停/失效/完成窗口）409。
+            | "coding_plan_run_revision"
+            | "coding_plan_run_plan_revision"
+            | "coding_plan_run_graph"
+            | "coding_plan_run_replay_drift"
+            | "coding_plan_run_phase"
+            | "coding_plan_run_not_active"
+            | "coding_plan_run_invalidated"
+            | "coding_plan_run_set_not_first_start"
+            | "coding_plan_run_outcome_frozen"
+            | "coding_plan_run_selection"
+            | "coding_plan_run_selection_attempt"
+            | "coding_plan_run_selection_target"
+            | "coding_plan_run_selection_unit"
+            | "coding_plan_run_selection_not_ready"
+            | "coding_plan_run_start_command"
+            | "coding_plan_run_attempt_binding"
+            | "coding_plan_run_attempt_target"
+            | "coding_plan_run_target_attempts"
+            | "coding_plan_run_selected_unit"
+            | "plan_coding_paused"
+            | "plan_coding_invalidated"
+            | "plan_coding_first_unit_completed" => StatusCode::CONFLICT,
+            // N2 族语义拒绝：空 selection 不能首启 / purge 作用域非法 / 在途
+            // amendment / plan 未确认（对齐 work_item_plan_not_confirmed 的
+            // 前置语义，REST 前 ensure_plan_confirmed 已先拒，此处为防御层）。
+            | "coding_plan_run_selection_missing"
+            | "coding_plan_run_purge_scope"
+            | "coding_plan_run_active_amendment"
+            | "coding_plan_run_plan_not_confirmed" => StatusCode::UNPROCESSABLE_ENTITY,
             // T11 gateway 稳定码表收口：政策门/复验拒绝为 4xx 业务阻断，禁止回退 500。
             // policy/target/registry/drift/resume/managed_settings 一律 409；capability 与
             // Codex danger-full-access 为 403；provider 不可用为 503；系统未接线为 500(防御)。
@@ -858,5 +895,76 @@ mod tests {
         assert!(!summary.contains("file.rs:10"));
         assert!(summary.chars().count() <= 1_024);
         assert!(!summary.chars().any(char::is_control));
+    }
+    #[test]
+    fn cascade_d2_3_entity_family_maps_to_stable_statuses() {
+        // 级联删除 D2.3（fix-cascade-deletion REQ-DEL-04/06）：删除窗口迟到写
+        //（with_live_write entity_deleting）与已删身份（entity_deleted）必须
+        // 稳定 409，不得经 product_store_error 默认 500 泄漏；三类 DELETE 的
+        // 404 缺口（无墓碑无 root）由 spec_not_found 收口。
+        let entity_cases = [
+            ("entity_deleting", StatusCode::CONFLICT),
+            ("entity_deleted", StatusCode::CONFLICT),
+            ("spec_not_found", StatusCode::NOT_FOUND),
+        ];
+        for (code, expected_status) in entity_cases {
+            let response = ApiError::runtime(code, "cascade family", json!({})).into_response();
+            assert_eq!(response.status(), expected_status, "{code} status mapping");
+        }
+    }
+
+    #[test]
+    fn cascade_d2_3_plan_coding_run_family_maps_to_stable_statuses() {
+        // N2 冻结错误族（fix-multi-repo-group-coding-start REQ-CS-02/05/07）经
+        // REST 面（post_plan_coding_start 等 product_store_api_error）直达：
+        // 冻结身份/相位/集合冲突 409；语义拒绝（空首启/作用域/在途 amendment）
+        // 422；未确认前置 400（对齐 work_item_plan_not_confirmed）。只做已冻结
+        // 的映射面，不改 N2 语义（重启语义归 DesignDelRestart 在途设计）。
+        let conflict_cases = [
+            "coding_plan_run_revision",
+            "coding_plan_run_plan_revision",
+            "coding_plan_run_graph",
+            "coding_plan_run_replay_drift",
+            "coding_plan_run_phase",
+            "coding_plan_run_not_active",
+            "coding_plan_run_invalidated",
+            "coding_plan_run_set_not_first_start",
+            "coding_plan_run_outcome_frozen",
+            "coding_plan_run_selection",
+            "coding_plan_run_selection_attempt",
+            "coding_plan_run_selection_target",
+            "coding_plan_run_selection_unit",
+            "coding_plan_run_selection_not_ready",
+            "coding_plan_run_start_command",
+            "coding_plan_run_attempt_binding",
+            "coding_plan_run_attempt_target",
+            "coding_plan_run_target_attempts",
+            "coding_plan_run_selected_unit",
+            "plan_coding_paused",
+            "plan_coding_invalidated",
+            "plan_coding_first_unit_completed",
+        ];
+        for code in conflict_cases {
+            let response = ApiError::runtime(code, "plan coding run", json!({})).into_response();
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "{code} status mapping"
+            );
+        }
+        let rejected_cases = [
+            "coding_plan_run_selection_missing",
+            "coding_plan_run_purge_scope",
+            "coding_plan_run_active_amendment",
+            "coding_plan_run_plan_not_confirmed",
+        ];
+        for code in rejected_cases {
+            let response = ApiError::runtime(code, "plan coding run", json!({})).into_response();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{code} status mapping"
+            );
+        }
     }
 }

@@ -22,6 +22,7 @@ import {
   listRepositoryBranches,
   listRepositories,
   startPlanCoding,
+  type DeleteLifecycleEntityOptions,
 } from "../../api/client";
 import { rebuildAggregateIndex } from "../../api/aggregate-index";
 import {
@@ -929,34 +930,65 @@ export function IssueLifecycleWorkbench({
       setError("缺少 Project");
       return;
     }
-
-    let deleteRequest: Promise<{ status: string }>;
-    if (card.kind === "story_spec") {
-      deleteRequest = deleteStorySpec(selectedProjectId, card.issueId, card.id);
-    } else if (card.kind === "design_spec") {
-      deleteRequest = deleteDesignSpec(
-        selectedProjectId,
-        card.issueId,
-        card.id,
-      );
-    } else if (card.kind === "work_item") {
-      deleteRequest = deleteWorkItem(selectedProjectId, card.issueId, card.id);
-    } else if (card.kind === "work_item_group") {
-      deleteRequest = deleteWorkItemPlan(
-        selectedProjectId,
-        card.issueId,
-        card.id,
-      );
-    } else {
+    if (
+      card.kind !== "story_spec" &&
+      card.kind !== "design_spec" &&
+      card.kind !== "work_item" &&
+      card.kind !== "work_item_group"
+    ) {
       setError("Issue 请从 Issue 卡片列表删除");
       return;
     }
+
+    // 级联删除 D2.3：删除请求按需显式发起（可二次调用），不是预创建 Promise；
+    // 确认资格由服务端三分类（D1.4）权威判定，前端不做确认历史判断。
+    const kind = card.kind;
+    const sendDelete = (
+      options?: DeleteLifecycleEntityOptions,
+    ): Promise<{ status: string }> => {
+      if (kind === "story_spec") {
+        return deleteStorySpec(selectedProjectId, card.issueId, card.id, options);
+      }
+      if (kind === "design_spec") {
+        return deleteDesignSpec(selectedProjectId, card.issueId, card.id, options);
+      }
+      if (kind === "work_item") {
+        // 独立 WI 非本次级联确认语义：保原行为（无 confirmed query）。
+        return deleteWorkItem(selectedProjectId, card.issueId, card.id);
+      }
+      return deleteWorkItemPlan(selectedProjectId, card.issueId, card.id, options);
+    };
 
     const cardKey = lifecycleCardKey(card);
     setDeletingCardKey(cardKey);
     setError(null);
     try {
-      await Promise.all([deleteRequest, waitForDeleteExitAnimation()]);
+      try {
+        await Promise.all([sendDelete(), waitForDeleteExitAnimation()]);
+      } catch (reason) {
+        // required 是唯一弹窗分支：409 deletion_confirmation_required 恰一次
+        // 确认，同意后第二 delete 显式带 confirmed=true；取消零出站破坏请求、
+        // 无刷新/退场。其余错误（coding/reference/busy 等）沿原错误模式提示
+        // 先删后置，不自动重试、不弹窗。
+        if (
+          !(
+            reason instanceof ApiRequestError &&
+            reason.code === "deletion_confirmation_required"
+          )
+        ) {
+          throw reason;
+        }
+        const confirmed = window.confirm(
+          "确定永久删除？此操作将永久清除内容、工作项、会话和 review，且不可恢复。",
+        );
+        if (!confirmed) {
+          return;
+        }
+        await Promise.all([
+          sendDelete({ confirmed: true }),
+          waitForDeleteExitAnimation(),
+        ]);
+      }
       if (selectedCardKey === cardKey) {
         setSelectedCardKey(null);
       }
@@ -975,11 +1007,16 @@ export function IssueLifecycleWorkbench({
     if (card.kind !== "work_item" && card.kind !== "work_item_group") {
       return;
     }
-    const message =
-      card.kind === "work_item_group"
-        ? "删除 Work Item Group 会同时删除子 Work Item、关联 Coding Workspace、日志和 worktree，且无法撤销。"
-        : "删除 Work Item 会同时删除关联的 Coding Workspace、日志和 worktree，且无法撤销。";
-    const confirmed = window.confirm(message);
+    if (card.kind === "work_item_group") {
+      // group drawer 移除旧无条件确认：Story/Design/group 同走服务端单次确认流。
+      void handleDeleteLifecycleCard(card);
+      return;
+    }
+    // 独立 WI 保原确认行为，但文案不再声称自动删除 Coding Workspace（存在时
+    // 服务端以 coding_workspace_exists 拒删，需先删除后置对象）。
+    const confirmed = window.confirm(
+      "删除 Work Item 会同时删除其会话与日志；若存在关联 Coding Workspace 需先删除，且无法撤销。",
+    );
     if (!confirmed) {
       return;
     }

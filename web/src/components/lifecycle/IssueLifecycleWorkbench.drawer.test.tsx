@@ -384,9 +384,7 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
   it("分仓 Plan 抽屉删除整组后关闭并恢复重新生成入口", async () => {
     const fetchMock = repositoryGroupedLifecycleFetch();
     vi.stubGlobal("fetch", fetchMock);
-    const confirmSpy = vi.spyOn(window, "confirm")
-      .mockReturnValueOnce(false)
-      .mockReturnValueOnce(true);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const user = userEvent.setup();
     const onOpenWorkspace = vi.fn();
 
@@ -395,14 +393,11 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
     await user.click(within(screen.getByTestId("lifecycle-card-drawer")).getByRole("button", {
       name: "删除 Work Item Group",
     }));
-    expect(fetchMock).not.toHaveBeenCalledWith(
-      expect.stringContaining("/work-item-plans/"),
-      expect.objectContaining({ method: "DELETE" }),
-    );
-    expect(screen.getByTestId("lifecycle-card-drawer")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "删除 Work Item Group" }));
 
-    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("删除 Work Item Group"));
+    // D2.3 机械迁移：group drawer 旧无条件预确认移除——删除一次直达（本夹具
+    // 200=Draft 语义），确认流由服务端三分类给出（见 crud
+    // cascade_d2_3_single_confirmation）；不再有「先取消再确认」两段式。
+    expect(confirmSpy).toHaveBeenCalledTimes(0);
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001",
       expect.objectContaining({ method: "DELETE" }),
@@ -669,9 +664,8 @@ describe("IssueLifecycleWorkbench drawer and work item groups", () => {
       screen.getByRole("button", { name: "删除 Work Item Group" }),
     );
 
-    expect(confirmSpy).toHaveBeenCalledWith(
-      expect.stringContaining("删除 Work Item Group"),
-    );
+    // D2.3 机械迁移：drawer 旧无条件确认移除，确认语义由服务端三分类权威。
+    expect(confirmSpy).toHaveBeenCalledTimes(0);
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001",
       expect.objectContaining({ method: "DELETE" }),

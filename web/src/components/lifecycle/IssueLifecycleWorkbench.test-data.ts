@@ -547,3 +547,88 @@ export function sharedIdLifecycleData(issueId: string): MockLifecycleData {
     ];
     return data;
 }
+
+// 级联删除 D2.3（fix-cascade-deletion REQ-DEL-04/05）：在基础 lifecycle 夹具
+// 之上模拟服务端三类 DELETE 确认契约——首次删除（无 query）按配置返回 409
+// 稳定码或交由基础夹具 200；`?confirmed=true` 恒放行至基础夹具（Draft 语义
+// = 未配置 required 的资源直接 200）。
+export type CascadeDeleteConfirmationReason =
+  | "previously_confirmed"
+  | "legacy_history_unknown";
+
+export type CascadeDeleteContractSpec = {
+  /** 首次 DELETE 需要一次确认的资源 id → 服务端三分类 reason。 */
+  requiredReasonByEntityId?: Record<string, CascadeDeleteConfirmationReason>;
+  /** 首次 DELETE 直接拒绝的资源 id → 稳定错误码（coding/reference/busy）。 */
+  rejectedCodeByEntityId?: Record<string, string>;
+};
+
+const CASCADE_DELETE_ENTITY_PATTERN =
+  /^\/api\/projects\/[^/]+\/issues\/[^/]+\/(?:story-specs|design-specs|work-item-plans)\/([^/?]+)(?:\?.*)?$/;
+
+export function cascadeDeleteConfirmationFetch(
+  baseFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+  spec: CascadeDeleteContractSpec = {},
+): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
+  return async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (init?.method !== "DELETE") {
+      return baseFetch(input, init);
+    }
+    const match = url.match(CASCADE_DELETE_ENTITY_PATTERN);
+    if (!match) {
+      return baseFetch(input, init);
+    }
+    const entityId = decodeURIComponent(match[1] ?? "");
+    const confirmed = url.includes("confirmed=true");
+    if (confirmed) {
+      // 服务端只在分类 Required 且 query 显式 true 时放行重删；query 由本
+      // 契约包装器消费，路径部分委托基础夹具（其路由 regex 不含 query）。
+      return baseFetch(url.slice(0, url.indexOf("?")), init);
+    }
+    const requiredReason = spec.requiredReasonByEntityId?.[entityId];
+    if (requiredReason) {
+      return new Response(
+        JSON.stringify({
+          code: "deletion_confirmation_required",
+          message: "该实体曾确认或确认历史未知，删除前需要一次确认",
+          details: { reason: requiredReason, entity_id: entityId },
+        }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      );
+    }
+    const rejectedCode = spec.rejectedCodeByEntityId?.[entityId];
+    if (rejectedCode) {
+      const bodyByCode: Record<string, { message: string; details: unknown }> = {
+        coding_workspace_exists: {
+          message: "存在 coding workspace，请先删除 coding workspace 再删除 work item group",
+          details: { plan_id: entityId, attempt_id: "coding_attempt_0001" },
+        },
+        entity_referenced: {
+          message: "实体仍被存活后置对象引用，请先删除引用它的对象",
+          details: {
+            entity_id: entityId,
+            references: [{ kind: "design_spec", id: "design_spec_0001" }],
+          },
+        },
+        entity_busy: {
+          message: "实体存在进行中的运行或并发写入，请等待收口后重试删除",
+          details: { entity_id: entityId },
+        },
+      };
+      const body = bodyByCode[rejectedCode];
+      if (!body) {
+        throw new Error(`unexpected cascade reject code: ${rejectedCode}`);
+      }
+      return new Response(
+        JSON.stringify({
+          code: rejectedCode,
+          message: body.message,
+          details: body.details,
+        }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      );
+    }
+    return baseFetch(input, init);
+  };
+}

@@ -423,13 +423,29 @@ export function deleteProductIssue(
   );
 }
 
+export type DeleteLifecycleEntityOptions = { confirmed?: boolean };
+
+// 级联删除 D2.3（plan §0.2）：确认 query 只在弹窗同意后显式携带；默认 URL
+// 无 query，服务端三分类才是权威（query 布尔不是安全授权）。
+function deleteLifecycleEntityQueryString(
+  options?: DeleteLifecycleEntityOptions,
+): string {
+  if (options?.confirmed !== true) {
+    return "";
+  }
+  const params = new URLSearchParams();
+  params.set("confirmed", "true");
+  return `?${params.toString()}`;
+}
+
 export function deleteStorySpec(
   projectId: string,
   issueId: string,
   storySpecId: string,
+  options?: DeleteLifecycleEntityOptions,
 ): Promise<{ status: string }> {
   return requestJson<{ status: string }>(
-    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/story-specs/${encodeURIComponent(storySpecId)}`,
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/story-specs/${encodeURIComponent(storySpecId)}${deleteLifecycleEntityQueryString(options)}`,
     {
       method: "DELETE",
     },
@@ -440,9 +456,10 @@ export function deleteDesignSpec(
   projectId: string,
   issueId: string,
   designSpecId: string,
+  options?: DeleteLifecycleEntityOptions,
 ): Promise<{ status: string }> {
   return requestJson<{ status: string }>(
-    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/design-specs/${encodeURIComponent(designSpecId)}`,
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/design-specs/${encodeURIComponent(designSpecId)}${deleteLifecycleEntityQueryString(options)}`,
     {
       method: "DELETE",
     },
@@ -466,9 +483,10 @@ export function deleteWorkItemPlan(
   projectId: string,
   issueId: string,
   planId: string,
+  options?: DeleteLifecycleEntityOptions,
 ): Promise<{ status: string }> {
   return requestJson<{ status: string }>(
-    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}`,
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}${deleteLifecycleEntityQueryString(options)}`,
     {
       method: "DELETE",
     },
