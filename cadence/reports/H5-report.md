@@ -137,3 +137,17 @@ tsc+build。
 
 提交：`280993ed` `fix: H5 双删除busy互斥与文案计数`（2 文件显式 add：
 `CodingWorkspacePage.tsx`＋`CodingWorkspacePage.group-delete.test.tsx`，197+/9-）。
+
+## P3 收尾（Main 复审 1×P3，互斥语义反映到控件可见态）
+
+- 单删按钮 `disabled` 补 `groupDeleteBusy`（`deleteBusy || groupDeleteBusy ||
+  !storeMatchesAddress`）——组删在途时顶栏入口同步禁用。
+- `deleteBusy` 下传 `CodingWorkspaceGroupProgress`（新 prop），组删入口
+  `disabled={groupDeleteBusy || deleteBusy}`——单删在途时组删入口同步禁用。
+
+TDD：红 2 failed（两处按钮态未同步）→绿组删族 2 文件 32/0（含审查要求复跑的
+13 件）→全量 **214 文件 2195/0**→build EXIT=0（全量首轮 1 failed=
+`LogicalCodebaseManagementDrawer` body overflow 串扰 flaky，单独复跑 9/0、
+全量复跑 2195/0 确认无关——与本包改动面零交集，与 P2 轮未捕获 flaky 同源）。
+
+提交：`9121b708` `fix: H5 互斥按钮态同步`（3 文件显式 add，12+/2-）。
