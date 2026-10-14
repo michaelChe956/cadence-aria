@@ -302,18 +302,26 @@ impl super::CodingAttemptStore {
     /// S4：runner 死亡转 AwaitingManualRecovery 时的同步收尾——该 attempt
     /// 名下仍处于 Running 的 role run 的唯一终态写方（runner）已死，不收尾
     /// 会让 RoleRunHistoryPanel 对已 fail-closed 的 attempt 永久投影「运行
-    /// 中」。统一收尾为 Failed，并携带 attempt 同款稳定 reason 码。返回收尾
-    /// 条数（0 表示本无残留）。
+    /// 中」。统一收尾为 Failed，并携带 attempt 同款稳定 reason 码；未
+    /// completed 恢复 journal 持有的 retry run 豁免（见
+    /// `incomplete_failed_review_recovery_exemption`）。返回收尾条数
+    /// （0 表示本无残留）。
     pub fn fail_running_role_runs_for_attempt(
         &self,
         attempt: &CodingExecutionAttempt,
         reason_code: &str,
     ) -> Result<usize, ProductStoreError> {
+        let (exempt_run_id, exempt_reason) =
+            self.incomplete_failed_review_recovery_exemption(attempt)?;
         let mut finalized = 0usize;
         for mut run in self
             .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         {
             if run.status != CodingRoleRunStatus::Running {
+                continue;
+            }
+            if is_journal_held_retry_run(&run, exempt_run_id.as_deref(), exempt_reason.as_deref())
+            {
                 continue;
             }
             run.status = CodingRoleRunStatus::Failed;
@@ -330,16 +338,23 @@ impl super::CodingAttemptStore {
     /// `ensure_failed_code_review_retry_role_run` 的 stale 收尾）。恢复瞬间
     /// 旧 runner 已死、新 run 由重启后的 runner 另行创建（各阶段重入处仅
     /// 复用 `Running && node_id.is_none()` 的 run），此刻仍 Running 的只能是
-    /// 残留脏数据。返回收尾条数（0 表示本无残留）。
+    /// 残留脏数据；未 completed 恢复 journal 持有的 retry run 同样豁免。
+    /// 返回收尾条数（0 表示本无残留）。
     pub fn supersede_residual_running_role_runs_for_attempt(
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<usize, ProductStoreError> {
+        let (exempt_run_id, exempt_reason) =
+            self.incomplete_failed_review_recovery_exemption(attempt)?;
         let mut superseded = 0usize;
         for mut run in self
             .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?
         {
             if run.status != CodingRoleRunStatus::Running {
+                continue;
+            }
+            if is_journal_held_retry_run(&run, exempt_run_id.as_deref(), exempt_reason.as_deref())
+            {
                 continue;
             }
             run.status = CodingRoleRunStatus::Superseded;
@@ -349,6 +364,37 @@ impl super::CodingAttemptStore {
         }
         Ok(superseded)
     }
+
+    /// S4 豁免面（P1 修复轮）：failed-code-review 恢复 journal 未 completed
+    /// 时，其持有的 retry role run 必须保持 Running+reason=recovery_key，才能
+    /// 被 `ensure_failed_code_review_retry_role_run` 的 reason 匹配与
+    /// `validate_retry_role_run` 识别复用；死亡收尾/恢复清场打穿它会让
+    /// retry_review 通道永久关死（gate 悬挂无动作）。识别与 store 自身
+    /// 恢复/回滚逻辑同款：`journal.retry_role_run_id` 或
+    /// `reason_code == recovery_key` 二者其一即豁免（后者覆盖 retry run 已
+    /// 建而 journal 尚未登记 id 的窗口）。
+    ///
+    /// 裁定取舍：接受豁免 run 在 AMR 态投影为 running 的已知单例投影瑕疵
+    /// （<恢复通道永久死）；若要消此瑕疵，走「恢复流程重开 journal run」
+    /// 另立切片。
+    fn incomplete_failed_review_recovery_exemption(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(Option<String>, Option<String>), ProductStoreError> {
+        Ok(
+            match self.get_failed_code_review_recovery_journal(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            )? {
+                Some(journal) if !journal.is_completed() => {
+                    (journal.retry_role_run_id, Some(journal.recovery_key))
+                }
+                _ => (None, None),
+            },
+        )
+    }
+
 
     pub fn update_role_run_refs(
         &self,
@@ -424,6 +470,18 @@ fn validate_retry_metadata(retry: &CodingRoleRunRetryMetadata) -> Result<(), Pro
         return Err(invalid_retry_metadata(retry.attempt_no.to_string()));
     }
     Ok(())
+}
+
+/// S4 豁免判定：run 是否为未 completed 恢复 journal 持有的 retry run——
+/// id 已登记（`journal.retry_role_run_id`）或 reason 等于 journal 的
+/// recovery_key（覆盖 run 已建而 id 尚未登记的窗口）二者其一。
+fn is_journal_held_retry_run(
+    run: &CodingRoleRun,
+    exempt_run_id: Option<&str>,
+    exempt_reason: Option<&str>,
+) -> bool {
+    exempt_run_id == Some(run.id.as_str())
+        || exempt_reason.is_some_and(|key| run.reason_code.as_deref() == Some(key))
 }
 
 fn invalid_retry_metadata(id: impl Into<String>) -> ProductStoreError {

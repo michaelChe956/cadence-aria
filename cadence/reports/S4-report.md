@@ -36,3 +36,15 @@
 
 - `resumption.rs:171`、`group.rs:114`、`group_completion.rs:76`、`autopilot_orchestrator.rs:348` 等其他 AMR 入口的 role run 收尾——设计切片仅锚定 task.rs 死亡路径与 RecoverCoding。
 - socket RecoverCoding 分支接线为薄组合(CAS→清场→spawn),无 lib 级分支测试,与 F-16 先例同款;测试在 lib 层复刻同款组合。
+
+## 修复轮(P1 审查裁定:豁免恢复 journal 的 retry run)
+
+**缺口**:`fail_/supersede_` 无差别收尾会打穿 failed-code-review 恢复 journal 持有的 retry role run——它必须保持 `Running + reason=recovery_key` 才能被 `ensure_failed_code_review_retry_role_run` 的 reason 匹配与 `validate_retry_role_run` 识别复用;打穿后 retry_review 通道永久关死(gate 悬挂无动作)。
+
+**修复**(role_run.rs):新增 `incomplete_failed_review_recovery_exemption`——journal 未 completed 时返回 `(retry_role_run_id, recovery_key)`,两个收尾/清场方法对「id 登记命中 **或** `reason_code==recovery_key`」的 Running run 跳过不收尾。reason 匹配覆盖「retry run 已建而 journal 尚未登记 id」的窗口,与 store 自身恢复/回滚逻辑(rollback 的双路识别)同源,宽于审查建议的纯 id 匹配,属同根因的完备化。
+
+**裁定取舍(登记)**:接受豁免 run 在 AMR 态投影为 running 的已知单例投影瑕疵(<恢复通道永久死);若要消此瑕疵,走「恢复流程重开 journal run」另立切片。
+
+**红绿**:红已观察——`runner_death_and_recovery_sweeps_exempt_incomplete_journal_retry_run`(failed_review_recovery/runner.rs,fixture 构建 journal 至 AttemptRunning 前缀 + 空 registry runner 前段死亡)`left: Failed, right: Running`;修复后全绿。断言面:死亡后 journal retry run 仍 Running+reason 原样、对照 decoy run 照常 Failed;RecoverCoding 清场后 retry run 仍 Running、残留 run 照常 Superseded;`recover_failed_code_review` 仍收敛(引擎侧至 GateResolved——Completed 由 reserved spawn 的 runner 在 provider 进入前完成,先例 reserved_spawn_* 事件序)。
+
+**回归(修复轮)**:`runner_recovery` 10 passed 0 failed;`coding_ws_handler::tests::` 全量 **122 passed; 0 failed**(121+1 新);`coding_attempt_store::admission` 40 passed 0 failed;`failed_review_recovery` 全族 **31 passed; 0 failed**。
