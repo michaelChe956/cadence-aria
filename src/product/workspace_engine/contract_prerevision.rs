@@ -188,6 +188,7 @@ fn contract_finding_to_review_finding(
 /// 按 `instruction_digest` 内容寻址，与冻结件 `structural-prompts/` 同
 /// 约定，纯派生零 I/O）。漂移/缺指令一律 None：本函数不从 finding 文本
 /// 反查指令，配对由持有两侧身份的调用方显式完成。
+#[allow(dead_code)] // L1 接线（SG6a 链/SG10a）前仅测试调用，同文件 SG2 先例
 pub(crate) fn machine_repair_dto_for_instruction(
     instruction: &StructuralRepairInstruction,
     current_source_hash: &str,
