@@ -264,7 +264,14 @@ export type ReviewRequestKind =
   | "github_pull_request"
   | "manual_external_request";
 export type RemoteKind = "github" | "gitlab" | "generic_git" | "unknown";
-export type PushStatus = "not_pushed" | "pushed" | "failed";
+// push_status 值域。FE-1（设计 Q1 冻结）：新增 skipped_not_configured —— 仓库未
+// 配置远端时的本地交付终态，既不是 pushed 也不是 failed；UI 必须与「已推送」
+// 区分（标签「本地交付(无远端)」）。
+export type PushStatus =
+  | "not_pushed"
+  | "pushed"
+  | "failed"
+  | "skipped_not_configured";
 
 export type ReviewRequest = {
   id: string;
@@ -562,6 +569,9 @@ export type PlanCodingLeaseState = "absent" | "held" | "contested";
 // completed|invalidated——provider 事实与初始化桶首 unit Running（物化事实）
 // 严格区分；invalidated 为 plan-run 授权失效投影（成员删除/精确 purge 后），
 // 不与 unit 事实状态混写。
+// FE-1（设计 Q3 冻结，additive）：attempt 状态守卫生效后新增
+// awaiting_manual_recovery|waiting_human|failed|aborted —— unit 仍是 Running
+// 但 attempt 已进入人工恢复/等待/终态时，投影不得继续报 provider 运行中。
 export type PlanCodingExecutionState =
   | "initialized"
   | "running"
@@ -569,10 +579,18 @@ export type PlanCodingExecutionState =
   | "waiting_slot"
   | "paused"
   | "completed"
-  | "invalidated";
+  | "invalidated"
+  | "awaiting_manual_recovery"
+  | "waiting_human"
+  | "failed"
+  | "aborted";
 
 // waiting_reason 值域 dependency_not_ready|execution_slot_occupied|
-// plan_coding_continuation_not_enabled（依赖优先于暂停文案）。
+// plan_coding_continuation_not_enabled（依赖优先于暂停文案）——三种「编排等待」
+// 语义仍由本联合类型描述。
+// FE-1（设计 Q3）：awaiting_manual_recovery 时 waiting_reason 透传
+// attempt.manual_recovery_reason（开放值集，如 coding_runner_failed_while_running），
+// 故 DTO 字段放宽为 string | null，本类型只作为编排等待子集保留。
 export type PlanCodingWaitingReason =
   | "dependency_not_ready"
   | "execution_slot_occupied"
@@ -591,12 +609,25 @@ export type CodingPlanStartOutcome =
   | { kind: "already_started"; attempt_id: string }
   | { kind: "needs_human"; attempt_id: string; reason: string };
 
+// FE-1（设计 Q5 / S3 后端契约冻结）：PlanCodingTargetDto 补九字段逐仓事实镜像，
+// 供 coding 页在多 target（work_item_group）时逐仓渲染 PR 面板；单仓/非 group 的
+// 顶部 header 零变化。字段名与 S3 后端 serde snake_case 一致，类型均 string|null
+// （stage/push_status 保持字符串口径，未命中标签时回落原值）。
 export type PlanCodingTargetDto = {
   target_repository_id: string;
   attempt_id: string;
   attempt_status: CodingAttemptStatus;
   worktree_path: string | null;
   lease_state: PlanCodingLeaseState;
+  repository_name: string | null;
+  branch_name: string | null;
+  base_branch: string | null;
+  stage: string | null;
+  head_commit: string | null;
+  push_status: string | null;
+  push_error: string | null;
+  review_request_id: string | null;
+  manual_recovery_reason: string | null;
 };
 
 export type PlanCodingUnitProgressDto = {
@@ -607,7 +638,9 @@ export type PlanCodingUnitProgressDto = {
   unit_status: CodingExecutionUnitStatus;
   execution_state: PlanCodingExecutionState;
   unsatisfied_dependency_ids: string[];
-  waiting_reason: PlanCodingWaitingReason | null;
+  // 编排等待取 PlanCodingWaitingReason 三值；awaiting_manual_recovery 时为
+  // attempt.manual_recovery_reason 原文（开放值集），故放宽为 string。
+  waiting_reason: string | null;
   // Slice B（仪表盘跨仓依赖投影）：全量直接依赖（权威绑定，跨桶不失真）、
   // 全图拓扑序与桶内摘要，供前端重建 plan 全图拓扑/依赖链。
   dependency_logical_work_item_ids: string[];

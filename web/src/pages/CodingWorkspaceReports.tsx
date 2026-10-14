@@ -13,6 +13,7 @@ import type {
   WorkItemExecutionPlan,
 } from "../api/types";
 import { GroupFinalReadinessPanel } from "../components/coding-workspace/GroupFinalReadinessPanel";
+import { PUSH_STATUS_LABELS } from "../state/coding-execution-labels";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { notifyLifecycleInvalidated } from "../state/lifecycle-workbench-store";
 import { errorMessage } from "./CodingWorkspaceControls";
@@ -201,7 +202,14 @@ export function GitPanel({ onRetryPush }: { onRetryPush: () => void }) {
         <InfoRow label="branch" value={store.branchName ?? request?.branch_name ?? "-"} />
         <InfoRow label="commit" value={store.headCommit ?? request?.commit_sha ?? "-"} />
         <InfoRow label="remote" value={store.pushedRemote ?? request?.remote ?? "-"} />
-        <InfoRow label="push" value={request?.push_status ?? "-"} />
+        <InfoRow
+          label="push"
+          value={
+            request
+              ? (PUSH_STATUS_LABELS[request.push_status] ?? request.push_status)
+              : "-"
+          }
+        />
         <InfoRow label="request" value={request?.id ?? "-"} />
       </dl>
       {request?.push_status === "failed" && request.push_error ? (

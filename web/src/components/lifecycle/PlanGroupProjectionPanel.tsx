@@ -1,5 +1,10 @@
 import { GitBranch } from "lucide-react";
 import type { PlanGroupProjectionDto, PlanTargetEntryDto } from "../../api/types";
+import {
+  ATTEMPT_STATUS_LABELS,
+  PUSH_STATUS_LABELS,
+  STAGE_LABELS,
+} from "../../state/coding-execution-labels";
 
 // REQ-MTG-04（WP3）：plan 级 group 聚合只读投影面板。三值终态徽标 + per-target
 // 行（复用 DeliveryStatusPanel 行风格）+ partial failure 未满足明细。
@@ -21,35 +26,8 @@ const OVERALL_BADGE_CLASSES: Record<PlanGroupProjectionDto["overall"], string> =
     "border-[var(--aria-line)] bg-[var(--aria-panel-muted)] text-[var(--aria-ink-muted)]",
 };
 
-const ATTEMPT_STATUS_LABELS: Record<string, string> = {
-  created: "已创建",
-  running: "执行中",
-  waiting_for_human: "等待人工",
-  blocked: "已阻塞",
-  awaiting_manual_recovery: "等待人工恢复",
-  awaiting_plan_amendment: "等待计划修订",
-  applying_plan_amendment: "应用计划修订",
-  amendment_apply_failed: "修订应用失败",
-  completed: "已完成",
-  failed: "已失败",
-  aborted: "已中止",
-};
-
-const STAGE_LABELS: Record<string, string> = {
-  prepare_context: "准备上下文",
-  worktree_prepare: "准备 Worktree",
-  coding: "编码",
-  code_review: "代码评审",
-  review_request: "评审请求",
-  internal_pr_review: "内部 PR 评审",
-  final_confirm: "最终确认",
-};
-
-const PUSH_STATUS_LABELS: Record<string, string> = {
-  pushed: "已推送",
-  not_pushed: "未推送",
-  failed: "推送失败",
-};
+// attempt/stage/push 三组标签已抽到 state/coding-execution-labels.ts（FE-1）：
+// FE-2 的逐仓 PR 面板共用同一份文案，本文件不再持有私有副本。
 
 export function PlanGroupProjectionPanel({
   projection,
@@ -102,8 +80,13 @@ function PlanTargetEntryRow({
   entry: PlanTargetEntryDto;
   overall: PlanGroupProjectionDto["overall"];
 }) {
+  // 交付谓词与后端 plan_group_projection 的 is_delivered 同口径（FE-1 / 设计 Q1'）：
+  // completed +（已推送 | 未配置远端而本地交付）。不同口径会让「已全部交付」徽标
+  // 与逐仓「未交付」自相矛盾。
   const delivered =
-    entry.attempt_status === "completed" && entry.push_status === "pushed";
+    entry.attempt_status === "completed" &&
+    (entry.push_status === "pushed" ||
+      entry.push_status === "skipped_not_configured");
   const pushFailed = entry.push_status === "failed";
   const failed =
     entry.attempt_status === "failed" ||

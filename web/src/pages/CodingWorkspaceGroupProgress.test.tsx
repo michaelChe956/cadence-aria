@@ -12,6 +12,20 @@ import {
 // （busi=wi_core、web=wi_registration（跨桶依赖 wi_core）、gateway=wi_unrelated、
 // frontend={wi_service, wi_panel}，wi_panel 直接依赖 {wi_service, wi_unrelated}）。
 // primary 已 Completed 但 plan_complete=false：聚合不冒充整 plan 完成。
+// FE-1：PlanCodingTargetDto 新增 S3 逐仓事实九字段；本夹具只覆盖 execution/lease
+// 与依赖拓扑事实，逐仓交付事实一律 null。
+const targetFacts = {
+  repository_name: null,
+  branch_name: null,
+  base_branch: null,
+  stage: null,
+  head_commit: null,
+  push_status: null,
+  push_error: null,
+  review_request_id: null,
+  manual_recovery_reason: null,
+} satisfies Record<string, null>;
+
 function planCodingProgressDto(
   overrides: Partial<PlanCodingProgressDto> = {},
 ): PlanCodingProgressDto {
@@ -31,6 +45,7 @@ function planCodingProgressDto(
         attempt_status: "blocked",
         worktree_path: "/tmp/wt/busi",
         lease_state: "held",
+        ...targetFacts,
       },
       {
         target_repository_id: "repo_web",
@@ -38,6 +53,7 @@ function planCodingProgressDto(
         attempt_status: "created",
         worktree_path: null,
         lease_state: "absent",
+        ...targetFacts,
       },
       {
         target_repository_id: "repo_gateway",
@@ -45,6 +61,7 @@ function planCodingProgressDto(
         attempt_status: "created",
         worktree_path: null,
         lease_state: "absent",
+        ...targetFacts,
       },
       {
         target_repository_id: "repo_frontend",
@@ -52,6 +69,7 @@ function planCodingProgressDto(
         attempt_status: "created",
         worktree_path: null,
         lease_state: "absent",
+        ...targetFacts,
       },
     ],
     units: [

@@ -38,6 +38,22 @@ const allDelivered: PlanGroupProjectionDto = {
   ],
 };
 
+// FE-1：未配置远端的本地交付。complete + skipped 按「已交付」计（与后端
+// is_delivered 谓词同口径），但必须标出「本地交付(无远端)」。
+const localDeliveryEntry = {
+  ...deliveredEntry,
+  target_repository_id: "66666666-6666-6666-6666-666666666666",
+  repository_name: "checkout_repo_gamma",
+  push_status: "skipped_not_configured",
+  review_request_id: "review_request_0003",
+};
+
+const allLocalDelivered: PlanGroupProjectionDto = {
+  plan_id: "work_item_plan_0001",
+  overall: "all_delivered",
+  entries: [localDeliveryEntry],
+};
+
 const partial: PlanGroupProjectionDto = {
   plan_id: "work_item_plan_0001",
   overall: "partial",
@@ -92,6 +108,21 @@ describe("PlanGroupProjectionPanel", () => {
       expect(row).toHaveTextContent("已交付");
     }
     expect(screen.getAllByText("checkout_repo_alpha")).toHaveLength(2);
+    expect(screen.queryAllByTestId("plan-target-unmet-reason")).toHaveLength(0);
+  });
+
+  it("skipped_not_configured 计为已交付并显式标注本地交付", () => {
+    render(<PlanGroupProjectionPanel projection={allLocalDelivered} />);
+
+    expect(screen.getByTestId("plan-group-overall-badge")).toHaveAttribute(
+      "data-status",
+      "all_delivered",
+    );
+    const row = screen.getByTestId("plan-target-entry-row");
+    expect(row).toHaveAttribute("data-status", "delivered");
+    expect(row).toHaveTextContent("已交付");
+    expect(row).toHaveTextContent("本地交付(无远端)");
+    expect(row).not.toHaveTextContent("已推送");
     expect(screen.queryAllByTestId("plan-target-unmet-reason")).toHaveLength(0);
   });
 

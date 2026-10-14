@@ -454,7 +454,7 @@ describe("CodingWorkspacePage reports and history", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
-    expect(tabs).toHaveTextContent("pushed");
+    expect(tabs).toHaveTextContent("已推送");
     expect(screen.getByRole("link", { name: "https://git.example/review/1" })).toHaveAttribute(
       "href",
       "https://git.example/review/1",
@@ -504,7 +504,7 @@ describe("CodingWorkspacePage reports and history", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
     const tabs = screen.getByTestId("coding-artifact-tabs");
-    expect(tabs).toHaveTextContent("failed");
+    expect(tabs).toHaveTextContent("推送失败");
     expect(tabs).toHaveTextContent(
       "推送到 origin/aria/work-items/work_item_0001/attempt-1 失败：remote rejected",
     );
@@ -592,6 +592,53 @@ describe("CodingWorkspacePage reports and history", () => {
     );
 
     await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+    expect(
+      screen.queryByRole("button", { name: "重新推送" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders local delivery label for skipped push and no retry button", async () => {
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "completed",
+      stage: "review_request",
+      activeTab: "git",
+      baseBranch: "main",
+      branchName: "aria/work-items/work_item_0001/attempt-1",
+      headCommit: "abc1234",
+      pushedRemote: null,
+      reviewRequest: {
+        id: "review_request_0001",
+        attempt_id: "coding_attempt_0001",
+        kind: "git_branch_only",
+        remote_kind: "generic_git",
+        remote: "origin",
+        base_branch: "main",
+        branch_name: "aria/work-items/work_item_0001/attempt-1",
+        commit_sha: "abc1234",
+        push_status: "skipped_not_configured",
+        external_url: null,
+        manual_instructions: [
+          "本地交付：分支 aria/work-items/work_item_0001/attempt-1 / commit abc1234（未配置远端）",
+        ],
+        push_error: null,
+        created_at: "2026-05-23T00:00:00Z",
+        updated_at: "2026-05-23T00:00:01Z",
+      },
+    });
+
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+    const tabs = screen.getByTestId("coding-artifact-tabs");
+    expect(tabs).toHaveTextContent("本地交付(无远端)");
+    expect(tabs).not.toHaveTextContent("已推送");
     expect(
       screen.queryByRole("button", { name: "重新推送" }),
     ).not.toBeInTheDocument();

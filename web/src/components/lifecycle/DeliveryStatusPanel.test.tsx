@@ -111,6 +111,18 @@ const noneSummary: IssueDeliverySummaryDto = {
   entries: [],
 };
 
+// FE-1：未配置远端的本地交付（skipped_not_configured）是完成态而非失败态，
+// 但绝不能显示成「已推送」。
+const localDeliverySummary: IssueDeliverySummaryDto = {
+  project_id: "project_0001",
+  issue_id: "issue_0001",
+  overall: "partial",
+  entries: [
+    deliveryEntry("cadence-aria", "work_item_0001", "pushed"),
+    deliveryEntry("cadence-web", "work_item_0002", "skipped_not_configured"),
+  ],
+};
+
 describe("DeliveryStatusPanel", () => {
   it("renders all_pushed with green badge", () => {
     render(<DeliveryStatusPanel summary={allPushedSummary} />);
@@ -158,6 +170,23 @@ describe("DeliveryStatusPanel", () => {
     expect(row).toHaveTextContent("未推送");
     expect(row).not.toHaveTextContent("推送失败");
     expect(screen.queryByTestId("delivery-entry-error")).not.toBeInTheDocument();
+  });
+
+  it("skipped_not_configured 渲染为本地交付，不冒充已推送也不计失败", () => {
+    render(<DeliveryStatusPanel summary={localDeliverySummary} />);
+
+    const rows = screen.getAllByTestId("delivery-entry-row");
+    expect(rows).toHaveLength(2);
+    const localRow = rows.find(
+      (row) => row.getAttribute("data-status") === "skipped",
+    );
+    expect(localRow).toBeDefined();
+    expect(localRow).toHaveTextContent("cadence-web");
+    expect(localRow).toHaveTextContent("本地交付(无远端)");
+    // 「已推送」只属于真正推送成功的仓卡。
+    expect(screen.getAllByText("已推送")).toHaveLength(1);
+    expect(screen.queryByTestId("delivery-entry-error")).not.toBeInTheDocument();
+    expect(screen.queryByText(/推送失败/u)).not.toBeInTheDocument();
   });
 
   it("renders none with unavailable hint", () => {

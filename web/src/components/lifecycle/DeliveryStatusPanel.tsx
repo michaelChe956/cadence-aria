@@ -1,5 +1,6 @@
 import { GitBranch } from "lucide-react";
 import type { DeliveryEntryDto, IssueDeliverySummaryDto } from "../../api/types";
+import { LOCAL_DELIVERY_LABEL } from "../../state/coding-execution-labels";
 import { SectionCollapseToggle } from "./SectionCollapseToggle";
 
 const OVERALL_LABELS: Record<IssueDeliverySummaryDto["overall"], string> = {
@@ -19,10 +20,13 @@ const OVERALL_BADGE_CLASSES: Record<
   none: "border-[var(--aria-line)] bg-[var(--aria-panel-muted)] text-[var(--aria-ink-muted)]",
 };
 
-type DeliveryPushState = "pushed" | "pending" | "failed";
+// skipped=完成态的本地交付（未配置远端）。它不是失败，但也不是「已推送」，
+// 必须单列一种状态，避免仓卡把本地交付冒充成远端已交付。
+type DeliveryPushState = "pushed" | "skipped" | "pending" | "failed";
 
 const PUSH_STATE_LABELS: Record<DeliveryPushState, string> = {
   pushed: "已推送",
+  skipped: LOCAL_DELIVERY_LABEL,
   pending: "未推送",
   failed: "推送失败",
 };
@@ -57,17 +61,33 @@ function deliveryPushState(entry: DeliveryEntryDto): DeliveryPushState {
   if (entry.push_status === "pushed") {
     return "pushed";
   }
-  return entry.push_status === "failed" ? "failed" : "pending";
-}
-
-// 仓卡状态取仓内最严重者：任一 WI 失败即失败；全部已推送才算已推送；其余未推送。
-function repositoryPushState(entries: DeliveryEntryDto[]): DeliveryPushState {
-  if (entries.some((entry) => deliveryPushState(entry) === "failed")) {
+  if (entry.push_status === "failed") {
     return "failed";
   }
-  return entries.every((entry) => deliveryPushState(entry) === "pushed")
-    ? "pushed"
-    : "pending";
+  if (entry.push_status === "skipped_not_configured") {
+    return "skipped";
+  }
+  return "pending";
+}
+
+// 仓卡状态取仓内最严重者（failed > pending > skipped > pushed）：任一 WI 失败即
+// 失败；有未推送即未推送；否则全部本地交付才算本地交付；全部已推送才算已推送。
+const PUSH_STATE_SEVERITY: Record<DeliveryPushState, number> = {
+  pushed: 0,
+  skipped: 1,
+  pending: 2,
+  failed: 3,
+};
+
+function repositoryPushState(entries: DeliveryEntryDto[]): DeliveryPushState {
+  let worst: DeliveryPushState = "pushed";
+  for (const entry of entries) {
+    const state = deliveryPushState(entry);
+    if (PUSH_STATE_SEVERITY[state] > PUSH_STATE_SEVERITY[worst]) {
+      worst = state;
+    }
+  }
+  return worst;
 }
 
 function countByPushState(
@@ -84,6 +104,7 @@ function countByPushState(
 }
 
 // 收起态的一眼可见摘要：仓数 + WI 数 + 未完成推送事实（不渲染仓卡也能判断进度）。
+// 本地交付单列：它是完成态，不能并进「未推送」，也不能并进「已推送」。
 function collapsedSummaryText(cards: DeliveryRepositoryCardData[]): string {
   const entries = cards.flatMap((card) => card.entries);
   const segments = [
@@ -92,11 +113,15 @@ function collapsedSummaryText(cards: DeliveryRepositoryCardData[]): string {
   ];
   const failed = countByPushState(entries, "failed");
   const pending = countByPushState(entries, "pending");
+  const skipped = countByPushState(entries, "skipped");
   if (failed > 0) {
     segments.push(`推送失败 ${failed}`);
   }
   if (pending > 0) {
     segments.push(`未推送 ${pending}`);
+  }
+  if (skipped > 0) {
+    segments.push(`${LOCAL_DELIVERY_LABEL} ${skipped}`);
   }
   return segments.join(" · ");
 }
@@ -168,7 +193,8 @@ function DeliveryRepositoryCard({
 }) {
   const state = repositoryPushState(card.entries);
   const failed = state === "failed";
-  const pushed = state === "pushed";
+  // 本地交付（skipped）也是完成态：与已推送同用成功色，但文案不同。
+  const delivered = state === "pushed" || state === "skipped";
 
   return (
     <div
@@ -189,7 +215,7 @@ function DeliveryRepositoryCard({
           className={
             failed
               ? "font-semibold text-[var(--aria-danger)]"
-              : pushed
+              : delivered
                 ? "font-semibold text-[var(--aria-success)]"
                 : "text-[var(--aria-ink-muted)]"
           }
@@ -239,7 +265,7 @@ function DeliveryRepositoryCard({
 
 // 多 WI 仓卡的副行明细：只列出实际出现的推送状态与计数（保持副行短小）。
 function pushStateBreakdown(entries: DeliveryEntryDto[]): string {
-  const order: DeliveryPushState[] = ["pushed", "pending", "failed"];
+  const order: DeliveryPushState[] = ["pushed", "skipped", "pending", "failed"];
   return order
     .map((state) => ({ state, count: countByPushState(entries, state) }))
     .filter((item) => item.count > 0)

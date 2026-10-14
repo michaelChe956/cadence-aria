@@ -173,6 +173,17 @@ function planTarget(repositoryId: string, attemptId: string): PlanCodingTargetDt
     attempt_status: "created",
     worktree_path: null,
     lease_state: "absent",
+    // FE-1：PlanCodingTargetDto 新增 S3 逐仓事实九字段；本 fixture 只覆盖
+    // execution/lease 事实，逐仓交付事实一律 null。
+    repository_name: null,
+    branch_name: null,
+    base_branch: null,
+    stage: null,
+    head_commit: null,
+    push_status: null,
+    push_error: null,
+    review_request_id: null,
+    manual_recovery_reason: null,
   };
 }
 

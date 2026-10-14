@@ -335,6 +335,16 @@ describe("CodingWorkspacePage shell and actions", () => {
           attempt_status: "running",
           worktree_path: "/tmp/wt/busi",
           lease_state: "held",
+          // FE-1：PlanCodingTargetDto 新增 S3 逐仓事实九字段（本夹具一律 null）。
+          repository_name: null,
+          branch_name: null,
+          base_branch: null,
+          stage: null,
+          head_commit: null,
+          push_status: null,
+          push_error: null,
+          review_request_id: null,
+          manual_recovery_reason: null,
         },
       ],
       units: [
