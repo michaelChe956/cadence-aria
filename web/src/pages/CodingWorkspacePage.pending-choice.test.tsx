@@ -208,3 +208,80 @@ describe("CodingWorkspacePage choice arrival and settings slot", () => {
     expect(screen.queryByTestId("cockpit-settings-fallback")).toBeNull();
   });
 });
+
+describe("CodingWorkspacePage P1-c focus drill-down", () => {
+  installCodingWorkspacePageTestHooks();
+
+  function spyScrollIntoView() {
+    const scrolled: HTMLElement[] = [];
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value(this: HTMLElement) {
+        scrolled.push(this);
+      },
+    });
+    return scrolled;
+  }
+
+  function readyStateWithPendingChoice() {
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "waiting_for_human",
+      stage: "coding",
+      chatEntries: [pendingChoiceEntry()],
+    });
+  }
+
+  // P1-c（REQ-MTG-12）：总览/全局待办徽标携带 focus.choiceId 下钻——不点
+  // 横幅也要直接定位到 choice 卡（pendingJumpEntryId 先例）。
+  it("locates the focused choice card on mount without clicking the banner", async () => {
+    const scrolled = spyScrollIntoView();
+    mockCodingWs();
+    readyStateWithPendingChoice();
+
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+        focus={{ choiceId: "choice-1" }}
+      />,
+    );
+
+    const card = await screen.findByTestId("choice-request-entry");
+    const row = card.closest('[data-entry-id="choice_request:choice-1"]');
+    expect(row).not.toBeNull();
+    expect(scrolled).toContain(row);
+  });
+
+  // P1-c：用户已停在「运行结果」页签时收到下钻焦点（同 attempt 的 A1 通知），
+  // 契约同 F-43 fix1——先切回对话页签，列表重挂后再滚动定位。
+  it("switches back from the results panel when a focus target arrives late", async () => {
+    const scrolled = spyScrollIntoView();
+    vi.mocked(getCodingAttemptDiff).mockResolvedValue({
+      attempt_id: CODING_ATTEMPT_ADDRESS.attemptId,
+      base_branch: "main",
+      worktree_path: "/tmp/worktree",
+      diff: "",
+    });
+    mockCodingWs();
+    readyStateWithPendingChoice();
+
+    const view = render(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+    expect(screen.queryByTestId("coding-chat-entry-list")).toBeNull();
+
+    view.rerender(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+        focus={{ choiceId: "choice-1" }}
+      />,
+    );
+
+    const card = await screen.findByTestId("choice-request-entry");
+    expect(screen.getByTestId("coding-chat-entry-list")).toBeInTheDocument();
+    expect(scrolled).toContain(card.closest('[data-entry-id="choice_request:choice-1"]'));
+  });
+});

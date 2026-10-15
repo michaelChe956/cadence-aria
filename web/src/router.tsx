@@ -16,6 +16,8 @@ import { ProviderAvailabilityGuard } from "./components/providers/ProviderAvaila
 import { CockpitShell } from "./components/cockpit/CockpitShell";
 import { ChatWorkspacePage } from "./pages/ChatWorkspacePage";
 import { CodingWorkspacePage } from "./pages/CodingWorkspacePage";
+import { CodingPlanOverviewPage } from "./pages/CodingPlanOverviewPage";
+import type { CodingAttentionItemDto } from "./api/types";
 import { ImageCreatePage } from "./pages/ImageCreatePage";
 import { LegacyCodingWorkspaceRedirect } from "./pages/LegacyCodingWorkspaceRedirect";
 
@@ -134,11 +136,29 @@ const workspaceRoute = createRoute({
 
 function CodingWorkspaceRouteComponent() {
   const { projectId, issueId, attemptId } = useParams({ strict: false });
+  const search = useSearch({ strict: false }) as CodingWorkspaceFocusSearch;
   const navigate = useNavigate();
+  // P1-c：planId 存在即「从总览下钻」上下文——返回回总览，否则回 workbench。
+  const planId = search.planId;
+  const openPlanOverview = (targetPlanId: string) =>
+    void navigate({
+      to: "/workbench/projects/$projectId/issues/$issueId/coding-plans/$planId",
+      params: { projectId, issueId, planId: targetPlanId },
+    });
   return (
     <CodingWorkspacePage
       address={{ projectId, issueId, attemptId }}
-      onBack={() => void navigate({ to: "/workbench" })}
+      focus={{
+        attentionKind: search.focus,
+        gateId: search.gateId,
+        choiceId: search.choiceId,
+      }}
+      onOpenPlanOverview={openPlanOverview}
+      onBack={() =>
+        planId
+          ? openPlanOverview(planId)
+          : void navigate({ to: "/workbench" })
+      }
     />
   );
 }
@@ -146,8 +166,149 @@ function CodingWorkspaceRouteComponent() {
 const codingWorkspaceRoute = createRoute({
   getParentRoute: () => guardedWorkflowRoute,
   path: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): CodingWorkspaceFocusSearch => ({
+    planId: searchParamString(search.planId),
+    workItemId: searchParamString(search.workItemId),
+    focus: searchParamString(search.focus),
+    gateId: searchParamString(search.gateId),
+    choiceId: searchParamString(search.choiceId),
+  }),
   component: CodingWorkspaceRouteComponent,
 });
+
+function searchParamString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function CodingPlanOverviewRouteComponent() {
+  const { projectId, issueId, planId } = useParams({ strict: false });
+  const navigate = useNavigate();
+  return (
+    <CodingPlanOverviewPage
+      projectId={projectId}
+      issueId={issueId}
+      planId={planId}
+      onBack={() => void navigate({ to: "/workbench" })}
+      onOpenAttempt={(target) =>
+        void navigate({
+          to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+          params: { projectId, issueId, attemptId: target.attemptId },
+          search: {
+            planId,
+            workItemId: target.workItemId,
+            gateId: target.gateId,
+            choiceId: target.choiceId,
+          },
+        })
+      }
+    />
+  );
+}
+
+const codingPlanOverviewRoute = createRoute({
+  getParentRoute: () => guardedWorkflowRoute,
+  path: "/workbench/projects/$projectId/issues/$issueId/coding-plans/$planId",
+  component: CodingPlanOverviewRouteComponent,
+});
+
+// ── P1-c（REQ-MTG-12）：plan 总览路由与 A1 待办 target 统一导航 ──
+// 契约 A1：attempt 走既有 coding 路由、plan 走 coding-plans/$planId、plan
+// 问题走 workspace/$sessionId；gateId/choiceId 焦点与 planId（返回总览上下文）
+// 经 search 传递。块 4（P4-e）只回调本 helper，不重复实现导航。
+export type CodingWorkspaceFocusSearch = {
+  planId?: string;
+  workItemId?: string;
+  focus?: string;
+  gateId?: string;
+  choiceId?: string;
+};
+
+export type CodingAttentionLocation = {
+  to: string;
+  params: Record<string, string>;
+  search: Record<string, string | undefined>;
+};
+
+export type CodingAttentionLocationItem = Pick<
+  CodingAttentionItemDto,
+  | "kind"
+  | "project_id"
+  | "issue_id"
+  | "plan_id"
+  | "attempt_id"
+  | "logical_work_item_id"
+  | "target"
+  | "focus"
+>;
+
+export function codingAttentionLocation(
+  item: CodingAttentionLocationItem,
+): CodingAttentionLocation | null {
+  if (item.target.type === "coding_attempt" && item.target.attempt_id) {
+    return {
+      to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+      params: {
+        projectId: item.project_id,
+        issueId: item.issue_id,
+        attemptId: item.target.attempt_id,
+      },
+      search: {
+        planId: item.plan_id ?? undefined,
+        workItemId: item.logical_work_item_id ?? undefined,
+        focus: item.kind === "final_confirm" ? "final_confirm" : undefined,
+        gateId: item.focus?.gate_id,
+        choiceId: item.focus?.choice_id,
+      },
+    };
+  }
+  if (item.target.type === "coding_plan" && item.target.plan_id) {
+    return {
+      to: "/workbench/projects/$projectId/issues/$issueId/coding-plans/$planId",
+      params: {
+        projectId: item.project_id,
+        issueId: item.issue_id,
+        planId: item.target.plan_id,
+      },
+      search: {},
+    };
+  }
+  if (item.target.type === "workspace_session" && item.target.session_id) {
+    return {
+      to: "/workbench/workspace/$sessionId",
+      params: { sessionId: item.target.session_id },
+      search: {},
+    };
+  }
+  return null;
+}
+
+type LooseNavigate = (location: CodingAttentionLocation) => void;
+
+export function openCodingAttentionLocation(
+  navigate: LooseNavigate,
+  item: CodingAttentionLocationItem,
+): boolean {
+  const location = codingAttentionLocation(item);
+  if (!location) {
+    return false;
+  }
+  navigate(location);
+  return true;
+}
+
+// P4-e（块 4）消费入口：通知/收件箱「去处理」经此统一导航，不各自拼地址。
+export function useCodingAttentionTargetOpener() {
+  const navigate = useNavigate();
+  return useCallback((item: CodingAttentionLocationItem) => {
+    openCodingAttentionLocation(
+      (location) =>
+        void (navigate as unknown as LooseNavigate)({ ...location }),
+      item,
+    );
+  }, [navigate]);
+}
 
 function LegacyCodingWorkspaceRouteComponent() {
   const { attemptId } = useParams({ strict: false });
@@ -199,6 +360,7 @@ const guardedWorkflowTree = guardedWorkflowRoute.addChildren([
   workbenchRoute,
   workspaceRoute,
   codingWorkspaceRoute,
+  codingPlanOverviewRoute,
   legacyCodingWorkspaceRoute,
 ]);
 

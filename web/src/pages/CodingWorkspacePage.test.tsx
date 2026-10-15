@@ -1,7 +1,16 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
-import type { CodingExecutionUnit, CodingWsOutMessage } from "../api/types";
+import {
+  createMemoryHistory,
+  RouterProvider,
+} from "@tanstack/react-router";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  CodingAttentionItemDto,
+  CodingExecutionUnit,
+  CodingWsOutMessage,
+  ProviderHealthResponse,
+} from "../api/types";
 import {
   confirmWorkItemExecutionPlan,
   deleteCodingAttempt,
@@ -9,7 +18,14 @@ import {
   getPlanCodingProgress,
   requestWorkItemExecutionPlanChange,
 } from "../api/client";
+import {
+  codingAttentionLocation,
+  createAppRouter,
+  router,
+} from "../router";
+import { useProviderAvailabilityStore } from "../state/provider-availability-store";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
+import { useWorkspaceSessionObservers } from "../hooks/useWorkspaceSessionObservers";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import {
   CODING_WORKSPACE_HOTKEYS,
@@ -42,6 +58,12 @@ vi.mock("../hooks/useCodingWorkspaceWs", () => ({
 
 vi.mock("../hooks/useUnloadGuard", () => ({
   useUnloadGuard: vi.fn(),
+}));
+
+// P1-c 路由集成用例渲染 RootRouteComponent（CockpitShell）——observer 依赖
+// 统一打桩（与 router.test/pending-choice 同款空投影）。
+vi.mock("../hooks/useWorkspaceSessionObservers", () => ({
+  useWorkspaceSessionObservers: vi.fn(),
 }));
 
 vi.mock("../components/shared/MonacoViewer", () => ({
@@ -78,6 +100,18 @@ vi.mock("../components/shared/MonacoDiffViewer", () => ({
     </div>
   ),
 }));
+
+// P1-c：定位断言共用——记录每个 scrollIntoView 调用落点的元素。
+function spyScrollIntoView() {
+  const scrolled: HTMLElement[] = [];
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value(this: HTMLElement) {
+      scrolled.push(this);
+    },
+  });
+  return scrolled;
+}
 
 describe("CodingWorkspacePage shell and actions", () => {
   installCodingWorkspacePageTestHooks();
@@ -1158,5 +1192,369 @@ describe("CodingWorkspacePage shell and actions", () => {
     expect(screen.queryByTestId("coding-topology-graph")).toBeNull();
     expect(screen.getByTestId("coding-dashboard")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "展开编码仪表盘" })).toBeInTheDocument();
+  });
+});
+
+describe("CodingWorkspacePage P1-c navigation and focus", () => {
+  installCodingWorkspacePageTestHooks();
+
+  function mockCodingSessionState(
+    overrides: Partial<Extract<CodingWsOutMessage, { type: "coding_session_state" }>>,
+  ) {
+    useCodingWorkspaceStore.getState().setSessionState({
+      type: "coding_session_state",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
+      attempt_id: "coding_attempt_0001",
+      attempt_scope: "work_item",
+      work_item_group_id: null,
+      current_work_item_id: "work_item_0001",
+      active_unit_id: null,
+      units: [],
+      status: "running",
+      stage: "coding",
+      branch_name: "aria/work-items/work_item_0001/attempt-1",
+      base_branch: "main",
+      worktree_path: "/tmp/worktree",
+      rework_count: 0,
+      max_auto_rework: 2,
+      head_commit: null,
+      pushed_remote: null,
+      provider_config_snapshot: {
+        author: "fake",
+        reviewer: "fake",
+        review_rounds: 1,
+      },
+      role_provider_config_snapshot: {
+        coder: "fake",
+        code_reviewer: "fake",
+        internal_reviewer: "fake",
+        review_rounds: 1,
+        permission_modes: { ...DEFAULT_PERMISSION_MODES },
+      },
+      timeline_nodes: [],
+      active_node_id: null,
+      code_review_reports: [],
+      review_request: null,
+      internal_pr_review: null,
+      pending_gates: [],
+      pending_choices: [],
+      role_runs: [],
+      chat_entries: [],
+      work_item_markdown: null,
+      verification_commands: [],
+      work_item_execution_plan: null,
+      linked_plan_repair: null,
+      require_execution_plan_confirm: false,
+      ...overrides,
+    });
+  }
+
+  function blockedGateFixture() {
+    return {
+      gate_id: "gate_0001",
+      kind: "blocked" as const,
+      title: "需要人工处理",
+      description: "Code Reviewer 被阻塞，等待人工处理",
+      reason_code: "code_review_blocked",
+      available_actions: [
+        {
+          action_id: "accept_risk",
+          label: "接受风险",
+          action_type: "accept_risk" as const,
+        },
+      ],
+    };
+  }
+
+  // P1-c（REQ-MTG-12）红测③：focus.gateId 从「运行结果」页签下钻——切回
+  // 对话页签并定位到门卡（GatePanel 只在对话页签渲染）。
+  it("locates the focused pending gate card from the results panel", async () => {
+    const scrolled = spyScrollIntoView();
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      status: "blocked",
+      stage: "code_review",
+      pendingGates: [blockedGateFixture()],
+    });
+    vi.mocked(getCodingAttemptDiff).mockResolvedValue({
+      attempt_id: CODING_ATTEMPT_ADDRESS.attemptId,
+      base_branch: "main",
+      worktree_path: "/tmp/worktree",
+      diff: "",
+    });
+
+    const view = render(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "运行结果" }));
+    expect(screen.queryByTestId("coding-pending-gate")).toBeNull();
+
+    view.rerender(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+        focus={{ gateId: "gate_0001" }}
+      />,
+    );
+
+    const card = await screen.findByTestId("coding-pending-gate");
+    expect(screen.getByTestId("coding-chat-entry-list")).toBeInTheDocument();
+    expect(scrolled).toContain(card);
+  });
+
+  // P1-c 红测③：final_confirm 待办下钻——定位「待最终确认」确认区横幅。
+  it("locates the final-confirm waiting banner for a final_confirm focus target", async () => {
+    const scrolled = spyScrollIntoView();
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      attemptScope: "work_item_group",
+      status: "waiting_for_human",
+      stage: "final_confirm",
+    });
+
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+        focus={{ attentionKind: "final_confirm" }}
+      />,
+    );
+
+    const banner = await screen.findByTestId("coding-final-confirm-waiting");
+    expect(banner).toHaveTextContent("编码执行完成，待最终确认");
+    expect(scrolled).toContain(banner);
+  });
+
+  // P1-c 红测④前置：GroupProgress「查看全部 WI」入口由页面透传回调（router
+  // 接线导航到总览路由；页面自身不感知路由）。
+  it("forwards the group progress overview entry through onOpenPlanOverview", async () => {
+    const onOpenPlanOverview = vi.fn();
+    mockCodingWs();
+    mockCodingSessionState({
+      attempt_scope: "work_item_group",
+      work_item_group_id: "work_item_plan_0001",
+      current_work_item_id: "work_item_0001",
+      active_unit_id: "coding_unit_0001",
+      units: [
+        {
+          unit_id: "coding_unit_0001",
+          logical_work_item_id: "work_item_0001",
+          work_item_revision_id: "work_item_revision_0001",
+          dependency_logical_work_item_ids: [],
+          order_index: 0,
+          status: "running",
+          summary: null,
+          latest_handoff_revision_id: null,
+          completion_commit: null,
+        },
+      ],
+    });
+
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+        onOpenPlanOverview={onOpenPlanOverview}
+      />,
+    );
+
+    await userEvent.click(await screen.findByTestId("plan-coding-open-overview"));
+    expect(onOpenPlanOverview).toHaveBeenCalledWith("work_item_plan_0001");
+  });
+});
+
+describe("P1-c A1 attention target navigation", () => {
+  function attentionItem(
+    overrides: Partial<CodingAttentionItemDto> = {},
+  ): CodingAttentionItemDto {
+    return {
+      key: "gate:gate_0001",
+      kind: "choice",
+      project_id: "project_1",
+      issue_id: "issue_1",
+      plan_id: "plan_1",
+      attempt_id: "attempt_1",
+      logical_work_item_id: "wi_1",
+      repository_name: null,
+      reason_code: null,
+      title: "待处理",
+      summary: "等待人工处理",
+      occurred_at: "2026-10-16T00:00:00Z",
+      target: { type: "coding_attempt", attempt_id: "attempt_1" },
+      focus: { gate_id: "gate_1", choice_id: "choice_1" },
+      ...overrides,
+    };
+  }
+
+  // P1-c 红测①（地址组装）：A1 coding_attempt target 统一走既有 coding
+  // 路由，focus/gateId/choiceId/planId/workItemId 全部经 search 传递。
+  it("builds the coding attempt location with focus search for an A1 target", () => {
+    expect(codingAttentionLocation(attentionItem())).toEqual({
+      to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+      params: { projectId: "project_1", issueId: "issue_1", attemptId: "attempt_1" },
+      search: {
+        planId: "plan_1",
+        workItemId: "wi_1",
+        gateId: "gate_1",
+        choiceId: "choice_1",
+      },
+    });
+  });
+
+  it("marks a final_confirm attention item with the confirm focus", () => {
+    expect(
+      codingAttentionLocation(
+        attentionItem({
+          kind: "final_confirm",
+          key: "final_confirm:attempt_1",
+          focus: null,
+        }),
+      ),
+    ).toEqual({
+      to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+      params: { projectId: "project_1", issueId: "issue_1", attemptId: "attempt_1" },
+      search: { planId: "plan_1", workItemId: "wi_1", focus: "final_confirm" },
+    });
+  });
+
+  it("builds the plan overview location for coding_plan targets", () => {
+    expect(
+      codingAttentionLocation(
+        attentionItem({
+          kind: "plan_final_confirm",
+          key: "plan_final_confirm:plan_1",
+          attempt_id: null,
+          logical_work_item_id: null,
+          target: { type: "coding_plan", plan_id: "plan_1" },
+          focus: null,
+        }),
+      ),
+    ).toEqual({
+      to: "/workbench/projects/$projectId/issues/$issueId/coding-plans/$planId",
+      params: { projectId: "project_1", issueId: "issue_1", planId: "plan_1" },
+      search: {},
+    });
+  });
+
+  it("builds the workspace session location for workspace_session targets", () => {
+    expect(
+      codingAttentionLocation(
+        attentionItem({
+          target: { type: "workspace_session", session_id: "session_1" },
+          focus: null,
+        }),
+      ),
+    ).toEqual({
+      to: "/workbench/workspace/$sessionId",
+      params: { sessionId: "session_1" },
+      search: {},
+    });
+  });
+
+  it("returns null for unknown or incomplete targets", () => {
+    expect(
+      codingAttentionLocation(
+        attentionItem({ target: { type: "something_else", attempt_id: "x" } }),
+      ),
+    ).toBeNull();
+    expect(
+      codingAttentionLocation(attentionItem({ target: { type: "coding_attempt" } })),
+    ).toBeNull();
+  });
+
+  it("registers the plan overview route", () => {
+    expect(
+      router.routesByPath[
+        "/workbench/projects/$projectId/issues/$issueId/coding-plans/$planId"
+      ],
+    ).toBeDefined();
+  });
+});
+
+describe("P1-c router integration", () => {
+  installCodingWorkspacePageTestHooks();
+
+  beforeEach(() => {
+    vi.mocked(useWorkspaceSessionObservers).mockReturnValue({
+      records: [],
+      inbox: [],
+      countedInbox: [],
+      watchedSessionIds: [],
+      watchSession: vi.fn(),
+      codingAttemptForSession: () => null,
+      displayItems: [],
+      actionableCount: 0,
+      notificationCandidates: [],
+    });
+  });
+
+
+  function availableProviderHealth(): ProviderHealthResponse {
+    return {
+      schema_version: 1,
+      generation: 1,
+      checked_at: "2026-10-16T00:00:00Z",
+      state_status: "ready",
+      state_error: null,
+      real_workflow_blocked: false,
+      test_provider_enabled: false,
+      providers: [],
+    };
+  }
+
+  function loadProviderAvailability() {
+    const health = availableProviderHealth();
+    useProviderAvailabilityStore.setState({
+      snapshot: health,
+      loadStatus: "loaded",
+      generation: health.generation,
+      stateStatus: health.state_status,
+      stateError: health.state_error,
+      realWorkflowBlocked: health.real_workflow_blocked,
+      testProviderEnabled: health.test_provider_enabled,
+    });
+  }
+
+  // P1-c 红测①②：带 planId/focus search 的 coding URL 落到正确 attempt 地址
+  // （WS 以该地址重置/重连），final_confirm 焦点定位确认区；红测④：返回
+  // 按钮回到 plan 总览路由（planId 上下文）。
+  it("routes a focused coding URL and returns to the plan overview", async () => {
+    const scrolled = spyScrollIntoView();
+    loadProviderAvailability();
+    mockCodingWs();
+    useCodingWorkspaceStore.setState({
+      ...readyCodingState(),
+      attemptScope: "work_item_group",
+      status: "waiting_for_human",
+      stage: "final_confirm",
+    });
+
+    const history = createMemoryHistory({
+      initialEntries: [
+        "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_0001" +
+          "?planId=work_item_plan_0001&workItemId=work_item_0001&focus=final_confirm",
+      ],
+    });
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    expect(await screen.findByTestId("coding-workspace-page")).toBeInTheDocument();
+    expect(vi.mocked(useCodingWorkspaceWs)).toHaveBeenCalledWith(
+      expect.objectContaining({ attemptId: "coding_attempt_0001" }),
+    );
+    const banner = await screen.findByTestId("coding-final-confirm-waiting");
+    expect(scrolled).toContain(banner);
+
+    await userEvent.click(screen.getByRole("button", { name: "返回" }));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe(
+        "/workbench/projects/project_0001/issues/issue_0001/coding-plans/work_item_plan_0001",
+      );
+    });
+    // getPlanCodingProgress 默认 mock 抛错——总览页错误面即“已回到总览”证据。
+    expect(await screen.findByTestId("plan-overview-error")).toBeInTheDocument();
   });
 });

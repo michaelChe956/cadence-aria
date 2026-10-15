@@ -100,12 +100,31 @@ type RepairActionScope = Pick<
   "childSessionId" | "amendmentId" | "repairGenerationKey"
 >;
 
+// P1-c（REQ-MTG-12）：总览/全局待办下钻焦点——router 把 search 的
+// focus/gateId/choiceId 解析后传入；choice 定位对话内选择卡、gate 定位门卡、
+// final_confirm 定位确认区，其余 kind 进入页面即可见面不单独定位。
+export type CodingWorkspaceFocusTarget = {
+  attentionKind?: string;
+  gateId?: string;
+  choiceId?: string;
+};
+
+type PendingCardFocus =
+  | { type: "gate"; gateId: string }
+  | { type: "final_confirm" };
+
 export function CodingWorkspacePage({
   address,
   onBack,
+  focus,
+  onOpenPlanOverview,
 }: {
   address: CodingAttemptAddress;
   onBack: () => void;
+  /** P1-c：下钻定位目标（未携带时不做任何定位）。 */
+  focus?: CodingWorkspaceFocusTarget;
+  /** P1-c：GroupProgress「查看全部 WI」入口；未接线不渲染（携带 planId）。 */
+  onOpenPlanOverview?: (planId: string) => void;
 }) {
   const api = useCodingWorkspaceWs(address);
   // P2-e（REQ-CRO-11）：choice 作答走 REST 命令谱系（同 command 重试/202
@@ -137,6 +156,9 @@ export function CodingWorkspacePage({
   // 故先记录目标 + 切回 chat，待列表重挂后由 effect 执行滚动（ChatCockpitPage
   // jumpEntryId 先例）。
   const [pendingJumpEntryId, setPendingJumpEntryId] = useState<string | null>(null);
+  // P1-c：下钻定位的门卡/确认区目标——等元素真出现（快照/WS 帧有先后，
+  // 可能晚于挂载）再 scrollIntoView，定位成功即消费。
+  const [pendingCardFocus, setPendingCardFocus] = useState<PendingCardFocus | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [groupDeleteBusy, setGroupDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -195,6 +217,12 @@ export function CodingWorkspacePage({
         : "Child Workspace 正在连接，Repair 操作暂不可用。")
     : null;
   const pageError = store.activePlanRepair ? deleteError : planError ?? deleteError;
+  // P1-c：GroupProgress「查看全部 WI」透传——planId 取 store（router 回调导航）。
+  const groupPlanId = store.workItemGroupId;
+  const openGroupPlanOverview =
+    groupPlanId && onOpenPlanOverview
+      ? () => onOpenPlanOverview(groupPlanId)
+      : undefined;
   const providerSummary = store.roleProviderConfigSnapshot
     ? `Coder ${store.roleProviderConfigSnapshot.coder} · Reviewer ${store.roleProviderConfigSnapshot.code_reviewer}`
     : "provider pending";
@@ -449,6 +477,7 @@ export function CodingWorkspacePage({
     setDeleteError(null);
     setPlanError(null);
     setPendingJumpEntryId(null);
+    setPendingCardFocus(null);
     pendingRepairActionRef.current = null;
     setPendingRepairAction(null);
     setRepairActionError(null);
@@ -467,6 +496,84 @@ export function CodingWorkspacePage({
     target.scrollToEntry(pendingJumpEntryId);
     setPendingJumpEntryId(null);
   }, [activePanel, pendingJumpEntryId, store.activePlanRepair]);
+
+  // P1-c（REQ-MTG-12）：总览徽标/A1 待办下钻焦点。choice 复用 pendingJumpEntryId
+  // 先例（先切回对话页签，列表挂载后滚动）；gate 卡与 final_confirm 确认区由
+  // pendingCardFocus 等元素真正出现再定位。focus 信号（地址+目标）只消费一次。
+  const focusSignal = focus
+    ? [
+        addressKey,
+        focus.attentionKind ?? "",
+        focus.gateId ?? "",
+        focus.choiceId ?? "",
+      ].join("\n")
+    : null;
+  const focusSignalRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (focusSignal === null || focusSignalRef.current === focusSignal) {
+      return;
+    }
+    focusSignalRef.current = focusSignal;
+    const target = focus;
+    if (!target) {
+      return;
+    }
+    if (target.choiceId) {
+      setPendingJumpEntryId(`choice_request:${target.choiceId}`);
+      setActivePanel("chat");
+      return;
+    }
+    if (target.gateId) {
+      setPendingCardFocus({ type: "gate", gateId: target.gateId });
+      setActivePanel("chat");
+      return;
+    }
+    if (target.attentionKind === "final_confirm") {
+      setPendingCardFocus({ type: "final_confirm" });
+    }
+    // 其余 kind（blocked/manual_recovery 等）无独立定位面，进入页面即可见。
+  }, [focusSignal]);
+
+  // P1-c：定位消费——门卡要求 chat 页签且 gate_id 匹配当前 pendingGate；
+  // 确认区横幅为页级元素，无页签前提。元素未出现时保持挂起等待。
+  useEffect(() => {
+    if (!pendingCardFocus) {
+      return;
+    }
+    if (pendingCardFocus.type === "gate") {
+      if (store.activePlanRepair || activePanel !== "chat") {
+        return;
+      }
+      if (pendingGate?.gate_id !== pendingCardFocus.gateId) {
+        return;
+      }
+      const card = document.querySelector<HTMLElement>(
+        '[data-testid="coding-pending-gate"]',
+      );
+      if (!card) {
+        return;
+      }
+      card.scrollIntoView({ block: "center" });
+      setPendingCardFocus(null);
+      return;
+    }
+    const banner = document.querySelector<HTMLElement>(
+      '[data-testid="coding-final-confirm-waiting"]',
+    );
+    if (!banner) {
+      return;
+    }
+    banner.scrollIntoView({ block: "center" });
+    setPendingCardFocus(null);
+  }, [
+    pendingCardFocus,
+    activePanel,
+    pendingGate,
+    store.activePlanRepair,
+    store.stage,
+    store.status,
+    store.attemptScope,
+  ]);
 
   useEffect(() => {
     const activeRepair = store.activePlanRepair;
@@ -931,6 +1038,7 @@ export function CodingWorkspacePage({
           onDeleteAllCodingWorkspaces={() => void handleDeleteAllCodingWorkspaces()}
           groupDeleteBusy={groupDeleteBusy}
           deleteBusy={deleteBusy}
+          onOpenPlanOverview={openGroupPlanOverview}
         />
       ) : null}
       <CodingDashboard projectId={address.projectId} issueId={address.issueId} />
