@@ -22,6 +22,19 @@ pub enum CodingWorkspaceEngineError {
     },
     #[error("coding_provider_protocol_error: {0}")]
     ProviderProtocol(String),
+    /// P4-a（REQ-PTR-IDLE）：provider 会话零活动挂起——共享 stream 的 idle
+    /// 看门狗触发（Timeout 事件 reason_code `provider_idle_stall`，含空闲
+    /// 诊断）。首次由 retry-cycle 同 provider fresh 重试一次；再次挂起经
+    /// `open_provider_stalled_gate` 转 attempt Blocked＋stalled 门。
+    #[error(
+        "provider_idle_stall: role={role:?} phase={phase} idle_secs={idle_secs} idle_limit_secs={idle_limit_secs}"
+    )]
+    ProviderIdleStall {
+        role: CodingProviderRole,
+        phase: String,
+        idle_secs: u64,
+        idle_limit_secs: u64,
+    },
     #[error("group_review_blocked: {reason_code}; gate_id={gate_id:?}")]
     GroupReviewBlocked {
         reason_code: String,

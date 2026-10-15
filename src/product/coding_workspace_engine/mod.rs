@@ -86,6 +86,7 @@ mod plan_defect_routing;
 mod plan_repair_start;
 mod prompts;
 mod provider_failure;
+mod provider_idle;
 mod provider_retry;
 mod provider_stream;
 mod reports;
@@ -225,6 +226,8 @@ pub(crate) use plan_defect_routing::*;
 pub(crate) use prompts::*;
 #[allow(unused_imports)]
 pub(crate) use provider_failure::*;
+#[allow(unused_imports)]
+pub(crate) use provider_idle::*;
 #[allow(unused_imports)]
 pub(crate) use provider_retry::*;
 #[allow(unused_imports)]

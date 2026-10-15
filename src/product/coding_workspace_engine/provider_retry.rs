@@ -124,6 +124,16 @@ pub(crate) enum ProviderInvocationOutcome {
         message: String,
         partial_output: String,
     },
+    /// P4-a（REQ-PTR-IDLE）：共享 stream 的零活动看门狗触发（C3/C4：env
+    /// 覆写短阈值红测、范式复用 workspace_engine watchdog）。首次挂起由
+    /// `resolve_provider_retry_cycle_outcome` 同 provider fresh 重试恰一次；
+    /// 再次挂起转 attempt Blocked＋stalled 门，不占 transport 预算分类。
+    IdleStall {
+        role: CodingProviderRole,
+        phase: String,
+        idle_secs: u64,
+        idle_limit_secs: u64,
+    },
 }
 
 impl ProviderInvocationOutcome {
@@ -135,6 +145,19 @@ impl ProviderInvocationOutcome {
         match result {
             Ok(outcome) => Self::Completed(outcome),
             Err(CodingWorkspaceEngineError::Aborted) => Self::Cancelled,
+            // P4-a：idle 挂起前置——不进 transport 分类（纯 idle 最多 2 次，
+            // 不改 transport 3 次预算）。
+            Err(CodingWorkspaceEngineError::ProviderIdleStall {
+                role,
+                phase,
+                idle_secs,
+                idle_limit_secs,
+            }) => Self::IdleStall {
+                role,
+                phase,
+                idle_secs,
+                idle_limit_secs,
+            },
             Err(error) => match classify_provider_failure(&error) {
                 ProviderFailureClassification::Retryable {
                     failure,
@@ -756,6 +779,12 @@ impl CodingWorkspaceEngine {
                 self.finalize_cancelled_provider_retry_cycle(attempt, node, role_run)
                     .await?;
                 Err(CodingWorkspaceEngineError::Aborted)
+            }
+            // P4-a（REQ-PTR-IDLE）红测先行占位：idle 挂起的收口（首次同
+            // provider fresh 重试恰一次、再次 Blocked＋stalled 门）在绿灯
+            // 阶段与 stream 看门狗一并实现。
+            ProviderInvocationOutcome::IdleStall { .. } => {
+                todo!("P4-a idle stall resolution lands with the stream watchdog")
             }
             ProviderInvocationOutcome::RetryableTransport {
                 failure,
