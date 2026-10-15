@@ -2,6 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ApiClient from "../api/client";
 import { ApiRequestError, getCodingChoiceResponseStatus, postCodingChoiceResponse } from "../api/client";
+import type { ChoiceReplyStatus } from "../api/types";
 import type { ChoiceResponsePayload } from "../state/chat-entries";
 import { useChoiceRespondCommand, type ChoiceRespondCommandState } from "./useChoiceRespondCommand";
 
@@ -26,7 +27,7 @@ const TWO_QUESTION_PAYLOAD: ChoiceResponsePayload = {
   ],
 };
 
-function reply(commandId: string, state: string) {
+function reply(commandId: string, state: ChoiceReplyStatus["state"]): ChoiceReplyStatus {
   return {
     command_id: commandId,
     expected_run_id: "run-1",

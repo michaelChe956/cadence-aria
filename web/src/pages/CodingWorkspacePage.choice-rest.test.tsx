@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { CodingAttemptSnapshotResponse } from "../api/types";
 import type { ChatEntry } from "../state/chat-entries";
 import type * as ApiClient from "../api/client";
 import {
