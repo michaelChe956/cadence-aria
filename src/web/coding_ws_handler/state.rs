@@ -428,6 +428,7 @@ pub(crate) fn coding_pending_gates(
             evidence_refs: vec![recovery.failed_node_id, recovery.stale_role_run_id],
             raw_provider_output_ref: None,
             diagnostic: None,
+            triage_summary: None,
         });
     }
     Ok(pending_gates)

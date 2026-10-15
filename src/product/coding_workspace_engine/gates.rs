@@ -2,6 +2,7 @@ use super::*;
 use crate::product::coding_attempt_store::admission::{
     TARGET_SNAPSHOT_IDENTITY_DRIFTED, TARGET_SNAPSHOT_MISSING_FOR_LOGICAL,
 };
+use crate::product::coding_models::{CodingTriageDid, CodingTriageFinding, CodingTriageSummary};
 use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryRouting};
 
 mod schema_v2;
@@ -211,7 +212,7 @@ impl CodingWorkspaceEngine {
             &attempt.id,
             CodingAttemptStatus::Blocked,
         )?;
-        self.store.create_blocked_gate(
+        let gate = self.store.create_blocked_gate(
             &updated,
             CreateBlockedGateInput {
                 attempt_id: attempt.id.clone(),
@@ -229,6 +230,9 @@ impl CodingWorkspaceEngine {
                 ],
             },
         )?;
+        // P2-c（REQ-CRO-09，C1 裁定）：分诊卡大白话摘要经 store 独立入口
+        // 回写（F-7：摘要构造/落盘绝不阻塞开门，任何失败仅静默降级）。
+        self.attach_coder_triage_summary(&updated, &gate, report, parse_error);
         // r51(#1 残点,coding fresh 现场):门必须同帧可见——只落盘不发帧时,
         // 客户端(WS 泵)无门可应答,r51 现场 blocked 后 35min 零 gate 帧
         // 空转到阶段超时。与 rework 上限门/审查中断门同构:落盘后发射
@@ -277,7 +281,7 @@ impl CodingWorkspaceEngine {
             &attempt.id,
             CodingAttemptStatus::Blocked,
         )?;
-        self.store.create_blocked_gate(
+        let gate = self.store.create_blocked_gate(
             &updated,
             CreateBlockedGateInput {
                 attempt_id: attempt.id.clone(),
@@ -297,6 +301,8 @@ impl CodingWorkspaceEngine {
                 ],
             },
         )?;
+        // P2-c：与人工分诊门同构——摘要经 store 独立入口回写，绝不阻塞开门。
+        self.attach_coder_triage_summary(&updated, &gate, report, None);
         // 与 open_coding_output_human_triage_gate 同构：门必须同帧可见——
         // 落盘后立即发射 CodingGateRequired（durable-first，断连不回滚业务事实）。
         let _ = self
@@ -310,6 +316,40 @@ impl CodingWorkspaceEngine {
             .await;
         Ok(updated)
     }
+
+    /// P2-c（REQ-CRO-09）：分诊门大白话摘要的引擎侧接线——门已落盘后，从
+    /// `raw_provider_output_ref`（durable 源）读回 coder 原始输出，构造
+    /// `CodingTriageSummary` 并经 store 独立入口回写。F-7：摘要构造/落盘
+    /// 绝不阻塞开门——引用缺失、文件丢失、解析降级、回写失败都静默跳过，
+    /// 门保持原样（卡片回落 `description`）。
+    fn attach_coder_triage_summary(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        gate: &CodingGateRequired,
+        report: Option<&ExecutionPlanDefectReport>,
+        parse_error: Option<&str>,
+    ) {
+        let Some(reference) = gate.raw_provider_output_ref.as_deref() else {
+            return;
+        };
+        let Ok(Some(full_output)) = self.store.read_provider_raw_output_by_ref(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            reference,
+        ) else {
+            return;
+        };
+        let summary = build_coder_triage_summary(report, parse_error, &full_output);
+        let _ = self.store.attach_blocked_gate_triage_summary(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &gate.gate_id,
+            summary,
+        );
+    }
+
 
     pub(crate) async fn emit_permission_request(
         &self,
@@ -738,6 +778,143 @@ impl CodingWorkspaceEngine {
     }
 }
 
+/// P2-c（A-6 经验值，防 gate JSON 膨胀）：triage_summary 文本截断与条数上限。
+const TRIAGE_SUMMARY_TEXT_LIMIT: usize = 500;
+const TRIAGE_SUMMARY_MAX_FINDINGS: usize = 5;
+const TRIAGE_SUMMARY_MAX_UNVERIFIED: usize = 5;
+const TRIAGE_SUMMARY_MAX_CHANGED_FILES: usize = 20;
+
+/// P2-c（REQ-CRO-09）：分诊卡「大白话」投影——固定模板 + 结构化字段，
+/// 不引入 LLM。problem/findings/unverified 取自在手的 finding；
+/// `did` 对 `extract_plan_defect_payload` 的同一候选对象（最后一个声明
+/// `plan_defect_findings` 的顶层 JSON）宽容解析 `delivery_report`，字段
+/// 缺失或类型不符一律降级（did=None），绝不报错。
+fn build_coder_triage_summary(
+    report: Option<&ExecutionPlanDefectReport>,
+    parse_error: Option<&str>,
+    full_output: &str,
+) -> CodingTriageSummary {
+    let findings = report
+        .map(|report| &report.findings)
+        .map(|findings| {
+            findings
+                .iter()
+                .take(TRIAGE_SUMMARY_MAX_FINDINGS)
+                .map(|finding| CodingTriageFinding {
+                    reason_code: truncate_triage_text(&finding.reason_code),
+                    message: truncate_triage_text(&finding.message),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let problem = report
+        .and_then(|report| report.findings.first())
+        .map(|finding| truncate_triage_text(&finding.message))
+        .unwrap_or_else(|| {
+            if parse_error.is_some() {
+                "Coder 输出未通过契约校验，需要人工分诊"
+            } else {
+                "Coder 输出需要人工分诊"
+            }
+            .to_string()
+        });
+    let mut unverified: Vec<String> = Vec::new();
+    if let Some(report) = report {
+        for finding in &report.findings {
+            for evidence in &finding.evidence {
+                let message = truncate_triage_text(&evidence.message);
+                if !message.is_empty() && !unverified.contains(&message) {
+                    unverified.push(message);
+                }
+            }
+        }
+    }
+    unverified.truncate(TRIAGE_SUMMARY_MAX_UNVERIFIED);
+    let did = extract_triage_delivery_report(full_output)
+        .and_then(|value| serde_json::from_value::<TriageDeliveryReport>(value).ok())
+        .map(|delivery| CodingTriageDid {
+            changed_files: delivery
+                .changed_files
+                .into_iter()
+                .filter_map(|file| file.path)
+                .take(TRIAGE_SUMMARY_MAX_CHANGED_FILES)
+                .map(|path| truncate_triage_text(&path))
+                .collect(),
+            commit_sha: delivery
+                .commit
+                .and_then(|commit| commit.sha)
+                .map(|sha| truncate_triage_text(&sha)),
+            verification_exit_code: delivery.verification.and_then(|v| v.exit_code),
+            environment_note: delivery
+                .environment_notes
+                .map(|note| truncate_triage_text(&note)),
+        });
+    CodingTriageSummary {
+        problem,
+        findings,
+        did,
+        unverified,
+    }
+}
+
+/// 从 coder 原始输出提取 `delivery_report`：与 `extract_plan_defect_payload`
+/// 同一候选语义——最后一个声明 `plan_defect_findings` 的顶层平衡对象。
+fn extract_triage_delivery_report(full_output: &str) -> Option<serde_json::Value> {
+    let mut delivery_report = None;
+    for candidate in extract_json_object_candidates(full_output) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate) else {
+            continue;
+        };
+        if value
+            .as_object()
+            .is_some_and(|object| object.contains_key("plan_defect_findings"))
+        {
+            delivery_report = value.get("delivery_report").cloned();
+        }
+    }
+    delivery_report
+}
+
+/// `delivery_report` 的宽容投影结构：子字段缺失按 None/空处理，类型不符
+/// 整体降级（did=None，F-7）。
+#[derive(serde::Deserialize)]
+struct TriageDeliveryReport {
+    #[serde(default)]
+    changed_files: Vec<TriageDeliveryChangedFile>,
+    #[serde(default)]
+    commit: Option<TriageDeliveryCommit>,
+    #[serde(default)]
+    verification: Option<TriageDeliveryVerification>,
+    #[serde(default)]
+    environment_notes: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct TriageDeliveryChangedFile {
+    #[serde(default)]
+    path: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct TriageDeliveryCommit {
+    #[serde(default)]
+    sha: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct TriageDeliveryVerification {
+    #[serde(default)]
+    exit_code: Option<i64>,
+}
+
+/// 按字符截断（中文安全，不以字节边界切割）。
+fn truncate_triage_text(value: &str) -> String {
+    if value.chars().count() <= TRIAGE_SUMMARY_TEXT_LIMIT {
+        return value.to_string();
+    }
+    value.chars().take(TRIAGE_SUMMARY_TEXT_LIMIT).collect()
+}
+
 include!("gates_parts/worktree_lock.inc.rs");
 
 include!("gates_parts/blocked_gate.inc.rs");
@@ -828,4 +1005,414 @@ fn is_code_review_feedback_gate(gate: &CodingGateRequired) -> bool {
                 | Some("code_review_verification_incomplete")
                 | Some("code_review_operational_blocker")
         )
+}
+
+#[cfg(test)]
+mod triage_summary_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::CreateCodingAttemptInput;
+    use crate::product::coding_models::CodingTriageSummary;
+    use crate::product::plan_repair::{
+        PlanDefectClass, PlanDefectConfidence, PlanDefectEvidence, PlanDefectFinding,
+        PlanDefectRoute, PlanDefectSeverity,
+    };
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+    /// WI-002 同构 finding（与 P2-b `coding_operational_blocker.rs` 同构）。
+    fn wi002_isomorphic_finding() -> PlanDefectFinding {
+        PlanDefectFinding {
+            finding_id: "PDF-CODER-0001".to_string(),
+            severity: PlanDefectSeverity::Error,
+            defect_class: PlanDefectClass::OperationalBlocker,
+            reason_code: "upstream_deliverable_absent_in_runtime".to_string(),
+            message: "CT-001 上游交付物缺失：busi 成员仓（WI-001）在运行环境中完全不存在"
+                .to_string(),
+            evidence: vec![PlanDefectEvidence {
+                kind: "filesystem_observation".to_string(),
+                source_ref: "/tmp/notify-center".to_string(),
+                message: "聚合根仅含 api/.git 骨架；busi 成员仓不存在".to_string(),
+            }],
+            contract_refs: vec!["CT-001".to_string()],
+            capability_refs: Vec::new(),
+            repair_target: None,
+            recommended_route: PlanDefectRoute::OperationalGate,
+            confidence: PlanDefectConfidence::High,
+        }
+    }
+
+    fn wi002_report() -> ExecutionPlanDefectReport {
+        ExecutionPlanDefectReport {
+            source: PlanDefectSource::Coder,
+            findings: vec![wi002_isomorphic_finding()],
+        }
+    }
+
+    fn wi002_finding_json() -> serde_json::Value {
+        serde_json::json!({
+            "finding_id": "PDF-CODER-0001",
+            "severity": "error",
+            "defect_class": "operational_blocker",
+            "reason_code": "upstream_deliverable_absent_in_runtime",
+            "message": "CT-001 上游交付物缺失：busi 成员仓（WI-001）在运行环境中完全不存在",
+            "evidence": [{
+                "kind": "filesystem_observation",
+                "source_ref": "/tmp/notify-center",
+                "message": "聚合根仅含 api/.git 骨架；busi 成员仓不存在"
+            }],
+            "contract_refs": ["CT-001"],
+            "capability_refs": [],
+            "repair_target": null,
+            "recommended_route": "operational_gate",
+            "confidence": "high"
+        })
+    }
+
+    /// WI-002 同构 coder 原始输出：结论对象同时声明 `plan_defect_findings` 与
+    /// `delivery_report`（changed_files 4 项、commit.sha、verification.exit_code、
+    /// environment_notes——现场 raw 实测形状）。
+    fn wi002_raw_with_delivery_report() -> String {
+        serde_json::json!({
+            "plan_defect_findings": [wi002_finding_json()],
+            "delivery_report": {
+                "changed_files": [
+                    {"path": "api/src/routes.ts", "change": "modified", "note": "挂载 busi 代理路由"},
+                    {"path": "api/src/busi-proxy.ts", "change": "added", "note": "新增代理实现"},
+                    {"path": "api/package.json", "change": "modified", "note": "登记依赖"},
+                    {"path": "api/README.md", "change": "modified", "note": "补充说明"}
+                ],
+                "commit": {"sha": "9f31c2ab7e5d", "branch": "aria/work-items/WI-002/attempt-1"},
+                "verification": {"command": "npm test", "exit_code": 0, "output": "ok"},
+                "git_status": "clean",
+                "environment_notes": "busi 成员仓（WI-001）在运行环境中不存在，聚合根仅含 api/.git 骨架"
+            }
+        })
+        .to_string()
+    }
+
+    fn wi002_raw_without_delivery_report() -> String {
+        serde_json::json!({
+            "plan_defect_findings": [wi002_finding_json()],
+        })
+        .to_string()
+    }
+
+    fn triage_summary_fixture() -> (
+        tempfile::TempDir,
+        CodingAttemptStore,
+        CodingExecutionAttempt,
+    ) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = CodingAttemptStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Fake,
+                    reviewer: Some(ProviderName::Fake),
+                    review_rounds: 1,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+            })
+            .expect("create attempt");
+        let attempt = store
+            .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("running attempt");
+        (tmp, store, attempt)
+    }
+
+    /// 红测①（REQ-CRO-09）：WI-002 同构 raw → problem 为首条 finding.message、
+    /// did.changed_files 恰 4 项、unverified 取自 evidence.message。
+    #[test]
+    fn build_coder_triage_summary_extracts_wi002_shaped_raw_output() {
+        let report = wi002_report();
+        let summary =
+            build_coder_triage_summary(Some(&report), None, &wi002_raw_with_delivery_report());
+        let finding = &report.findings[0];
+        assert_eq!(summary.problem, finding.message);
+        assert_eq!(summary.findings.len(), 1);
+        assert_eq!(summary.findings[0].reason_code, finding.reason_code);
+        assert_eq!(summary.findings[0].message, finding.message);
+        let did = summary
+            .did
+            .as_ref()
+            .expect("delivery_report 可解析时 did 必须存在");
+        assert_eq!(
+            did.changed_files,
+            vec![
+                "api/src/routes.ts",
+                "api/src/busi-proxy.ts",
+                "api/package.json",
+                "api/README.md",
+            ]
+        );
+        assert_eq!(did.commit_sha.as_deref(), Some("9f31c2ab7e5d"));
+        assert_eq!(did.verification_exit_code, Some(0));
+        assert_eq!(
+            did.environment_note.as_deref(),
+            Some("busi 成员仓（WI-001）在运行环境中不存在，聚合根仅含 api/.git 骨架")
+        );
+        assert_eq!(
+            summary.unverified,
+            vec!["聚合根仅含 api/.git 骨架；busi 成员仓不存在"]
+        );
+    }
+
+    /// 红测②（单元面）：`delivery_report` 缺失 / 字段类型错 → did=None，
+    /// 其余段照常给出，构造绝不报错。
+    #[test]
+    fn build_coder_triage_summary_degrades_to_did_none_without_or_malformed_delivery_report() {
+        let report = wi002_report();
+        let summary =
+            build_coder_triage_summary(Some(&report), None, &wi002_raw_without_delivery_report());
+        assert!(summary.did.is_none(), "delivery_report 缺失时 did 必须为 None");
+        assert_eq!(summary.problem, report.findings[0].message);
+
+        let raw_malformed = serde_json::json!({
+            "plan_defect_findings": [wi002_finding_json()],
+            "delivery_report": {"changed_files": "api/src/routes.ts"},
+        })
+        .to_string();
+        let summary = build_coder_triage_summary(Some(&report), None, &raw_malformed);
+        assert!(
+            summary.did.is_none(),
+            "delivery_report 字段类型错时 did 必须为 None"
+        );
+    }
+
+    /// 解析失败（report=None、有 parse_error）→ problem 为固定中文说明，
+    /// findings/unverified 为空、did=None。
+    #[test]
+    fn build_coder_triage_summary_uses_fixed_problem_text_when_parse_failed() {
+        let summary = build_coder_triage_summary(
+            None,
+            Some("plan_defect_output_invalid: boom"),
+            "coder 输出中没有任何 JSON 对象",
+        );
+        assert_eq!(summary.problem, "Coder 输出未通过契约校验，需要人工分诊");
+        assert!(summary.findings.is_empty());
+        assert!(summary.did.is_none());
+        assert!(summary.unverified.is_empty());
+    }
+
+    /// 大小上限（A-6）：字符串 500 字符、findings/unverified 各 5 条、
+    /// changed_files 20 项。
+    #[test]
+    fn build_coder_triage_summary_applies_size_caps() {
+        let findings = (0..7)
+            .map(|index| PlanDefectFinding {
+                finding_id: format!("PDF-CODER-{index:04}"),
+                severity: PlanDefectSeverity::Error,
+                defect_class: PlanDefectClass::OperationalBlocker,
+                reason_code: format!("reason_code_{index}"),
+                message: format!("{index}号finding：{}", "很长的说明".repeat(120)),
+                evidence: vec![PlanDefectEvidence {
+                    kind: "filesystem_observation".to_string(),
+                    source_ref: format!("/tmp/obs-{index}"),
+                    message: format!("未验证事项 {index}"),
+                }],
+                contract_refs: Vec::new(),
+                capability_refs: Vec::new(),
+                repair_target: None,
+                recommended_route: PlanDefectRoute::OperationalGate,
+                confidence: PlanDefectConfidence::High,
+            })
+            .collect::<Vec<_>>();
+        let report = ExecutionPlanDefectReport {
+            source: PlanDefectSource::Coder,
+            findings,
+        };
+        let raw = serde_json::json!({
+            "plan_defect_findings": [wi002_finding_json()],
+            "delivery_report": {
+                "changed_files": (0..25)
+                    .map(|index| serde_json::json!({"path": format!("src/file_{index:02}.rs")}))
+                    .collect::<Vec<_>>(),
+            },
+        })
+        .to_string();
+        let summary = build_coder_triage_summary(Some(&report), None, &raw);
+        assert_eq!(summary.findings.len(), 5);
+        assert_eq!(summary.unverified.len(), 5);
+        assert!(summary.problem.chars().count() <= 500);
+        let did = summary.did.expect("did");
+        assert_eq!(did.changed_files.len(), 20);
+        assert_eq!(did.changed_files[0], "src/file_00.rs");
+    }
+
+    /// 红测②（行为面，C1 裁定）：delivery_report 缺失 → did=None 且门照常
+    /// 创建；摘要经 coding_attempt_store 独立入口落盘，不经过
+    /// CreateBlockedGateInput。
+    #[tokio::test]
+    async fn human_triage_gate_created_with_did_none_summary_when_delivery_report_missing() {
+        let (root, store, attempt) = triage_summary_fixture();
+        let reference = store
+            .save_provider_raw_output(
+                &attempt,
+                CodingExecutionStage::Coding,
+                "coder_output",
+                &wi002_raw_without_delivery_report(),
+            )
+            .expect("save raw");
+        let (tx, _rx) = mpsc::channel(64);
+        let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+        let report = wi002_report();
+        engine
+            .open_coding_output_human_triage_gate(
+                &attempt,
+                "node_coding_0001",
+                Some(&report),
+                None,
+                Some(reference),
+            )
+            .await
+            .expect("delivery_report 缺失绝不阻塞开门");
+
+        let gates = store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates");
+        assert_eq!(gates.len(), 1, "门必须照常创建且只有一张");
+        let gate = &gates[0];
+        assert_eq!(
+            gate.reason_code.as_deref(),
+            Some("coding_output_human_triage")
+        );
+        let summary = gate
+            .triage_summary
+            .as_ref()
+            .expect("摘要应经 store 独立入口落盘");
+        assert!(summary.did.is_none());
+        assert_eq!(summary.problem, report.findings[0].message);
+        assert_eq!(
+            summary.unverified,
+            vec!["聚合根仅含 api/.git 骨架；busi 成员仓不存在"]
+        );
+        drop(root);
+    }
+
+    /// operational 门同卡同摘要：WI-002 同构 raw（含 delivery_report）→
+    /// did.changed_files 4 项随门落盘。
+    #[tokio::test]
+    async fn operational_blocker_gate_carries_triage_summary_with_did() {
+        let (root, store, attempt) = triage_summary_fixture();
+        let reference = store
+            .save_provider_raw_output(
+                &attempt,
+                CodingExecutionStage::Coding,
+                "coder_output",
+                &wi002_raw_with_delivery_report(),
+            )
+            .expect("save raw");
+        let (tx, _rx) = mpsc::channel(64);
+        let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+        let report = wi002_report();
+        engine
+            .open_coding_operational_blocker_gate(
+                &attempt,
+                "node_coding_0001",
+                Some(&report),
+                Some(reference),
+            )
+            .await
+            .expect("open operational blocker gate");
+
+        let gates = store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates");
+        assert_eq!(gates.len(), 1);
+        let gate = &gates[0];
+        assert_eq!(
+            gate.reason_code.as_deref(),
+            Some("coding_operational_blocker")
+        );
+        let did = gate
+            .triage_summary
+            .as_ref()
+            .and_then(|summary| summary.did.as_ref())
+            .expect("operational 门同样携带 did 摘要");
+        assert_eq!(did.changed_files.len(), 4);
+        drop(root);
+    }
+
+    /// F-7 极端面：raw 引用指向的文件不存在 → 门照常创建、无摘要（摘要
+    /// 任何失败都不影响开门主流程）。
+    #[tokio::test]
+    async fn human_triage_gate_creation_survives_missing_raw_output() {
+        let (root, store, attempt) = triage_summary_fixture();
+        let (tx, _rx) = mpsc::channel(64);
+        let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+        engine
+            .open_coding_output_human_triage_gate(
+                &attempt,
+                "node_coding_0001",
+                None,
+                Some("plan_defect_output_invalid: boom"),
+                Some("provider-raw/coding/coder_output_0009.txt".to_string()),
+            )
+            .await
+            .expect("raw 缺失绝不阻塞开门");
+
+        let gates = store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("open gates");
+        assert_eq!(gates.len(), 1, "门必须照常创建");
+        assert!(
+            gates[0].triage_summary.is_none(),
+            "读不到 raw 时无摘要，卡片回落 description"
+        );
+        drop(root);
+    }
+
+    /// 旧 gate JSON（无 triage_summary 字段）反序列化为 None——现场 WI-002
+    /// 老门兼容（serde default）。
+    #[test]
+    fn legacy_gate_json_deserializes_with_triage_summary_none() {
+        let legacy = serde_json::json!({
+            "gate_id": "coding_blocked_gate_0001",
+            "kind": "blocked",
+            "title": "Coder 输出需要人工分诊",
+            "description": "Coder 报告的 plan defect 需要人工分诊（1 条 finding），流程已暂停",
+            "stage": "coding",
+            "role": "coder",
+            "expires_at": null,
+            "provider_snapshot": null,
+            "available_actions": [
+                {"action_id": "retry_coding", "label": "重新启动 Coder", "action_type": "retry_coding"},
+                {"action_id": "abort", "label": "终止", "action_type": "abort"}
+            ],
+            "reason_code": "coding_output_human_triage",
+            "evidence_refs": [],
+            "raw_provider_output_ref": "provider-raw/coding/coder_output_0001.txt"
+        });
+        let gate: CodingGateRequired = serde_json::from_value(legacy).expect("legacy gate json");
+        assert_eq!(gate.gate_id, "coding_blocked_gate_0001");
+        assert!(gate.triage_summary.is_none());
+
+        // 序列化对称：None 时不写字段（旧读者不受影响）。
+        let value = serde_json::to_value(&gate).expect("serialize gate");
+        assert!(value.get("triage_summary").is_none());
+
+        // 有摘要时随门 JSON 落盘并可读回。
+        let mut with_summary = gate.clone();
+        with_summary.triage_summary = Some(CodingTriageSummary {
+            problem: "CT-001 上游交付物缺失".to_string(),
+            findings: Vec::new(),
+            did: None,
+            unverified: vec!["聚合根仅含 api/.git 骨架".to_string()],
+        });
+        let value = serde_json::to_value(&with_summary).expect("serialize gate");
+        assert_eq!(
+            value["triage_summary"]["unverified"][0],
+            "聚合根仅含 api/.git 骨架"
+        );
+        let round_trip: CodingGateRequired = serde_json::from_value(value).expect("round trip");
+        assert_eq!(round_trip, with_summary);
+    }
 }

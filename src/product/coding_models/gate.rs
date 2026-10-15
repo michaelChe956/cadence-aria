@@ -152,6 +152,46 @@ pub struct CodingGateRequired {
     pub raw_provider_output_ref: Option<String>,
     #[serde(default)]
     pub diagnostic: Option<CodingGateDiagnostic>,
+    /// P2-c（REQ-CRO-09）：分诊卡「大白话」摘要投影。additive：旧 gate JSON
+    /// 反序列化为 `None`（前端缺省回落 `description`）；经
+    /// `CodingAttemptStore::attach_blocked_gate_triage_summary` 独立入口落盘
+    ///（C1 裁定：不给 `CreateBlockedGateInput` 加字段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triage_summary: Option<CodingTriageSummary>,
+}
+
+/// P2-c（REQ-CRO-09）：分诊卡三段大白话——「AI 遇到什么问题／做了什么／
+/// 没能验证什么」。固定模板 + 结构化字段（`build_coder_triage_summary`
+/// 宽容提取），不引入 LLM 翻译。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CodingTriageSummary {
+    /// AI 遇到的问题（首条 finding.message，截断）。解析失败时为固定中文说明。
+    pub problem: String,
+    /// 全部 finding 的 (reason_code, message) 摘要；最多 5 条。
+    #[serde(default)]
+    pub findings: Vec<CodingTriageFinding>,
+    /// AI 做了什么：取自 delivery_report（宽容解析，缺失/类型错为 None）。
+    #[serde(default)]
+    pub did: Option<CodingTriageDid>,
+    /// 没能验证什么：finding.evidence[*].message 去重；最多 5 条。
+    #[serde(default)]
+    pub unverified: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CodingTriageFinding {
+    pub reason_code: String,
+    pub message: String,
+}
+
+/// delivery_report 的宽容投影：`changed_files` 最多 20 项；
+/// `commit_sha`/`verification_exit_code`/`environment_note` 缺失为 None。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CodingTriageDid {
+    pub changed_files: Vec<String>,
+    pub commit_sha: Option<String>,
+    pub verification_exit_code: Option<i64>,
+    pub environment_note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

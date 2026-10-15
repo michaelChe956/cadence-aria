@@ -361,6 +361,7 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
         evidence_refs: Vec::new(),
         raw_provider_output_ref: None,
         diagnostic: None,
+        triage_summary: None,
     };
 
     assert_eq!(

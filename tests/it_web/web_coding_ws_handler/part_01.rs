@@ -335,6 +335,7 @@ fn coding_gate_required_out_message_preserves_action_contract() {
         evidence_refs: Vec::new(),
         raw_provider_output_ref: None,
         diagnostic: None,
+        triage_summary: None,
     };
     let message = CodingWsOutMessage::CodingGateRequired { gate };
 

@@ -232,6 +232,69 @@ impl super::CodingAttemptStore {
         })
     }
 
+    /// P2-c（REQ-CRO-09，C1 裁定）：`triage_summary` 的独立落盘入口。不给
+    /// `CreateBlockedGateInput` 加字段（其全仓字面量众多且多数不在本包清单），
+    /// 引擎建门后按 gate_id 回写摘要；回写失败不影响已落盘的门（调用方按
+    /// F-7 忽略错误）。
+    pub fn attach_blocked_gate_triage_summary(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+        summary: crate::product::coding_models::CodingTriageSummary,
+    ) -> Result<CodingGateRequired, ProductStoreError> {
+        validate_relative_id(gate_id)?;
+        let gates_root = self.blocked_gates_root(project_id, issue_id, attempt_id);
+        let lock_target = gates_root.join("blocked-gate-mutations");
+        with_exclusive_lock(&lock_target, || {
+            let path = gates_root.join(format!("{gate_id}.json"));
+            if !super::path_is_regular_file(&path)? {
+                return Err(ProductStoreError::NotFound {
+                    kind: "coding_blocked_gate",
+                    id: gate_id.to_string(),
+                });
+            }
+            let mut record: BlockedGateRecord = read_json(&path)?;
+            record.gate.triage_summary = Some(summary);
+            record.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &record)?;
+            Ok(record.gate)
+        })
+    }
+
+    /// P2-c：按 `save_provider_raw_output` 生成的引用读回原始输出。宽容语义：
+    /// 引用形状不符或文件不存在返回 `Ok(None)`（F-7：读不到绝不影响开门）。
+    pub fn read_provider_raw_output_by_ref(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        reference: &str,
+    ) -> Result<Option<String>, ProductStoreError> {
+        let Some(relative) = reference.strip_prefix("provider-raw/") else {
+            return Ok(None);
+        };
+        if relative.is_empty()
+            || relative
+                .split('/')
+                .any(|component| component.is_empty() || component == "." || component == "..")
+        {
+            return Ok(None);
+        }
+        let path = self
+            .provider_raw_output_root(project_id, issue_id, attempt_id)
+            .join(relative);
+        match std::fs::read_to_string(&path) {
+            Ok(content) => Ok(Some(content)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ProductStoreError::Io(format!(
+                "read {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
     pub fn create_group_review_failure_gate(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -854,6 +917,9 @@ fn create_blocked_gate_unlocked(
         evidence_refs: input.evidence_refs,
         raw_provider_output_ref: input.raw_provider_output_ref,
         diagnostic,
+        // P2-c（C1 裁定）：摘要不经建门输入——建门后由
+        // `attach_blocked_gate_triage_summary` 独立入口回写。
+        triage_summary: None,
     };
     let record = BlockedGateRecord {
         gate: gate.clone(),
@@ -1123,5 +1189,84 @@ mod tests {
             .unwrap();
         assert_eq!(resolved.status, CodingChoiceGateStatus::Resolved);
         assert!(resolved.response.unwrap().answers.is_empty());
+    }
+
+    /// P2-c（REQ-CRO-09，C1 裁定）：triage_summary 独立落盘入口——不经过
+    /// CreateBlockedGateInput，建门后按 gate_id 回写；durable 读回不丢；
+    /// 未知 gate_id 报 NotFound。
+    #[test]
+    fn attach_blocked_gate_triage_summary_writes_on_open_gate() {
+        let (_tmp, store, attempt) = fixture_attempt();
+        let gate = store
+            .create_blocked_gate(
+                &attempt,
+                CreateBlockedGateInput {
+                    attempt_id: attempt.id.clone(),
+                    stage: CodingExecutionStage::Coding,
+                    node_id: Some("node_coding_0001".to_string()),
+                    role: Some(CodingProviderRole::Coder),
+                    title: "Coder 输出需要人工分诊".to_string(),
+                    description: "Coder 输出需要人工分诊，流程已暂停".to_string(),
+                    reason_code: Some("coding_output_human_triage".to_string()),
+                    evidence_refs: Vec::new(),
+                    raw_provider_output_ref: Some(
+                        "provider-raw/coding/coder_output_0001.txt".to_string(),
+                    ),
+                    available_actions: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert!(gate.triage_summary.is_none(), "新建门默认无摘要");
+
+        let summary = crate::product::coding_models::CodingTriageSummary {
+            problem: "CT-001 上游交付物缺失：busi 成员仓（WI-001）在运行环境中完全不存在"
+                .to_string(),
+            findings: vec![crate::product::coding_models::CodingTriageFinding {
+                reason_code: "upstream_deliverable_absent_in_runtime".to_string(),
+                message: "busi 成员仓不存在".to_string(),
+            }],
+            did: None,
+            unverified: vec!["聚合根仅含 api/.git 骨架；busi 成员仓不存在".to_string()],
+        };
+        let updated = store
+            .attach_blocked_gate_triage_summary(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &gate.gate_id,
+                summary,
+            )
+            .unwrap();
+        assert!(
+            updated.triage_summary.is_some(),
+            "回写后必须能读到摘要"
+        );
+        assert_eq!(
+            updated
+                .triage_summary
+                .as_ref()
+                .map(|summary| summary.did.is_none()),
+            Some(true)
+        );
+
+        // durable：open 列表读回不丢摘要。
+        let listed = store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].triage_summary.is_some());
+
+        // 未知 gate_id：NotFound（调用方按 F-7 忽略，不影响门本身）。
+        let missing = store.attach_blocked_gate_triage_summary(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "coding_blocked_gate_9999",
+            crate::product::coding_models::CodingTriageSummary::default(),
+        );
+        assert!(matches!(
+            missing,
+            Err(ProductStoreError::NotFound { .. })
+        ));
     }
 }
