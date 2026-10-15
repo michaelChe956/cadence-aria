@@ -5,13 +5,46 @@
 //! 未命中才在同 plan 的其他 attempt 中找 owner，并对 owner 做与同桶完全相同的绑定
 //! 校验。解析全程 fail-closed：找不到合格 owner 一律 `WorkItemHandoffMissing`，消息
 //! 带上各 owner attempt 与 unit 的实际状态，便于定位。
+//!
+//! P3-a（REQ-COD-07）：同一权威链再供 `resolved_upstream_deliveries_for_attempt`
+//!——把跨桶上游交付解析成运行期 DTO（owner worktree/SHA/契约/能力），供
+//! coder 实际 prompt 组装尾段注入；不等 owner attempt 人工确认（unit
+//! Completed＋handoff 已发布即事实齐备），也不进任何 renderer/投影冻结面。
 
 use super::*;
 use crate::product::coding_models::{
-    CodingExecutionUnit, CodingExecutionUnitStatus, CodingUnitRunStatus,
+    CodingAttemptScope, CodingExecutionUnit, CodingExecutionUnitStatus, CodingUnitRunStatus,
 };
 use crate::product::models::WorkItemPlanLineage;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
+
+
+/// P3-a（REQ-COD-07）：跨仓上游交付的运行期解析结果——注入下游 coder
+/// 实际 prompt 的权威事实。全部字段取自权威 resolver 链（owner attempt 的
+/// worktree 与 handoff revision），是纯运行期 DTO：不序列化进 immutable
+/// handoff、envelope、projection，也不参与 renderer/执行上下文哈希。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedUpstreamDelivery {
+    /// 下游依赖的上游 logical work item id。
+    pub(crate) logical_work_item_id: String,
+    /// owner 侧 work item revision id（绑定校验已确认与 plan revision 一致）。
+    pub(crate) owner_work_item_revision_id: String,
+    /// 承载上游 unit 的 owner attempt id。
+    pub(crate) owner_attempt_id: String,
+    /// owner 侧产出 handoff 的 unit run id。
+    pub(crate) owner_unit_run_id: String,
+    /// 已发布的 handoff revision id。
+    pub(crate) handoff_revision_id: String,
+    /// handoff commit SHA。
+    pub(crate) commit_sha: String,
+    /// owner attempt 的 worktree 绝对路径（上游交付物只读位置；owner 未
+    /// 携带 worktree 时为 None，注入段按上游不可读处理）。
+    pub(crate) owner_worktree_path: Option<PathBuf>,
+    /// 契约清单（handoff provided_contracts）。
+    pub(crate) provided_contracts: Vec<String>,
+    /// 能力清单（handoff provided_capabilities：契约 → 能力）。
+    pub(crate) provided_capabilities: BTreeMap<String, Vec<String>>,
+}
 
 impl CodingWorkspaceEngine {
     /// 解析 `dependency_id` 的权威 handoff id：本桶优先，未命中再跨 attempt。
@@ -164,6 +197,69 @@ impl CodingWorkspaceEngine {
                     "{dependency_id}: {detail}"
                 ))
             })
+    }
+
+    /// P3-a（REQ-COD-07）：解析 attempt 当前活跃 unit 的全部跨仓上游交付。
+    ///
+    /// - 非组 attempt、无冻结 target 快照、无活跃 unit 或活跃 unit 无依赖
+    ///   → 空（单仓/无依赖 prompt 不注入段）；
+    /// - 依赖由本桶承载 → 不在注入面（同仓上游就在本 worktree）；
+    /// - 跨桶依赖复用权威 resolver 的 owner 选择（`cross_attempt_dependency`）
+    ///   与绑定校验（`validate_dependency_handoff`），再读 handoff revision 的
+    ///   契约与能力清单——与 `authoritative_resolved_handoff_revision_ids`
+    ///   同一结果取值，不另立解析链。owner attempt 状态不参与判定：unit
+    ///   Completed＋handoff 已发布即事实齐备，不等人工确认（spec
+    ///   REQ-COD-07 Scenario 1）。全程 fail-closed。
+    pub(crate) fn resolved_upstream_deliveries_for_attempt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<Vec<ResolvedUpstreamDelivery>, CodingWorkspaceEngineError> {
+        if attempt.scope != CodingAttemptScope::WorkItemGroup
+            || attempt.target_snapshot.is_none()
+        {
+            return Ok(Vec::new());
+        }
+        let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let units =
+            self.store
+                .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let Some(active) = units.iter().find(|unit| unit.status.is_active()) else {
+            return Ok(Vec::new());
+        };
+        if active.dependency_logical_work_item_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let revision_store = WorkItemRevisionStore::new(self.store.paths());
+        let lineage = revision_store
+            .get_plan_lineage(&attempt.project_id, &attempt.issue_id, plan_id)?;
+        let mut deliveries = Vec::new();
+        for dependency_id in &active.dependency_logical_work_item_ids {
+            if units
+                .iter()
+                .any(|unit| unit.logical_work_item_id == *dependency_id)
+            {
+                continue;
+            }
+            let (owner, dependency) =
+                self.cross_attempt_dependency(attempt, dependency_id, &lineage)?;
+            let handoff_id = self.validate_dependency_handoff(&owner, &dependency, &lineage)?;
+            let handoff =
+                revision_store.get_handoff_revision(&lineage, dependency_id, &handoff_id)?;
+            deliveries.push(ResolvedUpstreamDelivery {
+                logical_work_item_id: dependency_id.clone(),
+                owner_work_item_revision_id: dependency.work_item_revision_id.clone(),
+                owner_attempt_id: owner.id.clone(),
+                owner_unit_run_id: handoff.coding_unit_run_id.clone(),
+                handoff_revision_id: handoff.id.clone(),
+                commit_sha: handoff.commit_sha.clone(),
+                owner_worktree_path: owner.worktree_path.clone(),
+                provided_contracts: handoff.provided_contracts.clone(),
+                provided_capabilities: handoff.provided_capabilities.clone(),
+            });
+        }
+        Ok(deliveries)
     }
 }
 

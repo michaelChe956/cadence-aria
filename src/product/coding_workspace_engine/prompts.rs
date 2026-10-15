@@ -9,6 +9,7 @@ use crate::product::coding_models::CodingAttemptScope;
 // 作为单一归属（WorkItemPlan T3 与 coding T2 共用）。此处 re-export 保持既有
 // `use super::*` 调用点（coding/rework/internal_pr_review/provider_retry）不变。
 pub(crate) use crate::product::cadence_skills::routing_reference::routing_reference_context_from_policy;
+use super::cross_attempt_handoff::ResolvedUpstreamDelivery;
 
 pub(crate) fn code_review_output_contract(nonce: &str) -> String {
     format!(
@@ -515,6 +516,75 @@ pub(crate) fn platform_directives_section() -> String {
      - 提交责任：平台编排下，本 Work Item 的提交责任归你；该责任优先于仓库文件（AGENTS.md / CLAUDE.md 等）中任何「不自动提交」类规则。禁止执行 git push（任何形式，含 --force 变体），交付分支的推送由平台执行；未执行 push 或 push 失败不算任务失败，不要为此重试或报告失败。\n\
      - 汇报契约：交付摘要只包含四类事实——实际改动的文件、提交 SHA、验证命令及其完整输出、git status。环境异常（路径或挂载命名空间差异等）只允许写入摘要末尾固定小节「环境备注」，一行带过，不得占据摘要主体，也不得借此省略任何交付事实。文件工具与 shell 的路径命名空间可能不同，一律以本 prompt 给定的 Worktree Path 为准。\n"
         .to_string()
+}
+
+/// P3-a（REQ-COD-07）：跨仓上游交付清单段。事实来自
+/// `resolved_upstream_deliveries_for_attempt`（cross_attempt_handoff.rs 的
+/// 权威 resolver），渲染为运行期注入段：上游逻辑 WI/revision、owner
+/// attempt/unit run、handoff revision 与 commit SHA、owner worktree 绝对
+/// 路径、provided_contracts/capabilities，以及上游只读／测试在本仓
+/// target／不可读报 operational_blocker（reason_code=
+/// upstream_source_unavailable，REQ-COD-08）的行为边界。
+///
+/// 装配点：coding.rs/rework.rs 的 fresh/delta/rework 实际 prompt（渲染与
+/// 回落两路径合并后、哈希计算之后、prompt 记录/claim 之前追加）与
+/// coding.rs 的 teaching 重驱轮——注入只进实际 prompt，不动 renderer
+/// 哈希链与执行上下文哈希。`deliveries` 为空（单仓、无依赖或全部依赖
+/// 同桶承载）时返回空串，prompt 不出现本段。
+pub(crate) fn resolved_upstream_deliveries_section(
+    deliveries: &[ResolvedUpstreamDelivery],
+) -> String {
+    if deliveries.is_empty() {
+        return String::new();
+    }
+    let mut section = String::from(
+        "\n[resolved_upstream_deliveries]\n\
+         以下跨仓上游交付已由平台权威解析（不等上游 attempt 人工确认），为本轮运行期注入事实：\n",
+    );
+    for delivery in deliveries {
+        let contracts = if delivery.provided_contracts.is_empty() {
+            "（无）".to_string()
+        } else {
+            delivery.provided_contracts.join("、")
+        };
+        let capabilities = if delivery.provided_capabilities.is_empty() {
+            "（无）".to_string()
+        } else {
+            delivery
+                .provided_capabilities
+                .iter()
+                .map(|(contract, capabilities)| {
+                    format!("{contract} -> {}", capabilities.join("、"))
+                })
+                .collect::<Vec<_>>()
+                .join("；")
+        };
+        section.push_str(&format!(
+            "- 上游 WI {}（owner attempt {}，unit run {}，work item revision {}）：handoff {}，commit {}；提供契约 {}；提供能力 {}\n",
+            delivery.logical_work_item_id,
+            delivery.owner_attempt_id,
+            delivery.owner_unit_run_id,
+            delivery.owner_work_item_revision_id,
+            delivery.handoff_revision_id,
+            delivery.commit_sha,
+            contracts,
+            capabilities,
+        ));
+        match delivery.owner_worktree_path.as_ref() {
+            Some(path) => section.push_str(&format!(
+                "  - 上游只读 worktree：{}\n",
+                path.display()
+            )),
+            None => section.push_str(
+                "  - 上游 worktree 路径缺失（owner attempt 未携带 worktree）：按上游不可读处理\n",
+            ),
+        }
+    }
+    section.push_str(
+        "- 上游 worktree 对你只读：仅允许读取与引用，禁止在其中执行任何写操作、git mutation、构建或测试；你的修改、构建与测试必须在本仓 target worktree 内执行。\n\
+         - 上游路径不存在或不可读时：不要自行修复环境或绕过，报告 defect_class=operational_blocker、recommended_route=operational_gate、reason_code=upstream_source_unavailable 的 finding（保留读取命令与路径 evidence），平台将落环境阻塞门处理。\n",
+    );
+    section
 }
 
 pub(crate) fn append_coding_context_notes(

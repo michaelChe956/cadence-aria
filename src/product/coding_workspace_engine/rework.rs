@@ -223,6 +223,13 @@ impl CodingWorkspaceEngine {
         // 合并后的最终 prompt 统一追加平台指令段（提交责任声明+汇报契约），
         // 哈希计算之后追加，所有 attempt 无条件注入。
         full_prompt.push_str(&platform_directives_section());
+        // P3-a（REQ-COD-07）：跨仓上游交付注入——同 coding.rs：权威 resolver
+        // 结果以运行期 DTO 组段，追加在 render→bind 哈希计算之后、下方
+        // claim 记录之前；fresh/delta 两臂都携带，单仓/无跨仓依赖时空段
+        // 零变化。
+        let upstream_deliveries = self.resolved_upstream_deliveries_for_attempt(&updated)?;
+        let upstream_section = resolved_upstream_deliveries_section(&upstream_deliveries);
+        full_prompt.push_str(&upstream_section);
         let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
         } else {
@@ -237,6 +244,8 @@ impl CodingWorkspaceEngine {
                 }
                 // S6:delta/rework 变体同样携带平台指令段（当前轮直接可见）。
                 delta_prompt.push_str(&platform_directives_section());
+                // P3-a：delta/rework 变体同样携带上游交付段（当前轮直接可见）。
+                delta_prompt.push_str(&upstream_section);
                 delta_prompt
             }
         };

@@ -217,6 +217,14 @@ impl CodingWorkspaceEngine {
         // 提交」类规则，汇报契约钉住交付摘要事实面。追加发生在 render→bind
         // 哈希计算之后，执行上下文哈希不受影响；所有 attempt 无条件注入。
         full_prompt.push_str(&platform_directives_section());
+        // P3-a（REQ-COD-07）：跨仓上游交付注入——权威 resolver 结果以运行期
+        // DTO 组段，追加在 render→bind 哈希计算之后（renderer/执行上下文哈希
+        // 不受影响）、下方 claim 记录之前，fresh/delta/rework/teaching/retry
+        // 全部实际 prompt 变体经同一 section 携带；单仓/无跨仓依赖时空段
+        // 零变化。
+        let upstream_deliveries = self.resolved_upstream_deliveries_for_attempt(&attempt)?;
+        let upstream_section = resolved_upstream_deliveries_section(&upstream_deliveries);
+        full_prompt.push_str(&upstream_section);
         let prompt_mode = if rendered_context.is_some() || resume_provider_session_id.is_none() {
             CodingPromptMode::FullConversation
         } else {
@@ -241,6 +249,9 @@ impl CodingWorkspaceEngine {
                 // S6:delta-only resume 轮同样携带平台指令段（同 r54 禁线
                 // 先例——当前轮必须直接可见）。
                 delta.push_str(&platform_directives_section());
+                // P3-a：delta-only resume 轮同样携带上游交付段（注入族
+                // 先例——当前轮必须直接可见）。
+                delta.push_str(&upstream_section);
                 delta
             }
         };
@@ -308,6 +319,7 @@ impl CodingWorkspaceEngine {
                     &role_run,
                     parse_error,
                     &full_prompt,
+                    &upstream_section,
                     command_rx,
                 )
                 .await?
@@ -473,6 +485,7 @@ impl CodingWorkspaceEngine {
         previous_role_run: &CodingRoleRun,
         parse_error: &CodingWorkspaceEngineError,
         full_prompt: &str,
+        upstream_section: &str,
         command_rx: &mut mpsc::Receiver<CodingRunnerCommand>,
     ) -> Result<Option<ProviderRetryCycleSuccess>, CodingWorkspaceEngineError> {
         let error_summary = truncate_prompt_section(&parse_error.to_string(), 2_000);
@@ -528,6 +541,10 @@ impl CodingWorkspaceEngine {
         let teaching_prompt =
             build_coding_output_teaching_reredrive_prompt(&parse_error.to_string());
         let fresh_prompt = format!("{full_prompt}\n\n{teaching_prompt}");
+        // P3-a（REQ-COD-07）：teaching 变体同样携带上游交付段——fresh 面经
+        // full_prompt 已含（不重复拼），delta 面（initial_prompt）补注一次。
+        let mut teaching_delta_prompt = teaching_prompt;
+        teaching_delta_prompt.push_str(upstream_section);
         let role_run = self.store.create_role_run(
             &refreshed,
             CodingExecutionStage::Coding,
@@ -543,7 +560,7 @@ impl CodingWorkspaceEngine {
                 provider,
                 provider_name: coder_provider,
                 worktree_path,
-                initial_prompt: teaching_prompt,
+                initial_prompt: teaching_delta_prompt,
                 fresh_prompt,
                 initial_prompt_mode: if resume_provider_session_id.is_some() {
                     CodingPromptMode::DeltaOnly
