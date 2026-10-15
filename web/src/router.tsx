@@ -23,6 +23,9 @@ import { LegacyCodingWorkspaceRedirect } from "./pages/LegacyCodingWorkspaceRedi
 
 function RootRouteComponent() {
   const navigate = useNavigate();
+  // P4-e（清单外机械补丁，IRC 已披露）：coding_action「去处理」/系统通知
+  // onclick 的 A1 统一导航经 prop 注入（Shell 不 import router，避免循环加载）。
+  const openAttentionTarget = useCodingAttentionTargetOpener();
   return (
     <CockpitShell
       onGoToInbox={(sessionId) =>
@@ -31,6 +34,7 @@ function RootRouteComponent() {
           params: { sessionId },
         })
       }
+      onOpenAttentionTarget={openAttentionTarget}
     >
       <Outlet />
     </CockpitShell>
