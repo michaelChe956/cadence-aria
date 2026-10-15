@@ -71,6 +71,9 @@ const KIND_GLYPH = {
   // 先补中性机械条目（glyph 复用 RotateCcw，class 沿用既有卡片风格）；
   // 后续真正渲染恢复卡时复用或改。
   lc_resume_recovery: RotateCcw,
+  // P4-d（REQ-UI37-19）：durable 待处理事项（coding_attention 来源）——
+  // 最机械条目保持编译；P4-e 落「去处理」卡时复用或改。
+  coding_action: ListChecks,
 } as const;
 
 // F-50 视觉 v2 §3：门禁条目与门卡同一视觉常量（中性底+琥珀左线）；stopped 维持
@@ -85,6 +88,7 @@ const KIND_CLASS = {
   lc_bootstrap: "rounded-lg border border-amber-200 bg-amber-50 px-3 py-2",
   lc_resume_recovery:
     "rounded-lg border border-amber-200 bg-amber-50 px-3 py-2",
+  coding_action: "rounded-lg border border-amber-200 bg-amber-50 px-3 py-2",
 } as const;
 
 export function CockpitInbox({
