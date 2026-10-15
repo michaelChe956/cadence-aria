@@ -8,6 +8,9 @@ mod schema_v2;
 
 pub(crate) const CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE: &str = "coding_output_human_triage";
 
+/// P2-b（REQ-COD-08、REQ-CRO-09）：coder 路径运行环境阻塞门 reason_code。
+pub(crate) const CODING_OPERATIONAL_BLOCKER_REASON_CODE: &str = "coding_operational_blocker";
+
 /// C2 Task 8（REQ-CVT-03/04，#19）：转入验证处理请求（REST／页面同一
 /// 应用服务，路由 Task 12 统一接线）。plan_revision／scope／expiry 由
 /// 应用服务按 attempt 权威绑定派生。
@@ -59,6 +62,11 @@ pub(crate) fn coding_gate_action_for_id(action_id: &str) -> Option<CodingGateAct
             action_id: "retry_coding".to_string(),
             label: "重新启动 Coder".to_string(),
             action_type: CodingGateActionType::RetryCoding,
+        }),
+        "retry_coding_with_context" => Some(CodingGateAction {
+            action_id: "retry_coding_with_context".to_string(),
+            label: "我来说明情况，让 AI 继续".to_string(),
+            action_type: CodingGateActionType::RetryCodingWithContext,
         }),
         "retry_review" => Some(CodingGateAction {
             action_id: "retry_review".to_string(),
@@ -233,6 +241,72 @@ impl CodingWorkspaceEngine {
                 .into_iter()
                 .find(|gate| gate.reason_code.as_deref() == Some(CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE))
                 .expect("triage gate just created") })
+            .await;
+        Ok(updated)
+    }
+
+    /// P2-b（REQ-COD-08、REQ-CRO-09）：coder 路径 `OpenOperationalGate` 决策的
+    /// 落门分支——运行环境类阻塞（defect_class=operational_blocker ∧
+    /// recommended_route=operational_gate）落「运行环境阻塞」门。与
+    /// `open_coding_output_human_triage_gate` 同构（Blocked／Coding／Coder、
+    /// create_blocked_gate、落盘后同帧发 CodingGateRequired），差异只在
+    /// reason_code／标题／动作多一个「我来说明情况，让 AI 继续」——供统计与
+    /// 后续自动化接管区分「环境问题」与「输出格式问题」。
+    pub(crate) async fn open_coding_operational_blocker_gate(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        report: Option<&ExecutionPlanDefectReport>,
+        raw_provider_output_ref: Option<String>,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let description = match report {
+            Some(report) => format!(
+                "Coder 报告运行环境阻塞（{} 条 finding），流程已暂停: {}",
+                report.findings.len(),
+                report
+                    .findings
+                    .first()
+                    .map(|finding| finding.message.clone())
+                    .unwrap_or_default()
+            ),
+            None => "Coder 报告运行环境阻塞，流程已暂停".to_string(),
+        };
+        let updated = self.store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )?;
+        self.store.create_blocked_gate(
+            &updated,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::Coding,
+                node_id: Some(node_id.to_string()),
+                role: Some(CodingProviderRole::Coder),
+                title: "运行环境阻塞".to_string(),
+                description,
+                reason_code: Some(CODING_OPERATIONAL_BLOCKER_REASON_CODE.to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref,
+                available_actions: vec![
+                    coding_gate_action_for_id("retry_coding").expect("retry coding action"),
+                    coding_gate_action_for_id("retry_coding_with_context")
+                        .expect("retry coding with context action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            },
+        )?;
+        // 与 open_coding_output_human_triage_gate 同构：门必须同帧可见——
+        // 落盘后立即发射 CodingGateRequired（durable-first，断连不回滚业务事实）。
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingGateRequired { gate: self
+                .store
+                .list_open_blocked_gates(&updated.project_id, &updated.issue_id, &updated.id)?
+                .into_iter()
+                .find(|gate| gate.reason_code.as_deref() == Some(CODING_OPERATIONAL_BLOCKER_REASON_CODE))
+                .expect("operational blocker gate just created") })
             .await;
         Ok(updated)
     }

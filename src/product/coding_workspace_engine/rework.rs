@@ -344,28 +344,40 @@ impl CodingWorkspaceEngine {
         })
         .await;
 
-        let attempt = if plan_defect_decision == Some(CodeReviewFlowDecision::StopForHumanTriage) {
-            self.open_coding_output_human_triage_gate(
-                &updated,
-                &node.id,
-                plan_defect_report.as_ref(),
-                plan_defect_error.as_deref(),
-                Some(raw_provider_output_ref.clone()),
-            )
-            .await?
-        } else if plan_defect_decision
-            .is_some_and(|decision| decision != CodeReviewFlowDecision::RunCoderFix)
-        {
-            updated
-        } else {
-            self.store
-                .update_attempt_stage(
-                    &updated.project_id,
-                    &updated.issue_id,
-                    &updated.id,
-                    CodingExecutionStage::CodeReview,
+        let attempt = match plan_defect_decision {
+            Some(CodeReviewFlowDecision::StopForHumanTriage) => {
+                self.open_coding_output_human_triage_gate(
+                    &updated,
+                    &node.id,
+                    plan_defect_report.as_ref(),
+                    plan_defect_error.as_deref(),
+                    Some(raw_provider_output_ref.clone()),
                 )
-                .map_err(CodingWorkspaceEngineError::from)?
+                .await?
+            }
+            // P2-b（A-9）：OpenOperationalGate 必须先于「非 RunCoderFix 决策原样
+            // 返回」的分支被匹配——否则被吞入静默路径，attempt 停在
+            // Running/Coding 无门无入口。
+            Some(CodeReviewFlowDecision::OpenOperationalGate) => {
+                self.open_coding_operational_blocker_gate(
+                    &updated,
+                    &node.id,
+                    plan_defect_report.as_ref(),
+                    Some(raw_provider_output_ref.clone()),
+                )
+                .await?
+            }
+            Some(decision) if decision != CodeReviewFlowDecision::RunCoderFix => updated,
+            _ => {
+                self.store
+                    .update_attempt_stage(
+                        &updated.project_id,
+                        &updated.issue_id,
+                        &updated.id,
+                        CodingExecutionStage::CodeReview,
+                    )
+                    .map_err(CodingWorkspaceEngineError::from)?
+            }
         };
         Ok(CoderExecutionOutcome {
             attempt,

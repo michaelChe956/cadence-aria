@@ -321,6 +321,7 @@ pub(crate) fn should_resume_runner_after_gate_response(
     matches!(
         action_id,
         "retry_coding"
+            | "retry_coding_with_context"
             | "send_to_coder"
             | "retry_review"
             | "retry_internal_review"

@@ -520,6 +520,8 @@ mod campaign_stage3_dependency;
 mod cross_attempt_handoff;
 mod code_review_triage;
 mod coder_resume_recovery;
+#[path = "tests/coding_operational_blocker.rs"]
+mod coding_operational_blocker;
 mod coding_output_teaching_reredrive;
 mod gate_coder_feedback;
 mod gate_rework;

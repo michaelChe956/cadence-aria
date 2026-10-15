@@ -374,17 +374,30 @@ impl CodingWorkspaceEngine {
             plan_defect_route,
         })
         .await;
-        let attempt = if plan_defect_decision == Some(CodeReviewFlowDecision::StopForHumanTriage) {
-            self.open_coding_output_human_triage_gate(
-                &attempt,
-                &node.id,
-                plan_defect_report.as_ref(),
-                plan_defect_error.as_deref(),
-                Some(raw_provider_output_ref.clone()),
-            )
-            .await?
-        } else {
-            attempt
+        let attempt = match plan_defect_decision {
+            Some(CodeReviewFlowDecision::StopForHumanTriage) => {
+                self.open_coding_output_human_triage_gate(
+                    &attempt,
+                    &node.id,
+                    plan_defect_report.as_ref(),
+                    plan_defect_error.as_deref(),
+                    Some(raw_provider_output_ref.clone()),
+                )
+                .await?
+            }
+            // P2-b（REQ-COD-08）：运行环境类阻塞落 coding_operational_blocker 门
+            //——此前该决策在 coder 路径无落门分支，attempt 静默停在
+            // Running/Coding 无门无入口。
+            Some(CodeReviewFlowDecision::OpenOperationalGate) => {
+                self.open_coding_operational_blocker_gate(
+                    &attempt,
+                    &node.id,
+                    plan_defect_report.as_ref(),
+                    Some(raw_provider_output_ref.clone()),
+                )
+                .await?
+            }
+            _ => attempt,
         };
         Ok(CoderExecutionOutcome {
             attempt,

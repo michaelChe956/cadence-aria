@@ -117,6 +117,7 @@ pub enum CodingGateActionType {
     ProvideContext,
     ManualContinue,
     RetryCoding,
+    RetryCodingWithContext,
     RetryReview,
     RetryInternalReview,
     RetryGroupReviewShard,

@@ -179,6 +179,12 @@ fn manual_continue_resumes_runner_from_original_stage() {
         "retry_coding",
         &attempt
     ));
+    // P2-b（REQ-CRO-10）：retry_coding_with_context 与 retry_coding 同属续跑白名单——
+    // 说明情况（写 context note）后等同 retry_coding，runner 必须续起。
+    assert!(should_resume_runner_after_gate_response(
+        "retry_coding_with_context",
+        &attempt
+    ));
     // 非续跑动作照旧不续跑。
     assert!(!should_resume_runner_after_gate_response(
         "retry_test_plan",

@@ -1,3 +1,8 @@
+/// P2-b（REQ-CRO-10）：gate 动作 `retry_coding_with_context` 的 extra_context
+/// 字符上限——与前端输入框同一 2000 字上限；后端双重校验，防绕过前端直写
+/// 超长 context note。
+const CODING_GATE_EXTRA_CONTEXT_CHAR_LIMIT: usize = 2000;
+
 impl CodingWorkspaceEngine {
     pub async fn handle_blocked_gate_response(
         &self,
@@ -47,7 +52,28 @@ impl CodingWorkspaceEngine {
             CodingGateActionType::Abort => {
                 self.handle_abort(project_id, issue_id, attempt_id).await?
             }
-            CodingGateActionType::RetryCoding => {
+            CodingGateActionType::RetryCoding | CodingGateActionType::RetryCodingWithContext => {
+                // P2-b（REQ-CRO-10）：retry_coding_with_context 先校验
+                // extra_context（去空白后非空且 ≤2000），再写 context note，然后
+                // 走既有 retry 流程。先写 note 后清会话/回 Running：note 写盘
+                // 失败则整个动作失败，gate 保持 Open，attempt 仍 Blocked 可重试。
+                if action.action_type == CodingGateActionType::RetryCodingWithContext {
+                    let content = extra_context
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|content| !content.is_empty())
+                        .ok_or_else(|| {
+                            CodingWorkspaceEngineError::ProviderStream(
+                                "coding_gate_extra_context_required".to_string(),
+                            )
+                        })?;
+                    if content.chars().count() > CODING_GATE_EXTRA_CONTEXT_CHAR_LIMIT {
+                        return Err(CodingWorkspaceEngineError::ProviderStream(
+                            "coding_gate_extra_context_too_long".to_string(),
+                        ));
+                    }
+                    self.store.create_context_note(&current, content.to_string())?;
+                }
                 let coder_provider = self
                     .store
                     .get_role_provider_config_snapshot(
