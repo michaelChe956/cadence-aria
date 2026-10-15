@@ -385,7 +385,6 @@ function attentionItem(
   overrides: Partial<CodingAttentionItemDto> & { key: string },
 ): CodingAttentionItemDto {
   return {
-    key: overrides.key,
     kind: "triage",
     project_id: "project_0001",
     issue_id: "issue_0001",

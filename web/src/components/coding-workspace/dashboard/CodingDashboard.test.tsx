@@ -150,7 +150,6 @@ function planAttentionItem(
   overrides: Partial<CodingAttentionItemDto> & { key: string },
 ): CodingAttentionItemDto {
   return {
-    key: overrides.key,
     kind: "choice",
     project_id: "project_0001",
     issue_id: "issue_0001",
