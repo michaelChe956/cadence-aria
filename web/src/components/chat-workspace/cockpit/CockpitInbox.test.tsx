@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CockpitInboxItem } from "../../../state/workspace-cockpit-projection";
@@ -1219,5 +1219,153 @@ describe("CockpitInbox trust guidance card simplification", () => {
     expect(screen.getByTestId("cockpit-trust-missing-action")).toBeVisible();
     expect(screen.queryByTestId("cockpit-trust-command-window")).toBeNull();
     expect(screen.getByTestId("cockpit-trust-register-button")).toBeVisible();
+  });
+});
+
+// ── P4-e（REQ-UI37-19）：coding_action 卡「去处理」下钻 ──
+// coding 卡与页面内卡同源（codingAttentionItem 事实投影驱动），收件箱只
+// 导航，不在卡上重复渲染表单/确认/终止动作（通知只导航同此口径）。
+// 导航经注入的 onOpenAttentionTarget（生产由 router 挂载点提供统一
+// opener）；测试以 mock 断言统一导航入参（契约 A1 target/focus）。
+import { codingAttentionItem } from "../../../state/workspace-cockpit-projection";
+import type { CodingAttentionItemDto } from "../../../api/types/lifecycle";
+import type { CodingAttentionLocationItem } from "../../../router";
+
+function attentionDto(overrides: Partial<CodingAttentionItemDto> = {}): CodingAttentionItemDto {
+  return {
+    key: "gate:attempt_a:gate_7",
+    kind: "stalled",
+    project_id: "project_0002",
+    issue_id: "issue_0002",
+    plan_id: null,
+    attempt_id: "coding_attempt_0001",
+    logical_work_item_id: null,
+    repository_name: "repo-b",
+    reason_code: "coder_provider_stalled",
+    title: "AI 挂起了",
+    summary: "Coder 长时间没有输出",
+    occurred_at: "2026-10-16T00:00:00Z",
+    target: { type: "coding_attempt", attempt_id: "coding_attempt_0001" },
+    focus: { gate_id: "gate_7" },
+    ...overrides,
+  };
+}
+
+describe("CockpitInbox coding_action 卡「去处理」（P4-e/REQ-UI37-19）", () => {
+  it("coding_action 卡渲染标题/摘要并经「去处理」以统一 target/focus 导航（gateId）", async () => {
+    const item = codingAttentionItem(attentionDto());
+    const onOpenAttentionTarget = vi.fn(() => true);
+    render(
+      <CockpitInbox items={[item]} onOpenAttentionTarget={onOpenAttentionTarget} />,
+    );
+
+    const row = screen.getByTestId("cockpit-inbox-item-coding_action");
+    expect(row).toHaveTextContent("AI 挂起了");
+    expect(row).toHaveTextContent("Coder 长时间没有输出 · repo-b");
+
+    await userEvent.click(within(row).getByRole("button", { name: "去处理" }));
+    expect(onOpenAttentionTarget).toHaveBeenCalledWith({
+      kind: "stalled",
+      project_id: "project_0002",
+      issue_id: "issue_0002",
+      plan_id: undefined,
+      attempt_id: "coding_attempt_0001",
+      logical_work_item_id: undefined,
+      target: { type: "coding_attempt", attempt_id: "coding_attempt_0001" },
+      focus: { gate_id: "gate_7" },
+    } satisfies CodingAttentionLocationItem);
+  });
+
+  it("final_confirm 事项导航带 focus=final_confirm 语义（kind 透传）；plan/workspace 目标各到对应路由", async () => {
+    const finalConfirmItem = codingAttentionItem(
+      attentionDto({
+        key: "final:attempt_a:node_1",
+        kind: "final_confirm",
+        reason_code: null,
+        focus: null,
+      }),
+    );
+    const firstOpener = vi.fn(() => true);
+    render(
+      <CockpitInbox
+        items={[finalConfirmItem]}
+        onOpenAttentionTarget={firstOpener}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "去处理" }));
+    expect(firstOpener).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "final_confirm", focus: undefined }),
+    );
+    cleanup();
+    const planItem = codingAttentionItem(
+      attentionDto({
+        key: "plan-final:plan_9:run_1",
+        kind: "plan_final_confirm",
+        plan_id: "plan_9",
+        attempt_id: null,
+        target: { type: "coding_plan", plan_id: "plan_9" },
+        focus: null,
+      }),
+    );
+    const planOpener = vi.fn(() => true);
+    const second = render(
+      <CockpitInbox items={[planItem]} onOpenAttentionTarget={planOpener} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "去处理" }));
+    expect(planOpener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "plan_final_confirm",
+        plan_id: "plan_9",
+        target: { type: "coding_plan", plan_id: "plan_9" },
+      }),
+    );
+    second.unmount();
+
+    const sessionItem = codingAttentionItem(
+      attentionDto({
+        key: "recovery:attempt_a:run_2",
+        kind: "manual_recovery",
+        attempt_id: null,
+        target: { type: "workspace_session", session_id: "ws_7" },
+        focus: null,
+      }),
+    );
+    const sessionOpener = vi.fn(() => true);
+    render(
+      <CockpitInbox items={[sessionItem]} onOpenAttentionTarget={sessionOpener} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "去处理" }));
+    expect(sessionOpener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "manual_recovery",
+        target: { type: "workspace_session", session_id: "ws_7" },
+      }),
+    );
+  });
+
+  it("coding_action 卡不重复渲染表单：与页面内卡同源，只有「去处理」一个按钮", () => {
+    const item = codingAttentionItem(attentionDto());
+    render(
+      <CockpitInbox
+        items={[item]}
+        actions={actions}
+        actionableSessionId="session_001"
+        onOpenAttentionTarget={vi.fn(() => true)}
+      />,
+    );
+
+    const row = screen.getByTestId("cockpit-inbox-item-coding_action");
+    expect(within(row).getAllByRole("button")).toHaveLength(1);
+    expect(within(row).getByRole("button", { name: "去处理" })).toBeInTheDocument();
+    expect(within(row).queryByRole("checkbox")).toBeNull();
+  });
+
+  it("导航未接线（无 shell context/显式 prop）时不渲染「去处理」，平台消息卡仍在", () => {
+    const item = codingAttentionItem(attentionDto());
+    render(<CockpitInbox items={[item]} />);
+
+    const row = screen.getByTestId("cockpit-inbox-item-coding_action");
+    expect(row).toHaveTextContent("AI 挂起了");
+    expect(within(row).queryByRole("button", { name: "去处理" })).toBeNull();
   });
 });

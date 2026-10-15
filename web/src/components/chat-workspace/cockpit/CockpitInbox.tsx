@@ -55,7 +55,12 @@ import {
   GATE_CARD_CLASS,
   GATE_NESTED_BLOCK_CLASS,
 } from "../gate-visual-tokens";
-import { useCockpitInboxPulse } from "../../cockpit/CockpitShell";
+import {
+  codingAttentionLocationItem,
+  useCockpitAttentionTargetOpener,
+  useCockpitInboxPulse,
+} from "../../cockpit/CockpitShell";
+import type { CodingAttentionLocationItem } from "../../../router";
 import { C1RecoveryCard, LcBootstrapCard } from "./CockpitInboxWaitingCards";
 
 const KIND_GLYPH = {
@@ -71,8 +76,9 @@ const KIND_GLYPH = {
   // 先补中性机械条目（glyph 复用 RotateCcw，class 沿用既有卡片风格）；
   // 后续真正渲染恢复卡时复用或改。
   lc_resume_recovery: RotateCcw,
-  // P4-d（REQ-UI37-19）：durable 待处理事项（coding_attention 来源）——
-  // 最机械条目保持编译；P4-e 落「去处理」卡时复用或改。
+  // P4-d/P4-e（REQ-UI37-19）：durable 待处理事项（coding_attention 来源），
+  // 与页面内卡同源（事实投影）；P4-e 起「去处理」下钻见
+  // CodingAttentionOpenButton（不在卡上重复渲染表单/确认/终止）。
   coding_action: ListChecks,
 } as const;
 
@@ -105,6 +111,7 @@ export function CockpitInbox({
   emptyHint,
   onOpenInfoSession,
   onOpenInfoCoding,
+  onOpenAttentionTarget,
   artifactVersions = [],
   leaseEvents = null,
   latestReviewSummary = null,
@@ -135,6 +142,11 @@ export function CockpitInbox({
     attemptId: string;
   }) => void;
   artifactVersions?: readonly ArtifactVersionSummary[];
+  /**
+   * P4-e（REQ-UI37-19）：coding_action 卡「去处理」的 A1 target 统一导航
+   *（显式 prop 优先，缺省回落 shell context；均未接线不出按钮）。
+   */
+  onOpenAttentionTarget?: (item: CodingAttentionLocationItem) => void;
   /** REQ-DLS-03：STALE 错误条引用的最近租约转移事件（诊断端点拉取，缺省不渲染）。 */
   leaseEvents?: readonly LeaseDiagnosticsEvent[] | null;
   latestReviewSummary?: string | null;
@@ -149,6 +161,9 @@ export function CockpitInbox({
    *（fresh 链后端绕过 engine 终态拒收，前端补位；文案与 F-30 同源）。 */
   resumeFreshTerminalBlockReason?: string | null;
 }) {
+  // P4-e：显式 prop 优先，缺省回落 shell 注入的统一导航（均未接线为 null）。
+  const shellAttentionOpener = useCockpitAttentionTargetOpener();
+  const openAttentionTarget = onOpenAttentionTarget ?? shellAttentionOpener;
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
   const selectableItems = useMemo(
     () => (onBulkConfirm ? items.filter(isSelectableGate) : []),
@@ -203,6 +218,7 @@ export function CockpitInbox({
     onChoiceRespond,
     onOpenInfoSession,
     onOpenInfoCoding,
+    openAttentionTarget,
     onTakeover,
     onRetry,
     onRetryFailedSc,
@@ -297,12 +313,39 @@ export function CockpitInbox({
   );
 }
 
+/**
+ * P4-e（REQ-UI37-19）：coding_action 卡「去处理」——durable 事实投影与页面内
+ * 卡同源，收件箱只导航（经统一 target/focus 下钻到 attempt 卡、plan 总览或
+ * workspace 会话），不在通知/收件箱上执行确认/终止或重复渲染表单。导航经
+ * shell 注入的 `onOpenAttentionTarget`（显式 prop 优先，context 兜底；均未
+ * 接线时不出按钮，fail-closed——本组件不 import router，避免循环加载）。
+ */
+function CodingAttentionOpenButton({
+  info,
+  openTarget,
+}: {
+  info: NonNullable<CockpitInboxItem["attentionInfo"]>;
+  openTarget: (item: CodingAttentionLocationItem) => void;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid="cockpit-attention-open"
+      onClick={() => openTarget(codingAttentionLocationItem(info))}
+      className="mt-2 min-h-9 rounded-md border border-amber-300 bg-white px-2.5 py-1 text-xs font-semibold text-amber-900 transition-colors duration-200 hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+    >
+      去处理
+    </button>
+  );
+}
+
 function CockpitInboxRow({
   item,
   actions,
   onChoiceRespond,
   onOpenInfoSession,
   onOpenInfoCoding,
+  openAttentionTarget,
   onTakeover,
   onRetry,
   onRetryFailedSc,
@@ -332,6 +375,8 @@ function CockpitInboxRow({
     issueId: string;
     attemptId: string;
   }) => void;
+  /** P4-e（REQ-UI37-19）：coding_action「去处理」导航（见 CockpitInbox 同名 prop）。 */
+  openAttentionTarget: ((item: CodingAttentionLocationItem) => void) | null;
   onTakeover?: (sessionId: string) => Promise<void>;
   onRetry?: (item: CockpitInboxItem) => void;
   /** P2 GAP-E/G（Task 0.1）：失败 SC 现场的人工显式重驱（透传页面 REST 接线）。 */
@@ -434,6 +479,12 @@ function CockpitInboxRow({
           >
             查看 Plan 会话
           </button>
+        ) : null}
+        {item.kind === "coding_action" && item.attentionInfo && openAttentionTarget ? (
+          <CodingAttentionOpenButton
+            info={item.attentionInfo}
+            openTarget={openAttentionTarget}
+          />
         ) : null}
         {item.kind === "gate" && actions && actionable ? (
           <GateInboxActions

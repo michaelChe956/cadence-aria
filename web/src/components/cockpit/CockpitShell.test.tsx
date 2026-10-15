@@ -1,5 +1,6 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readCockpitSettings } from "../../state/cockpit-settings";
 import { INFO_TTL_MS } from "../../state/recent-completion";
 import type { CockpitInboxItem } from "../../state/workspace-cockpit-projection";
@@ -90,11 +91,13 @@ function ShellWithInbox({
   countedInbox = inbox.filter((item) => item.kind !== "info"),
   notificationCandidates = [],
   onGoToInbox,
+  onOpenAttentionTarget,
 }: {
   inbox: readonly CockpitInboxItem[];
   countedInbox?: readonly CockpitInboxItem[];
   notificationCandidates?: readonly CockpitInboxItem[];
   onGoToInbox?: (sessionId: string) => void;
+  onOpenAttentionTarget?: (item: CodingAttentionLocationItem) => boolean;
 }) {
   mockedUseWorkspaceSessionObservers.mockReturnValue({
     records: [],
@@ -109,7 +112,7 @@ function ShellWithInbox({
   });
 
   return (
-    <CockpitShell onGoToInbox={onGoToInbox}>
+    <CockpitShell onGoToInbox={onGoToInbox} onOpenAttentionTarget={onOpenAttentionTarget}>
       <CockpitInbox items={inbox} />
     </CockpitShell>
   );
@@ -120,11 +123,13 @@ function renderShell({
   countedInbox,
   notificationCandidates,
   onGoToInbox,
+  onOpenAttentionTarget,
 }: {
   inbox: readonly CockpitInboxItem[];
   countedInbox?: readonly CockpitInboxItem[];
   notificationCandidates?: readonly CockpitInboxItem[];
   onGoToInbox?: (sessionId: string) => void;
+  onOpenAttentionTarget?: (item: CodingAttentionLocationItem) => boolean;
 }) {
   return render(
     <ShellWithInbox
@@ -132,6 +137,7 @@ function renderShell({
       countedInbox={countedInbox}
       notificationCandidates={notificationCandidates}
       onGoToInbox={onGoToInbox}
+      onOpenAttentionTarget={onOpenAttentionTarget}
     />,
   );
 }
@@ -524,5 +530,162 @@ describe("CockpitShell", () => {
       vi.advanceTimersByTime(5_000);
     });
     expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+// ── P4-e（REQ-UI37-19）：coding_action 新 key 系统提醒 ──
+// 导航经注入的 onOpenAttentionTarget（生产由 router 挂载点提供统一 opener）；
+// 测试以 mock 断言统一导航入参（契约 A1 target/focus），地址映射归
+// router.test.tsx 的 codingAttentionLocation 用例。
+import { codingAttentionItem } from "../../state/workspace-cockpit-projection";
+import type { CodingAttentionItemDto } from "../../api/types/lifecycle";
+import type { CodingAttentionLocationItem } from "../../router";
+
+function planACodingAttentionItem(): CockpitInboxItem {
+  const dto: CodingAttentionItemDto = {
+    key: "gate:attempt_a:gate_7",
+    kind: "stalled",
+    project_id: "project_0001",
+    issue_id: "issue_0001",
+    plan_id: null,
+    attempt_id: "coding_attempt_a",
+    logical_work_item_id: null,
+    repository_name: "repo-a",
+    reason_code: "coder_provider_stalled",
+    title: "AI 挂起了",
+    summary: "Coder 长时间没有输出",
+    occurred_at: "2026-10-16T00:00:00Z",
+    target: { type: "coding_attempt", attempt_id: "coding_attempt_a" },
+    focus: { gate_id: "gate_7" },
+  };
+  return codingAttentionItem(dto);
+}
+
+const attentionNotifications: {
+  title: string;
+  options?: NotificationOptions;
+  onclick: ((event: Event) => void) | null;
+}[] = [];
+
+class AttentionNotificationMock {
+  static requestPermission = vi.fn();
+  static permission: NotificationPermission = "granted";
+  onclick: ((event: Event) => void) | null = null;
+  constructor(
+    public title: string,
+    public options?: NotificationOptions,
+  ) {
+    attentionNotifications.push(this);
+  }
+}
+
+describe("CockpitShell coding_action 新 key 系统提醒（P4-e/REQ-UI37-19）", () => {
+  beforeEach(() => {
+    // 上一 describe 的 vi.useFakeTimers() 会残留，恢复真实计时器供
+    // findBy/waitFor 轮询。
+    vi.useRealTimers();
+    attentionNotifications.length = 0;
+    AttentionNotificationMock.permission = "granted";
+    vi.stubGlobal("Notification", AttentionNotificationMock);
+    document.head.querySelector('link[rel~="icon"]')?.remove();
+    const icon = document.createElement("link");
+    icon.rel = "icon";
+    icon.href = "data:image/svg+xml,original";
+    document.head.append(icon);
+    mockedUseWorkspaceSessionObservers.mockReset();
+    useWorkspaceStore.getState().reset();
+    document.title = "Aria Web";
+    window.localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+  it("plan B 收到 plan A 新 key：系统通知恰一次＋平台内消息，onclick 只导航到 attempt+focus", async () => {
+    const item = planACodingAttentionItem();
+    const onOpenAttentionTarget = vi.fn(() => true);
+    renderShell({
+      inbox: [item],
+      countedInbox: [item],
+      notificationCandidates: [item, item],
+      onOpenAttentionTarget,
+    });
+
+    // 平台内消息：toast＋收件箱行（权限无关的退路）。
+    expect(await screen.findByRole("status")).toHaveTextContent("需要处理：AI 挂起了");
+    expect(await screen.findByTestId("cockpit-inbox-item-coding_action")).toBeInTheDocument();
+
+    // 系统通知：同 key 候选重复到达也只发一次。
+    await waitFor(() => expect(attentionNotifications).toHaveLength(1));
+    expect(attentionNotifications[0].title).toContain("AI 挂起了");
+
+    attentionNotifications[0].onclick?.(new Event("click"));
+    expect(onOpenAttentionTarget).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "stalled",
+        project_id: "project_0001",
+        issue_id: "issue_0001",
+        attempt_id: "coding_attempt_a",
+        target: { type: "coding_attempt", attempt_id: "coding_attempt_a" },
+        focus: { gate_id: "gate_7" },
+      }),
+    );
+  });
+
+  it("通知权限拒绝：不发系统通知，平台消息（toast＋收件箱行）仍在", async () => {
+    AttentionNotificationMock.permission = "denied";
+    const item = planACodingAttentionItem();
+    renderShell({
+      inbox: [item],
+      countedInbox: [item],
+      notificationCandidates: [item],
+      onOpenAttentionTarget: vi.fn(() => true),
+    });
+
+    expect(await screen.findByRole("status")).toHaveTextContent("需要处理：AI 挂起了");
+    expect(await screen.findByTestId("cockpit-inbox-item-coding_action")).toBeInTheDocument();
+    expect(attentionNotifications).toHaveLength(0);
+  });
+
+  it("驾驶舱设置关闭系统通知时不发通知，平台消息仍在", async () => {
+    window.localStorage.setItem(
+      "aria.cockpit.settings.v1",
+      JSON.stringify({ systemNotificationsEnabled: false }),
+    );
+    const item = planACodingAttentionItem();
+    renderShell({
+      inbox: [item],
+      countedInbox: [item],
+      notificationCandidates: [item],
+      onOpenAttentionTarget: vi.fn(() => true),
+    });
+
+    expect(await screen.findByTestId("cockpit-inbox-item-coding_action")).toBeInTheDocument();
+    expect(attentionNotifications).toHaveLength(0);
+  });
+
+  it("告警条「去处理」对 coding 首条走 attention 导航，不再把 coding_attention 前缀当 sessionId", async () => {
+    const onGoToInbox = vi.fn();
+    const onOpenAttentionTarget = vi.fn(() => true);
+    const item = planACodingAttentionItem();
+    renderShell({
+      inbox: [item],
+      countedInbox: [item],
+      notificationCandidates: [item],
+      onGoToInbox,
+      onOpenAttentionTarget,
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("待处理 1 项");
+    // 同屏还有收件箱行内「去处理」——告警条按钮以 testid 定位。
+    await userEvent.click(await screen.findByTestId("cockpit-attention-go-to"));
+
+    expect(onOpenAttentionTarget).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: { type: "coding_attempt", attempt_id: "coding_attempt_a" },
+        focus: { gate_id: "gate_7" },
+      }),
+    );
+    expect(onGoToInbox).not.toHaveBeenCalledWith("coding_attention");
   });
 });

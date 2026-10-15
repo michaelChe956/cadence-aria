@@ -517,11 +517,14 @@ const VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES = [
   "coding_operational_blocker",
 ] as const;
 
-/** P2-d（REQ-CRO-09，C5）：走 CoderTriageCard 的分诊门 reason_code——集中定义，
- * `coder_provider_stalled` 的纳入由 P4-e 扩（C 区 #1：P2-d→P4-e→批 2）。 */
+/** P2-d（REQ-CRO-09，C5）：走 CoderTriageCard 的分诊门 reason_code——集中定义；
+ * P4-e（REQ-CRO-09/PTR-IDLE）：`coder_provider_stalled` 纳入——coder 挂起门
+ * 三动作（retry_coding/retry_coding_with_context/abort）复用同一张卡，
+ * 说明情况提交即重新开跑（块 4 §3.2）；reviewer 挂起门按 stage 回原门渲染。 */
 const TRIAGE_CARD_REASON_CODES = [
   "coding_output_human_triage",
   "coding_operational_blocker",
+  "coder_provider_stalled",
 ] as const;
 
 export function isTriageCardGate(gate: Pick<CodingGateRequired, "reason_code">): boolean {

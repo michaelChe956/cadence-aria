@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type {
   VerificationCommandEvidence,
@@ -222,5 +223,90 @@ describe("CodingWorkspaceControls GatePanel 分诊卡分流（P2-d/REQ-CRO-09）
     expect(panel.textContent).toContain("验证处理");
     fireEvent.click(screen.getByTestId("coding-verification-triage-enter"));
     expect(onEnter).toHaveBeenCalledWith("coding_blocked_gate_0001");
+  });
+});
+
+describe("CodingWorkspaceControls 挂起门复用分诊卡（P4-e/REQ-CRO-09 C5）", () => {
+  const coderStalledGate: CodingPendingGate = {
+    ...fourActionGate,
+    gate_id: "coding_blocked_gate_stalled",
+    title: "AI 挂起了",
+    description:
+      "Coder 已 600 秒没有任何输出（界 600 秒，阶段 coding），自动重试一次后仍无进展，流程已暂停。",
+    stage: "coding",
+    role: "coder",
+    reason_code: "coder_provider_stalled",
+    available_actions: [
+      { action_id: "retry_coding", label: "让 AI 再试一次", action_type: "retry_coding" },
+      {
+        action_id: "retry_coding_with_context",
+        label: "我来说明情况，让 AI 继续",
+        action_type: "retry_coding_with_context",
+      },
+      { action_id: "abort", label: "终止", action_type: "abort" },
+    ],
+  };
+
+  it("isTriageCardGate 纳入 coder_provider_stalled（C5 落地）；reviewer 挂起门不纳入", () => {
+    expect(isTriageCardGate(coderStalledGate)).toBe(true);
+    expect(
+      isTriageCardGate({ ...coderStalledGate, reason_code: "code_review_provider_stalled" }),
+    ).toBe(false);
+  });
+
+  it("coder_provider_stalled 经 GatePanel 复用 CoderTriageCard 三按钮，说明情况提交即派发 onRespond", async () => {
+    const onRespond = vi.fn();
+    render(
+      <GatePanel
+        gate={coderStalledGate}
+        onRespond={onRespond}
+        onConfirmStage={vi.fn()}
+        onAbort={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("coder-triage-card")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-pending-gate")).toBeNull();
+    expect(screen.getByTestId("coder-triage-problem")).toHaveTextContent(
+      "Coder 已 600 秒没有任何输出",
+    );
+    expect(
+      screen.getByRole("button", { name: "让 AI 再试一次" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "我来说明情况，让 AI 继续" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "终止" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "我来说明情况，让 AI 继续" }));
+    await userEvent.click(screen.getByTestId("coder-triage-context-submit"));
+    expect(screen.getByTestId("coder-triage-context-hint")).toHaveTextContent("请先写一两句话");
+    expect(onRespond).not.toHaveBeenCalled();
+
+    await userEvent.type(screen.getByLabelText("补充说明"), "磁盘满了解除后再试");
+    await userEvent.click(screen.getByTestId("coder-triage-context-submit"));
+    expect(onRespond).toHaveBeenCalledWith(
+      "coding_blocked_gate_stalled",
+      "retry_coding_with_context",
+      "磁盘满了解除后再试",
+    );
+  });
+
+  it("code_review_provider_stalled 保持通用门面板（retry_review/abort 原渲染）", () => {
+    const reviewerStalledGate: CodingPendingGate = {
+      ...coderStalledGate,
+      stage: "code_review",
+      role: "code_reviewer",
+      reason_code: "code_review_provider_stalled",
+      available_actions: [
+        { action_id: "retry_review", label: "重试审查", action_type: "retry_review" },
+        { action_id: "abort", label: "终止", action_type: "abort" },
+      ],
+    };
+    renderGatePanel(reviewerStalledGate);
+
+    expect(screen.getByTestId("coding-pending-gate")).toBeInTheDocument();
+    expect(screen.queryByTestId("coder-triage-card")).toBeNull();
+    expect(screen.getByRole("button", { name: "重试审查" })).toBeInTheDocument();
   });
 });

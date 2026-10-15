@@ -21,7 +21,11 @@ import {
   writeCockpitSettings,
   type CockpitSettings,
 } from "../../state/cockpit-settings";
-import type { CockpitInboxItem } from "../../state/workspace-cockpit-projection";
+import type {
+  CockpitInboxItem,
+  CodingAttentionInboxProjection,
+} from "../../state/workspace-cockpit-projection";
+import type { CodingAttentionLocationItem } from "../../router";
 import { CockpitEscalation } from "./CockpitEscalation";
 import { CockpitSettingsDialog } from "./CockpitSettingsDialog";
 import { isRecentCompletionVisible } from "../../state/recent-completion";
@@ -44,6 +48,11 @@ type CockpitShellContextValue = {
   codingAttemptForSession(sessionId: string): CodingAttempt | null;
   /** 页面顶栏登记设置入口宿主节点；未登记时 shell 兜底浮层渲染入口。 */
   registerSettingsSlot(node: HTMLElement | null): void;
+  /**
+   * P4-e（REQ-UI37-19）：A1 待处理 target 统一导航（shell prop 注入的镜像），
+   * 收件箱「去处理」等 shell 子树消费；null = 宿主未接线，不出导航按钮。
+   */
+  openAttentionTarget: ((item: CodingAttentionLocationItem) => void) | null;
 };
 
 const CockpitShellContext = createContext<CockpitShellContextValue | null>(null);
@@ -59,6 +68,89 @@ function faviconHref(count: number): string {
     : "";
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#FFF4EC"/><path d="M8 23 16 7l8 16h-4l-1.5-3.2h-5L12 23H8Zm7-7h2l-1-2.5L15 16Z" fill="#8E2D60"/>${badge}</svg>`;
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+// P4-e（REQ-UI37-19，契约 A1）：coding_action 事实投影 → 统一导航入参
+//（router.tsx `useCodingAttentionTargetOpener` 消费），通知/收件箱「去处理」
+// 共用，不各自拼地址。
+export function codingAttentionLocationItem(
+  info: CodingAttentionInboxProjection,
+): CodingAttentionLocationItem {
+  return {
+    kind: info.attentionKind,
+    project_id: info.projectId,
+    issue_id: info.issueId,
+    plan_id: info.planId ?? undefined,
+    attempt_id: info.attemptId ?? undefined,
+    logical_work_item_id: info.logicalWorkItemId ?? undefined,
+    target: info.target,
+    focus: info.focus ?? undefined,
+  };
+}
+
+// P4-e（REQ-UI37-19）：coding_action 新 key 系统提醒——候选已由 observer 层
+// 做 hydration 静默基线与同 key 去重，这里每身份至多发一次浏览器
+// Notification（权限已授且设置开启才发）；onclick 只导航到对应卡/plan 总览，
+// 不执行确认/终止；权限拒绝/无 API 时平台消息（toast＋收件箱行）仍是退路。
+function CodingAttentionNotifier({
+  candidates,
+  systemNotificationsEnabled,
+  openTarget,
+}: {
+  candidates: readonly CockpitInboxItem[];
+  systemNotificationsEnabled: boolean;
+  openTarget: (item: CodingAttentionLocationItem) => void;
+}) {
+  const remindedIdentitiesRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!systemNotificationsEnabled || typeof Notification === "undefined") {
+      return;
+    }
+    for (const item of candidates) {
+      if (item.kind !== "coding_action" || !item.attentionInfo) {
+        continue;
+      }
+      const { identity } = item.attentionInfo;
+      if (remindedIdentitiesRef.current.has(identity)) {
+        continue;
+      }
+      remindedIdentitiesRef.current.add(identity);
+      if (Notification.permission !== "granted") {
+        continue;
+      }
+      const notification = new Notification(`aria：${item.title}`, {
+        body: item.summary || item.attentionInfo.attentionKind,
+        tag: `aria-coding-attention:${identity}`,
+      });
+      const locationItem = codingAttentionLocationItem(item.attentionInfo);
+      notification.onclick = () => {
+        window.focus();
+        openTarget(locationItem);
+      };
+    }
+  }, [candidates, systemNotificationsEnabled, openTarget]);
+  return null;
+}
+
+// P4-e（REQ-UI37-19）：告警条「去处理」的 coding 分流——全局按钮不能再把
+// coding item.id 前缀（`coding_attention:…`）当 sessionId。
+function CodingAttentionGoToButton({
+  info,
+  openTarget,
+}: {
+  info: CodingAttentionInboxProjection;
+  openTarget: (item: CodingAttentionLocationItem) => void;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid="cockpit-attention-go-to"
+      onClick={() => openTarget(codingAttentionLocationItem(info))}
+      className="min-h-11 rounded-md bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--aria-danger)]"
+    >
+      去处理
+    </button>
+  );
 }
 
 export function useCockpitShellInbox(): readonly CockpitInboxItem[] {
@@ -97,12 +189,29 @@ export function useCockpitCodingAttemptForSession(): (
 ) => CodingAttempt | null {
   return useContext(CockpitShellContext)?.codingAttemptForSession ?? (() => null);
 }
+/**
+ * P4-e（REQ-UI37-19）：shell 子树（如收件箱）读取 A1 待处理 target 统一
+ * 导航；未接线（无 shell/宿主未注入）返回 null，消费方不出导航按钮。
+ */
+export function useCockpitAttentionTargetOpener(): ((
+  item: CodingAttentionLocationItem,
+) => void) | null {
+  return useContext(CockpitShellContext)?.openAttentionTarget ?? null;
+}
 export function CockpitShell({
   children,
   onGoToInbox,
+  onOpenAttentionTarget,
 }: {
   children: ReactNode;
   onGoToInbox?: (sessionId: string) => void;
+  /**
+   * P4-e（REQ-UI37-19）：A1 待处理 target 统一导航（router 挂载点注入
+   * `useCodingAttentionTargetOpener`）；缺席时 coding_action 的系统通知
+   * onclick/告警条分流/收件箱「去处理」均不启用（平台消息不受影响）。
+   * 组件自身不 import router 模块，避免 Shell↔router 循环加载。
+   */
+  onOpenAttentionTarget?: (item: CodingAttentionLocationItem) => void;
 }): JSX.Element {
   const [settings, setSettings] = useState<CockpitSettings>(() => readCockpitSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -311,6 +420,15 @@ export function CockpitShell({
     }, remainingDelayMs);
     return () => window.clearTimeout(timer);
   }, [countedInbox, settings.systemNotificationsEnabled]);
+  // P4-e（REQ-UI37-19）：告警条「去处理」的 coding 分流依据——首条待处理是
+  // coding_action 且统一导航已接线（onOpenAttentionTarget 注入）时走统一
+  // 导航，否则维持 sessionId 路径。
+  const firstCountedItem = countedInbox[0];
+  const firstCodingAttention =
+    firstCountedItem?.kind === "coding_action" && firstCountedItem.attentionInfo
+      ? firstCountedItem.attentionInfo
+      : null;
+  const hasCodingAttention = countedInbox.some((item) => item.kind === "coding_action");
 
   const goToInbox = useCallback(() => {
     const firstItem = countedInbox[0];
@@ -337,10 +455,12 @@ export function CockpitShell({
       watchSession,
       codingAttemptForSession,
       registerSettingsSlot: setSettingsSlot,
+      openAttentionTarget: onOpenAttentionTarget ?? null,
     }),
     [
       inbox,
       notificationGuidance,
+      onOpenAttentionTarget,
       pulseItemIds,
       records,
       settings,
@@ -379,13 +499,20 @@ export function CockpitShell({
             className="z-[90] flex min-h-11 shrink-0 items-center justify-between gap-3 bg-[var(--aria-danger)] px-3 py-1 text-sm font-semibold text-white shadow-md"
           >
             <span>待处理 {actionableCount} 项</span>
-            <button
-              type="button"
-              onClick={goToInbox}
-              className="min-h-11 rounded-md bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--aria-danger)]"
-            >
-              去处理
-            </button>
+            {firstCodingAttention && onOpenAttentionTarget ? (
+              <CodingAttentionGoToButton
+                info={firstCodingAttention}
+                openTarget={onOpenAttentionTarget}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={goToInbox}
+                className="min-h-11 rounded-md bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--aria-danger)]"
+              >
+                去处理
+              </button>
+            )}
           </aside>
         ) : null}
         {toast ? (
@@ -421,6 +548,13 @@ export function CockpitShell({
           onChange={updateSettings}
         />
         <CockpitEscalation items={countedInbox} settings={settings} />
+        {hasCodingAttention && onOpenAttentionTarget ? (
+          <CodingAttentionNotifier
+            candidates={notificationCandidates}
+            systemNotificationsEnabled={settings.systemNotificationsEnabled}
+            openTarget={onOpenAttentionTarget}
+          />
+        ) : null}
         <div data-testid="cockpit-shell-scroll" className="min-h-0 flex-1 overflow-y-auto">
           {children}
         </div>
