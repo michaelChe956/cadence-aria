@@ -275,6 +275,8 @@ impl CodingWorkspaceEngine {
             role_permission_mode_for_attempt(&self.store, attempt, CodingProviderRole::Coder)?;
         let mut node = initial_node;
         let mut role_run = self.ensure_retry_cycle_metadata(attempt, initial_role_run)?;
+        // P4-a：本 cycle 内 idle 挂起计数（纯 idle 最多 2 次调用后收口）。
+        let mut idle_stalls = 0u32;
 
         for attempt_no in 1..=MAX_PROVIDER_INVOCATIONS_PER_CYCLE {
             if attempt_no > 1 {
@@ -400,6 +402,7 @@ impl CodingWorkspaceEngine {
                     &node,
                     &role_run,
                     attempt_no,
+                    &mut idle_stalls,
                     outcome,
                 )
                 .await?
@@ -436,6 +439,8 @@ impl CodingWorkspaceEngine {
         )?;
         let mut node = initial_node;
         let mut role_run = self.ensure_retry_cycle_metadata(attempt, initial_role_run)?;
+        // P4-a：本 cycle 内 idle 挂起计数（纯 idle 最多 2 次调用后收口）。
+        let mut idle_stalls = 0u32;
 
         for attempt_no in 1..=MAX_PROVIDER_INVOCATIONS_PER_CYCLE {
             if attempt_no > 1 {
@@ -573,6 +578,7 @@ impl CodingWorkspaceEngine {
                     &node,
                     &role_run,
                     attempt_no,
+                    &mut idle_stalls,
                     outcome,
                 )
                 .await?
@@ -771,6 +777,7 @@ impl CodingWorkspaceEngine {
         node: &CodingTimelineNode,
         role_run: &CodingRoleRun,
         attempt_no: u32,
+        idle_stall_count: &mut u32,
         outcome: ProviderInvocationOutcome,
     ) -> Result<Option<ProviderStreamOutcome>, CodingWorkspaceEngineError> {
         match outcome {
@@ -780,11 +787,60 @@ impl CodingWorkspaceEngine {
                     .await?;
                 Err(CodingWorkspaceEngineError::Aborted)
             }
-            // P4-a（REQ-PTR-IDLE）红测先行占位：idle 挂起的收口（首次同
-            // provider fresh 重试恰一次、再次 Blocked＋stalled 门）在绿灯
-            // 阶段与 stream 看门狗一并实现。
-            ProviderInvocationOutcome::IdleStall { .. } => {
-                todo!("P4-a idle stall resolution lands with the stream watchdog")
+            // P4-a（REQ-PTR-IDLE）：idle 挂起前置收口——首次挂起同 provider
+            // fresh 重试恰一次（cycle 既有重试路径即 fresh：prompt 重建、
+            // resume_provider_session_id=None）；再次挂起转 attempt Blocked＋
+            // stalled 门。不占 transport 预算分类（纯 transport 仍 3 次）。
+            ProviderInvocationOutcome::IdleStall {
+                role,
+                phase,
+                idle_secs,
+                idle_limit_secs,
+            } => {
+                if let Err(error) = self.ensure_provider_retry_cycle_active(attempt) {
+                    self.finalize_retry_cycle_state_change(attempt, node, role_run)
+                        .await?;
+                    return Err(error);
+                }
+                self.store.update_role_run_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &role_run.id,
+                    CodingRoleRunStatus::Failed,
+                    Some(PROVIDER_IDLE_STALL_REASON_CODE.to_string()),
+                )?;
+                self.complete_timeline_node(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    &node.id,
+                    CodingTimelineNodeStatus::Failed,
+                    Some(format!(
+                        "provider 零活动挂起：{idle_secs} 秒无事件超过 {idle_limit_secs} 秒界（阶段 {phase}）"
+                    )),
+                )
+                .await?;
+                *idle_stall_count += 1;
+                if *idle_stall_count < 2 && attempt_no < MAX_PROVIDER_INVOCATIONS_PER_CYCLE {
+                    return Ok(None);
+                }
+                let error = CodingWorkspaceEngineError::ProviderIdleStall {
+                    role: role.clone(),
+                    phase: phase.clone(),
+                    idle_secs,
+                    idle_limit_secs,
+                };
+                self.open_provider_stalled_gate(
+                    attempt,
+                    &node.id,
+                    role,
+                    &phase,
+                    idle_secs,
+                    idle_limit_secs,
+                )
+                .await?;
+                Err(error)
             }
             ProviderInvocationOutcome::RetryableTransport {
                 failure,

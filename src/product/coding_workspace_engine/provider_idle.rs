@@ -74,10 +74,7 @@ fn env_positive_secs(key: &str, default_secs: u64) -> u64 {
 
 /// 工具 call 未返回时取 `max(角色界, 工具界)`（D-3 裁定 A）；无在途工具
 /// call 用角色界。是「距最后真实活动的静默」界，不是命令总耗时。
-pub(crate) fn effective_idle_limit(
-    limits: ProviderIdleLimits,
-    open_tool_calls: usize,
-) -> Duration {
+pub(crate) fn effective_idle_limit(limits: ProviderIdleLimits, open_tool_calls: usize) -> Duration {
     if open_tool_calls > 0 {
         limits.role.max(limits.tool_inflight)
     } else {

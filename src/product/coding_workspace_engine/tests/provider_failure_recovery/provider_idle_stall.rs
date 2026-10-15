@@ -29,7 +29,6 @@ use tokio::sync::Mutex as AsyncMutex;
 // env 覆写 helper（先例 group_review_budget.rs：静态 mutex 串行化 + Drop 恢复）
 // ---------------------------------------------------------------------------
 
-
 fn idle_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
@@ -121,8 +120,10 @@ impl StreamingProviderAdapter for IdleStallThenCompleteProvider {
         let (command_tx, _command_rx) = mpsc::channel(4);
         let output = self.output.clone();
         if start_no <= self.stalls_before_success {
-            // 楔死形态：event_tx 挂起持有（通道恒开）、永不发事件，直到 cancel。
+            // 楔死形态：event_tx 由挂起任务持有（通道恒开）、永不发事件，
+            // 直到 cancel。
             tokio::spawn(async move {
+                let _held_event_tx = event_tx;
                 tokio::select! {
                     _ = cancel.cancelled() => {}
                     _ = std::future::pending::<()>() => {}
@@ -451,10 +452,7 @@ async fn run_coder_invocation(
         .await
 }
 
-fn coder_role_run(
-    store: &CodingAttemptStore,
-    attempt: &CodingExecutionAttempt,
-) -> CodingRoleRun {
+fn coder_role_run(store: &CodingAttemptStore, attempt: &CodingExecutionAttempt) -> CodingRoleRun {
     store
         .create_role_run(
             attempt,
@@ -498,7 +496,10 @@ async fn wait_for_open_choice(store: &CodingAttemptStore, attempt: &CodingExecut
         let gates = store
             .list_open_choice_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
             .expect("open choice gates");
-        if gates.iter().any(|gate| gate.choice_id == "provider_choice_idle") {
+        if gates
+            .iter()
+            .any(|gate| gate.choice_id == "provider_choice_idle")
+        {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -677,9 +678,7 @@ async fn second_idle_stall_blocks_attempt_with_coder_provider_stalled_gate() {
         .expect("open gates");
     let gate = gates
         .iter()
-        .find(|gate| {
-            gate.reason_code.as_deref() == Some(CODER_PROVIDER_STALLED_REASON_CODE)
-        })
+        .find(|gate| gate.reason_code.as_deref() == Some(CODER_PROVIDER_STALLED_REASON_CODE))
         .expect("coder_provider_stalled gate");
     let action_ids: Vec<&str> = gate
         .available_actions
@@ -747,9 +746,7 @@ async fn reviewer_second_idle_stall_blocks_with_code_review_provider_stalled_gat
         .expect("open gates");
     let gate = gates
         .iter()
-        .find(|gate| {
-            gate.reason_code.as_deref() == Some(CODE_REVIEW_PROVIDER_STALLED_REASON_CODE)
-        })
+        .find(|gate| gate.reason_code.as_deref() == Some(CODE_REVIEW_PROVIDER_STALLED_REASON_CODE))
         .expect("code_review_provider_stalled gate");
     let action_ids: Vec<&str> = gate
         .available_actions
@@ -804,11 +801,16 @@ async fn choice_wait_suspends_idle_watchdog_until_answered() {
     let provider = ChoiceGateSilentProvider;
     let (command_tx, mut command_rx) = mpsc::channel(4);
 
-    let invocation =
-        run_coder_invocation(&engine, &attempt, &role_run, &provider, &mut command_rx);
+    let invocation = run_coder_invocation(&engine, &attempt, &role_run, &provider, &mut command_rx);
     tokio::pin!(invocation);
 
-    wait_for_open_choice(&store, &attempt).await;
+    // 单线程测试：等待 durable choice gate 落盘必须与 invocation 并发驱动。
+    tokio::select! {
+        () = wait_for_open_choice(&store, &attempt) => {}
+        outcome = &mut invocation => {
+            panic!("choice gate 未开而 invocation 先结束: {outcome:?}");
+        }
+    }
     // choice 悬置静默 2.4s（> 2× idle 界）：看门狗必须暂停不触发。
     tokio::time::sleep(Duration::from_millis(2400)).await;
     tokio::select! {
@@ -852,24 +854,27 @@ async fn permission_wait_suspends_idle_watchdog_until_answered() {
     let provider = PermissionGateSilentProvider;
     let (command_tx, mut command_rx) = mpsc::channel(4);
 
-    let invocation =
-        run_coder_invocation(&engine, &attempt, &role_run, &provider, &mut command_rx);
+    let invocation = run_coder_invocation(&engine, &attempt, &role_run, &provider, &mut command_rx);
     tokio::pin!(invocation);
 
-    // 等 PermissionRequest 帧送达（悬置开始）。
-    let mut permission_seen = false;
-    for _ in 0..100 {
-        while let Ok(message) = rx.try_recv() {
-            if matches!(message, CodingWsOutMessage::CodingPermissionRequest { .. }) {
-                permission_seen = true;
+    // 等 PermissionRequest 帧送达（悬置开始）；单线程测试下必须与
+    // invocation 并发驱动。
+    let permission_wait = async {
+        loop {
+            while let Ok(message) = rx.try_recv() {
+                if matches!(message, CodingWsOutMessage::CodingPermissionRequest { .. }) {
+                    return;
+                }
             }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if permission_seen {
-            break;
+    };
+    tokio::select! {
+        () = permission_wait => {}
+        outcome = &mut invocation => {
+            panic!("permission 帧未达而 invocation 先结束: {outcome:?}");
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(permission_seen, "permission request frame not observed");
 
     // 权限悬置静默 2.4s（> 2× idle 界）：看门狗必须暂停不触发。
     tokio::time::sleep(Duration::from_millis(2400)).await;

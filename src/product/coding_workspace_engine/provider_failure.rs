@@ -189,6 +189,88 @@ impl CodingWorkspaceEngine {
         Ok(updated)
     }
 
+    /// P4-a（REQ-PTR-IDLE）：provider 零活动挂起耗尽门——同 provider fresh
+    /// 重试一次后仍挂起时，attempt 转 Blocked 并按角色落 stalled 门：
+    /// coder 落 `coder_provider_stalled`（三动作，复用块2 CoderTriageCard，
+    /// `retry_coding_with_context` 提交即重新开跑）；reviewer 落
+    /// `code_review_provider_stalled`（按 stage 回对应审查动作，内部审查
+    /// 在 P4-b 接线）。同帧发 CodingGateRequired（durable-first，同既有门
+    /// 先例）；幂等去重由 store 承担。
+    pub(crate) async fn open_provider_stalled_gate(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        node_id: &str,
+        role: CodingProviderRole,
+        phase: &str,
+        idle_secs: u64,
+        idle_limit_secs: u64,
+    ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
+        let (stage, role_label, reason_code, retry_action) = match role {
+            CodingProviderRole::Coder => (
+                CodingExecutionStage::Coding,
+                "Coder",
+                CODER_PROVIDER_STALLED_REASON_CODE,
+                coding_gate_action_for_id("retry_coding").expect("retry coding action"),
+            ),
+            CodingProviderRole::CodeReviewer => (
+                CodingExecutionStage::CodeReview,
+                "Code Reviewer",
+                CODE_REVIEW_PROVIDER_STALLED_REASON_CODE,
+                coding_gate_action_for_id("retry_review").expect("retry review action"),
+            ),
+            CodingProviderRole::InternalReviewer => (
+                CodingExecutionStage::InternalPrReview,
+                "Internal Reviewer",
+                CODE_REVIEW_PROVIDER_STALLED_REASON_CODE,
+                coding_gate_action_for_id("retry_internal_review")
+                    .expect("retry internal review action"),
+            ),
+        };
+        let mut available_actions = vec![retry_action];
+        if matches!(role, CodingProviderRole::Coder) {
+            available_actions.push(
+                coding_gate_action_for_id("retry_coding_with_context")
+                    .expect("retry coding with context action"),
+            );
+        }
+        available_actions.push(coding_gate_action_for_id("abort").expect("abort action"));
+        let description = if matches!(role, CodingProviderRole::Coder) {
+            format!(
+                "{role_label} 已 {idle_secs} 秒没有任何输出（界 {idle_limit_secs} 秒，阶段 {phase}），自动重试一次后仍无进展，流程已暂停。可直接重试、说明情况后继续，或终止。"
+            )
+        } else {
+            format!(
+                "{role_label} 已 {idle_secs} 秒没有任何输出（界 {idle_limit_secs} 秒，阶段 {phase}），自动重试一次后仍无进展，流程已暂停。可重试对应阶段审查，或终止。"
+            )
+        };
+        let updated = self.store.update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )?;
+        let gate = self.store.create_blocked_gate(
+            &updated,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage,
+                node_id: Some(node_id.to_string()),
+                role: Some(role),
+                title: "AI 挂起了".to_string(),
+                description,
+                reason_code: Some(reason_code.to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions,
+            },
+        )?;
+        let _ = self
+            .event_tx
+            .send(CodingWsOutMessage::CodingGateRequired { gate })
+            .await;
+        Ok(updated)
+    }
+
     pub(crate) async fn fail_provider_stream<T>(
         &self,
         attempt: &CodingExecutionAttempt,

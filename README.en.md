@@ -152,6 +152,18 @@ In dev mode the frontend proxies `/api` to `http://127.0.0.1:4317`. Open `http:/
 - Node.js >= 18 and pnpm
 - Claude Code (the app guides installation if missing on first launch)
 
+### Idle-watchdog environment variables (coding providers)
+
+The shared provider stream for coding execution/review detects hangs by silence since the last real event: when a reviewer is silent for 5 minutes or a coder for 10 minutes, it first retries once automatically with the same provider using a fresh prompt; if it stalls again, the flow pauses with an "AI stalled" gate (retry / explain-and-continue / abort) and never switches providers. While a tool call is still in flight, the silence window widens to 30 minutes to avoid killing legitimate long builds. The three thresholds can be overridden via environment variables (positive integer seconds; invalid values fall back to defaults):
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `ARIA_CODING_REVIEWER_IDLE_SECS` | 300 | Reviewer (Code Review / Internal PR Review) idle-stall threshold in seconds |
+| `ARIA_CODING_CODER_IDLE_SECS` | 600 | Coder idle-stall threshold in seconds |
+| `ARIA_CODING_TOOL_INFLIGHT_IDLE_SECS` | 1800 | Idle threshold while a tool call has not returned (seconds); the larger of this and the role threshold applies |
+
+While waiting for a human choice/permission answer the watchdog pauses and never counts the wait as a stall.
+
 ---
 
 ## Development Guide

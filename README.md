@@ -156,6 +156,18 @@ cd web && pnpm dev --port 5173
 - Node.js >= 18 与 pnpm
 - Claude Code（首次启动时如不存在的会引导安装）
 
+### 挂起检测环境变量（coding provider 零活动看门狗）
+
+coding 执行/审查的共享 provider 流按「距最后真实事件的静默时长」检测挂起：reviewer 5 分钟、coder 10 分钟无任何事件时，先自动用同一 provider 全新重试一次；再次挂起则暂停流程并落「AI 挂起」门（可重试/说明情况后继续/终止），不切换 provider。工具命令未返回期间静默窗口放宽到 30 分钟，避免误杀正常长构建。三项阈值可用环境变量覆写（正整数秒，非法值回默认）：
+
+| 环境变量 | 默认 | 语义 |
+|---|---:|---|
+| `ARIA_CODING_REVIEWER_IDLE_SECS` | 300 | reviewer（Code Review / Internal PR Review）思考静默挂起界（秒） |
+| `ARIA_CODING_CODER_IDLE_SECS` | 600 | coder 思考静默挂起界（秒） |
+| `ARIA_CODING_TOOL_INFLIGHT_IDLE_SECS` | 1800 | 工具 call 未返回时的静默挂起界（秒），生效时取与角色界的较大值 |
+
+choice/权限等待人工应答期间看门狗暂停计时，不会把人工等待当挂起。
+
 ---
 
 ## 开发指南

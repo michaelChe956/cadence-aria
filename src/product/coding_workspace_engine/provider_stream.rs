@@ -239,6 +239,17 @@ impl CodingWorkspaceEngine {
         }
         let active_legacy_input = legacy_input.clone();
         let active_input = input;
+        // P4-a（REQ-PTR-IDLE）：零活动挂起看门狗（C4：范式照抄
+        // provider_drive/watchdog.rs——`sleep_until`+`tokio::pin!`+`select!`
+        // 条件臂、真实活动重置、choice/permission 人工等待暂停；耗尽由
+        // retry-cycle 同 provider fresh 重试恰一次再 Blocked+stalled 门）。
+        // C3：阈值每次调用启动时一次读取（env 覆写，并行测试下安全读点）。
+        let idle_limits = ProviderIdleLimits::for_role(&provider_role);
+        let mut open_tool_call_ids = std::collections::BTreeSet::<String>::new();
+        let mut idle_last_activity_at = tokio::time::Instant::now();
+        let idle_watchdog = tokio::time::sleep_until(idle_last_activity_at + idle_limits.role);
+        tokio::pin!(idle_watchdog);
+        let mut waiting_for_permission = false;
         // Task 3.2（REQ-ENV-09/D7）：策略会话由 engine 构造 durable 审计 sink
         // （LifecycleStore `tool-policy-run-audit/` 分区）并按 provider run 分配
         // `role_run_seq`（分配随该 run 的 provider_start 首行落盘持久化）；三
@@ -317,6 +328,37 @@ impl CodingWorkspaceEngine {
                         self.persist_provider_cancellation(attempt, role_run, "provider_start")?;
                         return Err(CodingWorkspaceEngineError::Aborted);
                     }
+                    // P4-a：启动等待期开始计时——拉起静默同样按 idle 挂起收口
+                    //（设计 §3.2「启动等待开始计时，ProviderStart 重置」）。
+                    _ = &mut idle_watchdog => {
+                        cancel.cancel();
+                        let idle_secs = idle_last_activity_at.elapsed().as_secs();
+                        let idle_limit_secs = idle_limits.role.as_secs();
+                        warn_cancellation_site(
+                            attempt,
+                            role_run,
+                            PROVIDER_IDLE_STALL_REASON_CODE,
+                            "provider_start",
+                        );
+                        self.record_role_run_event(
+                            attempt,
+                            role_run,
+                            CodingRoleRunEventType::Timeout,
+                            json!({
+                                "phase": "provider_start",
+                                "reason_code": PROVIDER_IDLE_STALL_REASON_CODE,
+                                "role": format!("{provider_role:?}"),
+                                "idle_secs": idle_secs,
+                                "idle_limit_secs": idle_limit_secs
+                            }),
+                        );
+                        return Err(CodingWorkspaceEngineError::ProviderIdleStall {
+                            role: provider_role.clone(),
+                            phase: "provider_start".to_string(),
+                            idle_secs,
+                            idle_limit_secs,
+                        });
+                    }
                 }
             } else {
                 tokio::select! {
@@ -338,6 +380,36 @@ impl CodingWorkspaceEngine {
                         );
                         self.persist_provider_cancellation(attempt, role_run, "provider_start")?;
                         return Err(CodingWorkspaceEngineError::Aborted);
+                    }
+                    // P4-a：无总 timeout 路径同样受启动等待 idle 界保护（同上）。
+                    _ = &mut idle_watchdog => {
+                        cancel.cancel();
+                        let idle_secs = idle_last_activity_at.elapsed().as_secs();
+                        let idle_limit_secs = idle_limits.role.as_secs();
+                        warn_cancellation_site(
+                            attempt,
+                            role_run,
+                            PROVIDER_IDLE_STALL_REASON_CODE,
+                            "provider_start",
+                        );
+                        self.record_role_run_event(
+                            attempt,
+                            role_run,
+                            CodingRoleRunEventType::Timeout,
+                            json!({
+                                "phase": "provider_start",
+                                "reason_code": PROVIDER_IDLE_STALL_REASON_CODE,
+                                "role": format!("{provider_role:?}"),
+                                "idle_secs": idle_secs,
+                                "idle_limit_secs": idle_limit_secs
+                            }),
+                        );
+                        return Err(CodingWorkspaceEngineError::ProviderIdleStall {
+                            role: provider_role.clone(),
+                            phase: "provider_start".to_string(),
+                            idle_secs,
+                            idle_limit_secs,
+                        });
                     }
                 }
             };
@@ -421,6 +493,12 @@ impl CodingWorkspaceEngine {
                         .await;
                 }
             };
+            // P4-a：ProviderStart 即真实活动——启动等待期清零，事件循环从
+            // 会话就绪起重新计静默。
+            idle_last_activity_at = tokio::time::Instant::now();
+            idle_watchdog.as_mut().reset(
+                idle_last_activity_at + effective_idle_limit(idle_limits, open_tool_call_ids.len()),
+            );
             let mut commands_open = true;
             let mut full_output = String::new();
             let mut tool_call_titles = BTreeMap::new();
@@ -476,6 +554,21 @@ impl CodingWorkspaceEngine {
                             commands_open = false;
                             continue;
                         };
+                        // P4-a：任何命令活动（含人工权限/选择应答）重置零活动
+                        // 看门狗（同 provider_drive 先例）；PermissionResponse
+                        // 同时解除权限等待暂停（权限悬置由 adapter 侧
+                        // PERMISSION_TIMEOUT 收口，不是 provider 楔死）。
+                        if matches!(command, CodingRunnerCommand::PermissionResponse { .. }) {
+                            waiting_for_permission = false;
+                        }
+                        idle_last_activity_at = tokio::time::Instant::now();
+                        idle_watchdog.as_mut().reset(
+                            idle_last_activity_at
+                                + effective_idle_limit(
+                                    idle_limits,
+                                    open_tool_call_ids.len(),
+                                ),
+                        );
                         match command {
                             CodingRunnerCommand::AbortAttempt => {
                                 let _ = session.commands.try_send(ProviderCommand::Abort);
@@ -649,6 +742,33 @@ impl CodingWorkspaceEngine {
                                 )
                                 .await;
                         };
+                        // P4-a：真实活动重置 idle 计时（UsageReport/ToolPolicy
+                        // 观测性事件除外，含 pi_empty_output_retry 的 Execution
+                        // 算新事件）；ToolCall/ToolResult 维护在途工具集（未
+                        // 返回时取 max(角色界, 工具界)）；PermissionRequest
+                        // 悬置看门狗等待人工应答。
+                        match &event {
+                            ProviderEvent::ToolCall(call) => {
+                                open_tool_call_ids.insert(call.id.clone());
+                            }
+                            ProviderEvent::ToolResult(result) => {
+                                open_tool_call_ids.remove(&result.tool_use_id);
+                            }
+                            ProviderEvent::PermissionRequest(_) => {
+                                waiting_for_permission = true;
+                            }
+                            _ => {}
+                        }
+                        if provider_event_is_idle_activity(&event) {
+                            idle_last_activity_at = tokio::time::Instant::now();
+                            idle_watchdog.as_mut().reset(
+                                idle_last_activity_at
+                                    + effective_idle_limit(
+                                        idle_limits,
+                                        open_tool_call_ids.len(),
+                                    ),
+                            );
+                        }
                         match event {
                             ProviderEvent::TextDelta { content } => {
                                 if !open_choice_ids.is_empty() {
@@ -1014,6 +1134,46 @@ impl CodingWorkspaceEngine {
                             | ProviderEvent::ToolPolicyWarning(_)
                             | ProviderEvent::ToolPolicyTerminated(_) => {}
                         }
+                    }
+                    // P4-a（REQ-PTR-IDLE）：零活动挂起看门狗——置于 biased
+                    // 轮询末位（同时就绪的事件/命令先重置，不误杀），且
+                    // choice/permission 人工等待悬置期间不计时（条件臂关闭；
+                    // 范式同 provider_drive watchdog）。处置：Abort 入会话
+                    // kill 链 + cancel；Timeout 事件带稳定原因码与空闲诊断；
+                    // 收口交 retry-cycle（首次同 provider fresh 重试恰一次）。
+                    _ = &mut idle_watchdog,
+                    if !waiting_for_permission && open_choice_ids.is_empty() =>
+                    {
+                        let idle_secs = idle_last_activity_at.elapsed().as_secs();
+                        let idle_limit_secs =
+                            effective_idle_limit(idle_limits, open_tool_call_ids.len()).as_secs();
+                        let _ = session.commands.try_send(ProviderCommand::Abort);
+                        cancel.cancel();
+                        warn_cancellation_site(
+                            attempt,
+                            role_run,
+                            PROVIDER_IDLE_STALL_REASON_CODE,
+                            "provider_stream",
+                        );
+                        self.record_role_run_event(
+                            attempt,
+                            role_run,
+                            CodingRoleRunEventType::Timeout,
+                            json!({
+                                "phase": "provider_stream",
+                                "reason_code": PROVIDER_IDLE_STALL_REASON_CODE,
+                                "role": format!("{provider_role:?}"),
+                                "idle_secs": idle_secs,
+                                "idle_limit_secs": idle_limit_secs,
+                                "open_tool_calls": open_tool_call_ids.len()
+                            }),
+                        );
+                        return Err(CodingWorkspaceEngineError::ProviderIdleStall {
+                            role: provider_role.clone(),
+                            phase: "provider_stream".to_string(),
+                            idle_secs,
+                            idle_limit_secs,
+                        });
                     }
                 }
             }
