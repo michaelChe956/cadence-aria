@@ -546,3 +546,65 @@ async fn plan_final_confirm_results_carry_target_and_attempt_ids_in_sorted_order
         .collect();
     assert_eq!(got, expected);
 }
+
+/// P4-c（REQ-CRO-12 / 3* 第 4 段）：多 target plan ready → attention 聚一条
+/// plan_final_confirm 并抑制逐仓 final_confirm；GET progress.attention_items
+/// 筛同源结果（本 plan）；occurred_at 取成员 FinalConfirm 节点 started_at
+/// 最大值（事实时间）。
+#[tokio::test]
+async fn plan_final_confirm_attention_aggregates_one_item_and_suppresses_per_attempt() {
+    let fixture = frozen_plan_fixture().await;
+    drive_all_targets(&fixture).await;
+
+    let items = crate::web::coding_attention_info::issue_coding_attention_items(
+        &fixture.paths,
+        PROJECT_ID,
+        ISSUE_ID,
+    )
+    .unwrap();
+    let plan_items: Vec<_> = items
+        .iter()
+        .filter(|item| item.kind == "plan_final_confirm")
+        .collect();
+    assert_eq!(plan_items.len(), 1, "恰一条 plan_final_confirm: {items:?}");
+    let item = plan_items[0];
+    assert_eq!(item.plan_id.as_deref(), Some(PLAN_ID));
+    assert_eq!(item.target.target_type, "coding_plan");
+    assert_eq!(item.target.plan_id.as_deref(), Some(PLAN_ID));
+    assert!(item.key.starts_with(&format!("plan-final:{PLAN_ID}:")));
+    assert!(
+        items.iter().all(|item| item.kind != "final_confirm"),
+        "多 target 聚合抑制逐仓 final_confirm 催点: {items:?}"
+    );
+
+    // occurred_at = 成员 FinalConfirm 节点 started_at 的最大值（事实时间，
+    // 非 GET now）。
+    let store = fixture.coding_store();
+    let mut member_node_times = Vec::new();
+    for (target, _) in [
+        (fixture.busi, "n3-busi"),
+        (fixture.web, "n3-web"),
+        (fixture.gateway, "n3-gateway"),
+        (fixture.frontend, "n3-frontend"),
+    ] {
+        let attempt = fixture.target_attempt(target);
+        let node = store
+            .get_timeline_nodes(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .unwrap()
+            .into_iter()
+            .find(|node| {
+                node.stage == crate::product::coding_models::CodingExecutionStage::FinalConfirm
+            })
+            .expect("final confirm node");
+        member_node_times.push(node.started_at);
+    }
+    member_node_times.sort();
+    assert_eq!(&item.occurred_at, member_node_times.last().unwrap());
+
+    // 3* 第 4 段（P1-a GET 接线）：progress.attention_items 只含本 plan 的
+    // 同源结果。
+    let progress = get_progress(&fixture.state).await.unwrap();
+    assert_eq!(progress.attention_items.len(), 1, "筛同源后仅本 plan 一条");
+    assert_eq!(progress.attention_items[0].key, item.key);
+    assert_eq!(progress.attention_items[0].kind, "plan_final_confirm");
+}

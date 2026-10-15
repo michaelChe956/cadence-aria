@@ -386,6 +386,28 @@ impl super::CodingAttemptStore {
             .collect())
     }
 
+    /// P4-c（REQ-CRO-12）：open blocked 门的只读事实面——`(gate, created_at)`
+    /// 元组。`created_at` 是 store 私有 `BlockedGateRecord` 字段，经此入口
+    /// 只读透出，供 web 层 attention 投影作 `occurred_at`（事实时间，不用
+    /// GET now）；store 不依赖 web DTO。
+    pub fn list_open_blocked_gate_facts(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<(CodingGateRequired, String)>, ProductStoreError> {
+        let mut records: Vec<BlockedGateRecord> =
+            super::list_json_records(&self.blocked_gates_root(project_id, issue_id, attempt_id))?;
+        records.retain(|record| record.status == BlockedGateStatus::Open);
+        Ok(records
+            .into_iter()
+            .map(|record| {
+                let created_at = record.created_at;
+                (normalize_blocked_gate(record.gate), created_at)
+            })
+            .collect())
+    }
+
     pub fn open_blocked_gate_node_id(
         &self,
         project_id: &str,
@@ -1237,10 +1259,7 @@ mod tests {
                 summary,
             )
             .unwrap();
-        assert!(
-            updated.triage_summary.is_some(),
-            "回写后必须能读到摘要"
-        );
+        assert!(updated.triage_summary.is_some(), "回写后必须能读到摘要");
         assert_eq!(
             updated
                 .triage_summary
@@ -1264,9 +1283,6 @@ mod tests {
             "coding_blocked_gate_9999",
             crate::product::coding_models::CodingTriageSummary::default(),
         );
-        assert!(matches!(
-            missing,
-            Err(ProductStoreError::NotFound { .. })
-        ));
+        assert!(matches!(missing, Err(ProductStoreError::NotFound { .. })));
     }
 }

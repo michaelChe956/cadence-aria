@@ -2,6 +2,7 @@ pub mod advance_plan;
 pub mod app;
 pub mod autopilot_orchestrator;
 pub mod choice_reply;
+pub mod coding_attention_info;
 pub mod coding_final_confirm_info;
 pub mod coding_start;
 pub mod coding_ws_handler;

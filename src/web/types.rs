@@ -529,6 +529,11 @@ pub struct IssueLifecycleResponse {
     /// additive：旧客户端反序列化缺省为空。
     #[serde(default)]
     pub c1_waiting_items: Vec<crate::web::plan_confirmed_info::C1WaitingItemDto>,
+    /// P4-c（REQ-CRO-12 / 契约 A1）：durable 事实派生的 coding 待处理事项
+    /// 投影（无 watched/recent 过滤，全局 cockpit 消费）。additive：旧
+    /// 客户端反序列化缺省为空。
+    #[serde(default)]
+    pub coding_attention_items: Vec<crate::web::coding_attention_info::CodingAttentionItemDto>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1290,6 +1295,11 @@ pub struct PlanCodingProgressDto {
     /// git（owner/范围/git 仍由逐项 `handle_final_confirm` 提交时校验）。
     #[serde(default)]
     pub final_confirm: PlanCodingFinalConfirmDto,
+    /// P4-c（REQ-CRO-12 / 契约 A1）：本 plan 同源的待处理事项（choice/
+    /// triage/blocked/stalled/manual_recovery/plan_final_confirm；多 target
+    /// 聚合抑制逐仓 final_confirm）。additive：旧客户端缺省为空。
+    #[serde(default)]
+    pub attention_items: Vec<crate::web::coding_attention_info::CodingAttentionItemDto>,
     pub plan_complete: bool,
     /// H4（设计 C 节，H5 冻结形状对齐）：workspace_lifecycle 事实——
     /// generation 单调、现存/缺失成员计数与状态；数据来自 run/advance/

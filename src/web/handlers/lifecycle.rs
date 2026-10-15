@@ -454,6 +454,15 @@ pub async fn issue_lifecycle(
         )
         .map_err(product_store_api_error)?;
 
+    // P4-c（REQ-CRO-12 / 契约 A1）：durable 事实待处理事项与列表同源派生；
+    // 读取失败按 HTTP 显式错误传播（不伪 client、不吞为空）。
+    let coding_attention_items = crate::web::coding_attention_info::issue_coding_attention_items(
+        &app_paths,
+        &project_id,
+        &issue_id,
+    )
+    .map_err(product_store_api_error)?;
+
     // P3（REQ-WIGA-07）：issue 级有界近期完成目录；仅在显式携带
     // recent_since 时计算（旧 URL/旧两 info 数组原样保持）。parsed_since
     // = max(RFC3339 query, now-24h)，limit 缺省 32、越界/孤立 422。
@@ -520,6 +529,7 @@ pub async fn issue_lifecycle(
         coding_final_confirm_info,
         recent_completion_info,
         c1_waiting_items,
+        coding_attention_items,
     }))
 }
 

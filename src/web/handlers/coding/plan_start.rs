@@ -1867,5 +1867,14 @@ pub(crate) fn build_plan_coding_progress(
         workspace_lifecycle: plan_workspace_lifecycle_projection(
             paths, project_id, issue_id, plan_id, run,
         )?,
+        // P4-c（契约 A1 / 3* 第 4 段）：本 plan 同源待处理事项——多 target
+        // plan 的 plan_final_confirm 聚一条，逐仓 final_confirm 抑制；无
+        // plan 归属的事项（手动单仓等）不进本 plan 视图。
+        attention_items: crate::web::coding_attention_info::issue_coding_attention_items(
+            paths, project_id, issue_id,
+        )?
+        .into_iter()
+        .filter(|item| item.plan_id.as_deref() == Some(plan_id))
+        .collect(),
     })
 }
