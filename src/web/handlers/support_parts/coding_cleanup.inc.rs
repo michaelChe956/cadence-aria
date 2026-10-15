@@ -197,8 +197,8 @@ pub(crate) fn cleanup_shared_worktree_by_routing(
 /// - 保护:该 issue 仍有 attempt 记录(任何 plan/轮次,含 parked 冻结路径)
 ///   指向此目录,或目录下仍有 git 注册 worktree(存活执行面)→ 保留;
 /// - 其余:整目录删除(缺失=已清,幂等)。IO 失败显式上抛,不静默。
-/// routing FailClosed 时不阻断已完成的删除结果,仅告警跳过(删除准入
-/// 已在前序步骤对 routing 做过 fail-closed)。
+///   routing FailClosed 时不阻断已完成的删除结果,仅告警跳过(删除准入
+///   已在前序步骤对 routing 做过 fail-closed)。
 pub(crate) async fn sweep_issue_worktree_residue(
     app_paths: &ProductAppPaths,
     project_id: &str,
@@ -217,7 +217,7 @@ pub(crate) async fn sweep_issue_worktree_residue(
     let repositories = crate::product::repository_store::RepositoryStore::new(app_paths.clone())
         .list(project_id)
         .map_err(product_store_api_error)?;
-    let repo_roots: Vec<std::path::PathBuf> = match &routing {
+    let mut repo_roots: Vec<std::path::PathBuf> = match &routing {
         RepositoryRouting::Legacy { repository_id } => repositories
             .iter()
             .filter(|record| {
@@ -225,16 +225,45 @@ pub(crate) async fn sweep_issue_worktree_residue(
             })
             .map(|record| record.path.clone())
             .collect(),
-        RepositoryRouting::Logical { manifest, .. } => repositories
-            .iter()
-            .filter(|record| {
-                record
-                    .logical_repository_id
-                    .as_ref()
-                    .is_some_and(|logical| manifest.member_ids.contains(logical))
-            })
-            .map(|record| record.path.clone())
-            .collect(),
+        // Bug1 fix-loop r2(v1.3):物理仓根优先取 LC 子树 checkouts/*.json 的
+        // canonical_path(原生项目无 repos.json);checkouts 解析不到成员时
+        // 退回 repos.json 原路径(混布夹具)。Legacy 分支保持逐字不变。
+        RepositoryRouting::Logical { manifest, .. } => {
+            // lc_id 与 `load_for_issue` 同源(issue 记录→None 走 legacy 根),
+            // 不依赖 manifest 自带 id(legacy 根 manifest 的 id 不等于子树名)。
+            let lc_id = crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+                app_paths, project_id, issue_id,
+            )
+            .map_err(product_store_api_error)?;
+            let lc_store = match lc_id.as_deref() {
+                Some(lc_id) => LogicalCodebaseStore::for_lc(app_paths.clone(), lc_id),
+                None => LogicalCodebaseStore::new(app_paths.clone()),
+            };
+            let mut roots: Vec<std::path::PathBuf> = lc_store
+                .list_checkouts(project_id)
+                .map_err(product_store_api_error)?
+                .into_iter()
+                .filter(|checkout| {
+                    manifest
+                        .member_ids
+                        .contains(&checkout.logical_repository_id)
+                })
+                .map(|checkout| checkout.canonical_path.clone())
+                .collect();
+            if roots.is_empty() {
+                roots = repositories
+                    .iter()
+                    .filter(|record| {
+                        record
+                            .logical_repository_id
+                            .as_ref()
+                            .is_some_and(|logical| manifest.member_ids.contains(logical))
+                    })
+                    .map(|record| record.path.clone())
+                    .collect();
+            }
+            roots
+        }
         RepositoryRouting::FailClosed { code, reason } => {
             tracing::warn!(
                 code = ?code,
@@ -244,6 +273,15 @@ pub(crate) async fn sweep_issue_worktree_residue(
             return Ok(());
         }
     };
+    repo_roots.sort();
+    repo_roots.dedup();
+    if repo_roots.is_empty() {
+        tracing::warn!(
+            project_id,
+            issue_id,
+            "issue worktree residue sweep resolved no repository roots; nothing to sweep"
+        );
+    }
 
     // 保护面:issue 仍有 attempt 记录(其 worktree_path 父目录即受保护)。
     let protected: Vec<std::path::PathBuf> = CodingAttemptStore::new(app_paths.clone())

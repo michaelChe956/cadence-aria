@@ -3240,3 +3240,187 @@ async fn plan_coding_delete_sweeps_leftover_issue_worktree_dirs_idempotently() {
         "live round-2 worktree must survive the sweep"
     );
 }
+
+/// Bug1 fix-loop r2(controller 2026-10-16 钉死根因):v1.3 LC 原生项目
+/// 无 repos.json(`RepositoryStore::list` 返回空),物理仓根只在 LC 子树
+/// `checkouts/*.json`。sweep 的仓根解析必须走 LC checkouts,不得依赖
+/// repos.json 静默空转(HTTP 200 clean 但目录未删、无日志)。
+#[tokio::test]
+async fn plan_coding_delete_sweeps_residue_without_legacy_repos_json() {
+    let fixture = n3_fixture().await;
+    let started = post_start(&fixture.state, "cmd_bug1r2_round1", PLAN_REVISION_ID)
+        .await
+        .expect("round 1 one-click start");
+    assert!(matches!(
+        started.start_outcome,
+        Some(CodingPlanStartOutcome::Started { .. })
+    ));
+    amr_ready_busi_attempt(&fixture).await;
+
+    // 记录四仓 issue 目录(拆卸前从 attempt 冻结路径取父目录)。
+    let mut issue_dirs = Vec::new();
+    for attempt in fixture
+        .coding_store()
+        .list_attempts_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+    {
+        if let Some(worktree_path) = attempt.worktree_path.clone() {
+            issue_dirs.push(worktree_path.parent().unwrap().to_path_buf());
+        }
+    }
+    assert_eq!(issue_dirs.len(), 4, "four target repos own an issue dir");
+
+    // 轮 1 整删(repos.json 仍在,拆卸链与清扫正常收口)。
+    let receipt = delete_workspaces(&fixture.state, "plan_delete_ui_bug1r2", Some(1), true)
+        .await
+        .expect("round 1 delete succeeds");
+    assert_eq!(receipt.operation_state, "accepted");
+    assert_eq!(receipt.generation, 2);
+
+    // 复刻 v1.3 原生现场:移除 v1.2 legacy repos.json,物理仓根只剩 LC
+    // 子树 checkouts 可解析。
+    let repos_json = fixture.paths.project_root(PROJECT_ID).join("repos.json");
+    assert!(
+        repos_json.exists(),
+        "fixture seeds legacy repos.json before removal"
+    );
+    std::fs::remove_file(&repos_json).unwrap();
+
+    // 复刻 owner 现场残留:零 attempt、零注册,仅 issue 级目录(含
+    // `.provider-session-cache` 与未注册 UUID 子目录)。
+    for dir in &issue_dirs {
+        std::fs::create_dir_all(dir.join(".provider-session-cache")).unwrap();
+        let leftover = dir.join("uuid-leftover");
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("leftover.txt"), "residue").unwrap();
+    }
+
+    // owner 重删(零成员路径,收尾 sweep 负责清理):必须经 LC checkouts
+    // 解析仓根清掉残留(repos.json 已不存在,旧实现在此静默空转)。
+    let replay = delete_workspaces(&fixture.state, "plan_delete_ui_bug1r2_r", None, true)
+        .await
+        .expect("re-delete over the LC-checkouts layout succeeds");
+    assert_eq!(replay.operation_state, "accepted");
+    for dir in &issue_dirs {
+        assert!(
+            !dir.exists(),
+            "residue must be swept via LC checkout roots: {}",
+            dir.display()
+        );
+    }
+
+    // 幂等:直接再清扫一次,零变化。
+    crate::web::handlers::support::sweep_issue_worktree_residue(
+        &fixture.paths,
+        PROJECT_ID,
+        ISSUE_ID,
+    )
+    .await
+    .expect("idempotent re-sweep over the LC-checkouts layout");
+    for dir in &issue_dirs {
+        assert!(!dir.exists(), "re-sweep must not resurrect residue");
+    }
+}
+
+/// Bug1 fix-loop r2(owner 硬约束):repos.json 原路径必须保持可清扫——
+/// LC checkouts 缺失(混布夹具)时,Logical 分支的 repos.json 兜底仍是
+/// 有效解析路径;若兜底被移除本测试必红。
+#[tokio::test]
+async fn plan_coding_delete_sweeps_via_repos_json_fallback_when_checkouts_missing() {
+    let fixture = n3_fixture().await;
+    let started = post_start(&fixture.state, "cmd_bug1r2fb_round1", PLAN_REVISION_ID)
+        .await
+        .expect("round 1 one-click start");
+    assert!(matches!(
+        started.start_outcome,
+        Some(CodingPlanStartOutcome::Started { .. })
+    ));
+    amr_ready_busi_attempt(&fixture).await;
+
+    let mut issue_dirs = Vec::new();
+    for attempt in fixture
+        .coding_store()
+        .list_attempts_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+    {
+        if let Some(worktree_path) = attempt.worktree_path.clone() {
+            issue_dirs.push(worktree_path.parent().unwrap().to_path_buf());
+        }
+    }
+    assert_eq!(issue_dirs.len(), 4);
+    let receipt = delete_workspaces(&fixture.state, "plan_delete_ui_bug1r2fb", Some(1), true)
+        .await
+        .expect("round 1 delete succeeds");
+    assert_eq!(receipt.operation_state, "accepted");
+
+    // 混布夹具:清空 LC 子树 checkouts 目录(repos.json 仍在),迫使仓根
+    // 解析走 repos.json 兜底原路径。
+    let lc_root = fixture
+        .paths
+        .logical_codebase_root(PROJECT_ID)
+        .join("checkouts");
+    if lc_root.exists() {
+        std::fs::remove_dir_all(&lc_root).unwrap();
+    }
+
+    for dir in &issue_dirs {
+        std::fs::create_dir_all(dir.join(".provider-session-cache")).unwrap();
+        let leftover = dir.join("uuid-leftover");
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("leftover.txt"), "residue").unwrap();
+    }
+    crate::web::handlers::support::sweep_issue_worktree_residue(
+        &fixture.paths,
+        PROJECT_ID,
+        ISSUE_ID,
+    )
+    .await
+    .expect("sweep via the repos.json fallback succeeds");
+    for dir in &issue_dirs {
+        assert!(
+            !dir.exists(),
+            "residue must be swept via the repos.json fallback: {}",
+            dir.display()
+        );
+    }
+}
+
+/// Bug1 fix-loop r2(owner 硬约束):单仓(Legacy)布局零扰动——无
+/// manifest/selection 的项目里 sweep 安全返回,不触碰任何目录、不报错
+/// (与修复前行为一致;空仓根仅新增 warn 日志)。
+#[tokio::test]
+async fn plan_coding_sweep_is_benign_noop_on_legacy_single_repo_layout() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    std::fs::create_dir_all(
+        root.path()
+            .join(".aria")
+            .join("projects")
+            .join("project_0001"),
+    )
+    .unwrap();
+
+    // 单仓布局:无 manifest/selection → Routing=Legacy(repository_id 为空,
+    // 由实体取);repos.json 即使在场也解析不到仓根 → 零候选零动作。
+    let repo_root = root.path().join("single-repo");
+    std::fs::create_dir_all(&repo_root).unwrap();
+    let residue = repo_root
+        .join(".worktrees")
+        .join("aria-issues")
+        .join("issue_0001")
+        .join("uuid-leftover");
+    std::fs::create_dir_all(&residue).unwrap();
+    std::fs::write(residue.join("leftover.txt"), "residue").unwrap();
+
+    crate::web::handlers::support::sweep_issue_worktree_residue(
+        &paths,
+        "project_0001",
+        "issue_0001",
+    )
+    .await
+    .expect("sweep on a legacy single-repo layout is a benign no-op");
+    assert!(
+        residue.exists(),
+        "legacy layout directories must be untouched by the sweep"
+    );
+}
