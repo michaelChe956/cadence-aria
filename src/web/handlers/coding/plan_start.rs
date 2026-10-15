@@ -1244,7 +1244,7 @@ async fn resume_parked_plan_attempt(
 
 /// plan scope 删除准入：try-shared 争用/墓碑一律立即
 /// `Conflict{entity_deleting}`，零阻塞等待（沿 EntityOperationStore 现语义）。
-fn plan_live_admission(
+pub(super) fn plan_live_admission(
     paths: &ProductAppPaths,
     project_id: &str,
     issue_id: &str,
@@ -1255,7 +1255,7 @@ fn plan_live_admission(
     EntityOperationStore::new(paths.clone()).with_live_write(&scope, || Ok(()))
 }
 
-fn ensure_plan_confirmed(
+pub(super) fn ensure_plan_confirmed(
     paths: &ProductAppPaths,
     project_id: &str,
     issue_id: &str,
@@ -1859,6 +1859,11 @@ pub(crate) fn build_plan_coding_progress(
         target_attempts,
         units,
         plan_complete,
+        // P1-a（REQ-MTG-11 / 契约 A2）：plan 级聚合最终确认投影（共享纯
+        // 函数只读持久事实，供块 4 attention 同源复用）。
+        final_confirm: super::plan_final_confirm::build_plan_final_confirm(
+            paths, project_id, issue_id, plan_id,
+        )?,
         workspace_lifecycle: plan_workspace_lifecycle_projection(
             paths, project_id, issue_id, plan_id, run,
         )?,

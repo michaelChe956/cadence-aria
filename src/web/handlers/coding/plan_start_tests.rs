@@ -54,11 +54,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-const PROJECT_ID: &str = "project_0001";
-const ISSUE_ID: &str = "issue_plan_0001";
-const PLAN_ID: &str = "work_item_plan_0001";
+pub(super) const PROJECT_ID: &str = "project_0001";
+pub(super) const ISSUE_ID: &str = "issue_plan_0001";
+pub(super) const PLAN_ID: &str = "work_item_plan_0001";
 const CREATED_AT: &str = "2026-10-13T00:00:00Z";
-const PLAN_REVISION_ID: &str = "plan_revision_0002";
+pub(super) const PLAN_REVISION_ID: &str = "plan_revision_0002";
 
 /// 五 WI/四 target（park-1 同形）：busi=wi_core、web=wi_registration（依赖
 /// wi_core，跨桶）、gateway=wi_unrelated、frontend={wi_service, wi_panel}；
@@ -346,22 +346,22 @@ fn n3_plan_projection(
     }
 }
 
-struct N3Fixture {
-    _root: tempfile::TempDir,
-    paths: ProductAppPaths,
-    state: WebAppState,
-    busi: LogicalRepositoryId,
-    web: LogicalRepositoryId,
-    gateway: LogicalRepositoryId,
-    frontend: LogicalRepositoryId,
+pub(super) struct N3Fixture {
+    pub(super) _root: tempfile::TempDir,
+    pub(super) paths: ProductAppPaths,
+    pub(super) state: WebAppState,
+    pub(super) busi: LogicalRepositoryId,
+    pub(super) web: LogicalRepositoryId,
+    pub(super) gateway: LogicalRepositoryId,
+    pub(super) frontend: LogicalRepositoryId,
 }
 
 impl N3Fixture {
-    fn coding_store(&self) -> CodingAttemptStore {
+    pub(super) fn coding_store(&self) -> CodingAttemptStore {
         CodingAttemptStore::new(self.paths.clone())
     }
 
-    fn run_store(&self) -> CodingPlanRunStore {
+    pub(super) fn run_store(&self) -> CodingPlanRunStore {
         CodingPlanRunStore::new(self.paths.clone())
     }
 
@@ -379,7 +379,7 @@ impl N3Fixture {
         )
     }
 
-    fn target_attempt(
+    pub(super) fn target_attempt(
         &self,
         target: LogicalRepositoryId,
     ) -> crate::product::coding_models::CodingExecutionAttempt {
@@ -389,11 +389,11 @@ impl N3Fixture {
             .expect("target attempt")
     }
 
-    fn busi_attempt(&self) -> crate::product::coding_models::CodingExecutionAttempt {
+    pub(super) fn busi_attempt(&self) -> crate::product::coding_models::CodingExecutionAttempt {
         self.target_attempt(self.busi)
     }
 
-    fn busi_selection(&self, command_id: &str) -> CodingPlanSelection {
+    pub(super) fn busi_selection(&self, command_id: &str) -> CodingPlanSelection {
         let attempt = self.busi_attempt();
         let unit = self
             .coding_store()
@@ -418,7 +418,7 @@ impl N3Fixture {
     }
 }
 
-async fn n3_fixture() -> N3Fixture {
+pub(super) async fn n3_fixture() -> N3Fixture {
     let root = tempfile::tempdir().unwrap();
     PlanRepairFixtureRuntime::seed(root.path(), PlanRepairFixtureControl::default())
         .await
@@ -684,7 +684,7 @@ async fn post_start(
     .map(|json| json.0)
 }
 
-async fn get_progress(
+pub(super) async fn get_progress(
     state: &WebAppState,
 ) -> Result<PlanCodingProgressDto, crate::web::error::ApiError> {
     super::plan_start::get_plan_coding_progress(

@@ -17,6 +17,7 @@ use crate::web::coding_ws_handler::{coding_pending_gates, coding_role_run_snapsh
 use crate::web::state::CodingAttemptRunKey;
 mod advance;
 mod group;
+mod plan_final_confirm;
 mod plan_start;
 mod progress;
 pub(crate) mod repository_resolution;
@@ -32,16 +33,24 @@ mod worktree_route;
 #[allow(unused_imports)]
 pub(crate) use advance::map_advance_outcome;
 pub use group::create_group_coding_attempt;
-pub use plan_start::{
-    delete_plan_coding_workspaces, get_plan_coding_progress, post_plan_coding_start,
-};
+/// P1-a（REQ-MTG-11 / 契约 A2）：plan 级聚合最终确认纯投影，供
+/// `coding_attention_info`（块 4 A1）与 GET 接线直接调用（不反调
+/// GET/lifecycle，避免循环）。
+pub(crate) use plan_final_confirm::build_plan_final_confirm;
+pub use plan_final_confirm::post_plan_coding_final_confirm;
 /// S2b/S2a 缝合：完成事件→就绪集推进桥（runner 完成链挂点调用；调用方
 /// 须持 `work_item_group:{project}:{issue}:{plan}` 串行锁——见 plan_start.rs
 /// 顶部锁契约）。
 pub(crate) use plan_start::drive_ready_units_for_plan;
+pub use plan_start::{
+    delete_plan_coding_workspaces, get_plan_coding_progress, post_plan_coding_start,
+};
 #[cfg(test)]
 #[path = "coding/advance_tests.rs"]
 mod advance_tests;
+#[cfg(test)]
+#[path = "coding/plan_final_confirm_tests.rs"]
+mod plan_final_confirm_tests;
 #[cfg(test)]
 #[path = "coding/plan_start_tests.rs"]
 mod plan_start_tests;

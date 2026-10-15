@@ -107,7 +107,7 @@ mod workspace_sc_recovery;
 mod workspace_session;
 
 #[rustfmt::skip]
-pub use coding::{create_coding_attempt, create_group_coding_attempt, delete_plan_coding_workspaces, get_plan_coding_progress, post_plan_coding_start};
+pub use coding::{create_coding_attempt, create_group_coding_attempt, delete_plan_coding_workspaces, get_plan_coding_progress, post_plan_coding_final_confirm, post_plan_coding_start};
 #[rustfmt::skip]
 pub(crate) use coding::{
     abort_coding_attempt, build_group_work_item_progress, coding_attempt_artifact_content, coding_attempt_diff,
@@ -129,6 +129,9 @@ pub use automation_target::get_automation_target;
 pub use codebases::{
     create_logical_codebase, delete_logical_codebase, get_logical_codebase, list_codebases,
 };
+/// P1-a（契约 A2）：plan 级聚合最终确认纯投影（块 4 coding_attention_info
+/// 同源调用，不经过 handler）。
+pub(crate) use coding::build_plan_final_confirm;
 #[cfg(test)]
 pub(crate) use coding::scope::CodingAttemptRoutePath;
 pub use evidence_query::evidence_query;

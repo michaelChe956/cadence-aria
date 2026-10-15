@@ -1285,6 +1285,11 @@ pub struct PlanCodingProgressDto {
     pub selected_attempt_id: Option<String>,
     pub target_attempts: Vec<PlanCodingTargetDto>,
     pub units: Vec<PlanCodingUnitProgressDto>,
+    /// P1-a（REQ-MTG-11 / 契约 A2）：plan 级聚合最终确认就绪投影。additive：
+    /// 旧客户端反序列化缺省为 not_ready 空投影；GET 只看持久事实，不检查
+    /// git（owner/范围/git 仍由逐项 `handle_final_confirm` 提交时校验）。
+    #[serde(default)]
+    pub final_confirm: PlanCodingFinalConfirmDto,
     pub plan_complete: bool,
     /// H4（设计 C 节，H5 冻结形状对齐）：workspace_lifecycle 事实——
     /// generation 单调、现存/缺失成员计数与状态；数据来自 run/advance/
@@ -1302,6 +1307,65 @@ pub struct PlanWorkspaceLifecycleDto {
     pub existing_member_count: usize,
     pub missing_member_count: usize,
     pub state: String,
+}
+
+/// P1-a（REQ-MTG-11 / 契约 A2）：未齐备的冻结 target（GET `blocking` 条目；
+/// POST not_ready 回执的失败项同构）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanCodingFinalConfirmBlockingDto {
+    pub attempt_id: String,
+    pub reason_code: String,
+    pub message: String,
+}
+
+/// P1-a（REQ-MTG-11 / 契约 A2）：plan 级聚合最终确认投影——
+/// `state` 值域 `not_ready|ready|partial|done`：Confirmed 视为已确认；
+/// 全 Completed → done；部分 Completed 且剩余全就绪 → partial；零确认且
+/// 全就绪 → ready；其余（含 blocking 非空/plan 未执行完成）→ not_ready。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanCodingFinalConfirmDto {
+    pub state: String,
+    pub ready_attempt_ids: Vec<String>,
+    pub confirmed_attempt_ids: Vec<String>,
+    pub blocking: Vec<PlanCodingFinalConfirmBlockingDto>,
+}
+
+impl Default for PlanCodingFinalConfirmDto {
+    fn default() -> Self {
+        Self {
+            state: "not_ready".to_string(),
+            ready_attempt_ids: Vec::new(),
+            confirmed_attempt_ids: Vec::new(),
+            blocking: Vec::new(),
+        }
+    }
+}
+
+/// P1-a（契约 A2）：POST `.../coding-final-confirm` 回执逐仓结果。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanCodingFinalConfirmResultItemDto {
+    pub attempt_id: String,
+    pub target_repository_id: String,
+    /// 值域 `confirmed|already_completed|failed|not_attempted`。
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// P1-a（契约 A2）：POST `.../coding-final-confirm` 回执——
+/// `outcome` 值域 `all_confirmed|partially_confirmed|not_ready`；partial 只
+/// 表示本次未全成，成功数按 `results` 计算。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanCodingFinalConfirmResultDto {
+    pub plan_id: String,
+    pub outcome: String,
+    pub results: Vec<PlanCodingFinalConfirmResultItemDto>,
 }
 
 /// H4（设计 C 节，H5 冻结名对齐）：DELETE …/coding-workspaces 成功回执——

@@ -342,6 +342,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             get(handlers::get_plan_coding_progress).post(handlers::post_plan_coding_start),
         )
         .route(
+            "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/coding-final-confirm",
+            post(handlers::post_plan_coding_final_confirm),
+        )
+        .route(
             "/api/projects/{project_id}/issues/{issue_id}/work-item-plans/{plan_id}/coding-workspaces",
             delete(handlers::delete_plan_coding_workspaces),
         )
