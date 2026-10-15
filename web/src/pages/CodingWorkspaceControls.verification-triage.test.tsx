@@ -1,11 +1,11 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
   VerificationCommandEvidence,
   VerificationTriageRecord,
 } from "../api/types";
 import type { CodingPendingGate } from "../state/coding-workspace-store";
-import { GatePanel } from "./CodingWorkspaceControls";
+import { GatePanel, isTriageCardGate } from "./CodingWorkspaceControls";
 const fourActionGate: CodingPendingGate = {
   gate_id: "coding_blocked_gate_0001",
   kind: "blocked",
@@ -162,5 +162,63 @@ describe("CodingWorkspaceControls command evidence panel（C2 Task 9/#2）", () 
     expect(panel.textContent).toContain("实际命令：未记录");
     expect(screen.queryByTestId("coding-command-evidence-mismatch")).toBeNull();
     expect(screen.queryByTestId("coding-rerun-planned-command")).toBeNull();
+  });
+});
+
+describe("CodingWorkspaceControls GatePanel 分诊卡分流（P2-d/REQ-CRO-09）", () => {
+  const operationalBlockerGate: CodingPendingGate = {
+    ...fourActionGate,
+    title: "运行环境阻塞",
+    description: "Coder 报告运行环境阻塞，流程已暂停",
+    stage: "coding",
+    role: "coder",
+    reason_code: "coding_operational_blocker",
+    available_actions: [
+      { action_id: "retry_coding", label: "重新启动 Coder", action_type: "retry_coding" },
+      {
+        action_id: "retry_coding_with_context",
+        label: "我来说明情况，让 AI 继续",
+        action_type: "retry_coding_with_context",
+      },
+      { action_id: "abort", label: "终止", action_type: "abort" },
+    ],
+  };
+
+  it("isTriageCardGate 按 reason_code 判定（C5：coder_provider_stalled 的纳入由 P4-e 扩）", () => {
+    expect(isTriageCardGate(operationalBlockerGate)).toBe(true);
+    expect(
+      isTriageCardGate({ ...operationalBlockerGate, reason_code: "coding_output_human_triage" }),
+    ).toBe(true);
+    expect(isTriageCardGate(fourActionGate)).toBe(false);
+    expect(
+      isTriageCardGate({ ...operationalBlockerGate, reason_code: null }),
+    ).toBe(false);
+  });
+
+  it("分诊门经 GatePanel 分流到 CoderTriageCard；CR 门保持原渲染（回归）", () => {
+    const { unmount: unmountCard } = renderGatePanel(operationalBlockerGate);
+    expect(screen.getByTestId("coder-triage-card")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-pending-gate")).toBeNull();
+    unmountCard();
+
+    renderGatePanel(fourActionGate);
+    expect(screen.getByTestId("coding-pending-gate")).toBeInTheDocument();
+    expect(screen.queryByTestId("coder-triage-card")).toBeNull();
+  });
+
+  it("coding_operational_blocker 已进验证处理资格白名单：折叠展开后可转入（k3 放行条件 ①）", () => {
+    const onEnter = vi.fn();
+    renderGatePanel(operationalBlockerGate, { onEnterVerificationTriage: onEnter });
+
+    const technical = screen.getByTestId("coder-triage-technical-details");
+    expect(technical.open).toBe(false);
+    fireEvent.click(within(technical).getByText("技术详情"));
+    const advanced = screen.getByTestId("coder-triage-advanced-verification");
+    fireEvent.click(within(advanced).getByText("高级：验证处理"));
+
+    const panel = screen.getByTestId("coding-verification-triage");
+    expect(panel.textContent).toContain("验证处理");
+    fireEvent.click(screen.getByTestId("coding-verification-triage-enter"));
+    expect(onEnter).toHaveBeenCalledWith("coding_blocked_gate_0001");
   });
 });

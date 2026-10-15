@@ -14,6 +14,7 @@ import { ConfirmTwiceButton } from "../components/chat-workspace/cockpit/Confirm
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import type { ChatEntry } from "../state/chat-entries";
 import { codingStartupRejectionCopy } from "../state/cockpit-operation-semantics";
+import { CoderTriageCard, GateMetadata, VerificationTriageSection } from "./CoderTriageCard";
 import type { CodingPendingGate } from "../state/coding-workspace-store";
 
 export const ACTIVE_ATTEMPT_STATUSES = new Set([
@@ -368,6 +369,21 @@ export function GatePanel({
     );
   }
 
+  // P2-d（REQ-CRO-09）：coder 分诊门走 CoderTriageCard（三段大白话＋三按钮＋
+  // 技术详情/高级验证处理折叠）；其余门走原渲染，零改动。
+  if (isTriageCardGate(gate)) {
+    return (
+      <CoderTriageCard
+        gate={gate}
+        onRespond={onRespond}
+        verificationTriage={verificationTriage}
+        onEnterVerificationTriage={onEnterVerificationTriage}
+        commandEvidence={commandEvidence}
+        onRerunPlannedCommand={onRerunPlannedCommand}
+      />
+    );
+  }
+
   const activeGate = gate;
   const submitting = activeGate.submitting === true;
   const gateErrorCode = activeGate.errorCode ?? null;
@@ -424,72 +440,13 @@ export function GatePanel({
             </div>
           ) : null}
           {isVerificationTriageEligibleGate(activeGate) ? (
-            <div data-testid="coding-verification-triage" className="mt-1 text-xs text-amber-900">
-              <div className="font-semibold">验证处理</div>
-              {verificationTriage ? (
-                <div data-testid="coding-verification-triage-status">
-                  状态：
-                  {verificationTriage.status === "approved"
-                    ? "已批准"
-                    : verificationTriage.status === "rejected"
-                      ? "已拒绝"
-                      : "待处理"}
-                  {verificationTriage.status === "approved" &&
-                  verificationTriage.conclusion !== "approve_plan_revision"
-                    ? "（finding 已由验证处理覆盖）"
-                    : null}
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  data-testid="coding-verification-triage-enter"
-                  disabled={!onEnterVerificationTriage}
-                  onClick={() => onEnterVerificationTriage?.(activeGate.gate_id)}
-                  className="mt-1 inline-flex h-7 items-center rounded-md border border-amber-300 bg-white px-2 font-semibold hover:bg-amber-100 disabled:opacity-60"
-                >
-                  转入验证处理
-                </button>
-              )}
-            </div>
-          ) : null}
-          {commandEvidence ? (
-            <div
-              data-testid="coding-command-evidence"
-              className="mt-1 grid gap-0.5 text-xs text-amber-900"
-            >
-              <div className="font-semibold">命令证据</div>
-              <div className="font-mono">
-                计划命令：
-                {commandEvidence.planned_command ??
-                  commandEvidence.planned_manual_instruction ??
-                  "未记录"}
-              </div>
-              <div className="font-mono">
-                实际命令：{commandEvidence.actual_command ?? "未记录"}
-              </div>
-              <div className="font-mono">
-                实际 cwd：{commandEvidence.actual_cwd ?? "未记录"}
-              </div>
-              <div className="font-mono">
-                退出码：{commandEvidence.exit_code ?? "未记录"}
-              </div>
-              {commandEvidence.mismatch ? (
-                <div data-testid="coding-command-evidence-mismatch" className="font-semibold">
-                  实际执行命令与计划不一致
-                </div>
-              ) : null}
-              {commandEvidence.mismatch ? (
-                <button
-                  type="button"
-                  data-testid="coding-rerun-planned-command"
-                  disabled={!onRerunPlannedCommand}
-                  onClick={() => onRerunPlannedCommand?.(commandEvidence.check_id)}
-                  className="mt-1 inline-flex h-7 w-fit items-center rounded-md border border-amber-300 bg-white px-2 font-semibold hover:bg-amber-100 disabled:opacity-60"
-                >
-                  重跑原计划命令
-                </button>
-              ) : null}
-            </div>
+            <VerificationTriageSection
+              gate={activeGate}
+              verificationTriage={verificationTriage}
+              onEnterVerificationTriage={onEnterVerificationTriage}
+              commandEvidence={commandEvidence}
+              onRerunPlannedCommand={onRerunPlannedCommand}
+            />
           ) : null}
           <GateMetadata gate={activeGate} />
           {needsReason ? (
@@ -541,7 +498,9 @@ function actionRequiresContext(action: CodingGateRequired["available_actions"][n
   return (
     action.action_type === "manual_continue" ||
     action.action_type === "accept_risk" ||
-    action.action_type === "send_to_coder"
+    action.action_type === "send_to_coder" ||
+    // P2-d（REQ-CRO-09/A4）：说明情况重试需非空 extra_context（前端与后端双重校验）。
+    action.action_type === "retry_coding_with_context"
   );
 }
 
@@ -554,34 +513,29 @@ const VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES = [
   "code_review_verification_incomplete",
   "code_review_operational_blocker",
   "coding_output_human_triage",
+  // P2-a/P2-d（REQ-CVT-06）：运行环境阻塞门同样可转入验证处理（与后端白名单同步）。
+  "coding_operational_blocker",
 ] as const;
+
+/** P2-d（REQ-CRO-09，C5）：走 CoderTriageCard 的分诊门 reason_code——集中定义，
+ * `coder_provider_stalled` 的纳入由 P4-e 扩（C 区 #1：P2-d→P4-e→批 2）。 */
+const TRIAGE_CARD_REASON_CODES = [
+  "coding_output_human_triage",
+  "coding_operational_blocker",
+] as const;
+
+export function isTriageCardGate(gate: Pick<CodingGateRequired, "reason_code">): boolean {
+  return (
+    gate.reason_code != null &&
+    (TRIAGE_CARD_REASON_CODES as readonly string[]).includes(gate.reason_code)
+  );
+}
 
 /** C2 Task 8（#19）：可转入独立验证处理的门（coder 输出门＋CR 三门）。 */
 export function isVerificationTriageEligibleGate(gate: CodingGateRequired): boolean {
   return (
     gate.reason_code != null &&
     (VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES as readonly string[]).includes(gate.reason_code)
-  );
-}
-
-function GateMetadata({ gate }: { gate: CodingPendingGate }) {
-  const rows = [
-    gate.reason_code ? ["reason", gate.reason_code] : null,
-    gate.raw_provider_output_ref ? ["raw", gate.raw_provider_output_ref] : null,
-    gate.evidence_refs?.length ? ["evidence", gate.evidence_refs.join(", ")] : null,
-  ].filter(Boolean) as [string, string][];
-  if (rows.length === 0) {
-    return null;
-  }
-  return (
-    <dl className="mt-1 grid gap-0.5 text-xs text-amber-800">
-      {rows.map(([label, value]) => (
-        <div key={label} className="grid min-w-0 grid-cols-[4.5rem_minmax(0,1fr)] gap-2">
-          <dt className="font-semibold">{label}</dt>
-          <dd className="min-w-0 break-words font-mono">{value}</dd>
-        </div>
-      ))}
-    </dl>
   );
 }
 

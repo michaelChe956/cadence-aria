@@ -20,6 +20,8 @@ const C1_ACTION_BUTTON_LABELS: Record<string, string> = {
   resume_repository_initialization: "网关恢复后继续",
   manual_continue: "人工继续",
   retry_coding: "重试编码",
+  // P2-d（REQ-CRO-09）：分诊卡「说明情况重试」动作，避免驾驶舱显示 raw id。
+  retry_coding_with_context: "我来说明情况，让 AI 继续",
   retry_review: "重试代码审查",
   retry_internal_review: "重试内部评审",
   retry_group_review_shard: "重试组评审分片",

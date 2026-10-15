@@ -397,6 +397,7 @@ export type CodingGateActionType =
   | "provide_context"
   | "manual_continue"
   | "retry_coding"
+  | "retry_coding_with_context"
   | "retry_review"
   | "retry_internal_review"
   | "retry_group_review_shard"
@@ -423,6 +424,8 @@ export type CodingGateRequired = {
   evidence_refs?: string[];
   raw_provider_output_ref?: string | null;
   diagnostic?: CodingGateDiagnostic | null;
+  /** P2-c（REQ-CRO-09）：分诊卡三段大白话投影；旧门 JSON 无该字段 → 前端回落 description。 */
+  triage_summary?: CodingTriageSummary | null;
 };
 
 export type CodingGateDiagnostic = {
@@ -430,6 +433,26 @@ export type CodingGateDiagnostic = {
   limit?: string | null;
   phase: string;
   run_failure_code: string;
+};
+
+/** P2-d（REQ-CRO-09）：与后端 `CodingTriageSummary` 同构（块 2 设计 §4.2）。 */
+export type CodingTriageFinding = {
+  reason_code: string;
+  message: string;
+};
+
+export type CodingTriageDid = {
+  changed_files: string[];
+  commit_sha?: string | null;
+  verification_exit_code?: number | null;
+  environment_note?: string | null;
+};
+
+export type CodingTriageSummary = {
+  problem: string;
+  findings?: CodingTriageFinding[];
+  did?: CodingTriageDid | null;
+  unverified?: string[];
 };
 
 /** C2 Task 8（#19）：attempt-scoped 验证处理记录（旁路 DTO，不进门动作枚举）。 */

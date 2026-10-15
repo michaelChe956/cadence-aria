@@ -681,7 +681,10 @@ function gateActionRequiresContext(actionId: string) {
   return (
     actionId === "manual_continue" ||
     actionId === "accept_risk" ||
-    actionId === "send_to_coder"
+    actionId === "send_to_coder" ||
+    // P2-d（REQ-CRO-09/A4）：说明情况重试需非空 extra_context，
+    // 空提交直接置 coding_gate_extra_context_required，不发 WS 帧。
+    actionId === "retry_coding_with_context"
   );
 }
 
