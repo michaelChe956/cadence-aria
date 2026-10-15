@@ -152,9 +152,13 @@ describe("CoderTriageCard（P2-d 分诊卡）", () => {
       <CoderTriageCard gate={humanTriageGate()} onRespond={vi.fn()} onEnterVerificationTriage={onEnter} />,
     );
 
-    const technical = screen.getByTestId("coder-triage-technical-details");
+    const technical = screen.getByTestId(
+      "coder-triage-technical-details",
+    ) as HTMLDetailsElement;
     expect(technical.open).toBe(false);
-    const advanced = screen.getByTestId("coder-triage-advanced-verification");
+    const advanced = screen.getByTestId(
+      "coder-triage-advanced-verification",
+    ) as HTMLDetailsElement;
     expect(advanced.open).toBe(false);
 
     fireEvent.click(within(technical).getByText("技术详情"));

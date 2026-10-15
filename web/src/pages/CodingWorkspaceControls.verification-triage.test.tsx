@@ -210,7 +210,9 @@ describe("CodingWorkspaceControls GatePanel 分诊卡分流（P2-d/REQ-CRO-09）
     const onEnter = vi.fn();
     renderGatePanel(operationalBlockerGate, { onEnterVerificationTriage: onEnter });
 
-    const technical = screen.getByTestId("coder-triage-technical-details");
+    const technical = screen.getByTestId(
+      "coder-triage-technical-details",
+    ) as HTMLDetailsElement;
     expect(technical.open).toBe(false);
     fireEvent.click(within(technical).getByText("技术详情"));
     const advanced = screen.getByTestId("coder-triage-advanced-verification");
