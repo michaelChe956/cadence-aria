@@ -1016,4 +1016,222 @@ mod tests {
         let _ = server_writer.shutdown().await;
         drop(dispatcher);
     }
+
+    /// P3-b(REQ-KACS-IDLE-RO)聚合 fixture 真跑(/tmp 下两成员仓):LC 会话的
+    /// boundary authority(聚合根)必须后置于 `--tmpfs /tmp` 挂载——修复前
+    /// root bind 先于 tmpfs,/tmp 下成员仓被私有 tmpfs 遮蔽,terminal 对
+    /// 真实上游路径不可读。断言:terminal Read 真实上游文件、native
+    /// Read(fs/read_text_file)同面、target 写成功、上游写失败且宿主不
+    /// 落盘。bwrap 缺失时跳过(先例 `lcg_t04`)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lc_terminal_reads_real_upstream_under_tmp_aggregate_root() {
+        if probe_bwrap().is_none() {
+            // Auto 模式 terminal 依赖 bubblewrap;未安装时跳过真机沙箱路径。
+            return;
+        }
+        use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoundaryPlan};
+
+        // 遮蔽 bug 只在 /tmp 子路径显形:聚合 fixture 必须钉在 /tmp 下。
+        let fixture = tempfile::Builder::new()
+            .prefix("p3b-lc-agg-")
+            .tempdir_in("/tmp")
+            .expect("aggregate fixture under /tmp");
+        let aggregate = canonicalize_root(fixture.path()).expect("canonical aggregate root");
+        assert!(
+            aggregate.starts_with("/tmp"),
+            "fixture must live under /tmp to expose the tmpfs shadowing"
+        );
+        let upstream = aggregate.join("upstream");
+        let target = aggregate.join("downstream");
+        std::fs::create_dir_all(upstream.join("src")).expect("mkdir upstream member");
+        std::fs::create_dir_all(&target).expect("mkdir downstream member");
+        std::fs::write(
+            upstream.join("src/lib.rs"),
+            "pub fn upstream_truth() -> u32 { 42 }\n",
+        )
+        .expect("seed upstream source");
+
+        let plan = ProviderBoundaryPlan::new(
+            ProviderBoundaryMode::TargetWriteOnly,
+            aggregate.clone(),
+            Some(target.clone()),
+            Vec::new(),
+        );
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (reader, writer) = tokio::io::split(client);
+        let peer = JsonRpcPeer::new(reader, writer);
+        let (event_tx, _events) = mpsc::channel(32);
+        let dispatcher = KimiClientServiceDispatcher::new(
+            peer,
+            "executor-lc-p3b".to_string(),
+            aggregate.clone(),
+            AdapterRole::Executor,
+            ProviderPermissionMode::Auto,
+            Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            CancellationToken::new(),
+            None,
+            Some(plan),
+        );
+        let (server_reader, mut server_writer) = tokio::io::split(server);
+        let mut server_reader = tokio::io::BufReader::new(server_reader);
+
+        async fn run_terminal(
+            dispatcher: &KimiClientServiceDispatcher<
+                tokio::io::WriteHalf<tokio::io::DuplexStream>,
+            >,
+            server_reader: &mut tokio::io::BufReader<
+                tokio::io::ReadHalf<tokio::io::DuplexStream>,
+            >,
+            next_id: &mut i64,
+            script: &str,
+            cwd: &str,
+        ) -> (Value, Value) {
+            let create_id = *next_id;
+            *next_id += 1;
+            assert!(dispatcher.dispatch(
+                "terminal/create",
+                json!(create_id),
+                json!({
+                    "sessionId": "executor-lc-p3b",
+                    "command": "/bin/bash",
+                    "args": ["-c", script],
+                    "cwd": cwd,
+                    "outputByteLimit": 4194304
+                })
+            ));
+            let reply = read_reply(server_reader, create_id).await;
+            let terminal_id = reply["result"]["terminalId"]
+                .as_str()
+                .expect("terminalId")
+                .to_string();
+            let wait_id = *next_id;
+            *next_id += 1;
+            assert!(dispatcher.dispatch(
+                "terminal/wait_for_exit",
+                json!(wait_id),
+                json!({"sessionId": "executor-lc-p3b", "terminalId": terminal_id})
+            ));
+            let wait_reply = read_reply(server_reader, wait_id).await;
+            let output_id = *next_id;
+            *next_id += 1;
+            assert!(dispatcher.dispatch(
+                "terminal/output",
+                json!(output_id),
+                json!({"sessionId": "executor-lc-p3b", "terminalId": terminal_id})
+            ));
+            let output_reply = read_reply(server_reader, output_id).await;
+            (wait_reply, output_reply)
+        }
+
+        // 会话 cwd=聚合根(kimi CLI 不转发模型 cwd 的现场形态),face root
+        // 由 resolve_cwd 锚定到 target 成员仓。
+        let session_cwd = aggregate.to_string_lossy().into_owned();
+
+        // 1) terminal Read:真实上游文件在原宿主路径可见(遮蔽修复的直接
+        //    证据;修复前 /tmp 被私有 tmpfs 盖住,cat 以 ENOENT 失败)。
+        let upstream_file = upstream.join("src/lib.rs");
+        let (wait_reply, output_reply) = run_terminal(
+            &dispatcher,
+            &mut server_reader,
+            &mut 30,
+            &format!("cat {}", upstream_file.to_string_lossy()),
+            &session_cwd,
+        )
+        .await;
+        assert_eq!(
+            wait_reply["result"]["exitCode"], json!(0),
+            "terminal must read the real upstream file at its host path: {wait_reply} {output_reply}"
+        );
+        assert!(
+            output_reply["result"]["output"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("upstream_truth"),
+            "upstream content must be the real file, not a shadowed tmpfs: {output_reply}"
+        );
+
+        // 2) terminal 写 target:成功(face root 锚定 + rw bind 回归)。
+        let (wait_reply, output_reply) = run_terminal(
+            &dispatcher,
+            &mut server_reader,
+            &mut 40,
+            "echo target-write-ok > note.txt",
+            &session_cwd,
+        )
+        .await;
+        assert_eq!(
+            wait_reply["result"]["exitCode"], json!(0),
+            "target write must keep working: {wait_reply} {output_reply}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("note.txt"))
+                .expect("target write landed in the member worktree"),
+            "target-write-ok\n"
+        );
+
+        // 3) terminal 写上游:authority 只读面 → EROFS,宿主不落盘。
+        let evil = upstream.join("evil.txt");
+        let (wait_reply, output_reply) = run_terminal(
+            &dispatcher,
+            &mut server_reader,
+            &mut 50,
+            &format!("echo pwn > {}", evil.to_string_lossy()),
+            &session_cwd,
+        )
+        .await;
+        assert_ne!(
+            wait_reply["result"]["exitCode"], json!(0),
+            "upstream write must be refused: {wait_reply} {output_reply}"
+        );
+        assert!(
+            output_reply["result"]["output"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Read-only file system"),
+            "upstream must fail as read-only, not as a shadowed path: {output_reply}"
+        );
+        assert!(!evil.exists(), "no host file may land upstream");
+
+        // 4) native Read 同面:绝对路径锚定聚合根读真实上游(LC 读面回归锁)。
+        assert!(dispatcher.dispatch(
+            "fs/read_text_file",
+            json!(60),
+            json!({
+                "sessionId": "executor-lc-p3b",
+                "path": upstream_file.to_string_lossy().as_ref()
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 60).await;
+        assert_eq!(
+            reply["result"]["content"],
+            json!("pub fn upstream_truth() -> u32 { 42 }\n"),
+            "native read must serve the real upstream file: {reply}"
+        );
+
+        // 5) native 写上游:唯一写面是 target,上游路径拒绝且不落盘。
+        let evil_native = upstream.join("evil-native.txt");
+        assert!(dispatcher.dispatch(
+            "fs/write_text_file",
+            json!(61),
+            json!({
+                "sessionId": "executor-lc-p3b",
+                "path": evil_native.to_string_lossy().as_ref(),
+                "content": "must not land"
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 61).await;
+        assert_eq!(
+            reply["error"]["code"], json!(ERROR_FS),
+            "native write must stay anchored at the target root: {reply}"
+        );
+        assert!(!evil_native.exists());
+
+        let _ = server_writer.shutdown().await;
+        drop(dispatcher);
+    }
 }
