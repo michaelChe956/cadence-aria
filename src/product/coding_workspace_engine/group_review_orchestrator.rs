@@ -383,6 +383,7 @@ impl<'a> GroupReviewOrchestrator<'a> {
                 }
                 Err(error @ GroupReviewExecutionError::UserCancelled)
                 | Err(error @ GroupReviewExecutionError::ProviderProtocol(_))
+                | Err(error @ GroupReviewExecutionError::IdleStall { .. })
                 | Err(error @ GroupReviewExecutionError::Internal(_)) => return Err(error),
             }
         }
