@@ -1029,3 +1029,4 @@ async fn owner_change_during_transport_failure_creates_no_automatic_retry_record
 mod logical_legacy_fallback;
 mod provider_idle_stall;
 mod retry_and_gate;
+mod reviewer_recovery;
