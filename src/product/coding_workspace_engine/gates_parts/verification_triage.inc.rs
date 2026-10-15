@@ -167,8 +167,7 @@ impl CodingWorkspaceEngine {
                 matches!(
                     gate.reason_code.as_deref(),
                     Some(CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE)
-                        // P2-a（REQ-CVT-06）字面量；P2-b 合入常量后改引。
-                        | Some("coding_operational_blocker")
+                        | Some(CODING_OPERATIONAL_BLOCKER_REASON_CODE)
                 )
             });
         if !finding_resolvable {

@@ -21,9 +21,7 @@ pub(crate) const VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES: [&str; 5] = [
     "code_review_verification_incomplete",
     "code_review_operational_blocker",
     super::gates::CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE,
-    // P2-a（REQ-CVT-06）字面量；P2-b 合入
-    // CODING_OPERATIONAL_BLOCKER_REASON_CODE 常量后改引常量。
-    "coding_operational_blocker",
+    super::gates::CODING_OPERATIONAL_BLOCKER_REASON_CODE,
 ];
 
 pub(crate) fn is_verification_triage_eligible_gate(gate: &CodingGateRequired) -> bool {
