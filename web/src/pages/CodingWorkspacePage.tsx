@@ -308,7 +308,18 @@ export function CodingWorkspacePage({
       return;
     }
     const reportRef = pendingGate?.evidence_refs?.find((ref) => ref.trim().length > 0);
-    if (!reportRef) {
+    // REQ-CVT-06：coder 门（coding_output_human_triage／
+    // coding_operational_blocker）evidence_refs 恒空，回退绑定该门自身
+    // （finding_id = gate_id#0，对应门的 plan defect finding）；CR 门
+    // 仍要求 evidence_refs 命中 code review report。
+    const coderGateFindingBase =
+      pendingGate != null &&
+      (pendingGate.reason_code === "coding_output_human_triage" ||
+        pendingGate.reason_code === "coding_operational_blocker")
+        ? pendingGate.gate_id
+        : null;
+    const findingBase = reportRef ?? coderGateFindingBase;
+    if (!findingBase) {
       setTriageSurfaceError("门缺少 finding 绑定证据（evidence_refs 为空）");
       return;
     }
@@ -316,7 +327,7 @@ export function CodingWorkspacePage({
     setTriageSurfaceError(null);
     try {
       await enterVerificationTriage(address, {
-        finding_id: `${reportRef}#0`,
+        finding_id: `${findingBase}#0`,
         check_id: selectedEvidence.check_id,
         original_command: selectedEvidence.planned_command ?? null,
         alternative_command: null,

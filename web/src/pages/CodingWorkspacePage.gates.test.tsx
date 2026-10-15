@@ -630,4 +630,108 @@ describe("CodingWorkspacePage gate panels", () => {
     expect(api.respondGate).not.toHaveBeenCalled();
   });
 
+  it("coder 输出门 evidence_refs 为空时回退 gate_id#0 转入验证处理", async () => {
+    mockCodingWs();
+    vi.mocked(listVerificationTriageRecords).mockResolvedValue({
+      attempt_id: "coding_attempt_0001",
+      attempt_version: 1,
+      records: [],
+    });
+    vi.mocked(getVerificationCommandEvidence).mockResolvedValue({
+      attempt_id: "coding_attempt_0001",
+      rework_count: 1,
+      evidence: [
+        {
+          check_id: "check_run_tests",
+          planned_command: "cargo test --lib",
+          planned_manual_instruction: null,
+          actual_command: "cargo test --lib --quiet",
+          actual_cwd: "/repo",
+          exit_code: 0,
+          test_execution_count: null,
+          environment_summary: null,
+          mismatch: true,
+        },
+      ],
+    });
+    const enterMock = vi.mocked(enterVerificationTriage).mockResolvedValue({
+      triage_id: "verification_triage_0002",
+      attempt_id: "coding_attempt_0001",
+      finding_id: "coding_blocked_gate_0002#0",
+      check_id: "check_run_tests",
+      plan_revision_id: "plan_rev_0001",
+      original_command: "cargo test --lib",
+      alternative_command: null,
+      cwd: null,
+      outcome: null,
+      test_execution_count: null,
+      environment: null,
+      scope: ["check_run_tests"],
+      expires_at: "2026-10-07T00:00:00Z",
+      status: "pending",
+      conclusion: null,
+      reason: null,
+      decided_by: null,
+      decided_at: null,
+    });
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      status: "blocked",
+      stage: "coding",
+      reworkCount: 1,
+      pendingGates: [
+        {
+          gate_id: "coding_blocked_gate_0002",
+          kind: "blocked",
+          title: "Coder 输出需要人工分诊",
+          description: "Coder 输出需要人工分诊，流程已暂停",
+          stage: "coding",
+          role: "coder",
+          reason_code: "coding_output_human_triage",
+          evidence_refs: [],
+          raw_provider_output_ref: null,
+          diagnostic: null,
+          available_actions: [
+            {
+              action_id: "retry_coding",
+              label: "重试 Coder",
+              action_type: "retry_coding",
+            },
+            {
+              action_id: "abort",
+              label: "终止",
+              action_type: "abort",
+            },
+          ],
+        },
+      ],
+    });
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+      />,
+    );
+    await waitFor(() => {
+      expect(listVerificationTriageRecords).toHaveBeenCalled();
+    });
+
+    expect(screen.getByTestId("coding-verification-triage-enter")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("coding-verification-triage-enter"));
+    });
+    await waitFor(() => {
+      expect(enterMock).toHaveBeenCalledWith(
+        CODING_ATTEMPT_ADDRESS,
+        expect.objectContaining({
+          finding_id: "coding_blocked_gate_0002#0",
+          check_id: "check_run_tests",
+        }),
+      );
+    });
+  });
+
 });
