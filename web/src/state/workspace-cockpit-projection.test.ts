@@ -4,7 +4,9 @@ import { useWorkspaceStore, type TimelineNode } from "./workspace-ws-store";
 import { installWorkspaceStoreTestHooks } from "./workspace-ws-store.test-utils";
 import {
   c1WaitingItem,
-  formatFlowElapsed,
+  codingAttentionIdentity,
+  codingAttentionItem,
+  cockpitInboxItemSessionId,
   gateActionBlockCopy,
   gateActionBlockReason,
   gateKindOf,
@@ -16,7 +18,7 @@ import {
   selectGateProjection,
   topologyTokenName,
 } from "./workspace-cockpit-projection";
-import type { C1WaitingItem } from "../api/types";
+import type { C1WaitingItem, CodingAttentionItemDto } from "../api/types";
 import {
   lcFreshOperationFixture,
   lcResumeRecoveryFixture,
@@ -1364,5 +1366,126 @@ describe("lc_bootstrap 聚合索引覆盖不足文案", () => {
     );
     expect(generic.title).toBe("聚合索引首建失败，等待显式重试");
     expect(generic.summary).not.toContain("可索引代码文件");
+  });
+});
+
+// P4-d（REQ-CRO-12/契约 A1 · REQ-UI37-19）：durable 待处理事项 → 收件箱
+// 只读投影——7 类 kind（含 plan_final_confirm 聚合条）+ 未知未来 kind 全量
+// 映射为 kind=coding_action/source=coding_attention，身份 [project,issue,key]。
+describe("P4-d coding attention inbox projection", () => {
+  const attention = (
+    overrides: Partial<CodingAttentionItemDto> = {},
+  ): CodingAttentionItemDto => ({
+    key: "gate:attempt_0001:gate_0001",
+    kind: "blocked",
+    project_id: "project_0001",
+    issue_id: "issue_0001",
+    plan_id: null,
+    attempt_id: "attempt_0001",
+    logical_work_item_id: null,
+    repository_name: null,
+    reason_code: "upstream_source_unavailable",
+    title: "执行被阻塞，需要处理",
+    summary: "上游源不可读",
+    occurred_at: "2026-10-15T08:00:00Z",
+    target: { type: "coding_attempt", attempt_id: "attempt_0001" },
+    focus: { gate_id: "gate_0001" },
+    ...overrides,
+  });
+
+  it("projects every attention kind (incl. plan_final_confirm aggregate) without dropping entries", () => {
+    const kinds = [
+      "choice",
+      "triage",
+      "blocked",
+      "stalled",
+      "manual_recovery",
+      "final_confirm",
+      "plan_final_confirm",
+    ];
+    for (const kind of kinds) {
+      const item = codingAttentionItem(attention({ kind, key: `k:${kind}` }));
+      expect(item.kind).toBe("coding_action");
+      expect(item.source).toBe("coding_attention");
+      expect(item.title).toBe(attention({ kind }).title);
+      expect(item.summary).toContain("上游源不可读");
+      expect(item.createdAt).toBe("2026-10-15T08:00:00Z");
+      expect(item.severity).toBe(2);
+      expect(item.gate).toBeNull();
+      expect(item.choice).toBeNull();
+      expect(item.attentionInfo?.attentionKind).toBe(kind);
+      expect(item.attentionInfo?.identity).toBe(
+        codingAttentionIdentity(attention({ kind, key: `k:${kind}` })),
+      );
+    }
+  });
+
+  it("keeps unknown future kinds visible instead of filtering them out", () => {
+    const item = codingAttentionItem(
+      attention({ kind: "some_future_kind", key: "future:1" }),
+    );
+    expect(item.kind).toBe("coding_action");
+    expect(item.attentionInfo?.attentionKind).toBe("some_future_kind");
+  });
+
+  it("uses full-scope identity [project,issue,key] and a non-session id prefix", () => {
+    const item = attention({
+      key: "gate:attempt_0001:gate_0001",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
+    });
+    expect(codingAttentionIdentity(item)).toBe(
+      JSON.stringify(["project_0001", "issue_0001", "gate:attempt_0001:gate_0001"]),
+    );
+    // 同 key 跨 project/issue 不合并。
+    expect(codingAttentionIdentity(attention({ project_id: "project_0002" }))).not.toBe(
+      codingAttentionIdentity(item),
+    );
+    expect(codingAttentionIdentity(attention({ issue_id: "issue_0002" }))).not.toBe(
+      codingAttentionIdentity(item),
+    );
+    const projected = codingAttentionItem(item);
+    // 收件箱 id 前缀不得被误读为 workspace session id（P4-e 走 attention 目标导航）。
+    expect(cockpitInboxItemSessionId(projected.id)).toBeNull();
+  });
+
+  it("mirrors target/focus and optional identity fields for 去处理 navigation", () => {
+    const planItem = codingAttentionItem(
+      attention({
+        kind: "plan_final_confirm",
+        key: "plan-final:plan_0001:run_1",
+        plan_id: "plan_0001",
+        attempt_id: null,
+        repository_name: "repo-a",
+        logical_work_item_id: "wi_0009",
+        reason_code: null,
+        target: { type: "coding_plan", plan_id: "plan_0001" },
+        focus: null,
+      }),
+    );
+    expect(planItem.attentionInfo?.projectId).toBe("project_0001");
+    expect(planItem.attentionInfo?.issueId).toBe("issue_0001");
+    expect(planItem.attentionInfo?.planId).toBe("plan_0001");
+    expect(planItem.attentionInfo?.attemptId).toBeNull();
+    expect(planItem.attentionInfo?.repositoryName).toBe("repo-a");
+    expect(planItem.attentionInfo?.logicalWorkItemId).toBe("wi_0009");
+    expect(planItem.attentionInfo?.reasonCode).toBeNull();
+    expect(planItem.attentionInfo?.target).toEqual({
+      type: "coding_plan",
+      plan_id: "plan_0001",
+    });
+    expect(planItem.attentionInfo?.focus).toBeNull();
+    expect(planItem.summary).toContain("repo-a");
+    expect(planItem.summary).toContain("wi_0009");
+
+    const choiceItem = codingAttentionItem(
+      attention({
+        kind: "choice",
+        key: "choice:attempt_0001:choice_0001",
+        target: { type: "coding_attempt", attempt_id: "attempt_0001" },
+        focus: { choice_id: "choice_0001" },
+      }),
+    );
+    expect(choiceItem.attentionInfo?.focus).toEqual({ choice_id: "choice_0001" });
   });
 });

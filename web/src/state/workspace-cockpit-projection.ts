@@ -1,6 +1,7 @@
 import { gateIdentityFromState } from "./cockpit-action-routing";
 import { protocolErrorCopy, STALE_DRIVER_LEASE_CODE } from "./protocol-error-copy";
 import type {
+  CodingAttentionItemDto,
   C1WaitingItem,
   ChoiceQuestion,
   CodingFinalConfirmInfoItem,
@@ -503,7 +504,8 @@ export type CockpitInboxKind =
   | "c1_recovery"
   | "sc_failed"
   | "lc_bootstrap"
-  | "lc_resume_recovery";
+  | "lc_resume_recovery"
+  | "coding_action";
 
 /**
  * P0 1.3（REQ-WIGA-05）Task 11：驾驶舱 choice 就地作答投影——workspace 侧
@@ -572,7 +574,8 @@ export interface CockpitInboxItem {
     | "c1_waiting"
     | "sc_failed"
     | "logical_codebase_bootstrap"
-    | "lc_resume_recovery",
+    | "lc_resume_recovery"
+    | "coding_attention",
   createdAt: string | null;
   gate: GateProjection | null;
   inlineError: { code: string; message: string } | null;
@@ -600,6 +603,10 @@ export interface CockpitInboxItem {
    * 仅 waiting/fresh_reserved/fresh_running 投卡，resolved 证据留 store
    * 不投卡（动作资格只镜像后端 allowed_actions，前端不推导）。 */
   recovery?: LcResumeRecoveryInboxProjection | null;
+  /** P4-d（REQ-UI37-19）：kind="coding_action" 时的 durable 待处理事项
+   * 投影（7 类 kind + 未知 kind 全量；目标/定位供「去处理」导航，动作不
+   * 在收件箱/通知上执行）。 */
+  attentionInfo?: CodingAttentionInboxProjection | null;
   /** trust 缺失错误条的可登记投影（按稳定码识别 + provider wire 标签
    * 同源解析；owner 2026-10-12 直批「登记并重试」按钮）；其余条目缺省。 */
   trustMissing?: TrustMissingProjection | null;
@@ -955,6 +962,74 @@ export function codingFinalConfirmInfoItem(
   };
 }
 
+/** P4-d（REQ-CRO-12/契约 A1 · REQ-UI37-19）：durable 待处理事项的收件箱
+ * 投影——服务端 `CodingAttentionItemDto` 的 camelCase 只读镜像。identity
+ * 为完整 scope `[project_id, issue_id, key]`（JSON 数组序列化，跨
+ * project/issue 的重名 key 不合并）；target/focus 只定位不写操作
+ *（「去处理」导航由 Shell 消费）。 */
+export interface CodingAttentionInboxProjection {
+  identity: string;
+  attentionKind: string;
+  projectId: string;
+  issueId: string;
+  planId: string | null;
+  attemptId: string | null;
+  logicalWorkItemId: string | null;
+  repositoryName: string | null;
+  reasonCode: string | null;
+  occurredAt: string;
+  target: CodingAttentionItemDto["target"];
+  focus: CodingAttentionItemDto["focus"] | null;
+}
+
+/** 稳定身份：JSON.stringify([project_id, issue_id, key])——数组序列化
+ * 避免跨 project/issue/key 分隔符冲突（与 recentCompletionIdentity 同构）。 */
+export function codingAttentionIdentity(item: CodingAttentionItemDto): string {
+  return JSON.stringify([item.project_id, item.issue_id, item.key]);
+}
+
+/** P4-d：durable 待处理事项 → 收件箱条目（进 display/count，无 watched/
+ * TTL/上限过滤）。kind 全量透传（choice/triage/blocked/stalled/
+ * manual_recovery/final_confirm/plan_final_confirm 及未知未来 kind 均
+ * 投 kind="coding_action"，不枚举过滤）；标题/摘要/时间取服务端 durable
+ * 事实，前端不另造文案。id 前缀 `coding_attention:` 不携带 workspace
+ * session（cockpitInboxItemSessionId 对其 fail-closed 返回 null，
+ * 批量/就地动作不误路由）。 */
+export function codingAttentionItem(item: CodingAttentionItemDto): CockpitInboxItem {
+  const summaryParts = [
+    item.summary,
+    item.repository_name,
+    item.logical_work_item_id,
+  ].filter((part): part is string => Boolean(part));
+  return {
+    id: `coding_attention:${item.project_id}:${item.issue_id}:${item.key}`,
+    kind: "coding_action",
+    severity: 2,
+    title: item.title,
+    summary: summaryParts.join(" · "),
+    triage: false,
+    source: "coding_attention",
+    createdAt: item.occurred_at,
+    gate: null,
+    inlineError: null,
+    choice: null,
+    attentionInfo: {
+      identity: codingAttentionIdentity(item),
+      attentionKind: item.kind,
+      projectId: item.project_id,
+      issueId: item.issue_id,
+      planId: item.plan_id ?? null,
+      attemptId: item.attempt_id ?? null,
+      logicalWorkItemId: item.logical_work_item_id ?? null,
+      repositoryName: item.repository_name ?? null,
+      reasonCode: item.reason_code ?? null,
+      occurredAt: item.occurred_at,
+      target: item.target,
+      focus: item.focus ?? null,
+    },
+  };
+}
+
 /** 收件箱条目 id（`${sessionId}:gate:${key}` 等形态）的会话归属；无会话前缀返回 null。 */
 export function cockpitInboxItemSessionId(itemId: string): string | null {
   const separator = itemId.indexOf(":");
@@ -962,7 +1037,10 @@ export function cockpitInboxItemSessionId(itemId: string): string | null {
     return null;
   }
   const sessionId = itemId.slice(0, separator);
-  return sessionId === "gate" || sessionId === "hard_error" || sessionId === "stopped"
+  return sessionId === "gate" ||
+      sessionId === "hard_error" ||
+      sessionId === "stopped" ||
+      sessionId === "coding_attention"
     ? null
     : sessionId;
 }

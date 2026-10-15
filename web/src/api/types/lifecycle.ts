@@ -206,6 +206,44 @@ export type C1WaitingItem = {
   superseded_by?: string | null;
 };
 
+// P4-d（REQ-CRO-12/契约 A1 · REQ-UI37-19）：coding 待处理事项 DTO——
+// 服务端 `CodingAttentionItemDto` 的 snake_case 镜像（durable 事实只读投影，
+// 事实关闭后条目自然消失）。kind 语义：choice|triage|blocked|stalled|
+// manual_recovery|final_confirm|plan_final_confirm（宽 string，前端不枚举
+// 过滤——未知未来 kind 不丢）；身份 = [project_id, issue_id, key]。
+export type CodingAttentionFocusDto = {
+  gate_id?: string;
+  choice_id?: string;
+};
+
+// 事项目标：coding_attempt|coding_plan|workspace_session（project/issue 取
+// 条目顶层，地址域不重复；attempt 目标必有 attempt_id、plan 目标必有 plan_id）。
+export type CodingAttentionTargetDto = {
+  type: string;
+  attempt_id?: string;
+  plan_id?: string;
+  session_id?: string;
+};
+
+export type CodingAttentionItemDto = {
+  /** 稳定身份第三段（前两段为 project/issue）。 */
+  key: string;
+  kind: string;
+  project_id: string;
+  issue_id: string;
+  plan_id?: string | null;
+  attempt_id?: string | null;
+  logical_work_item_id?: string | null;
+  repository_name?: string | null;
+  reason_code?: string | null;
+  title: string;
+  summary: string;
+  /** RFC3339 事实时间（gate/choice created_at、node started_at 等）。 */
+  occurred_at: string;
+  target: CodingAttentionTargetDto;
+  focus?: CodingAttentionFocusDto | null;
+};
+
 // C5 Task 6（REQ-INIT-C5-RESUME）：repository 初始化失败的结构化诊断
 //（服务端 RepositoryInitializationFailureDiagnostics snake_case 镜像）。
 export type RepositoryInitializationFailureDiagnostics = {
@@ -242,6 +280,9 @@ export type IssueLifecycleResponse = {
   // C1（enrollment-recovery-surface Task 9）：durable 恢复等待项。additive：
   // 旧响应缺失时前端按无等待项处理。
   c1_waiting_items?: C1WaitingItem[];
+  // P4-d（REQ-UI37-19）：durable 事实待处理事项全局目录（无 watched 过滤）。
+  // additive：旧响应缺失时前端按无待处理事项处理。
+  coding_attention_items?: CodingAttentionItemDto[];
 };
 
 export type GenerateStorySpecsRequest = ProviderWorkspaceConfigInput & {

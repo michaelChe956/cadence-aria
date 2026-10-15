@@ -35,6 +35,10 @@ import {
   type CockpitInboxItem,
 } from "../state/workspace-cockpit-projection";
 import {
+  codingAttentionIdentity,
+  codingAttentionItem,
+} from "../state/workspace-cockpit-projection";
+import {
   INFO_TTL_MS,
   RECENT_COMPLETION_WINDOW_MS,
   isRecentCompletionVisible,
@@ -76,6 +80,7 @@ export interface WorkspaceSessionObserverOptions {
       | "coding_final_confirm_info"
       | "recent_completion_info"
       | "c1_waiting_items"
+      | "coding_attention_items"
     >
   >;
   /** C4 Task 9：LC 目录读取（默认真实 API；测试注入伪实现）。 */
@@ -154,6 +159,12 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   const [notificationCandidates, setNotificationCandidates] = useState<
     readonly CockpitInboxItem[]
   >([]);
+  // P4-d（REQ-UI37-19）：durable 待处理事项全局目录（全部 lifecycle 条目，
+  // 无 watched/TTL/上限过滤）——进 display/count，按 [project,issue,key]
+  // 身份去重；事实关闭后随下一轮目录消失。
+  const [codingAttentionItems, setCodingAttentionItems] = useState<
+    readonly CockpitInboxItem[]
+  >([]);
   // C1 Task 9（enrollment-recovery-surface）：issue 级 durable 恢复等待项
   // （孤儿候选/lease 三态/Failed advance/intent 停等/换代历史）——只读补读
   // 投影，动作经页面接线的 C1 REST 发送器出站。
@@ -179,6 +190,8 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   // hydration 在一轮补读静默收敛（无 pending dirty）后才关闭，初始 GET
   // 在途期间的失效唤醒归入同一静默批次。
   const knownRecentIdentitiesRef = useRef<Set<string> | null>(null);
+  // P4-d（REQ-UI37-19）：已见过的待处理事项身份（提醒每 key 恰一次）。
+  const knownAttentionIdentitiesRef = useRef<Set<string> | null>(null);
   const hydrationClosedRef = useRef(false);
   // C5 Task 6：上一轮 project 等待项 durable 快照（GET 失败时保留）。
   const projectC1ItemsRef = useRef<readonly CockpitInboxItem[]>([]);
@@ -275,14 +288,28 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
       ...visibleRecentItems,
       ...waitingInbox,
       ...lcBootstrapItems,
+      ...codingAttentionItems,
     ],
-    [records, infoItems, codingInfoItems, visibleRecentItems, waitingInbox, lcBootstrapItems],
+    [
+      records,
+      infoItems,
+      codingInfoItems,
+      visibleRecentItems,
+      waitingInbox,
+      lcBootstrapItems,
+      codingAttentionItems,
+    ],
   );
   const countedRecords = useMemo(
     () => records.filter((record) => watchedSessionIds.includes(record.sessionId)),
     [records, watchedSessionIds],
   );
-  const countedInbox = useMemo(() => selectObservedInbox(countedRecords), [countedRecords]);
+  // P4-d（REQ-UI37-19）：durable 待处理事项不受 watched 过滤，直接并入可
+  // 操作列表（计数 = watched 会话条目 + 全部待处理事项）。
+  const countedInbox = useMemo(
+    () => [...selectObservedInbox(countedRecords), ...codingAttentionItems],
+    [countedRecords, codingAttentionItems],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -320,6 +347,29 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
       // 提醒，Task 3 绑定 TTL/once。
       setNotificationCandidates((previous) => [...previous, ...candidates]);
       setRecentCompletionItems(items);
+    };
+
+    // P4-d（REQ-UI37-19）：待处理事项目录的应用——与近期完成同用的
+    // hydration 静默基线，但无 TTL/上限过滤；事实关闭后条目随下一轮
+    // 目录消失（known 集只增不减，同 key 不重复产生提醒候选）。
+    const applyAttentionCatalog = (
+      items: readonly CockpitInboxItem[],
+      identities: readonly string[],
+    ) => {
+      const known = knownAttentionIdentitiesRef.current ?? new Set<string>();
+      knownAttentionIdentitiesRef.current = known;
+      const candidates: CockpitInboxItem[] = [];
+      for (let index = 0; index < identities.length; index += 1) {
+        const identity = identities[index];
+        if (!hydrationClosedRef.current) {
+          known.add(identity);
+        } else if (!known.has(identity)) {
+          known.add(identity);
+          candidates.push(items[index]);
+        }
+      }
+      setNotificationCandidates((previous) => [...previous, ...candidates]);
+      setCodingAttentionItems(items);
     };
 
     const runCatalogRefresh = () => {
@@ -461,6 +511,22 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
             }
             setPlanConfirmedInfos(legacyPlanInfos);
             setCodingFinalConfirmInfos(legacyCodingInfos);
+            // P4-d（REQ-UI37-19）：全部 lifecycle 的待处理事项无 watched/
+            // TTL/上限过滤进入 display/count；同 [project,issue,key] 身份
+            // 只保留一条（重复响应不重复计数/提醒）。
+            const attentionByIdentity = new Map<string, CockpitInboxItem>();
+            for (const lifecycle of lifecycles) {
+              for (const attention of lifecycle.coding_attention_items ?? []) {
+                const identity = codingAttentionIdentity(attention);
+                if (!attentionByIdentity.has(identity)) {
+                  attentionByIdentity.set(identity, codingAttentionItem(attention));
+                }
+              }
+            }
+            applyAttentionCatalog(
+              Array.from(attentionByIdentity.values()),
+              Array.from(attentionByIdentity.keys()),
+            );
             applyRecentCatalog(
               Array.from(recentByIdentity.values()),
               Array.from(recentByIdentity.keys()),
