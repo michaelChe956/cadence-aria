@@ -48,6 +48,8 @@ vi.mock("../components/cockpit/CockpitShell", () => ({
   useCockpitSettings: () => readCockpitSettings(),
   useCockpitObservedRecords: () => cockpitObservedRecords,
   useCockpitSettingsSlotRef: () => () => undefined,
+  // P4-e：coding_action「去处理」导航注入(no-op——保持各测试原有意图)。
+  useCockpitAttentionTargetOpener: () => () => undefined,
 }));
 
 const DANGEROUS_PROMPT = '⚠️ Dangerous command:\n\n  rm -rf "$BASE"\n\nAllow?';
