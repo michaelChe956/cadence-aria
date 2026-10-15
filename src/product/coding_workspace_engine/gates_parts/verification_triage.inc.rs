@@ -145,7 +145,8 @@ impl CodingWorkspaceEngine {
 
         // finding 绑定校验："<report_id>#<index>" 必须命中持久化 code review
         // report 的 finding；coder 输出门路径（开放 coding_output_human_triage
-        // 门）绑定该门 plan defect finding 引用；其余 fail-closed。
+        // 与 coding_operational_blocker 门）绑定该门 plan defect finding 引用；
+        // 其余 fail-closed。
         let finding_resolvable = request
             .finding_id
             .rsplit_once('#')
@@ -163,7 +164,12 @@ impl CodingWorkspaceEngine {
             })
             .is_some()
             || eligible.iter().any(|gate| {
-                gate.reason_code.as_deref() == Some(CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE)
+                matches!(
+                    gate.reason_code.as_deref(),
+                    Some(CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE)
+                        // P2-a（REQ-CVT-06）字面量；P2-b 合入常量后改引。
+                        | Some("coding_operational_blocker")
+                )
             });
         if !finding_resolvable {
             return Err(CodingWorkspaceEngineError::ProviderStream(

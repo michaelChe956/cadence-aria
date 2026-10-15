@@ -326,6 +326,83 @@ async fn verification_triage_entry_keeps_gate_action_sets_unchanged() {
     );
 }
 
+/// P2-a（REQ-CVT-06）：`coding_operational_blocker` 门可转入验证处理——
+/// 资格白名单含该 reason_code（字面量；P2-b 合入常量后改引常量），
+/// finding 绑定走 coder 门路径（`<gate_id>#0`，无 report#idx 持久面）；
+/// 原门保持开放且动作集合不被验证处理改写。
+#[tokio::test]
+async fn coding_operational_blocker_gate_enters_verification_triage() {
+    let (_root, store, engine, attempt) = verification_triage_group_fixture();
+    let blocked = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("blocked");
+    let gate = store
+        .create_blocked_gate(
+            &blocked,
+            CreateBlockedGateInput {
+                attempt_id: blocked.id.clone(),
+                stage: CodingExecutionStage::Coding,
+                node_id: Some("coding_node_0002".to_string()),
+                role: Some(CodingProviderRole::Coder),
+                title: "Coder 运营阻塞".to_string(),
+                description: "coder 执行遇到运营阻塞，流程已暂停".to_string(),
+                reason_code: Some("coding_operational_blocker".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![
+                    coding_gate_action_for_id("retry_coding").expect("retry coding action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            },
+        )
+        .expect("coding operational blocker gate");
+
+    let record = engine
+        .enter_verification_triage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            crate::product::coding_workspace_engine::VerificationTriageEntryRequest {
+                finding_id: format!("{}#0", gate.gate_id),
+                check_id: TRIAGE_CHECK_PLAIN.to_string(),
+                original_command: None,
+                alternative_command: None,
+                cwd: None,
+                outcome: None,
+                test_execution_count: None,
+                environment: None,
+            },
+        )
+        .await
+        .expect("enter from coding operational blocker gate");
+
+    assert_eq!(record.finding_id, format!("{}#0", gate.gate_id));
+    assert_eq!(record.check_id, TRIAGE_CHECK_PLAIN);
+    assert_eq!(
+        record.original_command.as_deref(),
+        Some("cargo test --lib"),
+        "原命令缺失时按绑定 check 的计划合同字面命令回填"
+    );
+    let gates = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("open gates");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0].gate_id, gate.gate_id);
+    assert_eq!(
+        gates[0]
+            .available_actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["retry_coding", "abort"]
+    );
+}
+
 /// 拒绝条件全部 fail-closed：无用户批准上下文、非零测试要求而证据测试量
 /// 为零、证据不完整、豁免 scope 宽于绑定 check、plan revision 过期；记录
 /// 保持 Pending，原链零推进。

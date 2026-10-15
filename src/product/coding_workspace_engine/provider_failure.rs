@@ -16,11 +16,14 @@ pub(crate) struct ReviewBlockedGateInput<'a> {
 /// Code Review 三门（人工分诊／验证不完整／运营阻塞）＋ coder 输出人工
 /// 分诊门。验证处理是这些门的旁路 DTO／面板入口，不进动作枚举、不改
 /// available_actions。
-pub(crate) const VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES: [&str; 4] = [
+pub(crate) const VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES: [&str; 5] = [
     "code_review_output_human_triage",
     "code_review_verification_incomplete",
     "code_review_operational_blocker",
     super::gates::CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE,
+    // P2-a（REQ-CVT-06）字面量；P2-b 合入
+    // CODING_OPERATIONAL_BLOCKER_REASON_CODE 常量后改引常量。
+    "coding_operational_blocker",
 ];
 
 pub(crate) fn is_verification_triage_eligible_gate(gate: &CodingGateRequired) -> bool {
