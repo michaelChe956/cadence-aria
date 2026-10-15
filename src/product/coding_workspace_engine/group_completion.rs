@@ -668,6 +668,17 @@ fn group_handoff_contract_facts(
         .handoff_contract
         .provided_contract_refs
         .clone();
+    if provided_contracts.is_empty() {
+        // P3-c（REQ-GCE-07）：refs 为空时从冻结的 output_contracts 登记——
+        // 平台在完成发布时登记契约，不依赖 coder 自报；无 output 的非接口
+        // WI 仍允许为空。
+        provided_contracts = revision
+            .canonical_contract
+            .output_contracts
+            .iter()
+            .map(|output| output.contract_id.clone())
+            .collect();
+    }
     provided_contracts.sort();
     provided_contracts.dedup();
     let mut provided_capabilities = std::collections::BTreeMap::new();
@@ -715,4 +726,132 @@ fn group_handoff_revision_conflict(handoff_id: &str) -> CodingWorkspaceEngineErr
     CodingWorkspaceEngineError::ProviderStream(format!(
         "group_completion_handoff_revision_conflict: {handoff_id}"
     ))
+}
+
+#[cfg(test)]
+mod handoff_contract_registration_tests {
+    use super::*;
+    use crate::product::work_item_contract::{
+        CanonicalWorkItemContract, HandoffContract, PromisedOutputContract,
+        WorkItemContractIdentity, WorkItemGoal, WorkItemWritePolicy,
+    };
+    use std::collections::BTreeMap;
+
+    fn revision_with(
+        provided_contract_refs: Vec<&str>,
+        output_contracts: Vec<(&str, Vec<&str>)>,
+    ) -> WorkItemRevision {
+        WorkItemRevision {
+            id: "work_item_revision_0001".to_string(),
+            logical_work_item_id: "work_item_0001".to_string(),
+            source_draft_revision_id: "draft_revision_0001".to_string(),
+            canonical_contract: CanonicalWorkItemContract {
+                intent_contract: None,
+                schema_version: 1,
+                identity: WorkItemContractIdentity {
+                    logical_work_item_id: "work_item_0001".to_string(),
+                    title: "upstream work item".to_string(),
+                    kind: "implementation".to_string(),
+                },
+                goal: WorkItemGoal {
+                    summary: "upstream work item".to_string(),
+                },
+                non_goals: Vec::new(),
+                depends_on: Vec::new(),
+                input_contracts: Vec::new(),
+                output_contracts: output_contracts
+                    .into_iter()
+                    .map(|(contract_id, capabilities)| PromisedOutputContract {
+                        contract_id: contract_id.to_string(),
+                        capabilities: capabilities.into_iter().map(str::to_string).collect(),
+                    })
+                    .collect(),
+                tasks: Vec::new(),
+                write_policy: WorkItemWritePolicy {
+                    exclusive_scopes: Vec::new(),
+                    forbidden_scopes: Vec::new(),
+                },
+                acceptance_criteria: Vec::new(),
+                verification_checks: Vec::new(),
+                handoff_contract: HandoffContract {
+                    required_fields: Vec::new(),
+                    provided_contract_refs: provided_contract_refs
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    reviewer_check_refs: Vec::new(),
+                },
+                blocker_rules: Vec::new(),
+                design_traceability: Vec::new(),
+            },
+            canonical_contract_hash: "canonical_hash".to_string(),
+            work_item_projection_bundle_id: "projection_bundle_0001".to_string(),
+            verification_plan_revision_id: "verification_revision_0001".to_string(),
+            created_at: "2026-10-15T00:00:00Z".to_string(),
+        }
+    }
+
+    /// P3-c（REQ-GCE-07）①：refs 空 + output 声明契约 → 完成 handoff 从冻结
+    /// output_contracts 登记 refs/能力/hash 齐（接既有 hash/build/publish 链）；
+    /// 重复 contract_id 合并去重，不依赖 coder 自报。
+    #[test]
+    fn registers_contract_refs_from_frozen_outputs_when_refs_empty() {
+        let revision = revision_with(
+            Vec::new(),
+            vec![
+                ("CT-002", vec!["cap_shared", "cap_only_b"]),
+                ("CT-001", vec!["cap_shared", "cap_only_a"]),
+                ("CT-001", vec!["cap_only_a", "cap_dup"]),
+            ],
+        );
+        let facts = group_handoff_contract_facts(&revision).expect("contract facts");
+        assert_eq!(facts.provided_contracts, vec!["CT-001", "CT-002"]);
+        let expected_capabilities = BTreeMap::from([
+            (
+                "CT-001".to_string(),
+                vec!["cap_dup".to_string(), "cap_only_a".to_string(), "cap_shared".to_string()],
+            ),
+            (
+                "CT-002".to_string(),
+                vec!["cap_only_b".to_string(), "cap_shared".to_string()],
+            ),
+        ]);
+        assert_eq!(facts.provided_capabilities, expected_capabilities);
+        assert_eq!(
+            facts.contract_hash,
+            stable_handoff_contract_hash(
+                &["CT-001".to_string(), "CT-002".to_string()],
+                &expected_capabilities
+            )
+            .expect("expected hash")
+        );
+    }
+
+    /// P3-c（REQ-GCE-07）②：refs 非空保持原选择——不因 output 声明扩集。
+    #[test]
+    fn keeps_explicit_refs_selection_when_non_empty() {
+        let revision = revision_with(
+            vec!["CT-001"],
+            vec![("CT-001", vec!["cap_a"]), ("CT-002", vec!["cap_b"])],
+        );
+        let facts = group_handoff_contract_facts(&revision).expect("contract facts");
+        assert_eq!(facts.provided_contracts, vec!["CT-001"]);
+        assert_eq!(
+            facts.provided_capabilities,
+            BTreeMap::from([("CT-001".to_string(), vec!["cap_a".to_string()])])
+        );
+    }
+
+    /// P3-c（REQ-GCE-07）③：无 output 的非接口 WI 允许为空（空 hash 仍稳定）。
+    #[test]
+    fn allows_empty_registration_without_outputs() {
+        let revision = revision_with(Vec::new(), Vec::new());
+        let facts = group_handoff_contract_facts(&revision).expect("contract facts");
+        assert!(facts.provided_contracts.is_empty());
+        assert!(facts.provided_capabilities.is_empty());
+        assert_eq!(
+            facts.contract_hash,
+            stable_handoff_contract_hash(&[], &BTreeMap::new()).expect("empty hash")
+        );
+    }
 }
