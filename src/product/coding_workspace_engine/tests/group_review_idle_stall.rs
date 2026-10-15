@@ -59,7 +59,8 @@ fn execution_store() -> (TempDir, CodingAttemptStore, String) {
 #[tokio::test]
 async fn internal_reviewer_idle_stall_once_recovers_and_review_continues() {
     let (_root, store, _attempt_id) = execution_store();
-    let executor = FakeGroupReviewExecutor::new(vec![Err(idle_stall("shard")), success("review output")]);
+    let executor =
+        FakeGroupReviewExecutor::new(vec![Err(idle_stall("shard")), success("review output")]);
     let orchestrator = GroupReviewOrchestrator::new(&executor, &store);
 
     let result = orchestrator
@@ -68,15 +69,15 @@ async fn internal_reviewer_idle_stall_once_recovers_and_review_continues() {
         .expect("one idle stall recovers on fresh retry");
     assert_eq!(result.full_output, "review output");
     // 同 provider fresh 重试恰一次：两次调用、同 prompt。
-    assert_eq!(
-        executor.prompts(),
-        vec!["shard prompt", "shard prompt"]
-    );
+    assert_eq!(executor.prompts(), vec!["shard prompt", "shard prompt"]);
 }
 
 #[tokio::test]
 async fn internal_reviewer_idle_stall_twice_exhausts_in_two_calls_not_third_transport() {
-    let (_root, store, attempt_id) = execution_store();
+    // 建门路径会 Running→Blocked;Created 直转 Blocked 被状态机拒绝,
+    // 故复用父模块把 attempt 置 Running 的现成 fixture。
+    let (_root, store, attempt) = super::running_attempt_with_worktree();
+    let attempt_id = attempt.id.clone();
     // 第三次结果故意不给：若编排器把挂起当 transport 吃满 3 次预算，Fake 会以
     // internal_exhausted 兜底并让 prompts 断言失败。
     let executor =
@@ -89,12 +90,8 @@ async fn internal_reviewer_idle_stall_twice_exhausts_in_two_calls_not_third_tran
         .expect_err("two idle stalls exhaust");
     assert!(matches!(error, GroupReviewExecutionError::IdleStall { .. }));
     // 两次挂起只调 2 次，不占 transport 3 次预算。
-    assert_eq!(
-        executor.prompts(),
-        vec!["shard prompt", "shard prompt"]
-    );
+    assert_eq!(executor.prompts(), vec!["shard prompt", "shard prompt"]);
 
-    let attempt = store.find_attempt_by_id(&attempt_id).expect("attempt");
     let gate = orchestrator
         .create_failure_gate(
             &attempt,

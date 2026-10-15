@@ -17,7 +17,9 @@ pub(crate) enum GroupReviewExecutionError {
     /// 首次挂起同 provider fresh 重试恰一次，两次挂起即耗尽，由
     /// `create_failure_gate` 落 `code_review_provider_stalled` 门（按 stage
     /// 恢复），不占 transport 3 次预算。
-    #[error("provider_idle_stall: phase={phase} idle_secs={idle_secs} idle_limit_secs={idle_limit_secs}")]
+    #[error(
+        "provider_idle_stall: phase={phase} idle_secs={idle_secs} idle_limit_secs={idle_limit_secs}"
+    )]
     IdleStall {
         phase: String,
         idle_secs: u64,

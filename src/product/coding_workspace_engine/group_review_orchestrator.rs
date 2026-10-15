@@ -11,8 +11,9 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{Semaphore, mpsc};
 
 use super::{
-    CodingProviderStreamRun, CodingWorkspaceEngine, CodingWorkspaceEngineError,
-    provider_type_for_name, role_permission_mode_for_attempt, streaming_input_from_adapter,
+    CODE_REVIEW_PROVIDER_STALLED_REASON_CODE, CodingProviderStreamRun, CodingWorkspaceEngine,
+    CodingWorkspaceEngineError, coding_gate_action_for_id, provider_type_for_name,
+    role_permission_mode_for_attempt, streaming_input_from_adapter,
 };
 
 use super::group_review_budget::{
@@ -57,6 +58,10 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 const GROUP_REVIEW_MAX_ATTEMPTS: usize = 3;
+
+/// P4-b（REQ-PTR-IDLE）：internal reviewer 零活动挂起的独立预算——首次挂起
+/// 同 provider fresh 重试恰一次，两次挂起即耗尽（不占 transport 3 次预算）。
+const GROUP_REVIEW_MAX_IDLE_STALLS: u32 = 2;
 
 /// group review shard/reduction（Reviewer）streaming 启动的生产构造函数（D2
 /// 锚点）。内部构造 legacy `AdapterInput{role: Reviewer}` 并经共享工厂
@@ -173,6 +178,22 @@ impl<'a> GroupReviewOrchestrator<'a> {
                 None,
                 None,
             ),
+            // P4-b（REQ-PTR-IDLE）：idle 挂起耗尽不走组审查失败门（那会按
+            // reason_code 改写动作为重试分片/归约），改走 P4-a 备好的
+            // stalled 门（按 stage 恢复 retry_internal_review）。
+            GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::IdleStall {
+                phase,
+                idle_secs,
+                idle_limit_secs,
+            }) => {
+                return self.create_provider_stalled_gate(
+                    attempt,
+                    node_id,
+                    phase,
+                    *idle_secs,
+                    *idle_limit_secs,
+                );
+            }
             _ => {
                 return Err(ProductStoreError::Io(
                     "group_review_failure_gate_unsupported_error".to_string(),
@@ -209,6 +230,60 @@ impl<'a> GroupReviewOrchestrator<'a> {
                 phase: phase.to_string(),
                 run_failure_code: reason_code.to_string(),
             },
+        )
+    }
+
+    /// P4-b（REQ-PTR-IDLE）：internal reviewer 零活动挂起耗尽门——同 P4-a
+    /// `open_provider_stalled_gate` 的 InternalReviewer 面（reason_code
+    /// `code_review_provider_stalled`，动作按 stage 恢复：retry_internal_review
+    /// 与 abort，文案同源），attempt 转 Blocked。走通用 `create_blocked_gate`
+    /// 而非组审查失败门（后者按 reason_code 改写动作，见
+    /// `create_failure_gate` 的组审查失败臂）；编排器无 event_tx，
+    /// durable-first 落盘由 P4-c 投影按 reason_code 消费。
+    fn create_provider_stalled_gate(
+        &self,
+        attempt: &crate::product::coding_models::CodingExecutionAttempt,
+        node_id: &str,
+        phase: &str,
+        idle_secs: u64,
+        idle_limit_secs: u64,
+    ) -> Result<crate::product::coding_models::CodingGateRequired, ProductStoreError> {
+        let attempt = if attempt.status == CodingAttemptStatus::Blocked {
+            attempt.clone()
+        } else {
+            self.store.update_attempt_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingAttemptStatus::Blocked,
+            )?
+        };
+        self.store.create_blocked_gate_with_diagnostic(
+            &attempt,
+            CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage: CodingExecutionStage::InternalPrReview,
+                node_id: Some(node_id.to_string()),
+                role: Some(CodingProviderRole::InternalReviewer),
+                title: "AI 挂起了".to_string(),
+                description: format!(
+                    "Internal Reviewer 已 {idle_secs} 秒没有任何输出（界 {idle_limit_secs} 秒，阶段 {phase}），自动重试一次后仍无进展，流程已暂停。可重试对应阶段审查，或终止。"
+                ),
+                reason_code: Some(CODE_REVIEW_PROVIDER_STALLED_REASON_CODE.to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![
+                    coding_gate_action_for_id("retry_internal_review")
+                        .expect("retry internal review action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            },
+            Some(CodingGateDiagnostic {
+                actual_value: Some(idle_secs.to_string()),
+                limit: Some(idle_limit_secs.to_string()),
+                phase: phase.to_string(),
+                run_failure_code: CODE_REVIEW_PROVIDER_STALLED_REASON_CODE.to_string(),
+            }),
         )
     }
 
@@ -374,20 +449,33 @@ impl<'a> GroupReviewOrchestrator<'a> {
         max_attempts: usize,
     ) -> Result<GroupReviewExecutionResult, GroupReviewExecutionError> {
         let attempts = max_attempts.max(1);
-        let mut last_transport_error = None;
-        for _ in 0..attempts {
+        let mut transport_attempts_left = attempts;
+        // P4-b（REQ-PTR-IDLE）：idle 挂起与 transport 预算分离（同 P4-a
+        // retry-cycle 语义）——首次挂起同 provider fresh 重试恰一次（execute
+        // 每次新起会话、resume 恒 None 即 fresh）；两次挂起即耗尽返回
+        // `IdleStall`，由调用方经 `create_failure_gate` 落
+        // `code_review_provider_stalled` 门，不占 transport 重试次数。
+        let mut idle_stall_count = 0u32;
+        loop {
             match self.executor.execute(prompt).await {
                 Ok(result) => return Ok(result),
                 Err(error @ GroupReviewExecutionError::Transport(_)) => {
-                    last_transport_error = Some(error);
+                    transport_attempts_left -= 1;
+                    if transport_attempts_left == 0 {
+                        return Err(error);
+                    }
+                }
+                Err(error @ GroupReviewExecutionError::IdleStall { .. }) => {
+                    idle_stall_count += 1;
+                    if idle_stall_count >= GROUP_REVIEW_MAX_IDLE_STALLS {
+                        return Err(error);
+                    }
                 }
                 Err(error @ GroupReviewExecutionError::UserCancelled)
                 | Err(error @ GroupReviewExecutionError::ProviderProtocol(_))
-                | Err(error @ GroupReviewExecutionError::IdleStall { .. })
                 | Err(error @ GroupReviewExecutionError::Internal(_)) => return Err(error),
             }
         }
-        Err(last_transport_error.expect("at least one transport error after exhausted retries"))
     }
 
     pub(crate) async fn execute_repair(
@@ -1054,6 +1142,19 @@ fn map_group_review_engine_error(error: CodingWorkspaceEngineError) -> GroupRevi
         {
             GroupReviewExecutionError::ProviderProtocol(message)
         }
+        // P4-b（REQ-PTR-IDLE）：共享 idle 看门狗的挂起保留 idle 类别进
+        // 重试编排（首次 fresh 重试一次），不折损成 Transport 吃 3 次预算。
+        // group review executor 恒 InternalReviewer，role 不再携带。
+        CodingWorkspaceEngineError::ProviderIdleStall {
+            phase,
+            idle_secs,
+            idle_limit_secs,
+            ..
+        } => GroupReviewExecutionError::IdleStall {
+            phase,
+            idle_secs,
+            idle_limit_secs,
+        },
         CodingWorkspaceEngineError::ProviderStream(message)
         | CodingWorkspaceEngineError::ProviderAdapter(ProviderAdapterError {
             details: message,
@@ -1200,5 +1301,28 @@ fn severity_rank(severity: &crate::product::coding_models::FindingSeverity) -> u
         crate::product::coding_models::FindingSeverity::Info => 0,
         crate::product::coding_models::FindingSeverity::Warning => 1,
         crate::product::coding_models::FindingSeverity::Error => 2,
+    }
+}
+
+#[cfg(test)]
+mod provider_idle_stall_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn maps_provider_idle_stall_to_idle_category_not_transport() {
+        let mapped = map_group_review_engine_error(CodingWorkspaceEngineError::ProviderIdleStall {
+            role: CodingProviderRole::InternalReviewer,
+            phase: "shard".to_string(),
+            idle_secs: 5,
+            idle_limit_secs: 1,
+        });
+        assert!(matches!(
+            &mapped,
+            GroupReviewExecutionError::IdleStall {
+                phase,
+                idle_secs: 5,
+                idle_limit_secs: 1,
+            } if phase == "shard"
+        ));
     }
 }
