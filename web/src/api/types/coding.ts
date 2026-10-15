@@ -9,6 +9,7 @@ import type {
   WorkItemExecutionPlan,
   WorkspaceProviderName,
 } from "./common";
+import type { CodingAttentionItemDto } from "./lifecycle";
 import type {
   PlanAmendmentManifest,
   PlanRepairRequest,
@@ -686,6 +687,13 @@ export type PlanCodingProgressDto = {
   selected_attempt_id: string | null;
   target_attempts: PlanCodingTargetDto[];
   units: PlanCodingUnitProgressDto[];
+  // P1-b（REQ-MTG-11 / 契约 A2）：plan 级聚合最终确认就绪投影——state 值域
+  // not_ready|ready|partial|done（Confirmed 视为已确认）。additive：旧响应
+  // 缺省按 not_ready 空投影处理（服务端 serde default 同口径）。
+  final_confirm?: PlanCodingFinalConfirmDto;
+  // P1-b（REQ-MTG-12）：本 plan 同源待处理事项（块 4 A1 镜像），总览待办
+  // 徽标消费。additive：旧响应缺省按无待办处理。
+  attention_items?: CodingAttentionItemDto[];
   plan_complete: boolean;
   // H5（设计 C 节冻结，additive）：workspace_lifecycle 事实——generation、现存/
   // 缺失成员数、状态；数据来自服务端交叉核验，不从 attempt_status 猜物理存在
@@ -707,6 +715,60 @@ export type PlanWorkspaceLifecycleDto = {
   missing_member_count: number;
   state: PlanWorkspaceLifecycleState;
 };
+
+// P1-b（REQ-MTG-11 / 契约 A2）：未齐备的冻结 target（GET `blocking` 条目；
+// POST not_ready 回执的失败项同构）。
+export type PlanCodingFinalConfirmBlockingDto = {
+  attempt_id: string;
+  reason_code: string;
+  message: string;
+};
+
+// P1-b（REQ-MTG-11 / 契约 A2）：plan 级聚合最终确认投影——Confirmed 视为已
+// 确认；全 Completed → done；部分 Completed 且剩余全就绪 → partial；零确认且
+// 全就绪 → ready；其余（含 blocking 非空/plan 未执行完成）→ not_ready。
+export type PlanCodingFinalConfirmDto = {
+  state: PlanCodingFinalConfirmState;
+  ready_attempt_ids: string[];
+  confirmed_attempt_ids: string[];
+  blocking: PlanCodingFinalConfirmBlockingDto[];
+};
+
+export type PlanCodingFinalConfirmState =
+  | "not_ready"
+  | "ready"
+  | "partial"
+  | "done";
+
+// P1-b（契约 A2）：POST `.../coding-final-confirm` 回执逐仓结果——
+// status 值域 confirmed|already_completed|failed|not_attempted。
+export type PlanCodingFinalConfirmResultItemDto = {
+  attempt_id: string;
+  target_repository_id: string;
+  status: PlanCodingFinalConfirmResultStatus;
+  error_code?: string | null;
+  message?: string | null;
+};
+
+export type PlanCodingFinalConfirmResultStatus =
+  | "confirmed"
+  | "already_completed"
+  | "failed"
+  | "not_attempted";
+
+// P1-b（契约 A2）：POST 回执——outcome 值域 all_confirmed|partially_confirmed|
+// not_ready；partial 只表示本次未全成，成功数按 `results` 计算（失败仓
+// error_code/message 可见；不加 command_id/generation 防重放）。
+export type PlanCodingFinalConfirmResultDto = {
+  plan_id: string;
+  outcome: PlanCodingFinalConfirmOutcome;
+  results: PlanCodingFinalConfirmResultItemDto[];
+};
+
+export type PlanCodingFinalConfirmOutcome =
+  | "all_confirmed"
+  | "partially_confirmed"
+  | "not_ready";
 
 // H5（设计 C 节冻结）：DELETE …/coding-workspaces 成功 200 回执；重复同
 // command 同 generation 返回 replayed，不扫下一代刚创建的 attempts。

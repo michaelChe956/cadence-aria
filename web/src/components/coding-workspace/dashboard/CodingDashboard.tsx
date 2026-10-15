@@ -40,7 +40,7 @@ export function CodingDashboard({
     return () => window.clearInterval(timer);
   }, []);
 
-  const aggregate = usePlanCodingProgress({
+  const { data: aggregate } = usePlanCodingProgress({
     projectId,
     issueId,
     planId: workItemGroupId,

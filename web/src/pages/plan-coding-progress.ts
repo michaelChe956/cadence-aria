@@ -1,6 +1,8 @@
 import type {
   CodingAttemptStatus,
+  CodingAttentionItemDto,
   PlanCodingExecutionState,
+  PlanCodingFinalConfirmState,
   PlanCodingProgressDto,
   PlanCodingTargetDto,
   PlanCodingUnitProgressDto,
@@ -25,6 +27,15 @@ export type PlanCodingUnitProgressView = {
   waitingReason: string | null;
   /** REQ-CS-06 三种等待文案；无等待事实时为 null。 */
   waitingLabel: string | null;
+  // P1-b（REQ-MTG-12）：总览列全所需事实——全量直接依赖（权威绑定）、
+  // order_index、summary（缺省由消费方回落 WI ID）。
+  dependencyLogicalWorkItemIds: string[];
+  orderIndex: number;
+  summary: string | null;
+  /** P1-b：owning target 的逐仓事实镜像（attempt 状态/仓库名/stage）。 */
+  attemptStatus: CodingAttemptStatus | null;
+  repositoryName: string | null;
+  stage: string | null;
 };
 
 export type PlanCodingTargetProgressView = {
@@ -33,6 +44,10 @@ export type PlanCodingTargetProgressView = {
   attemptStatus: CodingAttemptStatus;
   leaseState: string;
   worktreePath: string | null;
+  // P1-b（REQ-MTG-12/13）：仓库名与 stage 透传（FE-1 逐仓事实镜像）。
+  repositoryName: string | null;
+  branchName: string | null;
+  stage: string | null;
 };
 
 export type PlanCodingProgressView = {
@@ -49,6 +64,10 @@ export type PlanCodingProgressView = {
   targets: PlanCodingTargetProgressView[];
   /** H5：workspace_lifecycle 只读透传（旧响应无此事实时为 null）。 */
   workspaceLifecycle: PlanWorkspaceLifecycleView | null;
+  // P1-b（REQ-MTG-11）：plan 级聚合最终确认投影（旧响应无此事实时为 null）。
+  finalConfirm: PlanCodingFinalConfirmView | null;
+  // P1-b（REQ-MTG-12）：同源待办事实透传（旧响应无此事实时为空）。
+  attentionItems: CodingAttentionItemDto[];
 };
 
 export type PlanWorkspaceLifecycleView = {
@@ -56,6 +75,20 @@ export type PlanWorkspaceLifecycleView = {
   existingMemberCount: number;
   missingMemberCount: number;
   state: PlanWorkspaceLifecycleState;
+};
+
+// P1-b（REQ-MTG-11 / 契约 A2）：final_confirm 四态与 blocking 原因的纯镜像。
+export type PlanCodingFinalConfirmBlockingView = {
+  attemptId: string;
+  reasonCode: string;
+  message: string;
+};
+
+export type PlanCodingFinalConfirmView = {
+  state: PlanCodingFinalConfirmState;
+  readyAttemptIds: string[];
+  confirmedAttemptIds: string[];
+  blocking: PlanCodingFinalConfirmBlockingView[];
 };
 
 // H5（设计 C/D）：plan 聚合标题区整组删除入口的文案派生——全部成员在场时
@@ -137,7 +170,11 @@ export function planCodingWaitingLabel(
   return null;
 }
 
-function unitView(unit: PlanCodingUnitProgressDto): PlanCodingUnitProgressView {
+function unitView(
+  unit: PlanCodingUnitProgressDto,
+  targetByAttempt: Map<string, PlanCodingTargetDto>,
+): PlanCodingUnitProgressView {
+  const owning = targetByAttempt.get(unit.attempt_id) ?? null;
   return {
     unitId: unit.unit_id,
     logicalWorkItemId: unit.logical_work_item_id,
@@ -149,6 +186,14 @@ function unitView(unit: PlanCodingUnitProgressDto): PlanCodingUnitProgressView {
     unsatisfiedDependencyIds: [...unit.unsatisfied_dependency_ids],
     waitingReason: unit.waiting_reason,
     waitingLabel: planCodingWaitingLabel(unit),
+    dependencyLogicalWorkItemIds: [
+      ...(unit.dependency_logical_work_item_ids ?? []),
+    ],
+    orderIndex: unit.order_index ?? 0,
+    summary: unit.summary ?? null,
+    attemptStatus: owning?.attempt_status ?? null,
+    repositoryName: owning?.repository_name ?? null,
+    stage: owning?.stage ?? null,
   };
 }
 
@@ -159,12 +204,19 @@ function targetView(target: PlanCodingTargetDto): PlanCodingTargetProgressView {
     attemptStatus: target.attempt_status,
     leaseState: target.lease_state,
     worktreePath: target.worktree_path,
+    repositoryName: target.repository_name ?? null,
+    branchName: target.branch_name ?? null,
+    stage: target.stage ?? null,
   };
 }
+
 
 export function toPlanCodingProgressView(
   dto: PlanCodingProgressDto,
 ): PlanCodingProgressView {
+  const targetByAttempt = new Map(
+    dto.target_attempts.map((target) => [target.attempt_id, target]),
+  );
   return {
     planId: dto.plan_id,
     boundPlanRevisionId: dto.bound_plan_revision_id,
@@ -178,7 +230,7 @@ export function toPlanCodingProgressView(
     completedUnitCount: dto.units.filter(
       (unit) => unit.execution_state === "completed",
     ).length,
-    units: dto.units.map(unitView),
+    units: dto.units.map((unit) => unitView(unit, targetByAttempt)),
     targets: dto.target_attempts.map(targetView),
     workspaceLifecycle: dto.workspace_lifecycle
       ? {
@@ -188,5 +240,18 @@ export function toPlanCodingProgressView(
           state: dto.workspace_lifecycle.state,
         }
       : null,
+    finalConfirm: dto.final_confirm
+      ? {
+          state: dto.final_confirm.state,
+          readyAttemptIds: [...dto.final_confirm.ready_attempt_ids],
+          confirmedAttemptIds: [...dto.final_confirm.confirmed_attempt_ids],
+          blocking: dto.final_confirm.blocking.map((blocking) => ({
+            attemptId: blocking.attempt_id,
+            reasonCode: blocking.reason_code,
+            message: blocking.message,
+          })),
+        }
+      : null,
+    attentionItems: dto.attention_items ? [...dto.attention_items] : [],
   };
 }

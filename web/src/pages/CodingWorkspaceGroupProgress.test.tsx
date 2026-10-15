@@ -1,6 +1,10 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
-import type { CodingExecutionUnit, PlanCodingProgressDto } from "../api/types";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type {
+  CodingAttentionItemDto,
+  CodingExecutionUnit,
+  PlanCodingProgressDto,
+} from "../api/types";
 import { CodingWorkspaceGroupProgress } from "./CodingWorkspaceGroupProgress";
 import {
   planCodingGroupDeleteEntry,
@@ -302,6 +306,99 @@ describe("toPlanCodingProgressView pure projection", () => {
     expect(view.units[0]?.executionStateLabel).toBe("授权已失效");
     expect(view.units[0]?.waitingLabel).toBeNull();
   });
+
+  it("p1-b: passes through final_confirm aggregate facts verbatim", () => {
+    const view = toPlanCodingProgressView(
+      planCodingProgressDto({
+        final_confirm: {
+          state: "partial",
+          ready_attempt_ids: ["coding_attempt_web_0001"],
+          confirmed_attempt_ids: ["coding_attempt_busi_0001"],
+          blocking: [
+            {
+              attempt_id: "coding_attempt_gateway_0001",
+              reason_code: "attempt_not_in_final_confirm",
+              message: "stage is not final_confirm",
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(view.finalConfirm).toEqual({
+      state: "partial",
+      readyAttemptIds: ["coding_attempt_web_0001"],
+      confirmedAttemptIds: ["coding_attempt_busi_0001"],
+      blocking: [
+        {
+          attemptId: "coding_attempt_gateway_0001",
+          reasonCode: "attempt_not_in_final_confirm",
+          message: "stage is not final_confirm",
+        },
+      ],
+    });
+  });
+
+  it("p1-b: defaults final_confirm to null and attention to empty for legacy responses", () => {
+    const view = toPlanCodingProgressView(planCodingProgressDto());
+    expect(view.finalConfirm).toBeNull();
+    expect(view.attentionItems).toEqual([]);
+  });
+
+  it("p1-b: passes through attention items and per-unit summary/order/owning-target facts", () => {
+    const attention = [
+      {
+        key: "gate-busi-1",
+        kind: "triage",
+        project_id: "project_0001",
+        issue_id: "issue_0001",
+        plan_id: "issue_plan_0001",
+        attempt_id: "coding_attempt_busi_0001",
+        logical_work_item_id: "wi_core",
+        repository_name: "busi 服务仓",
+        reason_code: null,
+        title: "分诊待处理",
+        summary: "coder provider 失败等待分诊",
+        occurred_at: "2026-10-16T10:00:00Z",
+        target: { type: "coding_attempt", attempt_id: "coding_attempt_busi_0001" },
+        focus: { gate_id: "gate_busi_1" },
+      },
+    ] satisfies CodingAttentionItemDto[];
+    const base = planCodingProgressDto();
+    const view = toPlanCodingProgressView({
+      ...base,
+      attention_items: attention,
+      units: base.units.map((unit) =>
+        unit.logical_work_item_id === "wi_core"
+          ? { ...unit, summary: "核心域订单模型" }
+          : unit,
+      ),
+      target_attempts: base.target_attempts.map((target) =>
+        target.target_repository_id === "repo_busi"
+          ? { ...target, repository_name: "busi 服务仓", stage: "final_confirm" }
+          : target,
+      ),
+    });
+
+    expect(view.attentionItems).toEqual(attention);
+    const core = view.units.find((unit) => unit.logicalWorkItemId === "wi_core");
+    expect(core?.summary).toBe("核心域订单模型");
+    expect(core?.orderIndex).toBe(0);
+    expect(core?.dependencyLogicalWorkItemIds).toEqual([]);
+    expect(core?.attemptStatus).toBe("blocked");
+    expect(core?.repositoryName).toBe("busi 服务仓");
+    expect(core?.stage).toBe("final_confirm");
+    const panel = view.units.find((unit) => unit.logicalWorkItemId === "wi_panel");
+    expect(panel?.dependencyLogicalWorkItemIds).toEqual([
+      "wi_unrelated",
+      "wi_service",
+    ]);
+    const busi = view.targets.find(
+      (target) => target.targetRepositoryId === "repo_busi",
+    );
+    expect(busi?.repositoryName).toBe("busi 服务仓");
+    expect(busi?.stage).toBe("final_confirm");
+  });
 });
 
 const LOCAL_UNITS: CodingExecutionUnit[] = [
@@ -366,10 +463,13 @@ describe("CodingWorkspaceGroupProgress aggregated plan progress", () => {
     expect(section).toHaveTextContent("等待依赖完成");
     expect(section).toHaveTextContent("等待执行槽位");
     expect(section).toHaveTextContent("下一项编排尚未启用");
-    // selected 工作台入口可见，plan 未完成如实呈现。
+    // selected 工作台入口可见，WI 执行未完成如实呈现（P1-b ⑥：plan_complete 只
+    // 代表「全部 WI 执行完成」，不冒充人工确认）。
     expect(section).toHaveTextContent("coding_attempt_busi_0001");
-    expect(section).toHaveTextContent("plan 未完成");
-    expect(section).not.toHaveTextContent("plan 完成");
+    expect(section).toHaveTextContent("1 / 5");
+    expect(section).toHaveTextContent("WI 执行未完成");
+    expect(section).not.toHaveTextContent("全部 WI 执行完成");
+    expect(section).not.toHaveTextContent("全部人工确认");
 
     vi.unstubAllGlobals();
   });
@@ -719,5 +819,143 @@ describe("h5: plan-scoped group delete entry reachability", () => {
     expect(await screen.findByTestId("plan-coding-delete-all")).toBeDisabled();
 
     vi.unstubAllGlobals();
+  });
+});
+
+describe("p1-b: overview entry and aggregate confirm wiring", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("renders the 查看全部 WI entry in the aggregate branch and fires the callback", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(planCodingProgressDto()), { status: 200 }),
+      ),
+    );
+    const onOpenPlanOverview = vi.fn();
+
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="issue_plan_0001"
+        currentWorkItemId="work_item_0001"
+        units={LOCAL_UNITS}
+        projectId="project_0001"
+        issueId="issue_0001"
+        onOpenPlanOverview={onOpenPlanOverview}
+      />,
+    );
+
+    await screen.findByTestId("plan-coding-progress");
+    const button = screen.getByTestId("plan-coding-open-overview");
+    expect(button).toHaveTextContent("查看全部 WI");
+    fireEvent.click(button);
+  });
+
+  it("renders the 查看全部 WI entry in the local fallback branch too", () => {
+    const onOpenPlanOverview = vi.fn();
+
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="issue_plan_0001"
+        currentWorkItemId="work_item_0001"
+        units={LOCAL_UNITS}
+        onOpenPlanOverview={onOpenPlanOverview}
+      />,
+    );
+
+    const button = screen.getByTestId("plan-coding-open-overview");
+    expect(button).toHaveTextContent("查看全部 WI");
+    fireEvent.click(button);
+    expect(onOpenPlanOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits the overview entry when no callback is wired", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(planCodingProgressDto()), { status: 200 }),
+      ),
+    );
+
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="issue_plan_0001"
+        currentWorkItemId="work_item_0001"
+        units={LOCAL_UNITS}
+        projectId="project_0001"
+        issueId="issue_0001"
+      />,
+    );
+
+    await screen.findByTestId("plan-coding-progress");
+    expect(screen.queryByTestId("plan-coding-open-overview")).toBeNull();
+  });
+
+  it("shows the aggregate confirm button when final_confirm is ready and posts exactly once, then re-pulls the aggregate", async () => {
+    const dto = planCodingProgressDto({
+      final_confirm: {
+        state: "ready",
+        ready_attempt_ids: [
+          "coding_attempt_busi_0001",
+          "coding_attempt_web_0001",
+          "coding_attempt_gateway_0001",
+          "coding_attempt_frontend_0001",
+        ],
+        confirmed_attempt_ids: [],
+        blocking: [],
+      },
+    });
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        if (String(input).endsWith("/coding-final-confirm")) {
+          return new Response(
+            JSON.stringify({
+              plan_id: "issue_plan_0001",
+              outcome: "all_confirmed",
+              results: dto.target_attempts.map((target) => ({
+                attempt_id: target.attempt_id,
+                target_repository_id: target.target_repository_id,
+                status: "confirmed",
+              })),
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify(dto), { status: 200 });
+      }),
+    );
+
+    render(
+      <CodingWorkspaceGroupProgress
+        planId="issue_plan_0001"
+        currentWorkItemId="work_item_0001"
+        units={LOCAL_UNITS}
+        projectId="project_0001"
+        issueId="issue_0001"
+      />,
+    );
+
+    const button = await screen.findByTestId("plan-final-confirm-button");
+    expect(button).toHaveTextContent("确认本计划全部完成（4 仓/5 项）");
+    fireEvent.click(button);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("plan-final-confirm-result")).toBeInTheDocument(),
+    );
+    const posts = calls.filter((call) =>
+      call.input.endsWith("/coding-final-confirm"),
+    );
+    expect(posts).toHaveLength(1);
+    expect(posts[0]?.init?.method).toBe("POST");
+    // onConfirmed 后重拉 GET 聚合刷新真实状态（不依赖新事件协议）。
+    const gets = calls.filter((call) => call.input.endsWith("/coding-start"));
+    expect(gets.length).toBeGreaterThanOrEqual(2);
   });
 });

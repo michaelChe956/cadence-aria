@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ApiRequestError,
   abortCodingAttempt,
+  confirmPlanCoding,
   confirmWorkItemExecutionPlan,
   createCodingAttempt,
   createGroupCodingAttempt,
@@ -46,7 +47,11 @@ describe("coding attempts api client", () => {
     await getCodingAttemptArtifact(address, "unit.stdout.log");
     await confirmWorkItemExecutionPlan(address);
     await requestWorkItemExecutionPlanChange(address, { note: "补充边界测试" });
-
+    await confirmPlanCoding(
+      "project/with space",
+      "issue/with space",
+      "plan/1",
+    );
     const basePath =
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/coding-attempts/coding%20attempt%2F1";
 
@@ -59,6 +64,7 @@ describe("coding attempts api client", () => {
       `${basePath}/artifacts/unit.stdout.log`,
       `${basePath}/execution-plan/confirm`,
       `${basePath}/execution-plan/change-request`,
+      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-item-plans/plan%2F1/coding-final-confirm",
     ]);
     expect(calls[0].init?.method).toBe("POST");
     expect(calls[0].init?.body).toBe(JSON.stringify({}));
@@ -68,6 +74,9 @@ describe("coding attempts api client", () => {
     expect(calls[4].init?.method).toBe("DELETE");
     expect(calls[6].init?.method).toBe("POST");
     expect(calls[7].init?.body).toBe(JSON.stringify({ note: "补充边界测试" }));
+    // P1-b（REQ-MTG-11 / 契约 A2）：plan 级聚合确认——无 body POST。
+    expect(calls[8].init?.method).toBe("POST");
+    expect(calls[8].init?.body).toBeUndefined();
   });
 
   it("maps coding attempt snapshot and artifact response fields", async () => {

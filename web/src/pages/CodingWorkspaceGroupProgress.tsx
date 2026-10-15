@@ -6,6 +6,7 @@ import {
   toPlanCodingProgressView,
   type PlanCodingProgressView,
 } from "./plan-coding-progress";
+import { PlanCodingFinalConfirm } from "./PlanCodingFinalConfirm";
 
 
 function currentUnitIndex(
@@ -52,6 +53,7 @@ export function CodingWorkspaceGroupProgress({
   onDeleteAllCodingWorkspaces,
   groupDeleteBusy = false,
   deleteBusy = false,
+  onOpenPlanOverview,
 }: {
   planId: string | null;
   currentWorkItemId: string | null;
@@ -66,8 +68,11 @@ export function CodingWorkspaceGroupProgress({
   groupDeleteBusy?: boolean;
   /** P3：单删请求在途——互斥语义同步到入口可见态（与 groupDeleteBusy 取或）。 */
   deleteBusy?: boolean;
+  /** P1-b（REQ-MTG-12）：「查看全部 WI」总览入口；未接线时不渲染。 */
+  onOpenPlanOverview?: () => void;
 }) {
-  const aggregateDto = usePlanCodingProgress({ projectId, issueId, planId, refreshKey });
+  const { data: aggregateDto, refetch: refetchAggregate } =
+    usePlanCodingProgress({ projectId, issueId, planId, refreshKey });
   const aggregate = useMemo(
     () => (aggregateDto ? toPlanCodingProgressView(aggregateDto) : null),
     [aggregateDto],
@@ -89,6 +94,17 @@ export function CodingWorkspaceGroupProgress({
         {label}
       </button>
     ) : null;
+
+  const overviewEntry = onOpenPlanOverview ? (
+    <button
+      type="button"
+      data-testid="plan-coding-open-overview"
+      onClick={() => onOpenPlanOverview()}
+      className="inline-flex h-7 shrink-0 items-center rounded-md border border-[var(--aria-line)] bg-white px-2 text-[11px] font-semibold text-[var(--aria-ink)] hover:bg-slate-50"
+    >
+      查看全部 WI
+    </button>
+  ) : null;
 
   if (!planId) {
     return null;
@@ -127,17 +143,22 @@ export function CodingWorkspaceGroupProgress({
           className="grid min-h-11 shrink-0 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2 text-xs md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-center"
         >
           <div className="flex min-w-0 items-center justify-between gap-2">
-            <div className="min-w-0">
-              <div className="font-semibold text-[var(--aria-ink)]">WorkItemGroup</div>
-              <div className="truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
-                {planId}
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="min-w-0">
+                <div className="font-semibold text-[var(--aria-ink)]">WorkItemGroup</div>
+                <div className="truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
+                  {planId}
+                </div>
               </div>
+              {overviewEntry}
             </div>
             {deleteEntry ? groupDeleteButton(deleteEntry.label) : null}
           </div>
           <div className="shrink-0 text-right font-mono text-[var(--aria-ink-muted)]">
             {aggregate.completedUnitCount} / {aggregate.units.length} ·{" "}
-            {aggregate.planComplete ? "plan 完成" : "plan 未完成"}
+            {/* P1-b ⑥：plan_complete 只代表「全部 WI 执行完成」，人工确认语义
+                归 final_confirm（聚合按钮/总览标题），两者不混写。 */}
+            {aggregate.planComplete ? "全部 WI 执行完成" : "WI 执行未完成"}
           </div>
           <div className="col-span-2 min-w-0 truncate font-mono text-[11px] text-[var(--aria-ink-muted)] md:col-span-1 md:text-right">
             {selectedAttemptId ? `selected ${selectedAttemptId}` : (aggregate.phase ?? "-")}
@@ -171,6 +192,19 @@ export function CodingWorkspaceGroupProgress({
               </li>
             ))}
           </ul>
+          {projectId && issueId && aggregate.finalConfirm ? (
+            <div className="col-span-2 md:col-span-3">
+              <PlanCodingFinalConfirm
+                projectId={projectId}
+                issueId={issueId}
+                planId={planId}
+                finalConfirm={aggregate.finalConfirm}
+                targetCount={aggregate.targets.length}
+                unitCount={aggregate.units.length}
+                onConfirmed={refetchAggregate}
+              />
+            </div>
+          ) : null}
         </section>
       </div>
     );
@@ -182,11 +216,14 @@ export function CodingWorkspaceGroupProgress({
   return (
     <section data-testid="onboarding-anchor-coding-progress" className="grid min-h-11 shrink-0 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 border-b border-[var(--aria-line)] bg-[var(--aria-panel)] px-4 py-2 text-xs md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-center">
       <div className="flex min-w-0 items-center justify-between gap-2">
-        <div className="min-w-0">
-          <div className="font-semibold text-[var(--aria-ink)]">WorkItemGroup</div>
-          <div className="truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
-            {planId}
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="min-w-0">
+            <div className="font-semibold text-[var(--aria-ink)]">WorkItemGroup</div>
+            <div className="truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
+              {planId}
+            </div>
           </div>
+          {overviewEntry}
         </div>
         {groupDeleteButton("删除本计划全部 Coding 工作区")}
       </div>

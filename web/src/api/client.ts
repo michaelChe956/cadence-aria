@@ -37,6 +37,7 @@ import type {
   RetryFailedScRunStatus,
   TakeoverResponse,
   PlanCodingProgressDto,
+  PlanCodingFinalConfirmResultDto,
   PlanCodingStartRequest,
   PlanCodingStartResultDto,
   PlanCodingWorkspaceDeletionResultDto,
@@ -728,6 +729,20 @@ export function getPlanCodingProgress(
 ): Promise<PlanCodingProgressDto> {
   return requestJson<PlanCodingProgressDto>(
     `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}/coding-start`,
+  );
+}
+
+// P1-b（REQ-MTG-11 / 契约 A2）：plan 级聚合最终确认——无 body POST，按 target
+// 顺序逐仓调用既有确认（首失败即停），回执逐仓结果（失败仓 error_code/message
+// 可见）；不做回执/防重放/跨仓事务（owner 已裁定剔除，已知风险 H-1~H-6）。
+export function confirmPlanCoding(
+  projectId: string,
+  issueId: string,
+  planId: string,
+): Promise<PlanCodingFinalConfirmResultDto> {
+  return requestJson<PlanCodingFinalConfirmResultDto>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/work-item-plans/${encodeURIComponent(planId)}/coding-final-confirm`,
+    { method: "POST" },
   );
 }
 
