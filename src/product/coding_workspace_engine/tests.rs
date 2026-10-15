@@ -543,6 +543,7 @@ mod group_review_executor;
 mod group_review_facts;
 mod group_review_failure;
 mod group_review_identity_snapshot;
+mod group_review_idle_stall;
 mod group_review_material;
 mod group_review_orchestrator;
 mod group_review_prompts;

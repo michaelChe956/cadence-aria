@@ -91,6 +91,15 @@ pub(crate) fn map_group_review_orchestration_error(
         GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::Internal(message)) => {
             CodingWorkspaceEngineError::GroupReviewExecutorInternal(message)
         }
+        // P4-b（REQ-PTR-IDLE）：internal reviewer 零活动挂起耗尽映射为可人工
+        // 恢复的 Blocked 语义（stalled 门已由 create_failure_gate 落
+        // code_review_provider_stalled），不进 Failed 收口。
+        GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::IdleStall { .. }) => {
+            CodingWorkspaceEngineError::GroupReviewBlocked {
+                reason_code: CODE_REVIEW_PROVIDER_STALLED_REASON_CODE.to_string(),
+                gate_id,
+            }
+        }
         GroupReviewOrchestrationError::Store(error) => CodingWorkspaceEngineError::Store(error),
     }
 }
@@ -245,7 +254,10 @@ impl CodingWorkspaceEngine {
             | GroupReviewOrchestrationError::ShardOutputInvalid { .. }
             | GroupReviewOrchestrationError::ReductionOutputInvalid { .. }
             | GroupReviewOrchestrationError::ShardTransportExhausted { .. }
-            | GroupReviewOrchestrationError::ReductionTransportExhausted => {
+            | GroupReviewOrchestrationError::ReductionTransportExhausted
+            | GroupReviewOrchestrationError::Executor(GroupReviewExecutionError::IdleStall {
+                ..
+            }) => {
                 match orchestrator.create_failure_gate(attempt, node_id, &error) {
                     Ok(gate) => Some(gate.gate_id),
                     Err(store_error) => {
