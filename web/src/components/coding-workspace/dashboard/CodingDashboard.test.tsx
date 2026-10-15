@@ -2,6 +2,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  CodingAttentionItemDto,
   CodingExecutionUnit,
   PlanCodingProgressDto,
   PlanCodingTargetDto,
@@ -134,6 +135,7 @@ function multiRepoPlanProgressDto(): PlanCodingProgressDto {
 
 function seedGroupAttemptStore(): void {
   useCodingWorkspaceStore.setState({
+    attemptId: "coding_attempt_busi_0001",
     units: [unit],
     timelineNodes: [],
     currentWorkItemId: "WI-001",
@@ -144,9 +146,26 @@ function seedGroupAttemptStore(): void {
   });
 }
 
+function planAttentionItem(
+  overrides: Partial<CodingAttentionItemDto> & { key: string },
+): CodingAttentionItemDto {
+  return {
+    key: overrides.key,
+    kind: "choice",
+    project_id: "project_0001",
+    issue_id: "issue_0001",
+    title: "待处理",
+    summary: "待处理事项",
+    occurred_at: "2026-10-16T00:00:00Z",
+    target: { type: "coding_attempt" },
+    ...overrides,
+  };
+}
+
 describe("CodingDashboard", () => {
   beforeEach(() => {
     useCodingWorkspaceStore.setState({
+      attemptId: null,
       units: [unit],
       timelineNodes: [],
       currentWorkItemId: "WI-001",
@@ -159,6 +178,7 @@ describe("CodingDashboard", () => {
 
   afterEach(() => {
     useCodingWorkspaceStore.setState({
+      attemptId: null,
       units: [],
       timelineNodes: [],
       currentWorkItemId: null,
@@ -269,5 +289,100 @@ describe("CodingDashboard", () => {
     });
     expect(container.querySelector('[data-node="WI-001"]')).not.toBeNull();
     expect(container.querySelector('[data-node="WI-002"]')).toBeNull();
+  });
+
+  // P1-d（REQ-MTG-13）：attempt 全态状态条——多仓取聚合 target_attempts；
+  // WaitingForHuman＋FinalConfirm 显示「等待最终确认」不叫分诊；unit 已完成
+  // 与 attempt 待确认可同时呈现（六态拓扑判据不变）。
+  it("renders the aggregate attempt status strip with final-confirm wording beside the untouched topology", async () => {
+    const dto = multiRepoPlanProgressDto();
+    dto.units[0] = {
+      ...dto.units[0]!,
+      unit_status: "completed",
+    };
+    dto.target_attempts = [
+      {
+        ...planTarget("repo_busi", "coding_attempt_busi_0001"),
+        attempt_status: "waiting_for_human",
+        stage: "final_confirm",
+        repository_name: "busi",
+      },
+      {
+        ...planTarget("repo_api", "coding_attempt_api_0001"),
+        attempt_status: "running",
+        stage: "coding",
+        repository_name: "api",
+      },
+      {
+        ...planTarget("repo_gateway", "coding_attempt_gateway_0001"),
+        attempt_status: "awaiting_plan_amendment",
+        repository_name: "gateway",
+      },
+      {
+        ...planTarget("repo_frontend", "coding_attempt_frontend_0001"),
+        attempt_status: "amendment_apply_failed",
+        repository_name: "frontend",
+      },
+    ];
+    dto.attention_items = [
+      planAttentionItem({
+        key: "k_choice",
+        kind: "choice",
+        attempt_id: "coding_attempt_api_0001",
+      }),
+      planAttentionItem({
+        key: "k_triage",
+        kind: "triage",
+        attempt_id: "coding_attempt_gateway_0001",
+      }),
+    ];
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(JSON.stringify(dto), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    seedGroupAttemptStore();
+
+    const { container } = render(
+      <CodingDashboard projectId="project_0001" issueId="issue_0001" />,
+    );
+
+    const strip = await screen.findByTestId("coding-dashboard-attempts");
+    expect(
+      screen.getByTestId("coding-dashboard-attempt-coding_attempt_busi_0001"),
+    ).toHaveTextContent("等待最终确认");
+    expect(strip).toHaveTextContent("busi");
+    expect(strip).toHaveTextContent("api");
+    expect(strip).toHaveTextContent("执行中 · 编码");
+    expect(strip).toHaveTextContent("等待计划修订");
+    expect(strip).toHaveTextContent("待办 choice");
+    expect(strip).toHaveTextContent("待办 triage");
+    expect(strip).not.toHaveTextContent("等待分诊");
+    expect(strip).not.toHaveTextContent("等待人工");
+
+    // unit 已完成与 attempt 待确认同时呈现；六态拓扑判据不改。
+    await waitFor(() => {
+      expect(container.querySelector('[data-node="WI-001"]')?.getAttribute("data-state")).toBe(
+        "done",
+      );
+    });
+  });
+
+  it("renders the current session attempt outside a group attempt without fetching", () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    useCodingWorkspaceStore.setState({
+      attemptId: "coding_attempt_0001",
+      status: "waiting_for_human",
+      stage: "final_confirm",
+    });
+
+    render(<CodingDashboard projectId="project_0001" issueId="issue_0001" />);
+
+    const strip = screen.getByTestId("coding-dashboard-attempts");
+    expect(strip).toHaveTextContent("coding_attempt_0001");
+    expect(strip).toHaveTextContent("等待最终确认");
+    expect(strip).not.toHaveTextContent("等待分诊");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

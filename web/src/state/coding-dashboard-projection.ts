@@ -1,9 +1,12 @@
 import type {
+  CodingAttemptStatus,
+  CodingAttentionItemDto,
   CodingExecutionUnit,
   CodingExecutionUnitStatus,
   CodingTimelineNode,
   PlanCodingProgressDto,
 } from "../api/types";
+import { ATTEMPT_STATUS_LABELS, STAGE_LABELS } from "./coding-execution-labels";
 import type { CockpitFlowState } from "./workspace-cockpit-projection";
 
 export type CodingUnitState = CockpitFlowState;
@@ -123,6 +126,104 @@ function latestRevision(
   if (currentShadowed && !nextShadowed) return next;
   if (!currentShadowed && nextShadowed) return current;
   return next;
+}
+
+// P1-d（REQ-MTG-13）：仪表盘 attempt 全态状态条的展示模型与投影——多仓取聚合
+// target_attempts（待办 kind 取同源 attention_items），单仓/聚合缺席回落当前
+// session attempt。只读展示层，不参与 unit 六态拓扑判据（codingUnitState 仍
+// 是拓扑唯一口径），unit 已完成与 attempt 待确认可同时呈现。
+export interface CodingDashboardAttempt {
+  attemptId: string;
+  repositoryName: string | null;
+  status: CodingAttemptStatus;
+  stage: string | null;
+  /** 11 态文案（ATTEMPT_STATUS_LABELS）；WaitingForHuman＋FinalConfirm 专用短语。 */
+  statusLabel: string;
+  /** STAGE_LABELS 文案；最终确认等待已折进 statusLabel，置 null 防复读。 */
+  stageLabel: string | null;
+  /** 本 attempt 的待办 kind（首见序去重），供状态条徽标。 */
+  attentionKinds: readonly string[];
+}
+
+/** 单仓/聚合缺席时的 session attempt 最小输入面。 */
+export interface CodingDashboardSessionAttemptInput {
+  attemptId: string | null;
+  status: CodingAttemptStatus | null;
+  stage: string | null;
+}
+
+// WaitingForHuman＋FinalConfirm 是聚合确认等待，不与编码侧人工卡壳（等待人工/
+// 分诊）混称（REQ-MTG-13）；短语已含 stage 语义，stageLabel 不再复读「最终确认」。
+export const CODING_ATTEMPT_FINAL_CONFIRM_WAIT_LABEL = "等待最终确认";
+
+function attemptStatusLabel(status: CodingAttemptStatus, stage: string | null): string {
+  if (status === "waiting_for_human" && stage === "final_confirm") {
+    return CODING_ATTEMPT_FINAL_CONFIRM_WAIT_LABEL;
+  }
+  return ATTEMPT_STATUS_LABELS[status] ?? status;
+}
+
+function attemptStageLabel(status: CodingAttemptStatus, stage: string | null): string | null {
+  if (stage === null || (status === "waiting_for_human" && stage === "final_confirm")) {
+    return null;
+  }
+  return STAGE_LABELS[stage] ?? stage;
+}
+
+function attentionKindsByAttempt(
+  items: readonly CodingAttentionItemDto[] | undefined,
+): Map<string, string[]> {
+  const byAttempt = new Map<string, string[]>();
+  for (const item of items ?? []) {
+    if (!item.attempt_id) {
+      continue;
+    }
+    const kinds = byAttempt.get(item.attempt_id);
+    if (kinds) {
+      if (!kinds.includes(item.kind)) {
+        kinds.push(item.kind);
+      }
+    } else {
+      byAttempt.set(item.attempt_id, [item.kind]);
+    }
+  }
+  return byAttempt;
+}
+
+export function selectCodingDashboardAttempts(
+  aggregate: PlanCodingProgressDto | null,
+  session: CodingDashboardSessionAttemptInput,
+): readonly CodingDashboardAttempt[] {
+  if (aggregate && aggregate.target_attempts.length > 0) {
+    const kindsByAttempt = attentionKindsByAttempt(aggregate.attention_items);
+    return aggregate.target_attempts.map((target) => {
+      const stage = target.stage ?? null;
+      return {
+        attemptId: target.attempt_id,
+        repositoryName: target.repository_name ?? null,
+        status: target.attempt_status,
+        stage,
+        statusLabel: attemptStatusLabel(target.attempt_status, stage),
+        stageLabel: attemptStageLabel(target.attempt_status, stage),
+        attentionKinds: kindsByAttempt.get(target.attempt_id) ?? [],
+      };
+    });
+  }
+  if (!session.attemptId || !session.status) {
+    return [];
+  }
+  const sessionStage = session.stage ?? null;
+  return [
+    {
+      attemptId: session.attemptId,
+      repositoryName: null,
+      status: session.status,
+      stage: sessionStage,
+      statusLabel: attemptStatusLabel(session.status, sessionStage),
+      stageLabel: attemptStageLabel(session.status, sessionStage),
+      attentionKinds: [],
+    },
+  ];
 }
 
 export function selectCodingTopology(units: readonly CodingTopologyUnitInput[]): CodingTopology {

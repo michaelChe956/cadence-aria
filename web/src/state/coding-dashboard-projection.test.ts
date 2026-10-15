@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type {
+  CodingAttentionItemDto,
+  CodingAttemptStatus,
   CodingExecutionUnit,
   CodingTimelineNode,
   PlanCodingProgressDto,
@@ -13,6 +15,7 @@ import {
   CODING_UNIT_STATE_LABELS,
   codingUnitState,
   selectCodingBudgetGates,
+  selectCodingDashboardAttempts,
   selectCodingDashboardUnits,
   selectCodingDependencyChain,
   selectCodingTopology,
@@ -375,5 +378,180 @@ describe("selectCodingBudgetGates", () => {
     expect(gates[0]?.remainingMs).toBeLessThanOrEqual(CODING_BUDGET_NEAR_EXHAUSTION_MS);
     expect(gates[0]?.nearExhaustion).toBe(true);
     expect(gates[1]?.nearExhaustion).toBe(false);
+  });
+});
+
+function attentionItem(
+  overrides: Partial<CodingAttentionItemDto> & { key: string },
+): CodingAttentionItemDto {
+  return {
+    key: overrides.key,
+    kind: "triage",
+    project_id: "project_0001",
+    issue_id: "issue_0001",
+    title: "待处理",
+    summary: "待处理事项",
+    occurred_at: "2026-10-16T00:00:00Z",
+    target: { type: "coding_attempt" },
+    ...overrides,
+  };
+}
+
+function attemptAggregate(
+  targets: Array<Partial<PlanCodingTargetDto> & Pick<PlanCodingTargetDto, "attempt_id">>,
+  attentionItems: CodingAttentionItemDto[] = [],
+): PlanCodingProgressDto {
+  const aggregate = multiRepoPlanProgressDto();
+  aggregate.target_attempts = targets.map((overrides) => ({
+    ...planTarget(overrides.target_repository_id ?? "repo_x", overrides.attempt_id),
+    ...overrides,
+  }));
+  aggregate.attention_items = attentionItems;
+  return aggregate;
+}
+
+// P1-d（REQ-MTG-13）红测口径：11 个 attempt 态逐一参数化；WaitingForHuman＋
+// FinalConfirm 显示「等待最终确认」，不与编码侧人工卡壳（等待人工/分诊）混称；
+// 多仓取聚合 target_attempts，单仓/聚合缺席回落当前 session attempt。
+describe("selectCodingDashboardAttempts", () => {
+  const IDLE_SESSION = { attemptId: null, status: null, stage: null };
+  const ALL_ELEVEN_STATUSES: CodingAttemptStatus[] = [
+    "created",
+    "running",
+    "waiting_for_human",
+    "blocked",
+    "awaiting_manual_recovery",
+    "awaiting_plan_amendment",
+    "applying_plan_amendment",
+    "amendment_apply_failed",
+    "completed",
+    "failed",
+    "aborted",
+  ];
+
+  it("parameterizes all eleven attempt statuses through the shared label tables", () => {
+    const aggregate = attemptAggregate(
+      ALL_ELEVEN_STATUSES.map((status, index) => ({
+        attempt_id: `coding_attempt_${index}`,
+        target_repository_id: `repo_${index}`,
+        repository_name: `仓库${index}`,
+        attempt_status: status,
+        stage: status === "waiting_for_human" ? "final_confirm" : "coding",
+      })),
+    );
+    const attempts = selectCodingDashboardAttempts(aggregate, IDLE_SESSION);
+
+    expect(attempts.map((attempt) => attempt.status)).toEqual(ALL_ELEVEN_STATUSES);
+    expect(attempts.map((attempt) => attempt.statusLabel)).toEqual([
+      "已创建",
+      "执行中",
+      "等待最终确认",
+      "已阻塞",
+      "等待人工恢复",
+      "等待计划修订",
+      "应用计划修订",
+      "修订应用失败",
+      "已完成",
+      "已失败",
+      "已中止",
+    ]);
+    // 非 final_confirm 态的 stage 走 STAGE_LABELS；最终确认等待已把 stage 折进
+    // statusLabel 短语（避免「等待最终确认 · 最终确认」复读）。
+    expect(attempts.map((attempt) => attempt.stageLabel)).toEqual(
+      ALL_ELEVEN_STATUSES.map((status) => (status === "waiting_for_human" ? null : "编码")),
+    );
+    expect(attempts[0]).toMatchObject({
+      attemptId: "coding_attempt_0",
+      repositoryName: "仓库0",
+      stage: "coding",
+    });
+  });
+
+  it("labels waiting_for_human at final_confirm as 等待最终确认 instead of triage/human wording", () => {
+    const aggregate = attemptAggregate([
+      {
+        attempt_id: "coding_attempt_confirm",
+        attempt_status: "waiting_for_human",
+        stage: "final_confirm",
+      },
+      {
+        attempt_id: "coding_attempt_gate",
+        attempt_status: "waiting_for_human",
+        stage: "coding",
+      },
+    ]);
+    const [confirm, gate] = selectCodingDashboardAttempts(aggregate, IDLE_SESSION);
+
+    expect(confirm?.statusLabel).toBe("等待最终确认");
+    expect(confirm?.statusLabel).not.toContain("分诊");
+    expect(confirm?.statusLabel).not.toContain("人工");
+    // 其他 stage 的人工等待仍是通用文案，不冒充最终确认。
+    expect(gate?.statusLabel).toBe("等待人工");
+  });
+
+  it("collects deduped attention kinds per attempt and skips items without an attempt", () => {
+    const aggregate = attemptAggregate(
+      [{ attempt_id: "coding_attempt_a" }, { attempt_id: "coding_attempt_b" }],
+      [
+        attentionItem({ key: "k1", kind: "choice", attempt_id: "coding_attempt_a" }),
+        attentionItem({ key: "k2", kind: "triage", attempt_id: "coding_attempt_a" }),
+        attentionItem({ key: "k3", kind: "choice", attempt_id: "coding_attempt_a" }),
+        attentionItem({ key: "k4", kind: "blocked", attempt_id: "coding_attempt_b" }),
+        attentionItem({ key: "k5", kind: "final_confirm", attempt_id: null }),
+      ],
+    );
+    const attempts = selectCodingDashboardAttempts(aggregate, IDLE_SESSION);
+
+    expect(attempts[0]?.attentionKinds).toEqual(["choice", "triage"]);
+    expect(attempts[1]?.attentionKinds).toEqual(["blocked"]);
+  });
+
+  it("falls back to the current session attempt when no aggregate targets exist", () => {
+    expect(
+      selectCodingDashboardAttempts(null, {
+        attemptId: "coding_attempt_session",
+        status: "running",
+        stage: "coding",
+      }),
+    ).toEqual([
+      {
+        attemptId: "coding_attempt_session",
+        repositoryName: null,
+        status: "running",
+        stage: "coding",
+        statusLabel: "执行中",
+        stageLabel: "编码",
+        attentionKinds: [],
+      },
+    ]);
+
+    // 单仓 session 的最终确认等待同样使用「等待最终确认」。
+    expect(
+      selectCodingDashboardAttempts(null, {
+        attemptId: "coding_attempt_session",
+        status: "waiting_for_human",
+        stage: "final_confirm",
+      })[0]?.statusLabel,
+    ).toBe("等待最终确认");
+  });
+
+  it("returns an empty strip when neither targets nor a live session attempt exist", () => {
+    expect(selectCodingDashboardAttempts(null, IDLE_SESSION)).toEqual([]);
+    expect(
+      selectCodingDashboardAttempts(null, {
+        attemptId: "coding_attempt_x",
+        status: null,
+        stage: null,
+      }),
+    ).toEqual([]);
+    const emptyTargets = multiRepoPlanProgressDto();
+    emptyTargets.target_attempts = [];
+    expect(
+      selectCodingDashboardAttempts(emptyTargets, {
+        attemptId: null,
+        status: "running",
+        stage: null,
+      }),
+    ).toEqual([]);
   });
 });
