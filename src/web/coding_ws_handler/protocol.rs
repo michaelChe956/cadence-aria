@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::product::coding_models::{
-    CodeReviewReport, CodingAttemptStatus, CodingChatEntry, CodingChoiceGate, CodingExecutionStage,
+    CodeReviewReport, CodingAttemptStatus, CodingChatEntry, CodingChoiceGate, CodingChoiceQuestion,
+    CodingExecutionStage,
     CodingGateRequired as CodingGateRequiredModel, CodingProviderPermissionMode,
     CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunSnapshot,
     CodingTimelineNode, CodingTimelineNodeStatus, GroupFinalReadinessSnapshot, InternalPrReview,
@@ -105,6 +106,10 @@ pub enum CodingWsOutMessage {
         options: Vec<ChoiceOption>,
         allow_multiple: bool,
         allow_free_text: bool,
+        /// P2-e（REQ-CRO-11）：多题透传——与快照 `pending_choices[].questions`
+        /// 同形；旧帧 serde 缺省为空，前端按单一 default 题回落。
+        #[serde(default)]
+        questions: Vec<CodingChoiceQuestion>,
     },
     CodingChoiceResponseAck {
         id: String,
@@ -179,6 +184,7 @@ pub(crate) fn coding_choice_request_frame(gate: &CodingChoiceGate) -> CodingWsOu
             .collect(),
         allow_multiple: gate.allow_multiple,
         allow_free_text: gate.allow_free_text,
+        questions: gate.questions.clone(),
     }
 }
 
@@ -271,5 +277,71 @@ pub(crate) fn coding_attempt_lookup_protocol_error(error: &ProductStoreError) ->
             "product_store_error".to_string(),
             format!("coding attempt lookup failed: {other}"),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn question(id: &str) -> CodingChoiceQuestion {
+        CodingChoiceQuestion {
+            id: id.to_string(),
+            prompt: format!("{id} prompt"),
+            options: vec![],
+            allow_multiple: false,
+            allow_free_text: true,
+        }
+    }
+
+    fn choice_gate(questions: Vec<CodingChoiceQuestion>) -> CodingChoiceGate {
+        CodingChoiceGate {
+            gate_id: "coding_choice_gate_1".to_string(),
+            choice_id: "choice_1".to_string(),
+            attempt_id: "coding_attempt_1".to_string(),
+            node_id: None,
+            stage: CodingExecutionStage::Coding,
+            role: CodingProviderRole::Coder,
+            provider: ProviderName::Fake,
+            source: "provider".to_string(),
+            prompt: "编码拆分确认".to_string(),
+            options: vec![],
+            allow_multiple: false,
+            allow_free_text: false,
+            status: crate::product::coding_models::CodingChoiceGateStatus::Open,
+            response: None,
+            questions,
+            expected_run_id: None,
+            created_at: "2026-10-15T00:00:00Z".to_string(),
+            updated_at: "2026-10-15T00:00:00Z".to_string(),
+        }
+    }
+
+    /// P2-e 红测①：带 questions 的 gate 输出的帧逐题带 questions（实时帧与
+    /// attach 补发共用本构造点，两路同形）。
+    #[test]
+    fn coding_choice_request_frame_maps_questions_verbatim() {
+        let frame = coding_choice_request_frame(&choice_gate(vec![question("q_0"), question("q_1")]));
+        let CodingWsOutMessage::CodingChoiceRequest { questions, .. } = &frame else {
+            panic!("expected coding_choice_request frame");
+        };
+        assert_eq!(questions.len(), 2);
+        assert_eq!(questions[0].id, "q_0");
+        assert_eq!(questions[1].id, "q_1");
+        assert!(questions[0].allow_free_text);
+    }
+
+    /// wire 形状：多题帧序列化含 questions；旧 gate（questions 空）帧同样
+    /// 落 `questions: []`，前端按 default 单题回落。
+    #[test]
+    fn coding_choice_request_frame_serializes_questions() {
+        let multi =
+            serde_json::to_value(coding_choice_request_frame(&choice_gate(vec![question("q_0")])))
+                .unwrap();
+        assert_eq!(multi["type"], "coding_choice_request");
+        assert_eq!(multi["questions"][0]["id"], "q_0");
+        let legacy = serde_json::to_value(coding_choice_request_frame(&choice_gate(vec![])))
+            .unwrap();
+        assert!(legacy["questions"].as_array().unwrap().is_empty());
     }
 }

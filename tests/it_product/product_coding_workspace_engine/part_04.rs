@@ -542,6 +542,7 @@ async fn execute_coding_forwards_provider_permission_choice_and_status_events() 
                     options,
                     allow_multiple,
                     allow_free_text,
+                    ..
                 } if id == "choice_0001"
                     && prompt == "Select implementation strategy"
                     && source == "provider_choice"

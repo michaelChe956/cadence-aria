@@ -824,6 +824,8 @@ export type CodingWsOutMessage =
       options: ChoiceOption[];
       allow_multiple: boolean;
       allow_free_text: boolean;
+      /** P2-e（REQ-CRO-11）：多题透传（与快照 `CodingChoiceGate.questions` 同形）；旧帧缺省。 */
+      questions?: CodingChoiceQuestion[];
     }
   | {
       type: "coding_choice_response_ack";

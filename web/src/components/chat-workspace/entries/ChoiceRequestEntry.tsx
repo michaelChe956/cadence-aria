@@ -45,11 +45,17 @@ export function ChoiceRequestEntry({
   const isResolved = entry.resolved === true;
   const isRejected = metadata?.rejected === true;
   const rejectionReason = stringField(metadata, "rejection_reason");
+  // P2-e：REST 命令谱系经 metadata 回写卡片状态——expired（F-9 文案）与
+  // 提交错误（F-10 保留可重试）。
+  const isChoiceExpired = metadata?.choice_expired === true;
+  const submitError = stringField(metadata, "choice_submit_error");
   const [selectedByQuestion, setSelectedByQuestion] = useState<Record<string, string[]>>({});
   const [freeTextByQuestion, setFreeTextByQuestion] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
-  // Task 11：外部受控优先（202 复查期间禁改答案；错误回落后允许同命令重试）。
-  const effectiveSubmitting = submittingOverride ?? submitting;
+  // Task 11：外部受控优先（202 复查期间禁改答案；错误回落后允许同命令重试）；
+  // P2-e：错误/提示回落（choice_submit_error）同样解除内部一次性 submitting，
+  // 保卡片可改答案重试。
+  const effectiveSubmitting = submittingOverride ?? (submitting && !submitError);
   const [promptExpanded, setPromptExpanded] = useState(false);
 
   function selectedIdsFor(questionId: string) {
@@ -106,10 +112,12 @@ export function ChoiceRequestEntry({
     const freeTexts = answers
       .map((answer) => answer.free_text)
       .filter((text): text is string => Boolean(text));
+    // P2-e（REQ-CRO-11）：REST 提交恒按题号逐题组装 answers——无 questions
+    // 的旧单题卡经 choiceQuestions 回落单一 default 题，answers 恒非空。
     const payload: ChoiceResponsePayload = {
       selected_option_ids: selectedOptionIds,
       free_text: freeTexts.length > 0 ? freeTexts.join("\n\n") : null,
-      ...(usesStructuredQuestions ? { answers } : {}),
+      answers,
     };
     setSubmitting(true);
     onRespond?.(entry, payload);
@@ -229,7 +237,13 @@ export function ChoiceRequestEntry({
       </div>
 
       {isResolved ? (
-        isRejected ? (
+        isChoiceExpired ? (
+          // P2-e 红测⑤（F-9）：REST 410 expired → 失效提示，无作答控件。
+          <span className="inline-flex max-w-full items-start gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">
+            <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0">这个问题已失效（AI 已重新开始）</span>
+          </span>
+        ) : isRejected ? (
           <span className="inline-flex max-w-full items-start gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">
             <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span className="min-w-0">
@@ -251,6 +265,18 @@ export function ChoiceRequestEntry({
           <div className="space-y-3">
             {questions.map((question) => renderQuestion(question, showQuestionPrompts))}
           </div>
+
+          {submitError ? (
+            // P2-e 红测④（X1/D-3 提示语）：无 runner 等提交受阻的人话提示；
+            // 不提供「恢复运行」按钮，卡片保持可作答。
+            <div
+              data-testid="choice-submit-error"
+              className="flex items-start gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700"
+            >
+              <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 break-words">{submitError}</span>
+            </div>
+          ) : null}
 
           {onRespond ? (
             <div className="flex justify-end">

@@ -380,6 +380,72 @@ describe("coding workspace store", () => {
     expect(useCodingWorkspaceStore.getState().currentWorkItemId).toBe("work_item_0001");
   });
 
+  // P2-e（REQ-CRO-11）：快照 pending_choices 的 questions 与 expected_run_id
+  // 必须落进 choice entry metadata——多题逐题作答与 REST 应答绑定的数据源。
+  it("carries choice questions and expected_run_id into pending choice entries", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.setSessionState(
+      sessionState({
+        pending_choices: [
+          {
+            gate_id: "coding_choice_gate_0001",
+            choice_id: "choice_0001",
+            attempt_id: "coding_attempt_0001",
+            node_id: null,
+            stage: "coding",
+            role: "coder",
+            provider: "fake",
+            source: "provider",
+            prompt: "编码拆分确认",
+            options: [],
+            allow_multiple: false,
+            allow_free_text: false,
+            status: "open",
+            response: null,
+            questions: [
+              {
+                id: "q-1",
+                prompt: "是否补齐测试",
+                options: [
+                  { id: "yes", label: "补齐" },
+                  { id: "no", label: "暂不" },
+                ],
+                allow_multiple: false,
+                allow_free_text: false,
+              },
+            ],
+            expected_run_id: "run-incarnation-1",
+            created_at: "2026-10-15T00:00:00Z",
+            updated_at: "2026-10-15T00:00:00Z",
+          },
+        ] as never,
+      }),
+    );
+
+    expect(useCodingWorkspaceStore.getState().chatEntries).toMatchObject([
+      {
+        id: "choice_request:choice_0001",
+        type: "choice_request",
+        metadata: {
+          request_id: "choice_0001",
+          questions: [
+            {
+              id: "q-1",
+              prompt: "是否补齐测试",
+              options: [
+                { id: "yes", label: "补齐" },
+                { id: "no", label: "暂不" },
+              ],
+              allow_multiple: false,
+              allow_free_text: false,
+            },
+          ],
+          expected_run_id: "run-incarnation-1",
+        },
+      },
+    ]);
+  });
+
   it("hydrates persisted coding chat entries from a websocket session snapshot", () => {
     const store = useCodingWorkspaceStore.getState();
 

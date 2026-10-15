@@ -604,6 +604,26 @@ describe("useCodingWorkspaceWs inbound events", () => {
         options: [{ id: "dp", label: "Dynamic programming", description: "Iterative" }],
         allow_multiple: false,
         allow_free_text: true,
+        // P2-e（REQ-CRO-11）：帧带 questions，entry metadata 必须透传（多题
+        // 逐题作答的数据源）。
+        questions: [
+          {
+            id: "q_0",
+            prompt: "是否用动态规划",
+            options: [
+              { id: "dp", label: "Dynamic programming", description: "Iterative" },
+            ],
+            allow_multiple: false,
+            allow_free_text: false,
+          },
+          {
+            id: "q_1",
+            prompt: "是否补测试",
+            options: [],
+            allow_multiple: false,
+            allow_free_text: true,
+          },
+        ],
       });
       harness.api.respondPermission("permission_0001", true);
       harness.api.respondChoice("choice_0001", ["dp"], "use iterative dp");
@@ -642,6 +662,24 @@ describe("useCodingWorkspaceWs inbound events", () => {
           options: [{ id: "dp", label: "Dynamic programming", description: "Iterative" }],
           allow_multiple: false,
           allow_free_text: true,
+          questions: [
+            {
+              id: "q_0",
+              prompt: "是否用动态规划",
+              options: [
+                { id: "dp", label: "Dynamic programming", description: "Iterative" },
+              ],
+              allow_multiple: false,
+              allow_free_text: false,
+            },
+            {
+              id: "q_1",
+              prompt: "是否补测试",
+              options: [],
+              allow_multiple: false,
+              allow_free_text: true,
+            },
+          ],
           response: {
             selected_option_ids: ["dp"],
             free_text: "use iterative dp",

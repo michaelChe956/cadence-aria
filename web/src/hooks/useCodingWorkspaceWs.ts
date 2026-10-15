@@ -533,6 +533,11 @@ function handleCodingWsMessage(
           options: request.options,
           allow_multiple: request.allow_multiple,
           allow_free_text: request.allow_free_text,
+          // P2-e（REQ-CRO-11）：帧带 questions 透传进 metadata（多题逐题作答
+          // 数据源）；旧帧缺省不落键，卡片按单一 default 题回落。
+          ...(request.questions && request.questions.length > 0
+            ? { questions: request.questions }
+            : {}),
         },
       });
       break;

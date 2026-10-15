@@ -15,6 +15,7 @@ import {
   deleteCodingAttempt,
   deletePlanCodingWorkspaces,
   enterVerificationTriage,
+  getCodingAttemptSnapshot,
   getPlanCodingProgress,
   listVerificationTriageRecords,
   readCodingPolicyText,
@@ -23,6 +24,7 @@ import {
   getVerificationCommandEvidence,
 } from "../api/client";
 import type {
+  ChoiceResponseRequest,
   VerificationCommandEvidence,
   VerificationTriageRecord,
 } from "../api/types";
@@ -43,6 +45,10 @@ import {
   ChatEntryList,
   type ChatEntryListHandle,
 } from "../components/chat-workspace/ChatEntryList";
+import {
+  useChoiceRespondCommand,
+  type ChoiceRespondCommandState,
+} from "../hooks/useChoiceRespondCommand";
 import { useCodingWorkspaceWs } from "../hooks/useCodingWorkspaceWs";
 import { useCockpitHotkeys } from "../hooks/useCockpitHotkeys";
 import { useUnloadGuard } from "../hooks/useUnloadGuard";
@@ -102,6 +108,9 @@ export function CodingWorkspacePage({
   onBack: () => void;
 }) {
   const api = useCodingWorkspaceWs(address);
+  // P2-e（REQ-CRO-11）：choice 作答走 REST 命令谱系（同 command 重试/202
+  // 复查/expired 不路由新 run），不再经 WS choice_response。
+  const { respondChoice } = useChoiceRespondCommand(address, handleChoiceCommandState);
   const store = useCodingWorkspaceStore();
   const settingsSlotRef = useCockpitSettingsSlotRef();
   const planRepairApi = useWorkspaceWs(
@@ -1222,8 +1231,114 @@ export function CodingWorkspacePage({
   function handleChoiceResponse(entry: ChatEntry, response: ChoiceResponsePayload) {
     const requestId = requestIdFromEntry(entry);
     if (!requestId) return;
-    api.respondChoice(requestId, response.selected_option_ids, response.free_text);
+    void submitChoiceViaRest(requestId, entry, response);
   }
+
+  // P2-e：expected_run_id 取自 entry.metadata（快照路径，pendingChoiceEntry
+  // 已写入 handler 按活跃 run 注入的化身）；实时帧路径 metadata 不带化身，
+  // 回落取最新 REST 快照。两处皆无 → 无唯一活跃 run（X1）：不发请求、卡片
+  // 只显示人话提示，不提供「恢复运行」按钮。
+  async function submitChoiceViaRest(
+    requestId: string,
+    entry: ChatEntry,
+    response: ChoiceResponsePayload,
+  ) {
+    const expectedRunId = await resolveChoiceExpectedRunId(requestId, entry);
+    if (!expectedRunId) {
+      markChoiceEntry(requestId, (metadata) => ({
+        ...metadata,
+        choice_submit_error: "AI 当前没有在运行，这个问题暂时无法回答",
+      }));
+      return;
+    }
+    respondChoice(requestId, expectedRunId, response);
+  }
+
+  async function resolveChoiceExpectedRunId(requestId: string, entry: ChatEntry) {
+    const fromStore = choiceMetadataString(choiceEntryFromState(requestId), "expected_run_id");
+    if (fromStore) return fromStore;
+    const fromEntry = choiceMetadataString(entry, "expected_run_id");
+    if (fromEntry) return fromEntry;
+    try {
+      const snapshot = await getCodingAttemptSnapshot(address);
+      const gate = snapshot.pending_choices.find((choice) => choice.choice_id === requestId);
+      return gate?.expected_run_id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  // REST 命令谱系回写卡片：delivered → 已选择（含逐题 answers）；expired →
+  // 失效横幅；error → errorMessage 保留卡片可重试（F-9/F-10）。
+  function handleChoiceCommandState(
+    choiceId: string,
+    state: ChoiceRespondCommandState,
+    request: ChoiceResponseRequest,
+  ) {
+    if (state.status === "delivered") {
+      const freeTexts = request.answers
+        .map((answer) => answer.free_text)
+        .filter((text): text is string => Boolean(text));
+      markChoiceEntry(
+        choiceId,
+        (metadata) => ({
+          ...metadata,
+          response: {
+            selected_option_ids: request.answers.flatMap((answer) => answer.selected_option_ids),
+            free_text: freeTexts.length > 0 ? freeTexts.join("\n\n") : null,
+            answers: request.answers,
+          },
+        }),
+        true,
+      );
+      return;
+    }
+    if (state.status === "expired") {
+      markChoiceEntry(
+        choiceId,
+        (metadata) => ({ ...metadata, choice_expired: true }),
+        true,
+      );
+      return;
+    }
+    if (state.status === "error") {
+      markChoiceEntry(choiceId, (metadata) => ({
+        ...metadata,
+        choice_submit_error: state.errorMessage ?? "应答请求失败",
+      }));
+    }
+  }
+}
+
+function choiceEntryFromState(requestId: string) {
+  return (
+    useCodingWorkspaceStore
+      .getState()
+      .chatEntries.find(
+        (candidate) =>
+          candidate.type === "choice_request" && candidate.metadata?.request_id === requestId,
+      ) ?? null
+  );
+}
+
+function choiceMetadataString(entry: ChatEntry | null, key: string) {
+  const metadata = entry?.metadata as Record<string, unknown> | undefined;
+  return typeof metadata?.[key] === "string" ? (metadata[key] as string) : null;
+}
+
+function markChoiceEntry(
+  requestId: string,
+  merge: (metadata: Record<string, unknown>) => Record<string, unknown>,
+  resolved = false,
+) {
+  const store = useCodingWorkspaceStore.getState();
+  const entry = choiceEntryFromState(requestId);
+  if (!entry) return;
+  store.appendChatEntry({
+    ...entry,
+    resolved,
+    metadata: merge({ ...(entry.metadata as Record<string, unknown>) }),
+  });
 }
 
 function repairScopeMatches(

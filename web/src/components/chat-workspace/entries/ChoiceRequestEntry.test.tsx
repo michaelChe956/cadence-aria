@@ -19,9 +19,18 @@ describe("ChoiceRequestEntry", () => {
     fireEvent.click(screen.getByLabelText("继续"));
     fireEvent.click(screen.getByRole("button", { name: "提交选择" }));
 
+    // P2-e（REQ-CRO-11）：REST 提交恒按题号逐题组装 answers——无 questions
+    // 的旧单题卡回落单一 default 题，answers 恒非空。
     expect(onRespond).toHaveBeenCalledWith(entry, {
       selected_option_ids: ["continue"],
       free_text: null,
+      answers: [
+        {
+          question_id: "default",
+          selected_option_ids: ["continue"],
+          free_text: null,
+        },
+      ],
     });
   });
 
@@ -44,6 +53,13 @@ describe("ChoiceRequestEntry", () => {
     expect(onRespond).toHaveBeenCalledWith(entry, {
       selected_option_ids: ["tests", "docs"],
       free_text: null,
+      answers: [
+        {
+          question_id: "default",
+          selected_option_ids: ["tests", "docs"],
+          free_text: null,
+        },
+      ],
     });
   });
 
@@ -64,7 +80,51 @@ describe("ChoiceRequestEntry", () => {
     expect(onRespond).toHaveBeenCalledWith(entry, {
       selected_option_ids: [],
       free_text: "请继续实现最小方案",
+      answers: [
+        {
+          question_id: "default",
+          selected_option_ids: [],
+          free_text: "请继续实现最小方案",
+        },
+      ],
     });
+  });
+
+
+  // P2-e 红测④（X1）：无 runner 时页面写入 choice_submit_error 人话提示——
+  // 卡片显示提示、控件保持可用（无「恢复运行」按钮）。
+  it("shows the submit error hint and keeps controls enabled", () => {
+    const onRespond = vi.fn();
+    const entry = makeChoiceEntry({
+      options: [
+        { id: "continue", label: "继续" },
+        { id: "stop", label: "停止" },
+      ],
+      choice_submit_error: "AI 当前没有在运行，这个问题暂时无法回答",
+    });
+
+    render(<ChoiceRequestEntry entry={entry} onRespond={onRespond} />);
+
+    expect(
+      screen.getByText("AI 当前没有在运行，这个问题暂时无法回答"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "恢复运行" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("继续"));
+    expect(screen.getByRole("button", { name: "提交选择" })).toBeEnabled();
+  });
+
+  // P2-e 红测⑤：expired → 失效提示（F-9 文案），不渲染作答控件。
+  it("shows the expired banner without submit controls", () => {
+    const onRespond = vi.fn();
+    const entry = makeChoiceEntry({
+      resolved: true,
+      choice_expired: true,
+    });
+
+    render(<ChoiceRequestEntry entry={entry} onRespond={onRespond} />);
+
+    expect(screen.getByText("这个问题已失效（AI 已重新开始）")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "提交选择" })).not.toBeInTheDocument();
   });
 
   it("renders and submits all questions in one structured choice request", () => {
@@ -229,6 +289,13 @@ describe("ChoiceRequestEntry", () => {
     expect(onRespond).toHaveBeenCalledWith(entry, {
       selected_option_ids: ["continue"],
       free_text: null,
+      answers: [
+        {
+          question_id: "default",
+          selected_option_ids: ["continue"],
+          free_text: null,
+        },
+      ],
     });
   });
 

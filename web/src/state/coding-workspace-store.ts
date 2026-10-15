@@ -701,6 +701,14 @@ function pendingChoiceEntry(choice: CodingChoiceGate): ChatEntry {
       allow_multiple: choice.allow_multiple,
       allow_free_text: choice.allow_free_text,
       status: choice.status,
+      // P2-e（REQ-CRO-11）：多题逐题作答的数据源（快照路径恒有；旧 gate
+      // 缺省为空，卡片按单一 default 题回落）。
+      ...(choice.questions && choice.questions.length > 0
+        ? { questions: choice.questions }
+        : {}),
+      // P2-e：REST 应答绑定的 run 化身（handler 层按活跃 run 注入）；无活跃
+      // run 时缺省——提交侧不得猜 run。
+      ...(choice.expected_run_id ? { expected_run_id: choice.expected_run_id } : {}),
       ...(choice.response ? { response: choice.response } : {}),
     },
   };
