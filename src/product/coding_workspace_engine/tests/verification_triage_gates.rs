@@ -327,7 +327,7 @@ async fn verification_triage_entry_keeps_gate_action_sets_unchanged() {
 }
 
 /// P2-a（REQ-CVT-06）：`coding_operational_blocker` 门可转入验证处理——
-/// 资格白名单含该 reason_code（字面量；P2-b 合入常量后改引常量），
+/// 资格白名单含该 reason_code（白名单已改引 `CODING_OPERATIONAL_BLOCKER_REASON_CODE` 常量），
 /// finding 绑定走 coder 门路径（`<gate_id>#0`，无 report#idx 持久面）；
 /// 原门保持开放且动作集合不被验证处理改写。
 #[tokio::test]
