@@ -3152,3 +3152,91 @@ async fn plan_coding_s2_parked_attempt_continues_in_place_without_second_runner(
         Some(frontend.id.as_str())
     );
 }
+
+/// Bug1(owner 2026-10-16):plan 级删除后仓侧 worktree 残留的幂等清扫。
+/// 现场形态:注册已删/从未注册但目录残留(parked 冻结路径未物化 + issue
+/// 父目录下 `.provider-session-cache` 宿主领土),重放「删除本计划全部
+/// coding 工作区」必须把残留目录清干净;新轮存活 attempt 的目录受保护。
+#[tokio::test]
+async fn plan_coding_delete_sweeps_leftover_issue_worktree_dirs_idempotently() {
+    let fixture = n3_fixture().await;
+    let started = post_start(&fixture.state, "cmd_bug1_round1", PLAN_REVISION_ID)
+        .await
+        .expect("round 1 one-click start");
+    assert!(matches!(
+        started.start_outcome,
+        Some(CodingPlanStartOutcome::Started { .. })
+    ));
+
+    // 复刻现场残留:busi 已物化;其余三仓 parked 冻结路径目录残留(未注册),
+    // 外加 issue 父目录下的 `.provider-session-cache` 宿主残留。
+    let mut issue_dirs = Vec::new();
+    for attempt in fixture
+        .coding_store()
+        .list_attempts_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+    {
+        let Some(worktree_path) = attempt.worktree_path.clone() else {
+            continue;
+        };
+        if !worktree_path.exists() {
+            std::fs::create_dir_all(&worktree_path).unwrap();
+            std::fs::write(worktree_path.join("leftover.txt"), "residue").unwrap();
+        }
+        let issue_dir = worktree_path.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(issue_dir.join(".provider-session-cache")).unwrap();
+        issue_dirs.push(issue_dir);
+    }
+    assert_eq!(
+        issue_dirs.len(),
+        4,
+        "four target repos each own an issue worktree dir"
+    );
+
+    // 确认删除:不得被未注册残留目录卡死,且 issue 级残留父目录一并清干净。
+    let receipt = delete_workspaces(&fixture.state, "plan_delete_ui_bug1", Some(1), true)
+        .await
+        .expect("confirmed delete must not choke on unregistered residue dirs");
+    assert_eq!(receipt.operation_state, "accepted");
+    assert_eq!(receipt.generation, 2);
+    for dir in &issue_dirs {
+        assert!(
+            !dir.exists(),
+            "issue worktree residue must be swept: {}",
+            dir.display()
+        );
+    }
+
+    // 幂等重放:再次删除(新 command)零成员零残留,仍成功且目录不再出现。
+    delete_workspaces(&fixture.state, "plan_delete_ui_bug1_r", None, true)
+        .await
+        .expect("idempotent re-delete");
+    for dir in &issue_dirs {
+        assert!(!dir.exists(), "replay must not resurrect residue");
+    }
+
+    // 保护面:新轮存活 attempt 持有 worktree 时,清扫不得触碰其 issue 目录。
+    let round2 = post_start(&fixture.state, "cmd_bug1_round2", PLAN_REVISION_ID)
+        .await
+        .expect("round 2 restart");
+    assert!(matches!(
+        round2.start_outcome,
+        Some(CodingPlanStartOutcome::Started { .. })
+    ));
+    let live = amr_ready_busi_attempt(&fixture).await;
+    crate::web::handlers::support::sweep_issue_worktree_residue(
+        &fixture.paths,
+        PROJECT_ID,
+        ISSUE_ID,
+    )
+    .await
+    .expect("sweep with a live round is a no-op, not an error");
+    let live_path = live
+        .worktree_path
+        .clone()
+        .expect("round-2 materialized worktree");
+    assert!(
+        live_path.exists(),
+        "live round-2 worktree must survive the sweep"
+    );
+}

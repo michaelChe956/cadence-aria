@@ -589,3 +589,87 @@ async fn git_remote_configured_distinguishes_missing_from_unreachable_remote() {
         "only the exact remote name counts"
     );
 }
+
+/// Bug1(owner 2026-10-16 现场):plan 级删除后「注册已删、目录残留」。
+/// `git worktree remove --force` 对未注册目录报 `is not a working tree`,
+/// 删除链由此卡死且残留目录永不消失;remove 必须把残留目录补删干净并幂等。
+#[tokio::test]
+async fn remove_worktree_clears_unregistered_leftover_directory_idempotently() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    initialize_commit_fixture(repo);
+    let worktree_path = repo
+        .join(".worktrees")
+        .join("aria-issues")
+        .join("issue_0001")
+        .join("uuid-leftover");
+    fs::create_dir_all(&worktree_path).expect("create leftover dir");
+    fs::write(worktree_path.join("leftover.txt"), "residue").expect("write residue");
+
+    let service = GitWorkspaceService::new();
+    service
+        .remove_worktree(repo, &worktree_path)
+        .await
+        .expect("unregistered leftover directory must be removed, not fatal");
+    assert!(
+        !worktree_path.exists(),
+        "leftover directory must be gone after remove"
+    );
+
+    service
+        .remove_worktree(repo, &worktree_path)
+        .await
+        .expect("second remove on missing path is idempotent");
+    assert!(!worktree_path.exists());
+}
+
+/// Bug1 新建侧:未注册残留目录会让 `git worktree add` 以 `already exists`
+/// 失败(现场表现为「已存在部分内容」)。create 必须与删除残留兼容:
+/// 清掉残留后重建为合法 worktree,后续 remove 正常回收。
+#[tokio::test]
+async fn create_worktree_replaces_unregistered_leftover_directory() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    initialize_commit_fixture(repo);
+    let default_branch = String::from_utf8(
+        StdCommand::new("git")
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .expect("read default branch")
+            .stdout,
+    )
+    .expect("utf8 branch");
+    let branch = "aria/issues/issue_0001/uuid-reuse";
+    let worktree_path = repo
+        .join(".worktrees")
+        .join("aria-issues")
+        .join("issue_0001")
+        .join("uuid-reuse");
+    fs::create_dir_all(&worktree_path).expect("create leftover dir");
+    fs::write(worktree_path.join("leftover.txt"), "residue").expect("write residue");
+
+    let service = GitWorkspaceService::new();
+    service
+        .create_branch(repo, branch, default_branch.trim())
+        .await
+        .expect("create branch");
+    service
+        .create_worktree(repo, branch, &worktree_path)
+        .await
+        .expect("creation must tolerate deletion residue instead of failing already-exists");
+    assert!(
+        worktree_path.join(".git").exists(),
+        "recreated path must be a real worktree"
+    );
+    assert!(
+        !worktree_path.join("leftover.txt").exists(),
+        "residue content must not leak into the new worktree"
+    );
+
+    service
+        .remove_worktree(repo, &worktree_path)
+        .await
+        .expect("remove registered worktree after recreation");
+    assert!(!worktree_path.exists());
+}

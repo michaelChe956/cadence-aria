@@ -187,6 +187,127 @@ pub(crate) fn cleanup_shared_worktree_by_routing(
     Ok(())
 }
 
+/// Bug1(owner 2026-10-16 裁定):plan 级删除后的仓侧 issue worktree 残留清扫。
+///
+/// 成员 worktree 拆除只处理 `<repo>/.worktrees/aria-issues/<issue>/<uuid>`
+/// 精确路径;父目录 `<repo>/.worktrees/aria-issues/<issue>/`(含 provider
+/// 边界的 `.provider-session-cache` 宿主领土缓存)从不被清理,形成
+/// 「注册已删、目录残留」。本清扫在删除动作收尾统一执行:
+/// - 候选:按 routing 枚举 issue 所属各物理仓的 issue worktree 根目录;
+/// - 保护:该 issue 仍有 attempt 记录(任何 plan/轮次,含 parked 冻结路径)
+///   指向此目录,或目录下仍有 git 注册 worktree(存活执行面)→ 保留;
+/// - 其余:整目录删除(缺失=已清,幂等)。IO 失败显式上抛,不静默。
+/// routing FailClosed 时不阻断已完成的删除结果,仅告警跳过(删除准入
+/// 已在前序步骤对 routing 做过 fail-closed)。
+pub(crate) async fn sweep_issue_worktree_residue(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+) -> ApiResult<()> {
+    validate_relative_id(issue_id).map_err(|error| {
+        ApiError::validation(
+            "plan_coding_workspace_sweep_invalid_id",
+            format!("invalid issue worktree residue sweep id: {error}"),
+        )
+    })?;
+
+    // 候选仓根:routing 枚举(Logical=manifest 成员;Legacy=issue 物理仓)。
+    let routing = RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)
+        .map_err(product_store_api_error)?;
+    let repositories = crate::product::repository_store::RepositoryStore::new(app_paths.clone())
+        .list(project_id)
+        .map_err(product_store_api_error)?;
+    let repo_roots: Vec<std::path::PathBuf> = match &routing {
+        RepositoryRouting::Legacy { repository_id } => repositories
+            .iter()
+            .filter(|record| {
+                !repository_id.is_empty() && record.id.as_str() == repository_id.as_str()
+            })
+            .map(|record| record.path.clone())
+            .collect(),
+        RepositoryRouting::Logical { manifest, .. } => repositories
+            .iter()
+            .filter(|record| {
+                record
+                    .logical_repository_id
+                    .as_ref()
+                    .is_some_and(|logical| manifest.member_ids.contains(logical))
+            })
+            .map(|record| record.path.clone())
+            .collect(),
+        RepositoryRouting::FailClosed { code, reason } => {
+            tracing::warn!(
+                code = ?code,
+                reason = %reason,
+                "skip issue worktree residue sweep: repository routing failed"
+            );
+            return Ok(());
+        }
+    };
+
+    // 保护面:issue 仍有 attempt 记录(其 worktree_path 父目录即受保护)。
+    let protected: Vec<std::path::PathBuf> = CodingAttemptStore::new(app_paths.clone())
+        .list_attempts_for_issue(project_id, issue_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .filter_map(|attempt| attempt.worktree_path.clone())
+        .filter_map(|worktree_path| {
+            let parent = worktree_path.parent()?.to_path_buf();
+            let canonical = parent.canonicalize().unwrap_or_else(|_| parent.clone());
+            Some(vec![parent, canonical])
+        })
+        .flatten()
+        .collect();
+
+    let git = GitWorkspaceService::new();
+    for repo_root in repo_roots {
+        let candidate = repo_root
+            .join(".worktrees")
+            .join("aria-issues")
+            .join(issue_id);
+        if !candidate.exists() {
+            continue;
+        }
+        let candidate_canonical = candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.clone());
+        if protected
+            .iter()
+            .any(|path| path == &candidate || path == &candidate_canonical)
+        {
+            continue;
+        }
+        // 目录下仍有注册 worktree(其他 plan/轮次存活):保护,不整删。
+        let registered_in_candidate = git
+            .list_worktree_paths(&repo_root)
+            .await
+            .map_err(git_workspace_api_error)?
+            .into_iter()
+            .any(|worktree| {
+                worktree.starts_with(&candidate) || worktree.starts_with(&candidate_canonical)
+            });
+        if registered_in_candidate {
+            continue;
+        }
+        std::fs::remove_dir_all(&candidate).map_err(|error| {
+            ApiError::runtime(
+                "issue_worktree_residue_sweep_failed",
+                format!(
+                    "failed to remove issue worktree residue {}: {error}",
+                    candidate.display()
+                ),
+                json!({ "path": candidate.display().to_string() }),
+            )
+        })?;
+        tracing::info!(
+            path = %candidate.display(),
+            "swept issue worktree residue directory"
+        );
+    }
+
+    Ok(())
+}
+
 /// `try_acquire_shared_resource_cleanup` 的稳定错误映射（资源清理 lease 争用：
 /// D2.2 `with_held_or_acquired_cleanup_lease` 现取通道消费）。
 fn shared_resource_cleanup_api_error(

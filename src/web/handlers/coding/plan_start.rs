@@ -365,6 +365,10 @@ pub async fn delete_plan_coding_workspaces(
         }
         // members 空 && 无残留：幂等成功，零弹窗零变更（Clean）。
     }
+    // Bug1(owner 2026-10-16):删除动作自身具备残留清扫幂等——无论本次走
+    // 续清/重放/成员拆卸/零成员哪条路径,收尾统一清扫仓侧 issue worktree
+    // 残留目录(注册已删、目录留下的存量也一并清干净;存活引用受保护)。
+    sweep_issue_worktree_residue(&app_paths, &project_id, &issue_id).await?;
     deleted_attempt_ids.sort();
     deleted_attempt_ids.dedup();
     // remaining 报权威事实（设计 C：前端不假装全删/失败展示剩余数）——服务端

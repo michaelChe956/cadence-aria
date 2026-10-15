@@ -147,10 +147,25 @@ impl GitWorkspaceService {
                 branch_name
             )));
         }
-
         if let Some(parent) = worktree_path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
                 GitWorkspaceError::Io(format!("create {}: {error}", parent.display()))
+            })?;
+        }
+        // Bug1(2026-10-16):未注册但目录在场 = 删除残留(注册已删、目录留下)。
+        // 路径已过 `ensure_safe_worktree_path`(aria worktree 命名空间内),
+        // 直接补删后再建,使新建与删除残留兼容——否则 `git worktree add`
+        // 以 `already exists` 失败,现场表现为「已存在部分内容」。
+        if worktree_path.exists() {
+            tracing::info!(
+                worktree = %worktree_path.display(),
+                "replacing unregistered worktree residue directory on create"
+            );
+            std::fs::remove_dir_all(worktree_path).map_err(|error| {
+                GitWorkspaceError::Io(format!(
+                    "remove residue {}: {error}",
+                    worktree_path.display()
+                ))
             })?;
         }
         let worktree = worktree_path.to_string_lossy().to_string();
@@ -170,9 +185,39 @@ impl GitWorkspaceService {
             return Ok(());
         }
         let worktree = worktree_path.to_string_lossy().to_string();
-        self.run_git(repo_path, &["worktree", "remove", "--force", &worktree])
-            .await
-            .map(|_| ())
+        // Bug1(2026-10-16):保证「目录与注册要么都在要么都不在」。
+        // - 已注册:`git worktree remove --force` 原子清两者;报成功但目录
+        //   仍在(超时竞态/部分删除)时补删目录,失败显式上抛。
+        // - 未注册但目录在场 = 删除残留:aria worktree 命名空间内的孤儿
+        //   目录,直接补删,使删除动作对既有残留幂等(重放即清干净)。
+        if self
+            .find_worktree_branch(repo_path, worktree_path)
+            .await?
+            .is_some()
+        {
+            self.run_git(repo_path, &["worktree", "remove", "--force", &worktree])
+                .await?;
+        } else {
+            tracing::info!(
+                worktree = %worktree,
+                "removing unregistered worktree residue directory"
+            );
+            std::fs::remove_dir_all(worktree_path).map_err(|error| {
+                GitWorkspaceError::Io(format!(
+                    "remove residue {}: {error}",
+                    worktree_path.display()
+                ))
+            })?;
+        }
+        if worktree_path.exists() {
+            std::fs::remove_dir_all(worktree_path).map_err(|error| {
+                GitWorkspaceError::Io(format!(
+                    "remove residue {}: {error}",
+                    worktree_path.display()
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     pub async fn prune_worktrees(&self, repo_path: &Path) -> Result<(), GitWorkspaceError> {
@@ -180,6 +225,25 @@ impl GitWorkspaceService {
         self.run_git(repo_path, &["worktree", "prune"])
             .await
             .map(|_| ())
+    }
+
+    /// 枚举仓内全部已注册 worktree 的绝对路径(porcelain `worktree ` 行)。
+    /// Bug1 清扫用:issue 级残留目录内仍有注册 worktree(其他 plan/轮次
+    /// 存活)时不得整目录删除。
+    pub(crate) async fn list_worktree_paths(
+        &self,
+        repo_path: &Path,
+    ) -> Result<Vec<PathBuf>, GitWorkspaceError> {
+        self.ensure_git_repo(repo_path).await?;
+        let output = self
+            .run_git(repo_path, &["worktree", "list", "--porcelain"])
+            .await?;
+        Ok(output
+            .stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(PathBuf::from)
+            .collect())
     }
 
     pub async fn delete_local_branch(
