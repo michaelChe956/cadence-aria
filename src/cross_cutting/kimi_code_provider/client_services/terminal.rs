@@ -37,6 +37,13 @@ pub enum TerminalIsolation {
     Bubblewrap {
         bwrap: PathBuf,
         writable_root: bool,
+        /// P3-b (REQ-KACS-IDLE-RO): read-only authority root — the trusted
+        /// LC boundary plan's working directory (canonical aggregate root),
+        /// mounted read-only at its original path AFTER the private `/tmp`
+        /// tmpfs so sibling member worktrees beneath `/tmp` stay visible to
+        /// terminal Read. `None` for direct sessions; never a writable face
+        /// (the writable root stays the sole write authorization).
+        readable_root: Option<PathBuf>,
         writable_git_paths: Vec<PathBuf>,
     },
     Unavailable,
@@ -496,11 +503,13 @@ fn build_terminal_command(
         TerminalIsolation::Bubblewrap {
             bwrap,
             writable_root,
+            readable_root,
             writable_git_paths,
         } => {
             let mut builder = Command::new(bwrap);
             let args = build_bwrap_args(
                 &command.root,
+                readable_root.as_deref(),
                 &command.cwd,
                 anchor.map(AsRawFd::as_raw_fd),
                 *writable_root,
@@ -834,12 +843,14 @@ mod tests {
     #[cfg(unix)]
     fn bwrap_isolation(
         writable_root: bool,
+        readable_root: Option<PathBuf>,
         writable_git_paths: Vec<PathBuf>,
     ) -> Option<TerminalIsolation> {
         use super::super::sandbox::probe_bwrap;
         probe_bwrap().map(|bwrap| TerminalIsolation::Bubblewrap {
             bwrap,
             writable_root,
+            readable_root,
             writable_git_paths,
         })
     }
@@ -896,7 +907,7 @@ mod tests {
         use super::super::sandbox::frozen_writable_git_paths;
         let dir = tempfile::tempdir().expect("worktree");
         let root = dir.path().canonicalize().expect("canonical root");
-        let Some(isolation) = bwrap_isolation(true, frozen_writable_git_paths(&root)) else {
+        let Some(isolation) = bwrap_isolation(true, None, frozen_writable_git_paths(&root)) else {
             return; // bubblewrap 不在时跳过真机隔离路径
         };
         let script = "git init -q \
@@ -955,7 +966,7 @@ mod tests {
             vec![main.join(".git").canonicalize().expect("commondir")],
             "only the out-of-root common dir needs an extra rw bind"
         );
-        let Some(isolation) = bwrap_isolation(true, git_paths) else {
+        let Some(isolation) = bwrap_isolation(true, None, git_paths) else {
             return; // bubblewrap 不在时跳过真机隔离路径
         };
         let script = "echo f17 > f17.txt \
@@ -978,7 +989,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn read_only_root_sandbox_still_blocks_writes_inside_root() {
-        let Some(isolation) = bwrap_isolation(false, Vec::new()) else {
+        let Some(isolation) = bwrap_isolation(false, None, Vec::new()) else {
             return;
         };
         let dir = tempfile::tempdir().expect("worktree");
@@ -997,7 +1008,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn writable_root_sandbox_keeps_host_outside_root_read_only() {
-        let Some(isolation) = bwrap_isolation(true, Vec::new()) else {
+        let Some(isolation) = bwrap_isolation(true, None, Vec::new()) else {
             return;
         };
         let dir = tempfile::tempdir().expect("worktree");

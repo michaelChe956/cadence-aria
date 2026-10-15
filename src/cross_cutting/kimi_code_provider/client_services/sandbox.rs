@@ -415,18 +415,26 @@ pub fn validate_path_no_follow(root: &Path, rel: &Path) -> std::io::Result<()> {
 /// execute `binary argv...` inside a sandbox: read-only bind of the whole
 /// host filesystem, no network, limited empty `/tmp`, no new privileges,
 /// cleared environment with an explicit allowlist, and an anchored verified
-/// cwd. The authorized root is bound read-only by default; the coding
-/// (Executor) role passes `writable_root` so its worktree — whose contract
-/// includes the TDD write path and commit responsibility (F-17) — is bound
-/// read-write instead, together with any `writable_binds` paths resolved
-/// outside it (the git dir of a linked worktree). Everything else outside
-/// the authorized root stays read-only in both modes. The extra writable
-/// mounts are passed positionally and consumed exactly once at this single
-/// call site; grouping them into a struct would add indirection for no
-/// reuse.
+/// cwd. Mount order is a security semantic (argv order = application order;
+/// a later mount on an ancestor path shadows earlier mounts beneath it):
+/// host ro root → proc/dev/tmpfs → authority ro (`readable_root`) → the
+/// authorized root → extra writable binds → cwd anchor. The authorized root
+/// is bound read-only by default; the coding (Executor) role passes
+/// `writable_root` so its worktree — whose contract includes the TDD write
+/// path and commit responsibility (F-17) — is bound read-write instead,
+/// together with any `writable_binds` paths resolved outside it (the git dir
+/// of a linked worktree). `readable_root` (P3-b, REQ-KACS-IDLE-RO) is the
+/// LC boundary authority — the canonical aggregate root holding sibling
+/// member worktrees — mounted read-only so terminal Read reaches the real
+/// upstream even when the aggregate lives beneath `/tmp`; `None` for direct
+/// sessions. Everything else outside the authorized root stays read-only in
+/// both modes. The extra writable mounts are passed positionally and
+/// consumed exactly once at this single call site; grouping them into a
+/// struct would add indirection for no reuse.
 #[allow(clippy::too_many_arguments)]
 pub fn build_bwrap_args(
     root: &Path,
+    readable_root: Option<&Path>,
     cwd: &Path,
     cwd_fd: Option<RawFd>,
     writable_root: bool,
@@ -436,19 +444,12 @@ pub fn build_bwrap_args(
     argv: &[String],
 ) -> Vec<OsString> {
     let root_str = root.as_os_str().to_str().expect("utf8 root");
-    // The root mount MUST come after `--ro-bind / /`: bubblewrap applies
-    // mounts in argv order and a later mount on an ancestor path (/) shadows
-    // earlier mounts beneath it, so a rw root bind placed first would be
-    // silently covered by the read-only host root (verified live).
     let root_flag = if writable_root { "--bind" } else { "--ro-bind" };
     let mut command = Vec::<OsString>::new();
     for value in [
         "--ro-bind",
         "/",
         "/",
-        root_flag,
-        root_str,
-        root_str,
         "--proc",
         "/proc",
         "--dev",
@@ -463,6 +464,30 @@ pub fn build_bwrap_args(
         // "Unknown option", which made every auto-mode terminal exit 1.
         "--clearenv",
     ] {
+        command.push(OsString::from(value));
+    }
+    // Authority read face (P3-b/REQ-KACS-IDLE-RO): the LC boundary authority
+    // (canonical aggregate root holding the sibling member worktrees),
+    // read-only at its original path, mounted AFTER the private `/tmp` tmpfs
+    // so a `/tmp`-descendant aggregate stays visible to terminal Read.
+    // Skipped when it equals `root`: a read-only LC session already mounts
+    // the very same path read-only below.
+    if let Some(authority) = readable_root.filter(|authority| *authority != root) {
+        let authority = authority.as_os_str().to_str().expect("utf8 authority root");
+        for value in ["--ro-bind", authority, authority] {
+            command.push(OsString::from(value));
+        }
+    }
+    // The root mount MUST come after `--ro-bind / /` AND after
+    // `--tmpfs /tmp`: bubblewrap applies mounts in argv order and a later
+    // mount on an ancestor path shadows earlier mounts beneath it — the
+    // read-only host root would silently cover an early rw root bind, and
+    // the private tmpfs would hide a root beneath `/tmp` (the aggregate
+    // fixture shape where member worktrees live under `/tmp`; same order as
+    // `provider_boundary::build_boundary_argv`). The later root/target bind
+    // then re-shadows its own subtree (rw for the coding role) inside the
+    // read-only authority face.
+    for value in [root_flag, root_str, root_str] {
         command.push(OsString::from(value));
     }
     // Extra read-write mounts for the coding role (F-17): the git dirs of a
@@ -583,6 +608,7 @@ mod tests {
         env.insert("PATH".to_string(), trusted_path_env());
         let argv = build_bwrap_args(
             &root,
+            None,
             &cwd,
             Some(42),
             false,
@@ -638,6 +664,7 @@ mod tests {
         env.insert("PATH".to_string(), trusted_path_env());
         let argv = build_bwrap_args(
             &root,
+            None,
             &cwd,
             Some(42),
             true,
@@ -690,6 +717,69 @@ mod tests {
         assert_eq!(text.last().map(String::as_str), Some("status"));
     }
 
+    /// P3-b(REQ-KACS-IDLE-RO)红测①:挂载顺序 host ro→proc/dev/tmpfs→
+    /// authority ro→target bind→git binds→cwd(纯单测,无需真跑)。root/
+    /// target 的 bind 必须后置于 `--tmpfs /tmp`——bwrap 按 argv 顺序应用
+    /// 挂载,先挂的 /tmp 子路径会被私有 tmpfs 遮蔽(聚合 fixture 成员仓
+    /// 在 /tmp 下时 terminal Read 不可见的根因);authority ro 先于 target
+    /// bind,使 target 的 rw 面在其子树内重新遮蔽只读 authority。
+    #[test]
+    fn bwrap_args_mount_order_tmpfs_before_authority_ro_and_target_bind() {
+        let authority = PathBuf::from("/tmp/agg");
+        let root = PathBuf::from("/tmp/agg/downstream");
+        let cwd = root.clone();
+        let git_common = PathBuf::from("/repo/.git");
+        let mut env = BTreeMap::new();
+        env.insert("PATH".to_string(), trusted_path_env());
+        let argv = build_bwrap_args(
+            &root,
+            Some(&authority),
+            &cwd,
+            Some(42),
+            true,
+            std::slice::from_ref(&git_common),
+            &env,
+            &PathBuf::from("/usr/bin/bash"),
+            &["-c".to_string(), "true".to_string()],
+        );
+        let text: Vec<String> = argv
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let at = |needle: &[&str]| -> usize {
+            text.windows(needle.len())
+                .position(|window| window.iter().zip(needle).all(|(arg, want)| arg == want))
+                .unwrap_or_else(|| panic!("{needle:?} missing from argv: {text:?}"))
+        };
+        let host_ro = at(&["--ro-bind", "/", "/"]);
+        let tmpfs = at(&["--tmpfs", "/tmp"]);
+        let authority_ro = at(&["--ro-bind", "/tmp/agg", "/tmp/agg"]);
+        let target_bind = at(&["--bind", "/tmp/agg/downstream", "/tmp/agg/downstream"]);
+        let git_bind = at(&["--bind", "/repo/.git", "/repo/.git"]);
+        let cwd_anchor = at(&["--bind-fd", "42", "/tmp/work"]);
+        assert!(host_ro < tmpfs, "host ro root comes first");
+        assert!(
+            tmpfs < authority_ro,
+            "authority ro must follow the private tmpfs (else /tmp descendants are shadowed)"
+        );
+        assert!(
+            authority_ro < target_bind,
+            "authority ro precedes the target bind (target rw wins inside its subtree)"
+        );
+        assert!(target_bind < git_bind, "git binds follow the target bind");
+        assert!(
+            git_bind < cwd_anchor,
+            "the cwd anchor is applied after all mounts"
+        );
+        // Authority is strictly read-only: no rw bind may target it.
+        assert!(
+            !text
+                .windows(3)
+                .any(|window| window[0] == "--bind" && window[1] == "/tmp/agg"),
+            "authority root must never be writable: {text:?}"
+        );
+    }
+
     /// fix round 1(F-17/P1):linked worktree 的 gitdir/commondir 在授权根外,
     /// 由 `writable_binds` 以 rw bind 挂进沙箱(root bind 之后、同样在只读
     /// 宿主根之后)。
@@ -702,6 +792,7 @@ mod tests {
         env.insert("PATH".to_string(), trusted_path_env());
         let argv = build_bwrap_args(
             &root,
+            None,
             &cwd,
             Some(42),
             true,

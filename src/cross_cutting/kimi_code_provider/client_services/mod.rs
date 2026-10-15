@@ -1081,12 +1081,8 @@ mod tests {
         let mut server_reader = tokio::io::BufReader::new(server_reader);
 
         async fn run_terminal(
-            dispatcher: &KimiClientServiceDispatcher<
-                tokio::io::WriteHalf<tokio::io::DuplexStream>,
-            >,
-            server_reader: &mut tokio::io::BufReader<
-                tokio::io::ReadHalf<tokio::io::DuplexStream>,
-            >,
+            dispatcher: &KimiClientServiceDispatcher<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
+            server_reader: &mut tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
             next_id: &mut i64,
             script: &str,
             cwd: &str,
@@ -1144,7 +1140,8 @@ mod tests {
         )
         .await;
         assert_eq!(
-            wait_reply["result"]["exitCode"], json!(0),
+            wait_reply["result"]["exitCode"],
+            json!(0),
             "terminal must read the real upstream file at its host path: {wait_reply} {output_reply}"
         );
         assert!(
@@ -1165,7 +1162,8 @@ mod tests {
         )
         .await;
         assert_eq!(
-            wait_reply["result"]["exitCode"], json!(0),
+            wait_reply["result"]["exitCode"],
+            json!(0),
             "target write must keep working: {wait_reply} {output_reply}"
         );
         assert_eq!(
@@ -1185,7 +1183,8 @@ mod tests {
         )
         .await;
         assert_ne!(
-            wait_reply["result"]["exitCode"], json!(0),
+            wait_reply["result"]["exitCode"],
+            json!(0),
             "upstream write must be refused: {wait_reply} {output_reply}"
         );
         assert!(
@@ -1226,7 +1225,8 @@ mod tests {
         ));
         let reply = read_reply(&mut server_reader, 61).await;
         assert_eq!(
-            reply["error"]["code"], json!(ERROR_FS),
+            reply["error"]["code"],
+            json!(ERROR_FS),
             "native write must stay anchored at the target root: {reply}"
         );
         assert!(!evil_native.exists());

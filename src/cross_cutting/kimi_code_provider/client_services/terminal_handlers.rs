@@ -93,6 +93,15 @@ fn isolation_for(state: &ClientServiceState) -> Result<TerminalIsolation, Client
                 TerminalIsolation::Bubblewrap {
                     bwrap,
                     writable_root,
+                    // P3-b(REQ-KACS-IDLE-RO):authority 只读面只来自可信
+                    // boundary plan 的 working_directory(canonical 聚合
+                    // 根;计划构造为 pub(crate),模型/调用方无法自造),
+                    // 由 sandbox 在私有 /tmp tmpfs 之后以 ro bind 恢复其
+                    // 原路径可见性。direct 会话恒 None。
+                    readable_root: state
+                        .target_boundary
+                        .as_ref()
+                        .map(|plan| plan.working_directory().to_path_buf()),
                     writable_git_paths: state.writable_git_paths.clone(),
                 }
             })
@@ -604,6 +613,127 @@ mod tests {
     fn bwrap_state(role: AdapterRole) -> Arc<ClientServiceState> {
         let dir = tempfile::tempdir().expect("dir");
         bwrap_state_at(role, dir.path().canonicalize().expect("canonical root"))
+    }
+
+    /// P3-b:LC 会话状态(bwrap Some + boundary plan),其余同
+    /// `bwrap_state_at`(plan.working_directory 必须等于 root,与
+    /// `ClientServiceState::new` 的一致性早门同款约束)。
+    fn bwrap_state_with_boundary(
+        root: PathBuf,
+        plan: Option<ProviderBoundaryPlan>,
+    ) -> Arc<ClientServiceState> {
+        let (event_tx, _events) = mpsc::channel(32);
+        Arc::new(ClientServiceState {
+            session_id: "client-service-test".to_string(),
+            root: root.clone(),
+            policy: ClientServicePolicy::new(AdapterRole::Executor, ProviderPermissionMode::Auto),
+            permission_mode: ProviderPermissionMode::Auto,
+            bridge: Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            terminal: TerminalManager::new(),
+            bwrap: Some(PathBuf::from("/usr/bin/bwrap")),
+            writable_git_paths: writable_git_paths_for(
+                &AdapterRole::Executor,
+                &root,
+                plan.as_ref(),
+            ),
+            cleanup_cancel: CancellationToken::new().child_token(),
+            baseline_tree: None,
+            target_boundary: plan,
+        })
+    }
+
+    /// P3-b(REQ-KACS-IDLE-RO)direct 冒烟红测③:readable_root 只来自可信
+    /// boundary authority——direct 会话恒 None 且原角色 rw/ro 判定不变;
+    /// LC 会话取 plan 的 working_directory(TargetWriteOnly 与 ReadOnly
+    /// 同规:后者的面根即 authority,由 build_bwrap_args 去重)。
+    #[tokio::test]
+    async fn isolation_readable_root_lc_authority_direct_none() {
+        // direct Executor/Orchestrator:角色 rw/ro 判定原值 + readable_root None。
+        for (role, expected_writable) in [
+            (AdapterRole::Executor, true),
+            (AdapterRole::Orchestrator, false),
+        ] {
+            match isolation_for(&bwrap_state(role.clone())).expect("direct isolation") {
+                TerminalIsolation::Bubblewrap {
+                    writable_root,
+                    readable_root,
+                    ..
+                } => {
+                    assert_eq!(
+                        writable_root, expected_writable,
+                        "direct role rw/ro judgement unchanged: {role:?}"
+                    );
+                    assert_eq!(
+                        readable_root, None,
+                        "direct sessions carry no authority read face: {role:?}"
+                    );
+                }
+                TerminalIsolation::Unavailable => panic!("expected bubblewrap isolation"),
+            }
+        }
+
+        // LC TargetWriteOnly:authority=plan.working_directory(聚合根),
+        // 可写面判定仍由 plan 决定。
+        let aggregate = tempfile::tempdir().expect("aggregate");
+        let aggregate = aggregate
+            .path()
+            .canonicalize()
+            .expect("canonical aggregate");
+        let target = aggregate.join("member");
+        std::fs::create_dir_all(&target).expect("mkdir member");
+        let plan = ProviderBoundaryPlan::new(
+            ProviderBoundaryMode::TargetWriteOnly,
+            aggregate.clone(),
+            Some(target),
+            Vec::new(),
+        );
+        match isolation_for(&bwrap_state_with_boundary(aggregate.clone(), Some(plan)))
+            .expect("lc target-write-only isolation")
+        {
+            TerminalIsolation::Bubblewrap {
+                writable_root,
+                readable_root,
+                ..
+            } => {
+                assert!(writable_root, "LC coding face stays writable");
+                assert_eq!(
+                    readable_root,
+                    Some(aggregate.clone()),
+                    "LC authority read face is the boundary working directory"
+                );
+            }
+            TerminalIsolation::Unavailable => panic!("expected bubblewrap isolation"),
+        }
+
+        // LC ReadOnly:面根=会话根=authority,readable_root 同规(挂载去重
+        // 由 build_bwrap_args 处理),写面保持关闭。
+        let plan = ProviderBoundaryPlan::new(
+            ProviderBoundaryMode::ReadOnly,
+            aggregate.clone(),
+            None,
+            Vec::new(),
+        );
+        match isolation_for(&bwrap_state_with_boundary(aggregate.clone(), Some(plan)))
+            .expect("lc read-only isolation")
+        {
+            TerminalIsolation::Bubblewrap {
+                writable_root,
+                readable_root,
+                ..
+            } => {
+                assert!(!writable_root, "LC read-only action keeps no write face");
+                assert_eq!(
+                    readable_root,
+                    Some(aggregate),
+                    "read-only LC sessions still name the authority root"
+                );
+            }
+            TerminalIsolation::Unavailable => panic!("expected bubblewrap isolation"),
+        }
     }
 
     #[tokio::test]
