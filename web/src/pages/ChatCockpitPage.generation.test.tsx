@@ -243,12 +243,15 @@ describe("ChatCockpitPage", () => {
     await user.click(screen.getByLabelText("继续"));
     await user.click(screen.getByRole("button", { name: "提交选择" }));
 
-    expect(sendChoiceResponse).toHaveBeenCalledWith(
-      "choice-1",
-      ["continue"],
-      null,
-      undefined,
-    );
+    // P2-e（REQ-CRO-11）：ChoiceRequestEntry 恒按题号逐题组装 answers——无
+    // questions 的旧单题卡回落单一 default 题，WS 提交第 4 参恒非空。
+    expect(sendChoiceResponse).toHaveBeenCalledWith("choice-1", ["continue"], null, [
+      {
+        question_id: "default",
+        selected_option_ids: ["continue"],
+        free_text: null,
+      },
+    ]);
   });
 
   it("guides an unstarted session from the empty inbox instead of an error state", () => {
