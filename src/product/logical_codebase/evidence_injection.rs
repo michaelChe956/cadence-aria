@@ -240,4 +240,37 @@ mod tests {
             "script must not reference management session material:\n{EVIDENCE_QUERY_SCRIPT}"
         );
     }
+
+    /// 批2 T1 修复轮 3（P1）：恢复 write_evidence_query_script 的行为覆盖
+    ///（轮 2 误删）——写入内容、0755 可执行、幂等覆盖。
+    #[test]
+    fn evidence_query_script_writes_executable_file_idempotently() {
+        let tmp = TempDir::new().expect("tempdir");
+        let worktree = tmp.path().join("worktree");
+        fs::create_dir_all(&worktree).expect("worktree dir");
+
+        write_evidence_query_script(&worktree).expect("write script");
+
+        let path = script_path(&worktree);
+        assert_eq!(
+            fs::read_to_string(&path).expect("read script"),
+            EVIDENCE_QUERY_SCRIPT
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path)
+                .expect("script metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755, "script must be 0755, got {mode:o}");
+        }
+
+        // 幂等：二次写入不报错、内容不变。
+        write_evidence_query_script(&worktree).expect("re-write script");
+        assert_eq!(
+            fs::read_to_string(&path).expect("re-read script"),
+            EVIDENCE_QUERY_SCRIPT
+        );
+    }
 }

@@ -371,6 +371,20 @@ pub async fn enforce_api_auth(
     enforce(auth, req, next).await
 }
 
+/// Host authority 的 host 部分（去端口；`[::1]:5173` → `::1`、
+/// `127.0.0.1:39721` → `127.0.0.1`、无端口原样）。`is_loopback_host` 只认
+/// 裸 host（serve 参数形态），请求 Host 头须先经此归一。
+fn authority_host(authority: &str) -> &str {
+    let authority = authority.trim();
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        return bracketed.split(']').next().unwrap_or(bracketed);
+    }
+    authority
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(authority)
+}
+
 async fn enforce(auth: Arc<ApiAuthState>, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     if !path_guarded_by_auth(&path) {
@@ -383,9 +397,11 @@ async fn enforce(auth: Arc<ApiAuthState>, req: Request, next: Next) -> Response 
     }
     let headers = req.headers().clone();
     // Host 先于 Origin/身份/交换（DNS rebinding 防线）。
-    let host_ok = headers
+    let host_header = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
+        .map(str::trim);
+    let host_ok = host_header
         .map(|host| auth.host_allowed(host))
         .unwrap_or(false);
     if !host_ok {
@@ -408,11 +424,16 @@ async fn enforce(auth: Arc<ApiAuthState>, req: Request, next: Next) -> Response 
         return forbidden_response("forbidden_origin", "request origin not allowed");
     }
 
-    // 批2 T1 修复轮 2（NEW-2 裁定，设计 v3.0 §五 为约束权威）：/api/evidence-query
-    // 保留专用 evidence token 语义——handler 既有 token→attempt→role→预算链即门
-    //（attempt/run 绑定、仅证据只读），豁免管理会话校验；上面的 Host/Origin 卫生
-    // 照常生效，其余端点的会话语义不变。不给注入工具链下发任何管理会话。
-    if path == "/api/evidence-query" && method == axum::http::Method::POST {
+    // 批2 T1 修复轮 2（NEW-2 裁定，设计 v3.0 §五 为约束权威）+ 修复轮 3（P3）：
+    // /api/evidence-query 保留专用 evidence token 语义——handler 既有
+    // token→attempt→role→预算链即门（attempt/run 绑定、仅证据只读），豁免管理
+    // 会话校验；豁免镜像路由挂载条件（仅回环 Host——evidence 路由仅在回环监听
+    // 挂载），非回环 Host 无会话 → 401 fail-closed，不落静态 fallback 200。
+    // 上面的 Host/Origin 卫生照常生效，其余端点会话语义不变。
+    if path == "/api/evidence-query"
+        && method == axum::http::Method::POST
+        && host_header.is_some_and(|host| crate::web::app::is_loopback_host(authority_host(host)))
+    {
         return next.run(req).await;
     }
     // 会话检查 / token 交换端点免身份（handler 自身给出 401/204/400）。

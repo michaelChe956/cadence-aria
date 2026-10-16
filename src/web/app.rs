@@ -2097,5 +2097,46 @@ mod tests {
                 );
             }
         }
+
+        /// 批2 T1 修复轮 3（P3）：专用 token 豁免镜像挂载条件（仅回环）——
+        /// 非回环 Host 下 evidence 路由未挂载，无会话请求必须 401 fail-closed，
+        /// 不得经静态 fallback 落 200。
+        #[tokio::test]
+        async fn api_auth_evidence_query_exemption_limited_to_loopback() {
+            let root = tempdir().expect("root");
+            let bind: std::net::SocketAddr = "192.168.1.5:4317".parse().expect("bind");
+            let auth = std::sync::Arc::new(
+                crate::web::api_auth::ApiAuthState::for_bind(
+                    &bind,
+                    &["http://aria.example:4317".to_string()],
+                )
+                .expect("non-loopback auth with explicit origin"),
+            );
+            // 非回环部署：evidence 路由不挂载（evidence_enabled=false）。
+            let app = build_web_router_with_evidence(state(root.path()).with_api_auth(auth), false);
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/evidence-query")
+                        .header("host", "aria.example:4317")
+                        .header("origin", "http://aria.example:4317")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({ "token": "deadbeef", "role": "coder", "query": "x" })
+                                .to_string(),
+                        ))
+                        .expect("non-loopback evidence request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "非回环 Host 的 evidence-query 无会话必须 401 fail-closed，不得落静态 200"
+            );
+        }
     }
 }
