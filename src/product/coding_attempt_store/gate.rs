@@ -1426,6 +1426,24 @@ mod tests {
             attempt.work_item_group_id.as_deref(),
             Some("work_item_plan_0001")
         );
+        // 生产中 group attempt 创建时 plan lineage 已由 plan 流程落盘；
+        // ensure_provider_run_allowed 的 plan-repair reconcile 需读它
+        //（linked_active_plan_repair_snapshot → get_plan_lineage）。
+        crate::product::work_item_revision_store::WorkItemRevisionStore::new(paths.clone())
+            .put_plan_lineage(
+                &crate::product::models::work_item_revision::WorkItemPlanLineage {
+                    id: "work_item_plan_0001".to_string(),
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    story_spec_refs: Vec::new(),
+                    design_spec_refs: Vec::new(),
+                    active_revision_id: None,
+                    active_amendment_id: None,
+                    created_at: "2026-10-16T00:00:00Z".to_string(),
+                    updated_at: "2026-10-16T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
 
         // manual：无 enrollment 绑定，ensure_provider_run_allowed 不拦（回归）。
         store

@@ -1173,10 +1173,10 @@
         let temp = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(temp.path().join(".aria"));
         let store = CodingAttemptStore::new(paths.clone());
-        let group_input = |plan_id: &str| {
+        let group_input = |issue_id: &str, plan_id: &str| {
             crate::product::coding_attempt_store::CreateGroupCodingAttemptInput {
                 project_id: PROJECT_ID.to_string(),
-                issue_id: ISSUE_ID.to_string(),
+                issue_id: issue_id.to_string(),
                 plan_id: plan_id.to_string(),
                 current_work_item_id: WORK_ITEM_ID.to_string(),
                 base_branch: "main".to_string(),
@@ -1190,7 +1190,9 @@
         };
 
         // manual：无 enrollment 绑定的 plan，admission 正常签票并转 Running。
-        let manual = store.create_group_attempt(group_input("work_item_plan_9999")).unwrap();
+        let manual = store
+            .create_group_attempt(group_input(ISSUE_ID, "work_item_plan_9999"))
+            .unwrap();
         store
             .admit_and_transition_attempt_to_executable(
                 &manual.project_id,
@@ -1203,15 +1205,19 @@
             .unwrap();
         assert_eq!(admitted.status, CodingAttemptStatus::Running);
 
-        // 精确绑定已 terminated 的 plan：admission fail-closed 拒绝。
-        let terminated_attempt =
-            store.create_group_attempt(group_input("work_item_plan_0001")).unwrap();
+        // 精确绑定已 terminated 的 plan：admission fail-closed 拒绝。第二现场
+        // 用独立 issue——同 issue 下已有活跃 manual attempt 时，
+        // create_group_attempt 被 active_coding_attempt_exists 准入拒绝。
+        const TERMINATED_ISSUE_ID: &str = "issue_0002";
+        let terminated_attempt = store
+            .create_group_attempt(group_input(TERMINATED_ISSUE_ID, "work_item_plan_0001"))
+            .unwrap();
         let enrollment_store =
             crate::product::issue_automation_store::IssueAutomationStore::new(paths.clone());
         let created = enrollment_store
             .compare_and_set(
                 PROJECT_ID,
-                ISSUE_ID,
+                TERMINATED_ISSUE_ID,
                 None,
                 crate::product::models::automation::EnrollmentWriteCommand::Enable {
                     selection_key: "human-choice-1".to_string(),
@@ -1247,7 +1253,7 @@
         let bound = enrollment_store
             .bind_plan(
                 PROJECT_ID,
-                ISSUE_ID,
+                TERMINATED_ISSUE_ID,
                 created.policy_revision,
                 "work_item_plan_0001",
                 "session_0001",
@@ -1256,7 +1262,7 @@
         enrollment_store
             .terminate_plan(
                 PROJECT_ID,
-                ISSUE_ID,
+                TERMINATED_ISSUE_ID,
                 crate::product::models::automation::EnrollmentTerminationRequest {
                     command_id: "terminate-command-1".to_string(),
                     expected_enrollment_id: bound.enrollment_id.clone(),
