@@ -42,6 +42,13 @@ pub use plan_final_confirm::post_plan_coding_final_confirm;
 /// 须持 `work_item_group:{project}:{issue}:{plan}` 串行锁——见 plan_start.rs
 /// 顶部锁契约）。
 pub(crate) use plan_start::drive_ready_units_for_plan;
+/// 批 2 R2（REQ-WIGA-03/C5-CHAIN、REQ-MTG-03）：Enrolled LC 共享驱动
+/// 服务与 N0 失败事实写口（`autopilot_orchestrator` 消费；锁契约见
+/// plan_start.rs 顶部）。
+pub(crate) use plan_start::{
+    EnrolledPlanDriveIdentity, EnrolledPlanStartStep, enrolled_plan_coding_start,
+    upsert_automation_drive_failure_fact,
+};
 pub use plan_start::{
     delete_plan_coding_workspaces, get_plan_coding_progress, post_plan_coding_start,
 };

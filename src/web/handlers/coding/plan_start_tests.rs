@@ -3424,3 +3424,535 @@ async fn plan_coding_sweep_is_benign_noop_on_legacy_single_repo_layout() {
         "legacy layout directories must be untouched by the sweep"
     );
 }
+
+// ─── 批 2 R2（REQ-WIGA-03/C5-CHAIN、REQ-MTG-03、REQ-WIGA-12）───
+// Enrolled 共享驱动的 drive 层红线：`drive_ready_units_for_plan` 按 attempt
+// 冻结 policy 选 origin（AutoStartOnce→当前 binding 的 Enrolled、Manual→
+// Manual 原样、失效零 provider 禁降级）；Running parked 物化/拉 runner 前
+// 复核同一自动授权；Enrolled 启动失败写 N0 `automation_failed`
+//(stage=coding_start，key 取确定性 command、无 checkpoint 首次冻结）。
+
+use crate::product::coding_models::CodingStartRunPolicy;
+use crate::product::issue_automation_store::IssueAutomationStore;
+use crate::product::logical_codebase::EnrollmentTarget;
+use crate::product::models::automation::{
+    EnrollmentBindingHistory, EnrollmentBindingIdentity, EnrollmentOptions, EnrollmentSource,
+    IssueAutomationEnrollment,
+};
+
+const R2_ENROLLMENT_ID: &str = "enrollment_r2_0001";
+const R2_POLICY_REVISION: u64 = 7;
+
+/// N3 issue 的权威载体解析出的集合 target（LC id 与 coding_start 的
+/// carrier 互证同源；成员集覆盖 plan 全部四桶）。
+fn r2_collection_target(fixture: &N3Fixture) -> EnrollmentTarget {
+    let authority =
+        crate::product::logical_codebase::RepositoryAuthorityResolver::new(fixture.paths.clone())
+            .resolve_for_issue(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .expect("n3 issue authority resolution");
+    let logical_codebase_id = authority
+        .target
+        .logical_codebase_id
+        .expect("n3 issue resolves a logical codebase authority");
+    let mut members = vec![
+        fixture.busi,
+        fixture.web,
+        fixture.gateway,
+        fixture.frontend,
+    ];
+    members.sort();
+    EnrollmentTarget::LogicalCodebaseMembers {
+        logical_codebase_id,
+        logical_repository_ids: members,
+    }
+}
+
+/// N3 现场上写入一条 enabled 集合绑定 enrollment（真实结构 + 真实 store
+/// 路径；成员集覆盖 plan 全部四桶，满足 coding_start 的 record 越权核对）。
+fn r2_write_collection_enrollment(fixture: &N3Fixture, enabled: bool, policy_revision: u64) {
+    let target = r2_collection_target(fixture);
+    let source = EnrollmentSource {
+        stories: Vec::new(),
+        designs: Vec::new(),
+    };
+    let binding = EnrollmentBindingIdentity {
+        binding_version: 1,
+        enrollment_id: R2_ENROLLMENT_ID.to_string(),
+        plan_id: PLAN_ID.to_string(),
+        session_id: "session_r2_n3".to_string(),
+        source: source.clone(),
+        target: target.clone(),
+        author_provider: crate::product::models::ProviderName::Fake,
+        reviewer_provider: crate::product::models::ProviderName::Fake,
+    };
+    let enrollment = IssueAutomationEnrollment {
+        enrollment_id: R2_ENROLLMENT_ID.to_string(),
+        selection_key: "r2-collection-selection".to_string(),
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        enabled,
+        policy_revision,
+        source,
+        options: EnrollmentOptions {
+            author_provider: crate::product::models::ProviderName::Fake,
+            reviewer_provider: crate::product::models::ProviderName::Fake,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            plan_approval: crate::product::models::automation::PlanApprovalPolicy::Manual,
+            plan_options: crate::product::models::IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+        },
+        target: Some(target),
+        prepare_intent_id: "prepare_intent_r2".to_string(),
+        plan_id: Some(PLAN_ID.to_string()),
+        session_id: Some("session_r2_n3".to_string()),
+        created_at: CREATED_AT.to_string(),
+        updated_at: CREATED_AT.to_string(),
+        binding_history: Some(EnrollmentBindingHistory {
+            current: binding,
+            previous: Vec::new(),
+        }),
+        command_ledger: Vec::new(),
+        terminated_at: None,
+        attention_facts: Vec::new(),
+    };
+    crate::product::json_store::write_json(
+        &fixture
+            .paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("automation-enrollment.json"),
+        &enrollment,
+    )
+    .unwrap();
+}
+
+/// 把指定 target 桶的 attempt 冻结策略改写为 AutoStartOnce（模拟 enrolled
+/// advance split 落盘后的真实策略形状；经真实 store 写回）。
+fn r2_freeze_auto_start_policy(
+    fixture: &N3Fixture,
+    target: LogicalRepositoryId,
+    policy_revision: u64,
+) -> crate::product::coding_models::CodingExecutionAttempt {
+    let mut attempt = fixture.target_attempt(target);
+    attempt.start_run_policy = CodingStartRunPolicy::AutoStartOnce {
+        enrollment_id: R2_ENROLLMENT_ID.to_string(),
+        policy_revision,
+        source_plan_revision: PLAN_REVISION_ID.to_string(),
+    };
+    fixture
+        .coding_store()
+        .write_coding_attempt_for_test(&attempt)
+        .unwrap();
+    attempt
+}
+
+/// R2 ①③：首启后 fan-out 按 attempt 冻结 policy 逐桶选 origin——
+/// AutoStartOnce 桶以当前 binding 的 Enrolled origin 启动（claim 冻结
+/// enrollment/policy/binding/target 身份、command 沿确定性派生），同轮
+/// Manual 桶保持 Manual 原样，未就绪桶零启动。
+#[tokio::test]
+async fn plan_coding_r2_drive_fanout_starts_auto_buckets_with_enrolled_origin() {
+    let fixture = n3_fixture().await;
+    let run_command_id = "cmd_r2_auto_0001";
+    s2_seed_first_start_started(&fixture, run_command_id).await;
+    s2_finish_first_unit(&fixture, CodingExecutionUnitStatus::Completed);
+    // web=AutoStartOnce（就绪）、gateway=Manual（就绪）、frontend=AutoStartOnce
+    //（wi_service 依赖 wi_unrelated 未完成→不就绪）。
+    r2_freeze_auto_start_policy(&fixture, fixture.web, R2_POLICY_REVISION);
+    r2_freeze_auto_start_policy(&fixture, fixture.frontend, R2_POLICY_REVISION);
+    r2_write_collection_enrollment(&fixture, true, R2_POLICY_REVISION);
+
+    let outcome = drive_ready_units_for_plan(&fixture.state, PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+        .await
+        .expect("r2 enrolled fan-out drive");
+
+    let expected_target = r2_collection_target(&fixture);
+
+    // AutoStartOnce 桶：Enrolled origin（含当前 binding 身份）+ 确定性 command。
+    let web = fixture.target_attempt(fixture.web);
+    let claim = web.start_claim.as_ref().expect("auto bucket started");
+    assert_eq!(
+        claim.origin,
+        crate::product::coding_models::CodingStartOrigin::Enrolled {
+            enrollment_id: R2_ENROLLMENT_ID.to_string(),
+            policy_revision: R2_POLICY_REVISION,
+            binding_version: Some(1),
+            target: Some(expected_target.clone()),
+        },
+        "auto bucket must start with the enrolled origin, never manual"
+    );
+    assert_eq!(
+        claim.command_id,
+        CodingPlanSelection::deterministic_start_command_id(
+            PROJECT_ID,
+            ISSUE_ID,
+            PLAN_ID,
+            run_command_id,
+            &fixture.web.0.to_string()
+        )
+    );
+    assert_eq!(
+        fixture
+            .state
+            .coding_runs
+            .runner_count(&CodingAttemptRunKey::from_attempt(&web)),
+        1
+    );
+
+    // 同轮 Manual 桶：Manual origin 原样（不因 enrollment 在场改语义）。
+    let gateway = fixture.target_attempt(fixture.gateway);
+    let manual_claim = gateway.start_claim.as_ref().expect("manual bucket started");
+    assert_eq!(manual_claim.origin, CodingStartOrigin::Manual);
+
+    // 未就绪的 AutoStartOnce 桶零启动。
+    assert!(fixture.target_attempt(fixture.frontend).start_claim.is_none());
+
+    let mut started = outcome.started_attempt_ids.clone();
+    started.sort();
+    let mut expected = vec![web.id.clone(), gateway.id.clone()];
+    expected.sort();
+    assert_eq!(started, expected);
+}
+
+/// R2 ③：撤销（disable/换代漂移）后 AutoStartOnce 桶零 provider、不降级
+/// Manual；独立 Manual 桶不受 enrollment 状态影响照常启动。
+#[tokio::test]
+async fn plan_coding_r2_drive_revoked_enrollment_zero_provider_no_manual_downgrade() {
+    let fixture = n3_fixture().await;
+    let run_command_id = "cmd_r2_revoke_0001";
+    s2_seed_first_start_started(&fixture, run_command_id).await;
+    s2_finish_first_unit(&fixture, CodingExecutionUnitStatus::Completed);
+    r2_freeze_auto_start_policy(&fixture, fixture.web, R2_POLICY_REVISION);
+    // 冻结 revision 7，当前 enrollment 已换代到 revision 9（撤销/篡改形态）。
+    r2_write_collection_enrollment(&fixture, true, R2_POLICY_REVISION + 2);
+
+    let outcome = drive_ready_units_for_plan(&fixture.state, PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+        .await
+        .expect("revoked drive must not error, just stop the auto bucket");
+
+    let web = fixture.target_attempt(fixture.web);
+    assert!(
+        web.start_claim.is_none(),
+        "revoked enrollment must yield zero provider on auto buckets"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .coding_runs
+            .runner_count(&CodingAttemptRunKey::from_attempt(&web)),
+        0,
+        "no manual downgrade: the auto bucket must not gain a runner"
+    );
+    assert!(outcome.busy_attempt_ids.contains(&web.id));
+    assert!(
+        !outcome.started_attempt_ids.contains(&web.id),
+        "the revoked auto bucket must not appear as started"
+    );
+
+    // 独立 Manual 桶不受影响（独立链不回滚）。
+    let gateway = fixture.target_attempt(fixture.gateway);
+    assert!(gateway.start_claim.is_some(), "manual bucket still starts");
+}
+
+/// R2 ⑥：Enrolled 启动失败写 N0 `automation_failed`（stage=coding_start、
+/// key 取确定性 command、attempt_id 真值、无 claim checkpoint 首次冻结、
+/// 重复驱动同 key 不增项且 occurred_at 保留）。
+#[tokio::test]
+async fn plan_coding_r2_drive_enrolled_start_failure_writes_attention_fact() {
+    let fixture = n3_fixture().await;
+    let run_command_id = "cmd_r2_fact_0001";
+    s2_seed_first_start_started(&fixture, run_command_id).await;
+    s2_finish_first_unit(&fixture, CodingExecutionUnitStatus::Completed);
+    // web 桶冻结策略带错的 source_plan_revision（篡改形态）→ Enrolled start
+    // 在 verify_journal_and_record 处 fail-closed。
+    let mut web = r2_freeze_auto_start_policy(&fixture, fixture.web, R2_POLICY_REVISION);
+    web.start_run_policy = CodingStartRunPolicy::AutoStartOnce {
+        enrollment_id: R2_ENROLLMENT_ID.to_string(),
+        policy_revision: R2_POLICY_REVISION,
+        source_plan_revision: "plan_revision_tampered".to_string(),
+    };
+    fixture
+        .coding_store()
+        .write_coding_attempt_for_test(&web)
+        .unwrap();
+    r2_write_collection_enrollment(&fixture, true, R2_POLICY_REVISION);
+
+    let drive_error = drive_ready_units_for_plan(
+        &fixture.state,
+        PROJECT_ID,
+        ISSUE_ID,
+        PLAN_ID,
+        None,
+    )
+    .await
+    .expect_err("tampered enrolled start must fail closed");
+    assert_eq!(
+        drive_error.code,
+        "plan_coding_continuation_start_failed",
+        "{drive_error:?}"
+    );
+
+    let enrollment = IssueAutomationStore::new(fixture.paths.clone())
+        .get(PROJECT_ID, ISSUE_ID)
+        .unwrap()
+        .unwrap();
+    let command_id = CodingPlanSelection::deterministic_start_command_id(
+        PROJECT_ID,
+        ISSUE_ID,
+        PLAN_ID,
+        run_command_id,
+        &fixture.web.0.to_string(),
+    );
+    let expected_key = format!("{PLAN_ID}:{command_id}:coding_start_failed");
+    let fact = enrollment
+        .attention_facts
+        .iter()
+        .find(|fact| fact.key == expected_key)
+        .unwrap_or_else(|| panic!("coding_start failure fact missing: {:?}", enrollment.attention_facts));
+    assert_eq!(fact.kind, crate::product::models::automation::AutomationAttentionKind::AutomationFailed);
+    assert_eq!(fact.stage, crate::product::models::automation::AutomationAttentionStage::CodingStart);
+    assert_eq!(fact.plan_id.as_deref(), Some(PLAN_ID));
+    assert_eq!(fact.session_id.as_deref(), Some("session_r2_n3"));
+    assert_eq!(fact.attempt_id.as_deref(), Some(web.id.as_str()));
+    assert!(!fact.reason_code.is_empty());
+    let frozen_at = fact.occurred_at.clone();
+
+    // 重复驱动：同 key 单条、occurred_at 首次冻结保留。
+    let _ = drive_ready_units_for_plan(&fixture.state, PROJECT_ID, ISSUE_ID, PLAN_ID, None).await;
+    let enrollment = IssueAutomationStore::new(fixture.paths.clone())
+        .get(PROJECT_ID, ISSUE_ID)
+        .unwrap()
+        .unwrap();
+    let matches: Vec<_> = enrollment
+        .attention_facts
+        .iter()
+        .filter(|fact| fact.key == expected_key)
+        .collect();
+    assert_eq!(matches.len(), 1, "stable key must not add entries");
+    assert_eq!(matches[0].occurred_at, frozen_at);
+    assert!(
+        fixture.target_attempt(fixture.web).start_claim.is_none(),
+        "failed enrolled start must not leave a claim"
+    );
+}
+
+/// R2 ④（parked 授权复核-正例）：Running parked 的 AutoStartOnce 桶在
+/// 授权有效时照常物化 + 重启 runner（跨桶桥续跑不因策略复核降级）。
+/// park 形状与 s2 parked 修复轮同源：frontend 桶 wi_service 已完成、
+/// 跨桶依赖全 Completed 后 wi_panel 是首个就绪 Pending unit。
+#[tokio::test]
+async fn plan_coding_r2_parked_auto_bucket_resumes_with_valid_authorization() {
+    use crate::product::lifecycle_store::{LifecycleStore, UpsertRepoSharedWorktreeInput};
+
+    let fixture = n3_fixture().await;
+    let run_command_id = "cmd_r2_parked_ok";
+    s2_seed_first_start_started(&fixture, run_command_id).await;
+    // 完成事实：wi_core（busi）/wi_unrelated（gateway）/wi_service（frontend
+    //根）——wi_panel 跨桶依赖全 Completed。
+    s2_finish_first_unit(&fixture, CodingExecutionUnitStatus::Completed);
+    s2_finish_root_unit(
+        &fixture,
+        fixture.gateway,
+        "wi_unrelated",
+        CodingExecutionUnitStatus::Completed,
+    );
+    r2_freeze_auto_start_policy(&fixture, fixture.frontend, R2_POLICY_REVISION);
+    r2_write_collection_enrollment(&fixture, true, R2_POLICY_REVISION);
+    let frontend = fixture.target_attempt(fixture.frontend);
+    fixture
+        .coding_store()
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &frontend.id)
+        .unwrap();
+    s2_finish_root_unit(
+        &fixture,
+        fixture.frontend,
+        "wi_service",
+        CodingExecutionUnitStatus::Completed,
+    );
+    // 真实 park 形状（advance Waiting 分支）：清 active、current 保留完成 unit。
+    let mut parked = fixture.target_attempt(fixture.frontend);
+    parked.active_unit_id = None;
+    parked.current_work_item_id = Some("wi_service".to_string());
+    fixture
+        .coding_store()
+        .update_attempt_non_status_fields(&parked)
+        .unwrap();
+    let lifecycle = LifecycleStore::new(fixture.paths.clone());
+    lifecycle
+        .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: fixture.frontend,
+            branch_name: "aria-issues/issue_plan_0001".to_string(),
+            worktree_path: std::env::temp_dir().join("r2-parked-frontend-ok"),
+            base_branch: "main".to_string(),
+        })
+        .unwrap();
+    lifecycle
+        .try_acquire_repo_worktree_lock(
+            PROJECT_ID,
+            ISSUE_ID,
+            fixture.frontend,
+            "wi_service",
+            &frontend.id,
+        )
+        .unwrap();
+
+    let outcome = drive_ready_units_for_plan(&fixture.state, PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+        .await
+        .expect("authorized parked auto bucket resumes");
+
+    assert!(outcome.resumed_attempt_ids.contains(&frontend.id));
+    let resumed = fixture.target_attempt(fixture.frontend);
+    assert_eq!(
+        resumed.current_work_item_id.as_deref(),
+        Some("wi_panel"),
+        "authorized parked auto bucket materializes the next ready unit"
+    );
+    assert!(resumed.active_unit_id.is_some());
+    assert_eq!(
+        fixture
+            .state
+            .coding_runs
+            .runner_count(&CodingAttemptRunKey::from_attempt(&resumed)),
+        1
+    );
+}
+
+/// R2 ④（parked 授权复核-负例）：授权失效（disable）的 AutoStartOnce
+/// parked 桶零物化、零 runner；同轮 Manual 独立桶照常（独立链不回滚）。
+#[tokio::test]
+async fn plan_coding_r2_parked_auto_bucket_revoked_zero_materialization() {
+    let fixture = n3_fixture().await;
+    let run_command_id = "cmd_r2_parked_revoked";
+    s2_seed_first_start_started(&fixture, run_command_id).await;
+    s2_finish_first_unit(&fixture, CodingExecutionUnitStatus::Completed);
+    s2_finish_root_unit(
+        &fixture,
+        fixture.gateway,
+        "wi_unrelated",
+        CodingExecutionUnitStatus::Completed,
+    );
+    r2_freeze_auto_start_policy(&fixture, fixture.frontend, R2_POLICY_REVISION);
+    r2_write_collection_enrollment(&fixture, false, R2_POLICY_REVISION);
+    let frontend = fixture.target_attempt(fixture.frontend);
+    fixture
+        .coding_store()
+        .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &frontend.id)
+        .unwrap();
+    s2_finish_root_unit(
+        &fixture,
+        fixture.frontend,
+        "wi_service",
+        CodingExecutionUnitStatus::Completed,
+    );
+    let mut parked = fixture.target_attempt(fixture.frontend);
+    parked.active_unit_id = None;
+    parked.current_work_item_id = Some("wi_service".to_string());
+    fixture
+        .coding_store()
+        .update_attempt_non_status_fields(&parked)
+        .unwrap();
+
+    let outcome = drive_ready_units_for_plan(&fixture.state, PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+        .await
+        .expect("revoked parked drive is a stop, not an error");
+
+    let after = fixture.target_attempt(fixture.frontend);
+    assert!(
+        after.active_unit_id.is_none(),
+        "revoked authorization must not materialize the parked unit"
+    );
+    let panel = fixture
+        .coding_store()
+        .list_coding_units(PROJECT_ID, ISSUE_ID, &after.id)
+        .unwrap()
+        .into_iter()
+        .find(|unit| unit.logical_work_item_id == "wi_panel")
+        .expect("wi_panel unit");
+    assert_eq!(
+        panel.status,
+        CodingExecutionUnitStatus::Pending,
+        "revoked authorization must leave the parked unit untouched"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .coding_runs
+            .runner_count(&CodingAttemptRunKey::from_attempt(&after)),
+        0,
+        "revoked authorization must not spawn a runner"
+    );
+    assert!(outcome.busy_attempt_ids.contains(&frontend.id));
+    assert!(outcome.resumed_attempt_ids.is_empty());
+    // Manual 独立桶照常启动。
+    assert!(
+        fixture
+            .target_attempt(fixture.web)
+            .start_claim
+            .is_some(),
+        "manual independent chain still starts"
+    );
+}
+
+/// R2 ⑦：`coding_chain_stage` 聚合 run 冻结 targets 新鲜状态——单桶
+/// Completed≠全 plan 完成（仍有未终态桶→Coding 观察推进）；门/失败
+/// 分别投影 AwaitingHuman/NeedsHuman。
+#[tokio::test]
+async fn plan_coding_r2_aggregate_run_targets_fresh_status() {
+    use crate::web::autopilot_orchestrator::{
+        ReconcileOutcome, aggregate_plan_targets_fresh_status,
+    };
+
+    let fixture = n3_fixture().await;
+    s2_seed_first_start_started(&fixture, "cmd_r2_agg_0001").await;
+    let run = fixture
+        .run_store()
+        .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+        .unwrap()
+        .unwrap();
+
+    // 全桶 Created/未终态：执行观察。
+    assert_eq!(
+        aggregate_plan_targets_fresh_status(&fixture.paths, &run).unwrap(),
+        ReconcileOutcome::Coding
+    );
+
+    // 单桶 Completed：≠全 plan 完成，其余桶推进中仍 Coding。
+    s2_finish_first_unit(&fixture, CodingExecutionUnitStatus::Completed);
+    assert_eq!(
+        aggregate_plan_targets_fresh_status(&fixture.paths, &run).unwrap(),
+        ReconcileOutcome::Coding,
+        "a single completed bucket must not conclude the whole plan"
+    );
+
+    // 任一桶人控门：AwaitingHuman。
+    let mut web = fixture.target_attempt(fixture.web);
+    web.status = CodingAttemptStatus::WaitingForHuman;
+    fixture
+        .coding_store()
+        .write_coding_attempt_for_test(&web)
+        .unwrap();
+    assert_eq!(
+        aggregate_plan_targets_fresh_status(&fixture.paths, &run).unwrap(),
+        ReconcileOutcome::AwaitingHuman
+    );
+
+    // 任一桶失败：NeedsHuman（失败链停，不再驱动其余桶的判定入口）。
+    let mut web = fixture.target_attempt(fixture.web);
+    web.status = CodingAttemptStatus::Failed;
+    fixture
+        .coding_store()
+        .write_coding_attempt_for_test(&web)
+        .unwrap();
+    assert_eq!(
+        aggregate_plan_targets_fresh_status(&fixture.paths, &run).unwrap(),
+        ReconcileOutcome::NeedsHuman
+    );
+}

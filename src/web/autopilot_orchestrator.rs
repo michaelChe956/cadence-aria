@@ -439,22 +439,20 @@ async fn human_stop_point(
     Ok(None)
 }
 
-/// P2 Task 5：Confirmed 编排链分诊。只在「Confirmed + `plan_confirmed_info`
-/// 可派生成功 publication/compile + 当前 enrollment 精确绑定」时接管：
-/// 未 Ready 先 stable-id `advance_plan`（本轮到 Ready 即止）；Ready 后读取
-/// group journal 唯一 attempt，按状态分诊或 stable-id AutoStartOnce
-///（`wiga-start-{attempt_id}`，同 claim 意图固定）。Failed/Aborted/漂移
-/// 一律 NeedsHuman；任何 Replayed 的 Failed/Aborted 记录也人工分诊，
-/// 不隐式新 command。其余 session 状态返回 None 交生成准入。
+/// P2 Task 5 + 批 2 R2：Confirmed 编排链分诊。只在「Confirmed +
+/// `plan_confirmed_info` 可派生成功 publication/compile + 当前 enrollment
+/// 精确绑定」时接管；N0 未解除 advance/coding_start 失败事实先停点
+///（不自动 retry）。目标分派（R2）：LC 绑定（旧单成员＋集合）改走
+/// `plan_start` 共享服务——先落 CodingPlanRun 再复用全图驱动
+///（首启沿 `deterministic_start_command_id`，删 `wiga-start-{attempt}`
+/// 旁路）；物理单仓/旧代无 target 保留单 attempt 自动链。失败/漂移一律
+/// fail-closed NeedsHuman 并写 N0 失败事实。其余 session 状态返回 None
+/// 交生成准入。
 async fn coding_chain_stage(
     state: &WebAppState,
     enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
 ) -> Result<Option<ReconcileOutcome>, String> {
-    use crate::product::advance_store::{AdvanceOutcome, AdvanceStatus, AdvanceStore};
-    use crate::product::coding_models::{CodingAttemptStatus, CodingStartOrigin};
     use crate::product::models::WorkspaceSessionStatus;
-    use crate::web::advance_plan::{AdvancePlanOrigin, advance_plan};
-    use crate::web::coding_start::{StartCodingCommand, StartCodingOutcome, start_coding_once};
 
     let Some(session_id) = enrollment.session_id.as_deref() else {
         return Ok(None);
@@ -478,21 +476,204 @@ async fn coding_chain_stage(
     let Some(plan_id) = enrollment.plan_id.clone() else {
         return Ok(Some(ReconcileOutcome::NeedsHuman));
     };
+
+    // 批 2 R2（§5，REQ-WIGA-12）：当前 binding 的 advance/coding_start 失败
+    // 事实未解除即停点（NeedsHuman），不自动 retry；解除走人手/T3
+    // continue-chain（成功 resolve 原 key 再 wake）。
+    if unresolved_drive_failure_fact(enrollment, &plan_id, session_id) {
+        return Ok(Some(ReconcileOutcome::NeedsHuman));
+    }
+
+    // R2 目标分派：LC 绑定走共享服务全图驱动；物理单仓/旧代无 target
+    // 保留单 attempt 自动链（`bind_ready` 要求 logical snapshot，不能硬塞）。
+    let lc_bound = matches!(
+        enrollment.target.as_ref(),
+        Some(crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase { .. })
+            | Some(
+                crate::product::logical_codebase::EnrollmentTarget::LogicalCodebaseMembers { .. }
+            )
+    );
+    if lc_bound {
+        return enrolled_lc_coding_chain(state, &paths, enrollment, &plan_id).await;
+    }
+    single_attempt_coding_chain(state, &paths, enrollment, &plan_id).await
+}
+
+/// 批 2 R2：N0 未解除的 advance/coding_start 失败事实判定（kind=
+/// automation_failed、stage∈{advance,coding_start}、plan/session 与绑定
+/// 当前代互证）。
+fn unresolved_drive_failure_fact(
+    enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
+    plan_id: &str,
+    session_id: &str,
+) -> bool {
+    use crate::product::models::automation::{
+        AutomationAttentionKind, AutomationAttentionStage,
+    };
+    enrollment.attention_facts.iter().any(|fact| {
+        fact.kind == AutomationAttentionKind::AutomationFailed
+            && matches!(
+                fact.stage,
+                AutomationAttentionStage::Advance | AutomationAttentionStage::CodingStart
+            )
+            && fact.plan_id.as_deref() == Some(plan_id)
+            && fact.session_id.as_deref() == Some(session_id)
+    })
+}
+
+/// 批 2 R2（REQ-WIGA-03/C5-CHAIN、REQ-MTG-03）：LC 绑定的共享服务驱动
+/// 链——先落 run（prepare，稳定 command=enrollment/plan 身份）→ Enrolled
+/// advance → 首启；首项 outcome 落盘/在途即 `drive_ready_units_for_plan`
+/// fan-out 其余就绪桶（tick 与完成挂点同源复用，per-plan 串行锁同键）；
+/// 终局按 run 冻结 targets 的新鲜状态聚合（单桶 Completed≠全 plan 完成）。
+async fn enrolled_lc_coding_chain(
+    state: &WebAppState,
+    paths: &ProductAppPaths,
+    enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
+    plan_id: &str,
+) -> Result<Option<ReconcileOutcome>, String> {
+    use crate::product::coding_plan_run::{CodingPlanRunPhase, CodingPlanRunStore};
+    use crate::product::coding_plan_run::CodingPlanStartOutcome;
+    use crate::web::handlers::{
+        EnrolledPlanDriveIdentity, EnrolledPlanStartStep, drive_ready_units_for_plan,
+        enrolled_plan_coding_start,
+    };
+
+    let Ok(identity) = EnrolledPlanDriveIdentity::load(paths, enrollment) else {
+        // 旧代无版本化绑定/内部投影漂移：fail-closed 人工分诊（无绑定
+        // 事实写者授权，不写 N0 事实）。
+        return Ok(Some(ReconcileOutcome::NeedsHuman));
+    };
+    let (run, step) = match enrolled_plan_coding_start(state, &identity).await {
+        Ok(result) => result,
+        // 失败事实已在服务内沿 N0 写入（写失败已优先上抛为 tick 错误）；
+        // 业务失败按停点分诊。
+        Err(_) => return Ok(Some(ReconcileOutcome::NeedsHuman)),
+    };
+    match &step {
+        EnrolledPlanStartStep::AdvancedToReady => return Ok(Some(ReconcileOutcome::Advancing)),
+        EnrolledPlanStartStep::Recorded(CodingPlanStartOutcome::NeedsHuman { .. })
+        | EnrolledPlanStartStep::Existing(CodingPlanRunPhase::NeedsHuman) => {
+            return Ok(Some(ReconcileOutcome::NeedsHuman));
+        }
+        _ => {}
+    }
+
+    // 首项 outcome 已落盘 / run 已在途：全图 fan-out（与完成挂点同函数、
+    // 同 per-plan 串行锁；重复 tick 同 claim 零新启）。
+    let run_store = CodingPlanRunStore::new(paths.clone());
+    let mut run = run_store
+        .get(&enrollment.project_id, &enrollment.issue_id, plan_id)
+        .map_err(|error| format!("coding plan run unreadable: {error}"))?
+        .unwrap_or(run);
+    if matches!(
+        run.phase,
+        CodingPlanRunPhase::Started | CodingPlanRunPhase::AlreadyStarted
+    ) {
+        let _drive_guard = state
+            .coding_runs
+            .lock_named(&format!(
+                "work_item_group:{}:{}:{}",
+                enrollment.project_id, enrollment.issue_id, plan_id
+            ))
+            .await;
+        drive_ready_units_for_plan(
+            state,
+            &enrollment.project_id,
+            &enrollment.issue_id,
+            plan_id,
+            None,
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "enrolled plan fan-out failed: {}: {}",
+                error.code, error.message
+            )
+        })?;
+        run = run_store
+            .get(&enrollment.project_id, &enrollment.issue_id, plan_id)
+            .map_err(|error| format!("coding plan run unreadable: {error}"))?
+            .unwrap_or(run);
+    }
+    Ok(Some(aggregate_plan_targets_fresh_status(paths, &run)?))
+}
+
+/// 批 2 R2：run 冻结 targets 的新鲜状态聚合（`coding_chain_stage` 终局
+/// 分诊）——任一失败/人工恢复 → NeedsHuman；任一人控门 → AwaitingHuman；
+/// 其余（Created/Running/Completed/amendment）为执行或观察：单桶
+/// Completed≠全 plan 完成（其余桶继续由 fan-out 驱动）。空绑定集
+///（ready_bound 等待窗口）视为执行观察。
+pub(crate) fn aggregate_plan_targets_fresh_status(
+    paths: &ProductAppPaths,
+    run: &crate::product::coding_plan_run::CodingPlanRun,
+) -> Result<ReconcileOutcome, String> {
+    use crate::product::coding_models::CodingAttemptStatus;
+
+    let store = crate::product::coding_attempt_store::CodingAttemptStore::new(paths.clone());
+    let mut awaiting_human = false;
+    for binding in &run.target_attempts {
+        let attempt = store
+            .get_attempt(&run.project_id, &run.issue_id, &binding.attempt_id)
+            .map_err(|error| format!("run target attempt unreadable: {error}"))?;
+        match attempt.status {
+            CodingAttemptStatus::Failed
+            | CodingAttemptStatus::Aborted
+            | CodingAttemptStatus::AwaitingManualRecovery => {
+                return Ok(ReconcileOutcome::NeedsHuman)
+            }
+            CodingAttemptStatus::WaitingForHuman | CodingAttemptStatus::Blocked => {
+                awaiting_human = true;
+            }
+            CodingAttemptStatus::Created
+            | CodingAttemptStatus::Running
+            | CodingAttemptStatus::Completed
+            | CodingAttemptStatus::AwaitingPlanAmendment
+            | CodingAttemptStatus::ApplyingPlanAmendment
+            | CodingAttemptStatus::AmendmentApplyFailed => {}
+        }
+    }
+    if awaiting_human {
+        Ok(ReconcileOutcome::AwaitingHuman)
+    } else {
+        Ok(ReconcileOutcome::Coding)
+    }
+}
+
+/// 物理单仓（及旧代无 target enrollment）的单 attempt 自动链（P2 Task 5
+/// 原语义，R2 保留）：未 Ready 先 stable-id `advance_plan`（到 Ready 即
+/// 止）；Ready 后按 group journal 定位唯一 attempt，按状态分诊或 stable-id
+/// AutoStartOnce（`wiga-start-{attempt_id}`）。失败沿 N0 写
+/// `automation_failed` 事实（瞬态准入争用除外，下一 tick 重试）。
+async fn single_attempt_coding_chain(
+    state: &WebAppState,
+    paths: &ProductAppPaths,
+    enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
+    plan_id: &str,
+) -> Result<Option<ReconcileOutcome>, String> {
+    use crate::product::advance_store::{AdvanceOutcome, AdvanceStatus, AdvanceStore, AdvanceInput};
+    use crate::product::coding_models::{CodingAttemptStatus, CodingStartOrigin};
+    use crate::product::models::automation::AutomationAttentionStage;
+    use crate::web::advance_plan::{AdvancePlanOrigin, advance_plan};
+    use crate::web::coding_start::{StartCodingCommand, StartCodingOutcome, start_coding_once};
+    use crate::web::handlers::upsert_automation_drive_failure_fact;
+
     let project_id = enrollment.project_id.clone();
     let issue_id = enrollment.issue_id.clone();
+    let advance_command_id = format!("wiga-advance-{}-{plan_id}", enrollment.enrollment_id);
 
     let advance_ready = AdvanceStore::new(paths.clone())
-        .get_advance_for_plan(&project_id, &issue_id, &plan_id)
+        .get_advance_for_plan(&project_id, &issue_id, plan_id)
         .map_err(|error| format!("advance record unreadable: {error}"))?
         .is_some_and(|record| record.status == AdvanceStatus::Ready);
     if !advance_ready {
         let outcome = advance_plan(
             state,
-            crate::product::advance_store::AdvanceInput {
-                command_id: format!("wiga-advance-{}-{plan_id}", enrollment.enrollment_id),
+            AdvanceInput {
+                command_id: advance_command_id.clone(),
                 project_id: project_id.clone(),
                 issue_id: issue_id.clone(),
-                plan_id: plan_id.clone(),
+                plan_id: plan_id.to_string(),
             },
             AdvancePlanOrigin::Enrolled {
                 enrollment_id: enrollment.enrollment_id.clone(),
@@ -500,17 +681,58 @@ async fn coding_chain_stage(
             },
         )
         .await;
-        return Ok(Some(match outcome {
+        let proceed = match &outcome {
             Ok(AdvanceOutcome::Completed { record, .. })
                 if record.status == AdvanceStatus::Ready =>
             {
-                ReconcileOutcome::Advancing
+                return Ok(Some(ReconcileOutcome::Advancing));
             }
             Ok(AdvanceOutcome::Replayed { record }) if record.status == AdvanceStatus::Ready => {
-                ReconcileOutcome::Advancing
+                true
             }
-            _ => ReconcileOutcome::NeedsHuman,
-        }));
+            Ok(AdvanceOutcome::Rejected { code, .. })
+                if code == "ADVANCE_PLAN_ADMISSION_CONTENDED" =>
+            {
+                // 瞬态准入争用：不写事实，下一 tick 重试。
+                return Ok(Some(ReconcileOutcome::NeedsHuman));
+            }
+            other => {
+                // R2（REQ-WIGA-12）：advance 失败写 N0 事实（checkpoint 取
+                // record.updated_at，无 record 首次冻结）；写失败上抛。
+                let (reason_code, checkpoint) = match other {
+                    Ok(AdvanceOutcome::Rejected { record, code, .. }) => {
+                        (code.clone(), record.as_ref().map(|r| r.updated_at.clone()))
+                    }
+                    Ok(AdvanceOutcome::Completed { record, .. })
+                    | Ok(AdvanceOutcome::Replayed { record }) => (
+                        "enrolled_advance_not_ready".to_string(),
+                        Some(record.updated_at.clone()),
+                    ),
+                    Err(_) => (
+                        "enrolled_advance_failed".to_string(),
+                        AdvanceStore::new(paths.clone())
+                            .get_advance_for_plan(&project_id, &issue_id, plan_id)
+                            .ok()
+                            .flatten()
+                            .map(|record| record.updated_at),
+                    ),
+                };
+                upsert_automation_drive_failure_fact(
+                    paths,
+                    enrollment,
+                    AutomationAttentionStage::Advance,
+                    plan_id,
+                    &advance_command_id,
+                    None,
+                    &reason_code,
+                    checkpoint,
+                )?;
+                return Ok(Some(ReconcileOutcome::NeedsHuman));
+            }
+        };
+        if !proceed {
+            return Ok(Some(ReconcileOutcome::NeedsHuman));
+        }
     }
 
     // Ready：group journal 只用于定位唯一 attempt 身份；状态必须从 attempt
@@ -518,7 +740,7 @@ async fn coding_chain_stage(
     // PrepareContext），据其分诊会在 attempt 已停等人时重入首启路径，
     // 把 durable claim 误降级 NeedsHuman。
     let journal = crate::product::coding_attempt_store::CodingAttemptStore::new(paths.clone())
-        .get_group_initialization(&project_id, &issue_id, &plan_id)
+        .get_group_initialization(&project_id, &issue_id, plan_id)
         .map_err(|error| format!("group initialization journal unreadable: {error}"))?;
     let attempt = journal.attempt;
     let attempt = crate::product::coding_attempt_store::CodingAttemptStore::new(paths.clone())
@@ -537,13 +759,14 @@ async fn coding_chain_stage(
         | CodingAttemptStatus::Aborted
         | CodingAttemptStatus::AwaitingManualRecovery => Ok(Some(ReconcileOutcome::NeedsHuman)),
         CodingAttemptStatus::Created => {
+            let command_id = format!("wiga-start-{}", attempt.id);
             let start = start_coding_once(
                 state,
                 &project_id,
                 &issue_id,
                 StartCodingCommand {
                     attempt_id: attempt.id.clone(),
-                    command_id: format!("wiga-start-{}", attempt.id),
+                    command_id: command_id.clone(),
                     origin: CodingStartOrigin::Enrolled {
                         enrollment_id: enrollment.enrollment_id.clone(),
                         policy_revision: enrollment.policy_revision,
@@ -558,11 +781,45 @@ async fn coding_chain_stage(
                 },
             )
             .await;
-            Ok(Some(match start {
+            match start {
                 Ok(StartCodingOutcome::Started { .. })
-                | Ok(StartCodingOutcome::AlreadyStarted { .. }) => ReconcileOutcome::Coding,
-                Ok(StartCodingOutcome::NeedsHuman { .. }) | Err(_) => ReconcileOutcome::NeedsHuman,
-            }))
+                | Ok(StartCodingOutcome::AlreadyStarted { .. }) => {
+                    Ok(Some(ReconcileOutcome::Coding))
+                }
+                Ok(StartCodingOutcome::NeedsHuman { attempt_id, reason }) => {
+                    // R2（REQ-WIGA-12）：人控分诊是 coding_start 失败停点。
+                    upsert_automation_drive_failure_fact(
+                        paths,
+                        enrollment,
+                        AutomationAttentionStage::CodingStart,
+                        plan_id,
+                        &command_id,
+                        Some(attempt_id),
+                        &reason,
+                        attempt
+                            .start_claim
+                            .as_ref()
+                            .map(|claim| claim.claimed_at.clone()),
+                    )?;
+                    Ok(Some(ReconcileOutcome::NeedsHuman))
+                }
+                Err(error) => {
+                    upsert_automation_drive_failure_fact(
+                        paths,
+                        enrollment,
+                        AutomationAttentionStage::CodingStart,
+                        plan_id,
+                        &command_id,
+                        Some(attempt.id.clone()),
+                        error.code(),
+                        attempt
+                            .start_claim
+                            .as_ref()
+                            .map(|claim| claim.claimed_at.clone()),
+                    )?;
+                    Ok(Some(ReconcileOutcome::NeedsHuman))
+                }
+            }
         }
     }
 }
@@ -957,6 +1214,217 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ─── 批 2 R2（REQ-WIGA-03/C5-CHAIN、REQ-MTG-03、REQ-WIGA-12）───
+    // LC（单成员/集合）绑定改走 plan_start 共享服务：先落 CodingPlanRun
+    // 再开独立根、首启沿 deterministic_start_command_id（删 wiga-start
+    // 旁路）、Enrolled origin、tick 同 claim 幂等；advance/coding_start
+    // 失败写 N0 automation_failed 事实且未解除即停点。
+
+    /// R2 ①②④：单成员 LC 绑定——tick1 先落 run（Advancing、零 runner），
+    /// tick2 经共享服务 Enrolled 首启（claim origin=Enrolled、command 为
+    /// run.command_id 的确定性派生而非 wiga-start 旁路、单桶物化恰一条
+    /// target 绑定），tick3 同 claim 零重启。
+    #[tokio::test]
+    async fn r2_lc_chain_creates_run_first_and_starts_enrolled_origin() {
+        use crate::product::coding_plan_run::{
+            CodingPlanRunPhase, CodingPlanRunStore, CodingPlanSelection,
+        };
+
+        let fixture = crate::web::wiga_gate_fixture::confirmed_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        let plan_id = enrollment.plan_id.clone().expect("bound plan");
+
+        // tick1：advance 到 Ready 即止——run 已先落盘、零 runner。
+        assert_eq!(
+            fixture.reconcile().await.unwrap(),
+            ReconcileOutcome::Advancing
+        );
+        let run_store = CodingPlanRunStore::new(fixture.inner.paths.clone());
+        let run = run_store
+            .get(PROJECT_ID, ISSUE_ID, &plan_id)
+            .unwrap()
+            .expect("coding plan run persisted before any root opens");
+        assert_eq!(
+            run.command_id,
+            format!(
+                "wiga-advance-{}-{plan_id}",
+                enrollment.enrollment_id
+            ),
+            "run command uses the stable enrollment/plan identity"
+        );
+        assert_eq!(run.phase, CodingPlanRunPhase::Prepared);
+        assert_eq!(fixture.coding_runner_count(), 0);
+
+        // tick2：共享服务 bind→mark→Enrolled start→record。
+        assert_eq!(fixture.reconcile().await.unwrap(), ReconcileOutcome::Coding);
+        let run = run_store
+            .get(PROJECT_ID, ISSUE_ID, &plan_id)
+            .unwrap()
+            .expect("run survives the start tick");
+        let attempt = fixture.attempt();
+        // 单实际桶：引擎空 target_attempts，由共享服务物化恰一条绑定。
+        assert_eq!(run.target_attempts.len(), 1);
+        assert_eq!(
+            run.target_attempts[0].attempt_id, attempt.id,
+            "materialized binding carries the real single-bucket attempt"
+        );
+        let claim = attempt.start_claim.as_ref().expect("enrolled first start");
+        assert_eq!(claim.origin, fixture.auto_origin());
+        let expected_command = CodingPlanSelection::deterministic_start_command_id(
+            PROJECT_ID,
+            ISSUE_ID,
+            &plan_id,
+            &run.command_id,
+            &run.target_attempts[0].target_repository_id,
+        );
+        assert_eq!(
+            claim.command_id, expected_command,
+            "first start follows the deterministic command; the wiga-start bypass is gone"
+        );
+        assert_ne!(claim.command_id, format!("wiga-start-{}", attempt.id));
+        assert_eq!(fixture.runner_count(&fixture.attempt_key()), 1);
+
+        // tick3：重复唤醒同 claim、零重启。
+        assert_eq!(fixture.reconcile().await.unwrap(), ReconcileOutcome::Coding);
+        assert_eq!(fixture.runner_count(&fixture.attempt_key()), 1);
+        let replay = fixture.attempt();
+        assert_eq!(replay.start_claim.as_ref().unwrap().command_id, expected_command);
+    }
+
+    /// R2 ⑥：advance 链失败（plan 进入在途 amendment → 共享服务 prepare
+    /// fail-closed）写 N0 `automation_failed(stage=advance)` 事实；未解除
+    /// 事实令后续 tick 停在该点（不自动 retry）、同 key 不增项、
+    /// occurred_at 首次冻结。
+    #[tokio::test]
+    async fn r2_advance_failure_writes_fact_and_gates_following_ticks() {
+        use crate::product::issue_automation_store::IssueAutomationStore;
+        use crate::product::models::automation::{
+            AutomationAttentionKind, AutomationAttentionStage,
+        };
+        use crate::product::work_item_revision_store::WorkItemRevisionStore;
+
+        let fixture = crate::web::wiga_gate_fixture::confirmed_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        let plan_id = enrollment.plan_id.clone().expect("bound plan");
+        // 篡改现场：plan 出现在途 amendment（durable lineage 事实）——
+        // Confirmed session/compile 投影不受影响，共享服务 prepare
+        // fail-closed（coding_plan_run_active_amendment）。
+        let revision_store = WorkItemRevisionStore::new(fixture.inner.paths.clone());
+        let mut lineage = revision_store
+            .get_plan_lineage(PROJECT_ID, ISSUE_ID, &plan_id)
+            .unwrap();
+        lineage.active_amendment_id = Some("amendment_r2_tamper".to_string());
+        crate::product::json_store::write_json(
+            &fixture
+                .inner
+                .paths
+                .issue_root(PROJECT_ID, ISSUE_ID)
+                .join("work-item-revisions")
+                .join(&plan_id)
+                .join("lineage.json"),
+            &lineage,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fixture.reconcile().await.unwrap(),
+            ReconcileOutcome::NeedsHuman
+        );
+
+
+        let store = IssueAutomationStore::new(fixture.inner.paths.clone());
+        let saved = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+        let command_id = format!(
+            "wiga-advance-{}-{plan_id}",
+            enrollment.enrollment_id
+        );
+        let expected_key = format!("{plan_id}:{command_id}:advance_failed");
+        let fact = saved
+            .attention_facts
+            .iter()
+            .find(|fact| fact.key == expected_key)
+            .unwrap_or_else(|| panic!("advance failure fact missing: {:?}", saved.attention_facts));
+        assert_eq!(fact.kind, AutomationAttentionKind::AutomationFailed);
+        assert_eq!(fact.stage, AutomationAttentionStage::Advance);
+        assert_eq!(fact.plan_id.as_deref(), Some(plan_id.as_str()));
+        assert_eq!(
+            fact.session_id.as_deref(),
+            enrollment.session_id.as_deref()
+        );
+        assert!(!fact.reason_code.is_empty());
+        let frozen_at = fact.occurred_at.clone();
+        assert!(
+            fixture.coding_attempts().is_empty(),
+            "failed advance must not create attempts"
+        );
+
+        // 后续 tick：未解除事实停点（不自动 retry）、同 key 单条、时间冻结。
+        assert_eq!(
+            fixture.reconcile().await.unwrap(),
+            ReconcileOutcome::NeedsHuman
+        );
+        let saved = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+        let matches: Vec<_> = saved
+            .attention_facts
+            .iter()
+            .filter(|fact| fact.key == expected_key)
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].occurred_at, frozen_at);
+        assert!(fixture.coding_attempts().is_empty());
+    }
+
+    /// R2 ③：Ready 后冻结策略被篡改为 Manual（不给旧 Manual 原地补授权）
+    /// ——共享服务仍以 Enrolled 身份准入，fail-closed 零 provider 并写
+    /// coding_start 失败事实。
+    #[tokio::test]
+    async fn r2_tampered_manual_policy_rejects_start_without_downgrade() {
+        use crate::product::coding_models::CodingStartRunPolicy;
+        use crate::product::issue_automation_store::IssueAutomationStore;
+        use crate::product::models::automation::{
+            AutomationAttentionKind, AutomationAttentionStage,
+        };
+
+        let fixture = crate::web::wiga_gate_fixture::confirmed_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        let plan_id = enrollment.plan_id.clone().expect("bound plan");
+        assert_eq!(
+            fixture.reconcile().await.unwrap(),
+            ReconcileOutcome::Advancing
+        );
+        // 篡改：把 Ready attempt 的冻结策略改写为 Manual。
+        let attempt = fixture.attempt();
+        let mut tampered = attempt.clone();
+        tampered.start_run_policy = CodingStartRunPolicy::Manual;
+        fixture
+            .store()
+            .write_coding_attempt_for_test(&tampered)
+            .unwrap();
+
+        assert_eq!(
+            fixture.reconcile().await.unwrap(),
+            ReconcileOutcome::NeedsHuman
+        );
+        assert_eq!(
+            fixture.runner_count(&fixture.attempt_key()),
+            0,
+            "tampered policy must yield zero provider and no manual downgrade"
+        );
+        let saved = IssueAutomationStore::new(fixture.inner.paths.clone())
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap();
+        assert!(
+            saved.attention_facts.iter().any(|fact| {
+                fact.kind == AutomationAttentionKind::AutomationFailed
+                    && fact.stage == AutomationAttentionStage::CodingStart
+                    && fact.plan_id.as_deref() == Some(plan_id.as_str())
+            }),
+            "coding_start failure fact must be persisted: {:?}",
+            saved.attention_facts
+        );
     }
 }
 

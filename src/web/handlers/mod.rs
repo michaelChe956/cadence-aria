@@ -112,6 +112,8 @@ pub use coding::{create_coding_attempt, create_group_coding_attempt, delete_plan
 pub(crate) use coding::{
     abort_coding_attempt, build_group_work_item_progress, coding_attempt_artifact_content, coding_attempt_diff,
     restart_coding_attempt,
+    EnrolledPlanDriveIdentity, EnrolledPlanStartStep, enrolled_plan_coding_start,
+    upsert_automation_drive_failure_fact,
     confirm_work_item_execution_plan, delete_coding_attempt, get_coding_attempt,
     post_coding_gate_response,
     get_coding_policy_text, get_verification_command_evidence,

@@ -27,8 +27,8 @@ use crate::product::coding_attempt_store::{
     AuthoritativeCodingUnitBinding, CodingGroupInitializationPhase,
 };
 use crate::product::coding_models::{
-    CodingAttemptStatus, CodingExecutionUnit, CodingExecutionUnitStatus, CodingStartOrigin,
-    CodingStartPhase,
+    CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionUnit, CodingExecutionUnitStatus,
+    CodingStartOrigin, CodingStartPhase, CodingStartRunPolicy,
 };
 use crate::product::coding_plan_run::{
     CodingPlanRun, CodingPlanRunPhase, CodingPlanRunStore, CodingPlanSelection,
@@ -36,12 +36,17 @@ use crate::product::coding_plan_run::{
 };
 use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
 use crate::product::entity_operation_store::EntityOperationStore;
+use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::LogicalRepositoryId;
-use crate::product::models::automation::OperationState;
+use crate::product::models::automation::{
+    AutomationAttentionFact, AutomationAttentionKind, AutomationAttentionStage,
+    EnrollmentBindingIdentity, IssueAutomationEnrollment, OperationState,
+};
 use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
+use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::advance_plan::{AdvancePlanOrigin, advance_plan};
 use crate::web::coding_start::{StartCodingCommand, StartCodingOutcome, start_coding_once};
 use crate::web::state::CodingAttemptRunKey;
@@ -716,73 +721,18 @@ async fn drive_plan_coding_start(
                     serde_json::json!({}),
                 )
             })?;
-            let bindings = sorted_target_bindings(advance_target_bindings(outcome)?);
-
-            // ② 全图 ready 稳定选一：已有冻结 selection 直接复用（不重选）。
-            let selection = match run.selection.clone() {
-                Some(frozen) => Some(frozen),
-                None => select_first_ready_unit(
-                    app_paths,
-                    &run.project_id,
-                    &run.issue_id,
-                    &run,
-                    &bindings,
-                )
-                .map_err(product_store_api_error)?,
-            };
-
-            // ③ Ready 集互证 + selection 冻结（N2 锁内重读核身份/集合漂移）。
-            let bound = run_store
-                .bind_ready(&run, &bindings, selection)
-                .map_err(product_store_api_error)?;
-            let Some(selection) = bound.selection.clone() else {
-                // 无 ready：durable 绑定全集保持 ready_bound 等待，零首启。
-                return Ok((bound, PostFlow::WaitingBound));
-            };
-
-            // ④ 首启调用前持久化 start request（不能发空首启）。
-            let requested = run_store
-                .mark_start_requested(&bound)
-                .map_err(product_store_api_error)?;
-
-            // ⑤ 现 Manual start_coding_once：首启用已落盘
-            //    selection.start_command_id，durable claim 单发幂等；副作用
-            //    不明由其内部保持 NeedsHuman（不用重试隐式清除）。
-            let outcome = start_coding_once(
+            let bindings = advance_target_bindings(outcome)?;
+            // ②~⑥ 与 Enrolled 共享同一段首启编排（origin=Manual）。
+            bind_mark_start_record(
                 state,
-                &run.project_id,
-                &run.issue_id,
-                StartCodingCommand {
-                    attempt_id: selection.attempt_id.clone(),
-                    command_id: selection.start_command_id.clone(),
-                    origin: CodingStartOrigin::Manual,
-                },
+                run_store,
+                app_paths,
+                run,
+                bindings,
+                CodingStartOrigin::Manual,
+                None,
             )
             .await
-            .map_err(|error| {
-                ApiError::runtime(
-                    "plan_coding_first_start_failed",
-                    format!("plan coding first start failed: {error}"),
-                    serde_json::json!({ "code": error.code() }),
-                )
-            })?;
-            let outcome = match outcome {
-                StartCodingOutcome::Started { attempt_id } => {
-                    CodingPlanStartOutcome::Started { attempt_id }
-                }
-                StartCodingOutcome::AlreadyStarted { attempt_id } => {
-                    CodingPlanStartOutcome::AlreadyStarted { attempt_id }
-                }
-                StartCodingOutcome::NeedsHuman { attempt_id, reason } => {
-                    CodingPlanStartOutcome::NeedsHuman { attempt_id, reason }
-                }
-            };
-
-            // ⑥ record 真实 outcome（回执冻结后不再漂移；同值重放幂等）。
-            let recorded = run_store
-                .record_start_outcome(&requested, outcome.clone())
-                .map_err(product_store_api_error)?;
-            Ok((recorded, PostFlow::Recorded(outcome)))
         }
         // S2a（owner 2026-10-14）语义反转：Paused 不再 409 not_enabled——
         // resume 回执相位后按既有事实返回，续跑推进由入口统一核心重估。
@@ -801,6 +751,615 @@ async fn drive_plan_coding_start(
             }))
         }
     }
+}
+
+/// 首启编排共享段（Manual POST 与批 2 R2 Enrolled 共享服务同源）：
+/// 绑定集排序 → 全图 ready 稳定选一（冻结 selection 复用）→ bind_ready →
+/// mark_start_requested → `start_coding_once`（首启用已落盘
+/// `selection.start_command_id`，origin 由调用方传入）→ record 真实
+/// outcome。`enrolled` 携带授权身份时，start 失败/NeedsHuman 分诊沿 N0
+/// 写 `automation_failed(stage=coding_start)` 事实（key 取确定性 command、
+/// time 取 claim.claimed_at，无 claim checkpoint 由首次 upsert 冻结）。
+async fn bind_mark_start_record(
+    state: &WebAppState,
+    run_store: &CodingPlanRunStore,
+    app_paths: &ProductAppPaths,
+    run: CodingPlanRun,
+    bindings: Vec<AdvanceTargetAttemptBinding>,
+    origin: CodingStartOrigin,
+    enrolled: Option<&EnrolledPlanDriveIdentity>,
+) -> ApiResult<(CodingPlanRun, PostFlow)> {
+    let bindings = sorted_target_bindings(bindings);
+
+    // ② 全图 ready 稳定选一：已有冻结 selection 直接复用（不重选）。
+    let selection = match run.selection.clone() {
+        Some(frozen) => Some(frozen),
+        None => select_first_ready_unit(
+            app_paths,
+            &run.project_id,
+            &run.issue_id,
+            &run,
+            &bindings,
+        )
+        .map_err(product_store_api_error)?,
+    };
+
+    // ③ Ready 集互证 + selection 冻结（N2 锁内重读核身份/集合漂移）。
+    let bound = run_store
+        .bind_ready(&run, &bindings, selection)
+        .map_err(product_store_api_error)?;
+    let Some(selection) = bound.selection.clone() else {
+        // 无 ready：durable 绑定全集保持 ready_bound 等待，零首启。
+        return Ok((bound, PostFlow::WaitingBound));
+    };
+
+    // ④ 首启调用前持久化 start request（不能发空首启）。
+    let requested = run_store
+        .mark_start_requested(&bound)
+        .map_err(product_store_api_error)?;
+
+    // ⑤ `start_coding_once`：首启用已落盘 selection.start_command_id，
+    //    durable claim 单发幂等；副作用不明由其内部保持 NeedsHuman。
+    //    Enrolled 启动的失败/人控分诊沿 N0 写 coding_start 失败事实
+    //   （写失败上浮，不冒充已通知）。
+    let outcome = match start_coding_once(
+        state,
+        &run.project_id,
+        &run.issue_id,
+        StartCodingCommand {
+            attempt_id: selection.attempt_id.clone(),
+            command_id: selection.start_command_id.clone(),
+            origin: origin.clone(),
+        },
+    )
+    .await
+    {
+        Ok(StartCodingOutcome::Started { attempt_id }) => CodingPlanStartOutcome::Started { attempt_id },
+        Ok(StartCodingOutcome::AlreadyStarted { attempt_id }) => {
+            CodingPlanStartOutcome::AlreadyStarted { attempt_id }
+        }
+        Ok(StartCodingOutcome::NeedsHuman { attempt_id, reason }) => {
+            if let Some(identity) = enrolled {
+                upsert_coding_start_failure_fact(
+                    app_paths,
+                    &identity.enrollment,
+                    &attempt_id,
+                    &selection.start_command_id,
+                    &reason,
+                )
+                .map_err(attention_write_api_error)?;
+            }
+            CodingPlanStartOutcome::NeedsHuman { attempt_id, reason }
+        }
+        Err(error) => {
+            if let Some(identity) = enrolled {
+                upsert_coding_start_failure_fact(
+                    app_paths,
+                    &identity.enrollment,
+                    &selection.attempt_id,
+                    &selection.start_command_id,
+                    error.code(),
+                )
+                .map_err(attention_write_api_error)?;
+            }
+            return Err(ApiError::runtime(
+                "plan_coding_first_start_failed",
+                format!("plan coding first start failed: {error}"),
+                serde_json::json!({ "code": error.code() }),
+            ));
+        }
+    };
+
+    // ⑥ record 真实 outcome（回执冻结后不再漂移；同值重放幂等）。
+    let recorded = run_store
+        .record_start_outcome(&requested, outcome.clone())
+        .map_err(product_store_api_error)?;
+    Ok((recorded, PostFlow::Recorded(outcome)))
+}
+
+/// 批 2 R2（REQ-WIGA-03/C5-CHAIN、REQ-MTG-03）：Enrolled LC 共享驱动的
+/// 授权身份快照——tick 入口核验 enabled 后装载，advance/start origin 与
+/// N0 事实写共用同一身份（不含锁；不可变快照）。
+pub(crate) struct EnrolledPlanDriveIdentity {
+    pub enrollment: IssueAutomationEnrollment,
+    pub binding: EnrollmentBindingIdentity,
+}
+
+impl EnrolledPlanDriveIdentity {
+    /// 从 durable enrollment 装载（enabled + 当前版本化绑定有效；disabled/
+    /// 无绑定/投影漂移 → Err，调用方 fail-closed 人工分诊）。
+    pub(crate) fn load(
+        _paths: &ProductAppPaths,
+        enrollment: &IssueAutomationEnrollment,
+    ) -> Result<Self, String> {
+        let binding = crate::web::advance_plan::load_current_enrollment_binding(enrollment)?;
+        Ok(Self {
+            enrollment: enrollment.clone(),
+            binding,
+        })
+    }
+
+    fn advance_origin(&self) -> AdvancePlanOrigin {
+        AdvancePlanOrigin::Enrolled {
+            enrollment_id: self.enrollment.enrollment_id.clone(),
+            policy_revision: self.enrollment.policy_revision,
+        }
+    }
+
+    /// 首启 origin：当前 binding 身份（binding_version/target）随 claim
+    /// 冻结，`coding_start` 侧精确互证。
+    fn start_origin(&self) -> CodingStartOrigin {
+        CodingStartOrigin::Enrolled {
+            enrollment_id: self.enrollment.enrollment_id.clone(),
+            policy_revision: self.enrollment.policy_revision,
+            binding_version: Some(self.binding.binding_version),
+            target: Some(self.binding.target.clone()),
+        }
+    }
+}
+
+/// 批 2 R2：Enrolled 共享服务的分阶段停点（编排器映射 `ReconcileOutcome`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EnrolledPlanStartStep {
+    /// 本轮新 advance 到 durable Ready（crash-window 语义：到 Ready 即止，
+    /// 首启下一轮；与单 attempt 链一致）。
+    AdvancedToReady,
+    /// 无 ready unit：durable 绑定全集保持 ready_bound 等待（零首启）。
+    WaitingBound,
+    /// 首启回执已冻结（真实 outcome 落盘）。
+    Recorded(CodingPlanStartOutcome),
+    /// 已有事实按原样返回（含瞬态准入争用的观察相位）。
+    Existing(CodingPlanRunPhase),
+}
+
+/// 批 2 R2（REQ-WIGA-03/C5-CHAIN、REQ-MTG-03）：Enrolled LC 共享驱动
+/// 服务（crate 内共享，自动编排专用）：prepare（稳定 run command=
+/// `wiga-advance-{enrollment}-{plan}`，advance 冻结线同源）→ Enrolled
+/// advance → bind_ready → mark_start_requested → Enrolled start → 真实
+/// outcome 落盘。每段幂等重放；本轮新完成 advance 到 Ready 即止（首启
+/// 下一轮）。自取 per-plan 串行锁 `work_item_group:{project}:{issue}:
+/// {plan}`；首项 outcome 落盘后的全图 fan-out 由调用方（编排器 tick /
+/// 完成挂点）另行持锁调 `drive_ready_units_for_plan`（非重入）。错误沿
+/// N0 写 `automation_failed(stage=advance|coding_start)` 后上抛（事实写
+/// 失败优先上抛，不冒充已通知）。
+pub(crate) async fn enrolled_plan_coding_start(
+    state: &WebAppState,
+    identity: &EnrolledPlanDriveIdentity,
+) -> Result<(CodingPlanRun, EnrolledPlanStartStep), ApiError> {
+    let app_paths = product_app_paths(state);
+    let run_store = CodingPlanRunStore::new(app_paths.clone());
+    let enrollment = &identity.enrollment;
+    let project_id = enrollment.project_id.clone();
+    let issue_id = enrollment.issue_id.clone();
+    let plan_id = enrollment.plan_id.clone().ok_or_else(|| {
+        ApiError::validation(
+            "plan_coding_enrollment_unbound",
+            "enrolled coding chain requires a bound plan".to_string(),
+        )
+    })?;
+    // 稳定 run command：enrollment/plan 身份（与 Enrolled advance 的固定
+    // command 校验同线；`deterministic_start_command_id` 以其为种子）。
+    let command_id = format!("wiga-advance-{}-{plan_id}", enrollment.enrollment_id);
+    // 已有 run 用冻结 bound revision（重放同 selection）；首轮取当前权威
+    // active revision（prepare 锁内核对身份）。
+    let expected_revision = match run_store.get(&project_id, &issue_id, &plan_id) {
+        Ok(Some(run)) => run.bound_plan_revision_id.clone(),
+        Ok(None) => WorkItemRevisionStore::new(app_paths.clone())
+            .get_plan_lineage(&project_id, &issue_id, &plan_id)
+            .map_err(product_store_api_error)?
+            .active_revision_id
+            .ok_or_else(|| {
+                ApiError::runtime(
+                    "plan_coding_advance_not_ready",
+                    "plan has no active revision for the enrolled coding chain".to_string(),
+                    serde_json::json!({}),
+                )
+            })?,
+        Err(error) => return Err(product_store_api_error(error)),
+    };
+
+    // per-plan 串行锁（与 HTTP 入口/完成挂点同键；fan-out 不在本锁内）。
+    let group_lock_key = format!("work_item_group:{project_id}:{issue_id}:{plan_id}");
+    let _group_guard = state.coding_runs.lock_named(&group_lock_key).await;
+
+    let run = run_store
+        .prepare(&project_id, &issue_id, &plan_id, &command_id, &expected_revision)
+        .map_err(|error| {
+            enrolled_fact_error(
+                &app_paths,
+                identity,
+                AutomationAttentionStage::Advance,
+                &plan_id,
+                &command_id,
+                None,
+                "enrolled_plan_run_prepare_failed",
+                None,
+                ApiError::runtime(
+                    "plan_coding_advance_failed",
+                    format!("enrolled plan run prepare failed: {error:?}"),
+                    serde_json::json!({}),
+                ),
+            )
+        })?;
+
+    match run.phase {
+        CodingPlanRunPhase::Started
+        | CodingPlanRunPhase::AlreadyStarted
+        | CodingPlanRunPhase::NeedsHuman => {
+            let phase = run.phase;
+            Ok((run, EnrolledPlanStartStep::Existing(phase)))
+        }
+        CodingPlanRunPhase::Paused => {
+            let resumed = run_store
+                .resume_from_pause(&run)
+                .map_err(product_store_api_error)?;
+            let phase = resumed.phase;
+            Ok((resumed, EnrolledPlanStartStep::Existing(phase)))
+        }
+        CodingPlanRunPhase::Invalidated => Err(product_store_api_error(
+            ProductStoreError::Conflict {
+                kind: "coding_plan_run_not_active",
+                id: run.command_id.clone(),
+            },
+        )),
+        CodingPlanRunPhase::Prepared
+        | CodingPlanRunPhase::ReadyBound
+        | CodingPlanRunPhase::StartRequested => {
+            // ① Enrolled advance（幂等重放，command=run.command_id 稳定线）。
+            let outcome = advance_plan(
+                state,
+                AdvanceInput {
+                    command_id: run.command_id.clone(),
+                    project_id: project_id.clone(),
+                    issue_id: issue_id.clone(),
+                    plan_id: plan_id.clone(),
+                },
+                identity.advance_origin(),
+            )
+            .await
+            .map_err(|message| {
+                let checkpoint =
+                    advance_checkpoint_time(&app_paths, &project_id, &issue_id, &plan_id);
+                enrolled_fact_error(
+                    &app_paths,
+                    identity,
+                    AutomationAttentionStage::Advance,
+                    &plan_id,
+                    &run.command_id,
+                    None,
+                    "enrolled_advance_failed",
+                    checkpoint,
+                    ApiError::runtime(
+                        "plan_coding_advance_failed",
+                        format!("enrolled advance for plan coding start failed: {message}"),
+                        serde_json::json!({}),
+                    ),
+                )
+            })?;
+            match &outcome {
+                AdvanceOutcome::Completed { record, .. } => {
+                    if record.status != AdvanceStatus::Ready {
+                        let updated_at = record.updated_at.clone();
+                        let status = format!("{:?}", record.status);
+                        return Err(enrolled_fact_error(
+                            &app_paths,
+                            identity,
+                            AutomationAttentionStage::Advance,
+                            &plan_id,
+                            &run.command_id,
+                            None,
+                            "enrolled_advance_not_ready",
+                            Some(updated_at),
+                            ApiError::runtime(
+                                "plan_coding_advance_not_ready",
+                                format!(
+                                    "enrolled advance record {} is in durable status {status}",
+                                    record.id
+                                ),
+                                serde_json::json!({ "advance_id": record.id }),
+                            ),
+                        ));
+                    }
+                    // 本轮新完成到 Ready：即止（首启下一轮，crash-window
+                    // 语义与单 attempt 链一致）。
+                    return Ok((run, EnrolledPlanStartStep::AdvancedToReady));
+                }
+                AdvanceOutcome::Rejected { record, code, reason } => {
+                    if code == "ADVANCE_PLAN_ADMISSION_CONTENDED" {
+                        // 瞬态准入争用：不写事实，交下一 tick 重试。
+                        return Ok((
+                            run,
+                            EnrolledPlanStartStep::Existing(CodingPlanRunPhase::Prepared),
+                        ));
+                    }
+                    let checkpoint = record.as_ref().map(|record| record.updated_at.clone());
+                    let reason_text = reason.clone();
+                    let code_text = code.clone();
+                    return Err(enrolled_fact_error(
+                        &app_paths,
+                        identity,
+                        AutomationAttentionStage::Advance,
+                        &plan_id,
+                        &run.command_id,
+                        None,
+                        &code_text,
+                        checkpoint,
+                        ApiError::runtime(
+                            "plan_coding_advance_rejected",
+                            format!("enrolled advance was rejected: {reason_text}"),
+                            serde_json::json!({ "code": code_text }),
+                        ),
+                    ));
+                }
+                AdvanceOutcome::Replayed { .. } => {}
+            }
+            // ② Enrolled 绑定集（多 target 全集 / LC 单实际桶物化）→ ③~⑥
+            //    与 Manual 同一段首启编排（origin=Enrolled）。
+            let bindings = enrolled_target_bindings(outcome, &app_paths, &project_id, &issue_id)?;
+            let (run, flow) = bind_mark_start_record(
+                state,
+                &run_store,
+                &app_paths,
+                run,
+                bindings,
+                identity.start_origin(),
+                Some(identity),
+            )
+            .await?;
+            Ok((
+                run,
+                match flow {
+                    PostFlow::Recorded(outcome) => EnrolledPlanStartStep::Recorded(outcome),
+                    PostFlow::WaitingBound => EnrolledPlanStartStep::WaitingBound,
+                    PostFlow::Existing(phase) => EnrolledPlanStartStep::Existing(phase),
+                    PostFlow::Continued => {
+                        EnrolledPlanStartStep::Existing(CodingPlanRunPhase::Started)
+                    }
+                },
+            ))
+        }
+    }
+}
+
+/// 批 2 R2：Enrolled LC 的 advance 回执绑定集提取——多 target 用完整
+/// `target_attempts`（R1 已在 advance 侧一一对应互证）；LC 单实际桶
+///（引擎单 target 路径回执空集）由 `record.attempt_id` + attempt 真实
+/// `target_snapshot` 物化恰一条绑定（持久 record 与 outcome 一致）；
+/// 两者皆空/快照缺失 fail-closed（不从授权集合任选成员补造）。
+fn enrolled_target_bindings(
+    outcome: AdvanceOutcome,
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+) -> ApiResult<Vec<AdvanceTargetAttemptBinding>> {
+    match outcome {
+        AdvanceOutcome::Completed {
+            record,
+            target_attempts,
+            ..
+        } => {
+            if record.status != AdvanceStatus::Ready {
+                return Err(ApiError::runtime(
+                    "plan_coding_advance_not_ready",
+                    format!(
+                        "advance record {} is in durable status {:?}",
+                        record.id, record.status
+                    ),
+                    serde_json::json!({ "advance_id": record.id }),
+                ));
+            }
+            materialize_enrolled_binding(target_attempts, &record, app_paths, project_id, issue_id)
+        }
+        AdvanceOutcome::Replayed { record } => {
+            if record.status != AdvanceStatus::Ready {
+                return Err(ApiError::runtime(
+                    "plan_coding_advance_not_ready",
+                    format!(
+                        "advance record {} is in durable status {:?}",
+                        record.id, record.status
+                    ),
+                    serde_json::json!({ "advance_id": record.id }),
+                ));
+            }
+            materialize_enrolled_binding(
+                record.target_attempts.clone(),
+                &record,
+                app_paths,
+                project_id,
+                issue_id,
+            )
+        }
+        AdvanceOutcome::Rejected { code, reason, .. } => Err(ApiError::runtime(
+            "plan_coding_advance_rejected",
+            format!("enrolled advance was rejected: {reason}"),
+            serde_json::json!({ "code": code }),
+        )),
+    }
+}
+
+fn materialize_enrolled_binding(
+    target_attempts: Vec<AdvanceTargetAttemptBinding>,
+    record: &crate::product::advance_store::AdvanceRecord,
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+) -> ApiResult<Vec<AdvanceTargetAttemptBinding>> {
+    if !target_attempts.is_empty() {
+        return Ok(target_attempts);
+    }
+    let attempt_id = record.attempt_id.clone().ok_or_else(|| {
+        ApiError::validation(
+            "plan_coding_start_target_set_missing",
+            "enrolled LC advance produced neither target attempts nor a durable attempt id"
+                .to_string(),
+        )
+    })?;
+    let attempt = CodingAttemptStore::new(app_paths.clone())
+        .get_attempt(project_id, issue_id, &attempt_id)
+        .map_err(product_store_api_error)?;
+    let snapshot = attempt.target_snapshot.as_ref().ok_or_else(|| {
+        ApiError::validation(
+            "plan_coding_start_target_set_missing",
+            "enrolled LC single-bucket attempt carries no logical target snapshot".to_string(),
+        )
+    })?;
+    Ok(vec![AdvanceTargetAttemptBinding {
+        target_repository_id: snapshot.logical_repository_id.0.to_string(),
+        attempt_id,
+    }])
+}
+
+/// N0 失败事实写失败的 ApiError 映射（写失败上浮，不冒充已通知）。
+fn attention_write_api_error(error: String) -> ApiError {
+    ApiError::runtime(
+        "automation_attention_fact_write_failed",
+        error,
+        serde_json::json!({}),
+    )
+}
+
+/// 批 2 R2（REQ-WIGA-12）：advance/coding_start 失败事实写入口（N0）。
+/// key 取 durable command（确定性派生）；`checkpoint_time` 取
+/// record.updated_at / claim.claimed_at，无 checkpoint 由 N0 首次 upsert
+/// 冻结（禁 GET now 重置）；绑定失效（disabled/无版本化绑定）零写——事实
+/// 写者本身需当前代授权。写失败原样上抛（不冒充已通知）。
+pub(crate) fn upsert_automation_drive_failure_fact(
+    paths: &ProductAppPaths,
+    enrollment: &IssueAutomationEnrollment,
+    stage: AutomationAttentionStage,
+    plan_id: &str,
+    command_id: &str,
+    attempt_id: Option<String>,
+    reason_code: &str,
+    checkpoint_time: Option<String>,
+) -> Result<(), String> {
+    if !enrollment.enabled {
+        return Ok(());
+    }
+    let binding = crate::web::advance_plan::load_current_enrollment_binding(enrollment)?;
+    let suffix = match stage {
+        AutomationAttentionStage::Advance => "advance_failed",
+        AutomationAttentionStage::CodingStart => "coding_start_failed",
+        AutomationAttentionStage::Plan | AutomationAttentionStage::Termination => return Ok(()),
+    };
+    let fact = AutomationAttentionFact {
+        key: format!("{plan_id}:{command_id}:{suffix}"),
+        kind: AutomationAttentionKind::AutomationFailed,
+        stage,
+        plan_id: Some(plan_id.to_string()),
+        session_id: enrollment.session_id.clone(),
+        attempt_id,
+        reason_code: reason_code.to_string(),
+        occurred_at: checkpoint_time.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+        choice_id: None,
+        gate_id: None,
+    };
+    IssueAutomationStore::new(paths.clone())
+        .upsert_automation_attention_fact(
+            &enrollment.project_id,
+            &enrollment.issue_id,
+            &binding,
+            fact,
+        )
+        .map_err(|error| format!("upsert automation drive failure fact failed: {error}"))
+}
+
+/// coding_start 失败事实：time 优先取 attempt claim 的 claimed_at
+///（durable checkpoint），失败早于 claim 时无 checkpoint（首次冻结）。
+fn upsert_coding_start_failure_fact(
+    paths: &ProductAppPaths,
+    enrollment: &IssueAutomationEnrollment,
+    attempt_id: &str,
+    command_id: &str,
+    reason_code: &str,
+) -> Result<(), String> {
+    let checkpoint_time = CodingAttemptStore::new(paths.clone())
+        .get_attempt(&enrollment.project_id, &enrollment.issue_id, attempt_id)
+        .ok()
+        .and_then(|attempt| {
+            attempt
+                .start_claim
+                .as_ref()
+                .map(|claim| claim.claimed_at.clone())
+        });
+    upsert_automation_drive_failure_fact(
+        paths,
+        enrollment,
+        AutomationAttentionStage::CodingStart,
+        &enrollment
+            .plan_id
+            .clone()
+            .unwrap_or_default(),
+        command_id,
+        Some(attempt_id.to_string()),
+        reason_code,
+        checkpoint_time,
+    )
+}
+
+/// advance 失败事实的 durable checkpoint（record.updated_at；无 record →
+/// None=首次 upsert 冻结）。
+fn advance_checkpoint_time(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+) -> Option<String> {
+    AdvanceStore::new(paths.clone())
+        .get_advance_for_plan(project_id, issue_id, plan_id)
+        .ok()
+        .flatten()
+        .map(|record| record.updated_at)
+}
+
+/// Enrolled 共享服务错误路径：先写 N0 失败事实（写失败优先上抛），再
+/// 返回原始业务错误。
+fn enrolled_fact_error(
+    paths: &ProductAppPaths,
+    identity: &EnrolledPlanDriveIdentity,
+    stage: AutomationAttentionStage,
+    plan_id: &str,
+    command_id: &str,
+    attempt_id: Option<String>,
+    reason_code: &str,
+    checkpoint_time: Option<String>,
+    source: ApiError,
+) -> ApiError {
+    if !identity.enrollment.enabled {
+        return source;
+    }
+    let fact = AutomationAttentionFact {
+        key: {
+            let suffix = match stage {
+                AutomationAttentionStage::Advance => "advance_failed",
+                AutomationAttentionStage::CodingStart => "coding_start_failed",
+                AutomationAttentionStage::Plan | AutomationAttentionStage::Termination => "",
+            };
+            format!("{plan_id}:{command_id}:{suffix}")
+        },
+        kind: AutomationAttentionKind::AutomationFailed,
+        stage,
+        plan_id: Some(plan_id.to_string()),
+        session_id: identity.enrollment.session_id.clone(),
+        attempt_id,
+        reason_code: reason_code.to_string(),
+        occurred_at: checkpoint_time.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+        choice_id: None,
+        gate_id: None,
+    };
+    if let Err(error) = IssueAutomationStore::new(paths.clone()).upsert_automation_attention_fact(
+        &identity.enrollment.project_id,
+        &identity.enrollment.issue_id,
+        &identity.binding,
+        fact,
+    ) {
+        return ApiError::runtime(
+            "automation_attention_fact_write_failed",
+            format!("upsert automation drive failure fact failed: {error}"),
+            serde_json::json!({}),
+        );
+    }
+    source
 }
 
 /// S2a 续跑驱动结果：本轮全局重估后的推进事实（纯 ID，供入口/引擎
@@ -949,14 +1508,26 @@ pub(crate) async fn drive_ready_units_for_plan(
                     &run.command_id,
                     &binding.target_repository_id,
                 );
+                // 批 2 R2（REQ-WIGA-03/C5-CHAIN）：按 attempt 冻结 policy 选
+                // origin——Manual 原样；AutoStartOnce 取当前 binding 的
+                // Enrolled（撤销/篡改零 provider，禁止降级 Manual）。
+                let (origin, enrolled_enrollment) =
+                    match resolve_drive_start_origin(&app_paths, &attempt)? {
+                        DriveStartOrigin::Start { origin, enrollment } => (origin, enrollment),
+                        DriveStartOrigin::Revoked => {
+                            // 授权失效：该桶停点（busy 事实），不阻断其余链。
+                            outcome.busy_attempt_ids.push(attempt.id.clone());
+                            continue;
+                        }
+                    };
                 match start_coding_once(
                     state,
                     project_id,
                     issue_id,
                     StartCodingCommand {
                         attempt_id: attempt.id.clone(),
-                        command_id,
-                        origin: CodingStartOrigin::Manual,
+                        command_id: command_id.clone(),
+                        origin,
                     },
                 )
                 .await
@@ -968,24 +1539,39 @@ pub(crate) async fn drive_ready_units_for_plan(
                             logical_work_item_id: root.logical_work_item_id.clone(),
                             attempt_id: binding.attempt_id.clone(),
                             target_repository_id: binding.target_repository_id.clone(),
-                            start_command_id: CodingPlanSelection::deterministic_start_command_id(
-                                project_id,
-                                issue_id,
-                                plan_id,
-                                &run.command_id,
-                                &binding.target_repository_id,
-                            ),
+                            start_command_id: command_id,
                         };
                         rotated = Some(better_rotation(rotated, (rank_of(root), selection)));
                     }
-                    // 已启动/人控事实：幂等跳过，不阻断其余链。
-                    Ok(
-                        StartCodingOutcome::AlreadyStarted { attempt_id }
-                        | StartCodingOutcome::NeedsHuman { attempt_id, .. },
-                    ) => {
+                    // 已启动事实：幂等跳过，不阻断其余链。
+                    Ok(StartCodingOutcome::AlreadyStarted { attempt_id }) => {
+                        outcome.busy_attempt_ids.push(attempt_id);
+                    }
+                    // 人控分诊：Enrolled 启动沿 N0 写 coding_start 失败事实。
+                    Ok(StartCodingOutcome::NeedsHuman { attempt_id, reason }) => {
+                        if let Some(enrollment) = enrolled_enrollment.as_ref() {
+                            upsert_coding_start_failure_fact(
+                                &app_paths,
+                                enrollment,
+                                &attempt_id,
+                                &command_id,
+                                &reason,
+                            )
+                            .map_err(attention_write_api_error)?;
+                        }
                         outcome.busy_attempt_ids.push(attempt_id);
                     }
                     Err(error) => {
+                        if let Some(enrollment) = enrolled_enrollment.as_ref() {
+                            upsert_coding_start_failure_fact(
+                                &app_paths,
+                                enrollment,
+                                &attempt.id,
+                                &command_id,
+                                error.code(),
+                            )
+                            .map_err(attention_write_api_error)?;
+                        }
                         return Err(ApiError::runtime(
                             "plan_coding_continuation_start_failed",
                             format!("continuation start for plan coding failed: {error}"),
@@ -1002,6 +1588,19 @@ pub(crate) async fn drive_ready_units_for_plan(
                     runner_live && in_place_attempt_id == Some(attempt.id.as_str());
                 if (runner_live && !continues_in_place) || attempt.active_unit_id.is_some() {
                     // 忙：桶内推进归在册 runner（single-active-unit 不变量）。
+                    outcome.busy_attempt_ids.push(attempt.id.clone());
+                    continue;
+                }
+                // 批 2 R2（REQ-WIGA-03/C5-CHAIN）：AutoStartOnce 桶在物化/
+                // 拉 runner 前复核同一自动授权——失效零物化零 provider
+                //（busy 停点），禁降级 Manual；Manual 桶原语义不变。
+                if matches!(
+                    attempt.start_run_policy,
+                    CodingStartRunPolicy::AutoStartOnce { .. }
+                ) && matches!(
+                    resolve_drive_start_origin(&app_paths, &attempt)?,
+                    DriveStartOrigin::Revoked
+                ) {
                     outcome.busy_attempt_ids.push(attempt.id.clone());
                     continue;
                 }
@@ -1061,6 +1660,74 @@ pub(crate) async fn drive_ready_units_for_plan(
             .map_err(product_store_api_error)?;
     }
     Ok(outcome)
+}
+
+/// 批 2 R2（REQ-WIGA-03/C5-CHAIN）：drive 侧按 attempt 冻结 policy 解析
+/// 启动 origin。Manual → Manual 原样；AutoStartOnce → 当前 durable
+/// enrollment 精确互证（enabled + enrollment id/policy revision + 当前
+/// 版本化绑定）通过则给 Enrolled origin（binding_version/target 取当前
+/// 代），任何一项失效 → `Revoked`（零 provider、禁降级 Manual）。
+/// enrollment 读取失败（IO/损坏）显式上抛，不当撤销吞掉。
+enum DriveStartOrigin {
+    Start {
+        origin: CodingStartOrigin,
+        /// Enrolled 启动时的 enrollment 快照（失败事实写者身份）；Manual
+        /// 为 None。
+        enrollment: Option<IssueAutomationEnrollment>,
+    },
+    Revoked,
+}
+
+fn resolve_drive_start_origin(
+    paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<DriveStartOrigin, ApiError> {
+    let CodingStartRunPolicy::AutoStartOnce {
+        enrollment_id,
+        policy_revision,
+        ..
+    } = &attempt.start_run_policy
+    else {
+        return Ok(DriveStartOrigin::Start {
+            origin: CodingStartOrigin::Manual,
+            enrollment: None,
+        });
+    };
+    let unreadable = |error: ProductStoreError| {
+        ApiError::runtime(
+            "plan_coding_enrollment_unreadable",
+            format!(
+                "load enrollment for auto bucket {} failed: {error:?}",
+                attempt.id
+            ),
+            serde_json::json!({}),
+        )
+    };
+    let Some(enrollment) = IssueAutomationStore::new(paths.clone())
+        .get(&attempt.project_id, &attempt.issue_id)
+        .map_err(unreadable)?
+    else {
+        return Ok(DriveStartOrigin::Revoked);
+    };
+    if !enrollment.enabled
+        || enrollment.enrollment_id != *enrollment_id
+        || enrollment.policy_revision != *policy_revision
+    {
+        return Ok(DriveStartOrigin::Revoked);
+    }
+    let Ok(binding) = crate::web::advance_plan::load_current_enrollment_binding(&enrollment)
+    else {
+        return Ok(DriveStartOrigin::Revoked);
+    };
+    Ok(DriveStartOrigin::Start {
+        origin: CodingStartOrigin::Enrolled {
+            enrollment_id: enrollment.enrollment_id.clone(),
+            policy_revision: enrollment.policy_revision,
+            binding_version: Some(binding.binding_version),
+            target: Some(binding.target.clone()),
+        },
+        enrollment: Some(enrollment),
+    })
 }
 
 /// 确定性 selection 轮换：取本轮新启 unit 中（全图拓扑位置 → logical
