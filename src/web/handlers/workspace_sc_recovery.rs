@@ -489,42 +489,53 @@ pub async fn post_automation_continue_plan(
             "a non-empty context note is required to continue a stopped human gate",
         ));
     }
-    // 持久认领（Accepted）：后续 needs_human 结果也保留认领，重放不二次执行。
-    if let Err(error) = store.append_command_result(
-        &project_id,
-        &issue_id,
-        &request.command_id,
-        &digest,
-        crate::product::models::automation::OperationState::Accepted,
-    ) {
-        let code = if matches!(
-            error,
-            crate::product::models::automation::EnrollmentError::Conflict { .. }
-        ) {
-            "automation_continue_command_conflict"
-        } else {
-            "automation_continue_ledger_unavailable"
+    // 批 2 P4 fix（k3 波3 发现1）：命令账本在收尾时落真实 durable 状态——
+    // accepted 收尾写 Accepted、needs_human 收尾写 NeedsHuman（同文件 SC
+    // retry 的 mark_needs_human 先例）；同键重放臂按首次 durable 状态分派，
+    // 人工分诊停等不会被读成成功重放。append 同键同负载幂等返回既有条目
+    //（首结果权威），异负载 Conflict（fail-closed）。
+    let commit_ledger = |operation: crate::product::models::automation::OperationState| {
+        store
+            .append_command_result(&project_id, &issue_id, &request.command_id, &digest, operation)
+            .map(|entry| entry.state)
+            .map_err(|error| {
+                let code = if matches!(
+                    error,
+                    crate::product::models::automation::EnrollmentError::Conflict { .. }
+                ) {
+                    "automation_continue_command_conflict"
+                } else {
+                    "automation_continue_ledger_unavailable"
+                };
+                ApiError::runtime(
+                    code,
+                    format!("continue command ledger write failed: {error}"),
+                    json!({ "command_id": request.command_id }),
+                )
+            })
+    };
+    // 回执状态＝首次 durable 结果（并发竞态下以先落盘的权威结果为准）。
+    let ledger_state_name =
+        |operation: crate::product::models::automation::OperationState| match operation {
+            crate::product::models::automation::OperationState::NeedsHuman => "needs_human",
+            _ => "accepted",
         };
-        return Err(ApiError::runtime(
-            code,
-            format!("continue command claim failed: {error}"),
-            json!({ "command_id": request.command_id }),
-        ));
-    }
-
-    let needs_human = |reason_code: &str| {
+    let needs_human = |reason_code: &str| -> Result<(StatusCode, Json<crate::web::types::AutomationContinuePlanStatus>), ApiError> {
+        let committed = commit_ledger(
+            crate::product::models::automation::OperationState::NeedsHuman,
+        )?;
         Ok((
             StatusCode::OK,
             Json(continue_status(
                 &request.command_id,
                 &session_id,
-                "needs_human",
+                ledger_state_name(committed),
                 Some(reason_code),
             )),
         ))
     };
     // 成功收尾：resolve 对应停点事实（通知消失）＋ wake 编排器；resolve 写
-    // 失败不假成功（needs_human 回执）。
+    // 失败不假成功（needs_human 收尾，账本同步落 NeedsHuman）。
     let finish_accepted = |keys: &[String]| -> Result<(StatusCode, Json<crate::web::types::AutomationContinuePlanStatus>), ApiError> {
         for key in keys {
             if let Err(message) = crate::web::plan_generation::resolve_plan_attention_fact(
@@ -534,21 +545,20 @@ pub async fn post_automation_continue_plan(
                 &binding,
                 key,
             ) {
-                return Ok((
-                    StatusCode::OK,
-                    Json(continue_status(
-                        &request.command_id,
-                        &session_id,
-                        "needs_human",
-                        Some(&format!("automation_continue_resolve_failed: {message}")),
-                    )),
-                ));
+                return needs_human(&format!("automation_continue_resolve_failed: {message}"));
             }
         }
+        let committed =
+            commit_ledger(crate::product::models::automation::OperationState::Accepted)?;
         let _ = state.autopilot_wake.send(true);
         Ok((
             StatusCode::OK,
-            Json(continue_status(&request.command_id, &session_id, "accepted", None)),
+            Json(continue_status(
+                &request.command_id,
+                &session_id,
+                ledger_state_name(committed),
+                None,
+            )),
         ))
     };
 
@@ -1614,6 +1624,55 @@ mod tests {
                 !enrollment.attention_facts.iter().any(|fact| fact.key == gate_key)
             }, "gate fact resolved")
             .await;
+        }
+
+        /// k3 波3 发现1 fix：needs_human 收尾把命令账本落 NeedsHuman，同键
+        /// 重放回执 state=needs_human（不把人工分诊停等读成成功重放）；
+        /// accepted 收尾的重放语义不变（见账本重放用例）。
+        #[tokio::test]
+        async fn continue_plan_needs_human_outcome_replays_needs_human() {
+            let fixture = continue_fixture(
+                PlanApprovalPolicy::Auto,
+                crate::product::models::WorkspaceSessionStatus::StoppedNeedsHuman,
+                crate::product::models::SingleCandidatePhase::Approval,
+                Some(gate_snapshot(1)),
+                // 不带候选产物：修订回合因候选缺失被引擎 typed 拒绝 →
+                // continue 收尾必然 needs_human（确定性停等现场）。
+                false,
+            )
+            .await;
+            let gate_key =
+                crate::web::plan_generation::plan_gate_fact_key(&fixture.session_id);
+            let app = crate::web::app::build_web_router(fixture.state.clone());
+            let body = serde_json::json!({
+                "command_id": "cmd-gate-needs-human",
+                "expected_binding": fixture.binding_json(),
+                "expected_stop_key": gate_key,
+                "context": "按新口径继续修订。",
+            });
+            let (status, payload) = post_json(&app, continue_uri(), &body).await;
+            assert_eq!(status, StatusCode::OK, "needs_human finish: {payload}");
+            assert_eq!(payload["state"], "needs_human", "{payload}");
+
+            // durable 账本状态＝NeedsHuman（SC retry mark_needs_human 先例）。
+            let enrollment_after = fixture.enrollment();
+            let entry = enrollment_after
+                .command_ledger
+                .iter()
+                .find(|entry| entry.command_id == "cmd-gate-needs-human")
+                .expect("ledger entry committed");
+            assert_eq!(
+                entry.state,
+                crate::product::models::automation::OperationState::NeedsHuman
+            );
+
+            // 同键同负载重放：读首次 durable 结果 → needs_human（非 replayed）。
+            let (status, payload) = post_json(&app, continue_uri(), &body).await;
+            assert_eq!(status, StatusCode::OK, "replay after needs_human: {payload}");
+            assert_eq!(
+                payload["state"], "needs_human",
+                "replay must surface the durable needs_human result, not a fake replay: {payload}"
+            );
         }
 
         /// TDD ⑦：plan_generation intent NeedsHuman / EngineStarted(ProviderDispatched)
