@@ -1398,7 +1398,10 @@ pub(crate) struct PlanContinuationDriveOutcome {
 /// {plan}`（非重入）——HTTP 入口已持有；engine 完成链挂点（S2b）调用前
 /// 须先取同键。相位语义：无 run/首启窗口（Prepared/ReadyBound/
 /// StartRequested）零动作（首启编排归 POST 重放链）；Paused 先 resume；
-/// Invalidated fail-closed。
+/// Invalidated 静默观察（终止/整组删除后的 fan-out 零新启、零 provider，
+/// warn 日志可见，不上抛为 tick 错误——HTTP 首启/继续入口对 Invalidated
+/// 的 `coding_plan_run_not_active` 拒绝由 `enrolled_plan_coding_start`/
+/// `run_store.prepare` 承载，不经本函数）。
 pub(crate) async fn drive_ready_units_for_plan(
     state: &WebAppState,
     project_id: &str,
@@ -1416,10 +1419,14 @@ pub(crate) async fn drive_ready_units_for_plan(
         return Ok(PlanContinuationDriveOutcome::default());
     };
     if matches!(run.phase, CodingPlanRunPhase::Invalidated) {
-        return Err(product_store_api_error(ProductStoreError::Conflict {
-            kind: "coding_plan_run_not_active",
-            id: run.command_id.clone(),
-        }));
+        // 终止/删除围栏（k3 F/R4-E1 裁定）：失效 run 的 fan-out 只观察——
+        // 零启动、零 provider、不上抛；真准入拒绝仍在 prepare/共享服务面。
+        tracing::warn!(
+            plan_id,
+            command_id = %run.command_id,
+            "plan coding run invalidated; fan-out observes zero starts"
+        );
+        return Ok(PlanContinuationDriveOutcome::default());
     }
     if matches!(run.phase, CodingPlanRunPhase::Paused) {
         run = run_store
