@@ -893,13 +893,19 @@ fn verify_current_enrollment(
                     ),
                 ));
             }
+            // k3 波2 F3：载体 LC 身份与 enrollment 冻结同源（manifest 形态）
+            // ——resolver 的 resolution.target.logical_codebase_id 是 legacy
+            // digest 形态，legacy-LC 现场与 manifest UUID 恒不相等会误判漂移。
             let carrier_lc = match current_carrier {
                 crate::web::handlers::AutomationCarrierResolution::LogicalCodebase {
                     resolution,
-                } => resolution.target.logical_codebase_id.as_deref(),
+                } => resolution
+                    .manifest
+                    .as_ref()
+                    .map(|manifest| manifest.logical_codebase_id.to_string()),
                 _ => None,
             };
-            if carrier_lc != Some(logical_codebase_id.as_str()) {
+            if carrier_lc.as_deref() != Some(logical_codebase_id.as_str()) {
                 return Err(StartCodingError::new(
                     "coding_start_enrollment_mismatch",
                     format!(

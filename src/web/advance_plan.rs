@@ -226,11 +226,15 @@ pub async fn advance_plan(
                     repository_id: bound_repository,
                 },
             ) => current_repository == bound_repository,
-            // 批 2 R1：集合绑定走 LC 身份全等——权威载体必须解析到 LC 且
-            // LC 身份与绑定声明的 LC 全等（错 LC/跨载体漂移 fail-closed）。
-            // 旧单成员 LogicalCodebase 保持既有「LC 载体 × LC 绑定」语义
-            // （成员级恰一桶判定在下方 target 分派兜底；存量 fixture 的
-            // 合成 LC id 不受影响，零回归）。
+            // 批 2 R1＋k3 波2 F3（R4/E1 集成暴露的真缺陷裁决）：集合绑定的
+            // LC 身份互证改用与 enrollment 冻结同源的 **manifest 身份**
+            //（`resolution.manifest.logical_codebase_id`，PUT canonical Enable
+            // 冻结的同一形态）——resolver 的 `resolution.target.
+            // logical_codebase_id` 是 legacy digest 形态，legacy-LC 现场
+            //（manifest 随机 UUID）两者恒不相等，令集合自动链断在 advance
+            // drift。manifest 缺失＝无同源权威身份，fail-closed。旧单成员
+            // LogicalCodebase 保持既有「LC 载体 × LC 绑定」语义（成员级恰
+            // 一桶判定兜底，零回归）。
             (
                 crate::web::handlers::AutomationCarrierResolution::LogicalCodebase { resolution },
                 bound
@@ -238,10 +242,10 @@ pub async fn advance_plan(
                     ..
                 },
             ) => resolution
-                .target
-                .logical_codebase_id
-                .as_deref()
-                .is_some_and(|authoritative| bound.logical_codebase_id() == Some(authoritative)),
+                .manifest
+                .as_ref()
+                .map(|manifest| manifest.logical_codebase_id.to_string())
+                .is_some_and(|authoritative| bound.logical_codebase_id() == Some(authoritative.as_str())),
             // 旧单成员逻辑绑定：既有 LC×LC 匹配语义（零回归）。
             (
                 crate::web::handlers::AutomationCarrierResolution::LogicalCodebase { .. },
@@ -1538,6 +1542,111 @@ mod tests {
         assert_eq!(
             verify_enrolled_outcome_target_attempts(&binding, None, &rejected),
             Ok(())
+        );
+    }
+
+    /// k3 波2 F3（R4/E1 集成暴露的真缺陷裁决）：集合绑定 drift 互证必须
+    /// 用与 enrollment 冻结同源的 **manifest 身份**——legacy-LC 现场
+    /// （manifest 随机 UUID）下 resolver 的 legacy digest 形态恒不相等，
+    /// 修复前 canonical Enable 后 advance 必报 carrier drift（红①）。
+    /// 真·漂移（不同 LC 的绑定）仍 fail-closed（②）；单成员原行为由
+    /// 既有 enrolled_advance 用例组回归（③）。
+    #[tokio::test]
+    async fn enrolled_set_binding_drift_compares_manifest_identity() {
+        let fixture = confirmed_enrolled_fixture().await;
+        let paths = ProductAppPaths::new(fixture.state.workspace_root.join(".aria"));
+        let manifest = crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone())
+            .load_manifest(PROJECT_ID)
+            .expect("load manifest")
+            .expect("fixture logical codebase manifest");
+        assert!(
+            manifest.member_ids.len() == 1,
+            "fixture 形态：恰一成员（集合绑定授权上界取 manifest 身份＋成员∪额外 UUID）"
+        );
+        let manifest_lc = manifest.logical_codebase_id.to_string();
+        let real_member = manifest.member_ids[0].0.to_string();
+        let extra_member = uuid::Uuid::new_v4().to_string();
+        let enrollment_path = paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("automation-enrollment.json");
+
+        // 显式参数的嵌套 async fn（fixture 非 Clone，且 async move 闭包仅
+        // 可调用一次）：两轮调用共享同一 fixture。
+        async fn set_binding_advance(
+            fixture: &crate::web::wiga_gate_fixture::EnrolledGateFixture,
+            enrollment_path: &std::path::Path,
+            real_member: &str,
+            extra_member: &str,
+            logical_codebase_id: String,
+        ) -> Result<AdvanceOutcome, String> {
+            let mut enrollment_json: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(enrollment_path).unwrap(),
+            )
+            .unwrap();
+            let set_target = serde_json::json!({
+                "kind": "logical_codebase_members",
+                "logical_codebase_id": logical_codebase_id,
+                "logical_repository_ids": [real_member, extra_member],
+            });
+            enrollment_json["target"] = set_target.clone();
+            enrollment_json["binding_history"]["current"]["target"] = set_target;
+            std::fs::write(
+                enrollment_path,
+                serde_json::to_string(&enrollment_json).unwrap(),
+            )
+            .unwrap();
+            let enrollment = fixture.enrollment();
+            let input = AdvanceInput {
+                command_id: format!(
+                    "wiga-advance-{}-{}",
+                    enrollment.enrollment_id,
+                    enrollment.plan_id.as_deref().unwrap()
+                ),
+                project_id: enrollment.project_id.clone(),
+                issue_id: enrollment.issue_id.clone(),
+                plan_id: enrollment.plan_id.clone().unwrap(),
+            };
+            let origin = AdvancePlanOrigin::Enrolled {
+                enrollment_id: enrollment.enrollment_id.clone(),
+                policy_revision: enrollment.policy_revision,
+            };
+            advance_plan(&fixture.state, input, origin).await
+        }
+
+
+        // ①（修复前红）：manifest UUID 形态的集合绑定 → advance 通过 drift
+        // 互证正常返回（不报 enrolled advance carrier drift）。
+        let outcome = set_binding_advance(
+            &fixture,
+            &enrollment_path,
+            &real_member,
+            &extra_member,
+            manifest_lc.clone(),
+        )
+        .await;
+        match &outcome {
+            Ok(
+                AdvanceOutcome::Completed { .. } | AdvanceOutcome::Replayed { .. },
+            ) => {}
+            other => panic!(
+                "manifest-form set binding must advance, got {other:?} (drift 误判)"
+            ),
+        }
+
+        // ② 真·漂移：绑定声明另一 LC（manifest 之外）→ fail-closed。
+        let drifted_lc = uuid::Uuid::new_v4().to_string();
+        let error = set_binding_advance(
+            &fixture,
+            &enrollment_path,
+            &real_member,
+            &extra_member,
+            drifted_lc,
+        )
+            .await
+            .expect_err("drifted set binding must fail closed");
+        assert!(
+            error.contains("carrier drift"),
+            "true drift error: {error}"
         );
     }
 }
