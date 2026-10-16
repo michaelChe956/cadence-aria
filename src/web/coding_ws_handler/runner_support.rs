@@ -369,11 +369,12 @@ mod tests {
         // work_item_group_id；完整 group 深链与本判定无关）。
         let mut bound = attempt.clone();
         bound.work_item_group_id = Some("plan_t3_0001".to_string());
-        store.write_coding_attempt_for_test(&bound).expect("bind group");
+        store
+            .write_coding_attempt_for_test(&bound)
+            .expect("bind group");
 
-        let automation = crate::product::issue_automation_store::IssueAutomationStore::new(
-            paths.clone(),
-        );
+        let automation =
+            crate::product::issue_automation_store::IssueAutomationStore::new(paths.clone());
         automation
             .compare_and_set("project_0001", "issue_0001", None, {
                 use crate::product::models::automation::{
@@ -406,8 +407,7 @@ mod tests {
                             require_execution_plan_confirm: false,
                         },
                     },
-                    target:
-                    crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                    target: crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
                         repository_id: "repository_0001".to_string(),
                     },
                 }
@@ -448,16 +448,14 @@ mod tests {
             .await
             .expect("send abort");
 
-        let stopped = handle_pending_runner_commands(
-            &mut command_rx,
-            &store,
-            &engine,
-            &event_tx,
-            &bound,
-        )
-        .await
-        .expect("terminated plan abort exits cleanly");
-        assert!(stopped, "AbortAttempt on terminated plan must end the runner");
+        let stopped =
+            handle_pending_runner_commands(&mut command_rx, &store, &engine, &event_tx, &bound)
+                .await
+                .expect("terminated plan abort exits cleanly");
+        assert!(
+            stopped,
+            "AbortAttempt on terminated plan must end the runner"
+        );
 
         // 干净退出零状态写入：attempt 仍 Created（专用收口独占 Aborted 写入）。
         let after = store

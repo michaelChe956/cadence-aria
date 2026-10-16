@@ -1104,16 +1104,16 @@ fn verify_journal_and_record(
                         logical_repository_ids,
                         ..
                     },
-                ) => logical_repository_ids.iter().any(|member| {
-                    member.0.to_string() == target
-                }),
-                Some(
-                    crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
-                        logical_repository_id,
-                        ..
-                    },
-                ) => logical_repository_id.0.to_string() == target,
-                Some(crate::product::logical_codebase::EnrollmentTarget::SingleRepository { .. })
+                ) => logical_repository_ids
+                    .iter()
+                    .any(|member| member.0.to_string() == target),
+                Some(crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                    logical_repository_id,
+                    ..
+                }) => logical_repository_id.0.to_string() == target,
+                Some(crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                    ..
+                })
                 | None => false,
             }
         };

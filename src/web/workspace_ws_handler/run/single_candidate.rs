@@ -308,7 +308,7 @@ fn prevalidate_plan_candidate_ir(
             Err(error) => {
                 return Some(vec![format!(
                     "load enrollment binding for prevalidation failed: {error}"
-                )])
+                )]);
             }
         };
     let validation_member_targets = match &enrollment_binding {
@@ -318,7 +318,7 @@ fn prevalidate_plan_candidate_ir(
                 Err(error) => {
                     return Some(vec![format!(
                         "load plan session for member targets failed: {error}"
-                    )])
+                    )]);
                 }
             };
             let repository = match workspace_repository_for_session(
@@ -330,7 +330,7 @@ fn prevalidate_plan_candidate_ir(
                 Err(error) => {
                     return Some(vec![format!(
                         "resolve plan session repository for member targets failed: {error}"
-                    )])
+                    )]);
                 }
             };
             match crate::product::workspace_engine::draft_batch::compile_support::plan_compile_member_targets(

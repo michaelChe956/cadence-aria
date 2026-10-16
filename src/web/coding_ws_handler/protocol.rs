@@ -4,11 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::product::coding_models::{
     CodeReviewReport, CodingAttemptStatus, CodingChatEntry, CodingChoiceGate, CodingChoiceQuestion,
-    CodingExecutionStage,
-    CodingGateRequired as CodingGateRequiredModel, CodingProviderPermissionMode,
-    CodingProviderRole, CodingRoleProviderConfigSnapshot, CodingRoleRunSnapshot,
-    CodingTimelineNode, CodingTimelineNodeStatus, GroupFinalReadinessSnapshot, InternalPrReview,
-    ReviewRequest, WorkItemExecutionPlan,
+    CodingExecutionStage, CodingGateRequired as CodingGateRequiredModel,
+    CodingProviderPermissionMode, CodingProviderRole, CodingRoleProviderConfigSnapshot,
+    CodingRoleRunSnapshot, CodingTimelineNode, CodingTimelineNodeStatus,
+    GroupFinalReadinessSnapshot, InternalPrReview, ReviewRequest, WorkItemExecutionPlan,
 };
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::ProviderName;
@@ -326,7 +325,8 @@ mod tests {
     /// attach 补发共用本构造点，两路同形）。
     #[test]
     fn coding_choice_request_frame_maps_questions_verbatim() {
-        let frame = coding_choice_request_frame(&choice_gate(vec![question("q_0"), question("q_1")]));
+        let frame =
+            coding_choice_request_frame(&choice_gate(vec![question("q_0"), question("q_1")]));
         let CodingWsOutMessage::CodingChoiceRequest { questions, .. } = &frame else {
             panic!("expected coding_choice_request frame");
         };
@@ -341,12 +341,14 @@ mod tests {
     #[test]
     fn coding_choice_request_frame_serializes_questions() {
         let multi =
-            serde_json::to_value(coding_choice_request_frame(&choice_gate(vec![question("q_0")])))
-                .unwrap();
+            serde_json::to_value(coding_choice_request_frame(&choice_gate(vec![question(
+                "q_0",
+            )])))
+            .unwrap();
         assert_eq!(multi["type"], "coding_choice_request");
         assert_eq!(multi["questions"][0]["id"], "q_0");
-        let legacy = serde_json::to_value(coding_choice_request_frame(&choice_gate(vec![])))
-            .unwrap();
+        let legacy =
+            serde_json::to_value(coding_choice_request_frame(&choice_gate(vec![]))).unwrap();
         assert!(legacy["questions"].as_array().unwrap().is_empty());
     }
 }

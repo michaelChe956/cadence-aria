@@ -15,13 +15,13 @@ use serde_json::json;
 use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType};
-use crate::web::workspace_session::WorkspaceSessionManager;
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::handlers::support::{product_app_paths, product_store_api_error};
 use crate::web::handlers::workspace_choice::resolve_session_manager;
 use crate::web::state::WebAppState;
 use crate::web::types::{RetryFailedScRunRequest, RetryFailedScRunStatus};
+use crate::web::workspace_session::WorkspaceSessionManager;
 use crate::web::workspace_ws_handler::{ProviderRunKind, spawn_provider_run_claiming_idle};
 use crate::web::workspace_ws_types::{ProviderConfigSnapshot, TimelineNodeStatus};
 
@@ -292,9 +292,9 @@ fn plan_stop_key(
         PlanStop::FailedProvider => Some(crate::web::plan_generation::plan_failed_node_fact_key(
             &binding.session_id,
         )),
-        PlanStop::StoppedHumanGate => {
-            Some(crate::web::plan_generation::plan_gate_fact_key(&binding.session_id))
-        }
+        PlanStop::StoppedHumanGate => Some(crate::web::plan_generation::plan_gate_fact_key(
+            &binding.session_id,
+        )),
         PlanStop::GenerationNeedsHuman => Some(
             crate::web::plan_generation::plan_generation_failed_fact_key(
                 enrollment_id,
@@ -328,7 +328,10 @@ pub async fn post_automation_continue_plan(
     State(state): State<WebAppState>,
     Path((project_id, issue_id)): Path<(String, String)>,
     Json(request): Json<crate::web::types::AutomationContinuePlanRequest>,
-) -> ApiResult<(StatusCode, Json<crate::web::types::AutomationContinuePlanStatus>)> {
+) -> ApiResult<(
+    StatusCode,
+    Json<crate::web::types::AutomationContinuePlanStatus>,
+)> {
     if request.command_id.trim().is_empty() {
         return Err(ApiError::validation(
             "invalid_command_id",
@@ -387,13 +390,12 @@ pub async fn post_automation_continue_plan(
     let digest = request.payload_digest();
     match store.find_command_result(&project_id, &issue_id, &request.command_id, &digest) {
         Ok(Some(entry)) => {
-            let state_name = if entry.state
-                == crate::product::models::automation::OperationState::NeedsHuman
-            {
-                "needs_human"
-            } else {
-                "replayed"
-            };
+            let state_name =
+                if entry.state == crate::product::models::automation::OperationState::NeedsHuman {
+                    "needs_human"
+                } else {
+                    "replayed"
+                };
             return Ok((
                 StatusCode::OK,
                 Json(continue_status(
@@ -447,16 +449,14 @@ pub async fn post_automation_continue_plan(
     let intent_phase = crate::web::plan_generation::generation_intent(&state, &enrollment)
         .ok()
         .flatten()
-        .and_then(
-            |read| match read {
-                crate::product::issue_automation_store::PlanGenerationIntentRead::Current(
-                    intent,
-                ) => Some(intent.phase),
-                crate::product::issue_automation_store::PlanGenerationIntentRead::LegacyUnbound {
-                    ..
-                } => None,
-            },
-        );
+        .and_then(|read| match read {
+            crate::product::issue_automation_store::PlanGenerationIntentRead::Current(intent) => {
+                Some(intent.phase)
+            }
+            crate::product::issue_automation_store::PlanGenerationIntentRead::LegacyUnbound {
+                ..
+            } => None,
+        });
     let stop = resolve_plan_stop(&record, intent_phase);
     let Some(stop_key) = plan_stop_key(&stop, &enrollment.enrollment_id, &binding) else {
         return Err(ApiError::runtime(
@@ -496,7 +496,13 @@ pub async fn post_automation_continue_plan(
     //（首结果权威），异负载 Conflict（fail-closed）。
     let commit_ledger = |operation: crate::product::models::automation::OperationState| {
         store
-            .append_command_result(&project_id, &issue_id, &request.command_id, &digest, operation)
+            .append_command_result(
+                &project_id,
+                &issue_id,
+                &request.command_id,
+                &digest,
+                operation,
+            )
             .map(|entry| entry.state)
             .map_err(|error| {
                 let code = if matches!(
@@ -520,10 +526,15 @@ pub async fn post_automation_continue_plan(
             crate::product::models::automation::OperationState::NeedsHuman => "needs_human",
             _ => "accepted",
         };
-    let needs_human = |reason_code: &str| -> Result<(StatusCode, Json<crate::web::types::AutomationContinuePlanStatus>), ApiError> {
-        let committed = commit_ledger(
-            crate::product::models::automation::OperationState::NeedsHuman,
-        )?;
+    let needs_human = |reason_code: &str| -> Result<
+        (
+            StatusCode,
+            Json<crate::web::types::AutomationContinuePlanStatus>,
+        ),
+        ApiError,
+    > {
+        let committed =
+            commit_ledger(crate::product::models::automation::OperationState::NeedsHuman)?;
         Ok((
             StatusCode::OK,
             Json(continue_status(
@@ -536,7 +547,13 @@ pub async fn post_automation_continue_plan(
     };
     // 成功收尾：resolve 对应停点事实（通知消失）＋ wake 编排器；resolve 写
     // 失败不假成功（needs_human 收尾，账本同步落 NeedsHuman）。
-    let finish_accepted = |keys: &[String]| -> Result<(StatusCode, Json<crate::web::types::AutomationContinuePlanStatus>), ApiError> {
+    let finish_accepted = |keys: &[String]| -> Result<
+        (
+            StatusCode,
+            Json<crate::web::types::AutomationContinuePlanStatus>,
+        ),
+        ApiError,
+    > {
         for key in keys {
             if let Err(message) = crate::web::plan_generation::resolve_plan_attention_fact(
                 &paths,
@@ -570,7 +587,9 @@ pub async fn post_automation_continue_plan(
                 let mut locked = engine.lock().await;
                 if let Err(message) = locked.append_context_note(context.to_string()).await {
                     drop(locked);
-                    return needs_human(&format!("automation_continue_context_note_failed: {message}"));
+                    return needs_human(&format!(
+                        "automation_continue_context_note_failed: {message}"
+                    ));
                 }
             }
             // 旧 generation intent 重置 Claimed（无 checkpoint 时交由
@@ -602,13 +621,10 @@ pub async fn post_automation_continue_plan(
                     .await
                 {
                     drop(locked);
-                    return needs_human(&format!(
-                        "automation_continue_rearm_failed: {message}"
-                    ));
+                    return needs_human(&format!("automation_continue_rearm_failed: {message}"));
                 }
             }
-            match crate::web::plan_generation::start_plan_generation_once(&state, &enrollment)
-                .await
+            match crate::web::plan_generation::start_plan_generation_once(&state, &enrollment).await
             {
                 Ok(crate::web::plan_generation::PlanGenerationOutcome::Running) => {
                     finish_accepted(&[
@@ -626,9 +642,7 @@ pub async fn post_automation_continue_plan(
             let context = context.expect("context validated above");
             // 同 session CAS StoppedNeedsHuman→WaitingForHuman（预算已零只开
             // 一个新说明回合），内存恢复 HumanConfirm 后走既有候选修订。
-            let saved = match lifecycle
-                .reopen_stopped_needs_human_for_bound_continuation(&record)
-            {
+            let saved = match lifecycle.reopen_stopped_needs_human_for_bound_continuation(&record) {
                 Ok(saved) => saved,
                 Err(_) => {
                     return needs_human("automation_continue_gate_reopen_conflict");
@@ -648,7 +662,11 @@ pub async fn post_automation_continue_plan(
             )
             .await;
             match effect {
-                crate::web::workspace_ws_handler::HumanGateFeedbackEffect::TurnOpened { turn, prompt, .. } => {
+                crate::web::workspace_ws_handler::HumanGateFeedbackEffect::TurnOpened {
+                    turn,
+                    prompt,
+                    ..
+                } => {
                     // 已有 human-gate run 派发（唯一 manager run 面，非 superseding）。
                     let mut run_context =
                         manager.provider_run_context(state.workspace_runs.clone());
@@ -664,11 +682,15 @@ pub async fn post_automation_continue_plan(
                     )
                     .await
                     {
-                        Ok(true) => finish_accepted(&[crate::web::plan_generation::plan_gate_fact_key(&session_id)]),
+                        Ok(true) => {
+                            finish_accepted(&[crate::web::plan_generation::plan_gate_fact_key(
+                                &session_id,
+                            )])
+                        }
                         Ok(false) => needs_human("automation_continue_gate_run_busy"),
-                        Err(message) => needs_human(&format!(
-                            "automation_continue_gate_run_failed: {message}"
-                        )),
+                        Err(message) => {
+                            needs_human(&format!("automation_continue_gate_run_failed: {message}"))
+                        }
                     }
                 }
                 crate::web::workspace_ws_handler::HumanGateFeedbackEffect::Replayed { .. } => {
@@ -677,9 +699,10 @@ pub async fn post_automation_continue_plan(
                 crate::web::workspace_ws_handler::HumanGateFeedbackEffect::Busy { .. } => {
                     needs_human("automation_continue_gate_busy")
                 }
-                crate::web::workspace_ws_handler::HumanGateFeedbackEffect::Rejected { code, .. } => {
-                    needs_human(&format!("automation_continue_gate_rejected: {code}"))
-                }
+                crate::web::workspace_ws_handler::HumanGateFeedbackEffect::Rejected {
+                    code,
+                    ..
+                } => needs_human(&format!("automation_continue_gate_rejected: {code}")),
                 crate::web::workspace_ws_handler::HumanGateFeedbackEffect::EngineError(message) => {
                     needs_human(&format!("automation_continue_gate_engine_error: {message}"))
                 }
@@ -699,17 +722,22 @@ pub async fn post_automation_continue_plan(
             ) {
                 return needs_human("automation_continue_intent_reset_failed");
             }
-            match crate::web::plan_generation::start_plan_generation_once(&state, &enrollment)
-                .await
+            match crate::web::plan_generation::start_plan_generation_once(&state, &enrollment).await
             {
-                Ok(crate::web::plan_generation::PlanGenerationOutcome::Running) => finish_accepted(&[crate::web::plan_generation::plan_generation_failed_fact_key(
-                    &enrollment.enrollment_id,
-                    &binding.plan_id,
-                )]),
+                Ok(crate::web::plan_generation::PlanGenerationOutcome::Running) => {
+                    finish_accepted(&[
+                        crate::web::plan_generation::plan_generation_failed_fact_key(
+                            &enrollment.enrollment_id,
+                            &binding.plan_id,
+                        ),
+                    ])
+                }
                 _ => needs_human("automation_continue_dispatch_not_running"),
             }
         }
-        PlanStop::WaitingExisting | PlanStop::None => needs_human("automation_continue_not_stopped"),
+        PlanStop::WaitingExisting | PlanStop::None => {
+            needs_human("automation_continue_not_stopped")
+        }
     }
 }
 
@@ -1055,10 +1083,7 @@ mod tests {
                     .expect("durable record")
             }
 
-            fn write_record(
-                &self,
-                record: &crate::product::models::WorkspaceSessionRecord,
-            ) {
+            fn write_record(&self, record: &crate::product::models::WorkspaceSessionRecord) {
                 crate::product::json_store::write_json(
                     &self
                         .lifecycle
@@ -1075,7 +1100,10 @@ mod tests {
                 serde_json::to_value(&self.binding).expect("binding json")
             }
 
-            async fn manager(&self) -> std::sync::Arc<crate::web::workspace_session::WorkspaceSessionManager> {
+            async fn manager(
+                &self,
+            ) -> std::sync::Arc<crate::web::workspace_session::WorkspaceSessionManager>
+            {
                 self.state
                     .workspace_sessions
                     .get_or_create(&self.session_id, || {
@@ -1135,8 +1163,7 @@ mod tests {
                 root_path.clone(),
                 crate::web::runtime::WebRuntime::new_fake(root_path.clone()),
             );
-            let paths =
-                crate::product::app_paths::ProductAppPaths::new(root_path.join(".aria"));
+            let paths = crate::product::app_paths::ProductAppPaths::new(root_path.join(".aria"));
             let store = IssueAutomationStore::new(paths.clone());
             let lifecycle = LifecycleStore::new(paths.clone());
             store
@@ -1164,9 +1191,10 @@ mod tests {
                                 require_execution_plan_confirm: false,
                             },
                         },
-                        target: crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
-                            repository_id: "repo-1".to_string(),
-                        },
+                        target:
+                            crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                                repository_id: "repo-1".to_string(),
+                            },
                     },
                 )
                 .expect("enable enrollment");
@@ -1240,9 +1268,8 @@ mod tests {
                 .get(PROJECT_ID, ISSUE_ID)
                 .expect("read enrollment")
                 .expect("enrollment present");
-            let binding =
-                crate::web::advance_plan::load_current_enrollment_binding(&enrollment)
-                    .expect("current binding");
+            let binding = crate::web::advance_plan::load_current_enrollment_binding(&enrollment)
+                .expect("current binding");
             ContinueFixture {
                 _root: inner._root,
                 state,
@@ -1256,7 +1283,9 @@ mod tests {
         }
 
         fn continue_uri() -> String {
-            format!("/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/automation-enrollment/continue-plan")
+            format!(
+                "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/automation-enrollment/continue-plan"
+            )
         }
 
         fn control_uri() -> String {
@@ -1283,7 +1312,9 @@ mod tests {
             (status, payload)
         }
 
-        async fn wait_for<F: Fn(&crate::product::models::automation::IssueAutomationEnrollment) -> bool>(
+        async fn wait_for<
+            F: Fn(&crate::product::models::automation::IssueAutomationEnrollment) -> bool,
+        >(
             fixture: &ContinueFixture,
             predicate: F,
             label: &str,
@@ -1365,17 +1396,17 @@ mod tests {
 
             // 旧 intent 已按真实启动推进（越过 Claimed；Fake run 真实落账）。
             let ledger_before = fixture.record().provider_start_ledger.len();
-            wait_for(&fixture, |_| {
-                fixture.record().provider_start_ledger.len() > ledger_before
-            }, "provider start after continue")
+            wait_for(
+                &fixture,
+                |_| fixture.record().provider_start_ledger.len() > ledger_before,
+                "provider start after continue",
+            )
             .await;
             let enrollment = fixture.enrollment();
-            let intent = crate::web::plan_generation::generation_intent(
-                &fixture.state,
-                &enrollment,
-            )
-            .expect("intent read")
-            .expect("intent present");
+            let intent =
+                crate::web::plan_generation::generation_intent(&fixture.state, &enrollment)
+                    .expect("intent read")
+                    .expect("intent present");
             match intent {
                 crate::product::issue_automation_store::PlanGenerationIntentRead::Current(
                     intent,
@@ -1395,12 +1426,16 @@ mod tests {
                 } => panic!("legacy intent without target cannot drive automatic chains"),
             }
             // 继续成功 resolve：失败事实消失。
-            wait_for(&fixture, |enrollment| {
-                !enrollment
-                    .attention_facts
-                    .iter()
-                    .any(|fact| fact.key == failed_key)
-            }, "failed fact resolved")
+            wait_for(
+                &fixture,
+                |enrollment| {
+                    !enrollment
+                        .attention_facts
+                        .iter()
+                        .any(|fact| fact.key == failed_key)
+                },
+                "failed fact resolved",
+            )
             .await;
         }
 
@@ -1446,9 +1481,11 @@ mod tests {
             let (status, payload) = post_json(&app, continue_uri(), &body).await;
             assert_eq!(status, StatusCode::OK, "first continue: {payload}");
             let ledger_after_first = fixture.record().provider_start_ledger.len();
-            wait_for(&fixture, |_| {
-                fixture.record().provider_start_ledger.len() > ledger_after_first
-            }, "first continue drives")
+            wait_for(
+                &fixture,
+                |_| fixture.record().provider_start_ledger.len() > ledger_after_first,
+                "first continue drives",
+            )
             .await;
             let ledger_count = fixture.record().provider_start_ledger.len();
 
@@ -1535,8 +1572,7 @@ mod tests {
                 true,
             )
             .await;
-            let gate_key =
-                crate::web::plan_generation::plan_gate_fact_key(&fixture.session_id);
+            let gate_key = crate::web::plan_generation::plan_gate_fact_key(&fixture.session_id);
             fixture
                 .store
                 .upsert_automation_attention_fact(
@@ -1572,7 +1608,11 @@ mod tests {
             );
             assert_eq!(payload["context_required"], true, "{payload}");
             assert!(
-                fixture.enrollment().attention_facts.iter().any(|fact| fact.key == gate_key),
+                fixture
+                    .enrollment()
+                    .attention_facts
+                    .iter()
+                    .any(|fact| fact.key == gate_key),
                 "control GET must not write facts"
             );
 
@@ -1620,9 +1660,16 @@ mod tests {
             assert_eq!(turn.budget_reserved, 1, "explicit continue opens one turn");
 
             // 成功 resolve：门事实消失。
-            wait_for(&fixture, |enrollment| {
-                !enrollment.attention_facts.iter().any(|fact| fact.key == gate_key)
-            }, "gate fact resolved")
+            wait_for(
+                &fixture,
+                |enrollment| {
+                    !enrollment
+                        .attention_facts
+                        .iter()
+                        .any(|fact| fact.key == gate_key)
+                },
+                "gate fact resolved",
+            )
             .await;
         }
 
@@ -1641,8 +1688,7 @@ mod tests {
                 false,
             )
             .await;
-            let gate_key =
-                crate::web::plan_generation::plan_gate_fact_key(&fixture.session_id);
+            let gate_key = crate::web::plan_generation::plan_gate_fact_key(&fixture.session_id);
             let app = crate::web::app::build_web_router(fixture.state.clone());
             let body = serde_json::json!({
                 "command_id": "cmd-gate-needs-human",
@@ -1668,7 +1714,11 @@ mod tests {
 
             // 同键同负载重放：读首次 durable 结果 → needs_human（非 replayed）。
             let (status, payload) = post_json(&app, continue_uri(), &body).await;
-            assert_eq!(status, StatusCode::OK, "replay after needs_human: {payload}");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "replay after needs_human: {payload}"
+            );
             assert_eq!(
                 payload["state"], "needs_human",
                 "replay must surface the durable needs_human result, not a fake replay: {payload}"
@@ -1701,10 +1751,12 @@ mod tests {
                 )
                 .expect("intent needs human");
             let enrollment = fixture.enrollment();
-            let outcome =
-                crate::web::plan_generation::start_plan_generation_once(&fixture.state, &enrollment)
-                    .await
-                    .expect("observe");
+            let outcome = crate::web::plan_generation::start_plan_generation_once(
+                &fixture.state,
+                &enrollment,
+            )
+            .await
+            .expect("observe");
             assert_eq!(
                 outcome,
                 crate::web::plan_generation::PlanGenerationOutcome::NeedsHuman
@@ -1721,7 +1773,10 @@ mod tests {
             assert_eq!(fact.kind, AutomationAttentionKind::AutomationFailed);
             assert_eq!(fact.stage, AutomationAttentionStage::Plan);
             assert_eq!(fact.reason_code, "plan_generation_needs_human");
-            assert_eq!(fact.session_id.as_deref(), Some(fixture.session_id.as_str()));
+            assert_eq!(
+                fact.session_id.as_deref(),
+                Some(fixture.session_id.as_str())
+            );
 
             // 第二分支：EngineStarted 无活 run → 转 NeedsHuman 并写事实。
             let fixture2 = continue_fixture(
@@ -1807,19 +1862,27 @@ mod tests {
             .await;
             let manager = fixture.manager().await;
             let engine_tx = manager.engine_tx();
-            let gate_key =
-                crate::web::plan_generation::plan_gate_fact_key(&fixture.session_id);
+            let gate_key = crate::web::plan_generation::plan_gate_fact_key(&fixture.session_id);
 
             // HumanGateOpened + 预算耗尽 → review_limit。
             engine_tx
-                .send(crate::product::workspace_engine::EngineEvent::HumanGateOpened {
-                    stage: "human_confirm".to_string(),
-                })
+                .send(
+                    crate::product::workspace_engine::EngineEvent::HumanGateOpened {
+                        stage: "human_confirm".to_string(),
+                    },
+                )
                 .await
                 .expect("send gate open");
-            wait_for(&fixture, |enrollment| {
-                enrollment.attention_facts.iter().any(|fact| fact.key == gate_key)
-            }, "gate fact written")
+            wait_for(
+                &fixture,
+                |enrollment| {
+                    enrollment
+                        .attention_facts
+                        .iter()
+                        .any(|fact| fact.key == gate_key)
+                },
+                "gate fact written",
+            )
             .await;
             let fact = fixture
                 .enrollment()
@@ -1834,18 +1897,22 @@ mod tests {
             record.human_gate_snapshot = Some(gate_snapshot(2));
             fixture.write_record(&record);
             engine_tx
-                .send(crate::product::workspace_engine::EngineEvent::HumanGateOpened {
-                    stage: "human_confirm".to_string(),
-                })
+                .send(
+                    crate::product::workspace_engine::EngineEvent::HumanGateOpened {
+                        stage: "human_confirm".to_string(),
+                    },
+                )
                 .await
                 .expect("send gate open again");
-            wait_for(&fixture, |enrollment| {
-                enrollment
-                    .attention_facts
-                    .iter()
-                    .any(|fact| fact.key == gate_key
-                        && fact.kind == AutomationAttentionKind::PlanQuestion)
-            }, "gate fact refined to plan_question")
+            wait_for(
+                &fixture,
+                |enrollment| {
+                    enrollment.attention_facts.iter().any(|fact| {
+                        fact.key == gate_key && fact.kind == AutomationAttentionKind::PlanQuestion
+                    })
+                },
+                "gate fact refined to plan_question",
+            )
             .await;
             assert_eq!(
                 fixture
@@ -1875,9 +1942,16 @@ mod tests {
                 &fixture.session_id,
                 "choice-p4-1",
             );
-            wait_for(&fixture, |enrollment| {
-                enrollment.attention_facts.iter().any(|fact| fact.key == choice_key)
-            }, "choice fact written")
+            wait_for(
+                &fixture,
+                |enrollment| {
+                    enrollment
+                        .attention_facts
+                        .iter()
+                        .any(|fact| fact.key == choice_key)
+                },
+                "choice fact written",
+            )
             .await;
             let choice_fact = fixture
                 .enrollment()
@@ -1890,15 +1964,24 @@ mod tests {
 
             // 门关闭 → 门事实 resolve（choice 事实保留）。
             engine_tx
-                .send(crate::product::workspace_engine::EngineEvent::HumanGateClosed {
-                    decision: "abandon".to_string(),
-                    stage: "human_confirm".to_string(),
-                })
+                .send(
+                    crate::product::workspace_engine::EngineEvent::HumanGateClosed {
+                        decision: "abandon".to_string(),
+                        stage: "human_confirm".to_string(),
+                    },
+                )
                 .await
                 .expect("send gate close");
-            wait_for(&fixture, |enrollment| {
-                !enrollment.attention_facts.iter().any(|fact| fact.key == gate_key)
-            }, "gate fact resolved on close")
+            wait_for(
+                &fixture,
+                |enrollment| {
+                    !enrollment
+                        .attention_facts
+                        .iter()
+                        .any(|fact| fact.key == gate_key)
+                },
+                "gate fact resolved on close",
+            )
             .await;
             assert!(
                 fixture
@@ -1916,19 +1999,28 @@ mod tests {
                 Some(crate::product::models::SingleCandidatePhase::Failed);
             fixture.write_record(&record);
             engine_tx
-                .send(crate::product::workspace_engine::EngineEvent::TimelineNodeUpdated {
-                    node_id: "node_failed_p4".to_string(),
-                    status: crate::web::workspace_ws_types::TimelineNodeStatus::Failed,
-                    summary: Some("provider unavailable".to_string()),
-                    completed_at: None,
-                })
+                .send(
+                    crate::product::workspace_engine::EngineEvent::TimelineNodeUpdated {
+                        node_id: "node_failed_p4".to_string(),
+                        status: crate::web::workspace_ws_types::TimelineNodeStatus::Failed,
+                        summary: Some("provider unavailable".to_string()),
+                        completed_at: None,
+                    },
+                )
                 .await
                 .expect("send failed node");
             let failed_key =
                 crate::web::plan_generation::plan_failed_node_fact_key(&fixture.session_id);
-            wait_for(&fixture, |enrollment| {
-                enrollment.attention_facts.iter().any(|fact| fact.key == failed_key)
-            }, "provider failure fact written")
+            wait_for(
+                &fixture,
+                |enrollment| {
+                    enrollment
+                        .attention_facts
+                        .iter()
+                        .any(|fact| fact.key == failed_key)
+                },
+                "provider failure fact written",
+            )
             .await;
 
             // 禁用 enrollment → 零写入（后续门开不落新事实）。
@@ -1945,9 +2037,11 @@ mod tests {
             .expect("disable enrollment");
             let before = fixture.enrollment().attention_facts.len();
             engine_tx
-                .send(crate::product::workspace_engine::EngineEvent::HumanGateOpened {
-                    stage: "human_confirm".to_string(),
-                })
+                .send(
+                    crate::product::workspace_engine::EngineEvent::HumanGateOpened {
+                        stage: "human_confirm".to_string(),
+                    },
+                )
                 .await
                 .expect("send gate open on disabled");
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;

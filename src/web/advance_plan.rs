@@ -233,7 +233,8 @@ pub async fn advance_plan(
             // 合成 LC id 不受影响，零回归）。
             (
                 crate::web::handlers::AutomationCarrierResolution::LogicalCodebase { resolution },
-                bound @ crate::product::logical_codebase::EnrollmentTarget::LogicalCodebaseMembers {
+                bound
+                @ crate::product::logical_codebase::EnrollmentTarget::LogicalCodebaseMembers {
                     ..
                 },
             ) => resolution
@@ -348,8 +349,7 @@ pub async fn advance_plan(
                 }
                 if grouped.by_target.is_empty() {
                     return Err(
-                        "enrolled advance requires a non-empty set of logical targets"
-                            .to_string(),
+                        "enrolled advance requires a non-empty set of logical targets".to_string(),
                     );
                 }
                 let unauthorized: Vec<String> = grouped
@@ -435,8 +435,7 @@ pub async fn advance_plan(
     // 对应（Ready/Replay 同规则，删旧「恰一 attempt」上限，不以
     // attempt_id 代表全 plan）；非集合绑定沿用旧 Replayed 上限检。
     if let AdvancePlanOrigin::Enrolled { .. } = origin
-        && let Some((binding_target, expected_plan_targets)) =
-            enrolled_expected_targets.as_ref()
+        && let Some((binding_target, expected_plan_targets)) = enrolled_expected_targets.as_ref()
         && let Err(reason) = verify_enrolled_outcome_target_attempts(
             binding_target,
             expected_plan_targets.as_ref(),
@@ -1427,8 +1426,8 @@ mod tests {
         let expected: BTreeSet<String> = [uuid_of(1).0.to_string(), uuid_of(2).0.to_string()]
             .into_iter()
             .collect();
-        let record = |attempt_id: Option<&str>, attempts: Vec<AdvanceTargetAttemptBinding>| {
-            AdvanceRecord {
+        let record =
+            |attempt_id: Option<&str>, attempts: Vec<AdvanceTargetAttemptBinding>| AdvanceRecord {
                 id: "advance_f2".to_string(),
                 command_id: "command_f2".to_string(),
                 project_id: "project_0001".to_string(),
@@ -1443,8 +1442,7 @@ mod tests {
                 error: None,
                 created_at: "2026-10-16T00:00:00Z".to_string(),
                 updated_at: "2026-10-16T00:00:00Z".to_string(),
-            }
-        };
+            };
 
         // 1) 引擎正常 Rejected（稳定 code/reason）原样透传——修复前红：
         // Rejected 被归一为空 attempts，必撞集合 targets 不匹配断言转 Err。
@@ -1517,9 +1515,7 @@ mod tests {
             workspace_entry: "/worktree".to_string(),
             target_attempts: Vec::new(),
         };
-        assert!(
-            verify_enrolled_outcome_target_attempts(&binding, Some(&single), &empty).is_err()
-        );
+        assert!(verify_enrolled_outcome_target_attempts(&binding, Some(&single), &empty).is_err());
 
         // 5) 非集合绑定（旧单成员语义）：Replayed 多 target 仍拒（不变）；
         // Rejected 同样透传。

@@ -722,12 +722,10 @@ pub(crate) async fn terminate_plan_engine_side(
         attempts: Vec::new(),
     };
     // ②禁新 run：失效 CodingPlanRun。
-    if let Err(error) =
-        crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone())
-            .invalidate_run_for_plan(project_id, issue_id, plan_id)
+    if let Err(error) = crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone())
+        .invalidate_run_for_plan(project_id, issue_id, plan_id)
     {
-        outcome.session_error =
-            Some(format!("invalidate coding plan run failed: {error}"));
+        outcome.session_error = Some(format!("invalidate coding plan run failed: {error}"));
     }
     // ③取消 plan session 活跃 run（真实 completion 等待）＋CAS Terminated。
     if let Some(session_id) = bound_session_id {
@@ -793,9 +791,8 @@ pub(crate) async fn terminate_plan_engine_side(
             return outcome;
         }
     };
-    let (event_tx, _event_rx) = mpsc::channel::<
-        crate::web::coding_ws_handler::CodingWsOutMessage,
-    >(64);
+    let (event_tx, _event_rx) =
+        mpsc::channel::<crate::web::coding_ws_handler::CodingWsOutMessage>(64);
     let engine = crate::product::coding_workspace_engine::CodingWorkspaceEngine::new(
         coding_store.clone(),
         crate::product::git_workspace_service::GitWorkspaceService::new(),
@@ -820,7 +817,11 @@ pub(crate) async fn terminate_plan_engine_side(
         {
             Ok(_) => outcome.attempts.push(PlanTerminationAttemptOutcome {
                 attempt_id: attempt.id.clone(),
-                status: if pre_terminal { "already_terminal" } else { "aborted" },
+                status: if pre_terminal {
+                    "already_terminal"
+                } else {
+                    "aborted"
+                },
                 reason_code: None,
                 message: None,
             }),
@@ -834,7 +835,6 @@ pub(crate) async fn terminate_plan_engine_side(
     }
     outcome
 }
-
 
 /// 保持 `WsOutMessage` schema 不变，在 JSON 顶层增加可选 `event_seq`。
 pub(super) fn inject_event_seq(message: String, seq: u64) -> Option<String> {

@@ -223,7 +223,10 @@ mod tests {
             member_ids.clone(),
         );
         LogicalCodebaseStore::new(paths.clone())
-            .save_manifest(super::super::automation_enrollment_test_support::PROJECT_ID, &manifest)
+            .save_manifest(
+                super::super::automation_enrollment_test_support::PROJECT_ID,
+                &manifest,
+            )
             .unwrap();
         let now = "2026-10-16T00:00:00Z".to_string();
         let mut repositories = Vec::new();
@@ -325,10 +328,16 @@ mod tests {
         index.status = AggregateIndexStatus::Active;
         let index_store = AggregateIndexStore::new(paths.clone());
         index_store
-            .create(super::super::automation_enrollment_test_support::PROJECT_ID, index.clone())
+            .create(
+                super::super::automation_enrollment_test_support::PROJECT_ID,
+                index.clone(),
+            )
             .unwrap();
         index_store
-            .replace_active(super::super::automation_enrollment_test_support::PROJECT_ID, index)
+            .replace_active(
+                super::super::automation_enrollment_test_support::PROJECT_ID,
+                index,
+            )
             .unwrap();
         index_store
             .degrade_last_known_good(
@@ -406,8 +415,8 @@ mod tests {
             ],
         );
         let app = fixture.router();
-        let response = get_automation_target(&app, "?author_provider=fake&reviewer_provider=fake")
-            .await;
+        let response =
+            get_automation_target(&app, "?author_provider=fake&reviewer_provider=fake").await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(
@@ -580,8 +589,10 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(
-            violations.iter().any(|violation| violation["reason_code"]
-                == "provider_capability_launch_not_confirmed"),
+            violations
+                .iter()
+                .any(|violation| violation["reason_code"]
+                    == "provider_capability_launch_not_confirmed"),
             "violations should carry the capability-layer verdict code, got: {payload}"
         );
 

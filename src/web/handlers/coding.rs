@@ -901,16 +901,18 @@ fn gate_response_action_is_abort(
     gate_id: &str,
     action_id: &str,
 ) -> Result<bool, crate::product::coding_workspace_engine::CodingWorkspaceEngineError> {
-    Ok(crate::web::coding_ws_handler::coding_pending_gates(coding_store, attempt)?
-        .into_iter()
-        .any(|gate| {
-            gate.gate_id == gate_id
-                && gate.available_actions.iter().any(|action| {
-                    action.action_id == action_id
-                        && action.action_type
-                            == crate::product::coding_models::CodingGateActionType::Abort
-                })
-        }))
+    Ok(
+        crate::web::coding_ws_handler::coding_pending_gates(coding_store, attempt)?
+            .into_iter()
+            .any(|gate| {
+                gate.gate_id == gate_id
+                    && gate.available_actions.iter().any(|action| {
+                        action.action_id == action_id
+                            && action.action_type
+                                == crate::product::coding_models::CodingGateActionType::Abort
+                    })
+            }),
+    )
 }
 
 /// 批 2 T3（C2，REQ-WIGA-09）：WS GateResponse 的统一终止路由判定——
@@ -930,21 +932,22 @@ pub(crate) fn ws_gate_response_routes_termination(
     else {
         return Ok(None);
     };
-    let action_is_abort = crate::web::coding_ws_handler::coding_pending_gates(coding_store, attempt)
-        .map_err(|error| crate::product::json_store::ProductStoreError::Json(error.to_string()))?
-        .into_iter()
-        .any(|gate| {
-            gate.gate_id == gate_id
-                && gate.available_actions.iter().any(|action| {
-                    action.action_id == action_id
-                        && action.action_type
-                            == crate::product::coding_models::CodingGateActionType::Abort
-                })
-        });
+    let action_is_abort =
+        crate::web::coding_ws_handler::coding_pending_gates(coding_store, attempt)
+            .map_err(|error| {
+                crate::product::json_store::ProductStoreError::Json(error.to_string())
+            })?
+            .into_iter()
+            .any(|gate| {
+                gate.gate_id == gate_id
+                    && gate.available_actions.iter().any(|action| {
+                        action.action_id == action_id
+                            && action.action_type
+                                == crate::product::coding_models::CodingGateActionType::Abort
+                    })
+            });
     Ok(if action_is_abort {
-        Some(
-            super::automation_enrollment::automation_plan_termination_required_message(&identity),
-        )
+        Some(super::automation_enrollment::automation_plan_termination_required_message(&identity))
     } else {
         None
     })

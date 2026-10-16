@@ -1047,7 +1047,10 @@ fn c1_serial_compile(
 ) -> crate::product::work_item_plan_compiler::PlanCandidateIr {
     compile_work_item_plan(
         &c1_serial_source(intent_section, ("src/levels_new/**", "web/**"), "WI-002"),
-        &WorkItemPlanSourceContext { target_repository_id: C1_SERIAL_TARGET_REPO.to_string(), member_targets: None },
+        &WorkItemPlanSourceContext {
+            target_repository_id: C1_SERIAL_TARGET_REPO.to_string(),
+            member_targets: None,
+        },
     )
     .expect("plan must lower")
 }

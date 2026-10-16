@@ -8,12 +8,10 @@ use crate::product::lifecycle_store::{
     CreateDesignSpecInput, CreateIssueWorkItemPlanInput, CreateStorySpecInput,
     CreateWorkspaceSessionInput, WorkItemPlanSessionOptions,
 };
+use crate::product::logical_codebase::{ProviderTrustPrecondition, ProviderTrustPreparationResult};
 use crate::product::models::{IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, WorkspaceType};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
-use crate::product::logical_codebase::{
-    ProviderTrustPrecondition, ProviderTrustPreparationResult,
-};
 use crate::product::workspace_engine::conversational_gate::ConfirmationTrustContext;
 use crate::web::workspace_session::WorkspaceSessionManager;
 

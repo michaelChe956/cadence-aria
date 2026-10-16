@@ -774,14 +774,8 @@ async fn bind_mark_start_record(
     // ② 全图 ready 稳定选一：已有冻结 selection 直接复用（不重选）。
     let selection = match run.selection.clone() {
         Some(frozen) => Some(frozen),
-        None => select_first_ready_unit(
-            app_paths,
-            &run.project_id,
-            &run.issue_id,
-            &run,
-            &bindings,
-        )
-        .map_err(product_store_api_error)?,
+        None => select_first_ready_unit(app_paths, &run.project_id, &run.issue_id, &run, &bindings)
+            .map_err(product_store_api_error)?,
     };
 
     // ③ Ready 集互证 + selection 冻结（N2 锁内重读核身份/集合漂移）。
@@ -814,7 +808,9 @@ async fn bind_mark_start_record(
     )
     .await
     {
-        Ok(StartCodingOutcome::Started { attempt_id }) => CodingPlanStartOutcome::Started { attempt_id },
+        Ok(StartCodingOutcome::Started { attempt_id }) => {
+            CodingPlanStartOutcome::Started { attempt_id }
+        }
         Ok(StartCodingOutcome::AlreadyStarted { attempt_id }) => {
             CodingPlanStartOutcome::AlreadyStarted { attempt_id }
         }
@@ -963,7 +959,13 @@ pub(crate) async fn enrolled_plan_coding_start(
     let _group_guard = state.coding_runs.lock_named(&group_lock_key).await;
 
     let run = run_store
-        .prepare(&project_id, &issue_id, &plan_id, &command_id, &expected_revision)
+        .prepare(
+            &project_id,
+            &issue_id,
+            &plan_id,
+            &command_id,
+            &expected_revision,
+        )
         .map_err(|error| {
             enrolled_fact_error(
                 &app_paths,
@@ -996,12 +998,12 @@ pub(crate) async fn enrolled_plan_coding_start(
             let phase = resumed.phase;
             Ok((resumed, EnrolledPlanStartStep::Existing(phase)))
         }
-        CodingPlanRunPhase::Invalidated => Err(product_store_api_error(
-            ProductStoreError::Conflict {
+        CodingPlanRunPhase::Invalidated => {
+            Err(product_store_api_error(ProductStoreError::Conflict {
                 kind: "coding_plan_run_not_active",
                 id: run.command_id.clone(),
-            },
-        )),
+            }))
+        }
         CodingPlanRunPhase::Prepared
         | CodingPlanRunPhase::ReadyBound
         | CodingPlanRunPhase::StartRequested => {
@@ -1064,7 +1066,11 @@ pub(crate) async fn enrolled_plan_coding_start(
                     // 语义与单 attempt 链一致）。
                     return Ok((run, EnrolledPlanStartStep::AdvancedToReady));
                 }
-                AdvanceOutcome::Rejected { record, code, reason } => {
+                AdvanceOutcome::Rejected {
+                    record,
+                    code,
+                    reason,
+                } => {
                     if code == "ADVANCE_PLAN_ADMISSION_CONTENDED" {
                         // 瞬态准入争用：不写事实，交下一 tick 重试。
                         return Ok((
@@ -1286,10 +1292,7 @@ fn upsert_coding_start_failure_fact(
         paths,
         enrollment,
         AutomationAttentionStage::CodingStart,
-        &enrollment
-            .plan_id
-            .clone()
-            .unwrap_or_default(),
+        &enrollment.plan_id.clone().unwrap_or_default(),
         command_id,
         Some(attempt_id.to_string()),
         reason_code,
@@ -1715,8 +1718,7 @@ fn resolve_drive_start_origin(
     {
         return Ok(DriveStartOrigin::Revoked);
     }
-    let Ok(binding) = crate::web::advance_plan::load_current_enrollment_binding(&enrollment)
-    else {
+    let Ok(binding) = crate::web::advance_plan::load_current_enrollment_binding(&enrollment) else {
         return Ok(DriveStartOrigin::Revoked);
     };
     Ok(DriveStartOrigin::Start {

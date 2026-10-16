@@ -1733,8 +1733,7 @@ async fn lc_first_generation_trust_missing_emits_structured_guidance_frame() {
     assert_eq!(guidance["providers"], serde_json::json!(["codex"]));
     assert_eq!(guidance["reason_code"], "codex_trust_key_conflict");
     assert!(
-        guidance.get("command_markdown").is_none()
-            || guidance["command_markdown"].is_null(),
+        guidance.get("command_markdown").is_none() || guidance["command_markdown"].is_null(),
         "conflict guidance must not carry a one-shot command: {guidance}"
     );
 }
@@ -2386,11 +2385,7 @@ async fn story_generation_trust_missing_emits_structured_guidance_frame() {
         single_candidate_context_for_author(&fixture, ProviderName::KimiCode, provider);
     // 引擎事件经生产同构 forward 任务（map_engine_event）落 outbound——
     // author 臂错误/指导均走 EngineEvent 通道上浮。
-    let forward = spawn_engine_event_forward_task(
-        engine_rx,
-        context.outbound_tx.clone(),
-        None,
-    );
+    let forward = spawn_engine_event_forward_task(engine_rx, context.outbound_tx.clone(), None);
     handle_workspace_inbound_message(
         context,
         WsInMessage::StartGeneration {
@@ -2586,11 +2581,7 @@ async fn story_generation_other_unavailable_emits_no_guidance_frame() {
 
     let (context, mut outbound_rx) =
         single_candidate_context_for_author(&fixture, ProviderName::Codex, provider);
-    let forward = spawn_engine_event_forward_task(
-        engine_rx,
-        context.outbound_tx.clone(),
-        None,
-    );
+    let forward = spawn_engine_event_forward_task(engine_rx, context.outbound_tx.clone(), None);
     handle_workspace_inbound_message(
         context,
         WsInMessage::StartGeneration {

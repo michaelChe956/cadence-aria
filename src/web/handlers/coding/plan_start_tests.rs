@@ -3455,12 +3455,7 @@ fn r2_collection_target(fixture: &N3Fixture) -> EnrollmentTarget {
         .target
         .logical_codebase_id
         .expect("n3 issue resolves a logical codebase authority");
-    let mut members = vec![
-        fixture.busi,
-        fixture.web,
-        fixture.gateway,
-        fixture.frontend,
-    ];
+    let mut members = vec![fixture.busi, fixture.web, fixture.gateway, fixture.frontend];
     members.sort();
     EnrollmentTarget::LogicalCodebaseMembers {
         logical_codebase_id,
@@ -3611,7 +3606,12 @@ async fn plan_coding_r2_drive_fanout_starts_auto_buckets_with_enrolled_origin() 
     assert_eq!(manual_claim.origin, CodingStartOrigin::Manual);
 
     // 未就绪的 AutoStartOnce 桶零启动。
-    assert!(fixture.target_attempt(fixture.frontend).start_claim.is_none());
+    assert!(
+        fixture
+            .target_attempt(fixture.frontend)
+            .start_claim
+            .is_none()
+    );
 
     let mut started = outcome.started_attempt_ids.clone();
     started.sort();
@@ -3683,18 +3683,12 @@ async fn plan_coding_r2_drive_enrolled_start_failure_writes_attention_fact() {
         .unwrap();
     r2_write_collection_enrollment(&fixture, true, R2_POLICY_REVISION);
 
-    let drive_error = drive_ready_units_for_plan(
-        &fixture.state,
-        PROJECT_ID,
-        ISSUE_ID,
-        PLAN_ID,
-        None,
-    )
-    .await
-    .expect_err("tampered enrolled start must fail closed");
+    let drive_error =
+        drive_ready_units_for_plan(&fixture.state, PROJECT_ID, ISSUE_ID, PLAN_ID, None)
+            .await
+            .expect_err("tampered enrolled start must fail closed");
     assert_eq!(
-        drive_error.code,
-        "plan_coding_continuation_start_failed",
+        drive_error.code, "plan_coding_continuation_start_failed",
         "{drive_error:?}"
     );
 
@@ -3714,9 +3708,20 @@ async fn plan_coding_r2_drive_enrolled_start_failure_writes_attention_fact() {
         .attention_facts
         .iter()
         .find(|fact| fact.key == expected_key)
-        .unwrap_or_else(|| panic!("coding_start failure fact missing: {:?}", enrollment.attention_facts));
-    assert_eq!(fact.kind, crate::product::models::automation::AutomationAttentionKind::AutomationFailed);
-    assert_eq!(fact.stage, crate::product::models::automation::AutomationAttentionStage::CodingStart);
+        .unwrap_or_else(|| {
+            panic!(
+                "coding_start failure fact missing: {:?}",
+                enrollment.attention_facts
+            )
+        });
+    assert_eq!(
+        fact.kind,
+        crate::product::models::automation::AutomationAttentionKind::AutomationFailed
+    );
+    assert_eq!(
+        fact.stage,
+        crate::product::models::automation::AutomationAttentionStage::CodingStart
+    );
     assert_eq!(fact.plan_id.as_deref(), Some(PLAN_ID));
     assert_eq!(fact.session_id.as_deref(), Some("session_r2_n3"));
     assert_eq!(fact.attempt_id.as_deref(), Some(web.id.as_str()));
@@ -3893,10 +3898,7 @@ async fn plan_coding_r2_parked_auto_bucket_revoked_zero_materialization() {
     assert!(outcome.resumed_attempt_ids.is_empty());
     // Manual 独立桶照常启动。
     assert!(
-        fixture
-            .target_attempt(fixture.web)
-            .start_claim
-            .is_some(),
+        fixture.target_attempt(fixture.web).start_claim.is_some(),
         "manual independent chain still starts"
     );
 }

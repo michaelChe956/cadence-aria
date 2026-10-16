@@ -521,9 +521,7 @@ fn unresolved_drive_failure_fact(
     plan_id: &str,
     session_id: &str,
 ) -> bool {
-    use crate::product::models::automation::{
-        AutomationAttentionKind, AutomationAttentionStage,
-    };
+    use crate::product::models::automation::{AutomationAttentionKind, AutomationAttentionStage};
     enrollment.attention_facts.iter().any(|fact| {
         fact.kind == AutomationAttentionKind::AutomationFailed
             && matches!(
@@ -546,8 +544,8 @@ async fn enrolled_lc_coding_chain(
     enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
     plan_id: &str,
 ) -> Result<Option<ReconcileOutcome>, String> {
-    use crate::product::coding_plan_run::{CodingPlanRunPhase, CodingPlanRunStore};
     use crate::product::coding_plan_run::CodingPlanStartOutcome;
+    use crate::product::coding_plan_run::{CodingPlanRunPhase, CodingPlanRunStore};
     use crate::web::handlers::{
         EnrolledPlanDriveIdentity, EnrolledPlanStartStep, drive_ready_units_for_plan,
         enrolled_plan_coding_start,
@@ -643,7 +641,7 @@ pub(crate) fn aggregate_plan_targets_fresh_status(
             CodingAttemptStatus::Failed
             | CodingAttemptStatus::Aborted
             | CodingAttemptStatus::AwaitingManualRecovery => {
-                return Ok(ReconcileOutcome::NeedsHuman)
+                return Ok(ReconcileOutcome::NeedsHuman);
             }
             CodingAttemptStatus::WaitingForHuman | CodingAttemptStatus::Blocked => {
                 awaiting_human = true;
@@ -674,7 +672,9 @@ async fn single_attempt_coding_chain(
     enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
     plan_id: &str,
 ) -> Result<Option<ReconcileOutcome>, String> {
-    use crate::product::advance_store::{AdvanceOutcome, AdvanceStatus, AdvanceStore, AdvanceInput};
+    use crate::product::advance_store::{
+        AdvanceInput, AdvanceOutcome, AdvanceStatus, AdvanceStore,
+    };
     use crate::product::coding_models::{CodingAttemptStatus, CodingStartOrigin};
     use crate::product::models::automation::AutomationAttentionStage;
     use crate::web::advance_plan::{AdvancePlanOrigin, advance_plan};
@@ -1271,10 +1271,7 @@ mod tests {
             .expect("coding plan run persisted before any root opens");
         assert_eq!(
             run.command_id,
-            format!(
-                "wiga-advance-{}-{plan_id}",
-                enrollment.enrollment_id
-            ),
+            format!("wiga-advance-{}-{plan_id}", enrollment.enrollment_id),
             "run command uses the stable enrollment/plan identity"
         );
         assert_eq!(run.phase, CodingPlanRunPhase::Prepared);
@@ -1313,7 +1310,10 @@ mod tests {
         assert_eq!(fixture.reconcile().await.unwrap(), ReconcileOutcome::Coding);
         assert_eq!(fixture.runner_count(&fixture.attempt_key()), 1);
         let replay = fixture.attempt();
-        assert_eq!(replay.start_claim.as_ref().unwrap().command_id, expected_command);
+        assert_eq!(
+            replay.start_claim.as_ref().unwrap().command_id,
+            expected_command
+        );
     }
 
     /// R2 ⑥：advance 链失败（plan 进入在途 amendment → 共享服务 prepare
@@ -1356,13 +1356,9 @@ mod tests {
             ReconcileOutcome::NeedsHuman
         );
 
-
         let store = IssueAutomationStore::new(fixture.inner.paths.clone());
         let saved = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
-        let command_id = format!(
-            "wiga-advance-{}-{plan_id}",
-            enrollment.enrollment_id
-        );
+        let command_id = format!("wiga-advance-{}-{plan_id}", enrollment.enrollment_id);
         let expected_key = format!("{plan_id}:{command_id}:advance_failed");
         let fact = saved
             .attention_facts
@@ -1372,10 +1368,7 @@ mod tests {
         assert_eq!(fact.kind, AutomationAttentionKind::AutomationFailed);
         assert_eq!(fact.stage, AutomationAttentionStage::Advance);
         assert_eq!(fact.plan_id.as_deref(), Some(plan_id.as_str()));
-        assert_eq!(
-            fact.session_id.as_deref(),
-            enrollment.session_id.as_deref()
-        );
+        assert_eq!(fact.session_id.as_deref(), enrollment.session_id.as_deref());
         assert!(!fact.reason_code.is_empty());
         let frozen_at = fact.occurred_at.clone();
         assert!(

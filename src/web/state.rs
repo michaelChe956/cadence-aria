@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use crate::cross_cutting::aria_state_paths::AriaStatePaths;
-use crate::cross_cutting::bounded_command_runner::{BoundedCommandRunner, TokioBoundedCommandRunner};
+use crate::cross_cutting::bounded_command_runner::{
+    BoundedCommandRunner, TokioBoundedCommandRunner,
+};
 use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::claude_code_provider::ClaudePolicyProjector;
 use crate::cross_cutting::codex_provider::CodexPolicyProjector;
@@ -48,7 +50,9 @@ pub use repository_initialization_run_registry::{
     RepositoryInitializationRunRegistry,
 };
 mod aggregate_index_rebuild_registry;
-pub use aggregate_index_rebuild_registry::{AggregateIndexRebuildLease, AggregateIndexRebuildRegistry};
+pub use aggregate_index_rebuild_registry::{
+    AggregateIndexRebuildLease, AggregateIndexRebuildRegistry,
+};
 
 #[derive(Clone, Default)]
 pub struct WorkspaceRunRegistry {
