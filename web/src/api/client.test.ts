@@ -14,6 +14,7 @@ import {
   deleteCodingAttempt,
   generateDesignSpecs,
   generateStorySpecs,
+  getAutomationEnrollmentControl,
   getProviderStatus,
   getIssueLifecycle,
   getRepositoryInitialization,
@@ -22,6 +23,7 @@ import {
   listProjects,
   listRepositories,
   normalizeApiError,
+  postAutomationContinuePlan,
   postCodingGateResponse,
   recheckProviders,
   restartCodingAttempt,
@@ -795,5 +797,136 @@ describe("api client", () => {
         }),
       }),
     );
+  });
+
+  // 批 2 P5（REQ-WIGA-10）：plan 阶段失败继续的 control/continue REST 通道
+  //（消费 P4 落地的 GET automation-enrollment/control 与 POST continue-plan）。
+  const p5ControlBinding = {
+    binding_version: 1,
+    enrollment_id: "enrollment_0001",
+    plan_id: "plan_0001",
+    session_id: "session_0001",
+    source: { stories: [], designs: [] },
+    target: {
+      kind: "logical_codebase" as const,
+      logical_codebase_id: "11111111-1111-1111-1111-111111111111",
+      logical_repository_id: "00000000-0000-0000-0000-000000000001",
+    },
+    author_provider: "fake" as const,
+    reviewer_provider: "fake" as const,
+  };
+
+  it("gets the automation enrollment control projection with encoded ids", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            managed: true,
+            binding: p5ControlBinding,
+            plan_id: "plan_0001",
+            session_id: "session_0001",
+            terminated_at: null,
+            stop_key: "plan_failed:node_1",
+            stage: "failed",
+            allowed_actions: ["continue_plan"],
+            context_required: false,
+          }),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      getAutomationEnrollmentControl("project 1", "issue 1"),
+    ).resolves.toMatchObject({
+      managed: true,
+      stop_key: "plan_failed:node_1",
+      stage: "failed",
+      allowed_actions: ["continue_plan"],
+      context_required: false,
+    });
+    // requestJson 缺省走 fetch 默认 GET（不显式携带 method），与
+    // getAutomationEnrollment 等既有 GET 通道同式。
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project%201/issues/issue%201/automation-enrollment/control",
+      expect.objectContaining({ headers: { "content-type": "application/json" } }),
+    );
+  });
+
+  it("posts continue-plan with exact URL and body", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            command_id: "cmd-continue-1",
+            state: "accepted",
+            session_id: "session_0001",
+          }),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      postAutomationContinuePlan("project_1", "issue_0001", {
+        command_id: "cmd-continue-1",
+        expected_binding: p5ControlBinding,
+        expected_stop_key: "plan_failed:node_1",
+        context: "请重点看依赖声明",
+      }),
+    ).resolves.toMatchObject({
+      command_id: "cmd-continue-1",
+      state: "accepted",
+      session_id: "session_0001",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project_1/issues/issue_0001/automation-enrollment/continue-plan",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          command_id: "cmd-continue-1",
+          expected_binding: p5ControlBinding,
+          expected_stop_key: "plan_failed:node_1",
+          context: "请重点看依赖声明",
+        }),
+      }),
+    );
+  });
+
+  it("surfaces continue-plan server rejections as ApiRequestError without retry", async () => {
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        return new Response(
+          JSON.stringify({
+            code: "automation_continue_context_required",
+            message: "a non-empty context note is required to continue a stopped human gate",
+            details: {},
+          }),
+          { status: 422 },
+        );
+      }),
+    );
+
+    const error: ApiRequestError = await postAutomationContinuePlan(
+      "project_1",
+      "issue_0001",
+      {
+        command_id: "cmd-continue-1",
+        expected_binding: p5ControlBinding,
+        expected_stop_key: "plan_gate:session_0001",
+      },
+    ).then(
+      () => {
+        throw new Error("expected context_required rejection");
+      },
+      (reason: ApiRequestError) => reason,
+    );
+
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect(error.code).toBe("automation_continue_context_required");
+    expect(callCount).toBe(1);
   });
 });

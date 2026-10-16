@@ -675,6 +675,130 @@ export function rebindAutomationEnrollment(
   );
 }
 
+// 批 2 P5（REQ-WIGA-10）：plan 阶段失败继续的只读 control 投影（P4 落地
+// 的 GET automation-enrollment/control）。DTO 类型留在 client.ts——wire
+// 类型文件（api/types/lifecycle.ts）不在本包独占清单内；expected_binding
+// 复用 EnrollmentBindingIdentity（与 Rust EnrollmentBindingIdentity 同形）。
+export type AutomationControlStatus = {
+  managed: boolean;
+  binding?: EnrollmentBindingIdentity | null;
+  plan_id?: string | null;
+  session_id?: string | null;
+  terminated_at?: string | null;
+  stop_key?: string | null;
+  stage: string;
+  allowed_actions: string[];
+  context_required: boolean;
+};
+
+export type AutomationContinuePlanRequest = {
+  command_id: string;
+  expected_binding: EnrollmentBindingIdentity;
+  expected_stop_key: string;
+  /** 对话窗口补充说明：provider 失败继续可空；评审超限继续必须非空。 */
+  context?: string;
+};
+
+export type AutomationContinuePlanStatus = {
+  command_id: string;
+  state: "accepted" | "replayed" | "needs_human" | string;
+  session_id: string;
+  reason_code?: string | null;
+};
+
+/** GET 只读管理投影：真实 stop_key/stage/allowed_actions/context_required。 */
+export function getAutomationEnrollmentControl(
+  projectId: string,
+  issueId: string,
+): Promise<AutomationControlStatus> {
+  return requestJson<AutomationControlStatus>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/automation-enrollment/control`,
+  );
+}
+
+/**
+ * 批 2 P5（REQ-WIGA-10）：POST continue-plan。200 回执
+ * （accepted/replayed/needs_human）原样返回；4xx（含
+ * automation_continue_context_required 空说明、stop_key 漂移、terminated
+ * 拒绝等）抛 ApiRequestError——code/message 上抛，由调用方呈现。
+ */
+export async function postAutomationContinuePlan(
+  projectId: string,
+  issueId: string,
+  payload: AutomationContinuePlanRequest,
+): Promise<AutomationContinuePlanStatus> {
+  const response = await fetch(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/automation-enrollment/continue-plan`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  const body: unknown = await response.json().catch(() => null);
+  if (
+    response.ok &&
+    isRecord(body) &&
+    typeof body.command_id === "string" &&
+    typeof body.state === "string" &&
+    typeof body.session_id === "string"
+  ) {
+    return body as AutomationContinuePlanStatus;
+  }
+  if (!response.ok) {
+    const error: unknown = body;
+    throw new ApiRequestError({
+      code:
+        isRecord(error) && typeof error.code === "string"
+          ? error.code
+          : "web_client_error",
+      message:
+        isRecord(error) && typeof error.message === "string"
+          ? error.message
+          : response.statusText,
+      details:
+        isRecord(error) && isRecord(error.details)
+          ? (error.details as ApiError["details"])
+          : {},
+    });
+  }
+  throw new ApiRequestError({
+    code: "automation_continue_unexpected_response",
+    message: "继续自动化端点返回了无法识别的回执",
+    details: {},
+  });
+}
+
+/**
+ * 批 2 P5：workspace session → (project_id, issue_id) 只读目录解析——
+ * control/continue 均以 issue 为作用域，会话页只有 sessionId；按 observers
+ * 同源目录（projects → issues → lifecycle workspace_sessions）扫描定位，
+ * 找不到返回 null（调用方保持静默，不出恢复面）。
+ */
+export async function findWorkspaceSessionIssueAddress(
+  sessionId: string,
+): Promise<{ projectId: string; issueId: string } | null> {
+  try {
+    const { projects } = await listProjects();
+    for (const project of projects) {
+      const listed = await listProductIssues(project.project_id);
+      for (const issue of listed.issues) {
+        const lifecycle = await getIssueLifecycle(issue.issue_id, project.project_id);
+        if (
+          lifecycle.workspace_sessions.some(
+            (session) => session.workspace_session_id === sessionId,
+          )
+        ) {
+          return { projectId: project.project_id, issueId: issue.issue_id };
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 export function createCodingAttempt(
   projectId: string,
   issueId: string,

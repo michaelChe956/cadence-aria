@@ -522,7 +522,20 @@ function CockpitInboxRow({
             人工重新驱动
           </button>
         ) : null}
-        {item.kind === "stopped" && onTakeover ? (
+        {item.kind === "stopped" && item.automationManaged === true ? (
+          // 批 2 P5（REQ-WIGA-08 C1 前端半）：enabled 精确绑定当前 enrollment
+          // 的托管 stopped 卡不渲染接管按钮（服务端 P4 已拒
+          // workspace_session_takeover_not_allowed，隐藏仅同步呈现）；指引走
+          // 原 plan 对话窗口补说明继续，不转手动。视觉与 P2-d 卡片体系同源
+          //（琥珀指引底 + 中性弱化卡面）。
+          <p
+            data-testid="stopped-managed-hint"
+            className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs leading-4 text-amber-900"
+          >
+            自动化托管中——在原对话窗口补说明后「继续自动化」，不支持接管转手动
+          </p>
+        ) : null}
+        {item.kind === "stopped" && item.automationManaged !== true && onTakeover ? (
           <div className="mt-2 flex flex-wrap gap-2">
             {takeoverDisabled ? (
               <button

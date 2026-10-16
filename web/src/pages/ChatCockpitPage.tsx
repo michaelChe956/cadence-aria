@@ -2,9 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ClipboardCopy } from "lucide-react";
 import type { AuthorDecisionChoice } from "../api/types";
 import {
+  findWorkspaceSessionIssueAddress,
   getCodingAttemptSnapshot,
+  getAutomationEnrollmentControl,
+  postAutomationContinuePlan,
   postRetryFailedScRun,
   takeoverWorkspaceSession,
+  type AutomationControlStatus,
 } from "../api/client";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import {
@@ -690,6 +694,158 @@ export function ChatCockpitPage({
     },
     [sessionId],
   );
+
+  // 批 2 P5（REQ-WIGA-10）：plan 阶段失败/停点的对话窗口继续 UI。数据链：
+  // 本地停点形态门（completed 投影/failed/stopped_needs_human）→ 会话所属
+  // issue 目录解析（一次，缓存）→ P4 control GET 只读投影（stop_key/stage/
+  // allowed_actions/context_required）→ continue-plan REST。一切动作与读取
+  // 都走 client.ts 通道；前端不凭本地状态决定恢复路线（control 为权威）。
+  const [planIssueAddress, setPlanIssueAddress] = useState<{
+    projectId: string;
+    issueId: string;
+  } | null>(null);
+  const [planControl, setPlanControl] = useState<AutomationControlStatus | null>(null);
+  const [planContinueNotice, setPlanContinueNotice] = useState<{
+    tone: "info" | "warn" | "danger";
+    text: string;
+  } | null>(null);
+  const [planControlRefreshTick, setPlanControlRefreshTick] = useState(0);
+  // 同源托管管理态：durable 归属 owner=server 且 enabled（与 P4 服务端
+  // takeover 拒绝/收件箱隐藏同源），未知（null）不猜。
+  const sessionManagedByAutomation =
+    state.automation?.owner === "server" && state.automation.enabled === true;
+  // 停点形态门：Failed/停点的 completed 投影是红测靶点；generation_needs_human
+  // 的 durable session 侧同样停在 completed/failed 形态。
+  const planStopShaped =
+    state.workspaceType === "work_item_plan" &&
+    (state.stage === "completed" ||
+      state.sessionStatus === "failed" ||
+      state.sessionStatus === "stopped_needs_human");
+  const planContinueEligible =
+    isCurrentSession && sessionManagedByAutomation && planStopShaped;
+
+  useEffect(() => {
+    if (!planContinueEligible || planIssueAddress !== null) {
+      return;
+    }
+    let alive = true;
+    // 只读目录解析（projects → issues → lifecycle）；失败静默保持无恢复面。
+    void findWorkspaceSessionIssueAddress(sessionId)
+      .then((address) => {
+        if (alive && address !== null) {
+          setPlanIssueAddress(address);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [planContinueEligible, planIssueAddress, sessionId]);
+
+  useEffect(() => {
+    if (!planContinueEligible || planIssueAddress === null) {
+      if (!planContinueEligible) {
+        setPlanControl(null);
+      }
+      return;
+    }
+    let alive = true;
+    const { projectId, issueId } = planIssueAddress;
+    void getAutomationEnrollmentControl(projectId, issueId)
+      .then((status) => {
+        if (alive) {
+          setPlanControl(status);
+        }
+      })
+      .catch(() => {
+        if (alive) {
+          setPlanControl(null);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+    // 会话状态推进/继续动作后复读（tick 递增），停点漂移即时对账。
+  }, [
+    planContinueEligible,
+    planIssueAddress,
+    planControlRefreshTick,
+    sessionId,
+    state.activeNodeId,
+    state.sessionStatus,
+    state.stage,
+  ]);
+
+  // 恢复面资格只镜像 control 的 allowed_actions（含 continue_plan）与身份
+  //（stop_key/binding）；terminated/unmanaged/waiting 无 continue 不出面。
+  const planContinueControl =
+    planControl !== null &&
+    planControl.managed &&
+    planControl.terminated_at == null &&
+    planControl.stop_key != null &&
+    planControl.binding != null &&
+    planControl.allowed_actions.includes("continue_plan")
+      ? {
+          stage: planControl.stage,
+          contextRequired: planControl.context_required,
+          stopKey: planControl.stop_key,
+          binding: planControl.binding,
+        }
+      : null;
+
+  // 停点切换时撤旧通知（不同停点的回执不再悬挂）。
+  useEffect(() => {
+    setPlanContinueNotice(null);
+  }, [planContinueControl?.stopKey]);
+
+  const handlePlanContinue = useCallback(
+    async (context: string | null): Promise<boolean> => {
+      const control = planControl;
+      if (
+        planIssueAddress === null ||
+        control === null ||
+        control.stop_key == null ||
+        control.binding == null
+      ) {
+        return false;
+      }
+      try {
+        // 每次用户提交都是新命令（context 变化即不同 payload；同键异负载
+        // 服务端 fail-closed 拒绝，重放语义只护同 payload 的重复投递）。
+        const status = await postAutomationContinuePlan(
+          planIssueAddress.projectId,
+          planIssueAddress.issueId,
+          {
+            command_id: newCommandId(),
+            expected_binding: control.binding,
+            expected_stop_key: control.stop_key,
+            ...(context !== null ? { context } : {}),
+          },
+        );
+        if (status.state === "accepted" || status.state === "replayed") {
+          setPlanContinueNotice({ tone: "info", text: "已继续，自动化推进中" });
+        } else {
+          setPlanContinueNotice({
+            tone: "warn",
+            text: `需人工分诊：${status.reason_code ?? status.state}`,
+          });
+        }
+        setPlanControlRefreshTick((tick) => tick + 1);
+        return true;
+      } catch (error) {
+        const code =
+          typeof error === "object" && error !== null && "code" in error
+            ? String(error.code)
+            : "automation_continue_failed";
+        const message =
+          error instanceof Error && error.message !== "" ? error.message : "继续自动化请求失败";
+        setPlanContinueNotice({ tone: "danger", text: `${code} · ${message}` });
+        setPlanControlRefreshTick((tick) => tick + 1);
+        return false;
+      }
+    },
+    [planControl, planIssueAddress],
+  );
   // F-11/F-28 二轮：裸 driver 抢走租约（STALE_DRIVER_LEASE）或本连接以
   // observer 身份重连（OBSERVER_WRITE_REJECTED）后写操作被拒——重发 driver
   // hello 即重新持有租约（服务端 bind_role 对既有连接同样执行 lease.acquire），
@@ -743,7 +899,11 @@ export function ChatCockpitPage({
     () =>
       observedInbox.find(
         (item) =>
-          item.kind === "stopped" && item.id.startsWith(`${sessionId}:`),
+          item.kind === "stopped" &&
+          // 批 2 P5（C1 前端半）：托管 stopped 卡无接管按钮（服务端已拒），
+          // 接管热键不再瞄准该卡。
+          item.automationManaged !== true &&
+          item.id.startsWith(`${sessionId}:`),
       )?.id.split(":")[0] ?? null,
     [observedInbox, sessionId],
   );
@@ -1164,9 +1324,12 @@ export function ChatCockpitPage({
               codex run 楔死 27min 期间页面无任何脱困控件。矩阵
               （workspace_ws_handler/protocol.rs Running/CrossReview/Revision 臂）
               均已放行 WsInMessage::Abort；ChatInputBar 的 BUSY_STAGES 自带
-              禁输入+仅中止钮形态。 */}
+              禁输入+仅中止钮形态。
+              批 2 P5（REQ-WIGA-10）：Failed/停点的 completed 投影叠加 control
+              恢复资格时同样渲染输入条（恢复形态，见 planContinue prop）。 */}
           {isCurrentSession &&
-          (state.stage === "prepare_context" ||
+          (planContinueControl !== null ||
+            state.stage === "prepare_context" ||
             state.stage === "author_confirm" ||
             state.stage === "running" ||
             state.stage === "cross_review" ||
@@ -1196,6 +1359,17 @@ export function ChatCockpitPage({
               onAbort={workspaceWs.abort}
               hardErrorNotice={hardErrorNotice}
               gateOpen={selectGateProjection(state) !== null}
+              planContinue={
+                planContinueControl !== null
+                  ? {
+                      stage: planContinueControl.stage,
+                      contextRequired: planContinueControl.contextRequired,
+                      stopKey: planContinueControl.stopKey,
+                      notice: planContinueNotice,
+                      onSubmit: handlePlanContinue,
+                    }
+                  : null
+              }
             />
           ) : null}
           {/* 退役留档（T5/REQ-RET-02）：review_decision 动作条随消息族删除。 */}

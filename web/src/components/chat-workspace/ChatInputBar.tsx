@@ -59,6 +59,18 @@ interface ChatInputBarProps {
    * 漂移停在 busy 形态（F-53 现场）时中止钮被误当会话级「终止」；门级
    * 动作（反馈/确认/终止此门）由门卡承载，此处只做呈现分层不发新帧。 */
   gateOpen?: boolean;
+  /** 批 2 P5（REQ-WIGA-10）：plan 阶段失败/停点的恢复形态——completed 投影
+   * 仍可输入；stage/context_required 消费 P4 control GET，空说明拦截双保险
+   *（前端禁用＋服务端 validation）；onSubmit 解析 true=已出站（消耗输入＋
+   * 乐观条目）、false=失败保留输入。恢复形态不出现中止/开始生成/发送等
+   * 其它入口（无暂停、不转手动）。 */
+  planContinue?: {
+    stage: string;
+    contextRequired: boolean;
+    stopKey: string | null;
+    notice?: { tone: "info" | "warn" | "danger"; text: string } | null;
+    onSubmit: (context: string | null) => Promise<boolean>;
+  } | null;
 }
 
 export interface HardErrorNotice {
@@ -107,6 +119,7 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   onInputFocus,
   hardErrorNotice = null,
   gateOpen = false,
+  planContinue = null,
 }, ref) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
@@ -130,8 +143,11 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
     : authorOption.available
       ? "（可用）"
       : "（不可用）";
+  // 批 2 P5（REQ-WIGA-10）：plan 恢复形态优先于舞台矩阵——completed 投影
+  //（Failed/停点）仍可输入；其余动作区（开始生成/发送/中止）一律让位。
+  const planContinueActive = planContinue !== null;
   // 生成动作区只在 PrepareContext 有意义：Running 等阶段（生成中/锁定）不受 provider 门影响。
-  const showStartGeneration = isPrepareContext && !hideStartGeneration;
+  const showStartGeneration = !planContinueActive && isPrepareContext && !hideStartGeneration;
   const startGenerationBlocked =
     startGenerationDisabled || providerBlockReason !== null;
   // 阻断提示：provider 不可用原因优先（按钮可见时才谈得上），其次宿主传入的终态提示；
@@ -155,12 +171,22 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
   // 「发送反馈」恢复可用（提交即 request_revision）；未接线（WorkItemPlan 门/
   // 旧页面）时维持只读呈现，不发不误发。
   const inputDisabled =
-    disabled || isHumanConfirm || isBusy || stage === "completed";
+    disabled ||
+    (!planContinueActive && (isHumanConfirm || isBusy || stage === "completed"));
+  // 空说明拦截（P4 control context_required 的前端半）：评审超限继续必须
+  // 非空——按钮禁用＋就地提示；服务端 validation 是权威兜底。
+  const planContextMissing =
+    planContinueActive && planContinue.contextRequired && trimmedInput.length === 0;
+  const [planSubmitting, setPlanSubmitting] = useState(false);
+  const planSubmitBlocked = planSubmitting || planContextMissing || disabled;
   const canSendRevision =
-    isAuthorConfirm && onSendRevisionFeedback !== undefined && !inputDisabled;
+    !planContinueActive &&
+    isAuthorConfirm &&
+    onSendRevisionFeedback !== undefined &&
+    !inputDisabled;
   const canSend =
     !inputDisabled && trimmedInput.length > 0 && (isPrepareContext || canSendRevision);
-  const showSend = isPrepareContext || canSendRevision;
+  const showSend = !planContinueActive && (isPrepareContext || canSendRevision);
   const draftPayload =
     workItemPlanArtifact?.type === "draft_candidate" ? workItemPlanArtifact.payload : null;
   const batchPayload =
@@ -190,8 +216,27 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
     [],
   );
 
-  function handleSubmit(event: FormEvent) {
+  async function handleSubmit(event: FormEvent) {
     event.preventDefault();
+    if (planContinueActive && planContinue !== null) {
+      if (planSubmitBlocked) {
+        return;
+      }
+      // P5 恢复提交：页面接线 continue-plan REST（client.ts 通道）；true=已
+      // 出站（消耗输入＋乐观条目对齐既有发送语义），false=失败保留输入。
+      setPlanSubmitting(true);
+      const dispatched = await planContinue
+        .onSubmit(trimmedInput.length > 0 ? trimmedInput : null)
+        .catch(() => false);
+      setPlanSubmitting(false);
+      if (dispatched) {
+        if (trimmedInput.length > 0) {
+          appendOptimisticEntry("context_note", trimmedInput);
+        }
+        setInput("");
+      }
+      return;
+    }
     if (!canSend) {
       return;
     }
@@ -223,6 +268,47 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
       className="border-t border-[var(--aria-line)] bg-[var(--aria-panel)] p-3"
     >
       <div className="flex min-w-0 flex-col gap-2">
+        {planContinueActive && planContinue !== null ? (
+          // 批 2 P5（REQ-WIGA-10）：失败/超限/NeedsHuman 三态卡——与 P2-d
+          // 分诊卡同一视觉体系（琥珀底、大白话叙事、技术详情折叠）。
+          <div
+            data-testid="plan-continue-card"
+            className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2"
+          >
+            <p className="text-sm font-semibold text-amber-900">
+              {PLAN_CONTINUE_NARRATIVE[planContinue.stage]?.title ?? "自动化计划停在停点"}
+            </p>
+            <p className="mt-1 text-xs leading-4 text-amber-900">
+              {PLAN_CONTINUE_NARRATIVE[planContinue.stage]?.body ??
+              "自动化已停在原点，等待人工处理后继续。"}
+            </p>
+            <details data-testid="plan-continue-details" className="mt-1">
+              <summary className="cursor-pointer text-xs font-semibold text-amber-900">
+                技术详情
+              </summary>
+              <p className="aria-mono mt-0.5 break-words text-xs leading-4 text-amber-800">
+                stage={planContinue.stage}
+                {planContinue.stopKey !== null ? ` · stop_key=${planContinue.stopKey}` : ""}
+              </p>
+            </details>
+          </div>
+        ) : null}
+        {planContinueActive && planContinue?.notice ? (
+          <p
+            data-testid="plan-continue-notice"
+            role={planContinue.notice.tone === "danger" ? "alert" : "status"}
+            className={[
+              "aria-mono rounded-md border px-3 py-2 text-xs leading-4",
+              planContinue.notice.tone === "info"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                : planContinue.notice.tone === "warn"
+                  ? "border-amber-200 bg-amber-50 text-amber-900"
+                  : "border-red-200 bg-red-50 text-red-700",
+            ].join(" ")}
+          >
+            {planContinue.notice.text}
+          </p>
+        ) : null}
         <textarea
           ref={textareaRef}
           data-testid="context-note-input"
@@ -231,7 +317,13 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
           onFocus={onInputFocus}
           disabled={inputDisabled}
           rows={3}
-          placeholder={placeholderForStage(stage, activeNodeType)}
+          placeholder={
+            planContinueActive
+              ? (planContinue?.contextRequired ?? false)
+                ? "用一两句话说明情况；该说明会随「继续自动化」一并带给 AI"
+                : "可补充说明（可选），或直接点「继续自动化」"
+              : placeholderForStage(stage, activeNodeType)
+          }
           className="min-h-20 max-h-60 w-full resize-y rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm text-[var(--aria-ink)] placeholder:text-[var(--aria-ink-muted)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
         />
         {/* F-28 二轮：hard_error 就地错误面紧贴动作按钮行——收件箱条目远离
@@ -296,8 +388,9 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
         ) : null}
         <div className="flex flex-wrap items-center justify-end gap-2">
           {/* C3/REQ-HTR-02：busy 形态叠加「无开启中人工门」——门开态（含
-              stage 漂移误显 busy）不渲染 run 级中止钮，避免挤占「终止」心智。 */}
-          {isBusy && !gateOpen ? (
+              stage 漂移误显 busy）不渲染 run 级中止钮，避免挤占「终止」心智。
+              P5 恢复形态同样不出中止（无暂停语义，终止归 T4 统一入口）。 */}
+          {!planContinueActive && isBusy && !gateOpen ? (
             <button
               type="button"
               onClick={onAbort}
@@ -318,6 +411,27 @@ export const ChatInputBar = forwardRef<ChatInputBarHandle, ChatInputBarProps>(
               <Send className="h-4 w-4" />
               {canSendRevision ? "发送反馈" : "发送"}
             </button>
+          ) : null}
+          {planContinueActive ? (
+            <>
+              <button
+                data-testid="plan-continue-submit"
+                type="submit"
+                disabled={planSubmitBlocked}
+                className="inline-flex h-9 items-center gap-2 rounded-md border border-amber-300 bg-white px-3 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+              >
+                <RefreshCcw className="h-4 w-4" />
+                {planSubmitting ? "处理中" : "继续自动化"}
+              </button>
+              {planContextMissing ? (
+                <span
+                  data-testid="plan-continue-context-hint"
+                  className="w-full text-right text-xs font-semibold text-[var(--aria-danger)]"
+                >
+                  请先写一两句话说明情况——该说明会随「继续自动化」一并带给 AI
+                </span>
+              ) : null}
+            </>
           ) : null}
           {/* 退役留档（T5/REQ-RET-02）：staged/author 决策按钮分支随消息族删除。 */}
           {showStartGeneration ? (
@@ -382,6 +496,26 @@ function placeholderForStage(stage: string, activeNodeType?: string | null) {
   }
   return "补充上下文";
 }
+
+/**
+ * 批 2 P5（REQ-WIGA-10）：失败/超限/NeedsHuman 三态大白话叙事——与 P2-d
+ * 分诊卡（CoderTriageCard/buildTriageNarrative）同一叙事体系：先讲
+ * 「AI 遇到什么问题」，再说下一步怎么走；技术细节收进折叠。
+ */
+const PLAN_CONTINUE_NARRATIVE: Record<string, { title: string; body: string }> = {
+  failed: {
+    title: "AI 生成计划失败了",
+    body: "Provider 运行失败，自动化停在原点。可直接「继续自动化」重试，也可先写一两句说明（可选）一并带给 AI。",
+  },
+  stopped_needs_human: {
+    title: "人工说明次数已用尽",
+    body: "评审轮的人工说明预算已耗尽。请在下方写一两句补充说明后「继续自动化」——只开启一个新的说明回合，历史不清零。",
+  },
+  generation_needs_human: {
+    title: "计划生成停在人工分诊点",
+    body: "派发前出现需要人工处理的情况（如副作用不明）。可补充说明（可选）后「继续自动化」继续，保留自动化不转手动。",
+  },
+};
 
 function appendOptimisticEntry(type: ChatEntryType, content: string) {
   const entry: ChatEntry = {

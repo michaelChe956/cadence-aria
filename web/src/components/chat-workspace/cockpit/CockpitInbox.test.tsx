@@ -318,6 +318,45 @@ describe("CockpitInbox", () => {
     expect(within(inbox).getAllByTestId("confirm-twice-button")).toHaveLength(3);
   });
 
+  // 批 2 P5（REQ-WIGA-08 C1 前端半）：enabled 精确绑定当前 enrollment 的
+  // stopped 卡不渲染接管按钮（服务端 P4 已拒，隐藏仅同步呈现），托管卡给
+  // 对话窗口继续指引；非托管 stopped 卡接管按钮原样保留。
+  it("hides takeover on managed stopped cards and keeps it for unmanaged ones", () => {
+    const stoppedBase: CockpitInboxItem = {
+      id: "session_001:stopped:session_001",
+      kind: "stopped",
+      severity: 2,
+      title: "会话停在停点",
+      summary: "停点原因：stopped_needs_human · 等待人工接管后继续",
+      triage: false,
+      source: "session_status",
+      createdAt: null,
+      gate: null,
+      inlineError: null,
+      choice: null,
+    };
+
+    render(
+      <CockpitInbox
+        items={[
+          { ...stoppedBase, automationManaged: true, summary: "停点原因：stopped_needs_human · 自动化托管中——在对话窗口补说明继续" },
+          { ...stoppedBase, id: "session_002:stopped:session_002" },
+        ]}
+        actions={actions}
+        onTakeover={vi.fn(async () => undefined)}
+        actionableSessionId="session_001"
+      />,
+    );
+
+    const rows = screen.getAllByTestId("cockpit-inbox-item-stopped");
+    expect(rows).toHaveLength(2);
+    // 托管卡：无接管按钮，只给托管指引。
+    expect(within(rows[0]!).queryByRole("button", { name: "接管" })).toBeNull();
+    expect(within(rows[0]!).getByTestId("stopped-managed-hint")).toBeVisible();
+    // 非托管卡：接管按钮原样保留（回归）。
+    expect(within(rows[1]!).getByRole("button", { name: "接管" })).toBeVisible();
+  });
+
   it("explains the current plan, exposes bulk selection text, and makes confirmation primary", () => {
     render(
       <CockpitInbox

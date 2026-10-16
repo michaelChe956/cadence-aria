@@ -447,6 +447,55 @@ describe("workspace cockpit inbox projection", () => {
     ]);
   });
 
+  // 批 2 P5（REQ-WIGA-08 C1 前端半）：stopped 卡的同源托管管理态——durable
+  // automation 归属（P0 1.2 WS session_state.automation）owner=server 且
+  // enabled 的会话即「enabled 精确绑定当前 enrollment」（与 P4 服务端 takeover
+  // 拒绝同源），收件箱据此隐藏接管按钮；前端隐藏只是同步呈现，不以隐藏
+  // 代替服务端拒绝。
+  it("projects the managed flag and recovery copy on stopped items for server-owned enabled sessions", () => {
+    const store = useWorkspaceStore.getState();
+    store.setSessionStatus("stopped_needs_human");
+    useWorkspaceStore.setState({
+      automation: {
+        owner: "server",
+        enrollment_id: "enrollment_0001",
+        policy_revision: 1,
+        enabled: true,
+      },
+    });
+
+    const items = selectCockpitInbox(useWorkspaceStore.getState());
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        id: "stopped:session",
+        kind: "stopped",
+        automationManaged: true,
+      }),
+    ]);
+    expect(items[0]?.summary).not.toContain("等待人工接管");
+    expect(items[0]?.summary).toContain("对话窗口");
+  });
+
+  it("keeps the takeover copy and no managed flag for non-managed stopped sessions", () => {
+    for (const automation of [
+      null,
+      { owner: "client" as const, enrollment_id: "e", policy_revision: 1, enabled: false },
+      { owner: "server" as const, enrollment_id: "e", policy_revision: 1, enabled: false },
+    ]) {
+      useWorkspaceStore.setState({ automation });
+      useWorkspaceStore.getState().setSessionStatus("stopped_needs_human");
+
+      const items = selectCockpitInbox(useWorkspaceStore.getState());
+
+      expect(items[0]).toMatchObject({
+        kind: "stopped",
+        automationManaged: false,
+        summary: "停点原因：stopped_needs_human · 等待人工接管后继续",
+      });
+    }
+  });
+
   it("projects protocol errors as hard error items", () => {
     useWorkspaceStore.getState().setProtocolError({
       code: "INVALID_HUMAN_CONFIRM_ACTION",

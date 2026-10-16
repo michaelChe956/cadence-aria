@@ -612,6 +612,11 @@ export interface CockpitInboxItem {
   trustMissing?: TrustMissingProjection | null;
   /** trustMissing 条目对应 provider 已显式登记成功（typed 回执对账）。 */
   trustRegistered?: boolean;
+  /** 批 2 P5（REQ-WIGA-08 C1 前端半）：kind="stopped" 时的托管管理态——
+   * durable automation 归属 owner=server 且 enabled（与 P4 服务端 takeover
+   * 拒绝同源判据）；true 时收件箱不渲染接管按钮（隐藏仅同步呈现，服务端
+   * 拒绝仍是权威）。其余 kind 缺省。 */
+  automationManaged?: boolean;
 }
 
 /** trust 缺失指引卡投影（owner 2026-10-12 直批简化）：结构化指导
@@ -1115,6 +1120,11 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
   }
 
   if (state.sessionStatus === "stopped_needs_human") {
+    // 批 2 P5（C1 前端半）：durable 归属 owner=server 且 enabled 即托管态
+    //（与 P4 服务端 takeover 拒绝同源）——文案指向对话窗口继续而非人工
+    // 接管；非托管保留 L4 最小版接管文案。
+    const automationManaged =
+      state.automation?.owner === "server" && state.automation.enabled === true;
     items.push({
       id: `stopped:${state.sessionId ?? "session"}`,
       kind: "stopped",
@@ -1122,13 +1132,16 @@ export function selectCockpitInbox(state: WorkspaceWsState): CockpitInboxItem[] 
       title: "会话停在停点",
       // L4（最小版）：停点原因从 session 状态字段取，后缀为静态接管文案；
       // 完整停点指纹（已完成原因 + 已完成进度 + 失败指纹）随 1b 的 takeover 接线（REQ-UI37-08，tasks.md 2.9）深化。
-      summary: `停点原因：${state.sessionStatus} · 等待人工接管后继续`,
+      summary: automationManaged
+        ? `停点原因：${state.sessionStatus} · 自动化托管中——在对话窗口补说明继续`
+        : `停点原因：${state.sessionStatus} · 等待人工接管后继续`,
       triage: false,
       source: "session_status",
       createdAt: null,
       gate: null,
       inlineError: null,
       choice: null,
+      automationManaged,
     });
   }
 

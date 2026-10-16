@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
@@ -577,6 +578,123 @@ describe("ChatInputBar", () => {
       expect(screen.queryByTestId("start-generation-blocked-hint")).toBeNull();
       expect(screen.getByRole("button", { name: "中止" })).toBeInTheDocument();
       expect(screen.getByRole("textbox")).toBeDisabled();
+    });
+  });
+
+  // 批 2 P5（REQ-WIGA-10）：plan 阶段失败/停点的 completed 投影恢复输入——
+  // 消费 P4 control GET 的 stage/allowed_actions/context_required，在
+  // completed 舞台上仍可输入并「继续自动化」；不出现中止/开始生成/发送
+  // 等其它动作入口（不转手动、无暂停）。
+  describe("plan continue recovery mode", () => {
+    const renderRecoveryBar = (
+      planContinue: Parameters<typeof ChatInputBar>[0]["planContinue"],
+    ) =>
+      render(
+        <ChatInputBar
+          stage="completed"
+          planContinue={planContinue}
+          onSendContextNote={vi.fn()}
+          onStartGeneration={vi.fn()}
+          onAbort={vi.fn()}
+        />,
+      );
+
+    it("keeps the input usable on completed stage and exposes only the continue action", () => {
+      renderRecoveryBar({
+        stage: "failed",
+        contextRequired: false,
+        stopKey: "plan_failed:node_1",
+        notice: null,
+        onSubmit: vi.fn(async () => true),
+      });
+
+      expect(screen.getByRole("textbox")).toBeEnabled();
+      expect(screen.getByTestId("plan-continue-card")).toBeVisible();
+      expect(screen.getByTestId("plan-continue-submit")).toBeEnabled();
+      // 恢复形态不出现：中止（无暂停）、开始生成（不重跑入口）、发送
+      //（prepare/revision 通道）、接管（不转手动）。
+      expect(screen.queryByRole("button", { name: "中止" })).toBeNull();
+      expect(screen.queryByTestId("start-generation")).toBeNull();
+      expect(screen.queryByRole("button", { name: "发送" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "接管" })).toBeNull();
+    });
+
+    it("requires a non-empty context note for stopped_needs_human (空说明拦截)", async () => {
+      const user = userEvent.setup();
+      const onSubmit = vi.fn(async () => true);
+      renderRecoveryBar({
+        stage: "stopped_needs_human",
+        contextRequired: true,
+        stopKey: "plan_gate:session_001",
+        notice: null,
+        onSubmit,
+      });
+
+      const submit = screen.getByTestId("plan-continue-submit");
+      expect(submit).toBeDisabled();
+      expect(screen.getByTestId("plan-continue-context-hint")).toBeVisible();
+
+      await user.type(screen.getByRole("textbox"), "请按新说明补充依赖约束");
+      expect(submit).toBeEnabled();
+      expect(screen.queryByTestId("plan-continue-context-hint")).toBeNull();
+      await user.click(submit);
+
+      expect(onSubmit).toHaveBeenCalledWith("请按新说明补充依赖约束");
+    });
+
+    it("submits optional context as null on provider-failed stops and consumes input on success", async () => {
+      const user = userEvent.setup();
+      const onSubmit = vi.fn(async () => true);
+      renderRecoveryBar({
+        stage: "failed",
+        contextRequired: false,
+        stopKey: "plan_failed:node_1",
+        notice: null,
+        onSubmit,
+      });
+
+      await user.click(screen.getByTestId("plan-continue-submit"));
+
+      expect(onSubmit).toHaveBeenCalledWith(null);
+      expect(useWorkspaceStore.getState().chatEntries).toEqual([]);
+    });
+
+    it("preserves the note when the page reports a failed dispatch", async () => {
+      const user = userEvent.setup();
+      const onSubmit = vi.fn(async () => false);
+      renderRecoveryBar({
+        stage: "stopped_needs_human",
+        contextRequired: true,
+        stopKey: "plan_gate:session_001",
+        notice: null,
+        onSubmit,
+      });
+
+      const textbox = screen.getByRole("textbox");
+      await user.type(textbox, "修好的说明");
+      await user.click(screen.getByTestId("plan-continue-submit"));
+
+      expect(onSubmit).toHaveBeenCalledWith("修好的说明");
+      expect(textbox).toHaveValue("修好的说明");
+    });
+
+    it("renders the needs_human notice from the continue receipt", () => {
+      renderRecoveryBar({
+        stage: "generation_needs_human",
+        contextRequired: false,
+        stopKey: "plan_generation_failed:plan_1",
+        notice: {
+          tone: "warn",
+          text: "需人工分诊：automation_continue_dispatch_not_running",
+        },
+        onSubmit: vi.fn(async () => true),
+      });
+
+      expect(screen.getByTestId("plan-continue-notice")).toHaveTextContent(
+        "automation_continue_dispatch_not_running",
+      );
+      // NeedsHuman（派发前停等）三态之一：卡面给人工分诊叙事。
+      expect(screen.getByTestId("plan-continue-card")).toHaveTextContent("人工分诊");
     });
   });
 });
