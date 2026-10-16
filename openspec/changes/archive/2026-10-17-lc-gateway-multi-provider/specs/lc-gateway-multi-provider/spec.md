@@ -84,7 +84,19 @@ LC gateway SHALL 永久禁止 Codex `danger-full-access`。Planning/Review 仅�
 
 ### Requirement: 按角色守卫 tool policy 并同步 preflight
 
-Claude、Codex、Pi adapter SHALL 在任何进程 spawn、RPC handshake 或 Pi extension 启动前执行双向 `validate_tool_policy_for_role` 语义守卫：Orchestrator/WorkItemSplitter/Reviewer 必须带 `DenyFileWriteBuiltins`，Executor/Handoff 不得带通用 deny policy。Kimi SHALL 拒绝非空通用 ProviderToolPolicy，并只使用其既有 ClientServicePolicy。LC automation role-chain preflight SHALL 与 gateway 使用同一 provider 映射、action capability、trust、projection、Codex 模式、write-boundary、adapter 与 tool-policy 判定；聚合列出全部违规 role/provider/action/reason 和 capability/projection 引用。`gateway_required=false` SHALL NOT 绕过 LC gateway。
+Claude、Codex、Pi adapter SHALL 在任何进程 spawn、RPC handshake 或 Pi extension 启动前执行双向 `validate_tool_policy_for_role` 语义守卫；Kimi SHALL 拒绝非空通用 ProviderToolPolicy，并只使用其既有 ClientServicePolicy。LC automation role-chain preflight SHALL 与 gateway 使用同一判定面并聚合列出全部违规；`gateway_required=false` SHALL NOT 绕过 LC gateway。
+
+#### Scenario: 规划与评审角色必带写禁策略
+- **WHEN** Claude/Codex/Pi 以 Orchestrator、WorkItemSplitter 或 Reviewer 角色启动
+- **THEN** adapter SHALL 要求其 tool policy 携带 `DenyFileWriteBuiltins`，策略缺失该 deny 即在 provider child 启动前拒绝
+
+#### Scenario: Executor 与 Handoff 不得带通用 deny
+- **WHEN** Claude/Codex/Pi 以 Executor 或 Handoff 角色启动且 tool policy 携带通用 deny
+- **THEN** adapter SHALL 在 provider child 启动前拒绝，不得以通用 deny policy 限制其工具
+
+#### Scenario: preflight 与 gateway 同一判定面
+- **WHEN** preflight 汇聚 provider 映射、action capability、trust、projection、Codex 模式、write-boundary、adapter 与 tool-policy 判定
+- **THEN** 判定 SHALL 与 gateway 逐项同源，聚合结果列出全部违规 role/provider/action/reason 及 capability/projection 引用；任一不一致按漂移拒绝
 
 #### Scenario: 工具策略角色不匹配
 - **WHEN** Claude/Codex/Pi 的角色策略缺失、非法或与角色相反，或 Kimi 收到非空通用 tool policy
