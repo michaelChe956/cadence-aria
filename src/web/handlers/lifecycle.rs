@@ -456,12 +456,26 @@ pub async fn issue_lifecycle(
 
     // P4-c（REQ-CRO-12 / 契约 A1）：durable 事实待处理事项与列表同源派生；
     // 读取失败按 HTTP 显式错误传播（不伪 client、不吞为空）。
-    let coding_attention_items = crate::web::coding_attention_info::issue_coding_attention_items(
-        &app_paths,
-        &project_id,
-        &issue_id,
-    )
-    .map_err(product_store_api_error)?;
+    let mut coding_attention_items =
+        crate::web::coding_attention_info::issue_coding_attention_items(
+            &app_paths,
+            &project_id,
+            &issue_id,
+        )
+        .map_err(product_store_api_error)?;
+    // 批 2 N1（REQ-WIGA-12，块 3 §7.1）：N0 三类 automation 事实
+    //（plan_question/automation_failed/review_limit）在既有 coding 事项后
+    // 合并——只读 mapper 直读 enrollment（不递归调 GET、不写事实），未
+    // watched 也计数/展示；原 7 类事项及顺序不变。读取失败按 HTTP 显式
+    // 错误传播。
+    coding_attention_items.extend(
+        crate::web::automation_attention_info::issue_automation_attention_items(
+            &app_paths,
+            &project_id,
+            &issue_id,
+        )
+        .map_err(product_store_api_error)?,
+    );
 
     // P3（REQ-WIGA-07）：issue 级有界近期完成目录；仅在显式携带
     // recent_since 时计算（旧 URL/旧两 info 数组原样保持）。parsed_since
@@ -1169,4 +1183,5 @@ mod tests {
     include!("lifecycle_tests.inc.rs");
     include!("lifecycle_tests_n7.inc.rs");
     include!("lifecycle_recent_completion_tests.inc.rs");
+    include!("lifecycle_tests_n1.inc.rs");
 }

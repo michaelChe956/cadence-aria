@@ -1,5 +1,6 @@
 pub mod advance_plan;
 pub mod app;
+pub mod automation_attention_info;
 pub mod autopilot_orchestrator;
 pub mod choice_reply;
 pub mod coding_attention_info;

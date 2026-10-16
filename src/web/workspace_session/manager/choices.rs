@@ -524,3 +524,323 @@ async fn wait_for_terminal_choice_state(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 批 2 N1（REQ-WIGA-12）：失效 plan choice 事实清理钩子。
+// ---------------------------------------------------------------------------
+
+impl WorkspaceSessionManager {
+    /// 批 2 N1：答后清题（router `ChoicePendingChanged` 钩子）。`still_pending`
+    /// 是引擎进程级登记簿的当前挂起集（登记/移除均先于事件可达，无竞态）；
+    /// 不在挂起集内的本会话 plan choice 事实（kind=plan_question 且带
+    /// choice_id）即已答/失效，按稳定 key resolve（幂等）。
+    /// automation_failed/review_limit 等 durable 停点事实不碰——恢复/继续
+    /// 成功与终止清理由各自写者 resolve，不能把停点通知一并抹掉。清失败
+    /// 打点留痕（router 观察面无回传通道）。
+    pub(crate) fn resolve_answered_plan_choice_facts(&self, still_pending: &HashSet<String>) {
+        use crate::product::models::automation::AutomationAttentionKind;
+        let record = &self.session_record;
+        let Ok(Some((enrollment, binding))) =
+            crate::web::plan_generation::bound_auto_enrollment_for_plan_session(
+                &self.app_paths,
+                &record.project_id,
+                &record.issue_id,
+                &self.session_id,
+            )
+        else {
+            // 手动/未绑定/禁用（未终止）会话零事实，零副作用返回。
+            return;
+        };
+        for fact in &enrollment.attention_facts {
+            if fact.kind != AutomationAttentionKind::PlanQuestion {
+                continue;
+            }
+            let Some(choice_id) = fact.choice_id.as_deref() else {
+                continue;
+            };
+            if still_pending.contains(choice_id) {
+                continue;
+            }
+            if fact
+                .session_id
+                .as_deref()
+                .is_some_and(|session_id| session_id != self.session_id)
+            {
+                continue;
+            }
+            if let Err(message) = crate::web::plan_generation::resolve_plan_attention_fact(
+                &self.app_paths,
+                &record.project_id,
+                &record.issue_id,
+                &binding,
+                &fact.key,
+            ) {
+                eprintln!(
+                    "[aria-plan-attention] answered choice resolve failed session={}: {message}",
+                    self.session_id
+                );
+            }
+        }
+    }
+
+    /// 批 2 N1：run 终态按 incarnation 清失效题——`choice_ids` 是消亡 run
+    /// 仍挂起的 choice（原问题随进程丢失，不能伪造成可答题），按稳定 key
+    /// resolve。当前活跃 run 已重新挂起同一 id 时不清（supersede 后引擎
+    /// 重问的补注册竞态窗口收敛）；durable Failed/review_limit 不碰。
+    pub(super) fn resolve_stale_plan_choice_facts(&self, choice_ids: &[String]) {
+        if choice_ids.is_empty() {
+            return;
+        }
+        let record = &self.session_record;
+        let Ok(Some((_enrollment, binding))) =
+            crate::web::plan_generation::bound_auto_enrollment_for_plan_session(
+                &self.app_paths,
+                &record.project_id,
+                &record.issue_id,
+                &self.session_id,
+            )
+        else {
+            return;
+        };
+        let reasked_on_active_run: HashSet<String> = self
+            .pending_choice_frames()
+            .iter()
+            .filter_map(|frame| choice_frame_id(frame).map(str::to_string))
+            .collect();
+        for choice_id in choice_ids {
+            if reasked_on_active_run.contains(choice_id) {
+                continue;
+            }
+            let key =
+                crate::web::plan_generation::plan_choice_fact_key(&self.session_id, choice_id);
+            if let Err(message) = crate::web::plan_generation::resolve_plan_attention_fact(
+                &self.app_paths,
+                &record.project_id,
+                &record.issue_id,
+                &binding,
+                &key,
+            ) {
+                eprintln!(
+                    "[aria-plan-attention] stale choice resolve failed session={}: {message}",
+                    self.session_id
+                );
+            }
+        }
+    }
+}
+
+/// 批 2 N1：消亡 run 仍挂起的 choice id（F-24 帧登记簿；已答帧已被
+/// Delivered 看护摘除，剩下的即未答失效题）。
+pub(super) fn unanswered_choice_ids(run: &ActiveRun) -> Vec<String> {
+    run.pending_choices
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .filter_map(|frame| choice_frame_id(frame).map(str::to_string))
+        .collect()
+}
+
+#[cfg(test)]
+mod n1_tests {
+    use std::collections::HashSet;
+
+    use super::WorkspaceSessionManager;
+    use crate::product::issue_automation_store::IssueAutomationStore;
+    use crate::product::logical_codebase::EnrollmentTarget;
+    use crate::product::models::automation::{
+        AutomationAttentionFact, AutomationAttentionKind, AutomationAttentionStage,
+        EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand,
+    };
+    use crate::product::models::{IssueWorkItemPlanOptions, ProviderName};
+
+    /// 与 manager fixture 同源的 project/issue（test_fixture 固定口径）。
+    const N1_PROJECT: &str = "project_test";
+    const N1_ISSUE: &str = "issue_test";
+    const N1_PLAN: &str = "plan_n1_choices";
+
+    struct N1Fixture {
+        manager: std::sync::Arc<WorkspaceSessionManager>,
+        store: IssueAutomationStore,
+        binding: crate::product::models::automation::EnrollmentBindingIdentity,
+    }
+
+    fn bound_manager(session_id: &str) -> N1Fixture {
+        let manager = WorkspaceSessionManager::test_fixture_with_event_router(session_id);
+        let store = IssueAutomationStore::new(manager.app_paths.clone());
+        store
+            .compare_and_set(
+                N1_PROJECT,
+                N1_ISSUE,
+                None,
+                EnrollmentWriteCommand::Enable {
+                    selection_key: format!("n1-choices-{session_id}"),
+                    source: EnrollmentSource {
+                        stories: Vec::new(),
+                        designs: Vec::new(),
+                    },
+                    options: EnrollmentOptions {
+                        author_provider: ProviderName::Fake,
+                        reviewer_provider: ProviderName::Fake,
+                        review_rounds: 0,
+                        superpowers_enabled: false,
+                        openspec_enabled: false,
+                        plan_approval: crate::product::models::automation::PlanApprovalPolicy::Auto,
+                        plan_options: IssueWorkItemPlanOptions {
+                            include_integration_tests: false,
+                            include_e2e_tests: false,
+                            force_frontend_backend_split: false,
+                            require_execution_plan_confirm: false,
+                        },
+                    },
+                    target: EnrollmentTarget::SingleRepository {
+                        repository_id: "repo_n1".to_string(),
+                    },
+                },
+            )
+            .expect("enable enrollment");
+        store
+            .bind_plan(N1_PROJECT, N1_ISSUE, 1, N1_PLAN, &manager.session_id)
+            .expect("bind plan");
+        let enrollment = store
+            .get(N1_PROJECT, N1_ISSUE)
+            .expect("read enrollment")
+            .expect("enrollment present");
+        let binding = crate::web::advance_plan::load_current_enrollment_binding(&enrollment)
+            .expect("current binding");
+        N1Fixture {
+            manager,
+            store,
+            binding,
+        }
+    }
+
+    fn choice_fact(fixture: &N1Fixture, choice_id: &str) -> AutomationAttentionFact {
+        AutomationAttentionFact {
+            key: crate::web::plan_generation::plan_choice_fact_key(
+                &fixture.manager.session_id,
+                choice_id,
+            ),
+            kind: AutomationAttentionKind::PlanQuestion,
+            stage: AutomationAttentionStage::Plan,
+            plan_id: Some(N1_PLAN.to_string()),
+            session_id: Some(fixture.manager.session_id.clone()),
+            attempt_id: None,
+            reason_code: "plan_choice_pending".to_string(),
+            occurred_at: "2026-10-16T00:00:00Z".to_string(),
+            choice_id: Some(choice_id.to_string()),
+            gate_id: None,
+        }
+    }
+
+    fn durable_fact(
+        fixture: &N1Fixture,
+        key: String,
+        kind: AutomationAttentionKind,
+        reason_code: &str,
+    ) -> AutomationAttentionFact {
+        AutomationAttentionFact {
+            key,
+            kind,
+            stage: AutomationAttentionStage::Plan,
+            plan_id: Some(N1_PLAN.to_string()),
+            session_id: Some(fixture.manager.session_id.clone()),
+            attempt_id: None,
+            reason_code: reason_code.to_string(),
+            occurred_at: "2026-10-16T00:00:00Z".to_string(),
+            choice_id: None,
+            gate_id: None,
+        }
+    }
+
+    fn seed(fixture: &N1Fixture, fact: AutomationAttentionFact) {
+        fixture
+            .store
+            .upsert_automation_attention_fact(N1_PROJECT, N1_ISSUE, &fixture.binding, fact)
+            .expect("seed fact");
+    }
+
+    fn fact_keys(fixture: &N1Fixture) -> Vec<String> {
+        let mut keys = fixture
+            .store
+            .get(N1_PROJECT, N1_ISSUE)
+            .unwrap()
+            .expect("enrollment present")
+            .attention_facts
+            .into_iter()
+            .map(|fact| fact.key)
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys
+    }
+
+    /// 红测③（方法面）：挂起集外的 choice 事实清、挂起集内保留；
+    /// durable Failed/review_limit 不误清；幂等重放不增删。
+    #[tokio::test]
+    async fn answered_plan_choice_facts_resolve_but_durable_stop_facts_survive() {
+        let fixture = bound_manager("workspace_session_n1_choices");
+        seed(&fixture, choice_fact(&fixture, "choice_answered"));
+        seed(&fixture, choice_fact(&fixture, "choice_pending"));
+        let gate_key = crate::web::plan_generation::plan_gate_fact_key(&fixture.manager.session_id);
+        seed(
+            &fixture,
+            durable_fact(
+                &fixture,
+                gate_key.clone(),
+                AutomationAttentionKind::ReviewLimit,
+                "plan_human_gate_open",
+            ),
+        );
+        let failed_key =
+            crate::web::plan_generation::plan_failed_node_fact_key(&fixture.manager.session_id);
+        seed(
+            &fixture,
+            durable_fact(
+                &fixture,
+                failed_key.clone(),
+                AutomationAttentionKind::AutomationFailed,
+                "plan_provider_failed",
+            ),
+        );
+
+        let still_pending: HashSet<String> = ["choice_pending".to_string()].into_iter().collect();
+        fixture
+            .manager
+            .resolve_answered_plan_choice_facts(&still_pending);
+
+        let mut expected = vec![
+            crate::web::plan_generation::plan_choice_fact_key(
+                &fixture.manager.session_id,
+                "choice_pending",
+            ),
+            gate_key,
+            failed_key,
+        ];
+        expected.sort();
+        assert_eq!(
+            fact_keys(&fixture),
+            expected,
+            "已答清、未答留、durable 停点不误清"
+        );
+
+        // 幂等重放。
+        fixture
+            .manager
+            .resolve_answered_plan_choice_facts(&still_pending);
+        assert_eq!(fact_keys(&fixture), expected);
+    }
+
+    /// 红测③边界：无 enrollment（手动会话）零副作用、不报错。
+    #[tokio::test]
+    async fn answered_plan_choice_facts_noop_without_enrollment() {
+        let manager =
+            WorkspaceSessionManager::test_fixture_with_event_router("workspace_session_n1_manual");
+        let still_pending: HashSet<String> = HashSet::new();
+        manager.resolve_answered_plan_choice_facts(&still_pending);
+        assert!(
+            IssueAutomationStore::new(manager.app_paths.clone())
+                .get(N1_PROJECT, N1_ISSUE)
+                .unwrap()
+                .is_none()
+        );
+    }
+}

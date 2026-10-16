@@ -136,12 +136,18 @@ impl WorkspaceSessionManager {
             (replaced_run, (run_id, token, cancel, command_rx, node_id))
         };
         if let Some(run) = replaced_run {
-            {
+            let stale_choice_ids = {
                 let mut state = self
                     .state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 super::choices::retire_claims_for_run(&mut state, &run.run_incarnation);
+                // 批 2 N1（REQ-WIGA-12）：被顶替 run 未答挂起 choice 的失效
+                // 题锁外清（原问题随进程丢失，不能伪造成可答题）。
+                super::choices::unanswered_choice_ids(&run)
+            };
+            if !stale_choice_ids.is_empty() {
+                self.resolve_stale_plan_choice_facts(&stale_choice_ids);
             }
             Self::cancel_run(&run);
         }
@@ -149,6 +155,9 @@ impl WorkspaceSessionManager {
     }
 
     pub async fn finish_run(self: &Arc<Self>, token: u64) {
+        // 批 2 N1（REQ-WIGA-12）：本 run 未答挂起 choice 的失效题在状态锁
+        // 外清（enrollment 文件锁不得与 manager 状态锁互嵌）。
+        let mut stale_choice_ids = Vec::new();
         {
             let mut state = self
                 .state
@@ -158,6 +167,7 @@ impl WorkspaceSessionManager {
                 if run.token == token {
                     super::choices::retire_claims_for_run(&mut state, &run.run_incarnation);
                     state.journal.mark_run_terminal();
+                    stale_choice_ids = super::choices::unanswered_choice_ids(&run);
                 } else {
                     // 非本人 token：恢复原 run，不误伤。
                     state.active_run = Some(run);
@@ -169,6 +179,9 @@ impl WorkspaceSessionManager {
                 completion_tx.send_replace(true);
             }
         }
+        if !stale_choice_ids.is_empty() {
+            self.resolve_stale_plan_choice_facts(&stale_choice_ids);
+        }
         self.maybe_recycle().await;
     }
 
@@ -178,7 +191,7 @@ impl WorkspaceSessionManager {
     /// 状态锁内完成、等待在锁外（不持 engine 锁）；无活跃 run 直接返回
     /// false。30s 兜底超时防任务失联（打点后放行，终止收口继续）。
     pub async fn abort_active_run_and_wait_completion(&self) -> bool {
-        let completion = {
+        let (completion, stale_choice_ids) = {
             let mut state = self
                 .state
                 .lock()
@@ -188,13 +201,23 @@ impl WorkspaceSessionManager {
                 super::choices::retire_claims_for_run(&mut state, &run.run_incarnation);
                 state.journal.mark_run_terminal();
             }
-            run.map(|run| {
+            // 批 2 N1（REQ-WIGA-12）：消亡 run 未答挂起 choice 的失效题
+            // 锁外清（原问题随进程丢失）。
+            let stale_choice_ids = run
+                .as_ref()
+                .map(super::choices::unanswered_choice_ids)
+                .unwrap_or_default();
+            let completion = run.map(|run| {
                 let token = run.token;
                 let completion_rx = state.run_completions.get(&token).map(|tx| tx.subscribe());
                 Self::cancel_run(&run);
                 (token, completion_rx)
-            })
+            });
+            (completion, stale_choice_ids)
         };
+        if !stale_choice_ids.is_empty() {
+            self.resolve_stale_plan_choice_facts(&stale_choice_ids);
+        }
         let Some((token, completion_rx)) = completion else {
             return false;
         };
@@ -222,7 +245,7 @@ impl WorkspaceSessionManager {
     }
 
     pub async fn abort_active_run(&self) -> bool {
-        let run = {
+        let (run, stale_choice_ids) = {
             let mut state = self
                 .state
                 .lock()
@@ -232,8 +255,16 @@ impl WorkspaceSessionManager {
                 super::choices::retire_claims_for_run(&mut state, &run.run_incarnation);
                 state.journal.mark_run_terminal();
             }
-            run
+            // 批 2 N1（REQ-WIGA-12）：同 abort_active_run_and_wait_completion。
+            let stale_choice_ids = run
+                .as_ref()
+                .map(super::choices::unanswered_choice_ids)
+                .unwrap_or_default();
+            (run, stale_choice_ids)
         };
+        if !stale_choice_ids.is_empty() {
+            self.resolve_stale_plan_choice_facts(&stale_choice_ids);
+        }
         if let Some(run) = run {
             Self::cancel_run(&run);
             true
@@ -419,7 +450,9 @@ mod termination_tests {
         // 取消等待与 engine 锁持有并行：不得死锁。
         let manager_for_wait = manager.clone();
         let wait = tokio::spawn(async move {
-            manager_for_wait.abort_active_run_and_wait_completion().await
+            manager_for_wait
+                .abort_active_run_and_wait_completion()
+                .await
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
         manager.finish_run(holder_token).await;
@@ -429,5 +462,239 @@ mod termination_tests {
             .expect("wait task alive");
         assert!(had_run);
         let _ = holder.await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 批 2 N1（REQ-WIGA-12）：run 终态按 incarnation 清失效 plan choice 题。
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod n1_tests {
+    use crate::product::issue_automation_store::IssueAutomationStore;
+    use crate::product::logical_codebase::EnrollmentTarget;
+    use crate::product::models::automation::{
+        AutomationAttentionFact, AutomationAttentionKind, AutomationAttentionStage,
+        EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand,
+    };
+    use crate::product::models::{IssueWorkItemPlanOptions, ProviderName};
+    use crate::web::workspace_ws_handler::ProviderRunKind;
+    use crate::web::workspace_ws_types::{ChoiceOption, WsOutMessage};
+
+    const N1_PROJECT: &str = "project_test";
+    const N1_ISSUE: &str = "issue_test";
+
+    fn n1_choice_frame(id: &str) -> WsOutMessage {
+        WsOutMessage::ChoiceRequest {
+            id: id.to_string(),
+            prompt: "验收口径需要裁定".to_string(),
+            options: vec![ChoiceOption {
+                id: "option-a".to_string(),
+                label: "按全局口径".to_string(),
+                description: None,
+            }],
+            allow_multiple: false,
+            allow_free_text: false,
+            questions: Vec::new(),
+            source: "ask_user_question".to_string(),
+        }
+    }
+
+    fn bound_manager(
+        session_id: &str,
+        plan_id: &str,
+    ) -> (
+        std::sync::Arc<super::WorkspaceSessionManager>,
+        IssueAutomationStore,
+        crate::product::models::automation::EnrollmentBindingIdentity,
+    ) {
+        // test_fixture 的 app_paths 固定在 /tmp/<session_id>——pid 后缀隔离
+        // 历史 cargo test 进程残留（enrollment 幂等重放会冻结既有 revision）。
+        let session_id = format!("{session_id}_{}", std::process::id());
+        let manager = super::WorkspaceSessionManager::test_fixture(&session_id);
+        let store = IssueAutomationStore::new(manager.app_paths.clone());
+        store
+            .compare_and_set(
+                N1_PROJECT,
+                N1_ISSUE,
+                None,
+                EnrollmentWriteCommand::Enable {
+                    selection_key: format!("n1-runs-{session_id}"),
+                    source: EnrollmentSource {
+                        stories: Vec::new(),
+                        designs: Vec::new(),
+                    },
+                    options: EnrollmentOptions {
+                        author_provider: ProviderName::Fake,
+                        reviewer_provider: ProviderName::Fake,
+                        review_rounds: 0,
+                        superpowers_enabled: false,
+                        openspec_enabled: false,
+                        plan_approval: crate::product::models::automation::PlanApprovalPolicy::Auto,
+                        plan_options: IssueWorkItemPlanOptions {
+                            include_integration_tests: false,
+                            include_e2e_tests: false,
+                            force_frontend_backend_split: false,
+                            require_execution_plan_confirm: false,
+                        },
+                    },
+                    target: EnrollmentTarget::SingleRepository {
+                        repository_id: "repo_n1".to_string(),
+                    },
+                },
+            )
+            .expect("enable enrollment");
+        let revision = store
+            .get(N1_PROJECT, N1_ISSUE)
+            .expect("read enrollment")
+            .expect("enrollment present")
+            .policy_revision;
+        store
+            .bind_plan(N1_PROJECT, N1_ISSUE, revision, plan_id, &manager.session_id)
+            .expect("bind plan");
+        let enrollment = store
+            .get(N1_PROJECT, N1_ISSUE)
+            .expect("read enrollment")
+            .expect("enrollment present");
+        let binding = crate::web::advance_plan::load_current_enrollment_binding(&enrollment)
+            .expect("current binding");
+        (manager, store, binding)
+    }
+
+    fn fact(
+        manager: &super::WorkspaceSessionManager,
+        plan_id: &str,
+        key: String,
+        kind: AutomationAttentionKind,
+        choice_id: Option<&str>,
+    ) -> AutomationAttentionFact {
+        AutomationAttentionFact {
+            key,
+            kind,
+            stage: AutomationAttentionStage::Plan,
+            plan_id: Some(plan_id.to_string()),
+            session_id: Some(manager.session_id.clone()),
+            attempt_id: None,
+            reason_code: if choice_id.is_some() {
+                "plan_choice_pending".to_string()
+            } else {
+                "plan_provider_failed".to_string()
+            },
+            occurred_at: "2026-10-16T00:00:00Z".to_string(),
+            choice_id: choice_id.map(str::to_string),
+            gate_id: None,
+        }
+    }
+
+    fn fact_keys(store: &IssueAutomationStore) -> Vec<String> {
+        let mut keys = store
+            .get(N1_PROJECT, N1_ISSUE)
+            .unwrap()
+            .expect("enrollment present")
+            .attention_facts
+            .into_iter()
+            .map(|fact| fact.key)
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys
+    }
+
+    /// 红测③：finish_run 后消亡 run 未答挂起 choice 的题消失；durable
+    /// provider 失败事实（P4 写者）不误清。
+    #[tokio::test]
+    async fn finish_run_clears_stale_plan_choice_facts_but_keeps_durable_failures() {
+        let (manager, store, binding) =
+            bound_manager("workspace_session_n1_finish_run", "plan_n1_finish_run");
+        let stale_key =
+            crate::web::plan_generation::plan_choice_fact_key(&manager.session_id, "choice_stale");
+        let failed_key =
+            crate::web::plan_generation::plan_failed_node_fact_key(&manager.session_id);
+        store
+            .upsert_automation_attention_fact(
+                N1_PROJECT,
+                N1_ISSUE,
+                &binding,
+                fact(
+                    &manager,
+                    "plan_n1_finish_run",
+                    stale_key.clone(),
+                    AutomationAttentionKind::PlanQuestion,
+                    Some("choice_stale"),
+                ),
+            )
+            .expect("seed choice fact");
+        store
+            .upsert_automation_attention_fact(
+                N1_PROJECT,
+                N1_ISSUE,
+                &binding,
+                fact(
+                    &manager,
+                    "plan_n1_finish_run",
+                    failed_key.clone(),
+                    AutomationAttentionKind::AutomationFailed,
+                    None,
+                ),
+            )
+            .expect("seed failed fact");
+
+        let (_run_id, token, _cancel, _command_rx, _node) = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run");
+        manager.register_pending_choice_frame(n1_choice_frame("choice_stale"));
+        assert_eq!(
+            fact_keys(&store),
+            vec![stale_key.clone(), failed_key.clone()],
+            "run 存活期事实保持"
+        );
+
+        manager.finish_run(token).await;
+        assert_eq!(
+            fact_keys(&store),
+            vec![failed_key],
+            "run 终态清失效 choice 题，durable Failed 保留"
+        );
+    }
+
+    /// 红测③：被顶替（supersede）的 run 携带未答挂起 choice 消亡时，其
+    /// 失效题同样按 incarnation 清除。
+    #[tokio::test]
+    async fn superseded_run_stale_choice_facts_resolve_on_replacement() {
+        let (manager, store, binding) =
+            bound_manager("workspace_session_n1_supersede", "plan_n1_supersede");
+        let stale_key = crate::web::plan_generation::plan_choice_fact_key(
+            &manager.session_id,
+            "choice_superseded",
+        );
+        store
+            .upsert_automation_attention_fact(
+                N1_PROJECT,
+                N1_ISSUE,
+                &binding,
+                fact(
+                    &manager,
+                    "plan_n1_supersede",
+                    stale_key,
+                    AutomationAttentionKind::PlanQuestion,
+                    Some("choice_superseded"),
+                ),
+            )
+            .expect("seed choice fact");
+
+        let _run_a = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run a");
+        manager.register_pending_choice_frame(n1_choice_frame("choice_superseded"));
+        // 新 run 顶替旧 run：旧 run 的失效题随顶替清除。
+        let _run_b = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run b");
+        assert!(
+            fact_keys(&store).is_empty(),
+            "被顶替 run 的失效 choice 题已清"
+        );
     }
 }

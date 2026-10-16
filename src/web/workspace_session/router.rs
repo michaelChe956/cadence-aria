@@ -11,7 +11,6 @@ use crate::web::workspace_ws_types::WsOutMessage;
 
 use super::manager::{DurableProjectionError, WorkspaceSessionManager, inject_event_seq};
 
-
 // ─── 批 2 P4（REQ-WIGA-12）：plan 阶段停点/失败事实写清（router 观察面）───
 
 /// 批 2 P4：精确绑定 enabled auto 授权的 plan 会话才写事实（手动/未绑定/
@@ -63,6 +62,35 @@ fn upsert_plan_stop_fact(
     }
 }
 
+/// 批 2 N1（REQ-WIGA-12）：答后清题的挂起集判据（choice id 当前仍挂起 =
+/// 事实保留）。活引擎空闲时直读引擎投影；run 持锁时走 durable 投影
+///（provider 挂起集在进程级登记簿，跨引擎实例可见、登记/移除均先于事件
+/// 可达，见 pending_choices.rs）；两路读取均失败返回 `None`——fail-closed
+/// 不清题（宁留待办通知，不误清可答题）。
+fn pending_choice_ids_for_fact_clearing(
+    manager: &WorkspaceSessionManager,
+) -> Option<std::collections::HashSet<String>> {
+    let state = if let Ok(engine) = manager.engine.try_lock() {
+        let state = engine.build_session_state();
+        drop(engine);
+        state
+    } else {
+        manager.durable_projection().ok()?.session_state
+    };
+    match state {
+        WsOutMessage::SessionState {
+            pending_choice_requests,
+            ..
+        } => Some(
+            pending_choice_requests
+                .into_iter()
+                .map(|request| request.id)
+                .collect(),
+        ),
+        _ => Some(std::collections::HashSet::new()),
+    }
+}
+
 /// 批 2 P4：关门/继续成功后按稳定 key 清事实（幂等；清失败打点留痕）。
 fn resolve_plan_stop_fact(manager: &WorkspaceSessionManager, key: &str) {
     let record = &manager.session_record;
@@ -93,14 +121,15 @@ fn resolve_plan_stop_fact(manager: &WorkspaceSessionManager, key: &str) {
 /// HumanGateOpened 的 durable 门快照预算读取：manual 预算已耗尽 →
 /// review_limit（评审超限停点），否则 plan_question（choice/主动人工门同族
 /// 的对话停点）；读不到快照时按 plan_question 通知（fail-open）。
-fn plan_gate_fact_kind(manager: &WorkspaceSessionManager) -> crate::product::models::automation::AutomationAttentionKind {
-    let snapshot_budget = crate::product::lifecycle_store::LifecycleStore::new(
-        manager.app_paths.clone(),
-    )
-    .get_workspace_session(&manager.session_id)
-    .ok()
-    .and_then(|record| record.human_gate_snapshot)
-    .map(|snapshot| snapshot.manual_repairs_remaining);
+fn plan_gate_fact_kind(
+    manager: &WorkspaceSessionManager,
+) -> crate::product::models::automation::AutomationAttentionKind {
+    let snapshot_budget =
+        crate::product::lifecycle_store::LifecycleStore::new(manager.app_paths.clone())
+            .get_workspace_session(&manager.session_id)
+            .ok()
+            .and_then(|record| record.human_gate_snapshot)
+            .map(|snapshot| snapshot.manual_repairs_remaining);
     match snapshot_budget {
         Some(0) => crate::product::models::automation::AutomationAttentionKind::ReviewLimit,
         _ => crate::product::models::automation::AutomationAttentionKind::PlanQuestion,
@@ -111,10 +140,10 @@ fn plan_gate_fact_kind(manager: &WorkspaceSessionManager) -> crate::product::mod
 /// Failed（SC phase Failed）才写 provider 失败事实（键不含节点 id——单会话
 /// 一条，重复停点 upsert 不增项、occurred_at 首写冻结）。
 fn record_plan_provider_failure_if_durable(manager: &WorkspaceSessionManager) {
-    let Ok(record) = crate::product::lifecycle_store::LifecycleStore::new(
-        manager.app_paths.clone(),
-    )
-    .get_workspace_session(&manager.session_id) else {
+    let Ok(record) =
+        crate::product::lifecycle_store::LifecycleStore::new(manager.app_paths.clone())
+            .get_workspace_session(&manager.session_id)
+    else {
         return;
     };
     if record.workspace_type != crate::product::models::WorkspaceType::WorkItemPlan
@@ -278,6 +307,14 @@ impl WorkspaceSessionManager {
                         // 投影即时可见）——广播全量 session_state，前端对账
                         // 收敛已答卡。
                         manager.broadcast_choice_pending_state(true);
+                        // 批 2 N1（REQ-WIGA-12）：答后清题——挂起集（引擎进程
+                        // 级登记簿，移除先于事件可达）外的本会话 plan choice
+                        // 事实按稳定 key resolve；durable Failed/review_limit
+                        // 停点事实不碰。
+                        if let Some(still_pending) = pending_choice_ids_for_fact_clearing(&manager)
+                        {
+                            manager.resolve_answered_plan_choice_facts(&still_pending);
+                        }
                     }
                     // A1b2（设计 §4.4 / A2.2 移交）：durable LC 恢复事实变化的
                     // authoritative 广播接线——立即 try_lock 活引擎，忙时按最新
@@ -770,5 +807,192 @@ mod degraded_keyframe_tests {
             questions: Vec::new(),
             source: source.to_string(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 批 2 N1（REQ-WIGA-12）：ChoicePendingChanged 答后清题（router 全链路）。
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod n1_tests {
+    use std::sync::Arc;
+
+    use super::WorkspaceSessionManager;
+    use crate::product::issue_automation_store::IssueAutomationStore;
+    use crate::product::logical_codebase::EnrollmentTarget;
+    use crate::product::models::automation::{
+        AutomationAttentionFact, AutomationAttentionKind, AutomationAttentionStage,
+        EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand,
+    };
+    use crate::product::models::{IssueWorkItemPlanOptions, ProviderName};
+
+    const N1_PROJECT: &str = "project_test";
+    const N1_ISSUE: &str = "issue_test";
+    const N1_PLAN: &str = "plan_n1_router";
+
+    async fn wait_for_facts(
+        store: &IssueAutomationStore,
+        predicate: impl Fn(&[AutomationAttentionFact]) -> bool,
+        label: &str,
+    ) -> Vec<AutomationAttentionFact> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let facts = store
+                .get(N1_PROJECT, N1_ISSUE)
+                .unwrap()
+                .expect("enrollment present")
+                .attention_facts;
+            if predicate(&facts) {
+                return facts;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {label}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    fn fact(
+        session_id: &str,
+        key: String,
+        kind: AutomationAttentionKind,
+        choice_id: Option<&str>,
+    ) -> AutomationAttentionFact {
+        AutomationAttentionFact {
+            key,
+            kind,
+            stage: AutomationAttentionStage::Plan,
+            plan_id: Some(N1_PLAN.to_string()),
+            session_id: Some(session_id.to_string()),
+            attempt_id: None,
+            reason_code: if choice_id.is_some() {
+                "plan_choice_pending".to_string()
+            } else {
+                "plan_provider_failed".to_string()
+            },
+            occurred_at: "2026-10-16T00:00:00Z".to_string(),
+            choice_id: choice_id.map(str::to_string),
+            gate_id: None,
+        }
+    }
+
+    /// 红测③（router 全链路）：ChoicePendingChanged 后挂起集（引擎进程级
+    /// 登记簿）外的 choice 事实清、durable Failed/review_limit 不误清。
+    /// 测试现场无 provider 驱动 → 登记簿恒空 → 全部 choice 事实视为已答。
+    #[tokio::test]
+    async fn choice_pending_changed_clears_answered_choice_facts_full_path() {
+        let manager: Arc<WorkspaceSessionManager> =
+            WorkspaceSessionManager::test_fixture_with_event_router("workspace_session_n1_router");
+        let store = IssueAutomationStore::new(manager.app_paths.clone());
+        store
+            .compare_and_set(
+                N1_PROJECT,
+                N1_ISSUE,
+                None,
+                EnrollmentWriteCommand::Enable {
+                    selection_key: "n1-router".to_string(),
+                    source: EnrollmentSource {
+                        stories: Vec::new(),
+                        designs: Vec::new(),
+                    },
+                    options: EnrollmentOptions {
+                        author_provider: ProviderName::Fake,
+                        reviewer_provider: ProviderName::Fake,
+                        review_rounds: 0,
+                        superpowers_enabled: false,
+                        openspec_enabled: false,
+                        plan_approval: crate::product::models::automation::PlanApprovalPolicy::Auto,
+                        plan_options: IssueWorkItemPlanOptions {
+                            include_integration_tests: false,
+                            include_e2e_tests: false,
+                            force_frontend_backend_split: false,
+                            require_execution_plan_confirm: false,
+                        },
+                    },
+                    target: EnrollmentTarget::SingleRepository {
+                        repository_id: "repo_n1".to_string(),
+                    },
+                },
+            )
+            .expect("enable enrollment");
+        store
+            .bind_plan(N1_PROJECT, N1_ISSUE, 1, N1_PLAN, &manager.session_id)
+            .expect("bind plan");
+        let enrollment = store
+            .get(N1_PROJECT, N1_ISSUE)
+            .unwrap()
+            .expect("enrollment present");
+        let binding = crate::web::advance_plan::load_current_enrollment_binding(&enrollment)
+            .expect("current binding");
+        let choice_a = crate::web::plan_generation::plan_choice_fact_key(
+            &manager.session_id,
+            "choice_answered_a",
+        );
+        let choice_b = crate::web::plan_generation::plan_choice_fact_key(
+            &manager.session_id,
+            "choice_answered_b",
+        );
+        let gate_key = crate::web::plan_generation::plan_gate_fact_key(&manager.session_id);
+        let failed_key =
+            crate::web::plan_generation::plan_failed_node_fact_key(&manager.session_id);
+        for seeded in [
+            fact(
+                &manager.session_id,
+                choice_a,
+                AutomationAttentionKind::PlanQuestion,
+                Some("choice_answered_a"),
+            ),
+            fact(
+                &manager.session_id,
+                choice_b,
+                AutomationAttentionKind::PlanQuestion,
+                Some("choice_answered_b"),
+            ),
+            fact(
+                &manager.session_id,
+                gate_key.clone(),
+                AutomationAttentionKind::ReviewLimit,
+                None,
+            ),
+            fact(
+                &manager.session_id,
+                failed_key.clone(),
+                AutomationAttentionKind::AutomationFailed,
+                None,
+            ),
+        ] {
+            store
+                .upsert_automation_attention_fact(N1_PROJECT, N1_ISSUE, &binding, seeded)
+                .expect("seed fact");
+        }
+
+        manager
+            .engine_tx()
+            .send(crate::product::workspace_engine::EngineEvent::ChoicePendingChanged)
+            .await
+            .expect("send choice pending changed");
+
+        let remaining = wait_for_facts(
+            &store,
+            |facts| {
+                facts
+                    .iter()
+                    .all(|fact| fact.kind != AutomationAttentionKind::PlanQuestion)
+            },
+            "answered choice facts cleared",
+        )
+        .await;
+        let mut remaining_keys = remaining
+            .into_iter()
+            .map(|fact| fact.key)
+            .collect::<Vec<_>>();
+        remaining_keys.sort();
+        assert_eq!(
+            remaining_keys,
+            vec![failed_key, gate_key],
+            "答后清题；durable Failed/review_limit 不误清"
+        );
     }
 }
