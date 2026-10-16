@@ -8,6 +8,11 @@ use crate::product::lifecycle_store::{
     single_candidate_compile_id,
 };
 use crate::product::logical_codebase::LogicalRepositoryId;
+use crate::product::issue_automation_store::IssueAutomationStore;
+use crate::product::models::automation::{
+    AutomationAttentionFact, AutomationAttentionKind, AutomationAttentionStage,
+    EnrollmentBindingIdentity,
+};
 use crate::product::work_item_plan_compiler::{
     PlanCandidatePublicationProvenance, verify_publish_freshness,
 };
@@ -585,12 +590,22 @@ pub(crate) fn compile_verification_plan_id(compile_id: &str, index: usize) -> St
 
 impl WorkspaceEngine {
     pub(crate) async fn enter_work_item_plan_compile(&mut self) {
-        self.enter_work_item_plan_compile_with_auto_confirmation(false)
+        self.enter_work_item_plan_compile_with_auto_confirmation(false, false)
             .await;
     }
 
     pub(crate) async fn enter_policy_valid_work_item_plan_compile(&mut self) {
-        self.enter_work_item_plan_compile_with_auto_confirmation(true)
+        self.enter_work_item_plan_compile_with_auto_confirmation(true, false)
+            .await;
+    }
+
+    /// 批 2 P3：调用方已在同一确认链、同一 engine 锁内完成
+    /// `ensure_confirmation_trust_ready`（`handle_confirm` 的 SC Approval 臂与
+    /// `close_human_gate` Approve 臂——两处在直入 compile 前均已做 trust 按需
+    /// 准备）时使用本入口：跳过 P3 的二次 trust 预检（避免对同一确认重复
+    /// 登记/重复计数），但保持 Ready 路径的停点事实 resolve。
+    pub(crate) async fn enter_policy_valid_work_item_plan_compile_trust_ready(&mut self) {
+        self.enter_work_item_plan_compile_with_auto_confirmation(true, true)
             .await;
     }
 
@@ -643,7 +658,11 @@ impl WorkspaceEngine {
         }
     }
 
-    async fn enter_work_item_plan_compile_with_auto_confirmation(&mut self, auto_confirm: bool) {
+    async fn enter_work_item_plan_compile_with_auto_confirmation(
+        &mut self,
+        auto_confirm: bool,
+        trust_preverified: bool,
+    ) {
         // D2.1b：compile 状态机帧的 run admission——覆盖 compile 前的门
         // 收口/timeline 写、compile 本体与失败后的 mark_recovery/恢复
         // 节点写入（「无 attempt 也不能清运行中 compile」的完整窗口）；
@@ -662,6 +681,59 @@ impl WorkspaceEngine {
                 return;
             }
         };
+        // 批 2 P3（REQ-WIGA-02/12）：自动确认臂（与 compile 完成后的
+        // auto-confirm 同一判据，见 `work_item_plan_compile_auto_confirm_arm`）
+        // 在进入 compile 之前先复用 lifecycle.rs 的
+        // `ensure_confirmation_trust_ready` 做确认 trust 按需准备：
+        // - 非 Ready 返回 typed `ConfirmationTrustWaiting`：零 compile 副作用
+        //   （不建 compile 节点、不推进 stage、不跑 compile），保留 waiting
+        //   原 reason/session 目标；对精确绑定 enabled enrollment 的会话经
+        //   N0 store upsert `plan_question(stage=plan)`——未开页面也可读事实
+        //   通知；落人工确认门兜底（人工确认路径自身会再核 trust）。
+        // - trust Ready（含调用方在同一确认链内已验证的 `trust_preverified`
+        //   入口——不再二次预检，避免对同一确认重复登记/重复计数）：先
+        //   resolve 既有停点事实再继续（Ready resolve 后自动 Confirmed）；
+        //   resolve 失败仅经 Error 事件上抛，不阻断已合法的自动确认链
+        //   （停点条件已消失，不因通知簿记失败让链路倒退）。
+        if self.work_item_plan_compile_auto_confirm_arm(auto_confirm) {
+            if !trust_preverified
+                && let Err(waiting) = self
+                    .ensure_confirmation_trust_ready(
+                        self.session.author_provider.clone(),
+                        self.session.reviewer_provider.clone(),
+                    )
+                    .await
+            {
+                if let Err(error) = self.upsert_automation_confirmation_trust_fact(&waiting) {
+                    let _ = self
+                        .event_tx
+                        .send(EngineEvent::Error {
+                            message: format!(
+                                "upsert automation plan_question for confirmation trust \
+                                 waiting failed: {error}"
+                            ),
+                        })
+                        .await;
+                }
+                self.enter_human_confirm(Some(format!(
+                    "确认 trust 未就绪（{}），已暂停自动 Final Compile，等待人工确认",
+                    waiting.reason_code()
+                )))
+                .await;
+                return;
+            }
+            if let Err(error) = self.resolve_automation_confirmation_trust_fact() {
+                let _ = self
+                    .event_tx
+                    .send(EngineEvent::Error {
+                        message: format!(
+                            "resolve automation plan_question after confirmation trust \
+                             became ready failed: {error}"
+                        ),
+                    })
+                    .await;
+            }
+        }
         self.close_active_human_confirm_node("已确认通过").await;
         self.transition_stage(WorkspaceStage::Running).await;
         self.create_timeline_node(TimelineNodeDraft {
@@ -682,14 +754,7 @@ impl WorkspaceEngine {
                     "Final Compile 完成，已创建 {work_item_count} 个 Work Item"
                 )))
                 .await;
-                let single_candidate_approval = self.session.flow_kind
-                    == WorkItemPlanFlowKind::SingleCandidate
-                    && self.session.single_candidate_phase
-                        == Some(crate::product::models::SingleCandidatePhase::Approval);
-                if auto_confirm
-                    && (self.session.run_policy == RunPolicy::AutoIfValid
-                        || single_candidate_approval)
-                {
+                if self.work_item_plan_compile_auto_confirm_arm(auto_confirm) {
                     if let Err(message) = self
                         .complete_policy_valid_work_item_plan(work_item_count)
                         .await
@@ -784,6 +849,20 @@ impl WorkspaceEngine {
                 WorkspaceSessionStatus::WaitingForHuman,
             );
         }
+        // 批 2 P3（REQ-WIGA-12）：恢复门打开即对精确绑定 enabled enrollment
+        // 的会话 upsert plan_question(stage=plan)，focus 取真实 gate（durable
+        // compile transaction 的 compile_id，不伪造）；绑定不匹配的会话零
+        // 写入；无法解析真实 gate/写失败经 Error 事件上抛，门保持开态。
+        if let Err(error) = self.upsert_automation_compile_recovery_fact() {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::Error {
+                    message: format!(
+                        "upsert automation plan_question for compile recovery gate failed: {error}"
+                    ),
+                })
+                .await;
+        }
     }
 
     pub(crate) fn mark_latest_compile_transaction_recovery_required(&self, message: &str) -> bool {
@@ -817,6 +896,169 @@ impl WorkspaceEngine {
         tx.failure_reason = Some(message.to_string());
         tx.updated_at = chrono::Utc::now().to_rfc3339();
         store.put_compile_transaction(&tx).is_ok()
+    }
+
+    // ─── 批 2 P3（REQ-WIGA-02/12）：trust/compile 停点的 plan_question 写清 ───
+
+    /// 批 2 P3：本次 compile 入口是否为自动确认臂（与 compile 完成后的
+    /// auto-confirm 判据同一表达式：显式 policy-valid 入口，且
+    /// run_policy=AutoIfValid 或 SC Approval 相位）。
+    fn work_item_plan_compile_auto_confirm_arm(&self, auto_confirm: bool) -> bool {
+        auto_confirm
+            && (self.session.run_policy == RunPolicy::AutoIfValid
+                || (self.session.flow_kind == WorkItemPlanFlowKind::SingleCandidate
+                    && self.session.single_candidate_phase
+                        == Some(crate::product::models::SingleCandidatePhase::Approval)))
+    }
+
+    /// 批 2 P3：engine 层调 N0 store 的依赖接法（接法裁定与理由记录于
+    /// `.superpowers/sdd/b2wave1-P3-report.md`）：不新增引擎字段/构造参数——
+    /// app_paths 取自引擎持有的 lifecycle_store（与 advance.rs D2.1d retry 的
+    /// `IssueAutomationStore::new(app_paths)` 同一先例）；绑定身份按
+    /// (project_id, issue_id) 读 enrollment，仅当 enabled 且当前代绑定与本
+    /// 会话 (entity_id=plan, session_id) 精确相等才返回 Some——manual/未绑定/
+    /// 错绑会话一律零写入；enrollment 读取失败原样上抛（不吞错、不猜绑定）。
+    fn automation_attention_binding(
+        &self,
+    ) -> Result<Option<(IssueAutomationStore, EnrollmentBindingIdentity)>, String> {
+        let Some(lifecycle) = self.lifecycle_store.as_ref() else {
+            return Ok(None);
+        };
+        let store = IssueAutomationStore::new(lifecycle.app_paths().clone());
+        let Some(enrollment) = store
+            .get(&self.session.project_id, &self.session.issue_id)
+            .map_err(|error| format!("read automation enrollment failed: {error}"))?
+        else {
+            return Ok(None);
+        };
+        if !enrollment.enabled {
+            return Ok(None);
+        }
+        match enrollment.binding_history.map(|history| history.current) {
+            Some(binding)
+                if binding.plan_id == self.session.entity_id
+                    && binding.session_id == self.session.session_id =>
+            {
+                Ok(Some((store, binding)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// 批 2 P3：trust 停点事实的稳定 key（durable 会话身份派生：plan+session
+    /// +停点类别；与 compile 恢复门事实互不重叠）。
+    fn automation_confirmation_trust_fact_key(&self) -> String {
+        format!(
+            "{}:{}:confirmation_trust_waiting",
+            self.session.entity_id, self.session.session_id
+        )
+    }
+
+    /// 批 2 P3：trust 非 Ready 的停点 upsert——reason 保留 typed waiting 的
+    /// 原 reason_code（Home 原码透传/Context 稳定码）；trust 停点尚无
+    /// durable 门 id，不伪造 focus。
+    fn upsert_automation_confirmation_trust_fact(
+        &self,
+        waiting: &super::types::ConfirmationTrustWaiting,
+    ) -> Result<(), String> {
+        let Some((store, binding)) = self.automation_attention_binding()? else {
+            return Ok(());
+        };
+        let fact = AutomationAttentionFact {
+            key: self.automation_confirmation_trust_fact_key(),
+            kind: AutomationAttentionKind::PlanQuestion,
+            stage: AutomationAttentionStage::Plan,
+            plan_id: Some(self.session.entity_id.clone()),
+            session_id: Some(self.session.session_id.clone()),
+            attempt_id: None,
+            reason_code: waiting.reason_code().to_string(),
+            occurred_at: chrono::Utc::now().to_rfc3339(),
+            choice_id: None,
+            gate_id: None,
+        };
+        store
+            .upsert_automation_attention_fact(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &binding,
+                fact,
+            )
+            .map_err(|error| format!("upsert confirmation trust waiting fact failed: {error}"))
+    }
+
+    /// 批 2 P3：trust 转 Ready 后清对应停点事实（N0 resolve 同 key 幂等；
+    /// 未绑定/manual 会话零调用）。
+    fn resolve_automation_confirmation_trust_fact(&self) -> Result<(), String> {
+        let Some((store, binding)) = self.automation_attention_binding()? else {
+            return Ok(());
+        };
+        store
+            .resolve_automation_attention_fact(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &binding,
+                &self.automation_confirmation_trust_fact_key(),
+            )
+            .map_err(|error| format!("resolve confirmation trust waiting fact failed: {error}"))
+    }
+
+    /// 批 2 P3：compile 恢复门事实的稳定 key（plan+真实 compile_id；同一
+    /// transaction 重开不换 key，不同 compile 不同 key）。
+    fn automation_compile_recovery_fact_key(plan_id: &str, compile_id: &str) -> String {
+        format!("{plan_id}:{compile_id}:compile_recovery")
+    }
+
+    /// 批 2 P3：compile 恢复门打开的停点 upsert——focus 取真实 gate（durable
+    /// compile transaction 的 compile_id）；无 RecoveryRequired transaction
+    /// 时无从取真实 gate，不伪造、报错上抛。
+    fn upsert_automation_compile_recovery_fact(&self) -> Result<(), String> {
+        let plan_store = self
+            .work_item_plan_store()
+            .map_err(|error| format!("load plan store for attention fact failed: {error}"))?;
+        let tx = self
+            .latest_work_item_plan_recovery_transaction(&plan_store)
+            .map_err(|error| format!("load recovery compile transaction failed: {error}"))?;
+        let Some((store, binding)) = self.automation_attention_binding()? else {
+            return Ok(());
+        };
+        let fact = AutomationAttentionFact {
+            key: Self::automation_compile_recovery_fact_key(
+                &self.session.entity_id,
+                &tx.compile_id,
+            ),
+            kind: AutomationAttentionKind::PlanQuestion,
+            stage: AutomationAttentionStage::Plan,
+            plan_id: Some(self.session.entity_id.clone()),
+            session_id: Some(self.session.session_id.clone()),
+            attempt_id: None,
+            reason_code: "work_item_plan_compile_recovery_required".to_string(),
+            occurred_at: chrono::Utc::now().to_rfc3339(),
+            choice_id: None,
+            gate_id: Some(tx.compile_id.clone()),
+        };
+        store
+            .upsert_automation_attention_fact(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &binding,
+                fact,
+            )
+            .map_err(|error| format!("upsert compile recovery attention fact failed: {error}"))
+    }
+
+    /// 批 2 P3：恢复动作成功关门后清对应停点事实（key 不存在幂等成功）。
+    fn resolve_automation_compile_recovery_fact(&self, compile_id: &str) -> Result<(), String> {
+        let Some((store, binding)) = self.automation_attention_binding()? else {
+            return Ok(());
+        };
+        store
+            .resolve_automation_attention_fact(
+                &self.session.project_id,
+                &self.session.issue_id,
+                &binding,
+                &Self::automation_compile_recovery_fact_key(&self.session.entity_id, compile_id),
+            )
+            .map_err(|error| format!("resolve compile recovery attention fact failed: {error}"))
     }
 
     /// R3（oracle 裁决）：Final Compile 失败落 HumanConfirm 的第三分支此前不建
@@ -1244,6 +1486,9 @@ impl WorkspaceEngine {
                     "Final Compile 已回滚，等待人工确认下一步".to_string(),
                 ))
                 .await;
+                // 批 2 P3：恢复门成功关闭（状态迁移已全部落定）后清对应
+                // plan_question 事实；清失败上抛（事实保留可见，不假成功）。
+                self.resolve_automation_compile_recovery_fact(&tx.compile_id)?;
                 Ok(WorkItemPlanCompileRecoveryOutcome::HumanConfirm)
             }
             WorkItemPlanCompileRecoveryActionDto::Continue => {
@@ -1295,6 +1540,9 @@ impl WorkspaceEngine {
                 .await;
                 self.enter_human_confirm(Some("Final Compile 已提交，等待最终确认".to_string()))
                     .await;
+                // 批 2 P3：恢复门成功关闭（状态迁移已全部落定）后清对应
+                // plan_question 事实；清失败上抛（事实保留可见，不假成功）。
+                self.resolve_automation_compile_recovery_fact(&tx.compile_id)?;
                 Ok(WorkItemPlanCompileRecoveryOutcome::HumanConfirm)
             }
             WorkItemPlanCompileRecoveryActionDto::HumanTriage => {
@@ -1307,6 +1555,9 @@ impl WorkspaceEngine {
                     .await;
                 self.enter_human_confirm(Some("Final Compile 需要人工整理".to_string()))
                     .await;
+                // 批 2 P3：恢复门成功关闭（状态迁移已全部落定）后清对应
+                // plan_question 事实；清失败上抛（事实保留可见，不假成功）。
+                self.resolve_automation_compile_recovery_fact(&tx.compile_id)?;
                 Ok(WorkItemPlanCompileRecoveryOutcome::HumanConfirm)
             }
         }

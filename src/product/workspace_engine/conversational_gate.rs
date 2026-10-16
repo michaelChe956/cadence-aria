@@ -795,7 +795,8 @@ impl super::WorkspaceEngine {
                 // enter_human_confirm。
                 self.session.single_candidate_phase = saved.single_candidate_phase.clone();
                 self.session.human_gate_snapshot = saved.human_gate_snapshot;
-                self.enter_policy_valid_work_item_plan_compile().await;
+                self.enter_policy_valid_work_item_plan_compile_trust_ready()
+                    .await;
 
                 let durable = lifecycle
                     .get_workspace_session(&self.session.session_id)

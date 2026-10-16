@@ -53,7 +53,8 @@ impl WorkspaceEngine {
                             && self.session.single_candidate_phase
                                 == Some(crate::product::models::SingleCandidatePhase::Approval) =>
                     {
-                        self.enter_policy_valid_work_item_plan_compile().await;
+                        self.enter_policy_valid_work_item_plan_compile_trust_ready()
+                            .await;
                         return Ok(WorkspaceConfirmOutcome::None);
                     }
                     WorkspaceType::WorkItemPlan => {
