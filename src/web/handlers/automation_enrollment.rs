@@ -613,14 +613,14 @@ pub(crate) fn automation_identity_for_attempt(
     let Some(plan_id) = attempt.work_item_group_id.clone() else {
         return Ok(None);
     };
-    let enrollment = IssueAutomationStore::new(paths.clone())
-        .get(&attempt.project_id, &attempt.issue_id)?;
+    let enrollment =
+        IssueAutomationStore::new(paths.clone()).get(&attempt.project_id, &attempt.issue_id)?;
     Ok(enrollment
         .filter(|enrollment| {
             // k3 波5 F1 修复：托管判据＝精确绑定 plan 且 enabled 或已终止
-        //（terminated 仍 managed）；仅 Disable（enabled=false 且未终止）
-        // 不是托管——单 attempt abort/门动作保持原语义，与其余投影的
-        // owner=client 同判据（N0 守卫同口径）。
+            //（terminated 仍 managed）；仅 Disable（enabled=false 且未终止）
+            // 不是托管——单 attempt abort/门动作保持原语义，与其余投影的
+            // owner=client 同判据（N0 守卫同口径）。
             enrollment.plan_id.as_deref() == Some(plan_id.as_str())
                 && (enrollment.enabled || enrollment.terminated_at.is_some())
         })
@@ -640,33 +640,32 @@ pub(crate) fn automation_identity_for_attempt(
 
 /// k3 波5 F1（P2）：coding WS 会话快照的管理投影——精确绑定 plan 即返回
 /// ownership（与 REST `ownership_for_ids` 同判据：owner=Server iff
- /// enabled||terminated，仅 Disable 为 client；未绑定返回 None 保持旧帧）。
+/// enabled||terminated，仅 Disable 为 client；未绑定返回 None 保持旧帧）。
 pub(crate) fn automation_ownership_for_attempt(
     paths: &crate::product::app_paths::ProductAppPaths,
     attempt: &crate::product::coding_models::CodingExecutionAttempt,
-) -> Result<
-    Option<crate::product::models::automation::AutomationOwnership>,
-    ProductStoreError,
-> {
+) -> Result<Option<crate::product::models::automation::AutomationOwnership>, ProductStoreError> {
     let Some(plan_id) = attempt.work_item_group_id.clone() else {
         return Ok(None);
     };
-    let enrollment = IssueAutomationStore::new(paths.clone())
-        .get(&attempt.project_id, &attempt.issue_id)?;
+    let enrollment =
+        IssueAutomationStore::new(paths.clone()).get(&attempt.project_id, &attempt.issue_id)?;
     Ok(enrollment
         .filter(|enrollment| enrollment.plan_id.as_deref() == Some(plan_id.as_str()))
-        .map(|enrollment| crate::product::models::automation::AutomationOwnership {
-            owner: if enrollment.enabled || enrollment.terminated_at.is_some() {
-                crate::product::models::automation::AutomationOwner::Server
-            } else {
-                crate::product::models::automation::AutomationOwner::Client
+        .map(
+            |enrollment| crate::product::models::automation::AutomationOwnership {
+                owner: if enrollment.enabled || enrollment.terminated_at.is_some() {
+                    crate::product::models::automation::AutomationOwner::Server
+                } else {
+                    crate::product::models::automation::AutomationOwner::Client
+                },
+                enrollment_id: Some(enrollment.enrollment_id),
+                policy_revision: Some(enrollment.policy_revision),
+                enabled: enrollment.enabled,
+                plan_id: enrollment.plan_id,
+                terminated_at: enrollment.terminated_at,
             },
-            enrollment_id: Some(enrollment.enrollment_id),
-            policy_revision: Some(enrollment.policy_revision),
-            enabled: enrollment.enabled,
-            plan_id: enrollment.plan_id,
-            terminated_at: enrollment.terminated_at,
-        }))
+        ))
 }
 
 fn termination_identity_details(identity: &AutomationPlanTerminationIdentity) -> serde_json::Value {
@@ -835,12 +834,9 @@ pub async fn post_automation_enrollment_terminate(
             .collect();
         let mut clear_errors: Vec<String> = Vec::new();
         for key in &stale_keys {
-            if let Err(error) = store.resolve_automation_attention_fact(
-                &project_id,
-                &issue_id,
-                &binding,
-                key,
-            ) {
+            if let Err(error) =
+                store.resolve_automation_attention_fact(&project_id, &issue_id, &binding, key)
+            {
                 clear_errors.push(format!("{key}: {error}"));
             }
         }
@@ -1049,20 +1045,19 @@ pub async fn post_automation_enrollment_continue_chain(
                         json!({}),
                     )
                 })?;
-            let admission =
-                crate::product::workspace_engine::AdvancePlanAdmission::acquire(
-                    &paths,
-                    &project_id,
-                    &issue_id,
-                    &binding.plan_id,
+            let admission = crate::product::workspace_engine::AdvancePlanAdmission::acquire(
+                &paths,
+                &project_id,
+                &issue_id,
+                &binding.plan_id,
+            )
+            .map_err(|error| {
+                ApiError::runtime(
+                    "automation_continue_chain_admission_failed",
+                    format!("continue-chain admission rejected: {error:?}"),
+                    json!({}),
                 )
-                .map_err(|error| {
-                    ApiError::runtime(
-                        "automation_continue_chain_admission_failed",
-                        format!("continue-chain admission rejected: {error:?}"),
-                        json!({}),
-                    )
-                })?;
+            })?;
             let retry = match state.workspace_sessions.peek(&session_record.id).await {
                 Some(manager) => {
                     let engine_arc = manager.engine();
@@ -1076,40 +1071,38 @@ pub async fn post_automation_enrollment_continue_chain(
                         .get_workspace_session(&session_record.id)
                         .map_err(product_store_api_error)?;
                     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
-                    let mut engine = crate::product::workspace_engine::WorkspaceEngine::new_persistent(
-                        std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
-                            state.workspace_root.join("advance-engine-checkpoints"),
-                        )),
-                        lifecycle,
-                        event_tx,
-                        crate::product::workspace_engine::WorkspaceSession::from_record(full_record),
-                    );
+                    let mut engine =
+                        crate::product::workspace_engine::WorkspaceEngine::new_persistent(
+                            std::sync::Arc::new(
+                                crate::product::checkpoint_store::CheckpointStore::new(
+                                    state.workspace_root.join("advance-engine-checkpoints"),
+                                ),
+                            ),
+                            lifecycle,
+                            event_tx,
+                            crate::product::workspace_engine::WorkspaceSession::from_record(
+                                full_record,
+                            ),
+                        );
                     engine
                         .retry_initialization_with_lease(&retry_request, &admission)
                         .await
                 }
             }
             .map_err(|error| {
-                ApiError::runtime(
-                    "automation_continue_chain_rejected",
-                    error,
-                    json!({}),
-                )
+                ApiError::runtime("automation_continue_chain_rejected", error, json!({}))
             })?;
             let succeeded = matches!(
                 retry.state,
                 crate::product::models::automation::OperationState::Accepted
                     | crate::product::models::automation::OperationState::Replayed
-            ) && retry
-                .outcome
-                .as_ref()
-                .is_some_and(|outcome| {
-                    matches!(
-                        outcome,
-                        crate::product::advance_store::AdvanceOutcome::Completed { .. }
-                            | crate::product::advance_store::AdvanceOutcome::Replayed { .. }
-                    )
-                });
+            ) && retry.outcome.as_ref().is_some_and(|outcome| {
+                matches!(
+                    outcome,
+                    crate::product::advance_store::AdvanceOutcome::Completed { .. }
+                        | crate::product::advance_store::AdvanceOutcome::Replayed { .. }
+                )
+            });
             if succeeded {
                 resolve_and_wake(store).map_err(enrollment_api_error)?;
             }
@@ -2102,10 +2095,10 @@ mod tests {
     /// 仍 managed（同源管理投影）。
     #[tokio::test]
     async fn terminate_rest_confirmed_terminates_and_replays_idempotently() {
+        use crate::product::models::WorkspaceSessionStatus;
         use crate::product::models::automation::{
             AutomationAttentionFact, AutomationAttentionKind, AutomationAttentionStage,
         };
-        use crate::product::models::WorkspaceSessionStatus;
 
         let fixture = seed_fixture(1, true);
         let app = fixture.router();
@@ -2175,7 +2168,10 @@ mod tests {
         );
         let durable = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
         assert!(!durable.enabled);
-        assert_eq!(durable.terminated_at.as_deref(), Some(terminated_at.as_str()));
+        assert_eq!(
+            durable.terminated_at.as_deref(),
+            Some(terminated_at.as_str())
+        );
         assert!(
             durable.attention_facts.is_empty(),
             "termination must clear the bound plan's stale attention facts"
@@ -2189,7 +2185,10 @@ mod tests {
             ownership.owner,
             crate::product::models::automation::AutomationOwner::Server
         );
-        assert_eq!(ownership.terminated_at.as_deref(), Some(terminated_at.as_str()));
+        assert_eq!(
+            ownership.terminated_at.as_deref(),
+            Some(terminated_at.as_str())
+        );
 
         // 同 command 同 payload 重放：Replayed、terminated_at 冻结、幂等。
         let replay = post_terminate(&app, &body).await;
@@ -2218,7 +2217,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(outcome, crate::web::autopilot_orchestrator::ReconcileOutcome::NoEnrollment);
+        assert_eq!(
+            outcome,
+            crate::web::autopilot_orchestrator::ReconcileOutcome::NoEnrollment
+        );
     }
 
     /// T3 红测②（C2 旧 abort REST 路由）：自动绑定 plan 上的旧 abort 入口
@@ -2227,9 +2229,7 @@ mod tests {
     async fn abort_rest_routes_managed_attempt_to_unified_termination() {
         use tower::ServiceExt;
 
-        use crate::product::coding_attempt_store::{
-            CodingAttemptStore, CreateCodingAttemptInput,
-        };
+        use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
         use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
         let fixture = seed_fixture(1, true);
@@ -2289,7 +2289,9 @@ mod tests {
             .unwrap();
         let mut managed = attempt.clone();
         managed.work_item_group_id = Some(plan_id.clone());
-        coding_store.write_coding_attempt_for_test(&managed).unwrap();
+        coding_store
+            .write_coding_attempt_for_test(&managed)
+            .unwrap();
 
         let response = app
             .clone()
@@ -2336,8 +2338,7 @@ mod tests {
             .unwrap();
         let manual_payload = response_json(response).await;
         assert_ne!(
-            manual_payload["code"],
-            "automation_plan_termination_required",
+            manual_payload["code"], "automation_plan_termination_required",
             "manual attempt abort must keep the original semantics"
         );
     }
@@ -2348,9 +2349,7 @@ mod tests {
     /// managed）。
     #[tokio::test]
     async fn disabled_enrollment_projects_client_owner_and_keeps_manual_abort() {
-        use crate::product::coding_attempt_store::{
-            CodingAttemptStore, CreateCodingAttemptInput,
-        };
+        use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
         use crate::product::models::automation::AutomationOwner;
         use crate::web::coding_ws_handler::build_coding_session_state;
         use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -2399,23 +2398,21 @@ mod tests {
         group.work_item_group_id = Some(plan_id.clone());
         coding_store.write_coding_attempt_for_test(&group).unwrap();
         // 快照装配的 plan-repair reconcile 需要最小 lineage。
-        crate::product::work_item_revision_store::WorkItemRevisionStore::new(
-            fixture.paths.clone(),
-        )
-        .put_plan_lineage(
-            &crate::product::models::work_item_revision::WorkItemPlanLineage {
-                id: plan_id.clone(),
-                project_id: PROJECT_ID.to_string(),
-                issue_id: ISSUE_ID.to_string(),
-                story_spec_refs: Vec::new(),
-                design_spec_refs: Vec::new(),
-                active_revision_id: None,
-                active_amendment_id: None,
-                created_at: "2026-10-16T00:00:00Z".to_string(),
-                updated_at: "2026-10-16T00:00:00Z".to_string(),
-            },
-        )
-        .unwrap();
+        crate::product::work_item_revision_store::WorkItemRevisionStore::new(fixture.paths.clone())
+            .put_plan_lineage(
+                &crate::product::models::work_item_revision::WorkItemPlanLineage {
+                    id: plan_id.clone(),
+                    project_id: PROJECT_ID.to_string(),
+                    issue_id: ISSUE_ID.to_string(),
+                    story_spec_refs: Vec::new(),
+                    design_spec_refs: Vec::new(),
+                    active_revision_id: None,
+                    active_amendment_id: None,
+                    created_at: "2026-10-16T00:00:00Z".to_string(),
+                    updated_at: "2026-10-16T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
 
         let ws_automation = |coding_store: &CodingAttemptStore| {
             let frame = build_coding_session_state(coding_store, group.clone()).unwrap();
@@ -2454,13 +2451,20 @@ mod tests {
             .unwrap();
         let payload = response_json(response).await;
         assert_ne!(
-            payload["code"],
-            "automation_plan_termination_required",
+            payload["code"], "automation_plan_termination_required",
             "disabled enrollment must not route single-attempt abort to termination"
         );
 
         // 重新 Enable 后终止：terminated 仍 managed（owner=server）。
-        let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        // 重开已有 enrollment 必须携带当前 revision（null 只用于首建）。
+        let current_revision = IssueAutomationStore::new(fixture.paths.clone())
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap()
+            .policy_revision;
+        let mut re_enable = enrollment_body(&fixture, 1, 1);
+        re_enable["expected_revision"] = serde_json::json!(current_revision);
+        let enable = put_enrollment(&app, re_enable).await;
         let enable_status = enable.status();
         let enable_body = response_json(enable).await;
         assert_eq!(enable_status, StatusCode::OK, "re-enable body: {enable_body:?}");
