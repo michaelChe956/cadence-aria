@@ -1160,3 +1160,116 @@ async fn lcg_t13_ready_plan_does_not_start_other_target_without_manual_command()
         1
     );
 }
+
+/// k3 波2 F4（选型 A 读侧回退）：集合绑定的成员解析双形态读——
+/// ①legacy 旧根现场（enrollment 冻结 manifest UUID，成员驻留 project 级
+/// 旧根）：uuid 子树失败回退 issue 作用域旧根解析（修复前红：
+/// logical_repository_manifest not found）；②per-LC uuid 子树现场直接
+/// 命中；③成员不存在仍 fail-closed。
+#[test]
+fn set_enrollment_member_resolution_reads_legacy_root_fallback() {
+    use crate::product::logical_codebase::{
+        CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalCodebaseManifest,
+        LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
+        RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+    };
+    use crate::web::handlers::automation_enrollment_test_support::{
+        ISSUE_ID as PROJECT_ISSUE_ID, PROJECT_ID, seed_fixture,
+    };
+
+    let resolve = |paths: &crate::product::app_paths::ProductAppPaths,
+                   lc: &str,
+                   member: LogicalRepositoryId| {
+        crate::web::coding_start::resolve_set_enrollment_member(
+            paths,
+            PROJECT_ID,
+            PROJECT_ISSUE_ID,
+            lc,
+            member,
+        )
+    };
+
+    // ① legacy 旧根现场：seed_fixture 播种 project 级旧根 manifest/成员/
+    ///checkout/repos.json；enrollment 冻结任意 manifest UUID 形态。
+    let fixture = seed_fixture(2, true);
+    let enrolled_lc = uuid::Uuid::new_v4().to_string();
+    let member_one = LogicalRepositoryId(uuid::Uuid::from_u128(1));
+    let (member, checkout, repository) =
+        resolve(&fixture.paths, &enrolled_lc, member_one)
+            .expect("legacy root fallback must resolve set enrollment member");
+    assert_eq!(member.logical_repository_id, member_one);
+    assert_eq!(checkout.kind, CheckoutKind::Main);
+    assert_eq!(repository.logical_repository_id, Some(member_one));
+
+    // ② per-LC uuid 子树现场：for_lc 权威子树直接命中（无回退参与）。
+    let subtree_root = tempfile::tempdir().unwrap();
+    let subtree_paths =
+        crate::product::app_paths::ProductAppPaths::new(subtree_root.path().join(".aria"));
+    let lc_uuid = uuid::Uuid::new_v4().to_string();
+    let authority = LogicalCodebaseStore::for_lc(subtree_paths.clone(), &lc_uuid);
+    let manifest =
+        LogicalCodebaseManifest::new(PROJECT_ID, subtree_root.path().to_path_buf(), vec![member_one]);
+    authority.save_manifest(PROJECT_ID, &manifest).unwrap();
+    let now = "2026-10-16T00:00:00Z".to_string();
+    let checkout_path = subtree_root.path().join("checkout-f4");
+    std::fs::create_dir_all(&checkout_path).unwrap();
+    let source_identity =
+        RepositorySourceIdentity::from_git_parts(&checkout_path, checkout_path.join(".git"), None);
+    let checkout_id = RepositoryCheckoutId(uuid::Uuid::new_v4());
+    authority
+        .save_member(
+            PROJECT_ID,
+            &CodebaseMemberRecord {
+                logical_repository_id: member_one,
+                physical_repository_id: "physical-f4".to_string(),
+                alias: "repo-f4".to_string(),
+                role: "repository".to_string(),
+                ordinal: 1,
+                source_identity: source_identity.clone(),
+                repo_type: RepositoryType::Unknown,
+                tech_stack: Vec::new(),
+                owner: None,
+                tags: Vec::new(),
+                default_ref: None,
+                checkout_ids: vec![checkout_id],
+                status: MemberStatus::Active,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        )
+        .unwrap();
+    authority
+        .save_checkout(
+            PROJECT_ID,
+            &RepositoryCheckoutRecord {
+                checkout_id,
+                logical_repository_id: member_one,
+                physical_repository_id: "physical-f4".to_string(),
+                kind: CheckoutKind::Main,
+                canonical_path: checkout_path,
+                checkout_path_hash: "sha256:checkout-f4".to_string(),
+                git_dir_identity: source_identity.git_dir_identity(),
+                revision: Some("abcdef".to_string()),
+                availability: CheckoutAvailability::Available,
+                observed_at: now.clone(),
+                created_at: now.clone(),
+                updated_at: now,
+            },
+        )
+        .unwrap();
+    let (subtree_member, _, subtree_repository) =
+        resolve(&subtree_paths, &lc_uuid, member_one)
+            .expect("uuid subtree site must resolve directly");
+    assert_eq!(subtree_member.logical_repository_id, member_one);
+    assert_eq!(subtree_repository.id, "physical-f4");
+
+    // ③ 成员不存在：两路皆失败 → 原始（uuid 子树）错误 fail-closed。
+    let missing = LogicalRepositoryId(uuid::Uuid::from_u128(4242));
+    assert!(
+        resolve(&fixture.paths, &enrolled_lc, missing).is_err(),
+        "nonexistent member must fail closed"
+    );
+    assert!(
+        resolve(&subtree_paths, &lc_uuid, missing).is_err(),
+    );
+}

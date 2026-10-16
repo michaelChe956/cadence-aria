@@ -915,23 +915,23 @@ fn verify_current_enrollment(
                     ),
                 ));
             }
-            let (_, checkout, repository) =
-                crate::product::repository_store::RepositoryStore::new(paths.clone())
-                    .resolve_logical_repository_for_issue_codebase(
-                        &attempt.project_id,
-                        Some(logical_codebase_id),
-                        snapshot.logical_repository_id,
-                    )
-                    .map_err(|error| {
-                        StartCodingError::new(
-                            "coding_start_enrollment_mismatch",
-                            format!(
-                                "resolve set enrollment member {:?} under logical codebase \
-                                 {logical_codebase_id} failed: {error}",
-                                snapshot.logical_repository_id
-                            ),
-                        )
-                    })?;
+            let (_, checkout, repository) = resolve_set_enrollment_member(
+                paths,
+                &attempt.project_id,
+                &attempt.issue_id,
+                logical_codebase_id,
+                snapshot.logical_repository_id,
+            )
+            .map_err(|error| {
+                StartCodingError::new(
+                    "coding_start_enrollment_mismatch",
+                    format!(
+                        "resolve set enrollment member {:?} under logical codebase \
+                         {logical_codebase_id} failed: {error}",
+                        snapshot.logical_repository_id
+                    ),
+                )
+            })?;
             if repository.id != snapshot.physical_repository_id
                 || checkout.checkout_id != snapshot.checkout_id
             {
@@ -1199,6 +1199,57 @@ fn sc_advance_ready_gate(
         Err(error) => Err(StartCodingError::requires_advance(format!(
             "cannot verify durable advance readiness: {error}"
         ))),
+    }
+}
+
+/// k3 波2 F4（R4/E1 收尾配套缺口，controller 裁决选型 A 读侧回退）：集合
+/// 绑定的成员解析双形态读——先按 enrollment 冻结的 manifest UUID 走
+/// per-LC 子树（`logical-codebases/{uuid}/`，新 LC 现场直接命中）；失败时
+/// 回退 issue 作用域 LC id（`resolve_issue_logical_codebase_id`：legacy 现场
+/// None/别名 → project 级旧根 strict 解析，与 advance_split/
+/// build_attempt_target_snapshot 落子树同一作用域）。两路皆失败以原始
+/// （uuid 子树）错误 fail-closed；不动模型、不动写入侧，单成员/manifest
+/// 现场行为不变。
+fn resolve_set_enrollment_member(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    logical_codebase_id: &str,
+    logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId,
+) -> Result<
+    (
+        crate::product::logical_codebase::CodebaseMemberRecord,
+        crate::product::logical_codebase::RepositoryCheckoutRecord,
+        crate::product::models::RepositoryRecord,
+    ),
+    crate::product::json_store::ProductStoreError,
+> {
+    let uuid_subtree = crate::product::repository_store::RepositoryStore::new(paths.clone())
+        .resolve_logical_repository_for_issue_codebase(
+            project_id,
+            Some(logical_codebase_id),
+            logical_repository_id,
+        );
+    match uuid_subtree {
+        Ok(resolved) => Ok(resolved),
+        Err(uuid_error) => {
+            let scoped_lc =
+                match crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+                    paths,
+                    project_id,
+                    issue_id,
+                ) {
+                    Ok(scoped) => scoped,
+                    Err(_) => return Err(uuid_error),
+                };
+            crate::product::repository_store::RepositoryStore::new(paths.clone())
+                .resolve_logical_repository_for_issue_codebase(
+                    project_id,
+                    scoped_lc.as_deref(),
+                    logical_repository_id,
+                )
+                .map_err(|_| uuid_error)
+        }
     }
 }
 #[cfg(test)]
