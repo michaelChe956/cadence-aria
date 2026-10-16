@@ -623,6 +623,7 @@ async fn b2_p3_manual_require_execution_plan_confirm_true_survives_auto_confirm(
 /// （ContinueToCompleted 路由只落 (Running, None)）人工按「修复后重新
 /// 确认」走 close_human_gate(Approve) 会被静态资格（要求快照在场）恒拒，
 /// 自动链在 compile 前永久停滞。端到端：停等→人工 approve→Confirmed。
+#[tokio::test]
 async fn b2_p3_trust_waiting_then_human_gate_close_approve_confirms() {
     use crate::product::models::SingleCandidatePhase;
     use crate::product::workspace_engine::HumanGateCloseDecision;
