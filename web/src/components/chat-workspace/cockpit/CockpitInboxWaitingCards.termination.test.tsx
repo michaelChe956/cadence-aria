@@ -239,4 +239,21 @@ describe("AutomationTerminatedBanner（T4 终止态呈现）", () => {
     expect(banner).toHaveTextContent("2026-10-16T06:00:00Z");
     expect(banner).toHaveTextContent("已产出文件保留");
   });
+
+  // k3 波5 F2（P3 修复）：cleanup_required 如实说明需管理员介入——前端无
+  // 重试入口，且 terminate 重读 expected_policy_revision（终止后已 +1）会被
+  // 命令账本判异 payload Conflict，不得承诺「可重试同一终止命令」。
+  it("cleanup_required states admin intervention is required without promising a retry", () => {
+    render(
+      <AutomationTerminatedBanner
+        terminatedAt="2026-10-16T06:00:00Z"
+        outcome="cleanup_required"
+      />,
+    );
+
+    const banner = screen.getByTestId("automation-terminated-banner");
+    expect(banner).toHaveTextContent("清理未完成");
+    expect(banner).toHaveTextContent("需管理员介入");
+    expect(banner).not.toHaveTextContent("重试");
+  });
 });

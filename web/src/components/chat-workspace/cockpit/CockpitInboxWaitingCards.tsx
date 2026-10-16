@@ -92,8 +92,11 @@ export function AutomationTerminatedBanner({
       <span className="font-mono">{terminatedAt}</span>
       <span>本计划全部仓库已停止，不可继续；已产出文件保留。</span>
       {outcome === "cleanup_required" ? (
+        // k3 波5 F2（P3）：如实说明需管理员介入——前端无重试入口，且
+        // terminate 每次重读 expected_policy_revision（终止后已 +1），真
+        // 重试会被命令账本判异 payload Conflict，不承诺可重试。
         <span className="font-semibold">
-          部分收口未完成（cleanup_required），可重试同一终止命令。
+          清理未完成（cleanup_required），需管理员介入。
         </span>
       ) : null}
     </div>
