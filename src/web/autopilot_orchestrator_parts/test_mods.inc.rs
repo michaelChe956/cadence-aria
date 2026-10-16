@@ -456,3 +456,4 @@ mod g8_delegated_orphan {
         assert_eq!(session_after.provider_start_ledger.len(), 2);
     }
 }
+include!("r4_e1_campaign.inc.rs");

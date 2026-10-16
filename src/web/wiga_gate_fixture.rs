@@ -395,6 +395,471 @@ impl EnrolledGateFixture {
         }
     }
 
+    /// 批 2 R4/E1（REQ-WIGA-13）：四仓集合 enrollment fixture——4 成员 LC
+    ///（真实 main checkout 就位）＋repo-1 物理仓（issue.repo_id 解析）＋
+    /// 成员锚定确认 story/design；Enable target 为集合
+    /// `logical_codebase_members`（全部 4 成员）且 `plan_approval=auto`
+    ///（AutoIfValid 冻结）；`ensure_enrolled_plan` 锁内唯一创建/绑定
+    /// plan/session。不预注册生成 run：自动批准链由
+    /// `auto_approve_plan` 的引擎 policy-valid compile 承载（零人工）。
+    pub(crate) async fn new_four_repository_collection() -> Self {
+        use crate::web::handlers::automation_enrollment_test_support::collection_enable_body;
+
+        let inner = seed_fixture(4, true);
+        // 成员 checkout 的权威 `canonical_path` 是 `paths.root()/{checkout}`
+        //（`seed_fixture` 记录形态，与 p2/prepared 先例同源）；真仓必须就位
+        // 在同一路径，否则 advance 的目标快照捕获（`git rev-parse HEAD`）
+        // 落 fail-closed `plan_coding_advance_failed`。
+        for checkout in [
+            "checkout-enroll-a",
+            "checkout-enroll-b",
+            "checkout-enroll-c",
+            "checkout-enroll-d",
+        ] {
+            init_real_main_checkout(&inner.paths.root().join(checkout));
+        }
+        normalize_checkout_revision_to_unobserved(&inner.paths);
+        let root_path = inner._root.path().to_path_buf();
+        let state = fake_state_with_gateway(root_path.clone());
+        // 子 WorkItem 上下文经 issue.repo_id 解析 repo-1：与 `new` 同款真实
+        // git 仓（main 分支＋空提交＋本地 bare origin）＋repos.json 登记。
+        {
+            let repos_path = inner.paths.project_root(PROJECT_ID).join("repos.json");
+            let mut repositories: Vec<crate::product::models::RepositoryRecord> =
+                crate::product::json_store::read_json(&repos_path).unwrap();
+            let repo_root = inner._root.path().join("repo-1");
+            init_real_main_checkout(&repo_root);
+            let now = "2026-09-27T00:00:00Z".to_string();
+            repositories.push(crate::product::models::RepositoryRecord {
+                id: crate::web::handlers::automation_enrollment_test_support::REPOSITORY_ID
+                    .to_string(),
+                project_id: PROJECT_ID.to_string(),
+                name: "repo-1".to_string(),
+                path: repo_root,
+                repo_hash: "sha256:fixture-repo-1".to_string(),
+                runtime_root: inner._root.path().join("repo-1/.aria/runtime"),
+                default_policy_preset: "manual-write".to_string(),
+                default_provider_mode: "fake".to_string(),
+                created_at: now.clone(),
+                logical_repository_id: None,
+                primary_checkout_id: None,
+                identity_schema_version: 1,
+                updated_at: now,
+            });
+            crate::product::json_store::write_json(&repos_path, &repositories).unwrap();
+        }
+        // 成员锚定确认 story/design（member-a 物理仓；seed 的 repo-1 不在
+        // 有效成员集，compile 在 target 有效性上 fail-closed）。
+        let lifecycle_seed = LifecycleStore::new(inner.paths.clone());
+        let story = lifecycle_seed
+            .create_story_spec(crate::product::lifecycle_store::CreateStorySpecInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: "physical-checkout-enroll-a".to_string(),
+                title: "four repository story".to_string(),
+                aggregate_codebase: None,
+            })
+            .unwrap();
+        lifecycle_seed
+            .append_version(crate::product::lifecycle_store::AppendSpecVersionInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                entity_id: story.id.clone(),
+                markdown: "# four repository story".to_string(),
+                provider_run_refs: Vec::new(),
+                review_refs: Vec::new(),
+                confirmed_by: None,
+            })
+            .unwrap();
+        lifecycle_seed
+            .update_spec_confirmation_status(
+                PROJECT_ID,
+                ISSUE_ID,
+                &story.id,
+                crate::product::models::LifecycleConfirmationStatus::Confirmed,
+            )
+            .unwrap();
+        let logical_codebase_ref = crate::product::logical_codebase::LogicalCodebaseStore::new(
+            inner.paths.clone(),
+        )
+        .load_manifest(PROJECT_ID)
+        .unwrap()
+        .expect("seeded logical codebase manifest")
+        .logical_codebase_id;
+        // 聚合 Design 携带 involved/change_order（REQ-WSC-08 上界子集判定：
+        // involved 非空才打开多仓 plan 入口闸；多仓 involved 必须给顺序）。
+        // involved=实际三仓（member-4 选中但设计不涉及）。
+        let member =
+            |index: u128| crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::from_u128(index));
+        let design = lifecycle_seed
+            .create_design_spec(crate::product::lifecycle_store::CreateDesignSpecInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                story_spec_ids: vec![story.id.clone()],
+                title: "four repository design".to_string(),
+                aggregate_codebase: Some(
+                    crate::product::lifecycle_store::AggregateDesignSpecScope {
+                        logical_codebase_ref,
+                        effective_member_ids: vec![member(1), member(2), member(3), member(4)],
+                        involved_repository_ids: vec![member(1), member(2), member(3)],
+                        change_order: vec![member(1), member(2), member(3)],
+                    },
+                ),
+            })
+            .unwrap();
+        lifecycle_seed
+            .append_version(crate::product::lifecycle_store::AppendSpecVersionInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                entity_id: design.id.clone(),
+                markdown: "# four repository design".to_string(),
+                provider_run_refs: Vec::new(),
+                review_refs: Vec::new(),
+                confirmed_by: None,
+            })
+            .unwrap();
+        lifecycle_seed
+            .update_spec_confirmation_status(
+                PROJECT_ID,
+                ISSUE_ID,
+                &design.id,
+                crate::product::models::LifecycleConfirmationStatus::Confirmed,
+            )
+            .unwrap();
+        // LC 身份与 k3 波2 F3 裁决后的 advance 集合互证同源：PUT canonical
+        // Enable 冻结 manifest UUID 形态（`validate_enrollment_scope`），
+        // advance drift 比对同一 manifest 身份——fixture 同源取 manifest 值。
+        let logical_codebase_id = logical_codebase_ref.to_string();
+        // 与 `new` 同源自举桩（Enable 预检与 coding run 的 factory 组装均
+        // 走 build_readonly_for_lc）。
+        if let Some(runner_lc_id) =
+            crate::product::logical_codebase::RepositoryAuthorityResolver::new(inner.paths.clone())
+                .resolve_for_issue(PROJECT_ID, ISSUE_ID)
+                .unwrap()
+                .and_then(|authority| authority.target.logical_codebase_id)
+        {
+            let seed_manifest = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
+                inner.paths.clone(),
+                &runner_lc_id,
+            )
+            .load_manifest(PROJECT_ID)
+            .unwrap()
+            .expect("seeded logical codebase manifest");
+            crate::product::logical_codebase::AggregatePolicyArtifactStore::for_lc(
+                inner.paths.clone(),
+                &runner_lc_id,
+            )
+            .ensure_bootstrap(&seed_manifest)
+            .expect("seed aggregate policy artifact");
+            crate::product::logical_codebase::ProviderCapabilityStore::for_lc(
+                inner.paths.clone(),
+                &runner_lc_id,
+            )
+            .ensure_bootstrap(PROJECT_ID)
+            .expect("seed capability record");
+        }
+        let body = collection_enable_body(&story.id, &design.id, &logical_codebase_id);
+        let app = crate::web::app::build_web_router(state.clone());
+        let enable = put_enrollment(&app, body).await;
+        assert_eq!(enable.status(), StatusCode::OK);
+        assert!(response_json(enable).await["enabled"].as_bool().unwrap());
+
+        let lifecycle = LifecycleStore::new(inner.paths.clone());
+        let store = IssueAutomationStore::new(inner.paths.clone());
+        let enrollment = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+        ensure_enrolled_plan(&state, &enrollment)
+            .await
+            .expect("ensure enrolled plan");
+        let bound = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+        let plan_id = bound.plan_id.expect("bound plan");
+        let session_id = bound.session_id.expect("bound session");
+
+        let manager = state
+            .workspace_sessions
+            .get_or_create(&session_id, || {
+                WorkspaceSessionManager::create(&state, &session_id)
+            })
+            .await
+            .expect("bound session manager");
+        Self {
+            inner,
+            state,
+            lifecycle,
+            plan_id,
+            session_id,
+            manager: manager.clone(),
+            token: 0,
+            incarnation: manager
+                .active_run_incarnation()
+                .unwrap_or_default(),
+            gate_id: None,
+        }
+    }
+
+    /// 批 2 R4/E1：AutoIfValid 自动批准——铺四仓归属 accepted drafts（wi_a→
+    /// member-1、wi_b→member-2 依赖 wi_a、wi_c→member-3 独立）＋active
+    /// index＋Approval 相位（AutoIfValid）后，经引擎 policy-valid compile
+    /// 直达 Confirmed（先例 P2 `auto_enrolled_sc_confirms_via_engine_...`；
+    /// 全程零 approve/人工门 REST）。
+    pub(crate) async fn auto_approve_plan(&mut self) {
+        let engine_arc = self.manager.engine();
+        let mut engine = engine_arc.lock().await;
+        engine.session.artifact = Some(four_repository_outline_candidate_payload());
+        let plan_store = WorkItemPlanStore::new(self.inner.paths.clone());
+        let logical_codebase_id =
+            crate::product::logical_codebase::LogicalCodebaseStore::new(self.inner.paths.clone())
+                .load_manifest(PROJECT_ID)
+                .unwrap()
+                .expect("seeded logical codebase manifest")
+                .logical_codebase_id
+                .to_string();
+        let mut drafts = Vec::new();
+        for (outline_id, member_index, depends_on) in [
+            ("outline_a", 1u128, Vec::new()),
+            ("outline_b", 2u128, vec!["wi_a".to_string()]),
+            ("outline_c", 3u128, Vec::new()),
+        ] {
+            let draft = gate_draft_record_with_member(
+                &self.plan_id,
+                outline_id,
+                &format!("draft_{outline_id}"),
+                &logical_codebase_id,
+                crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::from_u128(
+                    member_index,
+                )),
+                depends_on,
+            );
+            drafts.push(draft);
+        }
+        // 跨仓依赖交付：wi_b 要求 wi_a 的 output contract（与既有
+        // seed_accepted_plan_drafts 的 draft_b 同款 rebrand）。
+        {
+            let mut required = crate::product::work_item_contract::canonical_contract_fixture(
+                "unused",
+            )
+            .input_contracts
+            .remove(0);
+            required.provider_logical_work_item_id = "wi_a".to_string();
+            required.contract_id = "contract.canonical".to_string();
+            required.required_capabilities = vec!["stable_hash".to_string()];
+            drafts[1]
+                .candidate
+                .canonical_contract_candidate
+                .input_contracts
+                .push(required);
+        }
+        for draft in drafts {
+            plan_store
+                .put_draft_record(&draft)
+                .expect("put four-repository member draft");
+        }
+        plan_store
+            .save_active_index(&four_repository_active_index(&self.plan_id))
+            .expect("save four-repository active index");
+        single_candidate_recovery_record(
+            &self.lifecycle,
+            &mut engine,
+            SingleCandidatePhase::Approval,
+            RunPolicy::AutoIfValid,
+        );
+        // 通用恢复 helper 把 IR 每 item target 硬编码为会话仓（单成员现场
+        // 等价生产 lowering）；四仓集合现场须按 Plan Intent 重放成员物理仓
+        //（生产 lowering 的 `resolve_item_target_repository_id` 语义），
+        // 否则 Final Compile 结构复验对 wi_b/wi_c 报 target_mismatch。
+        {
+            let member_physical: std::collections::BTreeMap<
+                crate::product::logical_codebase::LogicalRepositoryId,
+                String,
+            > = crate::product::logical_codebase::LogicalCodebaseStore::new(
+                self.inner.paths.clone(),
+            )
+            .list_members(PROJECT_ID)
+            .unwrap()
+            .into_iter()
+            .map(|member| (member.logical_repository_id, member.physical_repository_id))
+            .collect();
+            let durable = self.durable();
+            let ir_ref = durable
+                .plan_candidate_ir_ref
+                .clone()
+                .expect("candidate IR ref after recovery record");
+            let source_store = crate::product::work_item_plan_source_store::
+                WorkItemPlanSourceStore::new(self.inner.paths.clone());
+            let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                plan_id: self.plan_id.clone(),
+            };
+            let mut ir_record = source_store
+                .get_plan_candidate_ir(&scope, &ir_ref)
+                .expect("load fixture candidate IR");
+            // 不可变 store：换新 id 重放（同 source_revision 身份），session
+            // 引用改指新记录。
+            ir_record.id = format!("{}-four-repo-members", ir_record.id);
+            for item in &mut ir_record.ir.items {
+                if let Some(crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                    logical_repository_id,
+                    ..
+                }) = item
+                    .contract
+                    .intent_contract
+                    .as_ref()
+                    .map(|intent| &intent.target)
+                {
+                    if let Some(physical) = member_physical.get(logical_repository_id) {
+                        item.target_repository_id = physical.clone();
+                    }
+                }
+            }
+            ir_record.content_hash = String::new();
+            ir_record.content_hash = ir_record
+                .content_hash()
+                .expect("recompute fixture IR content hash");
+            let new_ir_ref = source_store
+                .put_plan_candidate_ir(PROJECT_ID, ISSUE_ID, &self.plan_id, &ir_record)
+                .expect("persist per-member fixture IR");
+            let new_ir_id = ir_record.id.clone();
+            // mechanical report 的 ir_id 与 provenance 引用校验互锁：同步
+            // 换新 id 重放（同 source_revision 身份）。
+            let report_ref = durable
+                .mechanical_report_ref
+                .clone()
+                .expect("candidate report ref after recovery record");
+            let mut report_record = source_store
+                .get_mechanical_report(&scope, &report_ref)
+                .expect("load fixture candidate report");
+            report_record.id = format!("{}-four-repo-members", report_record.id);
+            report_record.ir_id = new_ir_id;
+            report_record.content_hash = String::new();
+            report_record.content_hash = report_record
+                .content_hash()
+                .expect("recompute fixture report content hash");
+            let new_report_ref = source_store
+                .put_mechanical_report(PROJECT_ID, ISSUE_ID, &self.plan_id, &report_record)
+                .expect("persist per-member fixture report");
+            let mut session = self.durable();
+            session.plan_candidate_ir_ref = Some(new_ir_ref);
+            session.mechanical_report_ref = Some(new_report_ref);
+            crate::product::json_store::write_json(&self.session_path(&session.id), &session)
+                .expect("persist session with per-member refs");
+            let artifact = engine.session.artifact.clone();
+            engine.session = crate::product::workspace_engine::WorkspaceSession::from_record(session);
+            engine.session.artifact = artifact;
+        }
+        engine.enter_policy_valid_work_item_plan_compile().await;
+        drop(engine);
+        // 终态断言由调用方承担（诊断期不在此处提前 panic）。
+    }
+
+    /// 批 2 R4/E1：无页面 reconcile 循环（与 p2_campaign 同源）：任一 attempt
+    /// 进入 Failed/Aborted/AwaitingManualRecovery 即 panic（真实业务断点）。
+    pub(crate) async fn reconcile_until(
+        &self,
+        predicate: impl Fn(&[crate::product::coding_models::CodingExecutionAttempt]) -> bool,
+    ) {
+        let worker = AutopilotOrchestrator::new(self.state.clone(), Default::default());
+        let mut last_outcome = String::from("no iteration");
+        let reached = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+            loop {
+                let outcome = worker
+                    .reconcile(&self.state, PROJECT_ID, ISSUE_ID)
+                    .await
+                    .expect("r4/e1 campaign reconcile");
+                last_outcome = format!("{outcome:?}");
+                let attempts = self.coding_attempts();
+                for attempt in &attempts {
+                    use crate::product::coding_models::CodingAttemptStatus;
+                    match attempt.status {
+                        CodingAttemptStatus::Failed
+                        | CodingAttemptStatus::Aborted
+                        | CodingAttemptStatus::AwaitingManualRecovery => panic!(
+                            "r4/e1 campaign stopped unexpectedly at {:?}/{:?} reason={:?}",
+                            attempt.status, attempt.stage, attempt.manual_recovery_reason
+                        ),
+                        _ => {}
+                    }
+                }
+                if predicate(&attempts) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !reached {
+            let attempts = self.coding_attempts();
+            let detail = attempts
+                .iter()
+                .map(|attempt| {
+                    format!(
+                        "{:?}/{:?} claim={} member={:?} policy={:?}",
+                        attempt.status,
+                        attempt.stage,
+                        attempt.start_claim.is_some(),
+                        attempt
+                            .target_snapshot
+                            .as_ref()
+                            .map(|snapshot| snapshot.logical_repository_id),
+                        attempt.start_run_policy
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            let enrollment = self.enrollment();
+            let facts = enrollment
+                .attention_facts
+                .iter()
+                .map(|fact| format!("{:?}/{:?}", fact.kind, fact.stage))
+                .collect::<Vec<_>>()
+                .join(",");
+            panic!(
+                "r4/e1 campaign predicate not reached via reconcile only: last_reconcile={last_outcome}; \
+                 enrollment(enabled={}, terminated={}, plan={:?}, session={:?}, facts=[{facts}]); \
+                 attempts={}:\n  {detail}",
+                enrollment.enabled,
+                enrollment.terminated_at.is_some(),
+                enrollment.plan_id,
+                enrollment.session_id,
+                attempts.len(),
+            );
+        }
+    }
+
+    /// 批 2 R4/E1：指定逻辑成员仓的实际桶 attempt（按 target_snapshot 归属）。
+    pub(crate) fn attempt_for_member(
+        &self,
+        member: &crate::product::logical_codebase::LogicalRepositoryId,
+    ) -> Option<crate::product::coding_models::CodingExecutionAttempt> {
+        self.coding_attempts().into_iter().find(|attempt| {
+            attempt
+                .target_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.logical_repository_id == *member)
+        })
+    }
+
+    /// 批 2 R4/E1：四仓 plan 子 WorkItem 会话的完整授权复制 target 集
+    ///（finalizer child 精确绑定；集合 target 原样复制）。
+    pub(crate) fn child_collection_binding_targets(
+        &self,
+    ) -> Vec<crate::product::logical_codebase::EnrollmentTarget> {
+        self.lifecycle
+            .list_workspace_sessions(PROJECT_ID, ISSUE_ID)
+            .expect("list child work item sessions")
+            .into_iter()
+            .filter(|session| {
+                session.workspace_type == crate::product::models::WorkspaceType::WorkItem
+                    && ["wi_a", "wi_b", "wi_c"].contains(&session.entity_id.as_str())
+            })
+            .filter_map(|session| {
+                session
+                    .work_item_child_binding
+                    .map(|binding| binding.target)
+            })
+            .collect()
+    }
+
     /// 真实登记两张待答 choice 卡（run 挂起帧面，与 P0 part_02 同构）。
     pub(crate) async fn open_choice_with_two_questions(&self) {
         self.manager
@@ -1103,6 +1568,121 @@ pub(crate) fn gate_active_index(plan_id: &str) -> WorkItemPlanDraftActiveIndex {
         draft_statuses: BTreeMap::from([
             ("draft_outline_a".to_string(), WorkItemDraftStatus::Accepted),
             ("draft_outline_b".to_string(), WorkItemDraftStatus::Accepted),
+        ]),
+        batches: vec![],
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+/// 批 2 R4/E1：四仓 plan outline——wi_a→member-1、wi_b→member-2（依赖
+/// wi_a，跨仓依赖）、wi_c→member-3（独立）；member-4 选中但无 WI（授权
+/// 集 A⊋实际桶集 P，验收「选中无 WI 仓不造空 attempt」）。
+fn four_repository_outline() -> WorkItemPlanOutline {
+    let item = |outline_id: &str, kind: WorkItemKind, scope: &str, target: u128| WorkItemOutline {
+        target_repository_id: Some(crate::product::logical_codebase::LogicalRepositoryId(
+            uuid::Uuid::from_u128(target),
+        )),
+        outline_id: outline_id.to_string(),
+        logical_work_item_id: format!("wi_{}", outline_id.strip_prefix("outline_").unwrap()),
+        title: outline_id.to_string(),
+        kind,
+        goal: outline_id.to_string(),
+        scope: vec![scope.to_string()],
+        non_goals: Vec::new(),
+        estimated_context_tokens: Some(12_000),
+        session_fit: Some(WorkItemOutlineSessionFit::FitsSingleAgentSession),
+        source_story_spec_ids: vec!["story_001".to_string()],
+        source_design_spec_ids: vec!["design_001".to_string()],
+        exclusive_write_scopes: vec![scope.to_string()],
+        forbidden_write_scopes: Vec::new(),
+        depends_on: Vec::new(),
+        verification_intent: vec![format!("cargo test --locked --lib {outline_id}")],
+        trusted_verification_commands: Vec::new(),
+        handoff_notes: format!("handoff {outline_id}"),
+    };
+    let mut outline = WorkItemPlanOutline {
+        id: "outline_001".to_string(),
+        project_id: "project_001".to_string(),
+        issue_id: "issue_001".to_string(),
+        source_story_spec_ids: vec!["story_001".to_string()],
+        source_design_spec_ids: vec!["design_001".to_string()],
+        strategy_summary: "four repository test strategy".to_string(),
+        work_item_outlines: vec![
+            item("outline_a", WorkItemKind::Backend, "src/a.rs", 1),
+            item("outline_b", WorkItemKind::Backend, "src/b.rs", 2),
+            item("outline_c", WorkItemKind::Backend, "src/c.rs", 3),
+        ],
+        dependency_graph: vec![WorkItemOutlineDependencyEdge {
+            from_outline_id: "outline_a".to_string(),
+            to_outline_id: "outline_b".to_string(),
+        }],
+        risks: Vec::new(),
+        handoff_strategy: "handoff".to_string(),
+        status: "draft".to_string(),
+    };
+    outline.work_item_outlines[1].depends_on = vec!["outline_a".to_string()];
+    outline
+}
+
+pub(crate) fn four_repository_outline_candidate_payload() -> ArtifactPayload {
+    ArtifactPayload::WorkItemPlanOutlineCandidate {
+        outline_candidate: Box::new(WorkItemPlanOutlineCandidateDto {
+            outline: four_repository_outline(),
+            design_context_gaps: vec![],
+            validator_findings: vec![],
+            context_blockers: vec![],
+            current_generation_round_id: Some("round_0001".to_string()),
+            selected_generation_mode: Some(WorkItemGenerationModeDto::Serial),
+        }),
+    }
+}
+
+/// 批 2 R4/E1：成员归属 draft——contract 携带 `intent_contract`（
+/// LogicalCodebase 恰一成员，R1 归属语义），candidate target 同成员；
+/// 下游 draft 额外要求上游 output contract（跨仓依赖交付）。
+pub(crate) fn gate_draft_record_with_member(
+    plan_id: &str,
+    outline_id: &str,
+    draft_id: &str,
+    logical_codebase_id: &str,
+    member: crate::product::logical_codebase::LogicalRepositoryId,
+    depends_on: Vec<String>,
+) -> WorkItemDraftRecord {
+    let mut record = gate_draft_record(plan_id, outline_id, draft_id);
+    let logical_work_item_id = record.candidate.logical_work_item_id.clone();
+    let contract = &mut record.candidate.canonical_contract_candidate;
+    contract.intent_contract = Some(crate::product::work_item_contract::WorkItemIntentContract {
+        intent: crate::product::work_item_contract::WorkItemIntent::Create,
+        provider_work_item_id: logical_work_item_id.clone(),
+        depends_on,
+        exclusive_scopes: contract.write_policy.exclusive_scopes.clone(),
+        forbidden_scopes: contract.write_policy.forbidden_scopes.clone(),
+        target: crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+            logical_codebase_id: logical_codebase_id.to_string(),
+            logical_repository_id: member,
+        },
+    });
+    record.candidate.target_repository_id = Some(member);
+    record
+}
+
+pub(crate) fn four_repository_active_index(plan_id: &str) -> WorkItemPlanDraftActiveIndex {
+    WorkItemPlanDraftActiveIndex {
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        plan_id: plan_id.to_string(),
+        current_generation_round_id: "round_0001".to_string(),
+        outline_state: "confirmed".to_string(),
+        active_outline_id: None,
+        outline_to_current_draft_id: BTreeMap::from([
+            ("outline_a".to_string(), "draft_outline_a".to_string()),
+            ("outline_b".to_string(), "draft_outline_b".to_string()),
+            ("outline_c".to_string(), "draft_outline_c".to_string()),
+        ]),
+        draft_statuses: BTreeMap::from([
+            ("draft_outline_a".to_string(), WorkItemDraftStatus::Accepted),
+            ("draft_outline_b".to_string(), WorkItemDraftStatus::Accepted),
+            ("draft_outline_c".to_string(), WorkItemDraftStatus::Accepted),
         ]),
         batches: vec![],
         updated_at: chrono::Utc::now().to_rfc3339(),

@@ -3445,16 +3445,20 @@ const R2_POLICY_REVISION: u64 = 7;
 
 /// N3 issue 的权威载体解析出的集合 target（LC id 与 coding_start 的
 /// carrier 互证同源；成员集覆盖 plan 全部四桶）。
-fn r2_collection_target(fixture: &N3Fixture) -> EnrollmentTarget {
+pub(super) fn r2_collection_target(fixture: &N3Fixture) -> EnrollmentTarget {
     let authority =
         crate::product::logical_codebase::RepositoryAuthorityResolver::new(fixture.paths.clone())
             .resolve_for_issue(PROJECT_ID, ISSUE_ID)
             .unwrap()
             .expect("n3 issue authority resolution");
+    // k3 波2 F3 裁决后集合 LC 身份统一 manifest 形态（与 PUT canonical
+    // Enable/advance drift 同源）；resolver 的 legacy digest 形态不参与。
     let logical_codebase_id = authority
-        .target
+        .manifest
+        .as_ref()
+        .expect("n3 authority manifest")
         .logical_codebase_id
-        .expect("n3 issue resolves a logical codebase authority");
+        .to_string();
     let mut members = vec![fixture.busi, fixture.web, fixture.gateway, fixture.frontend];
     members.sort();
     EnrollmentTarget::LogicalCodebaseMembers {
@@ -3465,7 +3469,24 @@ fn r2_collection_target(fixture: &N3Fixture) -> EnrollmentTarget {
 
 /// N3 现场上写入一条 enabled 集合绑定 enrollment（真实结构 + 真实 store
 /// 路径；成员集覆盖 plan 全部四桶，满足 coding_start 的 record 越权核对）。
-fn r2_write_collection_enrollment(fixture: &N3Fixture, enabled: bool, policy_revision: u64) {
+pub(super) fn r2_write_collection_enrollment(fixture: &N3Fixture, enabled: bool, policy_revision: u64) {
+    r2_write_collection_enrollment_with_session(
+        fixture,
+        enabled,
+        policy_revision,
+        Some("session_r2_n3"),
+    )
+}
+
+/// `session_id` 只管顶层会话字段（终止引擎侧收口据此读会话/裁决
+/// cleanup_required）；binding 身份恒需会话串——合成缺省仅供 fan-out 直测，
+/// 真实互证场景由调用方显式给 id。
+fn r2_write_collection_enrollment_with_session(
+    fixture: &N3Fixture,
+    enabled: bool,
+    policy_revision: u64,
+    session_id: Option<&str>,
+) {
     let target = r2_collection_target(fixture);
     let source = EnrollmentSource {
         stories: Vec::new(),
@@ -3475,7 +3496,7 @@ fn r2_write_collection_enrollment(fixture: &N3Fixture, enabled: bool, policy_rev
         binding_version: 1,
         enrollment_id: R2_ENROLLMENT_ID.to_string(),
         plan_id: PLAN_ID.to_string(),
-        session_id: "session_r2_n3".to_string(),
+        session_id: session_id.unwrap_or("session_r2_n3").to_string(),
         source: source.clone(),
         target: target.clone(),
         author_provider: crate::product::models::ProviderName::Fake,
@@ -3506,7 +3527,7 @@ fn r2_write_collection_enrollment(fixture: &N3Fixture, enabled: bool, policy_rev
         target: Some(target),
         prepare_intent_id: "prepare_intent_r2".to_string(),
         plan_id: Some(PLAN_ID.to_string()),
-        session_id: Some("session_r2_n3".to_string()),
+        session_id: session_id.map(str::to_string),
         created_at: CREATED_AT.to_string(),
         updated_at: CREATED_AT.to_string(),
         binding_history: Some(EnrollmentBindingHistory {
@@ -3525,6 +3546,16 @@ fn r2_write_collection_enrollment(fixture: &N3Fixture, enabled: bool, policy_rev
         &enrollment,
     )
     .unwrap();
+}
+
+/// 批 2 R4/E1 ④（终止负例）：顶层 session 留空的集合 enrollment——该负例
+/// 不驱动任何真实 n3 会话；带合成 session 会让终止的引擎侧收口读会话失败
+/// 而落 cleanup_required（负例期望 terminated）。
+pub(super) fn e1_write_unbound_collection_enrollment(
+    fixture: &N3Fixture,
+    policy_revision: u64,
+) {
+    r2_write_collection_enrollment_with_session(fixture, true, policy_revision, None);
 }
 
 /// 把指定 target 桶的 attempt 冻结策略改写为 AutoStartOnce（模拟 enrolled
@@ -3958,3 +3989,15 @@ async fn plan_coding_r2_aggregate_run_targets_fresh_status() {
         ReconcileOutcome::NeedsHuman
     );
 }
+
+// R1 披露待补专项（tasks.md R1 §TDD ④⑥ 缺口）的集成覆盖由
+// r4_e1_campaign.inc.rs 的四仓整链承载（wiga fixture 提供真实
+// Confirmed＋SC 相位会话，advance 集合准入 P⊆A 一一对应与 coding_start
+// 集合互证/Enrolled origin 冻结在真实自动链上断言）。n3 现场不适用：
+// enrolled advance 的前置要求绑定会话 Confirmed＋SC 相位，而 n3 的
+// plan 会话为 Manual/Open 形态（session 状态前置与集合互证断言面正交）；
+// n3 侧保留 r2 集合播种器（`r2_write_collection_enrollment`，manifest 身份
+// 形态）供 fan-out 直测族复用；A2 终止负例另用顶层 session 留空的
+// `e1_write_unbound_collection_enrollment`（带合成 session 会让引擎侧收口
+// 读会话失败而落 cleanup_required）。
+

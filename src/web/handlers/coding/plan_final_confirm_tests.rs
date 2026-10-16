@@ -608,3 +608,116 @@ async fn plan_final_confirm_attention_aggregates_one_item_and_suppresses_per_att
     assert_eq!(progress.attention_items[0].key, item.key);
     assert_eq!(progress.attention_items[0].kind, "plan_final_confirm");
 }
+
+/// 批 2 R4/E1 ④（REQ-WIGA-09 负例，A2 handler 不改）：terminated＋部分
+/// Completed 的最终确认不可点——终止后未完成桶 Aborted 进 blocking，GET
+/// `final_confirm.state=not_ready`（按钮不可点）；POST not_ready、已完成仓
+/// already_completed、其余仓零状态副作用。
+#[tokio::test]
+async fn plan_final_confirm_terminated_with_partial_completed_is_not_clickable() {
+    let fixture = frozen_plan_fixture().await;
+    // 部分完成：busi 桶真实驱动到 FinalConfirm 后人手确认 → Completed。
+    drive_target_to_final_confirm(&fixture, fixture.busi, "n3-busi").await;
+    {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        let engine = CodingWorkspaceEngine::new(
+            fixture.coding_store(),
+            GitWorkspaceService::new(),
+            event_tx,
+        );
+        engine
+            .handle_final_confirm(PROJECT_ID, ISSUE_ID, &fixture.busi_attempt().id)
+            .await
+            .expect("human final confirm for one bucket");
+    }
+    assert_eq!(fixture.busi_attempt().status, CodingAttemptStatus::Completed);
+
+    // 集合 enrollment（绑定 n3 plan；顶层 session 缺省——本负例只走 attempt
+    // 侧收口语义；带合成 session 会让终止的引擎侧收口读会话失败而落
+    // cleanup_required）＋确认终止。
+    super::plan_start_tests::e1_write_unbound_collection_enrollment(&fixture, 11);
+    async fn terminate(
+        fixture: &N3Fixture,
+        confirmed: bool,
+    ) -> Result<
+        axum::Json<crate::web::types::AutomationEnrollmentTerminateResponse>,
+        crate::web::error::ApiError,
+    > {
+        let store = crate::product::issue_automation_store::IssueAutomationStore::new(
+            fixture.paths.clone(),
+        );
+        let durable = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+        crate::web::handlers::post_automation_enrollment_terminate(
+            axum::extract::State(fixture.state.clone()),
+            axum::extract::Path((PROJECT_ID.to_string(), ISSUE_ID.to_string())),
+            axum::Json(crate::web::types::AutomationEnrollmentTerminateRequest {
+                command_id: "cmd-e1-final-confirm-negative".to_string(),
+                expected_enrollment_id: durable.enrollment_id,
+                expected_policy_revision: durable.policy_revision,
+                expected_binding: None,
+                confirmed,
+                reason: None,
+            }),
+        )
+        .await
+    }
+    // 未确认：428 统一确认面，零终止副作用。
+    let unconfirmed = terminate(&fixture, false).await;
+    assert!(unconfirmed.is_err());
+    let error = unconfirmed.unwrap_err();
+    assert_eq!(error.code, "automation_plan_termination_required");
+    assert_eq!(
+        fixture.busi_attempt().status,
+        CodingAttemptStatus::Completed,
+        "unconfirmed termination must not touch attempts"
+    );
+    // 确认：整 plan 终止（未完成桶 Aborted、Completed 保留）。
+    let confirmed = terminate(&fixture, true).await.expect("confirmed termination").0;
+    assert_eq!(confirmed.outcome, "terminated");
+    assert_eq!(fixture.busi_attempt().status, CodingAttemptStatus::Completed);
+    for target in [fixture.web, fixture.gateway, fixture.frontend] {
+        assert_eq!(
+            fixture.target_attempt(target).status,
+            CodingAttemptStatus::Aborted,
+            "unfinished bucket must be finalized Aborted"
+        );
+    }
+
+    // GET：部分 Confirmed＋其余 blocking → not_ready（按钮不可点）。
+    let progress = get_progress(&fixture.state).await.unwrap();
+    assert_eq!(progress.final_confirm.state, "not_ready");
+    assert_eq!(progress.final_confirm.confirmed_attempt_ids.len(), 1);
+    assert_eq!(progress.final_confirm.blocking.len(), 3);
+    assert!(progress.final_confirm.ready_attempt_ids.is_empty());
+    for blocking in &progress.final_confirm.blocking {
+        assert_eq!(blocking.reason_code, "attempt_not_waiting_for_human");
+    }
+
+    // POST：not_ready，已完成仓 already_completed、未完成仓零状态变化。
+    let before: Vec<(String, CodingAttemptStatus)> = fixture
+        .coding_store()
+        .list_attempts_for_issue(PROJECT_ID, ISSUE_ID)
+        .unwrap()
+        .iter()
+        .map(|attempt| (attempt.id.clone(), attempt.status.clone()))
+        .collect();
+    let result = post_final_confirm(&fixture.state).await.unwrap();
+    assert_eq!(result.outcome, "not_ready");
+    let completed_id = progress.final_confirm.confirmed_attempt_ids[0].clone();
+    for item in &result.results {
+        if item.attempt_id == completed_id {
+            assert_eq!(item.status, "already_completed");
+        } else {
+            assert_eq!(item.status, "failed");
+            assert_eq!(item.error_code.as_deref(), Some("attempt_not_waiting_for_human"));
+        }
+    }
+    let after: Vec<(String, CodingAttemptStatus)> = fixture
+        .coding_store()
+        .list_attempts_for_issue(PROJECT_ID, ISSUE_ID)
+        .unwrap()
+        .iter()
+        .map(|attempt| (attempt.id.clone(), attempt.status.clone()))
+        .collect();
+    assert_eq!(after, before, "terminated plan final confirm has zero effects");
+}
