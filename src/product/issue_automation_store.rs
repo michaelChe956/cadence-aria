@@ -13,10 +13,10 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::automation::{
-    EnrollmentBindingHistory, EnrollmentBindingIdentity, EnrollmentCommandResult, EnrollmentError,
-    EnrollmentRebindRequest, EnrollmentRebindResult, EnrollmentWriteCommand,
-    IssueAutomationEnrollment, OperationState, PlanGenerationIntent, PlanGenerationPhase,
-    PreparedPlanIntent,
+    AutomationAttentionFact, EnrollmentBindingHistory, EnrollmentBindingIdentity,
+    EnrollmentCommandResult, EnrollmentError, EnrollmentRebindRequest, EnrollmentRebindResult,
+    EnrollmentWriteCommand, IssueAutomationEnrollment, OperationState, PlanGenerationIntent,
+    PlanGenerationPhase, PreparedPlanIntent,
 };
 
 /// issue 级 enrollment 的唯一持久入口；所有写路径都在目标 JSON 的伴生文件锁内
@@ -700,6 +700,94 @@ impl IssueAutomationStore {
         })
         .map_err(command_ledger_error)
     }
+
+    /// 批 2 N0（REQ-WIGA-09/12）：upsert 自动化待处理事实。enrollment
+    /// 文件锁内做精确绑定互证（仅当前代 binding 全等可写，旧/别的绑定
+    /// 拒绝；disabled 未终止拒绝；同一已 terminated 绑定放行终止收尾），
+    /// 事实的 plan/session 身份与绑定当前代互证；同 key 不增项且
+    /// `occurred_at` 首次冻结（重入保留）；不递增 `policy_revision`（不
+    /// 破坏其他 CAS 持有者的 expected_revision）。写失败原样上抛。
+    pub fn upsert_automation_attention_fact(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        expected_binding: &EnrollmentBindingIdentity,
+        fact: AutomationAttentionFact,
+    ) -> Result<(), EnrollmentError> {
+        let path = self.enrollment_path(project_id, issue_id)?;
+        let resolution = with_exclusive_lock(&path, || {
+            let Some(mut saved) = read_optional_enrollment(&path)? else {
+                return Ok(AttentionWriteResolution::Missing);
+            };
+            if let Err(resolution) = attest_attention_binding_locked(&saved, expected_binding) {
+                return Ok(resolution);
+            }
+            // 绑定互证：事实携带的 plan/session 身份必须与绑定当前代一致。
+            if let Some(plan_id) = fact.plan_id.as_deref()
+                && plan_id != expected_binding.plan_id
+            {
+                return Ok(AttentionWriteResolution::InvalidScope(format!(
+                    "attention fact plan_id must match the bound plan: expected {}, got {plan_id}",
+                    expected_binding.plan_id
+                )));
+            }
+            if let Some(session_id) = fact.session_id.as_deref()
+                && session_id != expected_binding.session_id
+            {
+                return Ok(AttentionWriteResolution::InvalidScope(format!(
+                    "attention fact session_id must match the bound session: expected {}, \
+                     got {session_id}",
+                    expected_binding.session_id
+                )));
+            }
+            // 稳定 key/time：同 key 重入替换内容但保留首次 occurred_at。
+            match saved
+                .attention_facts
+                .iter_mut()
+                .find(|existing| existing.key == fact.key)
+            {
+                Some(existing) => {
+                    let frozen = existing.occurred_at.clone();
+                    *existing = fact;
+                    existing.occurred_at = frozen;
+                }
+                None => saved.attention_facts.push(fact),
+            }
+            saved.updated_at = now_rfc3339();
+            write_json(&path, &saved)?;
+            Ok(AttentionWriteResolution::Applied)
+        })?;
+        resolve_attention_write(resolution)
+    }
+
+    /// 批 2 N0（REQ-WIGA-09/12）：按稳定 key 清除待处理事实（绑定互证
+    /// 规则同 upsert；T3 终止批量清/continue-chain 成功清均走此口）。
+    /// key 不存在幂等成功；有清除才落盘；不递增 `policy_revision`。
+    pub fn resolve_automation_attention_fact(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        expected_binding: &EnrollmentBindingIdentity,
+        key: &str,
+    ) -> Result<(), EnrollmentError> {
+        let path = self.enrollment_path(project_id, issue_id)?;
+        let resolution = with_exclusive_lock(&path, || {
+            let Some(mut saved) = read_optional_enrollment(&path)? else {
+                return Ok(AttentionWriteResolution::Missing);
+            };
+            if let Err(resolution) = attest_attention_binding_locked(&saved, expected_binding) {
+                return Ok(resolution);
+            }
+            let before = saved.attention_facts.len();
+            saved.attention_facts.retain(|fact| fact.key != key);
+            if saved.attention_facts.len() != before {
+                saved.updated_at = now_rfc3339();
+                write_json(&path, &saved)?;
+            }
+            Ok(AttentionWriteResolution::Applied)
+        })?;
+        resolve_attention_write(resolution)
+    }
 }
 
 /// C1 Task 6：命令账本锁内 `ProductStoreError` → `EnrollmentError` 边界
@@ -821,6 +909,62 @@ fn resolve_generation(
         GenerationResolution::Missing => Err(EnrollmentError::NotFound),
         GenerationResolution::InvalidScope(reason) => Err(EnrollmentError::InvalidScope(reason)),
     }
+}
+
+/// 批 2 N0：`upsert/resolve_automation_attention_fact` 的锁内判定。
+enum AttentionWriteResolution {
+    Applied,
+    Conflict { current_revision: Option<u64> },
+    Missing,
+    InvalidScope(String),
+}
+
+fn resolve_attention_write(resolution: AttentionWriteResolution) -> Result<(), EnrollmentError> {
+    match resolution {
+        AttentionWriteResolution::Applied => Ok(()),
+        AttentionWriteResolution::Conflict { current_revision } => {
+            Err(EnrollmentError::Conflict { current_revision })
+        }
+        AttentionWriteResolution::Missing => Err(EnrollmentError::NotFound),
+        AttentionWriteResolution::InvalidScope(reason) => {
+            Err(EnrollmentError::InvalidScope(reason))
+        }
+    }
+}
+
+/// 批 2 N0：attention 事实写/清的精确绑定互证。仅当前代 binding 全等
+/// 可写（enrollment_id 一致＋`binding_history.current` 全等；旧/别的绑定
+/// 一律 Conflict）；`enabled=false` 且未 terminated 拒绝——同一已
+/// terminated 绑定放行终止收尾（清旧事实/写清理失败），不因 enabled=false
+/// 阻断（T1 落 terminated_at＋enabled=false）；无 durable binding history
+/// 的旧代 enrollment 不驱动自动链（InvalidScope fail-closed）。
+fn attest_attention_binding_locked(
+    saved: &IssueAutomationEnrollment,
+    expected_binding: &EnrollmentBindingIdentity,
+) -> Result<(), AttentionWriteResolution> {
+    if saved.enrollment_id != expected_binding.enrollment_id {
+        return Err(AttentionWriteResolution::Conflict {
+            current_revision: Some(saved.policy_revision),
+        });
+    }
+    let Some(history) = saved.binding_history.as_ref() else {
+        return Err(AttentionWriteResolution::InvalidScope(
+            "attention facts require durable binding history; legacy enrollments \
+             cannot drive automatic chains"
+                .to_string(),
+        ));
+    };
+    if &history.current != expected_binding {
+        return Err(AttentionWriteResolution::Conflict {
+            current_revision: Some(saved.policy_revision),
+        });
+    }
+    if !saved.enabled && saved.terminated_at.is_none() {
+        return Err(AttentionWriteResolution::Conflict {
+            current_revision: Some(saved.policy_revision),
+        });
+    }
+    Ok(())
 }
 
 /// C5 Task 1：`automation-plan-intent.json` 的版本化读侧。旧格式文件
@@ -1013,6 +1157,10 @@ fn apply_revision_and_write(
                 target: Some(target),
                 binding_history: Some(binding_history),
                 command_ledger: Vec::new(),
+                // 批 2 N0：首次 Enable 无终止、无待处理事实；terminated_at
+                // 写入归 T1 终止 CAS。
+                terminated_at: None,
+                attention_facts: Vec::new(),
             }
         }
         // 重开（disabled 后换 payload 的启用）：保留 enrollment 身份与既有

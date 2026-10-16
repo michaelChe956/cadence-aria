@@ -114,6 +114,16 @@ pub struct IssueAutomationEnrollment {
     /// C1 Task 1：命令账本（同 command 同 payload 重放/异 payload 拒绝）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command_ledger: Vec<EnrollmentCommandResult>,
+    /// 批 2 N0（REQ-WIGA-12，C3 前移）：plan 终止时间（RFC3339）。纯字段——
+    /// 写入由 T1 终止 CAS 独占（terminated_at＋enabled=false 同锁落盘）；
+    /// 旧 JSON 缺字段读 `None`。非空即拒绝继续/派发（P4/T1 消费）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminated_at: Option<String>,
+    /// 批 2 N0（REQ-WIGA-09，§7.1）：自动化待处理事实（停点/失败/超限），
+    /// 只存事实、不存已读/推送状态；旧 JSON 缺字段读空。写者固定
+    /// （P3/P4/R2/T3），N1 只读；写/清经 store 精确绑定互证。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention_facts: Vec<AutomationAttentionFact>,
 }
 
 /// 自动化归属：仅 server 端 enrollment 可代表授权（REQ-WIGA-08）。
@@ -432,6 +442,60 @@ impl PlanGenerationIntent {
     pub fn action_key_for(enrollment_id: &str, plan_id: &str) -> String {
         format!("{enrollment_id}:{plan_id}:start_generation")
     }
+}
+
+// ─── 批 2 N0：自动化待处理事实与终止纯字段（REQ-WIGA-09/12）───
+
+/// 批 2 N0（§7.1）：待处理事实的三类 kind，复用 A1 通知、不建第二模型。
+/// `plan_question`＝plan 对话停点（choice/人工门/trust 等待/compile 恢复
+/// 门）；`automation_failed`＝provider/advance/coding_start/终止清理失败；
+/// `review_limit`＝plan 评审返修超限。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationAttentionKind {
+    PlanQuestion,
+    AutomationFailed,
+    ReviewLimit,
+}
+
+/// 批 2 N0：事实发生链段。advance/coding_start 停点是 continue-chain 的
+/// 显式继续目标；`termination` 供 T3 记录终止清理失败（重清成功即消失）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationAttentionStage {
+    Plan,
+    Advance,
+    CodingStart,
+    Termination,
+}
+
+/// 批 2 N0（REQ-WIGA-09，§7.1）：automation 待处理事实。
+///
+/// `key` 是稳定去重键（写者从 durable command/checkpoint 派生）：同 key
+/// 重复 upsert 不增项且 `occurred_at` 首次冻结（无 checkpoint 首次冻结、
+/// 重入保留）。`plan_id`/`session_id`/`attempt_id` 是事实身份（store 与
+/// 绑定当前代互证；attempt 不伪造，无 checkpoint 留 `None`）；
+/// `choice_id`/`gate_id` 是可选 focus（不扩展更多 focus）。不存已读/推送
+/// 状态。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationAttentionFact {
+    pub key: String,
+    pub kind: AutomationAttentionKind,
+    pub stage: AutomationAttentionStage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    /// 稳定失败/停点原因码（写者自有码，通知层只读不翻译）。
+    pub reason_code: String,
+    /// 首次发生时间（RFC3339；upsert 重入保留原值）。
+    pub occurred_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_id: Option<String>,
 }
 
 /// enrollment 写入失败语义：HTTP 层按 Conflict→409 / InvalidScope→422 /

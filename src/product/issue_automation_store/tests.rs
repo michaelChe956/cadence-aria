@@ -8,9 +8,10 @@ use crate::product::issue_automation_store::EnrollmentError;
 use crate::product::json_store::{read_json, write_json};
 use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
 use crate::product::models::automation::{
-    EnrollmentBindingIdentityInput, EnrollmentOptions, EnrollmentRebindRequest, EnrollmentSource,
-    EnrollmentWriteCommand, IssueAutomationEnrollment, OperationState, PlanApprovalPolicy,
-    SourceRevisionRef,
+    AutomationAttentionFact, AutomationAttentionKind, AutomationAttentionStage,
+    EnrollmentBindingIdentity, EnrollmentBindingIdentityInput, EnrollmentOptions,
+    EnrollmentRebindRequest, EnrollmentSource, EnrollmentWriteCommand, IssueAutomationEnrollment,
+    OperationState, PlanApprovalPolicy, SourceRevisionRef,
 };
 use crate::product::models::lifecycle::IssueWorkItemPlanOptions;
 use crate::product::models::provider::ProviderName;
@@ -891,4 +892,379 @@ fn issue_automation_store_ensure_plan_binding_concurrent_workers_bind_once() {
     assert_eq!(on_disk.session_id, first.session_id);
 }
 
+// ---------------------------------------------------------------------------
+// 批 2 N0（REQ-WIGA-09/12）：自动化待处理事实 store 与 terminated_at 纯字段。
+// ---------------------------------------------------------------------------
+
+/// N0 测试共享现场：enable＋bind 后返回当前 durable binding 与 revision。
+fn bound_enrollment_with_binding() -> (
+    tempfile::TempDir,
+    IssueAutomationStore,
+    EnrollmentBindingIdentity,
+    u64,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = IssueAutomationStore::new(ProductAppPaths::new(tmp.path()));
+    let created = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            None,
+            enable("human-choice-1", logical_repo(1)),
+        )
+        .unwrap();
+    let bound = store
+        .bind_plan(
+            "project_1",
+            "issue_1",
+            created.policy_revision,
+            "plan_0001",
+            "session_0001",
+        )
+        .unwrap();
+    let binding = bound
+        .binding_history
+        .clone()
+        .expect("binding history present after bind")
+        .current;
+    (tmp, store, binding, bound.policy_revision)
+}
+
+fn attention_fact(key: &str, occurred_at: &str) -> AutomationAttentionFact {
+    AutomationAttentionFact {
+        key: key.to_string(),
+        kind: AutomationAttentionKind::AutomationFailed,
+        stage: AutomationAttentionStage::Advance,
+        plan_id: Some("plan_0001".to_string()),
+        session_id: Some("session_0001".to_string()),
+        attempt_id: None,
+        reason_code: "initialization_failed".to_string(),
+        occurred_at: occurred_at.to_string(),
+        choice_id: None,
+        gate_id: None,
+    }
+}
+
+fn assert_invalid_scope(error: EnrollmentError) {
+    assert!(
+        matches!(error, EnrollmentError::InvalidScope(_)),
+        "expected InvalidScope, got {error:?}"
+    );
+}
+
+fn enrollment_json_path(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+    ProductAppPaths::new(tmp.path())
+        .issue_root("project_1", "issue_1")
+        .join("automation-enrollment.json")
+}
+
+/// 红测①：精确绑定写/清；同 key 不增项、occurred_at 首次冻结（重入
+/// 保留）；无 checkpoint 不伪造 attempt；事实写不递增 policy_revision。
+#[test]
+fn issue_automation_store_upsert_attention_fact_writes_resolves_and_freezes_time() {
+    let (_tmp, store, binding, revision) = bound_enrollment_with_binding();
+    let mut fact = attention_fact("plan-q:choice-1", "2026-10-16T00:00:00Z");
+    fact.kind = AutomationAttentionKind::PlanQuestion;
+    fact.stage = AutomationAttentionStage::Plan;
+    fact.attempt_id = Some("attempt_0001".to_string());
+    fact.choice_id = Some("choice_0001".to_string());
+    fact.gate_id = Some("gate_0001".to_string());
+    store
+        .upsert_automation_attention_fact("project_1", "issue_1", &binding, fact.clone())
+        .unwrap();
+    let saved = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert_eq!(saved.attention_facts, vec![fact.clone()]);
+    assert_eq!(
+        saved.policy_revision, revision,
+        "事实写不得递增 policy_revision"
+    );
+
+    // 同 key 重入：不增项，occurred_at 首次冻结，reason 取最新。
+    let mut again = attention_fact("plan-q:choice-1", "2026-10-16T09:00:00Z");
+    again.kind = AutomationAttentionKind::PlanQuestion;
+    again.stage = AutomationAttentionStage::Plan;
+    again.attempt_id = Some("attempt_0001".to_string());
+    again.reason_code = "trust_waiting_again".to_string();
+    store
+        .upsert_automation_attention_fact("project_1", "issue_1", &binding, again)
+        .unwrap();
+    let saved = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert_eq!(saved.attention_facts.len(), 1, "同 key 重复 upsert 不增项");
+    assert_eq!(
+        saved.attention_facts[0].occurred_at, "2026-10-16T00:00:00Z",
+        "occurred_at 首次冻结，重入保留"
+    );
+    assert_eq!(saved.attention_facts[0].reason_code, "trust_waiting_again");
+    assert_eq!(saved.policy_revision, revision);
+
+    // 无 checkpoint 的 advance 失败事实：attempt 身份不伪造（None 原样）。
+    let checkpointless = attention_fact("cmd-1:advance:retry", "2026-10-16T00:00:00Z");
+    store
+        .upsert_automation_attention_fact("project_1", "issue_1", &binding, checkpointless.clone())
+        .unwrap();
+    let saved = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert_eq!(saved.attention_facts.len(), 2);
+    assert_eq!(saved.attention_facts[1], checkpointless);
+
+    // 精确绑定清 key；重复清幂等成功。
+    store
+        .resolve_automation_attention_fact("project_1", "issue_1", &binding, "plan-q:choice-1")
+        .unwrap();
+    let saved = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert_eq!(saved.attention_facts, vec![checkpointless]);
+    assert_eq!(saved.policy_revision, revision);
+    store
+        .resolve_automation_attention_fact("project_1", "issue_1", &binding, "plan-q:choice-1")
+        .unwrap();
+}
+
+/// 红测③/④：旧/别的绑定拒绝；事实身份与绑定互证失败 InvalidScope；
+/// disabled 未终止阻断写/清；缺失与错误上抛不吞。
+#[test]
+fn issue_automation_store_attention_fact_requires_exact_binding() {
+    let (_tmp, store, binding, revision) = bound_enrollment_with_binding();
+    let fact = attention_fact("k1", "2026-10-16T00:00:00Z");
+
+    // 别的 enrollment 身份：写/清均拒绝。
+    let mut foreign = binding.clone();
+    foreign.enrollment_id = "other_enrollment".to_string();
+    assert_conflict(
+        store
+            .upsert_automation_attention_fact("project_1", "issue_1", &foreign, fact.clone())
+            .unwrap_err(),
+        revision,
+    );
+    assert_conflict(
+        store
+            .resolve_automation_attention_fact("project_1", "issue_1", &foreign, "k1")
+            .unwrap_err(),
+        revision,
+    );
+
+    // 事实身份与绑定互证失败：plan/session 漂移 InvalidScope。
+    let mut drift = attention_fact("k2", "2026-10-16T00:00:00Z");
+    drift.plan_id = Some("plan_other".to_string());
+    assert_invalid_scope(
+        store
+            .upsert_automation_attention_fact("project_1", "issue_1", &binding, drift)
+            .unwrap_err(),
+    );
+    let mut drift = attention_fact("k3", "2026-10-16T00:00:00Z");
+    drift.session_id = Some("session_other".to_string());
+    assert_invalid_scope(
+        store
+            .upsert_automation_attention_fact("project_1", "issue_1", &binding, drift)
+            .unwrap_err(),
+    );
+
+    // 换代后旧代 binding 写/清拒绝。
+    let bound = store.get("project_1", "issue_1").unwrap().unwrap();
+    store
+        .rebind(
+            "project_1",
+            "issue_1",
+            rebind_request(
+                "cmd-rebind-1",
+                bound.policy_revision,
+                binding.binding_version,
+                "plan_0002",
+                "session_0002",
+                target_logical(),
+            ),
+        )
+        .unwrap();
+    let after = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert_conflict(
+        store
+            .upsert_automation_attention_fact("project_1", "issue_1", &binding, fact)
+            .unwrap_err(),
+        after.policy_revision,
+    );
+    assert_conflict(
+        store
+            .resolve_automation_attention_fact("project_1", "issue_1", &binding, "k1")
+            .unwrap_err(),
+        after.policy_revision,
+    );
+
+    // disabled 未终止：同一绑定写/清一律 Conflict（终止收尾除外，见下个测试）。
+    let v2 = after.binding_history.clone().unwrap().current;
+    let mut fact_v2 = attention_fact("k1", "2026-10-16T00:00:00Z");
+    fact_v2.plan_id = Some("plan_0002".to_string());
+    fact_v2.session_id = Some("session_0002".to_string());
+    store
+        .upsert_automation_attention_fact("project_1", "issue_1", &v2, fact_v2.clone())
+        .unwrap();
+    let before_disable = store.get("project_1", "issue_1").unwrap().unwrap();
+    store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            Some(before_disable.policy_revision),
+            EnrollmentWriteCommand::Disable,
+        )
+        .unwrap();
+    let disabled = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert!(!disabled.enabled);
+    assert_eq!(disabled.terminated_at, None);
+    assert_conflict(
+        store
+            .upsert_automation_attention_fact("project_1", "issue_1", &v2, fact_v2)
+            .unwrap_err(),
+        disabled.policy_revision,
+    );
+    assert_conflict(
+        store
+            .resolve_automation_attention_fact("project_1", "issue_1", &v2, "k1")
+            .unwrap_err(),
+        disabled.policy_revision,
+    );
+
+    // enrollment 缺失：NotFound 上抛不吞。
+    assert!(matches!(
+        store
+            .upsert_automation_attention_fact(
+                "project_1",
+                "issue_9",
+                &v2,
+                attention_fact("k9", "t"),
+            )
+            .unwrap_err(),
+        EnrollmentError::NotFound
+    ));
+    // 非法路径 id：Store 错误上抛。
+    assert!(matches!(
+        store
+            .upsert_automation_attention_fact(
+                "../escape",
+                "issue_1",
+                &v2,
+                attention_fact("k9", "t"),
+            )
+            .unwrap_err(),
+        EnrollmentError::Store(_)
+    ));
+    assert!(matches!(
+        store
+            .resolve_automation_attention_fact("project_1", "../escape", &v2, "k9")
+            .unwrap_err(),
+        EnrollmentError::Store(_)
+    ));
+}
+
+/// 红测③：同一已 terminated 绑定（enabled=false）可清旧事实/写
+/// termination 清理失败，不因 enabled=false 阻断终止收尾；重清成功即消失。
+#[test]
+fn issue_automation_store_attention_fact_terminated_binding_clears_and_writes() {
+    let (tmp, store, binding, _revision) = bound_enrollment_with_binding();
+    store
+        .upsert_automation_attention_fact(
+            "project_1",
+            "issue_1",
+            &binding,
+            attention_fact("plan-q1", "2026-10-16T00:00:00Z"),
+        )
+        .unwrap();
+
+    // 模拟 T1 终止 CAS 的 durable 结果：terminated_at 落盘＋enabled=false
+    //（N0 只提供纯字段，写入归 T1）。
+    let mut terminated = store.get("project_1", "issue_1").unwrap().unwrap();
+    terminated.enabled = false;
+    terminated.terminated_at = Some("2026-10-16T01:00:00Z".to_string());
+    write_json(&enrollment_json_path(&tmp), &terminated).unwrap();
+
+    // 同一 terminated 绑定：清旧 plan 事实＋写 termination 清理失败均放行。
+    store
+        .resolve_automation_attention_fact("project_1", "issue_1", &binding, "plan-q1")
+        .unwrap();
+    let mut cleanup = attention_fact("terminate:cleanup", "2026-10-16T02:00:00Z");
+    cleanup.kind = AutomationAttentionKind::AutomationFailed;
+    cleanup.stage = AutomationAttentionStage::Termination;
+    store
+        .upsert_automation_attention_fact("project_1", "issue_1", &binding, cleanup.clone())
+        .unwrap();
+    let saved = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert_eq!(saved.attention_facts, vec![cleanup.clone()]);
+    assert_eq!(saved.terminated_at.as_deref(), Some("2026-10-16T01:00:00Z"));
+
+    // 重清成功即消失（幂等）。
+    store
+        .resolve_automation_attention_fact("project_1", "issue_1", &binding, "terminate:cleanup")
+        .unwrap();
+    let saved = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert!(saved.attention_facts.is_empty());
+}
+
+/// 红测②：旧 JSON 无 attention_facts/terminated_at 键（及显式空数组/
+/// null、pre-C1 无 binding_history）均可读；旧代无绑定事实写 fail-closed。
+#[test]
+fn issue_automation_store_reads_legacy_json_without_attention_fields() {
+    let (tmp, store, binding, _revision) = bound_enrollment_with_binding();
+    let path = enrollment_json_path(&tmp);
+    let current = store.get("project_1", "issue_1").unwrap().unwrap();
+
+    // 批 2 前旧 wire：无 attention_facts/terminated_at 键。
+    let mut legacy = serde_json::to_value(&current).unwrap();
+    let object = legacy.as_object_mut().unwrap();
+    object.remove("attention_facts");
+    object.remove("terminated_at");
+    write_json(&path, &legacy).unwrap();
+    let saved = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert!(saved.attention_facts.is_empty());
+    assert_eq!(saved.terminated_at, None);
+
+    // 显式空数组/null 同样读为空/None。
+    let mut explicit = serde_json::to_value(&current).unwrap();
+    let object = explicit.as_object_mut().unwrap();
+    object.insert("attention_facts".to_string(), serde_json::json!([]));
+    object.insert("terminated_at".to_string(), serde_json::Value::Null);
+    write_json(&path, &explicit).unwrap();
+    let saved = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert!(saved.attention_facts.is_empty());
+    assert_eq!(saved.terminated_at, None);
+
+    // 更旧的 pre-C1 wire（无 binding_history）：读仍成功；事实写按
+    // InvalidScope fail-closed（旧代无绑定不驱动自动链）。
+    let mut pre_c1 = serde_json::to_value(&current).unwrap();
+    pre_c1.as_object_mut().unwrap().remove("binding_history");
+    write_json(&path, &pre_c1).unwrap();
+    let saved = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert!(saved.binding_history.is_none());
+    assert!(saved.attention_facts.is_empty());
+    assert_eq!(saved.terminated_at, None);
+    assert_invalid_scope(
+        store
+            .upsert_automation_attention_fact(
+                "project_1",
+                "issue_1",
+                &binding,
+                attention_fact("k9", "t"),
+            )
+            .unwrap_err(),
+    );
+}
+
+/// 红测④：损坏 JSON fail-closed，读错误原样上抛（写/清两入口）。
+#[test]
+fn issue_automation_store_attention_fact_corrupt_json_propagates() {
+    let (tmp, store, binding, _revision) = bound_enrollment_with_binding();
+    std::fs::write(&enrollment_json_path(&tmp), "{ not json").unwrap();
+    assert!(matches!(
+        store
+            .upsert_automation_attention_fact(
+                "project_1",
+                "issue_1",
+                &binding,
+                attention_fact("k", "t"),
+            )
+            .unwrap_err(),
+        EnrollmentError::Store(_)
+    ));
+    assert!(matches!(
+        store
+            .resolve_automation_attention_fact("project_1", "issue_1", &binding, "k")
+            .unwrap_err(),
+        EnrollmentError::Store(_)
+    ));
+}
 include!("target_union_rebind_tests.inc.rs");
