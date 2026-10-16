@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   CodeReviewReport,
   CodingAttemptScope,
+  CodingSessionAutomation,
   CodingAttemptStatus,
   CodingChoiceGate,
   CodingExecutionStage,
@@ -68,6 +69,38 @@ export type CodingPendingGate = CodingGateRequired & {
   errorCode?: string | null;
 };
 
+/** 批 2 T4（REQ-WIGA-09）：统一终止确认的待确认请求（enrollment 身份缺失
+ * 时由确认面提交前经 GET enrollment 补读，未知不猜）。 */
+export interface AutomationTerminationRequest {
+  projectId: string;
+  issueId: string;
+  enrollmentId: string | null;
+  policyRevision: number | null;
+}
+
+/** 批 2 T4：终止成功后的 durable 结果投影（terminated_at/outcome）。 */
+export interface AutomationTerminationResult {
+  projectId: string;
+  issueId: string;
+  terminatedAt: string;
+  outcome: string;
+}
+
+/** 批 2 T4：统一「终止整个自动化」二次确认面状态（页面/收件箱共用）。 */
+export interface PlanTerminationState {
+  pending: AutomationTerminationRequest | null;
+  submitting: boolean;
+  error: string | null;
+  terminated: AutomationTerminationResult | null;
+}
+
+const initialPlanTermination: PlanTerminationState = {
+  pending: null,
+  submitting: false,
+  error: null,
+  terminated: null,
+};
+
 export interface CodingWorkspaceState {
   attemptId: string | null;
   workItemId: string | null;
@@ -112,6 +145,10 @@ export interface CodingWorkspaceState {
   activePlanRepair: PlanRepairSessionState | null;
   // 门禁开关唯一来源：work item / snapshot 上的 require_execution_plan_confirm
   requireExecutionPlanConfirm: boolean;
+  /** 批 2 T4（REQ-WIGA-08/09）：同源管理投影（managed 判据）；manual 缺省 null。 */
+  automation: CodingSessionAutomation | null;
+  /** 批 2 T4：统一终止确认面状态（open/close/submitting/result 由动作驱动）。 */
+  planTermination: PlanTerminationState;
 }
 
 export interface CodingWorkspaceActions {
@@ -166,6 +203,12 @@ export interface CodingWorkspaceActions {
     source?: PlanRepairIdentitySource,
   ) => void;
   clearPlanRepairAfterResume: (amendmentId: string) => void;
+  /** 批 2 T4：打开统一终止确认面（零请求副作用；入口可为页面/门/收件箱/428 路由）。 */
+  openTerminationConfirm: (request: AutomationTerminationRequest) => void;
+  closeTerminationConfirm: () => void;
+  setTerminationSubmitting: (submitting: boolean) => void;
+  setTerminationError: (error: string | null) => void;
+  setTerminationResult: (result: AutomationTerminationResult) => void;
   reset: () => void;
 }
 
@@ -212,6 +255,8 @@ const initialState: CodingWorkspaceState = {
   workItemExecutionPlan: null,
   activePlanRepair: null,
   requireExecutionPlanConfirm: false,
+  automation: null,
+  planTermination: initialPlanTermination,
 };
 export const useCodingWorkspaceStore = create<
   CodingWorkspaceState & CodingWorkspaceActions
@@ -281,6 +326,8 @@ export const useCodingWorkspaceStore = create<
         workItemExecutionPlan: snapshot.work_item_execution_plan ?? null,
         activePlanRepair,
         requireExecutionPlanConfirm: snapshot.require_execution_plan_confirm ?? false,
+        // 批 2 T4：同源管理投影随快照落 store（terminated 仍 managed）。
+        automation: snapshot.automation ?? null,
         protocolError: null,
         streamingContent: null,
         activeStreamNodeId: null,
@@ -496,6 +543,42 @@ export const useCodingWorkspaceStore = create<
 
   clearPlanRepairAfterResume: (amendmentId) =>
     set((state) => planRepairResumeStateUpdate(state, amendmentId)),
+
+  openTerminationConfirm: (request) =>
+    set((state) => ({
+      planTermination: {
+        ...state.planTermination,
+        pending: request,
+        submitting: false,
+        error: null,
+      },
+    })),
+
+  closeTerminationConfirm: () =>
+    set((state) => ({
+      planTermination: { ...state.planTermination, pending: null, error: null },
+    })),
+
+  setTerminationSubmitting: (submitting) =>
+    set((state) => ({
+      planTermination: { ...state.planTermination, submitting },
+    })),
+
+  setTerminationError: (error) =>
+    set((state) => ({
+      planTermination: { ...state.planTermination, error, submitting: false },
+    })),
+
+  setTerminationResult: (result) =>
+    set((state) => ({
+      planTermination: {
+        ...state.planTermination,
+        pending: null,
+        submitting: false,
+        error: null,
+        terminated: result,
+      },
+    })),
 
   reset: () => set({ ...initialState }),
 }));

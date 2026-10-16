@@ -165,6 +165,8 @@ function ChangedFileList({ files }: { files: string[] }) {
 export function CoderTriageCard({
   gate,
   onRespond,
+  automationManaged = false,
+  onOpenTermination,
   verificationTriage = null,
   onEnterVerificationTriage,
   commandEvidence = null,
@@ -172,6 +174,10 @@ export function CoderTriageCard({
 }: {
   gate: CodingPendingGate;
   onRespond: (gateId: string, actionId: string, extraContext?: string) => void;
+  /** 批 2 T4（REQ-WIGA-09）：托管判据（T3 同源投影 owner=server）——门动作
+   * 集合不变，但 abort 执行语义改整 plan 统一终止（路由二次确认面）。 */
+  automationManaged?: boolean;
+  onOpenTermination?: () => void;
   /** 原样透传自 GatePanel：验证处理旁路面板（收进二级折叠）。 */
   verificationTriage?: VerificationTriageRecord | null;
   onEnterVerificationTriage?: (gateId: string) => void;
@@ -337,7 +343,14 @@ export function CoderTriageCard({
               <button
                 type="button"
                 disabled={submitting}
-                onClick={() => onRespond(gate.gate_id, abortAction.action_id, undefined)}
+                onClick={() => {
+                  // 批 2 T4：托管下 Abort 走整 plan 统一终止；手动保持单 attempt。
+                  if (automationManaged && onOpenTermination) {
+                    onOpenTermination();
+                    return;
+                  }
+                  onRespond(gate.gate_id, abortAction.action_id, undefined);
+                }}
                 className={actionButtonClass}
               >
                 {submitting ? "处理中" : CODER_TRIAGE_ABORT_BUTTON_LABEL}

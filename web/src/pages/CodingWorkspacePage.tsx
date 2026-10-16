@@ -46,6 +46,11 @@ import {
   type ChatEntryListHandle,
 } from "../components/chat-workspace/ChatEntryList";
 import {
+  AutomationTerminatedBanner,
+  AutomationTerminationConfirmSurface,
+  AutomationTerminationEntryButton,
+} from "../components/chat-workspace/cockpit/CockpitInboxWaitingCards";
+import {
   useChoiceRespondCommand,
   type ChoiceRespondCommandState,
 } from "../hooks/useChoiceRespondCommand";
@@ -131,6 +136,26 @@ export function CodingWorkspacePage({
   // 复查/expired 不路由新 run），不再经 WS choice_response。
   const { respondChoice } = useChoiceRespondCommand(address, handleChoiceCommandState);
   const store = useCodingWorkspaceStore();
+
+  // 批 2 T4（REQ-WIGA-09/08）：托管判据用 T3 同源投影（owner=server 即
+  // managed，terminated 仍 managed）；终止态优先投影 terminated_at，其次
+  // 本页提交的 durable 结果（同一 project/issue 才呈现，防跨页残留）。
+  const automationManaged = store.automation?.owner === "server";
+  const terminationTerminatedAt =
+    store.automation?.terminated_at ??
+    (store.planTermination.terminated !== null &&
+      store.planTermination.terminated.projectId === (store.projectId ?? address.projectId) &&
+      store.planTermination.terminated.issueId === (store.issueId ?? address.issueId)
+      ? store.planTermination.terminated.terminatedAt
+      : null);
+  const openAutomationTermination = () => {
+    useCodingWorkspaceStore.getState().openTerminationConfirm({
+      projectId: store.projectId ?? address.projectId,
+      issueId: store.issueId ?? address.issueId,
+      enrollmentId: store.automation?.enrollment_id ?? null,
+      policyRevision: store.automation?.policy_revision ?? null,
+    });
+  };
   const settingsSlotRef = useCockpitSettingsSlotRef();
   const planRepairApi = useWorkspaceWs(
     store.activePlanRepair?.childSessionId ?? null,
@@ -980,10 +1005,25 @@ export function CodingWorkspacePage({
               startupErrorCode={startupErrorCode}
               groupFinalReadinessStatus={store.groupFinalReadiness?.status}
               groupFinalReadinessDiagnostics={store.groupFinalReadiness?.diagnostics}
+              automationManaged={automationManaged}
+              automationTerminated={terminationTerminatedAt !== null}
             />
           )}
+          {/* 批 2 T4（REQ-WIGA-09）：托管且未终止——「终止整个自动化」统一
+              入口（门阻塞时同样可达）；终止后由下方横幅呈现 terminated_at。 */}
+          {automationManaged && terminationTerminatedAt === null ? (
+            <AutomationTerminationEntryButton onOpen={openAutomationTermination} />
+          ) : null}
         </div>
       </header>
+      {/* 批 2 T4：终止态呈现（terminated_at）＋统一二次确认面（任意入口共用）。 */}
+      {terminationTerminatedAt !== null ? (
+        <AutomationTerminatedBanner
+          terminatedAt={terminationTerminatedAt}
+          outcome={store.planTermination.terminated?.outcome ?? null}
+        />
+      ) : null}
+      <AutomationTerminationConfirmSurface />
       {/* P3 WIGA Task 4（§4.2 / D5）：readiness Complete 且 waiting_for_human/
           final_confirm 的等待态——明确「编码执行完成，待最终确认」，人手
           点击「确认完成」（驾驶舱或本页按钮）后才允许完成横幅；unit 全
@@ -1156,7 +1196,9 @@ export function CodingWorkspacePage({
                 gate={pendingGate}
                 onRespond={api.respondGate}
                 onConfirmStage={api.confirmStageGate}
-                onAbort={api.abortAttempt}
+                onAbort={automationManaged ? openAutomationTermination : api.abortAttempt}
+                automationManaged={automationManaged}
+                onOpenTermination={automationManaged ? openAutomationTermination : undefined}
                 verificationTriage={verificationTriage}
                 onEnterVerificationTriage={
                   pendingGateEligibleForTriage && !triageActionBusy
@@ -1244,6 +1286,7 @@ export function CodingWorkspacePage({
                 startupErrorCode={startupErrorCode}
                 groupFinalReadinessStatus={store.groupFinalReadiness?.status}
                 groupFinalReadinessDiagnostics={store.groupFinalReadiness?.diagnostics}
+                automationManaged={automationManaged}
               />
             </div>
           )}

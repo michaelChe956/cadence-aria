@@ -87,6 +87,7 @@ export function CodingComposer({
   groupFinalReadinessStatus,
   groupFinalReadinessDiagnostics = [],
   startupErrorCode = null,
+  automationManaged = false,
 }: {
   api: ReturnType<typeof useCodingWorkspaceWs>;
   stage: CodingExecutionStage | null;
@@ -96,6 +97,8 @@ export function CodingComposer({
   groupFinalReadinessStatus?: GroupFinalReadinessStatus | null;
   groupFinalReadinessDiagnostics?: GroupFinalReadinessDiagnostic[];
   startupErrorCode?: string | null;
+  /** 批 2 T4（REQ-WIGA-09）：托管下隐藏单 attempt 中止（终止走统一入口）。 */
+  automationManaged?: boolean;
 }) {
   const [input, setInput] = useState("");
   const trimmedInput = input.trim();
@@ -120,7 +123,7 @@ export function CodingComposer({
         </div>
         <div className="flex min-w-0 items-center justify-between gap-2">
           <div className="truncate text-xs text-[var(--aria-ink-muted)]">{statusText}</div>
-          {status && ACTIVE_ATTEMPT_STATUSES.has(status) ? (
+          {status && ACTIVE_ATTEMPT_STATUSES.has(status) && !automationManaged ? (
             <button
               type="button"
               onClick={api.abortAttempt}
@@ -169,6 +172,7 @@ export function CodingComposer({
             compact
             groupFinalReadinessStatus={groupFinalReadinessStatus}
             groupFinalReadinessDiagnostics={groupFinalReadinessDiagnostics}
+            automationManaged={automationManaged}
           />
         </div>
       </div>
@@ -184,6 +188,8 @@ export function ActionButtons({
   groupFinalReadinessStatus,
   groupFinalReadinessDiagnostics = [],
   startupErrorCode = null,
+  automationManaged = false,
+  automationTerminated = false,
 }: {
   api: ReturnType<typeof useCodingWorkspaceWs>;
   stage: CodingExecutionStage | null;
@@ -192,6 +198,10 @@ export function ActionButtons({
   groupFinalReadinessStatus?: GroupFinalReadinessStatus | null;
   groupFinalReadinessDiagnostics?: GroupFinalReadinessDiagnostic[];
   startupErrorCode?: string | null;
+  /** 批 2 T4：托管下隐藏全部单 attempt 中止按钮（managed 判据=T3 同源投影）。 */
+  automationManaged?: boolean;
+  /** 批 2 T4：终止后不再提供重新开始（无接管/局部 abort/restart）。 */
+  automationTerminated?: boolean;
 }) {
   const buttonClass = compact
     ? "inline-flex h-8 items-center gap-1 rounded-md border border-[var(--aria-line)] bg-white px-2 text-xs font-semibold hover:bg-[var(--aria-panel-muted)]"
@@ -206,6 +216,11 @@ export function ActionButtons({
   // GatePromptEntry 的终止按钮同款 ConfirmTwiceButton 先例）；运行中/已完成
   // 不渲染（completed 不提供重开，进行中的 attempt 走阶段按钮）。
   if (status === "aborted" || status === "failed") {
+    // 批 2 T4（REQ-WIGA-09）：终止后不再提供重新开始（无接管/局部
+    // abort/restart；重启由 automation 链路或服务端拒绝收口）。
+    if (automationTerminated) {
+      return null;
+    }
     return (
       <div className="flex items-center gap-2">
         <ConfirmTwiceButton
@@ -273,15 +288,17 @@ export function ActionButtons({
             </span>
           ) : null}
         </div>
-        <button
-          type="button"
-          onClick={api.abortAttempt}
-          className={buttonClass}
-          aria-label={compact ? "底部中止" : undefined}
-        >
-          <X className="h-3.5 w-3.5" />
-          中止
-        </button>
+        {automationManaged ? null : (
+          <button
+            type="button"
+            onClick={api.abortAttempt}
+            className={buttonClass}
+            aria-label={compact ? "底部中止" : undefined}
+          >
+            <X className="h-3.5 w-3.5" />
+            中止
+          </button>
+        )}
       </div>
     );
   }
@@ -305,20 +322,22 @@ export function ActionButtons({
             {finalConfirmDiagnostic}
           </span>
         ) : null}
-        <button
-          type="button"
-          onClick={api.abortAttempt}
-          className={buttonClass}
-          aria-label={compact ? "底部中止" : undefined}
-        >
-          <X className="h-3.5 w-3.5" />
-          中止
-        </button>
+        {automationManaged ? null : (
+          <button
+            type="button"
+            onClick={api.abortAttempt}
+            className={buttonClass}
+            aria-label={compact ? "底部中止" : undefined}
+          >
+            <X className="h-3.5 w-3.5" />
+            中止
+          </button>
+        )}
       </div>
     );
   }
 
-  if (status && ACTIVE_ATTEMPT_STATUSES.has(status)) {
+  if (status && ACTIVE_ATTEMPT_STATUSES.has(status) && !automationManaged) {
     return (
       <button
         type="button"
@@ -340,6 +359,8 @@ export function GatePanel({
   onRespond,
   onConfirmStage,
   onAbort,
+  automationManaged = false,
+  onOpenTermination,
   verificationTriage = null,
   onEnterVerificationTriage,
   commandEvidence = null,
@@ -349,6 +370,11 @@ export function GatePanel({
   onRespond: ReturnType<typeof useCodingWorkspaceWs>["respondGate"];
   onConfirmStage: ReturnType<typeof useCodingWorkspaceWs>["confirmStageGate"];
   onAbort: ReturnType<typeof useCodingWorkspaceWs>["abortAttempt"];
+  /** 批 2 T4（REQ-WIGA-09）：托管判据（T3 同源投影 owner=server）——门动作
+   * 集合不变，但 Abort 执行语义改整 plan 统一终止。 */
+  automationManaged?: boolean;
+  /** 批 2 T4：打开统一终止二次确认面（页面接线，零请求副作用）。 */
+  onOpenTermination?: () => void;
   /** C2 Task 8：验证处理旁路面板（不进 action 枚举与 available_actions）。 */
   verificationTriage?: VerificationTriageRecord | null;
   onEnterVerificationTriage?: (gateId: string) => void;
@@ -376,6 +402,8 @@ export function GatePanel({
       <CoderTriageCard
         gate={gate}
         onRespond={onRespond}
+        automationManaged={automationManaged}
+        onOpenTermination={onOpenTermination}
         verificationTriage={verificationTriage}
         onEnterVerificationTriage={onEnterVerificationTriage}
         commandEvidence={commandEvidence}
@@ -403,6 +431,12 @@ export function GatePanel({
   const missingReasonMessage = needsCoderFeedbackContext ? "需要填写人工修复意见" : "需要填写原因";
 
   function handleAction(action: CodingGateRequired["available_actions"][number]) {
+    // 批 2 T4（REQ-WIGA-09）：托管下门 Abort 动作改走整 plan 统一终止
+    //（执行语义改变，动作集合/文案保持原样）；非 Abort 动作不变。
+    if (action.action_type === "abort" && automationManaged && onOpenTermination) {
+      onOpenTermination();
+      return;
+    }
     if (action.action_type === "confirm_stage" && activeGate.stage) {
       onConfirmStage(activeGate.stage);
       return;

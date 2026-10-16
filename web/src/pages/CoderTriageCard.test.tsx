@@ -178,3 +178,60 @@ describe("CoderTriageCard（P2-d 分诊卡）", () => {
     }
   });
 });
+
+// ── 批 2 T4（REQ-WIGA-09）：托管模式下门动作集合不变，abort 执行语义改
+// 整 plan 统一终止（路由到统一二次确认面）；非 Abort 动作与手动模式不变。──
+describe("CoderTriageCard（T4 托管统一终止路由）", () => {
+  it("automationManaged 时 abort 路由统一终止（不开门响应），retry 动作原样", () => {
+    const onRespond = vi.fn();
+    const onOpenTermination = vi.fn();
+    render(
+      <CoderTriageCard
+        gate={operationalBlockerGate()}
+        onRespond={onRespond}
+        automationManaged
+        onOpenTermination={onOpenTermination}
+      />,
+    );
+
+    // 门动作集合不变：三按钮仍按 available_actions 渲染。
+    const actions = screen.getByTestId("coder-triage-actions");
+    const labels = within(actions)
+      .getAllByRole("button")
+      .map((button) => button.textContent);
+    expect(labels).toEqual(["让 AI 再试一次", "我来说明情况，让 AI 继续", "终止"]);
+
+    fireEvent.click(within(actions).getByRole("button", { name: "终止" }));
+    expect(onOpenTermination).toHaveBeenCalledTimes(1);
+    expect(onRespond).not.toHaveBeenCalledWith(
+      "coding_blocked_gate_0002",
+      "abort",
+      undefined,
+    );
+
+    // 非 Abort 门动作语义不变。
+    fireEvent.click(within(actions).getByRole("button", { name: "让 AI 再试一次" }));
+    expect(onRespond).toHaveBeenCalledWith(
+      "coding_blocked_gate_0002",
+      "retry_coding",
+      undefined,
+    );
+  });
+
+  it("手动模式（未托管）abort 仍走单 attempt 门响应", () => {
+    const onRespond = vi.fn();
+    const onOpenTermination = vi.fn();
+    render(
+      <CoderTriageCard
+        gate={operationalBlockerGate()}
+        onRespond={onRespond}
+        automationManaged={false}
+        onOpenTermination={onOpenTermination}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "终止" }));
+    expect(onRespond).toHaveBeenCalledWith("coding_blocked_gate_0002", "abort", undefined);
+    expect(onOpenTermination).not.toHaveBeenCalled();
+  });
+});

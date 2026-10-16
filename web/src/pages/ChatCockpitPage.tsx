@@ -28,6 +28,11 @@ import { CockpitInbox } from "../components/chat-workspace/cockpit/CockpitInbox"
 import { ConfirmTwiceButton } from "../components/chat-workspace/cockpit/ConfirmTwiceButton";
 import { PlanApprovalPanel } from "../components/chat-workspace/cockpit/PlanApprovalPanel";
 import {
+  AutomationTerminatedBanner,
+  AutomationTerminationConfirmSurface,
+  AutomationTerminationEntryButton,
+} from "../components/chat-workspace/cockpit/CockpitInboxWaitingCards";
+import {
   useCockpitObservedRecords,
   useCockpitSessionWatch,
   useCockpitSettings,
@@ -42,6 +47,7 @@ import {
   GATE_TERMINATE_CONFIRM_LABEL,
 } from "../state/gate-prompt-copy";
 import { CockpitPageHeader } from "../components/cockpit/CockpitPageHeader";
+import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { useWorkspaceContentLoaders } from "../hooks/useWorkspaceContentLoaders";
 import { useLeaseDiagnostics } from "../hooks/useLeaseDiagnostics";
 import { useCockpitAutopilot } from "../hooks/useCockpitAutopilot";
@@ -851,6 +857,43 @@ export function ChatCockpitPage({
     },
     [planControl, planIssueAddress],
   );
+
+  // 批 2 T4（REQ-WIGA-09）：总览「终止整个自动化」统一入口——与 Coding
+  // Workspace/收件箱共用同一二次确认面（coding-workspace-store）。地址经
+  // P5 目录解析缓存补齐（未解析时点击现场解析，只读零副作用）；enrollment
+  // 身份优先用同源投影，缺失由确认面提交前 GET 补读。
+  const cockpitTerminateEligible =
+    isCurrentSession &&
+    sessionManagedByAutomation &&
+    state.workspaceType === "work_item_plan";
+  const handleOpenAutomationTermination = useCallback(() => {
+    void (async () => {
+      let resolved = planIssueAddress;
+      if (resolved === null) {
+        resolved = await findWorkspaceSessionIssueAddress(sessionId);
+        if (resolved === null) {
+          return;
+        }
+      }
+      useCodingWorkspaceStore.getState().openTerminationConfirm({
+        projectId: resolved.projectId,
+        issueId: resolved.issueId,
+        enrollmentId: state.automation?.enrollment_id ?? null,
+        policyRevision: state.automation?.policy_revision ?? null,
+      });
+    })();
+  }, [planIssueAddress, sessionId, state.automation]);
+  // 本页提交产生的终止结果（同 issue 才呈现 terminated_at，防跨会话残留）。
+  const cockpitPlanTermination = useCodingWorkspaceStore(
+    (storeState) => storeState.planTermination,
+  );
+  const cockpitTerminatedAt =
+    planIssueAddress !== null &&
+    cockpitPlanTermination.terminated !== null &&
+    cockpitPlanTermination.terminated.projectId === planIssueAddress.projectId &&
+    cockpitPlanTermination.terminated.issueId === planIssueAddress.issueId
+      ? cockpitPlanTermination.terminated.terminatedAt
+      : null;
   // F-11/F-28 二轮：裸 driver 抢走租约（STALE_DRIVER_LEASE）或本连接以
   // observer 身份重连（OBSERVER_WRITE_REJECTED）后写操作被拒——重发 driver
   // hello 即重新持有租约（服务端 bind_role 对既有连接同样执行 lease.acquire），
@@ -1214,7 +1257,17 @@ export function ChatCockpitPage({
                 ) : null}
               </div>
             ) : null}
+            {/* 批 2 T4（REQ-WIGA-09）：托管 plan 会话的「终止整个自动化」统一
+                入口（与 Coding Workspace/收件箱共用同一确认面）；终止后入口
+                撤下、呈现 terminated_at。 */}
+            {cockpitTerminateEligible && cockpitTerminatedAt === null ? (
+              <AutomationTerminationEntryButton onOpen={handleOpenAutomationTermination} />
+            ) : null}
           </div>
+          {cockpitTerminatedAt !== null ? (
+            <AutomationTerminatedBanner terminatedAt={cockpitTerminatedAt} />
+          ) : null}
+          <AutomationTerminationConfirmSurface />
           {pendingChoices.length > 0 || pendingChoiceRequests.length > 0 ? (
             <PendingChoiceNotice
               entries={selectedState?.chatEntries ?? []}
@@ -1361,7 +1414,11 @@ export function ChatCockpitPage({
                   : undefined
               }
               onStartGeneration={handleStartGeneration}
-              onAbort={workspaceWs.abort}
+              onAbort={
+                cockpitTerminateEligible
+                  ? handleOpenAutomationTermination
+                  : workspaceWs.abort
+              }
               hardErrorNotice={hardErrorNotice}
               gateOpen={selectGateProjection(state) !== null}
               planContinue={

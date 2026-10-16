@@ -795,6 +795,21 @@ export type PlanCodingStartResultDto = {
   waiting_units: PlanCodingUnitProgressDto[];
   progress: PlanCodingProgressDto;
 };
+/**
+ * 批 2 T4（REQ-WIGA-08/09）：coding WS 快照的同源管理投影（T3 REST/WS
+ * 一致，`models/automation.rs::AutomationOwnership` 同形）。manual/无绑定
+ * 缺省 null（旧帧兼容）；terminated 后仍 managed（owner 保持 server），
+ * `terminated_at` 非空即终态呈现判据。
+ */
+export type CodingSessionAutomation = {
+  owner: "client" | "server";
+  enrollment_id: string | null;
+  policy_revision: number | null;
+  enabled: boolean;
+  plan_id?: string | null;
+  terminated_at?: string | null;
+};
+
 
 export type CodingWsInMessage =
   | { type: "coding_hello"; attempt_id: string; last_seen_node_id?: string | null }
@@ -860,6 +875,8 @@ export type CodingWsOutMessage =
       linked_plan_repair: PlanRepairSessionSnapshot | null;
       group_review_artifacts?: GroupReviewArtifactProjection | null;
       require_execution_plan_confirm: boolean;
+      /** 批 2 T4：同源管理投影（managed/terminated 判据）；旧帧缺省 null。 */
+      automation?: CodingSessionAutomation | null;
     } & Omit<CodingAttemptSnapshotResponse, "attempt">)
   | { type: "coding_stage_change"; stage: CodingExecutionStage }
   | { type: "coding_timeline_node_created"; node: CodingTimelineNode }

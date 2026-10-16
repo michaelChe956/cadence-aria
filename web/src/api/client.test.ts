@@ -23,6 +23,8 @@ import {
   listProjects,
   listRepositories,
   normalizeApiError,
+  postAutomationEnrollmentTerminate,
+  parseAutomationTerminationIdentity,
   postAutomationContinuePlan,
   postCodingGateResponse,
   recheckProviders,
@@ -928,5 +930,122 @@ describe("api client", () => {
     expect(error).toBeInstanceOf(ApiRequestError);
     expect(error.code).toBe("automation_continue_context_required");
     expect(callCount).toBe(1);
+  });
+});
+// ── 批 2 T4（REQ-WIGA-09）：统一「终止自动化」REST 通道与 428 身份解析 ──
+describe("postAutomationEnrollmentTerminate（T4 统一终止）", () => {
+  it("posts confirmed termination with encoded ids and returns the durable receipt", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            command_id: "cmd-fe-terminate-enrollment_0001",
+            state: "accepted",
+            enrollment_id: "enrollment_0001",
+            plan_id: "plan_0001",
+            terminated_at: "2026-10-16T06:00:00Z",
+            outcome: "terminated",
+            results: [],
+          }),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await postAutomationEnrollmentTerminate("project 1", "issue/1", {
+      command_id: "cmd-fe-terminate-enrollment_0001",
+      expected_enrollment_id: "enrollment_0001",
+      expected_policy_revision: 3,
+      confirmed: true,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project%201/issues/issue%2F1/automation-enrollment/terminate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          command_id: "cmd-fe-terminate-enrollment_0001",
+          expected_enrollment_id: "enrollment_0001",
+          expected_policy_revision: 3,
+          confirmed: true,
+        }),
+      }),
+    );
+    expect(result.outcome).toBe("terminated");
+    expect(result.terminated_at).toBe("2026-10-16T06:00:00Z");
+  });
+
+  it("surfaces the 428 automation_plan_termination_required identity via ApiRequestError details", async () => {
+    const details = {
+      confirm_required: true,
+      plan_id: "plan_0001",
+      session_id: "session_0001",
+      enrollment_id: "enrollment_0001",
+      policy_revision: 3,
+      binding_version: 2,
+      terminated_at: null as string | null,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: "automation_plan_termination_required",
+              message: "automation plan termination requires unified confirmation",
+              details,
+            }),
+            { status: 428 },
+          ),
+      ),
+    );
+
+    const error: ApiRequestError = await postAutomationEnrollmentTerminate(
+      "project_0001",
+      "issue_0001",
+      {
+        command_id: "cmd-probe",
+        expected_enrollment_id: "enrollment_0001",
+        expected_policy_revision: 3,
+        confirmed: false,
+      },
+    ).then(
+      () => {
+        throw new Error("expected 428 rejection");
+      },
+      (reason: ApiRequestError) => reason,
+    );
+
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect(error.code).toBe("automation_plan_termination_required");
+    expect(parseAutomationTerminationIdentity(error.details)).toEqual(details);
+  });
+
+  it("parses the WS message JSON identity payload and rejects malformed input", () => {
+    expect(
+      parseAutomationTerminationIdentity(
+        JSON.stringify({
+          confirm_required: true,
+          plan_id: "plan_0001",
+          session_id: null,
+          enrollment_id: "enrollment_0001",
+          policy_revision: 2,
+          binding_version: null,
+          terminated_at: null,
+        }),
+      ),
+    ).toEqual({
+      confirm_required: true,
+      plan_id: "plan_0001",
+      session_id: null,
+      enrollment_id: "enrollment_0001",
+      policy_revision: 2,
+      binding_version: null,
+      terminated_at: null,
+    });
+    expect(parseAutomationTerminationIdentity("not json")).toBeNull();
+    expect(
+      parseAutomationTerminationIdentity({ enrollment_id: "missing-revision" }),
+    ).toBeNull();
   });
 });

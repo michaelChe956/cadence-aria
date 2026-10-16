@@ -1011,3 +1011,104 @@ describe("coding workspace store", () => {
     });
   });
 });
+
+// ── 批 2 T4（REQ-WIGA-08/09）：管理/终态投影进 store＋统一终止确认态 ──
+describe("automation ownership projection and unified termination confirm state", () => {
+  beforeEach(() => {
+    useCodingWorkspaceStore.getState().reset();
+  });
+
+  it("projects the managed automation ownership from session state (terminated stays managed)", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.setSessionState(
+      sessionState({
+        automation: {
+          owner: "server",
+          enrollment_id: "enrollment_0001",
+          policy_revision: 3,
+          enabled: true,
+          plan_id: "plan_0001",
+          terminated_at: null,
+        },
+      }),
+    );
+
+    expect(useCodingWorkspaceStore.getState().automation).toEqual({
+      owner: "server",
+      enrollment_id: "enrollment_0001",
+      policy_revision: 3,
+      enabled: true,
+      plan_id: "plan_0001",
+      terminated_at: null,
+    });
+
+    store.setSessionState(
+      sessionState({
+        automation: {
+          owner: "server",
+          enrollment_id: "enrollment_0001",
+          policy_revision: 3,
+          enabled: false,
+          plan_id: "plan_0001",
+          terminated_at: "2026-10-16T06:00:00Z",
+        },
+      }),
+    );
+
+    // T3 同源投影语义：terminated 后仍 managed（owner 保持 server）。
+    const terminated = useCodingWorkspaceStore.getState().automation;
+    expect(terminated?.owner).toBe("server");
+    expect(terminated?.terminated_at).toBe("2026-10-16T06:00:00Z");
+  });
+
+  it("keeps automation null for manual attempts (legacy frames omit the field)", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.setSessionState(sessionState());
+    expect(useCodingWorkspaceStore.getState().automation).toBeNull();
+  });
+
+  it("opens and closes the unified termination confirm surface without request side effects", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.openTerminationConfirm({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      enrollmentId: "enrollment_0001",
+      policyRevision: 3,
+    });
+    expect(useCodingWorkspaceStore.getState().planTermination.pending).toEqual({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      enrollmentId: "enrollment_0001",
+      policyRevision: 3,
+    });
+    expect(useCodingWorkspaceStore.getState().planTermination.submitting).toBe(false);
+
+    store.closeTerminationConfirm();
+    expect(useCodingWorkspaceStore.getState().planTermination.pending).toBeNull();
+  });
+
+  it("records the durable termination result (terminated_at + outcome) and closes the surface", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.openTerminationConfirm({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      enrollmentId: null,
+      policyRevision: null,
+    });
+    store.setTerminationResult({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      terminatedAt: "2026-10-16T06:00:00Z",
+      outcome: "terminated",
+    });
+
+    const termination = useCodingWorkspaceStore.getState().planTermination;
+    expect(termination.pending).toBeNull();
+    expect(termination.terminated).toEqual({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      terminatedAt: "2026-10-16T06:00:00Z",
+      outcome: "terminated",
+    });
+  });
+});

@@ -769,6 +769,105 @@ export async function postAutomationContinuePlan(
   });
 }
 
+// ── 批 2 T4（REQ-WIGA-09）：统一「终止自动化」REST 与 428 身份解析 ──
+
+/** T3 wire 契约：REST 428 details 与 WS CodingProtocolError.message（JSON
+ * 字符串）同形——confirm_required＋plan/enrollment/binding 身份。 */
+export const AUTOMATION_PLAN_TERMINATION_REQUIRED = "automation_plan_termination_required";
+
+export type AutomationTerminationIdentityDetails = {
+  confirm_required: boolean;
+  plan_id: string | null;
+  session_id: string | null;
+  enrollment_id: string;
+  policy_revision: number;
+  binding_version: number | null;
+  terminated_at: string | null;
+};
+
+/**
+ * 解析统一终止确认身份：接受 REST `ApiRequestError.details` 对象与 WS
+ * `CodingProtocolError.message` JSON 字符串（两者同形）。缺 enrollment_id/
+ * policy_revision 或载荷损坏返回 null（调用方保持未知，不猜身份）。
+ */
+export function parseAutomationTerminationIdentity(
+  raw: unknown,
+): AutomationTerminationIdentityDetails | null {
+  let source: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      source = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!isRecord(source)) {
+    return null;
+  }
+  if (
+    typeof source.enrollment_id !== "string" ||
+    typeof source.policy_revision !== "number"
+  ) {
+    return null;
+  }
+  return {
+    confirm_required: source.confirm_required === true,
+    plan_id: typeof source.plan_id === "string" ? source.plan_id : null,
+    session_id: typeof source.session_id === "string" ? source.session_id : null,
+    enrollment_id: source.enrollment_id,
+    policy_revision: source.policy_revision,
+    binding_version: typeof source.binding_version === "number" ? source.binding_version : null,
+    terminated_at: typeof source.terminated_at === "string" ? source.terminated_at : null,
+  };
+}
+
+export type AutomationEnrollmentTerminateRequest = {
+  command_id: string;
+  expected_enrollment_id: string;
+  expected_policy_revision: number;
+  /** 提示性绑定互证（可选；与 enrollment 当前代全等，不符 409 零副作用）。 */
+  expected_binding?: EnrollmentBindingIdentity;
+  /** true＝统一二次确认已接受；缺省零副作用（服务端 428 要求确认）。 */
+  confirmed: boolean;
+  reason?: string;
+};
+
+export type AutomationEnrollmentTerminateResponse = {
+  command_id: string;
+  state: string;
+  enrollment_id: string;
+  plan_id?: string | null;
+  terminated_at: string;
+  /** terminated | cleanup_required（cleanup_required 仍不可继续，同命令重放）。 */
+  outcome: string;
+  results: Array<{
+    attempt_id: string;
+    status: string;
+    reason_code?: string | null;
+    message?: string | null;
+  }>;
+};
+
+/**
+ * 批 2 T4：POST 统一终止 REST（`confirmed:true` 才有终止副作用）。未确认
+ * 探测／服务端要求确认时抛 `ApiRequestError`（code
+ * `automation_plan_termination_required`，details 携带身份）——调用方只打开
+ * 同一个二次确认面，不渲染为错误弹窗。
+ */
+export function postAutomationEnrollmentTerminate(
+  projectId: string,
+  issueId: string,
+  payload: AutomationEnrollmentTerminateRequest,
+): Promise<AutomationEnrollmentTerminateResponse> {
+  return requestJson<AutomationEnrollmentTerminateResponse>(
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/automation-enrollment/terminate`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
 /**
  * 批 2 P5：workspace session → (project_id, issue_id) 只读目录解析——
  * control/continue 均以 issue 为作用域，会话页只有 sessionId；按 observers

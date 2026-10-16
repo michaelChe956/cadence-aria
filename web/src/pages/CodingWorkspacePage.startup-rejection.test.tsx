@@ -12,6 +12,9 @@ vi.mock("../api/client", () => ({
   deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
   requestWorkItemExecutionPlanChange: vi.fn(),
+  // 批 2 T4：真实 hook 按码比对/解析终止身份（本测试不触发该分支）。
+  AUTOMATION_PLAN_TERMINATION_REQUIRED: "automation_plan_termination_required",
+  parseAutomationTerminationIdentity: vi.fn(() => null),
 }));
 
 vi.mock("../hooks/useUnloadGuard", () => ({

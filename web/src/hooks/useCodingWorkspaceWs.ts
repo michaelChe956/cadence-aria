@@ -9,6 +9,10 @@ import type {
   ExecutionEvent,
   WorkspaceProviderName,
 } from "../api/types";
+import {
+  AUTOMATION_PLAN_TERMINATION_REQUIRED,
+  parseAutomationTerminationIdentity,
+} from "../api/client";
 import type { ChoiceResponsePayload } from "../state/chat-entries";
 import { codingChatEntryToChatEntry } from "../state/coding-chat-entry-mapping";
 import { useCodingLogStore } from "../state/coding-log-store";
@@ -586,14 +590,30 @@ function handleCodingWsMessage(
         (message as Extract<CodingWsOutMessage, { type: "coding_provider_config_updated" }>).provider,
       );
       break;
-    case "coding_protocol_error":
+    case "coding_protocol_error": {
+      const code = message.code as string;
+      if (code === AUTOMATION_PLAN_TERMINATION_REQUIRED) {
+        // 批 2 T4（REQ-WIGA-09）：托管 plan 的旧 Abort/门动作 Abort 被服务端
+        // 路由为统一终止要求——只打开统一二次确认面（终止提示而非错误
+        // 弹窗），不落 protocolError/门错误；message 为 JSON 身份载荷。
+        const current = useCodingWorkspaceStore.getState();
+        const identity = parseAutomationTerminationIdentity(message.message);
+        current.openTerminationConfirm({
+          projectId: current.projectId ?? "",
+          issueId: current.issueId ?? "",
+          enrollmentId: identity?.enrollment_id ?? null,
+          policyRevision: identity?.policy_revision ?? null,
+        });
+        break;
+      }
       store.setProtocolError({
-        code: message.code as string,
+        code,
         message: message.message as string,
       });
-      markSubmittingGateError(message.code as string);
+      markSubmittingGateError(code);
       rejectCodingChoiceRequestFromError(message.message as string);
       break;
+    }
     case "plan_repair_required": {
       const repair = message as Extract<CodingWsOutMessage, { type: "plan_repair_required" }>;
       store.setPlanRepairRequired(repair);
