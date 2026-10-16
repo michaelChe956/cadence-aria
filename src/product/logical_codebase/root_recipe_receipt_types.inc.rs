@@ -47,6 +47,8 @@ pub const ROOT_RULE_ENTRY_FILE: &str = "AGENTS.md";
 /// 1.02 MiB），按 ≥10× 条目/≥60× 字节余量取整：数十成员 LC 及其常规
 /// 打包历史远在预算内；失控规模（海量 loose 对象/巨型文件）在审计前
 /// 即被阻断（见验收报告 2026-10-01_验收报告_LC根初始化大LC与写边界）。
+/// Bug2（2026-10-16）：预算只对 gitignore 观测面生效——被 `.gitignore`
+/// （含嵌套成员仓）与 `.git/info/exclude` 忽略的路径不计条目/字节。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RootRecipeSnapshotBudget {
     /// 快照条目（目录/文件/symlink）总数上限。

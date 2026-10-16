@@ -774,4 +774,306 @@ mod tests {
         assert!(message.contains("snapshot budget"), "{message}");
         assert!(message.contains("max_bytes"), "{message}");
     }
+
+    // ---- Bug2(2026-10-16):审计快照 gitignore 感知 -------------------------
+    // 报告:cadence/notes/2026-10-16_bug-filesystem-audit-不感知gitignore.md
+    // —— node_modules/target 等被 .gitignore/.git/info/exclude 忽略的路径
+    // 不计入快照预算、不进快照;未被忽略的超限路径仍 fail-closed 且报错
+    // 带可操作提示;无 .gitignore 仓观测语义不变。
+
+    /// 非 Git 聚合根 fixture,由用例自行布放 .gitignore/`.git/info/exclude`
+    /// 与大文件(复刻 owner 现场的 root/成员仓布局)。
+    struct GitignoreFixture {
+        _temp: tempfile::TempDir,
+        root: std::path::PathBuf,
+    }
+
+    impl GitignoreFixture {
+        fn new(setup: impl FnOnce(&Path)) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let raw = temp.path().join("aggregate-root");
+            std::fs::create_dir_all(&raw).unwrap();
+            setup(&raw);
+            let root = raw.canonicalize().unwrap();
+            Self { _temp: temp, root }
+        }
+
+        fn byte_capped_auditor(max_bytes: u64) -> RootRecipeFilesystemAuditor {
+            RootRecipeFilesystemAuditor::with_snapshot_budget(RootRecipeSnapshotBudget {
+                max_entries: usize::MAX,
+                max_bytes,
+            })
+        }
+    }
+
+    fn snapshot_paths(snapshot: &RootRecipeFilesystemSnapshot) -> Vec<&str> {
+        snapshot
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn snapshot_excludes_gitignore_ignored_paths_from_budget_and_entries() {
+        let fixture = GitignoreFixture::new(|root| {
+            std::fs::write(
+                root.join(".gitignore"),
+                "node_modules/\ndist\n*.log\ntarget/\n",
+            )
+            .unwrap();
+            std::fs::write(root.join("README.md"), "src\n").unwrap();
+            std::fs::create_dir_all(root.join("node_modules/dep")).unwrap();
+            std::fs::write(root.join("node_modules/dep/big.bin"), vec![0u8; 4096]).unwrap();
+            std::fs::create_dir_all(root.join("dist")).unwrap();
+            std::fs::write(root.join("dist/app.js"), vec![0u8; 4096]).unwrap();
+            std::fs::write(root.join("debug.log"), vec![0u8; 4096]).unwrap();
+            std::fs::create_dir_all(root.join("busi/target")).unwrap();
+            std::fs::write(root.join("busi/target/app.jar"), vec![0u8; 4096]).unwrap();
+        });
+        // 字节预算 4096:被忽略面(≥16KiB)若计入必然超限——预算门只对
+        // 未被忽略的观测面生效。
+        let auditor = GitignoreFixture::byte_capped_auditor(4096);
+        let (step, command) = command_spec(1);
+        let watch = auditor
+            .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap();
+        let paths = snapshot_paths(&watch.before);
+        for banned in [
+            "node_modules",
+            "node_modules/dep",
+            "node_modules/dep/big.bin",
+            "dist",
+            "dist/app.js",
+            "debug.log",
+            "busi/target",
+            "busi/target/app.jar",
+        ] {
+            assert!(
+                !paths.contains(&banned),
+                "ignored path {banned} must stay out of the snapshot: {paths:?}"
+            );
+        }
+        for observable in [".gitignore", "README.md", "busi"] {
+            assert!(
+                paths.contains(&observable),
+                "unignored path {observable} must stay observable: {paths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_honors_nested_gitignore_and_member_info_exclude() {
+        let fixture = GitignoreFixture::new(|root| {
+            // 成员仓 frontend:嵌套 .gitignore(审计根自身无 .gitignore)。
+            std::fs::create_dir_all(root.join("frontend/.git")).unwrap();
+            std::fs::write(root.join("frontend/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+            std::fs::write(root.join("frontend/.gitignore"), "node_modules/\n").unwrap();
+            std::fs::create_dir_all(root.join("frontend/node_modules/element-plus")).unwrap();
+            std::fs::write(
+                root.join("frontend/node_modules/element-plus/big.js"),
+                vec![0u8; 8192],
+            )
+            .unwrap();
+            std::fs::create_dir_all(root.join("frontend/src")).unwrap();
+            std::fs::write(root.join("frontend/src/main.js"), "1\n").unwrap();
+            // 成员仓 busi:仅 .git/info/exclude 忽略 target/。
+            std::fs::create_dir_all(root.join("busi/.git/info")).unwrap();
+            std::fs::write(root.join("busi/.git/info/exclude"), "target/\n").unwrap();
+            std::fs::create_dir_all(root.join("busi/target")).unwrap();
+            std::fs::write(root.join("busi/target/app.jar"), vec![0u8; 8192]).unwrap();
+            std::fs::write(root.join("busi/pom.xml"), "<p/>\n").unwrap();
+        });
+        let auditor = GitignoreFixture::byte_capped_auditor(4096);
+        let (step, command) = command_spec(1);
+        let watch = auditor
+            .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap();
+        let paths = snapshot_paths(&watch.before);
+        assert!(
+            !paths.iter().any(|path| path.contains("node_modules")),
+            "nested .gitignore must keep node_modules out: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|path| path.starts_with("busi/target")),
+            "member .git/info/exclude must keep target/ out: {paths:?}"
+        );
+        // gitignore/exclude 自身与成员 .git 面保持可观测(仅忽略其规则覆盖面)。
+        for observable in [
+            "frontend/.gitignore",
+            "frontend/.git/HEAD",
+            "busi/.git/info/exclude",
+            "busi/pom.xml",
+            "frontend/src/main.js",
+        ] {
+            assert!(
+                paths.contains(&observable),
+                "{observable} must stay observable: {paths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_budget_error_on_unignored_oversize_carries_actionable_hint() {
+        let fixture = GitignoreFixture::new(|root| {
+            std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+            std::fs::create_dir_all(root.join("node_modules")).unwrap();
+            std::fs::write(root.join("node_modules/skipped.bin"), vec![0u8; 1024]).unwrap();
+            std::fs::write(root.join("payload.bin"), vec![0u8; 4096]).unwrap();
+        });
+        let auditor = GitignoreFixture::byte_capped_auditor(2048);
+        let (step, command) = command_spec(1);
+        let error = auditor
+            .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap_err();
+        let message = format!("{error:?}");
+        assert!(message.contains("snapshot budget"), "{message}");
+        assert!(message.contains("max_bytes"), "{message}");
+        // 可操作提示:被忽略路径已不计入,剩余面可清理或入 .gitignore。
+        assert!(
+            message.contains(".gitignore"),
+            "budget error must point at the gitignore-aware remedy: {message}"
+        );
+    }
+
+    #[test]
+    fn gitignore_dir_only_basename_and_negation_semantics() {
+        let fixture = GitignoreFixture::new(|root| {
+            std::fs::create_dir_all(root.join("a")).unwrap();
+            std::fs::write(root.join("a/skip.log"), "x\n").unwrap();
+            std::fs::write(root.join("a/keep.log"), "x\n").unwrap();
+            std::fs::write(root.join("target"), "file named target\n").unwrap();
+            std::fs::create_dir_all(root.join("deep/target")).unwrap();
+            std::fs::write(root.join("deep/target/x.txt"), "x\n").unwrap();
+            std::fs::write(root.join("dist-root"), "anchored\n").unwrap();
+            std::fs::create_dir_all(root.join("sub/dist-root")).unwrap();
+            std::fs::write(root.join("sub/dist-root/y.txt"), "y\n").unwrap();
+            std::fs::write(
+                root.join(".gitignore"),
+                "*.log\n!keep.log\ntarget/\n/dist-root\n",
+            )
+            .unwrap();
+        });
+        let auditor = GitignoreFixture::byte_capped_auditor(u64::MAX);
+        let (step, command) = command_spec(1);
+        let watch = auditor
+            .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap();
+        let paths = snapshot_paths(&watch.before);
+        assert!(
+            !paths.contains(&"a/skip.log"),
+            "*.log must ignore by basename: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"a/keep.log"),
+            "!keep.log must re-include: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"target"),
+            "dir-only pattern must not eat a file named target: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|path| path.starts_with("deep/target")),
+            "basename dir pattern applies at any depth: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"dist-root"),
+            "leading-slash pattern anchors at the scope root: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"sub/dist-root") && paths.contains(&"sub/dist-root/y.txt"),
+            "anchored pattern must not leak into subdirectories: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn ignored_path_changes_stay_out_of_audit_diff() {
+        let fixture = GitignoreFixture::new(|root| {
+            std::fs::create_dir_all(root.join(".aria/aggregate")).unwrap();
+            std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+            std::fs::create_dir_all(root.join("node_modules/dep")).unwrap();
+            std::fs::write(root.join("node_modules/dep/a.js"), "1\n").unwrap();
+        });
+        let auditor = RootRecipeFilesystemAuditor::new();
+        let (step, command) = command_spec(1);
+        let watch = auditor
+            .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap();
+        // 命令窗内:被忽略面新增 + allowlist 内合法 artifact。
+        std::fs::write(fixture.root.join("node_modules/dep/b.js"), "2\n").unwrap();
+        std::fs::write(fixture.root.join(".aria/aggregate/change.txt"), "ok\n").unwrap();
+        let receipt = auditor
+            .after_command(watch, RECORDED_AT.to_string())
+            .unwrap();
+        assert_eq!(receipt.verdict, RootRecipeCommandVerdict::Allowed);
+        assert!(
+            !receipt
+                .observed_changes
+                .iter()
+                .any(|change| change.path.contains("node_modules")),
+            "changes inside ignored paths stay out of the diff: {:?}",
+            receipt.observed_changes
+        );
+        assert_eq!(receipt.observed_changes.len(), 1);
+        assert_eq!(receipt.observed_changes[0].path, ".aria/aggregate/change.txt");
+    }
+
+    #[test]
+    fn snapshot_without_gitignore_keeps_counting_everything() {
+        let fixture = GitignoreFixture::new(|root| {
+            std::fs::write(root.join("payload.bin"), vec![0u8; 4096]).unwrap();
+        });
+        let auditor = GitignoreFixture::byte_capped_auditor(1024);
+        let (step, command) = command_spec(1);
+        let error = auditor
+            .before_command(OPERATION_ID, &fixture.root, step, 1, command)
+            .unwrap_err();
+        let message = format!("{error:?}");
+        assert!(message.contains("snapshot budget"), "{message}");
+        assert!(message.contains("max_bytes"), "{message}");
+    }
+
+    /// /tmp 真实量级 fixture(复刻 2026-10-16 现场:node_modules >64MiB、
+    /// Java target 数十 MiB、源码 <1MiB):默认 64MiB 预算下,被忽略路径
+    /// 不计入——快照必须通过(owner 现场清理后 672K 可过的对偶面)。
+    #[test]
+    fn tmp_fixture_ignored_node_modules_and_target_fit_default_budget() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let root = temp.path().join("test-center-java");
+        std::fs::create_dir_all(root.join("frontend/src")).unwrap();
+        std::fs::write(root.join("frontend/.gitignore"), "node_modules/\ndist/\n").unwrap();
+        std::fs::write(root.join("frontend/src/main.js"), "1\n").unwrap();
+        std::fs::create_dir_all(root.join("frontend/node_modules/element-plus/es/components"))
+            .unwrap();
+        let oversize_map = std::fs::File::create(
+            root.join("frontend/node_modules/element-plus/es/components/big.mjs.map"),
+        )
+        .unwrap();
+        oversize_map.set_len(70 * 1024 * 1024).unwrap();
+        drop(oversize_map);
+        std::fs::create_dir_all(root.join("busi/.git/info")).unwrap();
+        std::fs::write(root.join("busi/.git/info/exclude"), "target/\n").unwrap();
+        std::fs::write(root.join("busi/pom.xml"), "<p/>\n").unwrap();
+        std::fs::create_dir_all(root.join("busi/target")).unwrap();
+        let fat_jar = std::fs::File::create(root.join("busi/target/app.jar")).unwrap();
+        fat_jar.set_len(45 * 1024 * 1024).unwrap();
+        drop(fat_jar);
+        let root = root.canonicalize().unwrap();
+
+        let auditor = RootRecipeFilesystemAuditor::new();
+        let (step, command) = command_spec(1);
+        let watch = auditor
+            .before_command(OPERATION_ID, &root, step, 1, command)
+            .unwrap();
+        let paths = snapshot_paths(&watch.before);
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.starts_with("frontend/node_modules")
+                    || path.starts_with("busi/target")),
+            "ignored oversize trees must stay out of the default-budget snapshot: {paths:?}"
+        );
+        assert!(paths.contains(&"frontend/src/main.js"));
+        assert!(paths.contains(&"busi/pom.xml"));
+    }
 }

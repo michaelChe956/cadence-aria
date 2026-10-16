@@ -597,12 +597,16 @@ fn snapshot_root(
 ) -> Result<RootRecipeFilesystemSnapshot, ProductStoreError> {
     let mut entries = Vec::new();
     let mut scale = SnapshotScale::default();
+    // gitignore 感知(Bug2 2026-10-16):遍历栈在进入目录时收集该目录的
+    // `.gitignore`/`.git/info/exclude` 规则,被忽略路径不计预算、不进快照。
+    let mut ignores = AuditIgnoreStack::default();
     walk_root(
         canonical_root,
         canonical_root,
         &mut entries,
         budget,
         &mut scale,
+        &mut ignores,
     )?;
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     let snapshot_digest = digest_snapshot_entries(&entries);
@@ -630,7 +634,10 @@ impl SnapshotScale {
         self.entries += 1;
         if self.entries > budget.max_entries {
             return Err(ProductStoreError::Io(format!(
-                "audit snapshot budget exceeded at {}: {} entries > max_entries {} (fail-closed)",
+                "audit snapshot budget exceeded at {}: {} entries > max_entries {} \
+                 (fail-closed; paths ignored by .gitignore/.git/info/exclude are \
+                 already excluded — clean up or gitignore remaining untracked \
+                 build outputs)",
                 path.display(),
                 self.entries,
                 budget.max_entries
@@ -648,7 +655,10 @@ impl SnapshotScale {
         self.bytes = self.bytes.saturating_add(len);
         if self.bytes > budget.max_bytes {
             return Err(ProductStoreError::Io(format!(
-                "audit snapshot budget exceeded at {}: {} cumulative bytes > max_bytes {} (fail-closed)",
+                "audit snapshot budget exceeded at {}: {} cumulative bytes > max_bytes {} \
+                 (fail-closed; paths ignored by .gitignore/.git/info/exclude are \
+                 already excluded — clean up or gitignore remaining untracked \
+                 build outputs)",
                 path.display(),
                 self.bytes,
                 budget.max_bytes
@@ -658,19 +668,24 @@ impl SnapshotScale {
     }
 }
 
-/// 全量递归快照：不跟随 symlink；目录不可读、文件不可读均视为不可观测
-/// 而 fail-closed 报错（绝不静默跳过）。非常规条目（Unix socket/fifo/
-/// device）是产品自管索引面（`.codegraph` daemon 等）的运行时 IPC 产物：
-/// 记为 special（路径+类型、无内容 digest）保持可观测，不 fail-closed
-/// 断审（2026-10-02 E2E 缺陷回归）。快照规模受预算门约束（Task 1.5
-/// carry → Task 3.4），超限同样 fail-closed。
+/// 全量递归快照（gitignore-aware，Bug2 2026-10-16）：被审计根及各
+/// 嵌套目录的 `.gitignore`、git 元数据 `.git/info/exclude` 忽略的路径
+/// 不计入预算、不进快照、其变更不可观测（node_modules/target 等非版本
+/// 构建面）。其余观测语义不变：不跟随 symlink；目录不可读、文件不可读
+/// 均视为不可观测而 fail-closed 报错（绝不静默跳过）。非常规条目
+/// （Unix socket/fifo/device）是产品自管索引面（`.codegraph` daemon 等）
+/// 的运行时 IPC 产物：记为 special（路径+类型、无内容 digest）保持可
+/// 观测，不 fail-closed 断审（2026-10-02 E2E 缺陷回归）。快照规模受
+/// 预算门约束（Task 1.5 carry → Task 3.4），超限同样 fail-closed。
 fn walk_root(
     root: &Path,
     dir: &Path,
     entries: &mut Vec<RootRecipeSnapshotEntry>,
     budget: &RootRecipeSnapshotBudget,
     scale: &mut SnapshotScale,
+    ignores: &mut AuditIgnoreStack,
 ) -> Result<(), ProductStoreError> {
+    let pushed = ignores.enter_dir(root, dir)?;
     let reader = std::fs::read_dir(dir)
         .map_err(|error| ProductStoreError::Io(format!("audit read {}: {error}", dir.display())))?;
     for entry in reader {
@@ -682,6 +697,11 @@ fn walk_root(
         let file_type = entry.file_type().map_err(|error| {
             ProductStoreError::Io(format!("audit stat {}: {error}", path.display()))
         })?;
+        // 被忽略路径(含目录整体)不计条目/字节、不进快照、不下降。
+        // symlink 按非目录参与匹配(与 git 不跟随 symlink 一致)。
+        if ignores.is_ignored(&relative, file_type.is_dir()) {
+            continue;
+        }
         scale.charge_entry(budget, &path)?;
         if file_type.is_symlink() {
             let target = std::fs::read_link(&path).map_err(|error| {
@@ -704,7 +724,7 @@ fn walk_root(
                 special_type: None,
                 escapes_root: false,
             });
-            walk_root(root, &path, entries, budget, scale)?;
+            walk_root(root, &path, entries, budget, scale, ignores)?;
         } else if file_type.is_file() {
             let bytes = std::fs::read(&path).map_err(|error| {
                 ProductStoreError::Io(format!("audit read {}: {error}", path.display()))
@@ -731,6 +751,7 @@ fn walk_root(
             });
         }
     }
+    ignores.leave_dir(pushed);
     Ok(())
 }
 

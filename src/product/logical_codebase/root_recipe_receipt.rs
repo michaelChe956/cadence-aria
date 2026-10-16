@@ -8,6 +8,12 @@
 //! 一律 fail-closed，拒绝事实与证据随 receipt durable 保留——允许记录，
 //! 不允许静默。auditor 对聚合根只读，绝不覆盖或回滚用户文件。
 //!
+//! 快照 gitignore 感知（Bug2 2026-10-16，
+//! cadence/notes/2026-10-16_bug-filesystem-audit-不感知gitignore.md）：
+//! 被仓库 `.gitignore`（含嵌套成员仓）与 `.git/info/exclude` 忽略的
+//! 路径不计入快照规模预算、不进快照（node_modules/target 等非版本
+//! 构建面不属于审计观测面）；观测面内的预算/可观测性约束不变。
+//!
 //! [`RootRecipeReceiptStore`] 把每条命令的审计事实
 //! （[`RootRecipeCommandReceipt`]）与最终 receipt（[`RootRecipeReceipt`]，
 //! 仅在四命令全部审计通过且关联 policy/rule digest 后由 `finalize`
@@ -31,12 +37,16 @@ use super::aggregate_initialization_store::root_recipe_command_index;
 // 保持每个文件低于 large_file_guard 的 1200 行上限：
 // - root_recipe_receipt_types.inc.rs：allowlist 常量与快照/变更/verdict/receipt
 //   契约类型。
+// - root_recipe_receipt_gitignore.inc.rs：快照 gitignore 感知过滤——
+//   `.gitignore`（含嵌套）与 `.git/info/exclude` 的解析/匹配（Bug2
+//   2026-10-16：被忽略路径不计预算、不进快照）。
 // - root_recipe_receipt_auditor.inc.rs：RootRecipeFilesystemAuditor——命令前后
 //   全量快照与 diff 的只读审计器。
 // - root_recipe_receipt_store.inc.rs：RootRecipeReceiptStore 与命令/receipt 校验、
 //   allowlist/classify/snapshot/digest 及 durable 原子写入辅助函数。
 // - root_recipe_receipt_tests.inc.rs：tests 模块。
 include!("root_recipe_receipt_types.inc.rs");
+include!("root_recipe_receipt_gitignore.inc.rs");
 include!("root_recipe_receipt_auditor.inc.rs");
 include!("root_recipe_receipt_store.inc.rs");
 include!("root_recipe_receipt_tests.inc.rs");
