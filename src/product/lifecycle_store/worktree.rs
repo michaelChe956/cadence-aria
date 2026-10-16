@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
-use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::coding_attempt_store::CodingAttemptStore;
+use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::entity_deletion_store::{
     DeletionEntityKind, EntityDeletionManifest, EntityDeletionRecord, EntityDeletionStore,
     EntityScope, read_json_if_exists,
@@ -617,9 +617,7 @@ impl LifecycleStore {
             let id = uuid::Uuid::parse_str(file_name).map_err(|error| {
                 ProductStoreError::InvalidRecord {
                     kind: "repo_shared_worktree",
-                    reason: format!(
-                        "record file name is not a UUID: {file_name}: {error}"
-                    ),
+                    reason: format!("record file name is not a UUID: {file_name}: {error}"),
                 }
             })?;
             if file_name != id.to_string() {
@@ -660,7 +658,8 @@ impl LifecycleStore {
             || {
                 let path = self.repo_shared_worktree_path(project_id, issue_id, repository_id);
                 with_exclusive_lock(&path, || {
-                    let mut record = read_repo_worktree(&path, project_id, issue_id, repository_id)?;
+                    let mut record =
+                        read_repo_worktree(&path, project_id, issue_id, repository_id)?;
                     if let Some(active_id) = &record.current_active_work_item_id {
                         if active_id != work_item_id {
                             return Err(ProductStoreError::Io(format!(
@@ -718,7 +717,8 @@ impl LifecycleStore {
             || {
                 let path = self.repo_shared_worktree_path(project_id, issue_id, repository_id);
                 with_exclusive_lock(&path, || {
-                    let mut record = read_repo_worktree(&path, project_id, issue_id, repository_id)?;
+                    let mut record =
+                        read_repo_worktree(&path, project_id, issue_id, repository_id)?;
                     if record.current_active_work_item_id.as_deref() != Some(work_item_id) {
                         return Err(repo_lock_owner_mismatch(repository_id, work_item_id));
                     }
@@ -795,7 +795,8 @@ impl LifecycleStore {
             || {
                 let path = self.repo_shared_worktree_path(project_id, issue_id, repository_id);
                 with_exclusive_lock(&path, || {
-                    let mut record = read_repo_worktree(&path, project_id, issue_id, repository_id)?;
+                    let mut record =
+                        read_repo_worktree(&path, project_id, issue_id, repository_id)?;
                     match record.current_active_work_item_id.as_deref() {
                         Some(active_id)
                             if active_id == current_work_item_id
@@ -856,7 +857,8 @@ impl LifecycleStore {
             || {
                 let path = self.repo_shared_worktree_path(project_id, issue_id, repository_id);
                 with_exclusive_lock(&path, || {
-                    let mut record = read_repo_worktree(&path, project_id, issue_id, repository_id)?;
+                    let mut record =
+                        read_repo_worktree(&path, project_id, issue_id, repository_id)?;
                     match record.current_active_work_item_id.as_deref() {
                         None if record.current_lock_owner_id.is_none() => return Ok(record),
                         Some(active_id) if active_id == work_item_id => {}
@@ -902,7 +904,8 @@ impl LifecycleStore {
             || {
                 let path = self.repo_shared_worktree_path(project_id, issue_id, repository_id);
                 with_exclusive_lock(&path, || {
-                    let mut record = read_repo_worktree(&path, project_id, issue_id, repository_id)?;
+                    let mut record =
+                        read_repo_worktree(&path, project_id, issue_id, repository_id)?;
                     if record.current_lock_owner_id.as_deref() != Some(owner_id) {
                         // 锁不是这个 attempt 持有（可能已释放或属于他人）：幂等返回。
                         return Ok(record);
@@ -945,7 +948,8 @@ impl LifecycleStore {
             || {
                 let path = self.repo_shared_worktree_path(project_id, issue_id, repository_id);
                 with_exclusive_lock(&path, || {
-                    let mut record = read_repo_worktree(&path, project_id, issue_id, repository_id)?;
+                    let mut record =
+                        read_repo_worktree(&path, project_id, issue_id, repository_id)?;
                     if record.current_active_work_item_id.is_some()
                         && record.current_lock_owner_id.as_deref() != Some(owner_id)
                     {
@@ -1087,15 +1091,11 @@ impl LifecycleStore {
     ) -> Result<Vec<EntityScope>, ProductStoreError> {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
-        let record = self.read_shared_worktree_for_admission(project_id, issue_id, repository_id)?;
-        let legacy_repository = record
-            .as_ref()
-            .map(|record| record.repository_id.clone());
-        let mut scopes = self.shared_worktree_record_owner_scopes(
-            record.as_ref(),
-            project_id,
-            issue_id,
-        )?;
+        let record =
+            self.read_shared_worktree_for_admission(project_id, issue_id, repository_id)?;
+        let legacy_repository = record.as_ref().map(|record| record.repository_id.clone());
+        let mut scopes =
+            self.shared_worktree_record_owner_scopes(record.as_ref(), project_id, issue_id)?;
         scopes.extend(self.shared_worktree_repo_plan_traces(
             project_id,
             issue_id,
@@ -1125,7 +1125,8 @@ impl LifecycleStore {
         legacy_repository: Option<&str>,
         operation: impl FnOnce() -> Result<T, ProductStoreError>,
     ) -> Result<T, ProductStoreError> {
-        let record = self.read_shared_worktree_for_admission(project_id, issue_id, repository_id)?;
+        let record =
+            self.read_shared_worktree_for_admission(project_id, issue_id, repository_id)?;
         let legacy_owned = legacy_repository
             .map(str::to_string)
             .or_else(|| record.as_ref().map(|record| record.repository_id.clone()));
@@ -1150,11 +1151,8 @@ impl LifecycleStore {
         }
 
         let admission_scopes: Vec<EntityScope> = if strict.is_empty() {
-            let soft = self.shared_worktree_record_owner_scopes(
-                record.as_ref(),
-                project_id,
-                issue_id,
-            )?;
+            let soft =
+                self.shared_worktree_record_owner_scopes(record.as_ref(), project_id, issue_id)?;
             let mut live_scopes = Vec::new();
             let mut saw_owner = false;
             for scope in soft {
@@ -1279,12 +1277,9 @@ impl LifecycleStore {
             }
         }
         if let Some(owner_id) = record.current_lock_owner_id.as_deref() {
-            if let Some(scope) = self.shared_worktree_plan_for_owner(
-                project_id,
-                issue_id,
-                owner_id,
-                Some(record),
-            )? {
+            if let Some(scope) =
+                self.shared_worktree_plan_for_owner(project_id, issue_id, owner_id, Some(record))?
+            {
                 scopes.push(scope);
             }
         }
@@ -1450,7 +1445,9 @@ impl LifecycleStore {
             .issue_lifecycle_root(project_id, issue_id)
             .join("coding-attempts");
         for path in json_child_paths(&attempts_root)? {
-            let Some(attempt) = read_json_if_exists::<crate::product::coding_models::CodingExecutionAttempt>(&path)?
+            let Some(attempt) = read_json_if_exists::<
+                crate::product::coding_models::CodingExecutionAttempt,
+            >(&path)?
             else {
                 continue;
             };
@@ -1501,8 +1498,7 @@ impl LifecycleStore {
                 Some(repository) => work_item.target_repository_id == Some(repository),
                 None => {
                     work_item.target_repository_id.is_none()
-                        && legacy_repository
-                            .is_some_and(|legacy| work_item.repository_id == legacy)
+                        && legacy_repository.is_some_and(|legacy| work_item.repository_id == legacy)
                 }
             };
             if !target_matches {
@@ -1544,7 +1540,10 @@ impl LifecycleStore {
     }
 
     /// scope 墓碑在位（purging/deleted 均真）。
-    fn shared_worktree_scope_tombstoned(&self, scope: &EntityScope) -> Result<bool, ProductStoreError> {
+    fn shared_worktree_scope_tombstoned(
+        &self,
+        scope: &EntityScope,
+    ) -> Result<bool, ProductStoreError> {
         Ok(EntityDeletionStore::new(self.paths.clone())
             .get(scope)?
             .is_some())
@@ -1624,10 +1623,12 @@ impl LifecycleStore {
             loop {
                 match acquire() {
                     Ok(lease) => break lease,
-                    Err(error @ ProductStoreError::Conflict {
-                        kind: "shared_resource_busy",
-                        ..
-                    }) => {
+                    Err(
+                        error @ ProductStoreError::Conflict {
+                            kind: "shared_resource_busy",
+                            ..
+                        },
+                    ) => {
                         if started.elapsed() >= WAIT_BUDGET {
                             return Err(error);
                         }

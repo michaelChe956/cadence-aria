@@ -61,10 +61,12 @@ fn validated_policy_only_exposes_getters_and_cannot_be_constructed_outside_modul
 
     // getter 返回冻结的引用;外部无法修改字段或凭空重建 validated policy。
     assert_eq!(validated.envelope().policy_revision, 1);
-    assert!(validated
-        .fingerprint()
-        .digest
-        .starts_with(&format!("{LC_RESUME_FINGERPRINT_SCHEMA}:sha256:")));
+    assert!(
+        validated
+            .fingerprint()
+            .digest
+            .starts_with(&format!("{LC_RESUME_FINGERPRINT_SCHEMA}:sha256:"))
+    );
 }
 
 /// fingerprint 随 provider exact version 与 capability snapshot 变化:任一漂移
@@ -1689,9 +1691,11 @@ mod lcg_t09a_resume_fingerprint {
             &evidence,
             &git_identity,
         );
-        assert!(baseline
-            .digest
-            .starts_with(&format!("{LC_RESUME_FINGERPRINT_SCHEMA}:sha256:")));
+        assert!(
+            baseline
+                .digest
+                .starts_with(&format!("{LC_RESUME_FINGERPRINT_SCHEMA}:sha256:"))
+        );
         assert_eq!(
             baseline.digest.len(),
             LC_RESUME_FINGERPRINT_SCHEMA.len() + 1 + 71
@@ -3145,7 +3149,10 @@ pub(crate) mod anchor_t10_support {
             }
             Ok(ProviderTrustFingerprintFacts {
                 verification: self.verification(provider, canonical_root),
-                record_digest: Some(format!("sha256:t10-trust-record-{}", provider_wire_tag(provider))),
+                record_digest: Some(format!(
+                    "sha256:t10-trust-record-{}",
+                    provider_wire_tag(provider)
+                )),
             })
         }
     }
@@ -3202,19 +3209,20 @@ pub(crate) mod anchor_t10_support {
                 .capability_digest_override
                 .clone()
                 .unwrap_or_else(|| format!("projection-digest-{:?}", envelope.action));
-            let session_projection_digest = self.session_digest_override.clone().unwrap_or_else(|| {
-                anchor_t10_digest(&[
-                    "anchor-t10-session-v1",
-                    self.family.tag(),
-                    self.exact_version.as_str(),
-                    capability_projection_digest.as_str(),
-                    input.trust_digest(),
-                    input.mcp_bundle_digest(),
-                    input.approval_policy(),
-                    &envelope.working_directory.to_string_lossy(),
-                    &envelope.config_digest,
-                ])
-            });
+            let session_projection_digest =
+                self.session_digest_override.clone().unwrap_or_else(|| {
+                    anchor_t10_digest(&[
+                        "anchor-t10-session-v1",
+                        self.family.tag(),
+                        self.exact_version.as_str(),
+                        capability_projection_digest.as_str(),
+                        input.trust_digest(),
+                        input.mcp_bundle_digest(),
+                        input.approval_policy(),
+                        &envelope.working_directory.to_string_lossy(),
+                        &envelope.config_digest,
+                    ])
+                });
             Ok(ProviderPolicyProjection::new(
                 self.family.ref_type(),
                 envelope.provider_dialect,
@@ -3412,8 +3420,7 @@ pub(crate) mod anchor_t10_support {
             }
             // audit 字面量(与真实 lc_start_audit_literal 同形):从冻结
             // full projection 装配,v2 材料不完整即拒。
-            let git_identity =
-                canonical_target_git_identity(&envelope.target.worktree);
+            let git_identity = canonical_target_git_identity(&envelope.target.worktree);
             let action_evidence = lc_projection.capability_projection_digest().to_string();
             let literal = LcProviderStartAudit {
                 action: "planning_read_only".to_string(),
@@ -3449,12 +3456,9 @@ pub(crate) mod anchor_t10_support {
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
                 .map(str::to_string);
-            if let (Some(resume_id), Some(sink)) =
-                (resume_id.clone(), input.audit_sink.as_ref())
-            {
-                let stored: Option<StoredProviderStart> = sink
-                    .find_provider_start(&resume_id)
-                    .map_err(|error| {
+            if let (Some(resume_id), Some(sink)) = (resume_id.clone(), input.audit_sink.as_ref()) {
+                let stored: Option<StoredProviderStart> =
+                    sink.find_provider_start(&resume_id).map_err(|error| {
                         ProviderAdapterError::parse_error(
                             format!("anchor t10 resume lookup failed: {error}"),
                             String::new(),
@@ -3496,9 +3500,10 @@ pub(crate) mod anchor_t10_support {
                 .clone()
                 .or_else(|| resume_id.clone())
                 .unwrap_or_else(|| format!("native-{}-t10", self.family.tag()));
-            if let (Some(expected), Some(confirmed)) =
-                (resume_id.as_deref(), self.handshake_native_id.lock().unwrap().as_deref())
-                && expected != confirmed
+            if let (Some(expected), Some(confirmed)) = (
+                resume_id.as_deref(),
+                self.handshake_native_id.lock().unwrap().as_deref(),
+            ) && expected != confirmed
             {
                 // 错 ID:child 已启动的 runtime 失败——如实 kill/reap,不伪称零 child。
                 self.children_killed.fetch_add(1, Ordering::SeqCst);
@@ -3527,9 +3532,7 @@ pub(crate) mod anchor_t10_support {
                         "sha256:t10-{}-policy",
                         self.family.tag()
                     ),
-                    argv: self
-                        .family
-                        .audit_argv(&native_id, resume_id.as_deref()),
+                    argv: self.family.audit_argv(&native_id, resume_id.as_deref()),
                     sandbox: self.family.audit_sandbox(),
                     approval_policy: self.family.audit_approval(),
                     provider_version: observed_version,
@@ -3537,9 +3540,7 @@ pub(crate) mod anchor_t10_support {
                     lc_projection: Some(LcProjectionAudit {
                         action: literal.action.clone(),
                         wire_dialect: literal.wire_dialect.clone(),
-                        capability_projection_digest: literal
-                            .capability_projection_digest
-                            .clone(),
+                        capability_projection_digest: literal.capability_projection_digest.clone(),
                         projection_digest: literal.projection_digest.clone(),
                         boundary_evidence_ref: literal.boundary_evidence_ref.clone(),
                     }),
@@ -3659,7 +3660,8 @@ pub(crate) mod anchor_t10_support {
                 working_directory: Some(self.authority_root.clone()),
                 workspace_session_id: None,
                 resume_provider_session_id: resume,
-                permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+                permission_mode:
+                    crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
                 tool_policy: None,
                 audit_sink: None,
                 structured_output_contract: None,
@@ -3687,20 +3689,18 @@ pub(crate) mod anchor_t10_support {
 
         pub(crate) fn registry(&self) -> ProviderRegistry {
             let mut registry = ProviderRegistry::new();
-            registry.register_gated(
-                self.family.name(),
-                self.adapter.clone(),
-                Arc::new(UnprovisionedProviderPolicyProjector),
-                always_available_gate(),
-            )
-            .expect("anchor t10 harness registry register");
+            registry
+                .register_gated(
+                    self.family.name(),
+                    self.adapter.clone(),
+                    Arc::new(UnprovisionedProviderPolicyProjector),
+                    always_available_gate(),
+                )
+                .expect("anchor t10 harness registry register");
             registry
         }
 
-        fn build_gateway(
-            &self,
-            registry: Arc<ProviderRegistry>,
-        ) -> LogicalCodebaseProviderGateway {
+        fn build_gateway(&self, registry: Arc<ProviderRegistry>) -> LogicalCodebaseProviderGateway {
             LogicalCodebaseProviderGateway::with_audit(
                 AggregatePolicyArtifactStore::new(self.paths.clone()),
                 self.capabilities.clone(),
@@ -3746,7 +3746,9 @@ pub(crate) mod anchor_t10_support {
         let audit = Arc::new(GatewayRunAudit::new());
         let trust = AnchorT10TrustSource::new();
         let capabilities = Arc::new(AnchorT10CapabilitySource::new(family));
-        let targets = Arc::new(MutableTargetResolver::new(paths.root().join("baseline.git")));
+        let targets = Arc::new(MutableTargetResolver::new(
+            paths.root().join("baseline.git"),
+        ));
         let mut registry = ProviderRegistry::new();
         registry
             .register_gated(
@@ -3804,7 +3806,9 @@ pub(crate) mod anchor_t10_support {
     /// 预置旧 run 的 durable provider_start 存档(resume 检索输入;lc_
     /// projection 五字段与冻结 full projection 同源)。
     pub(crate) fn anchor_t10_preset_resume_archive(
-        sink: &Arc<crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink>,
+        sink: &Arc<
+            crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink,
+        >,
         family: AnchorT10Family,
         resume_id: &str,
         projection: &ProviderPolicyProjection,
@@ -3823,9 +3827,7 @@ pub(crate) mod anchor_t10_support {
             lc_projection: Some(LcProjectionAudit {
                 action: "planning_read_only".to_string(),
                 wire_dialect: family.wire_text().to_string(),
-                capability_projection_digest: projection
-                    .capability_projection_digest()
-                    .to_string(),
+                capability_projection_digest: projection.capability_projection_digest().to_string(),
                 projection_digest: projection.projection_digest().to_string(),
                 boundary_evidence_ref: projection.boundary_evidence_ref().to_string(),
             }),
@@ -3837,8 +3839,8 @@ pub(crate) mod anchor_t10_support {
 mod anchor_t10_convergence {
     use super::anchor_t10_support::*;
     use super::*;
-    use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
     use crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent;
+    use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
 
     fn provider_start_records(
         sink: &RecordingToolPolicyAuditSink,
@@ -3867,8 +3869,12 @@ mod anchor_t10_convergence {
 
             // -- 默认 unsupported 不可达正例的前置:未接入 adapter(默认
             //    trait)在 full 路径只得到 typed 拒,registry start 零触达。
-            let mut bare_registry = crate::cross_cutting::provider_registry::ProviderRegistry::new();
-            bare_registry.register(family.name(), Arc::new(CountingStreamingAdapter::new()) as Arc<dyn StreamingProviderAdapter>);
+            let mut bare_registry =
+                crate::cross_cutting::provider_registry::ProviderRegistry::new();
+            bare_registry.register(
+                family.name(),
+                Arc::new(CountingStreamingAdapter::new()) as Arc<dyn StreamingProviderAdapter>,
+            );
             let bare_error = match harness
                 .gateway_with_registry(bare_registry)
                 .prepare_lc_streaming_candidate(
@@ -3903,7 +3909,10 @@ mod anchor_t10_convergence {
                 .unwrap_or_else(|error| panic!("[{tag}] prepare failed: {error}"));
             assert_eq!(harness.adapter.probe_calls(), 1, "[{tag}] ① probe");
             assert_eq!(candidate.facts().exact_version(), family.exact_version());
-            assert_eq!(candidate.facts().version_probe_key().provider, family.name());
+            assert_eq!(
+                candidate.facts().version_probe_key().provider,
+                family.name()
+            );
             assert_eq!(
                 candidate.facts().approval_policy(),
                 family.approval_policy()
@@ -3916,21 +3925,20 @@ mod anchor_t10_convergence {
             // -- full 指纹与 prepared full map(basis=FullLcProjectionV2)同源。
             let fingerprint = candidate.full_context_fingerprint();
             assert!(!fingerprint.digest.is_empty());
-            let persisted_prepared =
-                crate::product::models::LogicalLaunchFingerprintRecord {
-                    schema_version: 1,
-                    basis: crate::product::models::LogicalLaunchBasis::FullLcProjectionV2,
-                    role: crate::product::models::ProviderConversationRole::Author,
-                    provider: family.name(),
-                    role_run_seq: 1,
-                    node_id: "node-t10".to_string(),
-                    native_session_id: None,
-                    fingerprint_digest: fingerprint.digest.clone(),
-                    planning_access_fingerprint: fingerprint.digest.clone(),
-                    state: crate::product::models::LogicalLaunchFingerprintState::Prepared,
-                    created_at: "2026-10-11T00:00:00Z".to_string(),
-                    updated_at: "2026-10-11T00:00:00Z".to_string(),
-                };
+            let persisted_prepared = crate::product::models::LogicalLaunchFingerprintRecord {
+                schema_version: 1,
+                basis: crate::product::models::LogicalLaunchBasis::FullLcProjectionV2,
+                role: crate::product::models::ProviderConversationRole::Author,
+                provider: family.name(),
+                role_run_seq: 1,
+                node_id: "node-t10".to_string(),
+                native_session_id: None,
+                fingerprint_digest: fingerprint.digest.clone(),
+                planning_access_fingerprint: fingerprint.digest.clone(),
+                state: crate::product::models::LogicalLaunchFingerprintState::Prepared,
+                created_at: "2026-10-11T00:00:00Z".to_string(),
+                updated_at: "2026-10-11T00:00:00Z".to_string(),
+            };
 
             // -- full-matching resume:Resume,validated 携带冻结 full 投影。
             let disposition = harness
@@ -3946,11 +3954,16 @@ mod anchor_t10_convergence {
             match &disposition {
                 GatewaySessionDisposition::Resume(validated) => {
                     assert_eq!(
-                        validated.lc_projection().map(|projection| projection.projection_digest()),
+                        validated
+                            .lc_projection()
+                            .map(|projection| projection.projection_digest()),
                         Some(candidate.full_projection().projection_digest()),
                         "[{tag}] Resume validated must carry the frozen full projection"
                     );
-                    assert_eq!(validated.fingerprint().digest, persisted_prepared.fingerprint_digest);
+                    assert_eq!(
+                        validated.fingerprint().digest,
+                        persisted_prepared.fingerprint_digest
+                    );
                 }
                 _ => panic!("[{tag}] full-matching fingerprint must resume"),
             }
@@ -3973,7 +3986,9 @@ mod anchor_t10_convergence {
                 )
                 .expect("[{tag}] legacy basis disposition");
             match legacy {
-                GatewaySessionDisposition::StartNew { waiting, validated, .. } => {
+                GatewaySessionDisposition::StartNew {
+                    waiting, validated, ..
+                } => {
                     assert_eq!(
                         waiting.reason_code, RESUME_FINGERPRINT_UNAVAILABLE,
                         "[{tag}] legacy digest fed to the Full arm must fail closed to \
@@ -3995,9 +4010,7 @@ mod anchor_t10_convergence {
                 candidate.validated().envelope(),
                 candidate.full_projection(),
                 "projection-digest-t10-drifted-evidence",
-                &canonical_target_git_identity(
-                    &candidate.validated().envelope().target.worktree,
-                ),
+                &canonical_target_git_identity(&candidate.validated().envelope().target.worktree),
             );
             let drifted = harness
                 .gateway
@@ -4016,8 +4029,16 @@ mod anchor_t10_convergence {
                 _ => panic!("[{tag}] genuine v2 drift must wait for explicit fresh"),
             }
             assert_eq!(harness.audit.supersede_count(), supersede_before + 1);
-            assert_eq!(harness.adapter.adapter_starts(), 0, "[{tag}] ② after dispositions");
-            assert_eq!(harness.adapter.session_children(), 0, "[{tag}] ③ after dispositions");
+            assert_eq!(
+                harness.adapter.adapter_starts(),
+                0,
+                "[{tag}] ② after dispositions"
+            );
+            assert_eq!(
+                harness.adapter.session_children(),
+                0,
+                "[{tag}] ③ after dispositions"
+            );
 
             // -- 缺 full map/旧 basis:Unavailable → resume_fingerprint_unavailable
             //    等待,不 supersede 未知会话。
@@ -4029,10 +4050,11 @@ mod anchor_t10_convergence {
                 )
                 .expect("[{tag}] unavailable basis disposition");
             match unavailable {
-                GatewaySessionDisposition::StartNew { waiting, validated, .. } => {
+                GatewaySessionDisposition::StartNew {
+                    waiting, validated, ..
+                } => {
                     assert_eq!(
-                        waiting.reason_code,
-                        RESUME_FINGERPRINT_UNAVAILABLE,
+                        waiting.reason_code, RESUME_FINGERPRINT_UNAVAILABLE,
                         "[{tag}] missing full map must wait with resume_fingerprint_unavailable"
                     );
                     assert!(validated.lc_projection().is_some());
@@ -4058,11 +4080,27 @@ mod anchor_t10_convergence {
                 session.native_session_id.as_deref(),
                 Some(format!("native-{tag}-t10").as_str())
             );
-            assert_eq!(harness.adapter.probe_calls(), 1, "[{tag}] TTL hit at revalidation");
-            assert_eq!(harness.adapter.adapter_starts(), 1, "[{tag}] ② unique start");
-            assert_eq!(harness.adapter.session_children(), 1, "[{tag}] ③ unique start");
+            assert_eq!(
+                harness.adapter.probe_calls(),
+                1,
+                "[{tag}] TTL hit at revalidation"
+            );
+            assert_eq!(
+                harness.adapter.adapter_starts(),
+                1,
+                "[{tag}] ② unique start"
+            );
+            assert_eq!(
+                harness.adapter.session_children(),
+                1,
+                "[{tag}] ③ unique start"
+            );
             assert_eq!(harness.adapter.children_killed(), 0);
-            assert_eq!(harness.adapter.starts_without_projection(), 0, "[{tag}] no basis bypass");
+            assert_eq!(
+                harness.adapter.starts_without_projection(),
+                0,
+                "[{tag}] no basis bypass"
+            );
             assert_eq!(harness.audit.stream_launches(), stream_launches_before + 1);
 
             // 投影/audit/fingerprint 同源:adapter 消费冻结 full 投影,audit
@@ -4077,7 +4115,10 @@ mod anchor_t10_convergence {
                 .expect("[{tag}] audit literal assembled");
             assert!(literal.is_v2_complete());
             assert_eq!(literal.resume_fingerprint, fingerprint.digest);
-            assert_eq!(literal.resume_fingerprint, persisted_prepared.fingerprint_digest);
+            assert_eq!(
+                literal.resume_fingerprint,
+                persisted_prepared.fingerprint_digest
+            );
             assert_eq!(literal.wire_dialect, family.wire_text());
 
             // durable provider_start:lc_projection 五字段与本家标记同源。
@@ -4099,9 +4140,7 @@ mod anchor_t10_convergence {
             );
             assert_eq!(
                 audit_projection.capability_projection_digest,
-                candidate
-                    .full_projection()
-                    .capability_projection_digest()
+                candidate.full_projection().capability_projection_digest()
             );
 
             // -- 本家事实消费(公共断言,不跨 provider 文件):
@@ -4121,10 +4160,12 @@ mod anchor_t10_convergence {
                     );
                 }
                 AnchorT10Family::Kimi => {
-                    assert!(candidate
-                        .full_projection()
-                        .trust_digest()
-                        .starts_with(&format!("lc-trust-v1:{:?}:", family.name())));
+                    assert!(
+                        candidate
+                            .full_projection()
+                            .trust_digest()
+                            .starts_with(&format!("lc-trust-v1:{:?}:", family.name()))
+                    );
                     // native-source 与 Aria bundle 区分:换 native 标记后重
                     // prepare,facts/projection digest 随 MCP 来源变化。
                     harness
@@ -4189,7 +4230,10 @@ mod anchor_t10_convergence {
                 .gateway
                 .start_lc_prepared_streaming(resume_candidate, CancellationToken::new())
                 .await;
-            assert!(wrong.is_err(), "[{tag}] wrong native id must fail the resume");
+            assert!(
+                wrong.is_err(),
+                "[{tag}] wrong native id must fail the resume"
+            );
             assert_eq!(harness.adapter.session_children(), children_before + 1);
             assert_eq!(harness.adapter.children_killed(), killed_before + 1);
             assert_eq!(
@@ -4218,10 +4262,7 @@ mod anchor_t10_convergence {
                     .expect("[claude] resume prepare");
                 let claude_session = harness
                     .gateway
-                    .start_lc_prepared_streaming(
-                        claude_resume_candidate,
-                        CancellationToken::new(),
-                    )
+                    .start_lc_prepared_streaming(claude_resume_candidate, CancellationToken::new())
                     .await
                     .expect("[claude] same-id resume start");
                 assert_eq!(
@@ -4229,7 +4270,9 @@ mod anchor_t10_convergence {
                     Some(resume_id.as_str())
                 );
                 let claude_records = provider_start_records(&sink);
-                let last = claude_records.last().expect("[claude] resume provider_start");
+                let last = claude_records
+                    .last()
+                    .expect("[claude] resume provider_start");
                 assert!(last.argv.contains(&"--resume".to_string()));
                 assert!(last.argv.contains(&resume_id));
             }
@@ -4277,9 +4320,17 @@ mod anchor_t10_convergence {
                 ),
                 "[{tag}] unexpected drift shape: {drift}"
             );
-            assert_eq!(harness.adapter.probe_calls(), 2, "[{tag}] 重观测换 key 再探测");
+            assert_eq!(
+                harness.adapter.probe_calls(),
+                2,
+                "[{tag}] 重观测换 key 再探测"
+            );
             assert_eq!(harness.adapter.adapter_starts(), 0, "[{tag}] ② mismatch=0");
-            assert_eq!(harness.adapter.session_children(), 0, "[{tag}] ③ mismatch=0");
+            assert_eq!(
+                harness.adapter.session_children(),
+                0,
+                "[{tag}] ③ mismatch=0"
+            );
             assert_eq!(harness.adapter.starts_without_projection(), 0);
             assert_eq!(harness.audit.stream_launches(), 0);
         }
@@ -4405,10 +4456,12 @@ mod anchor_t10_convergence {
             )
             .await
             .expect("codex prepare under trusted source");
-        assert!(codex_candidate
-            .full_projection()
-            .trust_digest()
-            .contains("sha256:t10-trust-record-codex"));
+        assert!(
+            codex_candidate
+                .full_projection()
+                .trust_digest()
+                .contains("sha256:t10-trust-record-codex")
+        );
         codex_harness.trust.set_trusted(false);
         let trust_error = codex_harness
             .gateway

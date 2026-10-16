@@ -633,7 +633,8 @@ async fn lcg_t05_thread_resume_shares_restricted_projection_on_wire() {
 #[cfg(unix)]
 #[tokio::test]
 async fn codex_child_death_after_initialize_write_terminates_session_promptly() {
-    let fixture = executable_fixture("tests/fixtures/provider/codex_app_server_dead_child_fixture.sh");
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_dead_child_fixture.sh");
     let provider = CodexProvider::new(fixture);
     let input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
     let mut session = provider

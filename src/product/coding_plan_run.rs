@@ -3076,10 +3076,7 @@ mod tests {
             .invalidate_run_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
             .expect("missing run is not an error");
         assert!(
-            store
-                .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
-                .unwrap()
-                .is_none(),
+            store.get(PROJECT_ID, ISSUE_ID, PLAN_ID).unwrap().is_none(),
             "invalidation must not fabricate a run"
         );
 

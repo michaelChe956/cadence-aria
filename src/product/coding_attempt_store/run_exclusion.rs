@@ -390,9 +390,7 @@ impl super::CodingAttemptStore {
                         )]),
                     }
                 }
-                Err(error) => {
-                    unknown(vec![format!("issue worktree read failed: {error}")])
-                }
+                Err(error) => unknown(vec![format!("issue worktree read failed: {error}")]),
             };
         }
 
@@ -404,8 +402,7 @@ impl super::CodingAttemptStore {
             Ok(RepositoryRouting::Legacy { .. }) => {
                 // 单仓老路径只读旧 issue 维记录，不落入仓扫描回退；仓维
                 // 记录混在场 → fail-closed（新旧冲突）。
-                match lifecycle.list_repo_shared_worktrees(&attempt.project_id, &attempt.issue_id)
-                {
+                match lifecycle.list_repo_shared_worktrees(&attempt.project_id, &attempt.issue_id) {
                     Ok(repos) if !repos.is_empty() => unknown(vec![format!(
                         "repo_shared_worktree_present_for_legacy_route: {}/{}",
                         attempt.project_id, attempt.issue_id
@@ -414,16 +411,12 @@ impl super::CodingAttemptStore {
                         .get_issue_shared_worktree(&attempt.project_id, &attempt.issue_id)
                     {
                         Ok(Some(record)) => self.classify_worktree_record(&record),
-                        Ok(None) => unknown(vec![
-                            "worktree record not found for issue".to_string(),
-                        ]),
-                        Err(error) => {
-                            unknown(vec![format!("issue worktree read failed: {error}")])
+                        Ok(None) => {
+                            unknown(vec!["worktree record not found for issue".to_string()])
                         }
+                        Err(error) => unknown(vec![format!("issue worktree read failed: {error}")]),
                     },
-                    Err(error) => unknown(vec![format!(
-                        "list repo worktrees failed: {error}"
-                    )]),
+                    Err(error) => unknown(vec![format!("list repo worktrees failed: {error}")]),
                 }
             }
             Ok(RepositoryRouting::Logical { .. }) => unknown(vec![
@@ -434,9 +427,7 @@ impl super::CodingAttemptStore {
                 "target_snapshot_identity_drifted".to_string(),
                 format!("{}/{}", attempt.project_id, attempt.issue_id),
             ]),
-            Err(error) => unknown(vec![format!(
-                "repository routing load failed: {error}"
-            )]),
+            Err(error) => unknown(vec![format!("repository routing load failed: {error}")]),
         }
     }
 

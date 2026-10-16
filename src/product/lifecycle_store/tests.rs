@@ -1,5 +1,5 @@
-use tempfile::TempDir;
 use std::os::unix::fs::MetadataExt;
+use tempfile::TempDir;
 
 use uuid::Uuid;
 
@@ -890,7 +890,8 @@ fn d1_3a_sc_session(
             superpowers_enabled: false,
             openspec_enabled: false,
             work_item_plan_options: Some(WorkItemPlanSessionOptions {
-                flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate,
+                flow_kind:
+                    crate::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate,
                 run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
                 rollout_snapshot: false,
             }),
@@ -1019,7 +1020,11 @@ fn cascade_d1_3a_spec_version_and_review_round_late_writes_rejected() {
 fn cascade_d1_3a_session_message_status_conversations_rejected() {
     let (_tmp, store) = setup();
     d1_3a_plan(&store, "issue_work_item_plan_0001", Vec::new());
-    let session = create_session(&store, "issue_work_item_plan_0001", WorkspaceType::WorkItemPlan);
+    let session = create_session(
+        &store,
+        "issue_work_item_plan_0001",
+        WorkspaceType::WorkItemPlan,
+    );
     store
         .append_workspace_message(&session.id, "user".to_string(), "live".to_string())
         .expect("live message append must succeed");
@@ -1099,7 +1104,11 @@ fn cascade_d1_3a_session_message_status_conversations_rejected() {
 fn cascade_d1_3a_timeline_detail_artifact_rejected() {
     let (_tmp, store) = setup();
     d1_3a_plan(&store, "issue_work_item_plan_0001", Vec::new());
-    let session = create_session(&store, "issue_work_item_plan_0001", WorkspaceType::WorkItemPlan);
+    let session = create_session(
+        &store,
+        "issue_work_item_plan_0001",
+        WorkspaceType::WorkItemPlan,
+    );
     store
         .save_timeline_nodes(&session.id, &[])
         .expect("live timeline save must succeed");
@@ -1223,7 +1232,11 @@ fn cascade_d1_3a_scope_lock_taken_and_tombstone_arm_covers_find_delete_race() {
 
     let (_tmp, store) = setup();
     d1_3a_plan(&store, "issue_work_item_plan_0001", Vec::new());
-    let session = create_session(&store, "issue_work_item_plan_0001", WorkspaceType::WorkItemPlan);
+    let session = create_session(
+        &store,
+        "issue_work_item_plan_0001",
+        WorkspaceType::WorkItemPlan,
+    );
 
     let scope = d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0001");
     let scope_lock_path = issue_entity_operations_root(&store.app_paths(), &scope)
@@ -1261,8 +1274,11 @@ fn cascade_d1_3a_session_and_entity_ids_never_reused() {
     let (_tmp, store) = setup();
     let story = d1_3a_story(&store);
     d1_3a_plan(&store, "issue_work_item_plan_0001", Vec::new());
-    let first_session =
-        create_session(&store, "issue_work_item_plan_0001", WorkspaceType::WorkItemPlan);
+    let first_session = create_session(
+        &store,
+        "issue_work_item_plan_0001",
+        WorkspaceType::WorkItemPlan,
+    );
     // 显式 id 探针：创建即落身份绑定（§0.2 显式身份不跨实体复用）。
     let probe_id = "workspace_session_d1_3a_probe".to_string();
     store
@@ -1287,20 +1303,24 @@ fn cascade_d1_3a_session_and_entity_ids_never_reused() {
     store
         .delete_issue_work_item_plan(PROJECT_ID, ISSUE_ID, "issue_work_item_plan_0001")
         .unwrap();
-    store.delete_story_spec(PROJECT_ID, ISSUE_ID, &story.id).unwrap();
+    store
+        .delete_story_spec(PROJECT_ID, ISSUE_ID, &story.id)
+        .unwrap();
     let plan_lease = d1_3a_begin_purge(
         &store,
         &d1_3a_scope(DeletionEntityKind::Plan, "issue_work_item_plan_0001"),
     );
     d1_3a_complete_purge(&store, plan_lease);
-    let story_lease =
-        d1_3a_begin_purge(&store, &d1_3a_scope(DeletionEntityKind::Story, &story.id));
+    let story_lease = d1_3a_begin_purge(&store, &d1_3a_scope(DeletionEntityKind::Story, &story.id));
     d1_3a_complete_purge(&store, story_lease);
 
     // 新 session/实体 ID 不复用已删旧 ID。
     d1_3a_plan(&store, "issue_work_item_plan_0002", Vec::new());
-    let second_session =
-        create_session(&store, "issue_work_item_plan_0002", WorkspaceType::WorkItemPlan);
+    let second_session = create_session(
+        &store,
+        "issue_work_item_plan_0002",
+        WorkspaceType::WorkItemPlan,
+    );
     assert_ne!(second_session.id, first_session.id);
     let new_story = d1_3a_story(&store);
     assert_ne!(new_story.id, story.id);
@@ -1441,12 +1461,14 @@ fn cascade_d1_3a_incoming_ref_vs_upstream_delete_single_winner() {
             ..
         })
     ));
-    assert!(!store
-        .app_paths()
-        .issue_root(PROJECT_ID, ISSUE_ID)
-        .join("issue-work-item-plans")
-        .join("issue_work_item_plan_0001.json")
-        .exists());
+    assert!(
+        !store
+            .app_paths()
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("issue-work-item-plans")
+            .join("issue_work_item_plan_0001.json")
+            .exists()
+    );
 
     // 顺序 B：写方持上游共享 lease → 关联创建成功、删除被挡（恰一赢家）。
     let story_two = d1_3a_story(&store);
@@ -1471,9 +1493,11 @@ fn cascade_d1_3a_incoming_ref_vs_upstream_delete_single_winner() {
             validator_findings: Vec::new(),
         })
         .expect("plan creation referencing a live upstream must succeed");
-    assert!(store
-        .get_issue_work_item_plan(PROJECT_ID, ISSUE_ID, &plan.id)
-        .is_ok());
+    assert!(
+        store
+            .get_issue_work_item_plan(PROJECT_ID, ISSUE_ID, &plan.id)
+            .is_ok()
+    );
     assert!(matches!(
         EntityOperationStore::new(store.app_paths()).try_acquire_delete(&story_two_scope),
         Err(crate::product::entity_operation_store::EntityOperationError::Busy)
@@ -1696,8 +1720,7 @@ fn cascade_d1_3b_human_gate_turn_and_structural_late_writes_rejected() {
         reserved_at: "2026-10-14T00:00:00Z".to_string(),
     };
     assert!(matches!(
-        store
-            .compare_and_reserve_human_gate_turn(&running_session, late_turn, late_reservation),
+        store.compare_and_reserve_human_gate_turn(&running_session, late_turn, late_reservation),
         Err(ProductStoreError::Conflict {
             kind: "entity_deleting",
             ..
@@ -1935,7 +1958,10 @@ fn cascade_d1_3b_usage_diagnostic_late_write_rejected_no_timeline_revival() {
     let _lease = d1_3a_begin_purge(&store, &scope);
     std::fs::remove_dir_all(&timeline_dir).unwrap();
     assert!(matches!(
-        store.append_usage_persistence_diagnostic(&session.id, &serde_json::json!({"schema_version": 1})),
+        store.append_usage_persistence_diagnostic(
+            &session.id,
+            &serde_json::json!({"schema_version": 1})
+        ),
         Err(ProductStoreError::Conflict {
             kind: "entity_deleting",
             ..
@@ -2077,7 +2103,10 @@ fn d1_3c_seed_repo_worktree(
     mutate: impl FnOnce(&mut crate::product::models::IssueSharedWorktree),
 ) -> crate::product::models::IssueSharedWorktree {
     let mut record = crate::product::models::IssueSharedWorktree {
-        id: format!("repo_shared_worktree_{PROJECT_ID}_{ISSUE_ID}_{}", repository_id.0),
+        id: format!(
+            "repo_shared_worktree_{PROJECT_ID}_{ISSUE_ID}_{}",
+            repository_id.0
+        ),
         project_id: PROJECT_ID.to_string(),
         issue_id: ISSUE_ID.to_string(),
         repository_id: repository_id.0.to_string(),
@@ -2127,7 +2156,9 @@ fn d1_3c_seed_attempt(
             target_snapshot: target.map(|logical_id| {
                 crate::product::coding_models::AttemptTargetSnapshot {
                     logical_repository_id: logical_id,
-                    checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(Uuid::new_v4()),
+                    checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(
+                        Uuid::new_v4(),
+                    ),
                     physical_repository_id: REPOSITORY_ID.to_string(),
                     canonical_path: std::path::PathBuf::from("/tmp/repository_0001"),
                     git_dir_identity: "sha256:test".to_string(),
@@ -2374,10 +2405,7 @@ fn cascade_d1_3c_issue_entries_reject_late_deleted_owner_without_revival() {
         ),
         "无可证 owner 且原资源已被实体 cleanup 清除：不得凭旧缓存 path 重建"
     );
-    assert!(
-        !record_path.exists(),
-        "拒绝路径不得复活已清档记录"
-    );
+    assert!(!record_path.exists(), "拒绝路径不得复活已清档记录");
 
     // 新 Plan（真实 live owner）同仓正常创建不当旧 Plan 复活。
     d1_3a_plan(&store, "work_item_plan_0002", Vec::new());
@@ -2403,8 +2431,18 @@ fn cascade_d1_3c_repo_entries_reject_late_deleted_owner_and_live_plan_kept() {
     let api_member = LogicalRepositoryId(stable_member_uuid(0x0001));
     let web_member = LogicalRepositoryId(stable_member_uuid(0x0002));
     d1_3a_plan(&store, "work_item_plan_0001", Vec::new());
-    d1_3c_wi_with_target(&store, "work_item_0001", "work_item_plan_0001", Some(api_member));
-    d1_3c_wi_with_target(&store, "work_item_0002", "work_item_plan_0001", Some(api_member));
+    d1_3c_wi_with_target(
+        &store,
+        "work_item_0001",
+        "work_item_plan_0001",
+        Some(api_member),
+    );
+    d1_3c_wi_with_target(
+        &store,
+        "work_item_0002",
+        "work_item_plan_0001",
+        Some(api_member),
+    );
     store
         .upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/api"))
         .expect("seed api repo worktree");
@@ -2527,7 +2565,12 @@ fn cascade_d1_3c_repo_entries_reject_late_deleted_owner_and_live_plan_kept() {
     );
 
     d1_3a_plan(&store, "work_item_plan_0002", Vec::new());
-    d1_3c_wi_with_target(&store, "work_item_0003", "work_item_plan_0002", Some(api_member));
+    d1_3c_wi_with_target(
+        &store,
+        "work_item_0003",
+        "work_item_plan_0002",
+        Some(api_member),
+    );
     store
         .upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/new-plan"))
         .expect("另一 live Plan 同仓正常创建");
@@ -2733,7 +2776,8 @@ fn cascade_d1_3c_delete_and_upsert_mutually_exclusive_with_stable_inode() {
     );
     assert!(
         matches!(
-            store.upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/contended")),
+            store
+                .upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/contended")),
             Err(ProductStoreError::Conflict {
                 kind: "shared_resource_busy",
                 ..
@@ -2752,7 +2796,8 @@ fn cascade_d1_3c_delete_and_upsert_mutually_exclusive_with_stable_inode() {
         .expect("cleanup lease");
     assert!(
         matches!(
-            store.upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/contended")),
+            store
+                .upsert_repo_shared_worktree(d1_3c_repo_upsert_input(api_member, "aria/contended")),
             Err(ProductStoreError::Conflict {
                 kind: "shared_resource_busy",
                 ..

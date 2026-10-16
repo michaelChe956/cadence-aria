@@ -329,8 +329,7 @@ fn intent_target_bound_violation(
 
     let member_targets = || {
         context.member_targets.ok_or_else(|| {
-            "集合绑定缺少成员归属映射（member_targets）；无法核对 intent 的成员物理仓"
-                .to_string()
+            "集合绑定缺少成员归属映射（member_targets）；无法核对 intent 的成员物理仓".to_string()
         })
     };
     let EnrollmentTarget::LogicalCodebaseMembers {

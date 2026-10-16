@@ -1199,8 +1199,8 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
 #[test]
 fn plan_coding_n4_logical_launch_keeps_root_cwd_and_only_target_writable() {
     use crate::cross_cutting::provider_registry::ProviderRegistry;
-    use crate::product::coding_models::provider_config::CodingRoleProviderConfigSnapshot;
     use crate::product::coding_models::AttemptTargetSnapshot;
+    use crate::product::coding_models::provider_config::CodingRoleProviderConfigSnapshot;
     use crate::product::logical_codebase::policy::SessionPolicyAction;
     use crate::product::logical_codebase::{
         GatewayRunAudit, LogicalRepositoryId, RepositoryCheckoutId,
@@ -1314,7 +1314,7 @@ fn plan_coding_n4_logical_launch_keeps_root_cwd_and_only_target_writable() {
         assert_eq!(envelope.action, SessionPolicyAction::ReviewReadOnly);
         assert_eq!(
             envelope.working_directory, envelope.authority_root,
-        "reviewer session cwd stays the authority root"
+            "reviewer session cwd stays the authority root"
         );
         assert!(envelope.writable_roots.is_empty());
         assert!(

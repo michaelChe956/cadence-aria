@@ -1000,9 +1000,11 @@ pub(crate) fn planning_structure_items_from_ir(
                 // 批 2 R1（REQ-WIGA-01）：集合 intent 显式分支不造归属
                 //（门前 lower/validator 已拒集合 WI；此处签名不变、不取首
                 // 成员、不展开）。
-                Some(crate::product::logical_codebase::EnrollmentTarget::LogicalCodebaseMembers {
-                    ..
-                }) => (None, None),
+                Some(
+                    crate::product::logical_codebase::EnrollmentTarget::LogicalCodebaseMembers {
+                        ..
+                    },
+                ) => (None, None),
                 _ => (None, None),
             };
             PlanningStructureItem {

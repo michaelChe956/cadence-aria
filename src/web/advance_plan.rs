@@ -245,7 +245,9 @@ pub async fn advance_plan(
                 .manifest
                 .as_ref()
                 .map(|manifest| manifest.logical_codebase_id.to_string())
-                .is_some_and(|authoritative| bound.logical_codebase_id() == Some(authoritative.as_str())),
+                .is_some_and(|authoritative| {
+                    bound.logical_codebase_id() == Some(authoritative.as_str())
+                }),
             // 旧单成员逻辑绑定：既有 LC×LC 匹配语义（零回归）。
             (
                 crate::web::handlers::AutomationCarrierResolution::LogicalCodebase { .. },
@@ -1579,10 +1581,8 @@ mod tests {
             extra_member: &str,
             logical_codebase_id: String,
         ) -> Result<AdvanceOutcome, String> {
-            let mut enrollment_json: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(enrollment_path).unwrap(),
-            )
-            .unwrap();
+            let mut enrollment_json: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(enrollment_path).unwrap()).unwrap();
             let set_target = serde_json::json!({
                 "kind": "logical_codebase_members",
                 "logical_codebase_id": logical_codebase_id,
@@ -1613,7 +1613,6 @@ mod tests {
             advance_plan(&fixture.state, input, origin).await
         }
 
-
         // ①（修复前红）：manifest UUID 形态的集合绑定 → advance 通过 drift
         // 互证正常返回（不报 enrolled advance carrier drift）。
         let outcome = set_binding_advance(
@@ -1625,12 +1624,8 @@ mod tests {
         )
         .await;
         match &outcome {
-            Ok(
-                AdvanceOutcome::Completed { .. } | AdvanceOutcome::Replayed { .. },
-            ) => {}
-            other => panic!(
-                "manifest-form set binding must advance, got {other:?} (drift 误判)"
-            ),
+            Ok(AdvanceOutcome::Completed { .. } | AdvanceOutcome::Replayed { .. }) => {}
+            other => panic!("manifest-form set binding must advance, got {other:?} (drift 误判)"),
         }
 
         // ② 真·漂移：绑定声明另一 LC（manifest 之外）→ fail-closed。
@@ -1642,11 +1637,8 @@ mod tests {
             &extra_member,
             drifted_lc,
         )
-            .await
-            .expect_err("drifted set binding must fail closed");
-        assert!(
-            error.contains("carrier drift"),
-            "true drift error: {error}"
-        );
+        .await
+        .expect_err("drifted set binding must fail closed");
+        assert!(error.contains("carrier drift"), "true drift error: {error}");
     }
 }

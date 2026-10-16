@@ -292,9 +292,9 @@ impl LcVersionObservation {
 pub type LcVersionProbe = std::sync::Arc<
     dyn Fn(
             LcVersionProbeKey,
-        ) -> std::pin::Pin<
-            Box<dyn Future<Output = Result<String, VersionProbeError>> + Send>,
-        > + Send
+        )
+            -> std::pin::Pin<Box<dyn Future<Output = Result<String, VersionProbeError>> + Send>>
+        + Send
         + Sync,
 >;
 
@@ -313,8 +313,7 @@ pub struct LcVersionCache {
 // 同上:B0a2 合同先落,生产消费方为 3.3–3.6 的 adapter 接线;测试面已消费。
 #[cfg_attr(not(test), allow(dead_code))]
 struct LcVersionCacheInner {
-    slots:
-        std::sync::Mutex<std::collections::HashMap<LcVersionProbeKey, LcVersionCacheSlot>>,
+    slots: std::sync::Mutex<std::collections::HashMap<LcVersionProbeKey, LcVersionCacheSlot>>,
     clock: std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync>,
 }
 
@@ -322,22 +321,14 @@ struct LcVersionCacheInner {
 #[derive(Clone)]
 enum LcVersionCacheSlot {
     Fresh(LcVersionObservation),
-    InFlight(
-        tokio::sync::watch::Sender<Option<Result<LcVersionObservation, VersionProbeError>>>,
-    ),
+    InFlight(tokio::sync::watch::Sender<Option<Result<LcVersionObservation, VersionProbeError>>>),
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 enum LcVersionCacheClaim {
     Fresh(LcVersionObservation),
-    Waiting(
-        tokio::sync::watch::Receiver<
-            Option<Result<LcVersionObservation, VersionProbeError>>,
-        >,
-    ),
-    Won(
-        tokio::sync::watch::Sender<Option<Result<LcVersionObservation, VersionProbeError>>>,
-    ),
+    Waiting(tokio::sync::watch::Receiver<Option<Result<LcVersionObservation, VersionProbeError>>>),
+    Won(tokio::sync::watch::Sender<Option<Result<LcVersionObservation, VersionProbeError>>>),
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -438,9 +429,7 @@ impl LcVersionCache {
 struct LcVersionInFlightDropGuard {
     inner: std::sync::Arc<LcVersionCacheInner>,
     key: LcVersionProbeKey,
-    sender: tokio::sync::watch::Sender<
-        Option<Result<LcVersionObservation, VersionProbeError>>,
-    >,
+    sender: tokio::sync::watch::Sender<Option<Result<LcVersionObservation, VersionProbeError>>>,
 }
 
 impl LcVersionInFlightDropGuard {

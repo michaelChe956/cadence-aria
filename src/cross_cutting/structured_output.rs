@@ -493,9 +493,7 @@ fn next_is_structural(chars: &[char], from: usize) -> bool {
     chars[from..]
         .iter()
         .find(|ch| !ch.is_whitespace())
-        .is_none_or(|ch| {
-            matches!(ch, ',' | ':' | '}' | ']' | '\u{ff0c}' | '\u{ff1a}')
-        })
+        .is_none_or(|ch| matches!(ch, ',' | ':' | '}' | ']' | '\u{ff0c}' | '\u{ff1a}'))
 }
 fn sentinel_json_candidate(text: &str) -> Result<&str, ()> {
     let trimmed = text.trim();

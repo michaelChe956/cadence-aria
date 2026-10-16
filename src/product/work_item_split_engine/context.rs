@@ -117,9 +117,7 @@ pub fn extract_registered_requirement_ids(contexts: &[String]) -> Vec<String> {
         for token in context
             .split(|character: char| !(character.is_ascii_alphanumeric() || character == '-'))
         {
-            if (token.starts_with("REQ-")
-                || token.starts_with("NFR-")
-                || token.starts_with("AC-"))
+            if (token.starts_with("REQ-") || token.starts_with("NFR-") || token.starts_with("AC-"))
                 && token.len() > "AC-".len()
             {
                 ids.insert(token.to_string());

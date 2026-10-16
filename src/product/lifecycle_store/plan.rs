@@ -10,10 +10,10 @@ use crate::product::entity_operation_store::EntityDeletionLease;
 use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    DeletionConfirmation, DeletionConfirmationReason, IssueWorkItemPlan,
-    IssueWorkItemPlanStatus, LifecycleConfirmationStatus, LifecycleWorkItemRecord, ProviderName,
-    ProviderReviewRoundRecord, RepositoryProfile, SpecVersionRecord, VerificationPlan,
-    WorkItemPlanLineage, WorkItemPlanStatus, WorkspaceSessionRecord, WorkspaceType,
+    DeletionConfirmation, DeletionConfirmationReason, IssueWorkItemPlan, IssueWorkItemPlanStatus,
+    LifecycleConfirmationStatus, LifecycleWorkItemRecord, ProviderName, ProviderReviewRoundRecord,
+    RepositoryProfile, SpecVersionRecord, VerificationPlan, WorkItemPlanLineage,
+    WorkItemPlanStatus, WorkspaceSessionRecord, WorkspaceType,
 };
 use crate::product::work_item_split_engine::WorkItemSplitProviderOutput;
 
@@ -1268,8 +1268,7 @@ impl LifecycleStore {
                     }
                 };
                 let confirmed_version = list_json_records::<SpecVersionRecord>(
-                    &self
-                        .versions_root(&scope.project_id, &scope.issue_id, &scope.entity_id),
+                    &self.versions_root(&scope.project_id, &scope.issue_id, &scope.entity_id),
                 )?
                 .iter()
                 .any(|version| version.confirmed_by.is_some());

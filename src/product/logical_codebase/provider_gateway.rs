@@ -26,7 +26,9 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
 use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use crate::cross_cutting::provider_registry::ProviderRegistry;
-use crate::cross_cutting::session_launch::{ValidatedAdapterInput, ValidatedStreamingProviderInput};
+use crate::cross_cutting::session_launch::{
+    ValidatedAdapterInput, ValidatedStreamingProviderInput,
+};
 use crate::cross_cutting::streaming_provider::{ProviderSession, StreamingProviderAdapter};
 use crate::product::logical_codebase::policy::{
     AggregatePolicyArtifactStore, PolicyTarget, ProviderDialect, ProviderWireDialect,
@@ -1217,13 +1219,8 @@ impl LogicalCodebaseProviderGateway {
         mapped_details: &str,
         scenario: crate::product::logical_codebase::provider_trust::ProviderTrustScenario,
     ) -> String {
-        self.classify_launch_trust_failure(
-            gateway_error,
-            provider,
-            mapped_details,
-            scenario,
-        )
-        .details
+        self.classify_launch_trust_failure(gateway_error, provider, mapped_details, scenario)
+            .details
     }
 
     /// [`classify_launch_trust_failure_details`] 的结构化变体（单一事实

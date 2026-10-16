@@ -795,7 +795,8 @@ impl WorkspaceEngine {
                 revision_resume_fallback: None,
             })
             .await;
-            self.emit_launch_trust_guidance(revision_trust_waiting).await;
+            self.emit_launch_trust_guidance(revision_trust_waiting)
+                .await;
             // recovery（Completed → Resolved；其余回 Waiting，fail-safe）。
             if fresh_recovery.is_some() {
                 let reconcile_node = node_id.clone().or_else(|| {

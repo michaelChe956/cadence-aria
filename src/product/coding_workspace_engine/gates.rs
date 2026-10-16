@@ -239,12 +239,16 @@ impl CodingWorkspaceEngine {
         // CodingGateRequired(durable-first,断连不回滚业务事实)。
         let _ = self
             .event_tx
-            .send(CodingWsOutMessage::CodingGateRequired { gate: self
-                .store
-                .list_open_blocked_gates(&updated.project_id, &updated.issue_id, &updated.id)?
-                .into_iter()
-                .find(|gate| gate.reason_code.as_deref() == Some(CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE))
-                .expect("triage gate just created") })
+            .send(CodingWsOutMessage::CodingGateRequired {
+                gate: self
+                    .store
+                    .list_open_blocked_gates(&updated.project_id, &updated.issue_id, &updated.id)?
+                    .into_iter()
+                    .find(|gate| {
+                        gate.reason_code.as_deref() == Some(CODING_OUTPUT_HUMAN_TRIAGE_REASON_CODE)
+                    })
+                    .expect("triage gate just created"),
+            })
             .await;
         Ok(updated)
     }
@@ -307,12 +311,16 @@ impl CodingWorkspaceEngine {
         // 落盘后立即发射 CodingGateRequired（durable-first，断连不回滚业务事实）。
         let _ = self
             .event_tx
-            .send(CodingWsOutMessage::CodingGateRequired { gate: self
-                .store
-                .list_open_blocked_gates(&updated.project_id, &updated.issue_id, &updated.id)?
-                .into_iter()
-                .find(|gate| gate.reason_code.as_deref() == Some(CODING_OPERATIONAL_BLOCKER_REASON_CODE))
-                .expect("operational blocker gate just created") })
+            .send(CodingWsOutMessage::CodingGateRequired {
+                gate: self
+                    .store
+                    .list_open_blocked_gates(&updated.project_id, &updated.issue_id, &updated.id)?
+                    .into_iter()
+                    .find(|gate| {
+                        gate.reason_code.as_deref() == Some(CODING_OPERATIONAL_BLOCKER_REASON_CODE)
+                    })
+                    .expect("operational blocker gate just created"),
+            })
             .await;
         Ok(updated)
     }
@@ -349,7 +357,6 @@ impl CodingWorkspaceEngine {
             summary,
         );
     }
-
 
     pub(crate) async fn emit_permission_request(
         &self,
@@ -1172,7 +1179,10 @@ mod triage_summary_tests {
         let report = wi002_report();
         let summary =
             build_coder_triage_summary(Some(&report), None, &wi002_raw_without_delivery_report());
-        assert!(summary.did.is_none(), "delivery_report 缺失时 did 必须为 None");
+        assert!(
+            summary.did.is_none(),
+            "delivery_report 缺失时 did 必须为 None"
+        );
         assert_eq!(summary.problem, report.findings[0].message);
 
         let raw_malformed = serde_json::json!({

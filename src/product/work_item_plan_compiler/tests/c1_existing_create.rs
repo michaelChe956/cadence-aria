@@ -622,8 +622,10 @@ fn c1_members_target_intent_contract_set_bound_and_set_intent_rejected() {
     let diagnostics = validate_with(&ir, Some(&set_bound), Some(&mapping))
         .expect_err("set intent must be rejected");
     assert!(
-        diagnostics.iter().any(|diagnostic| diagnostic.code == "intent_unexecutable"
-            && diagnostic.message.contains("集合")),
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "intent_unexecutable"
+                && diagnostic.message.contains("集合")),
         "set intent diagnostic: {diagnostics:#?}"
     );
 

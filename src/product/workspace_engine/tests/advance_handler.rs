@@ -1193,9 +1193,7 @@ async fn legacy_record_without_policy_field_resumes_with_journal_authority() {
         .expect("first auto advance must complete");
     let (record_id, first_attempt) = match &first {
         AdvanceOutcome::Completed {
-            record,
-            attempt_id,
-            ..
+            record, attempt_id, ..
         } => (record.id.clone(), attempt_id.clone()),
         other => panic!("first advance must complete, got {other:?}"),
     };
@@ -1211,10 +1209,7 @@ async fn legacy_record_without_policy_field_resumes_with_journal_authority() {
             serde_json::from_str(&std::fs::read_to_string(&record_path).unwrap()).unwrap();
         let object = json.as_object_mut().unwrap();
         assert!(object.remove("start_run_policy").is_some());
-        object.insert(
-            "status".to_string(),
-            serde_json::json!("initializing"),
-        );
+        object.insert("status".to_string(), serde_json::json!("initializing"));
         std::fs::write(&record_path, serde_json::to_string(&json).unwrap()).unwrap();
     };
 
@@ -1230,7 +1225,10 @@ async fn legacy_record_without_policy_field_resumes_with_journal_authority() {
         .await
         .expect("legacy record must resume under journal authority (auto)");
     if let AdvanceOutcome::Completed { attempt_id, .. } = &replay_auto {
-        assert_eq!(attempt_id, &first_attempt, "续做必须复用同一 journal attempt");
+        assert_eq!(
+            attempt_id, &first_attempt,
+            "续做必须复用同一 journal attempt"
+        );
     }
 
     // B（retry 链路，修复前红）：record 读 Manual（旧形态）+ 传 Manual →
@@ -1321,7 +1319,11 @@ async fn legacy_record_without_policy_field_resumes_with_journal_authority() {
         .as_object_mut()
         .unwrap()
         .insert("status".to_string(), serde_json::json!("initializing"));
-    std::fs::write(&explicit_path, serde_json::to_string(&explicit_json).unwrap()).unwrap();
+    std::fs::write(
+        &explicit_path,
+        serde_json::to_string(&explicit_json).unwrap(),
+    )
+    .unwrap();
     let admission_c = crate::product::workspace_engine::AdvancePlanAdmission::acquire(
         &app_paths_c,
         "project_0001",
@@ -1330,11 +1332,7 @@ async fn legacy_record_without_policy_field_resumes_with_journal_authority() {
     )
     .expect("plan admission");
     let error = engine_c
-        .handle_advance_with_start_policy(
-            input("command_explicit_auto"),
-            auto_policy,
-            &admission_c,
-        )
+        .handle_advance_with_start_policy(input("command_explicit_auto"), auto_policy, &admission_c)
         .await
         .expect_err("explicit manual record must reject auto escalation");
     assert!(

@@ -357,12 +357,14 @@ impl FaultOncePreCheckStreamingProvider {
         let (commands, _command_rx) = tokio::sync::mpsc::channel(4);
         tokio::spawn(async move {
             let _ = event_tx
-                .send(cadence_aria::cross_cutting::streaming_provider::ProviderEvent::Completed(
-                    cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
-                        "aggregate recipe fixture turn output".to_string(),
-                        None,
+                .send(
+                    cadence_aria::cross_cutting::streaming_provider::ProviderEvent::Completed(
+                        cadence_aria::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                            "aggregate recipe fixture turn output".to_string(),
+                            None,
+                        ),
                     ),
-                ))
+                )
                 .await;
         });
         Ok(ProviderSession {
@@ -1169,7 +1171,10 @@ async fn a04_failed_identity_and_missing_rules_require_product_repair_before_rea
         "the bare chain must launch exactly three provider turns"
     );
     // 成员仓零写:被删除的规则文件不被重建(bootstrap 不复制/生成成员规则)。
-    assert!(!rules_path.exists(), "member rules must stay absent (zero write)");
+    assert!(
+        !rules_path.exists(),
+        "member rules must stay absent (zero write)"
+    );
     // 冻结正确的 envelope/policy digest：两次补读一致且非空。
     let digest = ready["policy"]["policy_digest"]
         .as_str()

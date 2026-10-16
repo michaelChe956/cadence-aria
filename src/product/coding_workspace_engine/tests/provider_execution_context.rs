@@ -158,11 +158,7 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
     // 插入）；执行上下文哈希仍等于渲染 content_hash（追加不动冻结哈希面）。
     assert_eq!(
         coder.input().prompt,
-        format!(
-            "{}{}",
-            expected_coder.text,
-            platform_directives_section()
-        )
+        format!("{}{}", expected_coder.text, platform_directives_section())
     );
     assert_eq!(
         run.coder_provider_renderer_version,

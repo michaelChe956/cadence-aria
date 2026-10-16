@@ -201,15 +201,13 @@ impl CodexProvider {
         let key = self.lc_version_probe_key();
         let command = self.command.clone();
         let supplier = self.version_supplier.clone();
-        let probe: LcVersionProbe = std::sync::Arc::new(move |_key| {
-            match supplier.clone() {
-                Some(supplier) => Box::pin(async move { supplier() }),
-                None => {
-                    let command = command.clone();
-                    Box::pin(async move {
-                        probe_codex_version(&command, CODEX_VERSION_PROBE_TIMEOUT).await
-                    })
-                }
+        let probe: LcVersionProbe = std::sync::Arc::new(move |_key| match supplier.clone() {
+            Some(supplier) => Box::pin(async move { supplier() }),
+            None => {
+                let command = command.clone();
+                Box::pin(
+                    async move { probe_codex_version(&command, CODEX_VERSION_PROBE_TIMEOUT).await },
+                )
             }
         });
         self.lc_version_cache

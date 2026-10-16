@@ -237,38 +237,38 @@ pub(crate) fn collection_enable_body(
     logical_codebase_id: &str,
 ) -> serde_json::Value {
     serde_json::json!({
-        "expected_revision": null,
-        "command": {
-            "type": "enable",
-            "selection_key": "r4-e1-four-repository-collection",
-            "source": {
-                "stories": [{"id": story_id, "version": 1}],
-                "designs": [{"id": design_id, "version": 1}]
- },
-            "options": {
-                // 与单成员 gate fixture 同口径：逻辑 target 的 coding 引擎
-                // 强制 provider gateway，测试态经恒健康 fake gateway 承接
-                // claude_code 方言（行为等同 fake）。
-                "author_provider": "claude_code",
-                "reviewer_provider": "claude_code",
-                "review_rounds": 1,
-                "superpowers_enabled": false,
-                "openspec_enabled": false,
-                "plan_approval": "auto",
-                "plan_options": {
-                    "include_integration_tests": false,
-                    "include_e2e_tests": false,
-                    "force_frontend_backend_split": false,
-                    "require_execution_plan_confirm": false
-                }
-            },
-            "target": {
-                "kind": "logical_codebase_members",
-                "logical_codebase_id": logical_codebase_id,
-                "logical_repository_ids": FOUR_MEMBER_LOGICAL_IDS
-            }
-        }
-    })
+           "expected_revision": null,
+           "command": {
+               "type": "enable",
+               "selection_key": "r4-e1-four-repository-collection",
+               "source": {
+                   "stories": [{"id": story_id, "version": 1}],
+                   "designs": [{"id": design_id, "version": 1}]
+    },
+               "options": {
+                   // 与单成员 gate fixture 同口径：逻辑 target 的 coding 引擎
+                   // 强制 provider gateway，测试态经恒健康 fake gateway 承接
+                   // claude_code 方言（行为等同 fake）。
+                   "author_provider": "claude_code",
+                   "reviewer_provider": "claude_code",
+                   "review_rounds": 1,
+                   "superpowers_enabled": false,
+                   "openspec_enabled": false,
+                   "plan_approval": "auto",
+                   "plan_options": {
+                       "include_integration_tests": false,
+                       "include_e2e_tests": false,
+                       "force_frontend_backend_split": false,
+                       "require_execution_plan_confirm": false
+                   }
+               },
+               "target": {
+                   "kind": "logical_codebase_members",
+                   "logical_codebase_id": logical_codebase_id,
+                   "logical_repository_ids": FOUR_MEMBER_LOGICAL_IDS
+               }
+           }
+       })
 }
 
 fn seed_logical_codebase(paths: &ProductAppPaths, members: &[(LogicalRepositoryId, &str)]) {

@@ -150,8 +150,8 @@ pub(crate) fn register_lock_attempt_hook(
 pub(crate) fn register_exact_lock_attempt_hook(
     lock_path: &Path,
 ) -> (LockAttemptHookGuard, mpsc::Receiver<()>) {
-    let lock_path = std::fs::canonicalize(lock_path)
-        .expect("held exact lock path should be canonicalizable");
+    let lock_path =
+        std::fs::canonicalize(lock_path).expect("held exact lock path should be canonicalizable");
     register_hook_at_canonical_lock_path(lock_path)
 }
 

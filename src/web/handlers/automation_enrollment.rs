@@ -2467,7 +2467,11 @@ mod tests {
         let enable = put_enrollment(&app, re_enable).await;
         let enable_status = enable.status();
         let enable_body = response_json(enable).await;
-        assert_eq!(enable_status, StatusCode::OK, "re-enable body: {enable_body:?}");
+        assert_eq!(
+            enable_status,
+            StatusCode::OK,
+            "re-enable body: {enable_body:?}"
+        );
         let enabled_revision = enable_body["policy_revision"].as_u64().unwrap();
         let terminate = post_terminate(
             &app,

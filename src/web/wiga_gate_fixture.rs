@@ -479,18 +479,18 @@ impl EnrolledGateFixture {
                 crate::product::models::LifecycleConfirmationStatus::Confirmed,
             )
             .unwrap();
-        let logical_codebase_ref = crate::product::logical_codebase::LogicalCodebaseStore::new(
-            inner.paths.clone(),
-        )
-        .load_manifest(PROJECT_ID)
-        .unwrap()
-        .expect("seeded logical codebase manifest")
-        .logical_codebase_id;
+        let logical_codebase_ref =
+            crate::product::logical_codebase::LogicalCodebaseStore::new(inner.paths.clone())
+                .load_manifest(PROJECT_ID)
+                .unwrap()
+                .expect("seeded logical codebase manifest")
+                .logical_codebase_id;
         // 聚合 Design 携带 involved/change_order（REQ-WSC-08 上界子集判定：
         // involved 非空才打开多仓 plan 入口闸；多仓 involved 必须给顺序）。
         // involved=实际三仓（member-4 选中但设计不涉及）。
-        let member =
-            |index: u128| crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::from_u128(index));
+        let member = |index: u128| {
+            crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::from_u128(index))
+        };
         let design = lifecycle_seed
             .create_design_spec(crate::product::lifecycle_store::CreateDesignSpecInput {
                 project_id: PROJECT_ID.to_string(),
@@ -589,9 +589,7 @@ impl EnrolledGateFixture {
             session_id,
             manager: manager.clone(),
             token: 0,
-            incarnation: manager
-                .active_run_incarnation()
-                .unwrap_or_default(),
+            incarnation: manager.active_run_incarnation().unwrap_or_default(),
             gate_id: None,
         }
     }
@@ -634,11 +632,10 @@ impl EnrolledGateFixture {
         // 跨仓依赖交付：wi_b 要求 wi_a 的 output contract（与既有
         // seed_accepted_plan_drafts 的 draft_b 同款 rebrand）。
         {
-            let mut required = crate::product::work_item_contract::canonical_contract_fixture(
-                "unused",
-            )
-            .input_contracts
-            .remove(0);
+            let mut required =
+                crate::product::work_item_contract::canonical_contract_fixture("unused")
+                    .input_contracts
+                    .remove(0);
             required.provider_logical_work_item_id = "wi_a".to_string();
             required.contract_id = "contract.canonical".to_string();
             required.required_capabilities = vec!["stable_hash".to_string()];
@@ -683,8 +680,10 @@ impl EnrolledGateFixture {
                 .plan_candidate_ir_ref
                 .clone()
                 .expect("candidate IR ref after recovery record");
-            let source_store = crate::product::work_item_plan_source_store::
-                WorkItemPlanSourceStore::new(self.inner.paths.clone());
+            let source_store =
+                crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
+                    self.inner.paths.clone(),
+                );
             let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
                 project_id: PROJECT_ID.to_string(),
                 issue_id: ISSUE_ID.to_string(),
@@ -743,7 +742,8 @@ impl EnrolledGateFixture {
             crate::product::json_store::write_json(&self.session_path(&session.id), &session)
                 .expect("persist session with per-member refs");
             let artifact = engine.session.artifact.clone();
-            engine.session = crate::product::workspace_engine::WorkspaceSession::from_record(session);
+            engine.session =
+                crate::product::workspace_engine::WorkspaceSession::from_record(session);
             engine.session.artifact = artifact;
         }
         engine.enter_policy_valid_work_item_plan_compile().await;

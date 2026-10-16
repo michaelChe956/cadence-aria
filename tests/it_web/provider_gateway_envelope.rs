@@ -1187,7 +1187,10 @@ struct SyncDirectSlotRecorder {
 
 impl ProviderAdapter for SyncDirectSlotRecorder {
     fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
-        self.inputs.lock().expect("sync direct slot").push(input.clone());
+        self.inputs
+            .lock()
+            .expect("sync direct slot")
+            .push(input.clone());
         Ok(AdapterOutput {
             exit_code: Some(0),
             stdout: "ok".to_string(),
@@ -1301,7 +1304,11 @@ fn lcg_t13_single_repository_sync_claude_codex_direct_topology_unchanged() {
 
     let claude_inputs = claude_slot.inputs.lock().expect("claude slot inputs");
     let codex_inputs = codex_slot.inputs.lock().expect("codex slot inputs");
-    assert_eq!(claude_inputs.len(), 2, "claude slot saw exactly the two runs");
+    assert_eq!(
+        claude_inputs.len(),
+        2,
+        "claude slot saw exactly the two runs"
+    );
     assert_eq!(codex_inputs.len(), 2, "codex slot saw exactly the two runs");
     assert_eq!(
         claude_inputs[0], claude_inputs[1],
@@ -1339,8 +1346,14 @@ fn lcg_t13_single_repository_sync_claude_codex_direct_topology_unchanged() {
             error.details
         );
     }
-    assert_eq!(claude_slot.inputs.lock().expect("claude slot inputs").len(), 2);
-    assert_eq!(codex_slot.inputs.lock().expect("codex slot inputs").len(), 2);
+    assert_eq!(
+        claude_slot.inputs.lock().expect("claude slot inputs").len(),
+        2
+    );
+    assert_eq!(
+        codex_slot.inputs.lock().expect("codex slot inputs").len(),
+        2
+    );
 }
 
 /// 写一个捕获型 fixture CLI:`--version` 分支回固定版本(需要版本探测的
@@ -1380,9 +1393,7 @@ fn parse_workspace_stream_capture(content: &str) -> (Vec<String>, String) {
 /// 有界等待并消费 capture 文件为 (argv 行, cwd)。脚本分两次 append
 /// (argv 后 cwd),必须等到至少两行才算写完整;读取后删除文件,使下
 /// 一次运行的存在性轮询有明确语义。
-async fn wait_workspace_stream_capture(
-    capture: &std::path::Path,
-) -> Option<(Vec<String>, String)> {
+async fn wait_workspace_stream_capture(capture: &std::path::Path) -> Option<(Vec<String>, String)> {
     for _ in 0..150 {
         if let Ok(content) = std::fs::read_to_string(capture) {
             if content.lines().count() >= 2 {
@@ -1559,8 +1570,7 @@ async fn lcg_t13_workspace_streaming_legacy_four_provider_path_unchanged() {
             // 内容 hash 命名,确定性),逐字节钉死会耦合 HOME,只锁形态。
             let extension = &args[3];
             assert!(
-                extension.ends_with(".ts")
-                    && extension.contains("aria-ask-"),
+                extension.ends_with(".ts") && extension.contains("aria-ask-"),
                 "pi extension path shape unchanged, got {extension}"
             );
         }

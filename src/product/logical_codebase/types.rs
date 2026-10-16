@@ -354,7 +354,10 @@ mod tests {
             logical_codebase_id: "lc_0001".to_string(),
             logical_repository_ids: vec![super::LogicalRepositoryId(uuid::Uuid::from_u128(1))],
         };
-        assert_ne!(target, expected, "guard: multi member set must not collapse");
+        assert_ne!(
+            target, expected,
+            "guard: multi member set must not collapse"
+        );
 
         let sorted = EnrollmentTarget::LogicalCodebaseMembers {
             logical_codebase_id: "lc_0001".to_string(),

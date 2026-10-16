@@ -28,11 +28,11 @@ use crate::product::models::automation::{
 };
 use crate::product::models::lifecycle::IssueWorkItemPlanOptions;
 use crate::product::models::provider::ProviderName;
-use crate::product::workspace_engine::conversational_gate::ConfirmationTrustContext;
 use crate::product::work_item_plan_policy::RunPolicy;
+use crate::product::workspace_engine::conversational_gate::ConfirmationTrustContext;
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use parking_lot::Mutex;
 use std::sync::Arc;
 
 /// 可编排 Waiting/Ready 的 trust precondition fake（无锁 fake，默认 Ready；
@@ -44,8 +44,9 @@ struct B2P3ScriptedTrustGate {
 
 impl B2P3ScriptedTrustGate {
     fn script_waiting(&self, reason_code: &str) {
-        self.scripted.lock().push_back(
-            ProviderTrustPreparationResult::Waiting {
+        self.scripted
+            .lock()
+            .push_back(ProviderTrustPreparationResult::Waiting {
                 waiting: ProviderTrustWaiting {
                     provider: ProviderName::Codex,
                     canonical_root: PathBuf::from("/b2-p3-fixture-root"),
@@ -57,8 +58,7 @@ impl B2P3ScriptedTrustGate {
                     command_markdown: None,
                     recorded_at: "2026-10-16T00:00:00Z".to_string(),
                 },
-            },
-        );
+            });
     }
 }
 
@@ -256,7 +256,9 @@ fn b2_p3_enable_and_bind(
     store
 }
 
-fn b2_p3_facts(store: &IssueAutomationStore) -> Vec<crate::product::models::automation::AutomationAttentionFact> {
+fn b2_p3_facts(
+    store: &IssueAutomationStore,
+) -> Vec<crate::product::models::automation::AutomationAttentionFact> {
     store
         .get("project_0001", "issue_0001")
         .expect("read enrollment")
@@ -284,7 +286,10 @@ async fn b2_p3_trust_waiting_persists_plan_question_and_skips_compile() {
     let store = b2_p3_enable_and_bind(&fixture.app_paths, &plan_id, &session_id);
     fixture.trust.script_waiting("b2_p3_fixture_home_failure");
 
-    fixture.engine.enter_policy_valid_work_item_plan_compile().await;
+    fixture
+        .engine
+        .enter_policy_valid_work_item_plan_compile()
+        .await;
 
     // 零 compile 副作用：不建 compile/恢复节点；会话落人工确认门兜底。
     let nodes = fixture
@@ -316,7 +321,10 @@ async fn b2_p3_trust_waiting_persists_plan_question_and_skips_compile() {
     assert_eq!(fact.plan_id.as_deref(), Some(plan_id.as_str()));
     assert_eq!(fact.session_id.as_deref(), Some(session_id.as_str()));
     assert_eq!(fact.reason_code, "b2_p3_fixture_home_failure");
-    assert_eq!(fact.gate_id, None, "trust 停点无 durable 门 id，不伪造 focus");
+    assert_eq!(
+        fact.gate_id, None,
+        "trust 停点无 durable 门 id，不伪造 focus"
+    );
     assert_eq!(fact.attempt_id, None);
     assert!(!fact.occurred_at.is_empty());
 }
@@ -333,14 +341,20 @@ async fn b2_p3_trust_waiting_repeats_stably_with_frozen_occurred_at() {
 
     // 第一次停等：落事实。
     fixture.trust.script_waiting("b2_p3_fixture_home_failure");
-    fixture.engine.enter_policy_valid_work_item_plan_compile().await;
+    fixture
+        .engine
+        .enter_policy_valid_work_item_plan_compile()
+        .await;
     let first = b2_p3_facts(&store);
     assert_eq!(first.len(), 1, "停等落一条事实：{first:?}");
     let occurred_at = first[0].occurred_at.clone();
 
     // 重复停等：同 key 不增项、occurred_at 首次冻结。
     fixture.trust.script_waiting("b2_p3_fixture_home_failure");
-    fixture.engine.enter_policy_valid_work_item_plan_compile().await;
+    fixture
+        .engine
+        .enter_policy_valid_work_item_plan_compile()
+        .await;
     let second = b2_p3_facts(&store);
     assert_eq!(second.len(), 1, "同 key 重复 upsert 不增项");
     assert_eq!(second[0].key, expected_key);
@@ -386,7 +400,10 @@ async fn b2_p3_trust_ready_resolves_fact_and_auto_confirms() {
         .expect("pre-seed waiting fact");
     assert_eq!(b2_p3_facts(&store).len(), 1);
 
-    fixture.engine.enter_policy_valid_work_item_plan_compile().await;
+    fixture
+        .engine
+        .enter_policy_valid_work_item_plan_compile()
+        .await;
 
     let durable = fixture
         .lifecycle
@@ -427,7 +444,10 @@ async fn b2_p3_manual_and_misbound_plans_write_no_attention_fact() {
     {
         let mut fixture = b2_p3_trust_engine(RunPolicy::AutoIfValid);
         fixture.trust.script_waiting("b2_p3_fixture_home_failure");
-        fixture.engine.enter_policy_valid_work_item_plan_compile().await;
+        fixture
+            .engine
+            .enter_policy_valid_work_item_plan_compile()
+            .await;
         assert_eq!(fixture.engine.session().stage, WorkspaceStage::HumanConfirm);
         let store = IssueAutomationStore::new(fixture.app_paths.clone());
         assert_eq!(
@@ -442,7 +462,10 @@ async fn b2_p3_manual_and_misbound_plans_write_no_attention_fact() {
         let plan_id = fixture.engine.session().entity_id.clone();
         b2_p3_enable_and_bind(&fixture.app_paths, &plan_id, "workspace_session_foreign");
         fixture.trust.script_waiting("b2_p3_fixture_home_failure");
-        fixture.engine.enter_policy_valid_work_item_plan_compile().await;
+        fixture
+            .engine
+            .enter_policy_valid_work_item_plan_compile()
+            .await;
         assert!(
             b2_p3_facts(&IssueAutomationStore::new(fixture.app_paths.clone())).is_empty(),
             "错绑会话零写入"
@@ -490,7 +513,9 @@ async fn b2_p3_compile_recovery_gate_upserts_fact_and_resolves_on_continue() {
     );
     let plan_store = engine.work_item_plan_store().unwrap();
     plan_store.put_compile_transaction(&compile_tx).unwrap();
-    engine.compile_initial_plan_revision(&accepted_drafts).unwrap();
+    engine
+        .compile_initial_plan_revision(&accepted_drafts)
+        .unwrap();
     compile_tx.status = WorkItemPlanCompileStatus::RecoveryRequired;
     compile_tx.failure_reason = Some("simulated crash after active plan".to_string());
     plan_store.put_compile_transaction(&compile_tx).unwrap();
@@ -561,7 +586,10 @@ async fn b2_p3_attention_fact_write_failure_surfaces_engine_error() {
     .expect("corrupt enrollment for write failure");
     fixture.trust.script_waiting("b2_p3_fixture_home_failure");
 
-    fixture.engine.enter_policy_valid_work_item_plan_compile().await;
+    fixture
+        .engine
+        .enter_policy_valid_work_item_plan_compile()
+        .await;
 
     assert_eq!(
         fixture.engine.session().stage,
@@ -570,7 +598,9 @@ async fn b2_p3_attention_fact_write_failure_surfaces_engine_error() {
     );
     let errors = b2_p3_collect_errors(&mut fixture.event_rx);
     assert!(
-        errors.iter().any(|message| message.contains("plan_question")),
+        errors
+            .iter()
+            .any(|message| message.contains("plan_question")),
         "事实写失败必须上抛：{errors:?}"
     );
 }
@@ -597,7 +627,10 @@ async fn b2_p3_manual_require_execution_plan_confirm_true_survives_auto_confirm(
     )
     .expect("flip plan options to manual confirm gate");
 
-    fixture.engine.enter_policy_valid_work_item_plan_compile().await;
+    fixture
+        .engine
+        .enter_policy_valid_work_item_plan_compile()
+        .await;
 
     let durable = fixture
         .lifecycle
@@ -662,10 +695,7 @@ async fn b2_p3_trust_waiting_then_human_gate_close_approve_confirms() {
         event_tx,
         session,
     )
-    .with_logical_provider_gateway(b2_p3_presence_gateway(
-        &app_paths,
-        gateway_root,
-    ));
+    .with_logical_provider_gateway(b2_p3_presence_gateway(&app_paths, gateway_root));
 
     // trust 非 Ready：停等落门（k3 F1 修复：落门前补建 SC 门快照）。
     engine.enter_policy_valid_work_item_plan_compile().await;

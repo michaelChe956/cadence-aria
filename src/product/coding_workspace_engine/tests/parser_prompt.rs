@@ -961,7 +961,9 @@ async fn rendered_coding_prompt_carries_platform_directives() {
         .unwrap();
 
     // 渲染路径成立佐证：unit run 落盘且执行上下文哈希已绑定。
-    let run = store.get_active_unit_run(&coded).expect("rendered unit run");
+    let run = store
+        .get_active_unit_run(&coded)
+        .expect("rendered unit run");
     assert!(
         run.coder_execution_context_hash.is_some(),
         "渲染路径必须绑定执行上下文哈希"

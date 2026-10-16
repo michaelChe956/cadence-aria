@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::{StableFileLock, with_exact_exclusive_lock};
 use crate::product::entity_deletion_store::{
-    DeletionPhase, EntityDeletionRecord, EntityScope,
-    entity_deletion_record_path, issue_entity_operations_root, read_json_if_exists,
+    DeletionPhase, EntityDeletionRecord, EntityScope, entity_deletion_record_path,
+    issue_entity_operations_root, read_json_if_exists,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::json_store::{ProductStoreError, write_json};
@@ -275,8 +275,14 @@ impl EntityOperationStore {
     /// 全项目 workspace session ID 分配：现全项目 session 最大序号与耐久高水位
     /// 取 max 再 +1；分配即持久化高水位，已分配（含已删实体）ID 不复用。
     pub fn allocate_workspace_session_id(&self) -> Result<String, ProductStoreError> {
-        let marker_path = self.paths.state_root().join("entity-session-high-water.json");
-        let lock_path = self.paths.state_root().join("entity-session-high-water.lock");
+        let marker_path = self
+            .paths
+            .state_root()
+            .join("entity-session-high-water.json");
+        let lock_path = self
+            .paths
+            .state_root()
+            .join("entity-session-high-water.lock");
         with_exact_exclusive_lock(&lock_path, || {
             let scan_max = scan_workspace_session_sequence(&self.paths.projects_root())?;
             let marker_high = read_json_if_exists::<WorkspaceSessionHighWater>(&marker_path)?
@@ -322,15 +328,16 @@ impl EntityOperationStore {
     }
 
     /// 反查会话归属：missing/歧义/墓碑 fail-closed（不做 live 授权）。
-    pub fn scope_for_workspace_session(&self, session_id: &str) -> Result<EntityScope, ProductStoreError> {
+    pub fn scope_for_workspace_session(
+        &self,
+        session_id: &str,
+    ) -> Result<EntityScope, ProductStoreError> {
         let binding_path = session_identity_binding_path(&self.paths, session_id)?;
-        let binding =
-            read_json_if_exists::<WorkspaceSessionIdentityBinding>(&binding_path)?.ok_or_else(
-                || ProductStoreError::NotFound {
-                    kind: "workspace_session_binding",
-                    id: session_id.to_string(),
-                },
-            )?;
+        let binding = read_json_if_exists::<WorkspaceSessionIdentityBinding>(&binding_path)?
+            .ok_or_else(|| ProductStoreError::NotFound {
+                kind: "workspace_session_binding",
+                id: session_id.to_string(),
+            })?;
         let record_path = entity_deletion_record_path(&self.paths, &binding.scope)?;
         if read_json_if_exists::<EntityDeletionRecord>(&record_path)?.is_some() {
             return Err(ProductStoreError::Conflict {
@@ -350,7 +357,11 @@ impl EntityOperationStore {
     ) -> Result<Vec<String>, ProductStoreError> {
         scope.validate()?;
         let mut ids = BTreeSet::new();
-        let bindings_root = self.paths.state_root().join("entity-identity").join("sessions");
+        let bindings_root = self
+            .paths
+            .state_root()
+            .join("entity-identity")
+            .join("sessions");
         for entry in child_directory_files(&bindings_root)? {
             let file_name = entry.file_name();
             let Some(name) = file_name.to_str() else {
@@ -366,10 +377,9 @@ impl EntityOperationStore {
                 _ => {}
             }
         }
-        let owned = crate::product::entity_deletion_store::EntityDeletionStore::new(
-            self.paths.clone(),
-        )
-        .list_owned_artifact_ids(scope)?;
+        let owned =
+            crate::product::entity_deletion_store::EntityDeletionStore::new(self.paths.clone())
+                .list_owned_artifact_ids(scope)?;
         ids.extend(owned.session_ids);
         Ok(ids.into_iter().collect())
     }
@@ -377,14 +387,15 @@ impl EntityOperationStore {
     /// list-by-owner（§0.5）：纯 ID/scope 占用索引
     /// （`EntityDeletionStore::index_owned_artifact_ids` 落盘）的 work_item_ids；
     /// root/pending 均缺后仍可反查。
-    pub fn list_child_entity_ids_by_owner(&self, scope: &EntityScope) -> Result<Vec<String>, ProductStoreError> {
+    pub fn list_child_entity_ids_by_owner(
+        &self,
+        scope: &EntityScope,
+    ) -> Result<Vec<String>, ProductStoreError> {
         scope.validate()?;
         Ok(
-            crate::product::entity_deletion_store::EntityDeletionStore::new(
-                self.paths.clone(),
-            )
-            .list_owned_artifact_ids(scope)?
-            .work_item_ids,
+            crate::product::entity_deletion_store::EntityDeletionStore::new(self.paths.clone())
+                .list_owned_artifact_ids(scope)?
+                .work_item_ids,
         )
     }
 
@@ -455,11 +466,18 @@ fn child_directories(root: &Path) -> Result<Vec<PathBuf>, ProductStoreError> {
 /// 目录内文件枚举：NotFound=空；其余 IO 错误必报。
 fn child_directory_files(root: &Path) -> Result<Vec<std::fs::DirEntry>, ProductStoreError> {
     Ok(child_entries(root)?
-        .filter(|entry| entry.file_type().map(|kind| kind.is_file()).unwrap_or(false))
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+        })
         .collect())
 }
 
-fn child_entries(root: &Path) -> Result<impl Iterator<Item = std::fs::DirEntry>, ProductStoreError> {
+fn child_entries(
+    root: &Path,
+) -> Result<impl Iterator<Item = std::fs::DirEntry>, ProductStoreError> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -469,7 +487,7 @@ fn child_entries(root: &Path) -> Result<impl Iterator<Item = std::fs::DirEntry>,
             return Err(ProductStoreError::Io(format!(
                 "read {}: {error}",
                 root.display()
-            )))
+            )));
         }
     };
     Ok(entries
@@ -482,7 +500,10 @@ fn child_entries(root: &Path) -> Result<impl Iterator<Item = std::fs::DirEntry>,
         .into_iter())
 }
 
-fn scope_lock_path(paths: &ProductAppPaths, scope: &EntityScope) -> Result<PathBuf, ProductStoreError> {
+fn scope_lock_path(
+    paths: &ProductAppPaths,
+    scope: &EntityScope,
+) -> Result<PathBuf, ProductStoreError> {
     Ok(issue_entity_operations_root(paths, scope)?
         .join("scope-locks")
         .join(scope.kind.path_segment())
@@ -530,7 +551,10 @@ fn entity_identity_reservation_path(
         .join(format!("{}.json", scope.entity_id)))
 }
 
-fn session_identity_binding_path(paths: &ProductAppPaths, session_id: &str) -> Result<PathBuf, ProductStoreError> {
+fn session_identity_binding_path(
+    paths: &ProductAppPaths,
+    session_id: &str,
+) -> Result<PathBuf, ProductStoreError> {
     crate::product::json_store::validate_relative_id(session_id)?;
     Ok(paths
         .state_root()
@@ -565,7 +589,7 @@ mod tests {
         ExclusiveFileLock, register_exact_lock_attempt_hook,
     };
     use crate::product::entity_deletion_store::{
-        DeletionEntityKind, EntityDeletionStore, EntityDeletionManifest,
+        DeletionEntityKind, EntityDeletionManifest, EntityDeletionStore,
     };
 
     fn test_paths() -> (tempfile::TempDir, ProductAppPaths) {
@@ -575,7 +599,12 @@ mod tests {
     }
 
     fn plan_scope(entity_id: &str) -> EntityScope {
-        EntityScope::new("project_0001", "issue_0001", DeletionEntityKind::Plan, entity_id)
+        EntityScope::new(
+            "project_0001",
+            "issue_0001",
+            DeletionEntityKind::Plan,
+            entity_id,
+        )
     }
 
     #[test]
@@ -666,7 +695,9 @@ mod tests {
         let scope = plan_scope("plan_0003");
 
         let run = operations.acquire_run(&scope).expect("first run lease");
-        let second_run = operations.acquire_run(&scope).expect("shared run lease coexists");
+        let second_run = operations
+            .acquire_run(&scope)
+            .expect("shared run lease coexists");
 
         // run 持共享时删除 try-exclusive → Busy（entity_busy fail-fast）。
         assert!(matches!(
@@ -685,10 +716,8 @@ mod tests {
         let scope_lock = scope_lock_path(&paths, &scope).expect("scope lock path");
         let (_hook, attempts) = register_exact_lock_attempt_hook(&scope_lock);
         let artifact = paths.root().join("admitted-artifact.json");
-        run.with_admitted_write(|| {
-            write_json(&artifact, &serde_json::json!({"committed": true}))
-        })
-        .expect("admitted write commits under object lock");
+        run.with_admitted_write(|| write_json(&artifact, &serde_json::json!({"committed": true})))
+            .expect("admitted write commits under object lock");
         let committed: serde_json::Value =
             crate::product::json_store::read_json(&artifact).expect("read admitted artifact");
         assert_eq!(committed["committed"], serde_json::json!(true));
@@ -786,7 +815,9 @@ mod tests {
         ));
 
         // 纯 ID 占用索引（删除重入/归属反查的固定来源）。
-        let lease = operations.try_acquire_delete(&scope_a).expect("delete lease");
+        let lease = operations
+            .try_acquire_delete(&scope_a)
+            .expect("delete lease");
         let manifest = EntityDeletionManifest {
             session_ids: vec![
                 "workspace_session_0001".to_string(),
@@ -821,10 +852,12 @@ mod tests {
                 .expect("list children for scope a"),
             vec!["work_item_a1".to_string(), "work_item_a2".to_string()]
         );
-        assert!(operations
-            .list_child_entity_ids_by_owner(&scope_b)
-            .expect("list children for scope b")
-            .is_empty());
+        assert!(
+            operations
+                .list_child_entity_ids_by_owner(&scope_b)
+                .expect("list children for scope b")
+                .is_empty()
+        );
 
         // 反查：missing fail-closed。
         assert_eq!(
@@ -881,11 +914,8 @@ mod tests {
             .issue_root("project_0002", "issue_0007")
             .join("workspace-sessions");
         std::fs::create_dir_all(&sessions_root).expect("create sessions root");
-        std::fs::write(
-            sessions_root.join("workspace_session_0007.json"),
-            "{}",
-        )
-        .expect("seed session file");
+        std::fs::write(sessions_root.join("workspace_session_0007.json"), "{}")
+            .expect("seed session file");
         assert_eq!(
             operations
                 .allocate_workspace_session_id()

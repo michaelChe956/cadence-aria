@@ -5,9 +5,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
-use crate::product::entity_deletion_store::{
-    DeletionEntityKind, EntityDeletionStore, EntityScope,
-};
+use crate::product::entity_deletion_store::{DeletionEntityKind, EntityDeletionStore, EntityScope};
 use crate::product::entity_operation_store::EntityOperationStore;
 use crate::product::id::{next_sequential_id, next_sequential_id_in_directory};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
@@ -443,74 +441,75 @@ impl LifecycleStore {
         let parent_scope = self.entity_scope_for_session(&parent)?;
         self.with_optional_entity_live_write(parent_scope.as_ref(), || {
             with_exclusive_lock(&event_path, || {
-            if path_exists(&event_path)? {
-                let event: HumanGateTakeoverEvent = read_json(&event_path)?;
-                if event.id != event_id || event.parent_session_id != parent.id {
-                    return Err(ProductStoreError::IdentityMismatch {
-                        kind: "human_gate_takeover",
-                        id: event_id.clone(),
-                    });
+                if path_exists(&event_path)? {
+                    let event: HumanGateTakeoverEvent = read_json(&event_path)?;
+                    if event.id != event_id || event.parent_session_id != parent.id {
+                        return Err(ProductStoreError::IdentityMismatch {
+                            kind: "human_gate_takeover",
+                            id: event_id.clone(),
+                        });
+                    }
+                    return self.get_workspace_session(&event.child_session_id);
                 }
-                return self.get_workspace_session(&event.child_session_id);
-            }
 
-            let child_id = format!("workspace_session_takeover_{}", parent.id);
-            let mut child = self.create_workspace_session_with_id(
-                CreateWorkspaceSessionInput {
-                    project_id: parent.project_id.clone(),
-                    issue_id: parent.issue_id.clone(),
-                    entity_id: parent.entity_id.clone(),
-                    workspace_type: WorkspaceType::WorkItemPlan,
-                    author_provider: parent.author_provider.clone(),
-                    reviewer_provider: parent.reviewer_provider.clone(),
-                    review_rounds: parent.review_rounds,
-                    superpowers_enabled: parent.superpowers_enabled,
-                    openspec_enabled: parent.openspec_enabled,
-                    work_item_plan_options: Some(super::WorkItemPlanSessionOptions {
-                        flow_kind: parent.flow_kind,
-                        run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
-                        rollout_snapshot: false,
-                    }),
-                },
-                child_id,
-            )?;
+                let child_id = format!("workspace_session_takeover_{}", parent.id);
+                let mut child = self.create_workspace_session_with_id(
+                    CreateWorkspaceSessionInput {
+                        project_id: parent.project_id.clone(),
+                        issue_id: parent.issue_id.clone(),
+                        entity_id: parent.entity_id.clone(),
+                        workspace_type: WorkspaceType::WorkItemPlan,
+                        author_provider: parent.author_provider.clone(),
+                        reviewer_provider: parent.reviewer_provider.clone(),
+                        review_rounds: parent.review_rounds,
+                        superpowers_enabled: parent.superpowers_enabled,
+                        openspec_enabled: parent.openspec_enabled,
+                        work_item_plan_options: Some(super::WorkItemPlanSessionOptions {
+                            flow_kind: parent.flow_kind,
+                            run_policy:
+                                crate::product::work_item_plan_policy::RunPolicy::Interactive,
+                            rollout_snapshot: false,
+                        }),
+                    },
+                    child_id,
+                )?;
 
-            // A stopped auto session is the immutable source of truth for the
-            // interactive successor. Copy only resumable context and remaining
-            // budget; never copy a provider-start or in-flight reservation.
-            child.status = WorkspaceSessionStatus::WaitingForHuman;
-            child.permission_modes = parent.permission_modes.clone();
-            child.provisional_reviewer_provider = parent.provisional_reviewer_provider.clone();
-            child.reviewer_enabled_at_start = parent.reviewer_enabled_at_start;
-            child.run_history = parent.run_history.clone();
-            child.review_invocation_scope = parent.review_invocation_scope.clone();
-            child.human_gate_snapshot = parent.human_gate_snapshot.clone();
-            child.policy_diagnostics = parent.policy_diagnostics.clone();
-            child.single_candidate_phase = parent.single_candidate_phase;
-            child.work_item_plan_source_revision_ref =
-                parent.work_item_plan_source_revision_ref.clone();
-            child.plan_candidate_ir_ref = parent.plan_candidate_ir_ref.clone();
-            child.mechanical_report_ref = parent.mechanical_report_ref.clone();
-            child.publication_provenance_ref = parent.publication_provenance_ref.clone();
-            child.messages = parent.messages.clone();
-            child.provider_conversations = parent.provider_conversations.clone();
-            child.repair_reservation = None;
-            child.human_gate_reservation = None;
-            child.provider_start_ledger = Vec::new();
-            child.updated_at = Utc::now().to_rfc3339();
-            let child_path = self
-                .workspace_sessions_root(&parent.project_id, &parent.issue_id)
-                .join(format!("{}.json", child.id));
-            write_json(&child_path, &child)?;
+                // A stopped auto session is the immutable source of truth for the
+                // interactive successor. Copy only resumable context and remaining
+                // budget; never copy a provider-start or in-flight reservation.
+                child.status = WorkspaceSessionStatus::WaitingForHuman;
+                child.permission_modes = parent.permission_modes.clone();
+                child.provisional_reviewer_provider = parent.provisional_reviewer_provider.clone();
+                child.reviewer_enabled_at_start = parent.reviewer_enabled_at_start;
+                child.run_history = parent.run_history.clone();
+                child.review_invocation_scope = parent.review_invocation_scope.clone();
+                child.human_gate_snapshot = parent.human_gate_snapshot.clone();
+                child.policy_diagnostics = parent.policy_diagnostics.clone();
+                child.single_candidate_phase = parent.single_candidate_phase;
+                child.work_item_plan_source_revision_ref =
+                    parent.work_item_plan_source_revision_ref.clone();
+                child.plan_candidate_ir_ref = parent.plan_candidate_ir_ref.clone();
+                child.mechanical_report_ref = parent.mechanical_report_ref.clone();
+                child.publication_provenance_ref = parent.publication_provenance_ref.clone();
+                child.messages = parent.messages.clone();
+                child.provider_conversations = parent.provider_conversations.clone();
+                child.repair_reservation = None;
+                child.human_gate_reservation = None;
+                child.provider_start_ledger = Vec::new();
+                child.updated_at = Utc::now().to_rfc3339();
+                let child_path = self
+                    .workspace_sessions_root(&parent.project_id, &parent.issue_id)
+                    .join(format!("{}.json", child.id));
+                write_json(&child_path, &child)?;
 
-            let event = HumanGateTakeoverEvent {
-                id: event_id,
-                parent_session_id: parent.id.clone(),
-                child_session_id: child.id.clone(),
-                created_at: Utc::now().to_rfc3339(),
-            };
-            write_json(&event_path, &event)?;
-            Ok(child)
+                let event = HumanGateTakeoverEvent {
+                    id: event_id,
+                    parent_session_id: parent.id.clone(),
+                    child_session_id: child.id.clone(),
+                    created_at: Utc::now().to_rfc3339(),
+                };
+                write_json(&event_path, &event)?;
+                Ok(child)
             })
         })
     }
@@ -877,13 +876,9 @@ impl LifecycleStore {
         self.with_optional_entity_live_write(scope.as_ref(), move || {
             with_exclusive_lock(&session_path, || {
                 let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
-                if session
-                    .provider_start_ledger
-                    .iter()
-                    .any(|entry| {
-                        entry.provider_start_idempotency_key == provider_start_idempotency_key
-                    })
-                {
+                if session.provider_start_ledger.iter().any(|entry| {
+                    entry.provider_start_idempotency_key == provider_start_idempotency_key
+                }) {
                     return Ok(false);
                 }
                 session.provider_start_ledger.push(
@@ -964,69 +959,69 @@ impl LifecycleStore {
         }
         let (session_path, scope) = self.resolve_session_scope(session_id)?;
         self.with_optional_entity_live_write(scope.as_ref(), move || {
-        with_exclusive_lock(&session_path, || {
-            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
-            // ① recovery 身份：缺失/被替换 → Stale。
-            let Some(recovery) = session.lc_resume_recovery.as_ref() else {
-                return Ok(LcFreshClaimOutcome::Stale {
-                    reason_code: LcFreshClaimOutcome::STALE_NO_RECOVERY.to_string(),
-                });
-            };
-            if recovery.recovery_id != recovery_id {
-                return Ok(LcFreshClaimOutcome::Stale {
-                    reason_code: LcFreshClaimOutcome::STALE_SUPERSEDED.to_string(),
-                });
-            }
-            // ② 同 ID 已受理先 Replay：先于一切 waiting/busy/resolved 判定，
-            //    只读 durable 事实，不 spawn、不等待 engine mutex。
-            if let Some(operation) = recovery
-                .fresh_operations
-                .iter()
-                .find(|operation| operation.operation_id == operation_id)
-            {
-                return Ok(LcFreshClaimOutcome::Replay {
-                    operation: operation.clone(),
-                    recovery_state: recovery.state,
-                });
-            }
-            // ③ 仅新 operation_id 才按 recovery 状态机分类。
-            match recovery.state {
-                LcResumeRecoveryState::FreshReserved | LcResumeRecoveryState::FreshRunning => {
-                    return Ok(LcFreshClaimOutcome::Busy {
-                        active_operation_id: recovery.operation_id.clone(),
-                    });
-                }
-                LcResumeRecoveryState::Resolved => {
+            with_exclusive_lock(&session_path, || {
+                let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+                // ① recovery 身份：缺失/被替换 → Stale。
+                let Some(recovery) = session.lc_resume_recovery.as_ref() else {
                     return Ok(LcFreshClaimOutcome::Stale {
-                        reason_code: LcFreshClaimOutcome::STALE_RESOLVED.to_string(),
+                        reason_code: LcFreshClaimOutcome::STALE_NO_RECOVERY.to_string(),
+                    });
+                };
+                if recovery.recovery_id != recovery_id {
+                    return Ok(LcFreshClaimOutcome::Stale {
+                        reason_code: LcFreshClaimOutcome::STALE_SUPERSEDED.to_string(),
                     });
                 }
-                LcResumeRecoveryState::Waiting => {}
-            }
-            let now = Utc::now().to_rfc3339();
-            let operation = LcFreshOperationResult {
-                operation_id: operation_id.to_string(),
-                state: LcFreshOperationState::Reserved,
-                fresh_node_id: None,
-                reason_code: None,
-                role_run_seq: None,
-                accepted_at: now.clone(),
-                updated_at: now.clone(),
-            };
-            let recovery = session
-                .lc_resume_recovery
-                .as_mut()
-                .expect("lc resume recovery presence checked above");
-            recovery.state = LcResumeRecoveryState::FreshReserved;
-            recovery.operation_id = Some(operation_id.to_string());
-            recovery.fresh_operations.push(operation.clone());
-            recovery.updated_at = now.clone();
-            session.updated_at = now;
-            write_json(&session_path, &session)?;
-            Ok(LcFreshClaimOutcome::Claimed {
-                record: session,
-                operation,
-            })
+                // ② 同 ID 已受理先 Replay：先于一切 waiting/busy/resolved 判定，
+                //    只读 durable 事实，不 spawn、不等待 engine mutex。
+                if let Some(operation) = recovery
+                    .fresh_operations
+                    .iter()
+                    .find(|operation| operation.operation_id == operation_id)
+                {
+                    return Ok(LcFreshClaimOutcome::Replay {
+                        operation: operation.clone(),
+                        recovery_state: recovery.state,
+                    });
+                }
+                // ③ 仅新 operation_id 才按 recovery 状态机分类。
+                match recovery.state {
+                    LcResumeRecoveryState::FreshReserved | LcResumeRecoveryState::FreshRunning => {
+                        return Ok(LcFreshClaimOutcome::Busy {
+                            active_operation_id: recovery.operation_id.clone(),
+                        });
+                    }
+                    LcResumeRecoveryState::Resolved => {
+                        return Ok(LcFreshClaimOutcome::Stale {
+                            reason_code: LcFreshClaimOutcome::STALE_RESOLVED.to_string(),
+                        });
+                    }
+                    LcResumeRecoveryState::Waiting => {}
+                }
+                let now = Utc::now().to_rfc3339();
+                let operation = LcFreshOperationResult {
+                    operation_id: operation_id.to_string(),
+                    state: LcFreshOperationState::Reserved,
+                    fresh_node_id: None,
+                    reason_code: None,
+                    role_run_seq: None,
+                    accepted_at: now.clone(),
+                    updated_at: now.clone(),
+                };
+                let recovery = session
+                    .lc_resume_recovery
+                    .as_mut()
+                    .expect("lc resume recovery presence checked above");
+                recovery.state = LcResumeRecoveryState::FreshReserved;
+                recovery.operation_id = Some(operation_id.to_string());
+                recovery.fresh_operations.push(operation.clone());
+                recovery.updated_at = now.clone();
+                session.updated_at = now;
+                write_json(&session_path, &session)?;
+                Ok(LcFreshClaimOutcome::Claimed {
+                    record: session,
+                    operation,
+                })
             })
         })
     }
@@ -1064,29 +1059,29 @@ impl LifecycleStore {
         let cas_scope = self.entity_scope_for_session(expected)?;
         self.with_optional_entity_live_write(cas_scope.as_ref(), move || {
             let session_path = self.find_workspace_session_path(&expected.id)?;
-        with_exclusive_lock(&session_path, || {
-            let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
-            if stored != *expected {
-                return Err(ProductStoreError::IdentityMismatch {
-                    kind: "workspace_session",
-                    id: expected.id.clone(),
-                });
-            }
-            if stored.status == status {
-                return Ok(stored);
-            }
-            // 批 2 T2（REQ-WIGA-09）：CAS Terminated 不覆盖已 Confirmed——
-            // 人工确认是比终止 CAS 更晚的最终事实，幂等保留 Confirmed。
-            if status == WorkspaceSessionStatus::Terminated
-                && stored.status == WorkspaceSessionStatus::Confirmed
-            {
-                return Ok(stored);
-            }
-            stored.status = status;
-            stored.updated_at = Utc::now().to_rfc3339();
-            write_json(&session_path, &stored)?;
-            Ok(stored)
-        })
+            with_exclusive_lock(&session_path, || {
+                let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
+                if stored != *expected {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "workspace_session",
+                        id: expected.id.clone(),
+                    });
+                }
+                if stored.status == status {
+                    return Ok(stored);
+                }
+                // 批 2 T2（REQ-WIGA-09）：CAS Terminated 不覆盖已 Confirmed——
+                // 人工确认是比终止 CAS 更晚的最终事实，幂等保留 Confirmed。
+                if status == WorkspaceSessionStatus::Terminated
+                    && stored.status == WorkspaceSessionStatus::Confirmed
+                {
+                    return Ok(stored);
+                }
+                stored.status = status;
+                stored.updated_at = Utc::now().to_rfc3339();
+                write_json(&session_path, &stored)?;
+                Ok(stored)
+            })
         })
     }
 
@@ -1167,7 +1162,8 @@ impl LifecycleStore {
     fn next_workspace_session_id(&self) -> Result<String, ProductStoreError> {
         // D1.3a：全项目 session 最大序号与耐久高水位取 max 再增（D1.0
         // `allocate_workspace_session_id`）；已分配（含已删实体）ID 不复用。
-        self.entity_operation_store().allocate_workspace_session_id()
+        self.entity_operation_store()
+            .allocate_workspace_session_id()
     }
 
     pub(super) fn find_workspace_session_path(
@@ -1291,7 +1287,8 @@ impl LifecycleStore {
         }
         ADMITTED_ENTITY_SCOPES.with(|admitted| admitted.borrow_mut().insert(scope.clone()));
         let _guard = AdmittedEntityScope(scope.clone());
-        self.entity_operation_store().with_live_write(scope, operation)
+        self.entity_operation_store()
+            .with_live_write(scope, operation)
     }
 
     /// 无法归属实体的旧档案保持原行为（None → 不准入，非授权放宽）。
@@ -1341,11 +1338,11 @@ impl LifecycleStore {
             store.with_entity_live_write(first, || nested(store, rest, operation))
         }
         let mut operation = Some(operation);
-        nested(
-            self,
-            &ordered,
-            &mut || (operation.take().expect("entity admission operation invoked once"))(),
-        )
+        nested(self, &ordered, &mut || {
+            (operation
+                .take()
+                .expect("entity admission operation invoked once"))()
+        })
     }
 
     /// session 记录 → 拥有实体 scope 归约（真实 parent/Plan binding，

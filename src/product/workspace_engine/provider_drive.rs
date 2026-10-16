@@ -221,9 +221,7 @@ impl WorkspaceEngine {
     /// 保留（旧客户端兼容）。`None` 时零发出（非 trust 错误不得误发）。
     pub(crate) async fn emit_launch_trust_guidance(
         &mut self,
-        waiting: Option<
-            crate::product::logical_codebase::provider_trust::ProviderTrustWaiting,
-        >,
+        waiting: Option<crate::product::logical_codebase::provider_trust::ProviderTrustWaiting>,
     ) {
         if let Some(waiting) = waiting {
             let _ = self
@@ -1049,17 +1047,16 @@ impl WorkspaceEngine {
         // checkpoint 的 scope guard 包实际 write——purging/deleted 会话拒绝且
         // checkpoints 目录不复活；非 persistent（无 lifecycle_store）保持原路径。
         let checkpoint = match &self.lifecycle_store {
-            Some(store) => store.with_workspace_session_live_write(
-                &self.session.session_id,
-                || {
+            Some(store) => {
+                store.with_workspace_session_live_write(&self.session.session_id, || {
                     self.checkpoint_store.create_checkpoint(
                         &self.session.session_id,
                         message_index,
                         artifact_snapshot,
                         WorkspaceStage::AuthorConfirm.as_str(),
                     )
-                },
-            ),
+                })
+            }
             None => self.checkpoint_store.create_checkpoint(
                 &self.session.session_id,
                 message_index,

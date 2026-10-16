@@ -3,12 +3,12 @@ use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
 use crate::product::entity_operation_store::{
     EntityOperationError, EntityOperationStore, EntityRunLease,
 };
+use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::lifecycle_store::{
     CompileReservationError, PolicyRoutePersist, single_candidate_approval_attempt_id,
     single_candidate_compile_id,
 };
 use crate::product::logical_codebase::LogicalRepositoryId;
-use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::models::automation::{
     AutomationAttentionFact, AutomationAttentionKind, AutomationAttentionStage,
     EnrollmentBindingIdentity,

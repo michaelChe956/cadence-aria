@@ -735,7 +735,6 @@ impl LifecycleStore {
         prompt: &str,
         structured_output: &serde_json::Value,
     ) -> Result<(), crate::product::json_store::ProductStoreError> {
-
         // D1.3b（fix-cascade-deletion plan Interfaces）：收口写按 handle 的
         // 真实 session 归属核 scope（不解析不透明 run_ref 猜路径）；
         // purging/deleted 拒绝收口，run 记录不被迟到写改写。
@@ -789,7 +788,6 @@ impl LifecycleStore {
         handle: &WorkItemSplitProviderRunHandle,
         reason: &str,
     ) -> Result<(), crate::product::json_store::ProductStoreError> {
-
         // D1.3b（fix-cascade-deletion plan Interfaces）：失败收口同样按 handle
         // 的真实 session 归属核 scope；purging/deleted 拒绝，run 记录字节不变。
         self.with_workspace_session_live_write(&handle.workspace_session_id, || {

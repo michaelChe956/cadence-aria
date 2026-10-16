@@ -573,9 +573,7 @@ impl WorkspaceEngine {
                 plan_options: &plan.options,
                 baseline_tree: baseline_tree.as_ref(),
                 existing_work_item_ids: &existing_work_item_ids,
-                enrollment_target: enrollment_binding
-                    .as_ref()
-                    .map(|binding| &binding.target),
+                enrollment_target: enrollment_binding.as_ref().map(|binding| &binding.target),
                 member_targets: validation_member_targets,
                 now: &validation_now,
             },

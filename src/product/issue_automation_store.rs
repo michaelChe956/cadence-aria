@@ -107,11 +107,9 @@ impl IssueAutomationStore {
                 // 批 2 T1（REQ-WIGA-09）：terminated 是不可恢复终态——
                 // Enable（含同 payload 幂等面）/Disable 一律 Conflict 零副
                 // 作用；终止命令重放只走 terminate_plan 的账本分支。
-                (Some(saved), _) if saved.terminated_at.is_some() => {
-                    CasResolution::Conflict {
-                        current_revision: Some(saved.policy_revision),
-                    }
-                }
+                (Some(saved), _) if saved.terminated_at.is_some() => CasResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                },
                 (
                     Some(saved),
                     EnrollmentWriteCommand::Enable {
@@ -547,8 +545,7 @@ impl IssueAutomationStore {
                 .find(|entry| entry.command_id == request.command_id)
             {
                 if ledger.payload_digest == digest {
-                    let terminated_at =
-                        saved.terminated_at.clone().unwrap_or_default();
+                    let terminated_at = saved.terminated_at.clone().unwrap_or_default();
                     return Ok(TerminationResolution::Replayed {
                         command_id: request.command_id.clone(),
                         terminated_at,

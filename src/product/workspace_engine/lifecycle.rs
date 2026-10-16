@@ -946,12 +946,11 @@ impl WorkspaceEngine {
         let session_id = self.session.session_id.clone();
         let project_id = self.session.project_id.clone();
         let issue_id = self.session.issue_id.clone();
-        let context_waiting = |reason_code: &str, message: String| {
-            ExplicitTrustRegistrationContextWaiting {
+        let context_waiting =
+            |reason_code: &str, message: String| ExplicitTrustRegistrationContextWaiting {
                 reason_code: reason_code.to_string(),
                 message,
-            }
-        };
+            };
 
         // LC 会话（已注入 gateway）：确认链同一 authority。
         if self.logical_provider_gateway.is_some() {
@@ -980,20 +979,18 @@ impl WorkspaceEngine {
             let app_paths = store.app_paths();
             // 漂移重验（与确认链同序同判据）：issue 原始 LC 归属未变、
             // 冻结根可 canonicalize、同 scope manifest 根与冻结根一致。
-            let current_issue_lc = resolve_issue_logical_codebase_id(
-                &app_paths,
-                &project_id,
-                &issue_id,
-            )
-            .map_err(|error| {
-                context_waiting(
-                    "trust_registration_context_unavailable",
-                    format!(
-                        "重解析 issue 原始 LC 归属失败（issue store IO：{error}）；\
+            let current_issue_lc =
+                resolve_issue_logical_codebase_id(&app_paths, &project_id, &issue_id).map_err(
+                    |error| {
+                        context_waiting(
+                            "trust_registration_context_unavailable",
+                            format!(
+                                "重解析 issue 原始 LC 归属失败（issue store IO：{error}）；\
                          登记停等，未触碰 home。"
-                    ),
-                )
-            })?;
+                            ),
+                        )
+                    },
+                )?;
             if current_issue_lc != issue_lc_id {
                 return Err(context_waiting(
                     "trust_registration_scope_changed",
@@ -1032,8 +1029,8 @@ impl WorkspaceEngine {
                     "同 scope LC manifest 已缺失，无法复验与冻结根一致；登记停等。".to_string(),
                 ));
             };
-            let canonical_manifest_root =
-                std::fs::canonicalize(&manifest.provider_context_root).map_err(|error| {
+            let canonical_manifest_root = std::fs::canonicalize(&manifest.provider_context_root)
+                .map_err(|error| {
                     context_waiting(
                         "trust_registration_root_changed",
                         format!(
@@ -1069,8 +1066,7 @@ impl WorkspaceEngine {
         let Some(repository_path) = self.session.repository_path.clone() else {
             return Err(context_waiting(
                 "trust_registration_root_unavailable",
-                "单仓会话缺少 repository 根，无法解析登记目标；登记停等，未触碰 home。"
-                    .to_string(),
+                "单仓会话缺少 repository 根，无法解析登记目标；登记停等，未触碰 home。".to_string(),
             ));
         };
         let canonical_root = std::fs::canonicalize(&repository_path).map_err(|error| {

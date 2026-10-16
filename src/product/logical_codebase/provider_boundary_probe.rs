@@ -1569,8 +1569,8 @@ pub(crate) fn boundary_probe_projection(
         PolicyTarget, ProviderDialect, SessionPolicyEnvelope,
     };
     use crate::product::logical_codebase::provider_gateway::ProviderRef;
-    use crate::product::logical_codebase::provider_projection::ProviderProjectionInput;
     use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector;
+    use crate::product::logical_codebase::provider_projection::ProviderProjectionInput;
 
     let action = fixture.boundary_action();
     let (dialect, mcp_source) = match &provider {
@@ -1666,7 +1666,8 @@ pub(crate) fn boundary_probe_projection(
 pub struct CliBoundaryProbeOutcome {
     pub evidence: ProviderBoundaryEvidence,
     pub projection: ProviderPolicyProjection,
-    pub record: crate::product::logical_codebase::provider_capability_store::ProviderCapabilityRecord,
+    pub record:
+        crate::product::logical_codebase::provider_capability_store::ProviderCapabilityRecord,
 }
 
 /// probe 签发证据对应的 2d 导入 record(与 6c 测试的 shape_validation_
@@ -1714,8 +1715,7 @@ pub(crate) fn probe_import_record(
         evidence: CapabilityEvidence::ProductionVerified,
         resume_evidence: ResumeEvidenceState::Unsupported,
         supported_actions: vec![action],
-        action_matrix: ProviderActionMatrix::from_rows(vec![row])
-            .expect("probe action rows"),
+        action_matrix: ProviderActionMatrix::from_rows(vec![row]).expect("probe action rows"),
         trust: ProviderCapabilityEvidence::Unknown,
         probed_at: Some(evidence.probed_at().to_string()),
         probe_artifact_ref: Some(evidence.artifact_ref().to_string()),
@@ -1754,8 +1754,9 @@ pub async fn run_cli_boundary_probe(
     let version = probe_cli_version(cli_program)?;
     let role = match action {
         SessionPolicyAction::CodingTargetWrite => crate::protocol::contracts::AdapterRole::Executor,
-        SessionPolicyAction::PlanningReadOnly
-        | SessionPolicyAction::ReviewReadOnly => crate::protocol::contracts::AdapterRole::Reviewer,
+        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
+            crate::protocol::contracts::AdapterRole::Reviewer
+        }
     };
     let projection = boundary_probe_projection(provider, &fixture, &version, role);
     let evidence = ProviderBoundaryProbe::run(&projection, &fixture).await?;
@@ -1869,7 +1870,6 @@ mod tests {
 
     use super::action_text;
     use super::boundary_probe_projection as probe_projection;
-
 
     /// 宿主侧 CLI 版本采集(与 probe 内部同一口径:trimmed 完整 stdout)。
     fn host_cli_version(cli: &str) -> String {
@@ -2337,7 +2337,10 @@ mod tests {
             "unit-planning-action-fixture",
         )
         .expect("fixture");
-        assert_eq!(planning.boundary_action(), SessionPolicyAction::PlanningReadOnly);
+        assert_eq!(
+            planning.boundary_action(),
+            SessionPolicyAction::PlanningReadOnly
+        );
         let coding = super::BoundaryFixture::create(
             ProviderName::ClaudeCode,
             "claude",
@@ -2347,7 +2350,10 @@ mod tests {
             "unit-coding-action-fixture",
         )
         .expect("fixture");
-        assert_eq!(coding.boundary_action(), SessionPolicyAction::CodingTargetWrite);
+        assert_eq!(
+            coding.boundary_action(),
+            SessionPolicyAction::CodingTargetWrite
+        );
     }
     #[tokio::test]
     async fn lcg_t06_external_cli_probe_entry_feeds_2d_import() {

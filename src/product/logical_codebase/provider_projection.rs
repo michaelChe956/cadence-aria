@@ -11,8 +11,8 @@
 //! (批次 D);digest 计算(固定字段序+长度分隔+schema 前缀)与 gateway
 //! 装配校验归 1b/1c;本文件只冻结 trait 与 DTO 形状。
 
-use std::sync::Arc;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::cross_cutting::provider_boundary::ProviderBoundaryPlan;
 use crate::cross_cutting::streaming_provider::{ProviderPermissionMode, ProviderToolPolicy};

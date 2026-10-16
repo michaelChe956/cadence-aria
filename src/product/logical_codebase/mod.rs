@@ -143,9 +143,9 @@ pub use provider_projection::{
 };
 pub use provider_trust::{
     HomeBackedProviderTrustRegistry, ProviderTrustAction, ProviderTrustError,
-    ProviderTrustScenario, ProviderTrustOwnership, ProviderTrustPrecondition,
-    ProviderTrustPreparationResult, ProviderTrustRegistration, ProviderTrustRegistrationResult,
-    ProviderTrustRegistry, ProviderTrustRevocation, ProviderTrustRevocationOutcome,
+    ProviderTrustOwnership, ProviderTrustPrecondition, ProviderTrustPreparationResult,
+    ProviderTrustRegistration, ProviderTrustRegistrationResult, ProviderTrustRegistry,
+    ProviderTrustRevocation, ProviderTrustRevocationOutcome, ProviderTrustScenario,
     ProviderTrustVerification, ProviderTrustWaiting, requires_workspace_trust,
 };
 pub use provider_trust_adapters::{

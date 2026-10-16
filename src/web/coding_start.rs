@@ -1235,9 +1235,7 @@ fn resolve_set_enrollment_member(
         Err(uuid_error) => {
             let scoped_lc =
                 match crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-                    paths,
-                    project_id,
-                    issue_id,
+                    paths, project_id, issue_id,
                 ) {
                     Ok(scoped) => scoped,
                     Err(_) => return Err(uuid_error),

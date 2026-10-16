@@ -18,7 +18,6 @@ use crate::product::coding_models::{
 use crate::product::models::WorkItemPlanLineage;
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 
-
 /// P3-a（REQ-COD-07）：跨仓上游交付的运行期解析结果——注入下游 coder
 /// 实际 prompt 的权威事实。全部字段取自权威 resolver 链（owner attempt 的
 /// worktree 与 handoff revision），是纯运行期 DTO：不序列化进 immutable
@@ -214,9 +213,7 @@ impl CodingWorkspaceEngine {
         &self,
         attempt: &CodingExecutionAttempt,
     ) -> Result<Vec<ResolvedUpstreamDelivery>, CodingWorkspaceEngineError> {
-        if attempt.scope != CodingAttemptScope::WorkItemGroup
-            || attempt.target_snapshot.is_none()
-        {
+        if attempt.scope != CodingAttemptScope::WorkItemGroup || attempt.target_snapshot.is_none() {
             return Ok(Vec::new());
         }
         let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
@@ -232,8 +229,8 @@ impl CodingWorkspaceEngine {
             return Ok(Vec::new());
         }
         let revision_store = WorkItemRevisionStore::new(self.store.paths());
-        let lineage = revision_store
-            .get_plan_lineage(&attempt.project_id, &attempt.issue_id, plan_id)?;
+        let lineage =
+            revision_store.get_plan_lineage(&attempt.project_id, &attempt.issue_id, plan_id)?;
         let mut deliveries = Vec::new();
         for dependency_id in &active.dependency_logical_work_item_ids {
             if units

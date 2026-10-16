@@ -566,19 +566,14 @@ impl WorkspaceEngine {
 mod t3_termination_tests {
     use super::*;
     use crate::product::app_paths::ProductAppPaths;
-    use crate::product::lifecycle_store::{
-        CreateWorkspaceSessionInput, LifecycleStore,
-    };
+    use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, LifecycleStore};
     use crate::product::models::provider::ProviderName;
-    use crate::product::models::{WorkspaceType, WorkspaceSessionStatus};
+    use crate::product::models::{WorkspaceSessionStatus, WorkspaceType};
 
     fn persistent_engine_with_status(
         root: &std::path::Path,
         durable_status: WorkspaceSessionStatus,
-    ) -> (
-        LifecycleStore,
-        WorkspaceEngine,
-    ) {
+    ) -> (LifecycleStore, WorkspaceEngine) {
         let paths = ProductAppPaths::new(root.join(".aria"));
         let lifecycle = LifecycleStore::new(paths.clone());
         let record = lifecycle

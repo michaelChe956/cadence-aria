@@ -2,8 +2,8 @@ use super::*;
 use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::models::automation::EnrollmentBindingIdentity;
 use crate::product::models::{
-    ChildBindingIdentity, WorkItemContextBudget, WorkItemExecutionPlanStatus, WorkItemRuntimeBinding,
-    WorkItemStatus, match_compile_child,
+    ChildBindingIdentity, WorkItemContextBudget, WorkItemExecutionPlanStatus,
+    WorkItemRuntimeBinding, WorkItemStatus, match_compile_child,
 };
 use crate::web::workspace_context::ensure_workspace_context_message;
 use crate::web::workspace_ws_types::{
@@ -142,13 +142,11 @@ impl WorkspaceEngine {
             .iter()
             .map(|item| (item.work_item_revision.logical_work_item_id.as_str(), item))
             .collect::<BTreeMap<_, _>>();
-        let member_targets = match self.logical_work_item_plan_repository_targets(
-            lifecycle,
-            &tx.previous_plan_snapshot,
-        )
-        .map_err(|error| {
-            format!("resolve plan repository targets for work item records failed: {error}")
-        })? {
+        let member_targets = match self
+            .logical_work_item_plan_repository_targets(lifecycle, &tx.previous_plan_snapshot)
+            .map_err(|error| {
+                format!("resolve plan repository targets for work item records failed: {error}")
+            })? {
             None => None,
             Some(_) => {
                 let session_record = lifecycle
@@ -859,7 +857,13 @@ pub(crate) fn work_item_record_attribution(
     legacy_repository_id: &str,
     intent_target: Option<&crate::product::logical_codebase::EnrollmentTarget>,
     logical_work_item_id: &str,
-) -> Result<(String, Option<crate::product::logical_codebase::LogicalRepositoryId>), String> {
+) -> Result<
+    (
+        String,
+        Option<crate::product::logical_codebase::LogicalRepositoryId>,
+    ),
+    String,
+> {
     use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
 
     let Some(targets) = member_targets else {
@@ -910,10 +914,9 @@ pub(crate) fn work_item_record_attribution(
             "work_item_target_missing: `{logical_work_item_id}` 声明了集合 target\
              （logical_codebase_members）；单个 work item 的归属必须是恰一成员"
         )),
-        Some(EnrollmentTarget::SingleRepository { repository_id }) => Ok((
-            repository_id.clone(),
-            Some(reverse_logical(repository_id)?),
-        )),
+        Some(EnrollmentTarget::SingleRepository { repository_id }) => {
+            Ok((repository_id.clone(), Some(reverse_logical(repository_id)?)))
+        }
         None => {
             let fallback = targets.fallback_physical_id.as_deref().ok_or_else(|| {
                 format!(

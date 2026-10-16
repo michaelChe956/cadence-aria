@@ -184,7 +184,11 @@ impl WorkspaceEngine {
             }
             None => self.pending_revision_context.take(),
         };
-        self.build_work_item_batch_streaming_input_variant(effective_feedback.as_deref(), context, false)
+        self.build_work_item_batch_streaming_input_variant(
+            effective_feedback.as_deref(),
+            context,
+            false,
+        )
     }
 
     /// B2b3（Task 5.4，设计 §5.3 legacy_batch 行）：LC 显式 fresh 构建——
@@ -380,7 +384,6 @@ impl WorkspaceEngine {
         })
         .await
     }
-
 
     /// B2b3（Task 5.4，设计 §5.3 legacy_batch 行）：LC 显式 fresh 的 batch
     /// provider 运行节点重建——仅新建 `WorkItemBatchRun` 节点（stale 收口后

@@ -630,7 +630,10 @@ async fn plan_final_confirm_terminated_with_partial_completed_is_not_clickable()
             .await
             .expect("human final confirm for one bucket");
     }
-    assert_eq!(fixture.busi_attempt().status, CodingAttemptStatus::Completed);
+    assert_eq!(
+        fixture.busi_attempt().status,
+        CodingAttemptStatus::Completed
+    );
 
     // 集合 enrollment（绑定 n3 plan；顶层 session 缺省——本负例只走 attempt
     // 侧收口语义；带合成 session 会让终止的引擎侧收口读会话失败而落
@@ -672,9 +675,15 @@ async fn plan_final_confirm_terminated_with_partial_completed_is_not_clickable()
         "unconfirmed termination must not touch attempts"
     );
     // 确认：整 plan 终止（未完成桶 Aborted、Completed 保留）。
-    let confirmed = terminate(&fixture, true).await.expect("confirmed termination").0;
+    let confirmed = terminate(&fixture, true)
+        .await
+        .expect("confirmed termination")
+        .0;
     assert_eq!(confirmed.outcome, "terminated");
-    assert_eq!(fixture.busi_attempt().status, CodingAttemptStatus::Completed);
+    assert_eq!(
+        fixture.busi_attempt().status,
+        CodingAttemptStatus::Completed
+    );
     for target in [fixture.web, fixture.gateway, fixture.frontend] {
         assert_eq!(
             fixture.target_attempt(target).status,
@@ -709,7 +718,10 @@ async fn plan_final_confirm_terminated_with_partial_completed_is_not_clickable()
             assert_eq!(item.status, "already_completed");
         } else {
             assert_eq!(item.status, "failed");
-            assert_eq!(item.error_code.as_deref(), Some("attempt_not_waiting_for_human"));
+            assert_eq!(
+                item.error_code.as_deref(),
+                Some("attempt_not_waiting_for_human")
+            );
         }
     }
     let after: Vec<(String, CodingAttemptStatus)> = fixture
@@ -719,5 +731,8 @@ async fn plan_final_confirm_terminated_with_partial_completed_is_not_clickable()
         .iter()
         .map(|attempt| (attempt.id.clone(), attempt.status.clone()))
         .collect();
-    assert_eq!(after, before, "terminated plan final confirm has zero effects");
+    assert_eq!(
+        after, before,
+        "terminated plan final confirm has zero effects"
+    );
 }

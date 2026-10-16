@@ -32,8 +32,7 @@ fn wi002_isomorphic_operational_finding() -> PlanDefectFinding {
         severity: PlanDefectSeverity::Error,
         defect_class: PlanDefectClass::OperationalBlocker,
         reason_code: "upstream_deliverable_absent_in_runtime".to_string(),
-        message: "CT-001 上游交付物缺失：busi 成员仓（WI-001）在运行环境中完全不存在"
-            .to_string(),
+        message: "CT-001 上游交付物缺失：busi 成员仓（WI-001）在运行环境中完全不存在".to_string(),
         evidence: vec![PlanDefectEvidence {
             kind: "filesystem_observation".to_string(),
             source_ref: "/tmp/notify-center".to_string(),
@@ -128,8 +127,9 @@ async fn coder_operational_gate_lands_operational_blocker_gate_with_three_action
     init_test_git_repo(attempt.worktree_path.as_ref().unwrap());
     let (tx, _rx) = mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider =
-        super::provider_execution_context::CapturingProjectionProvider::new(wi002_operational_output());
+    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
+        wi002_operational_output(),
+    );
     let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
     engine
         .execute_coding_with_commands(
@@ -196,8 +196,9 @@ async fn rework_operational_gate_lands_operational_blocker_gate() {
         .expect("code review stage");
     let (tx, _rx) = mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider =
-        super::provider_execution_context::CapturingProjectionProvider::new(wi002_operational_output());
+    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
+        wi002_operational_output(),
+    );
     let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
     engine
         .execute_coder_fix_from_review(
@@ -222,7 +223,10 @@ async fn rework_operational_gate_lands_operational_blocker_gate() {
         .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("open gates");
     assert_eq!(gates.len(), 1, "rework 路径必须落一个 gate");
-    assert_eq!(gates[0].reason_code.as_deref(), Some(OPERATIONAL_BLOCKER_GATE));
+    assert_eq!(
+        gates[0].reason_code.as_deref(),
+        Some(OPERATIONAL_BLOCKER_GATE)
+    );
     assert_eq!(
         gates[0]
             .available_actions
@@ -291,8 +295,9 @@ async fn land_operational_blocker_gate(
     let _ = root;
     let (tx, _rx) = mpsc::channel(64);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
-    let provider =
-        super::provider_execution_context::CapturingProjectionProvider::new(wi002_operational_output());
+    let provider = super::provider_execution_context::CapturingProjectionProvider::new(
+        wi002_operational_output(),
+    );
     let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
     engine
         .execute_coding_with_commands(
@@ -347,7 +352,8 @@ async fn retry_coding_with_context_writes_note_and_resumes_coding() {
         .expect("context notes");
     assert_eq!(notes.len(), 1, "必须先写一条 context note");
     assert_eq!(
-        notes[0].content, "busi 仓已恢复并重新物化，请按原计划重跑 CHECK-002"
+        notes[0].content,
+        "busi 仓已恢复并重新物化，请按原计划重跑 CHECK-002"
     );
 
     assert!(

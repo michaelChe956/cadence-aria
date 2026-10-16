@@ -809,7 +809,11 @@ mod handoff_contract_registration_tests {
         let expected_capabilities = BTreeMap::from([
             (
                 "CT-001".to_string(),
-                vec!["cap_dup".to_string(), "cap_only_a".to_string(), "cap_shared".to_string()],
+                vec![
+                    "cap_dup".to_string(),
+                    "cap_only_a".to_string(),
+                    "cap_shared".to_string(),
+                ],
             ),
             (
                 "CT-002".to_string(),

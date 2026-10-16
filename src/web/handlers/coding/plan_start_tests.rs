@@ -3469,7 +3469,11 @@ pub(super) fn r2_collection_target(fixture: &N3Fixture) -> EnrollmentTarget {
 
 /// N3 现场上写入一条 enabled 集合绑定 enrollment（真实结构 + 真实 store
 /// 路径；成员集覆盖 plan 全部四桶，满足 coding_start 的 record 越权核对）。
-pub(super) fn r2_write_collection_enrollment(fixture: &N3Fixture, enabled: bool, policy_revision: u64) {
+pub(super) fn r2_write_collection_enrollment(
+    fixture: &N3Fixture,
+    enabled: bool,
+    policy_revision: u64,
+) {
     r2_write_collection_enrollment_with_session(
         fixture,
         enabled,
@@ -3551,10 +3555,7 @@ fn r2_write_collection_enrollment_with_session(
 /// 批 2 R4/E1 ④（终止负例）：顶层 session 留空的集合 enrollment——该负例
 /// 不驱动任何真实 n3 会话；带合成 session 会让终止的引擎侧收口读会话失败
 /// 而落 cleanup_required（负例期望 terminated）。
-pub(super) fn e1_write_unbound_collection_enrollment(
-    fixture: &N3Fixture,
-    policy_revision: u64,
-) {
+pub(super) fn e1_write_unbound_collection_enrollment(fixture: &N3Fixture, policy_revision: u64) {
     r2_write_collection_enrollment_with_session(fixture, true, policy_revision, None);
 }
 
@@ -4000,4 +4001,3 @@ async fn plan_coding_r2_aggregate_run_targets_fresh_status() {
 // 形态）供 fan-out 直测族复用；A2 终止负例另用顶层 session 留空的
 // `e1_write_unbound_collection_enrollment`（带合成 session 会让引擎侧收口
 // 读会话失败而落 cleanup_required）。
-

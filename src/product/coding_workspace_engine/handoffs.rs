@@ -268,13 +268,9 @@ impl CodingWorkspaceEngine {
         };
         match updated.scope {
             CodingAttemptScope::WorkItemGroup => {
-                if let Err(error) =
-                    self.release_issue_shared_worktree_lock_for_attempt(
-                        project_id,
-                        issue_id,
-                        attempt_id,
-                    )
-                {
+                if let Err(error) = self.release_issue_shared_worktree_lock_for_attempt(
+                    project_id, issue_id, attempt_id,
+                ) {
                     tracing::warn!(
                         attempt_id,
                         error = %error,
@@ -734,13 +730,12 @@ impl CodingWorkspaceEngine {
 #[cfg(test)]
 mod termination_finalize_tests {
     use super::*;
-    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::coding_attempt_store::{
-        CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput,
-        CreateCodingAttemptInput,
+        CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput, CreateCodingAttemptInput,
     };
     use crate::product::lifecycle_store::{LifecycleStore, UpsertIssueSharedWorktreeInput};
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
     const PROJECT_ID: &str = "project_0001";
     const ISSUE_ID: &str = "issue_0001";
@@ -774,8 +769,7 @@ mod termination_finalize_tests {
     /// （`coding_group_attempt_incomplete`），与本两例要验证的 clean 门/
     /// 关门语义无关；WorkItem + issue 级 worktree 走同一
     /// `ensure_issue_shared_worktree_clean` 门，复现同一对照红锚。
-    fn terminated_work_item_attempt_with_dirty_issue_worktree()
-    -> (
+    fn terminated_work_item_attempt_with_dirty_issue_worktree() -> (
         tempfile::TempDir,
         ProductAppPaths,
         CodingAttemptStore,
@@ -824,12 +818,7 @@ mod termination_finalize_tests {
         // 一步获取锁并直接以 attempt 为 owner（与生产 acquire+bind 语义
         // 等价，少一次 lease 中转）。
         lifecycle
-            .try_acquire_issue_worktree_lock(
-                PROJECT_ID,
-                ISSUE_ID,
-                "work_item_0001",
-                &attempt.id,
-            )
+            .try_acquire_issue_worktree_lock(PROJECT_ID, ISSUE_ID, "work_item_0001", &attempt.id)
             .unwrap();
         (root, paths, store, attempt, dirty_file)
     }
@@ -1053,5 +1042,4 @@ mod termination_finalize_tests {
             .unwrap();
         assert_eq!(finalized.status, CodingAttemptStatus::Aborted);
     }
-
 }

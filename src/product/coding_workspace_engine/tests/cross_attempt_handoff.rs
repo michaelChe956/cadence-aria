@@ -782,11 +782,12 @@ fn cross_bucket_upstream_delivery_resolves_owner_facts_without_owner_confirmatio
 fn single_repo_and_local_dependency_attempts_have_no_upstream_delivery() {
     let f = cross_fixture();
     let single = test_attempt("coding_attempt_single_repo");
-    assert!(f
-        .engine
-        .resolved_upstream_deliveries_for_attempt(&single)
-        .expect("single repo resolves empty")
-        .is_empty());
+    assert!(
+        f.engine
+            .resolved_upstream_deliveries_for_attempt(&single)
+            .expect("single repo resolves empty")
+            .is_empty()
+    );
 
     // 同桶承载：WI-001 与消费 WI-002 同 attempt，上游交付就在本 worktree。
     let local = create_bucket_attempt(&f.store, "web2", OWNER_WI, None);
@@ -807,11 +808,12 @@ fn single_repo_and_local_dependency_attempts_have_no_upstream_delivery() {
         &[OWNER_WI],
         CodingExecutionUnitStatus::Running,
     );
-    assert!(f
-        .engine
-        .resolved_upstream_deliveries_for_attempt(&local)
-        .expect("local dependency resolves empty")
-        .is_empty());
+    assert!(
+        f.engine
+            .resolved_upstream_deliveries_for_attempt(&local)
+            .expect("local dependency resolves empty")
+            .is_empty()
+    );
 
     let section = resolved_upstream_deliveries_section(&[]);
     assert!(section.is_empty());

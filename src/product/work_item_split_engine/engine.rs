@@ -284,16 +284,15 @@ impl WorkItemSplitEngine {
         // 继续跑到自身终态(受 AdapterInput.timeout 兜底),结果被丢弃。
         let run_result = match launch {
             Ok(launch) => {
-                let joined =
-                    tokio::task::spawn_blocking(move || gateway.run_sync(launch))
-                        .await
-                        .map_err(|error| {
-                            ApiError::runtime(
-                                "work_item_split_provider_panic",
-                                "provider adapter panicked",
-                                json!({"details": error.to_string()}),
-                            )
-                        })?;
+                let joined = tokio::task::spawn_blocking(move || gateway.run_sync(launch))
+                    .await
+                    .map_err(|error| {
+                        ApiError::runtime(
+                            "work_item_split_provider_panic",
+                            "provider adapter panicked",
+                            json!({"details": error.to_string()}),
+                        )
+                    })?;
                 joined.map_err(map_provider_gateway_error)
             }
             Err(error) => Err(error),

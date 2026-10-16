@@ -444,7 +444,9 @@ fn resume_multi_repo_amr_self_held_residue_rebinds_own_repo_and_keeps_sibling_lo
         root.path().join("aggregate-root"),
         vec![own_repo, sibling_repo],
     );
-    authority.save_manifest(PROJECT_ID, &manifest).expect("manifest");
+    authority
+        .save_manifest(PROJECT_ID, &manifest)
+        .expect("manifest");
     IssueCodebaseSelectionStore::new(paths.clone())
         .save(&IssueCodebaseSelection::explicit(
             PROJECT_ID,
@@ -456,7 +458,10 @@ fn resume_multi_repo_amr_self_held_residue_rebinds_own_repo_and_keeps_sibling_lo
         ))
         .expect("selection");
     let lifecycle = LifecycleStore::new(paths.clone());
-    for (repo, name) in [(own_repo, "own-worktree"), (sibling_repo, "sibling-worktree")] {
+    for (repo, name) in [
+        (own_repo, "own-worktree"),
+        (sibling_repo, "sibling-worktree"),
+    ] {
         let worktree = root.path().join(name);
         fs::create_dir_all(&worktree).expect("worktree dir");
         lifecycle

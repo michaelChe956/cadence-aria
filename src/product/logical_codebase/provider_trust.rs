@@ -1146,7 +1146,12 @@ impl HomeBackedProviderTrustRegistry {
             message: error.message.clone(),
             retry_action,
             manual_guidance,
-            command_markdown: trust_command_markdown(&self.adapters, provider, canonical_root, error),
+            command_markdown: trust_command_markdown(
+                &self.adapters,
+                provider,
+                canonical_root,
+                error,
+            ),
             recorded_at: trust_now(),
         }
     }
@@ -2700,7 +2705,10 @@ mod tests {
                 None => panic!("dangling % in printf format"),
             }
         }
-        assert_eq!(placeholder_count, 1, "exactly one %s placeholder: {format_str}");
+        assert_eq!(
+            placeholder_count, 1,
+            "exactly one %s placeholder: {format_str}"
+        );
         let record: serde_json::Value = serde_json::from_str(&rendered)
             .expect("rendered command output must be valid Kimi record JSON");
         assert_eq!(record["root"], special_root.display().to_string());
@@ -2732,8 +2740,10 @@ mod tests {
             ProviderTrustScenario::Generation,
         );
         let header = codex.trust_key(&fixture.root);
-        let expected_snippet =
-            format!("在 {} 追加（或并入既有表）：\n{header}\ntrust_level = \"trusted\"", codex.config_path().display());
+        let expected_snippet = format!(
+            "在 {} 追加（或并入既有表）：\n{header}\ntrust_level = \"trusted\"",
+            codex.config_path().display()
+        );
         assert!(
             guidance.contains(&expected_snippet),
             "guidance must carry the exact config snippet at the real path: {guidance}"
@@ -2748,7 +2758,8 @@ mod tests {
         let error = ProviderTrustError::conflict("codex_trust_key_conflict", "conflict".into());
         let guidance = super::provider_trust_manual_guidance(
             &[
-                Arc::new(CodexTrustAdapter::for_home(fixture.home())) as Arc<dyn ProviderTrustHomeAdapter>,
+                Arc::new(CodexTrustAdapter::for_home(fixture.home()))
+                    as Arc<dyn ProviderTrustHomeAdapter>,
                 Arc::new(KimiTrustAdapter::for_home(fixture.home())),
             ],
             &ProviderName::Codex,
@@ -2768,8 +2779,7 @@ mod tests {
     fn provider_trust_explicit_registration_waiting_retry_action_targets_the_button() {
         let fixture = TrustFixture::new();
         std::fs::create_dir_all(fixture.codex_config().parent().unwrap()).unwrap();
-        let header =
-            CodexTrustAdapter::for_home(fixture.home()).trust_key(&fixture.root);
+        let header = CodexTrustAdapter::for_home(fixture.home()).trust_key(&fixture.root);
         std::fs::write(
             fixture.codex_config(),
             format!("{header}\ntrust_level = \"untrusted\"\n"),

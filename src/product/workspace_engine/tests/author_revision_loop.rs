@@ -783,7 +783,6 @@ async fn completed_revision_run_reconnects_to_author_confirm_with_revised_artifa
 // 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
 // （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-
 /// B1a（Task 4.1，设计 §5.2）：fresh 修订 prompt 自足——重连重建
 /// （`new_persistent` 从 durable record 恢复消息流）后，无 resume 的 fresh
 /// 输入 `ID=None` 且 artifact / 用户 feedback / trusted review / 压缩历史
@@ -836,9 +835,7 @@ async fn anchor_t11_fresh_revision_context_survives_reconnect() {
         checkpoint_store,
         lifecycle_store.clone(),
         mpsc::channel(64).0,
-        WorkspaceSession::from_record(
-            lifecycle_store.get_workspace_session(&record.id).unwrap(),
-        ),
+        WorkspaceSession::from_record(lifecycle_store.get_workspace_session(&record.id).unwrap()),
     );
     engine.session.artifact = Some(artifact_payload(
         "# Story Spec\n\n## 范围\n来源 source id: Issue issue_0001；初版产物",
@@ -861,7 +858,11 @@ async fn anchor_t11_fresh_revision_context_survives_reconnect() {
     assert!(fresh.resume_provider_session_id.is_none());
     assert!(fresh.prompt.contains("补充异常场景与回滚策略"));
     assert!(fresh.prompt.contains("# Story Spec"));
-    assert!(fresh.prompt.contains("TrustedReview：请补充异常场景与回滚策略。"));
+    assert!(
+        fresh
+            .prompt
+            .contains("TrustedReview：请补充异常场景与回滚策略。")
+    );
     assert!(fresh.prompt.contains("会话上下文（滑动窗口压缩"));
     assert!(fresh.prompt.contains("初版请覆盖登录成功路径。"));
 
@@ -875,22 +876,21 @@ async fn anchor_t11_fresh_revision_context_survives_reconnect() {
     assert!(feedback_fresh.prompt.contains("补充异常场景与回滚策略"));
     assert!(feedback_fresh.prompt.contains("# Story Spec"));
     assert!(
-        feedback_fresh
-            .prompt
-            .contains("会话上下文（滑动窗口压缩"),
+        feedback_fresh.prompt.contains("会话上下文（滑动窗口压缩"),
         "fresh author 反馈 prompt 必须注入压缩历史: {}",
         feedback_fresh.prompt
     );
     assert!(feedback_fresh.prompt.contains("初版请覆盖登录成功路径。"));
     assert!(
-        feedback_fresh.prompt.matches("补充异常场景与回滚策略").count() >= 1
+        feedback_fresh
+            .prompt
+            .matches("补充异常场景与回滚策略")
+            .count()
+            >= 1
     );
     // 反馈不重复 append：用户反馈小节只出现一次（历史重放不含反馈小节标题）。
     assert_eq!(
-        feedback_fresh
-            .prompt
-            .matches("## 用户反馈")
-            .count(),
+        feedback_fresh.prompt.matches("## 用户反馈").count(),
         1,
         "{}",
         feedback_fresh.prompt
@@ -911,8 +911,7 @@ async fn anchor_t11_candidate_read_error_stops_all_lc_launch_callers() {
     use crate::product::models::LogicalLaunchFingerprintState;
     use crate::product::workspace_engine::lifecycle::NativeResumeCandidateError;
 
-    let (fixture, mut inputs) =
-        logical_revision_fixture(LogicalRevisionAuthority::ManifestRoot);
+    let (fixture, mut inputs) = logical_revision_fixture(LogicalRevisionAuthority::ManifestRoot);
     let session_json_path = fixture
         .lifecycle
         .workspace_sessions_root("project_0001", "issue_0001")
@@ -996,7 +995,10 @@ async fn anchor_t11_candidate_read_error_stops_all_lc_launch_callers() {
         &format!("\"schema_version\":{TOOL_POLICY_AUDIT_SCHEMA_VERSION}"),
         "\"schema_version\":999",
     );
-    assert_ne!(&corrupted, &seeded_line, "fixture must mutate schema_version");
+    assert_ne!(
+        &corrupted, &seeded_line,
+        "fixture must mutate schema_version"
+    );
     std::fs::write(&audit_run_path, corrupted).expect("corrupt audit schema version");
 
     let (mut engine, mut engine_events) = revision_stage_engine_with_events(&fixture);
@@ -1115,7 +1117,10 @@ async fn anchor_t11_candidate_read_error_stops_all_lc_launch_callers() {
             &ProviderName::ClaudeCode,
         )
         .expect_err("unbound native in the fullmap era must wait, not resume or rebirth");
-    assert!(matches!(frozen, NativeResumeCandidateError::FrozenBindingUnavailable));
+    assert!(matches!(
+        frozen,
+        NativeResumeCandidateError::FrozenBindingUnavailable
+    ));
     assert!(
         unbound_engine
             .build_streaming_input("开始生成", AuthorPromptMode::FullConversation)
@@ -1136,7 +1141,9 @@ async fn anchor_t11_candidate_read_error_stops_all_lc_launch_callers() {
     );
     let frozen_launch = unbound_engine.resolve_revision_root_launch();
     assert!(
-        frozen_launch.as_ref().is_some_and(|decision| decision.is_err()),
+        frozen_launch
+            .as_ref()
+            .is_some_and(|decision| decision.is_err()),
         "launch 判定不得落 (None, _) validate/fresh 臂"
     );
 
@@ -1156,10 +1163,12 @@ async fn anchor_t11_candidate_read_error_stops_all_lc_launch_callers() {
                 &ProviderName::ClaudeCode
             )
             .expect("typed candidate read"),
-        Some(crate::product::workspace_engine::lifecycle::NativeResumeCandidate {
-            native_id: "native-anchored-x".to_string(),
-            role_run_seq: Some(2),
-        }),
+        Some(
+            crate::product::workspace_engine::lifecycle::NativeResumeCandidate {
+                native_id: "native-anchored-x".to_string(),
+                role_run_seq: Some(2),
+            }
+        ),
         "fullmap Active 绑定一致的 native 必须 Some(seq) 续接"
     );
 }
@@ -1169,8 +1178,7 @@ async fn anchor_t11_candidate_read_error_stops_all_lc_launch_callers() {
 /// 路径（scope 回写 focus/involved 不迁移 native 锚；cwd 恒为 root）。
 #[tokio::test]
 async fn anchor_t11_deferred_launch_anchor_stays_native_root_without_checkout_identity() {
-    let (fixture, _inputs) =
-        logical_revision_fixture(LogicalRevisionAuthority::ManifestRoot);
+    let (fixture, _inputs) = logical_revision_fixture(LogicalRevisionAuthority::ManifestRoot);
     // Story focus=None（AI 自决前的聚合视野形态）：business_repository 派生
     // 为聚合根视图（无成员 checkout 身份）→ launch 走 deferred aggregate_root
     // 臂；native 锚恒聚合根，不随业务选仓（focus/involved 回写）迁移。
@@ -1205,7 +1213,10 @@ async fn anchor_t11_deferred_launch_anchor_stays_native_root_without_checkout_id
     );
     assert_eq!(
         target.worktree,
-        fixture.manifest_root.canonicalize().expect("canonical root"),
+        fixture
+            .manifest_root
+            .canonicalize()
+            .expect("canonical root"),
         "deferred 锚 = E native anchor（聚合根视图），不退业务成员路径"
     );
     assert_eq!(

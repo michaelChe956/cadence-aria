@@ -477,7 +477,7 @@ impl LifecycleStore {
         let entries = match std::fs::read_dir(&root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(ProviderStartCandidateLookup::NoMatch)
+                return Ok(ProviderStartCandidateLookup::NoMatch);
             }
             Err(error) => return Err(audit_error(error)),
         };
@@ -500,8 +500,7 @@ impl LifecycleStore {
                 match line.event {
                     DurableToolPolicyEvent::ProviderStart(record) => {
                         if record.role == role
-                            && (record.provider == provider_canonical
-                                || record.provider == dashed)
+                            && (record.provider == provider_canonical || record.provider == dashed)
                             && !record.provider_session_id.trim().is_empty()
                         {
                             matched = true;

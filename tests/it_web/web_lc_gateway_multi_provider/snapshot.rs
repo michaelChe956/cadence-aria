@@ -53,7 +53,9 @@ impl RunMode {
     /// `LIVE_MATRIX_RUN_MODE`:full_chain(默认)/capture_plan_snapshot/
     /// resume_from_plan_snapshot。非法值 fail-closed 报错(不静默降级)。
     pub(crate) fn from_env() -> Result<Self, String> {
-        let Some(raw) = std::env::var("LIVE_MATRIX_RUN_MODE").ok().filter(|v| !v.trim().is_empty())
+        let Some(raw) = std::env::var("LIVE_MATRIX_RUN_MODE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
         else {
             return Ok(Self::FullChain);
         };
@@ -203,9 +205,8 @@ fn baseline_state_path(root: &Path) -> PathBuf {
 
 pub(crate) fn tree_digest(root: &Path) -> Result<String, String> {
     let mut entries: Vec<PathBuf> = Vec::new();
-    collect_files(root, root, &mut entries).map_err(|error| {
-        format!("tree_digest 扫描 {} 失败:{error}", root.display())
-    })?;
+    collect_files(root, root, &mut entries)
+        .map_err(|error| format!("tree_digest 扫描 {} 失败:{error}", root.display()))?;
     entries.sort();
     let mut hasher = Sha256::new();
     for path in entries {
@@ -219,12 +220,7 @@ pub(crate) fn tree_digest(root: &Path) -> Result<String, String> {
             Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
                 // 特殊条目(socket/fifo):路径可观测即可,不读内容。
             }
-            Err(error) => {
-                return Err(format!(
-                    "tree_digest 读取 {} 失败:{error}",
-                    path.display()
-                ))
-            }
+            Err(error) => return Err(format!("tree_digest 读取 {} 失败:{error}", path.display())),
         }
         hasher.update(b"\0");
     }
@@ -274,7 +270,10 @@ pub(crate) fn git_head(repo: &Path) -> Result<String, String> {
 // 原子落盘:staging + fsync + rename
 // ---------------------------------------------------------------------------
 
-pub(crate) fn write_manifest_atomic(directory: &Path, manifest: &SnapshotManifest) -> Result<(), String> {
+pub(crate) fn write_manifest_atomic(
+    directory: &Path,
+    manifest: &SnapshotManifest,
+) -> Result<(), String> {
     let target = directory.join("manifest.json");
     let staging = directory.join("manifest.json.staging");
     let bytes = serde_json::to_vec_pretty(manifest)
@@ -283,9 +282,8 @@ pub(crate) fn write_manifest_atomic(directory: &Path, manifest: &SnapshotManifes
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("创建快照目录失败 {}: {error}", parent.display()))?;
     }
-    std::fs::write(&staging, &bytes).map_err(|error| {
-        format!("manifest staging 写入失败 {}: {error}", staging.display())
-    })?;
+    std::fs::write(&staging, &bytes)
+        .map_err(|error| format!("manifest staging 写入失败 {}: {error}", staging.display()))?;
     let file = std::fs::File::open(&staging)
         .map_err(|error| format!("manifest staging 打开失败:{error}"))?;
     file.sync_all()
@@ -310,8 +308,8 @@ pub(crate) fn read_manifest(directory: &Path) -> Result<SnapshotManifest, String
     let path = directory.join("manifest.json");
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("manifest 读取失败 {}: {error}", path.display()))?;
-    let manifest: SnapshotManifest = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("manifest 解析失败:{error}"))?;
+    let manifest: SnapshotManifest =
+        serde_json::from_slice(&bytes).map_err(|error| format!("manifest 解析失败:{error}"))?;
     if manifest.schema_version != SNAPSHOT_MANIFEST_SCHEMA_VERSION {
         return Err(format!(
             "manifest schema_version={:?} 不受支持(期望 {:?})",
@@ -352,8 +350,13 @@ fn copy_tree_quiet(source: &Path, destination: &Path) -> Result<(), String> {
         }
         Ok(())
     }
-    copy_inner(source, destination)
-        .map_err(|error| format!("复制 {} -> {} 失败:{error}", source.display(), destination.display()))
+    copy_inner(source, destination).map_err(|error| {
+        format!(
+            "复制 {} -> {} 失败:{error}",
+            source.display(),
+            destination.display()
+        )
+    })
 }
 
 pub(crate) fn capture_plan_snapshot(
@@ -384,9 +387,7 @@ pub(crate) fn capture_plan_snapshot(
         .map_err(|error| format!("创建 pristine aggregate 失败:{error}"))?;
     copy_tree_quiet(input.workspace_root, &pristine_workspace)?;
     copy_tree_quiet(input.aggregate_root, &pristine_aggregate)?;
-    let member_repo = input
-        .aggregate_root
-        .join("alpha");
+    let member_repo = input.aggregate_root.join("alpha");
     let manifest = SnapshotManifest {
         schema_version: SNAPSHOT_MANIFEST_SCHEMA_VERSION,
         snapshot_point: SNAPSHOT_POINT_PLAN_CONFIRMED.to_string(),
@@ -403,10 +404,7 @@ pub(crate) fn capture_plan_snapshot(
         harness_revision: current_revision(),
         workspace_digest: tree_digest(&pristine_workspace)?,
         aggregate_digest: tree_digest(&pristine_aggregate)?,
-        source_evidence_root: input
-            .source_evidence_root
-            .to_string_lossy()
-            .to_string(),
+        source_evidence_root: input.source_evidence_root.to_string_lossy().to_string(),
         quiescent: true,
         created_at: chrono::Utc::now().to_rfc3339(),
     };
@@ -482,8 +480,7 @@ pub(crate) fn open_plan_snapshot(
     // 1) pristine 字节校验。
     let pristine_workspace = directory.join("pristine").join("workspace");
     let pristine_aggregate = directory.join("pristine").join("aggregate-root");
-    let workspace_digest = tree_digest(&pristine_workspace)
-        .map_err(SnapshotOpenError::Invalid)?;
+    let workspace_digest = tree_digest(&pristine_workspace).map_err(SnapshotOpenError::Invalid)?;
     if workspace_digest != manifest.workspace_digest {
         return Err(SnapshotOpenError::DigestMismatch {
             detail: format!(
@@ -492,8 +489,7 @@ pub(crate) fn open_plan_snapshot(
             ),
         });
     }
-    let aggregate_digest = tree_digest(&pristine_aggregate)
-        .map_err(SnapshotOpenError::Invalid)?;
+    let aggregate_digest = tree_digest(&pristine_aggregate).map_err(SnapshotOpenError::Invalid)?;
     if aggregate_digest != manifest.aggregate_digest {
         return Err(SnapshotOpenError::DigestMismatch {
             detail: format!(
@@ -525,10 +521,8 @@ pub(crate) fn open_plan_snapshot(
         .map_err(|error| SnapshotOpenError::Invalid(format!("run workspace 创建失败:{error}")))?;
     std::fs::create_dir_all(&run_aggregate)
         .map_err(|error| SnapshotOpenError::Invalid(format!("run aggregate 创建失败:{error}")))?;
-    copy_tree_quiet(&pristine_workspace, &run_workspace)
-        .map_err(SnapshotOpenError::Invalid)?;
-    copy_tree_quiet(&pristine_aggregate, &run_aggregate)
-        .map_err(SnapshotOpenError::Invalid)?;
+    copy_tree_quiet(&pristine_workspace, &run_workspace).map_err(SnapshotOpenError::Invalid)?;
+    copy_tree_quiet(&pristine_aggregate, &run_aggregate).map_err(SnapshotOpenError::Invalid)?;
     // 5) durable preflight:LC 子树与 policy 面摘要复核(回灌后)。
     let lc_root = run_workspace
         .join(".aria")
@@ -547,12 +541,12 @@ pub(crate) fn open_plan_snapshot(
     }
     // r53:回灌后 canonicalize——与 capture 轮同源绝对路径(evidence_root
     // 可为相对路径,产品登记/指纹面消费 canonical 绝对形态)。
-    let run_workspace = run_workspace
-        .canonicalize()
-        .map_err(|error| SnapshotOpenError::Invalid(format!("canonicalize run workspace:{error}")))?;
-    let run_aggregate = run_aggregate
-        .canonicalize()
-        .map_err(|error| SnapshotOpenError::Invalid(format!("canonicalize run aggregate:{error}")))?;
+    let run_workspace = run_workspace.canonicalize().map_err(|error| {
+        SnapshotOpenError::Invalid(format!("canonicalize run workspace:{error}"))
+    })?;
+    let run_aggregate = run_aggregate.canonicalize().map_err(|error| {
+        SnapshotOpenError::Invalid(format!("canonicalize run aggregate:{error}"))
+    })?;
     Ok(OpenedSnapshot {
         manifest,
         workspace_root: run_workspace,
@@ -564,9 +558,7 @@ pub(crate) fn open_plan_snapshot(
 pub(crate) fn record_resume_round(evidence_root: &Path) -> Result<u32, String> {
     let root = snapshots_root(evidence_root);
     let mut state = read_baseline_state(&root);
-    state.rounds_since_baseline = state
-        .rounds_since_baseline
-        .saturating_add(1);
+    state.rounds_since_baseline = state.rounds_since_baseline.saturating_add(1);
     std::fs::create_dir_all(&root).map_err(|error| format!("snapshots 目录创建失败:{error}"))?;
     std::fs::write(
         baseline_state_path(&root),
@@ -601,8 +593,12 @@ pub(crate) fn resolve_snapshot_id(evidence_root: &Path) -> Result<String, String
         .filter(|name| name != "state.json")
         .collect();
     ids.sort();
-    ids.pop()
-        .ok_or_else(|| format!("{} 下无可用快照(先跑 capture_plan_snapshot)", root.display()))
+    ids.pop().ok_or_else(|| {
+        format!(
+            "{} 下无可用快照(先跑 capture_plan_snapshot)",
+            root.display()
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -666,10 +662,7 @@ mod tests {
         let mut manifest = sample_manifest();
         manifest.quiescent = false;
         write_manifest_atomic(dir.path(), &manifest).expect("write manifest");
-        assert!(
-            read_manifest(dir.path()).is_err(),
-            "非静止快照不得用于续跑"
-        );
+        assert!(read_manifest(dir.path()).is_err(), "非静止快照不得用于续跑");
     }
 
     #[test]
@@ -691,7 +684,10 @@ mod tests {
 
     #[test]
     fn diff_gate_matches_skipped_stage_prefixes() {
-        let touched = ["src/product/workspace_engine/prompts.rs", "src/web/other.rs"];
+        let touched = [
+            "src/product/workspace_engine/prompts.rs",
+            "src/web/other.rs",
+        ];
         let matched: Vec<&str> = touched
             .iter()
             .copied()

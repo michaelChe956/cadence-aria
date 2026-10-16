@@ -377,16 +377,15 @@ impl CodingWorkspaceEngine {
                 .await?
             }
             Some(decision) if decision != CodeReviewFlowDecision::RunCoderFix => updated,
-            _ => {
-                self.store
-                    .update_attempt_stage(
-                        &updated.project_id,
-                        &updated.issue_id,
-                        &updated.id,
-                        CodingExecutionStage::CodeReview,
-                    )
-                    .map_err(CodingWorkspaceEngineError::from)?
-            }
+            _ => self
+                .store
+                .update_attempt_stage(
+                    &updated.project_id,
+                    &updated.issue_id,
+                    &updated.id,
+                    CodingExecutionStage::CodeReview,
+                )
+                .map_err(CodingWorkspaceEngineError::from)?,
         };
         Ok(CoderExecutionOutcome {
             attempt,

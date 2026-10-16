@@ -8,8 +8,8 @@ use crate::product::coding_models::CodingAttemptScope;
 // `routing_reference_context_from_policy` 已迁至 `cadence_skills/routing_reference.rs`
 // 作为单一归属（WorkItemPlan T3 与 coding T2 共用）。此处 re-export 保持既有
 // `use super::*` 调用点（coding/rework/internal_pr_review/provider_retry）不变。
-pub(crate) use crate::product::cadence_skills::routing_reference::routing_reference_context_from_policy;
 use super::cross_attempt_handoff::ResolvedUpstreamDelivery;
+pub(crate) use crate::product::cadence_skills::routing_reference::routing_reference_context_from_policy;
 
 pub(crate) fn code_review_output_contract(nonce: &str) -> String {
     format!(
@@ -571,10 +571,7 @@ pub(crate) fn resolved_upstream_deliveries_section(
             capabilities,
         ));
         match delivery.owner_worktree_path.as_ref() {
-            Some(path) => section.push_str(&format!(
-                "  - 上游只读 worktree：{}\n",
-                path.display()
-            )),
+            Some(path) => section.push_str(&format!("  - 上游只读 worktree：{}\n", path.display())),
             None => section.push_str(
                 "  - 上游 worktree 路径缺失（owner attempt 未携带 worktree）：按上游不可读处理\n",
             ),

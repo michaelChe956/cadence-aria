@@ -153,7 +153,10 @@ impl EntityDeletionManifest {
             review_ids: union(&self.review_ids, &other.review_ids),
             provider_run_ids: union(&self.provider_run_ids, &other.provider_run_ids),
             verification_plan_ids: union(&self.verification_plan_ids, &other.verification_plan_ids),
-            repository_profile_ids: union(&self.repository_profile_ids, &other.repository_profile_ids),
+            repository_profile_ids: union(
+                &self.repository_profile_ids,
+                &other.repository_profile_ids,
+            ),
             target_repository_ids: union(&self.target_repository_ids, &other.target_repository_ids),
             advance_ids: union(&self.advance_ids, &other.advance_ids),
             advance_retry_command_ids: union(
@@ -176,14 +179,20 @@ impl EntityDeletionStore {
     }
 
     /// 读取删除事实（墓碑）：NotFound=None；真实 IO/JSON 错误不当 None。
-    pub fn get(&self, scope: &EntityScope) -> Result<Option<EntityDeletionRecord>, ProductStoreError> {
+    pub fn get(
+        &self,
+        scope: &EntityScope,
+    ) -> Result<Option<EntityDeletionRecord>, ProductStoreError> {
         let path = entity_deletion_record_path(&self.paths, scope)?;
         read_json_if_exists(&path)
     }
 
     /// purging 开始（幂等）：同条记录 `purging→deleted`；既存记录原样返回
     /// （不重写 started_at/deleted_at）。只接受合法 delete lease。
-    pub fn begin(&self, lease: &EntityDeletionLease) -> Result<EntityDeletionRecord, ProductStoreError> {
+    pub fn begin(
+        &self,
+        lease: &EntityDeletionLease,
+    ) -> Result<EntityDeletionRecord, ProductStoreError> {
         let scope = lease.scope();
         let path = entity_deletion_record_path(&self.paths, scope)?;
         match read_json_if_exists::<EntityDeletionRecord>(&path)? {
@@ -206,10 +215,18 @@ impl EntityDeletionStore {
 
     /// 完成（幂等）：首次补 `deleted_at`；重试不覆盖完成时间；pending manifest
     /// 仍存在时拒绝（成功 complete 前必须移除）。
-    pub fn complete(&self, lease: &EntityDeletionLease) -> Result<EntityDeletionRecord, ProductStoreError> {
+    pub fn complete(
+        &self,
+        lease: &EntityDeletionLease,
+    ) -> Result<EntityDeletionRecord, ProductStoreError> {
         let scope = lease.scope();
         let path = entity_deletion_record_path(&self.paths, scope)?;
-        if read_json_if_exists::<EntityDeletionManifest>(&pending_manifest_path(&self.paths, scope)?)?.is_some() {
+        if read_json_if_exists::<EntityDeletionManifest>(&pending_manifest_path(
+            &self.paths,
+            scope,
+        )?)?
+        .is_some()
+        {
             return Err(ProductStoreError::InvalidRecord {
                 kind: "entity_pending_manifest",
                 reason: "pending manifest must be removed before completion".to_string(),
@@ -258,7 +275,10 @@ impl EntityDeletionStore {
     }
 
     /// 幂等移除 pending manifest；NotFound=已移除。
-    pub fn remove_pending_manifest(&self, lease: &EntityDeletionLease) -> Result<(), ProductStoreError> {
+    pub fn remove_pending_manifest(
+        &self,
+        lease: &EntityDeletionLease,
+    ) -> Result<(), ProductStoreError> {
         let path = pending_manifest_path(&self.paths, lease.scope())?;
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -293,12 +313,13 @@ impl EntityDeletionStore {
     }
 
     /// 读取纯 ID 占用索引；固定路径不存在=未索引/已清，返回空 manifest。
-    pub fn list_owned_artifact_ids(&self, scope: &EntityScope) -> Result<EntityDeletionManifest, ProductStoreError> {
+    pub fn list_owned_artifact_ids(
+        &self,
+        scope: &EntityScope,
+    ) -> Result<EntityDeletionManifest, ProductStoreError> {
         let path = owned_artifact_index_path(&self.paths, scope)?;
-        Ok(
-            read_json_if_exists::<EntityDeletionManifest>(&path)?
-                .unwrap_or_else(|| EntityDeletionManifest::empty(scope.clone())),
-        )
+        Ok(read_json_if_exists::<EntityDeletionManifest>(&path)?
+            .unwrap_or_else(|| EntityDeletionManifest::empty(scope.clone())))
     }
 }
 
@@ -373,14 +394,13 @@ pub(crate) fn read_json_if_exists<T: serde::de::DeserializeOwned>(
             return Err(ProductStoreError::Io(format!(
                 "open {}: {error}",
                 path.display()
-            )))
+            )));
         }
     };
     serde_json::from_reader(file)
         .map(Some)
         .map_err(|error| ProductStoreError::Json(format!("{}: {error}", path.display())))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -410,7 +430,8 @@ mod tests {
     #[test]
     fn cascade_d1_0_tombstone_and_lease() {
         let (_temp, paths) = test_paths();
-        let operations = crate::product::entity_operation_store::EntityOperationStore::new(paths.clone());
+        let operations =
+            crate::product::entity_operation_store::EntityOperationStore::new(paths.clone());
         let deletions = EntityDeletionStore::new(paths.clone());
         let scope = EntityScope::new(
             "project_0001",
@@ -430,7 +451,10 @@ mod tests {
         assert_eq!(begun.phase, DeletionPhase::Purging);
         assert!(begun.deleted_at.is_none());
         assert_eq!(
-            deletions.get(&scope).expect("get after begin").map(|record| record.phase),
+            deletions
+                .get(&scope)
+                .expect("get after begin")
+                .map(|record| record.phase),
             Some(DeletionPhase::Purging)
         );
 
@@ -444,7 +468,9 @@ mod tests {
             .save_pending_manifest(&lease, &manifest)
             .expect("save pending manifest");
         assert_eq!(
-            deletions.load_pending_manifest(&lease).expect("load pending"),
+            deletions
+                .load_pending_manifest(&lease)
+                .expect("load pending"),
             Some(manifest.clone())
         );
         let pending_path = pending_manifest_path(&paths, &scope).expect("pending path");
@@ -475,8 +501,14 @@ mod tests {
                 "work_item_c".to_string()
             ]
         );
-        assert_eq!(indexed.review_ids, vec!["review_0001".to_string(), "review_0002".to_string()]);
-        assert_eq!(indexed.session_ids, vec!["workspace_session_0001".to_string()]);
+        assert_eq!(
+            indexed.review_ids,
+            vec!["review_0001".to_string(), "review_0002".to_string()]
+        );
+        assert_eq!(
+            indexed.session_ids,
+            vec!["workspace_session_0001".to_string()]
+        );
 
         // pending 未移除时 complete 拒绝。
         assert!(matches!(
@@ -492,7 +524,9 @@ mod tests {
             .remove_pending_manifest(&lease)
             .expect("remove pending manifest idempotent");
         assert_eq!(
-            deletions.load_pending_manifest(&lease).expect("load after remove"),
+            deletions
+                .load_pending_manifest(&lease)
+                .expect("load after remove"),
             None
         );
         let completed = deletions.complete(&lease).expect("complete");
@@ -512,7 +546,13 @@ mod tests {
             .join("plan");
         let mut record_files: Vec<String> = std::fs::read_dir(&records_root)
             .expect("read entity-deletions dir")
-            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         record_files.sort();
         assert_eq!(record_files, vec!["plan_0009.json".to_string()]);
@@ -521,7 +561,12 @@ mod tests {
         let raw: serde_json::Value =
             crate::product::json_store::read_json(&records_root.join("plan_0009.json"))
                 .expect("read raw record");
-        let mut keys: Vec<&str> = raw.as_object().expect("record object").keys().map(String::as_str).collect();
+        let mut keys: Vec<&str> = raw
+            .as_object()
+            .expect("record object")
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
@@ -540,13 +585,29 @@ mod tests {
     #[test]
     fn cascade_d1_0_scope_path_escape_rejected() {
         let (_temp, paths) = test_paths();
-        let operations = crate::product::entity_operation_store::EntityOperationStore::new(paths.clone());
+        let operations =
+            crate::product::entity_operation_store::EntityOperationStore::new(paths.clone());
         let deletions = EntityDeletionStore::new(paths.clone());
 
         for scope in [
-            EntityScope::new("../evil", "issue_0001", DeletionEntityKind::Plan, "plan_0001"),
-            EntityScope::new("project_0001", "issue/0001", DeletionEntityKind::Story, "story_0001"),
-            EntityScope::new("project_0001", "issue_0001", DeletionEntityKind::Design, "../escape"),
+            EntityScope::new(
+                "../evil",
+                "issue_0001",
+                DeletionEntityKind::Plan,
+                "plan_0001",
+            ),
+            EntityScope::new(
+                "project_0001",
+                "issue/0001",
+                DeletionEntityKind::Story,
+                "story_0001",
+            ),
+            EntityScope::new(
+                "project_0001",
+                "issue_0001",
+                DeletionEntityKind::Design,
+                "../escape",
+            ),
             EntityScope::new("", "issue_0001", DeletionEntityKind::Plan, "plan_0001"),
         ] {
             assert!(matches!(
@@ -555,9 +616,11 @@ mod tests {
             ));
             assert!(matches!(
                 operations.try_acquire_delete(&scope),
-                Err(crate::product::entity_operation_store::EntityOperationError::Store(
-                    ProductStoreError::PathEscape(_)
-                ))
+                Err(
+                    crate::product::entity_operation_store::EntityOperationError::Store(
+                        ProductStoreError::PathEscape(_)
+                    )
+                )
             ));
         }
     }

@@ -25,7 +25,8 @@ impl LifecycleStore {
             .work_items_root(&input.project_id, &input.issue_id)
             .join(format!("{}.json", input.work_item_id));
         let owning_scope = if path_is_regular_file(&work_item_path)? {
-            let record: crate::product::models::LifecycleWorkItemRecord = read_json(&work_item_path)?;
+            let record: crate::product::models::LifecycleWorkItemRecord =
+                read_json(&work_item_path)?;
             self.entity_scope_for_work_item_record(&record)?
         } else {
             None

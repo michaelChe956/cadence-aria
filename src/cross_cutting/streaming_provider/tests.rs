@@ -1726,8 +1726,7 @@ impl AnchorT09ProbeFactory {
     }
 
     fn set_failure(&self, error: super::VersionProbeError) {
-        *self.outcome.lock().expect("anchor t09 probe") =
-            AnchorT09ProbeOutcome::Fail(error);
+        *self.outcome.lock().expect("anchor t09 probe") = AnchorT09ProbeOutcome::Fail(error);
     }
 
     fn calls(&self) -> usize {
@@ -1758,7 +1757,10 @@ async fn anchor_t09_version_ttl_boundary_singleflight_and_failures() {
     let cache = Arc::new(super::LcVersionCache::with_clock(clock.source()));
     let probe = AnchorT09ProbeFactory::default();
     let cancel = CancellationToken::new();
-    let key = anchor_t09_key(crate::product::models::ProviderName::ClaudeCode, "identity-1");
+    let key = anchor_t09_key(
+        crate::product::models::ProviderName::ClaudeCode,
+        "identity-1",
+    );
 
     // same-key 并发 burst:barrier 同时释放 8 个 caller——single-flight 下
     // 全程只有 winner 的一次有界观测,其余 caller 等同一结果或命中缓存。
@@ -1815,7 +1817,10 @@ async fn anchor_t09_version_ttl_boundary_singleflight_and_failures() {
 
     // 观测失败不缓存(独立 key,不受上面 key 的成功观测干扰):连续两次
     // 失败都真实再观测、都 typed Err——失败结果不进入缓存。
-    let failure_key = anchor_t09_key(crate::product::models::ProviderName::KimiCode, "identity-failure");
+    let failure_key = anchor_t09_key(
+        crate::product::models::ProviderName::KimiCode,
+        "identity-failure",
+    );
     probe.set_failure(super::VersionProbeError::Unavailable);
     let failed_first = cache
         .cached_lc_cli_version(failure_key.clone(), probe.probe(), cancel.clone())
@@ -1896,9 +1901,7 @@ async fn anchor_t09_version_ttl_boundary_singleflight_and_failures() {
     key2_release_tx
         .send(())
         .expect("release the blocked key2 observation");
-    let key2_observation = key2_caller
-        .await
-        .expect("key2 caller join");
+    let key2_observation = key2_caller.await.expect("key2 caller join");
     assert_eq!(key2_observation.exact_version(), "codex 2.0.0");
 }
 
@@ -1908,7 +1911,10 @@ async fn anchor_t09_version_ttl_boundary_singleflight_and_failures() {
 async fn anchor_t09_command_identity_change_invalidates_live_cache() {
     let cache = std::sync::Arc::new(super::LcVersionCache::new());
     let probe = AnchorT09ProbeFactory::default();
-    let old_key = anchor_t09_key(crate::product::models::ProviderName::ClaudeCode, "identity-v1");
+    let old_key = anchor_t09_key(
+        crate::product::models::ProviderName::ClaudeCode,
+        "identity-v1",
+    );
     let observation = cache
         .cached_lc_cli_version(old_key.clone(), probe.probe(), CancellationToken::new())
         .await
@@ -1916,7 +1922,10 @@ async fn anchor_t09_command_identity_change_invalidates_live_cache() {
     assert_eq!(observation.exact_version(), "cli 1.4.0");
 
     // executable identity 改变 → 新 key(路径相同也算不同命令)。
-    let new_key = anchor_t09_key(crate::product::models::ProviderName::ClaudeCode, "identity-v2");
+    let new_key = anchor_t09_key(
+        crate::product::models::ProviderName::ClaudeCode,
+        "identity-v2",
+    );
     assert_ne!(new_key, old_key);
     // canonical executable 路径改变 → 新 key。
     let path_key = super::LcVersionProbeKey {
@@ -1957,7 +1966,10 @@ async fn anchor_t09_command_identity_change_invalidates_live_cache() {
 async fn anchor_t09_process_restart_does_not_reuse_version_cache() {
     let clock = std::sync::Arc::new(AnchorT09ManualClock::new());
     let probe = AnchorT09ProbeFactory::default();
-    let key = anchor_t09_key(crate::product::models::ProviderName::KimiCode, "identity-restart");
+    let key = anchor_t09_key(
+        crate::product::models::ProviderName::KimiCode,
+        "identity-restart",
+    );
     let first_cache = super::LcVersionCache::with_clock(clock.source());
     let original = first_cache
         .cached_lc_cli_version(key.clone(), probe.probe(), CancellationToken::new())
@@ -1993,8 +2005,8 @@ async fn anchor_t09_process_restart_does_not_reuse_version_cache() {
 /// 不得复活被取消的旧 run;释放 barrier 后旧 run 仍为零启动。
 #[tokio::test]
 async fn anchor_t09_probe_timeout_or_cancel_cannot_revive_old_run() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let clock = Arc::new(AnchorT09ManualClock::new());
     let cache = Arc::new(super::LcVersionCache::with_clock(clock.source()));
@@ -2002,13 +2014,12 @@ async fn anchor_t09_probe_timeout_or_cancel_cannot_revive_old_run() {
 
     // ① 超时:typed Err(Timeout),不缓存(再调必须再观测)。
     probe.set_failure(super::VersionProbeError::Timeout);
-    let timeout_key = anchor_t09_key(crate::product::models::ProviderName::Codex, "identity-timeout");
+    let timeout_key = anchor_t09_key(
+        crate::product::models::ProviderName::Codex,
+        "identity-timeout",
+    );
     let timed_out_observation = cache
-        .cached_lc_cli_version(
-            timeout_key.clone(),
-            probe.probe(),
-            CancellationToken::new(),
-        )
+        .cached_lc_cli_version(timeout_key.clone(), probe.probe(), CancellationToken::new())
         .await;
     assert!(matches!(
         timed_out_observation,
@@ -2098,7 +2109,10 @@ async fn anchor_t09_winner_panic_evicts_inflight_slot_for_next_caller() {
     use std::sync::Arc;
 
     let cache = Arc::new(super::LcVersionCache::new());
-    let key = anchor_t09_key(crate::product::models::ProviderName::ClaudeCode, "identity-panic");
+    let key = anchor_t09_key(
+        crate::product::models::ProviderName::ClaudeCode,
+        "identity-panic",
+    );
 
     // winner 的 probe future 注入 panic:任务边界捕获(JoinError::is_panic),
     // 不让测试进程直接终止。
