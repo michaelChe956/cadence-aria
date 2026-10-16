@@ -31,11 +31,6 @@ pub const SESSION_COOKIE_NAME: &str = "aria_session";
 /// 与任何令牌无关。
 pub const TRUSTED_ORIGINS_ENV: &str = "ARIA_API_TRUSTED_ORIGINS";
 
-/// 批2 T1（审查 F2）：注入工具会话 cookie jar 相对路径（workspace 根与 worktree
-/// 同路径；与 product 层 `evidence_injection::TOOLING_SESSION_COOKIE_FILE` 一致，
-/// 分层同 `WEB_ENDPOINT_FILE` 先例）。
-pub(crate) const TOOLING_SESSION_COOKIE_FILE: &str = ".aria/aria-session-cookie";
-
 /// token / 会话 ID 的随机字节数（合同下限 32）。
 const SECRET_BYTES: usize = 32;
 
@@ -283,19 +278,6 @@ impl ApiAuthState {
         let normalized = host.trim().to_ascii_lowercase();
         self.expected_authorities.contains(&normalized)
     }
-
-    /// 批2 T1（审查 F2）：为注入工具链（evidence 查询脚本等受信进程内工具）直接
-    /// 铸造会话，不经 bootstrap token 交换。crate 内受信接口：仅同进程
-    /// `serve_web`/注入链调用；会话与浏览器会话同池，进程重启全部失效。
-    /// 返回 cookie 头形式 `aria_session=<hex>`；CSPRNG 不可用 → None（fail-visible
-    /// 降级，绝不伪造熵）。残余边界（R9/GC8）：落地文件同 UID 可读，平台鉴权
-    /// 不抵御同 UID 进程取证。
-    pub(crate) fn mint_session_for_injected_tooling(&self) -> Option<String> {
-        let session = os_random_bytes(SECRET_BYTES).ok()?;
-        let mut inner = self.inner.lock().expect("api auth lock");
-        inner.sessions.insert(session.clone());
-        Some(format!("{SESSION_COOKIE_NAME}={}", hex::encode(session)))
-    }
 }
 
 /// 生成会话 cookie 的 `Set-Cookie` 值：`HttpOnly; SameSite=Strict; Path=/`，
@@ -425,6 +407,14 @@ async fn enforce(auth: Arc<ApiAuthState>, req: Request, next: Next) -> Response 
     if !origin_ok {
         return forbidden_response("forbidden_origin", "request origin not allowed");
     }
+
+    // 批2 T1 修复轮 2（NEW-2 裁定，设计 v3.0 §五 为约束权威）：/api/evidence-query
+    // 保留专用 evidence token 语义——handler 既有 token→attempt→role→预算链即门
+    //（attempt/run 绑定、仅证据只读），豁免管理会话校验；上面的 Host/Origin 卫生
+    // 照常生效，其余端点的会话语义不变。不给注入工具链下发任何管理会话。
+    if path == "/api/evidence-query" && method == axum::http::Method::POST {
+        return next.run(req).await;
+    }
     // 会话检查 / token 交换端点免身份（handler 自身给出 401/204/400）。
     if path == "/api/auth/session"
         && (method == axum::http::Method::GET || method == axum::http::Method::POST)
@@ -529,29 +519,6 @@ mod tests {
             token_a, token_b,
             "CSPRNG token must not repeat across states"
         );
-    }
-
-    /// 批2 T1 审查 F2：进程内受信铸造的工具会话可直接通过校验。
-    #[test]
-    fn api_auth_mint_tooling_session_issues_valid_in_process_session() {
-        let auth = ApiAuthState::for_bind(&loopback_bind(39721), &[]).expect("auth");
-        let cookie = auth
-            .mint_session_for_injected_tooling()
-            .expect("mint must succeed with CSPRNG available");
-        assert!(
-            cookie.starts_with("aria_session="),
-            "cookie 头形式：{cookie}"
-        );
-        let value = cookie.strip_prefix("aria_session=").expect("value");
-        assert_eq!(value.len(), 64);
-        assert!(value.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(auth.session_valid(value), "铸造会话必须立即有效");
-
-        let second = auth
-            .mint_session_for_injected_tooling()
-            .expect("second mint");
-        assert_ne!(cookie, second, "每次铸造独立会话");
-        assert!(auth.session_valid(value), "旧会话不被后续铸造失效");
     }
 
     #[test]

@@ -742,22 +742,6 @@ pub async fn serve_web(
         "{}",
         crate::web::api_auth::delivery_notice(&auth, owner_terminal_attached())
     );
-    // 批2 T1（审查 F2）：铸造注入工具会话并写 workspace 根 cookie jar（0600），
-    // worktree prepare 注入链复制进各 worktree，供 evidence 查询脚本穿越认证。
-    // 残余边界（R9/GC8）：该文件同 UID 可读，鉴权不抵御同 UID 进程。
-    match auth.mint_session_for_injected_tooling() {
-        Some(tooling_cookie) => {
-            if let Err(error) = write_tooling_session_cookie_file(&workspace_root, &tooling_cookie)
-            {
-                eprintln!("[aria-auth] write tooling session cookie failed: {error}");
-            }
-        }
-        None => {
-            eprintln!(
-                "[aria-auth] tooling session unavailable (CSPRNG); evidence-query injection degraded"
-            );
-        }
-    }
     let state = state.with_api_auth(auth);
     let app = build_web_router_with_evidence(state.clone(), evidence_enabled).fallback(
         move |req: axum::extract::Request| {
@@ -786,20 +770,6 @@ pub async fn serve_web(
 /// 不交付（显式报告缺少交付前提），绝不绕道集中日志。
 fn owner_terminal_attached() -> bool {
     unsafe { libc::isatty(libc::STDERR_FILENO) == 1 }
-}
-
-/// 批2 T1（审查 F2）：把工具会话 cookie jar 写入 workspace 根 `.aria/`（0600），
-/// worktree prepare 注入链（`inject_tooling_session`）复制进各 worktree 供
-/// evidence 查询脚本携带。残余边界（R9/GC8）：该文件同 UID 可读。
-fn write_tooling_session_cookie_file(workspace_root: &Path, cookie: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let path = workspace_root.join(crate::web::api_auth::TOOLING_SESSION_COOKIE_FILE);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, cookie)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
 }
 
 fn orchestrator_wake_subscribe(state: &WebAppState) -> tokio::sync::watch::Receiver<bool> {
@@ -1947,87 +1917,185 @@ mod tests {
             );
         }
 
-        /// 批2 T1 审查 F2：注入脚本链路（jar 复制 + Origin + cookie）在认证
-        /// 开启的真实路由上端到端可达 handler；无 cookie 仍 401。
+        /// 批2 T1 修复轮 2（NEW-2 裁定）：/api/evidence-query 走专用 evidence
+        /// token 语义——合法专用 token 无任何管理会话即穿过中间件进入 handler
+        /// 证据链；非法 token 由 handler 专用链拒绝；Host/Origin 卫生照常。
         #[tokio::test]
-        async fn api_auth_injected_evidence_script_reaches_handler_end_to_end() {
+        async fn api_auth_evidence_query_uses_dedicated_token_semantics() {
             let root = tempdir().expect("root");
+
+            // 专用 token fixture：attempt 记录 + issue_evidence_token（与
+            // handlers/evidence_query.rs 测试同构的最小链）。
+            let paths = crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria"));
+            let repo = root.path().join("repo");
+            std::fs::create_dir_all(&repo).expect("repo dir");
+            let attempt = crate::product::coding_models::CodingExecutionAttempt {
+                id: "coding_attempt_0001".to_string(),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                attempt_no: 1,
+                scope: crate::product::coding_models::CodingAttemptScope::WorkItem,
+                status: crate::product::coding_models::CodingAttemptStatus::Running,
+                version: 0,
+                manual_recovery_reason: None,
+                admission_ticket_consumed_at: None,
+                admission_kind: crate::product::coding_models::CodingAdmissionKind::LegacyGroup,
+                stage: crate::product::coding_models::CodingExecutionStage::Coding,
+                base_branch: "main".to_string(),
+                branch_name: "aria/issues/issue_0001".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: crate::web::workspace_ws_types::ProviderConfigSnapshot {
+                    author: crate::product::models::ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                rework_count: 0,
+                max_auto_rework: 0,
+                work_item_group_id: None,
+                current_work_item_id: Some("work_item_0001".to_string()),
+                active_unit_id: None,
+                head_commit: None,
+                pushed_remote: None,
+                review_request_id: None,
+                provider_conversations: Vec::new(),
+                created_at: "2026-08-11T00:00:00Z".to_string(),
+                updated_at: "2026-08-11T00:00:00Z".to_string(),
+                target_snapshot: None,
+                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+                start_claim: None,
+                completed_at: None,
+            };
+            crate::product::json_store::write_json(
+                &paths
+                    .issue_lifecycle_root("project_0001", "issue_0001")
+                    .join("coding-attempts")
+                    .join("coding_attempt_0001.json"),
+                &attempt,
+            )
+            .expect("write attempt record");
+            let token = crate::product::logical_codebase::evidence_token::issue_evidence_token(
+                &paths, &repo, &attempt,
+            )
+            .expect("issue evidence token");
+
+            // 认证开启的真实 evidence 路由（evidence_enabled=true 挂载）。
             let bind: std::net::SocketAddr =
                 format!("127.0.0.1:{AUTH_PORT}").parse().expect("bind");
             let auth = std::sync::Arc::new(
                 crate::web::api_auth::ApiAuthState::for_bind(&bind, &[]).expect("auth"),
             );
-
-            // serve_web 同款铸造 + workspace 根 jar 写入。
-            let cookie = auth
-                .mint_session_for_injected_tooling()
-                .expect("tooling session mint");
-            super::super::write_tooling_session_cookie_file(root.path(), &cookie)
-                .expect("write workspace jar");
-
-            // worktree prepare 注入链同款复制。
-            let worktree = root.path().join("wt");
-            std::fs::create_dir_all(&worktree).expect("worktree dir");
-            crate::product::logical_codebase::evidence_injection::inject_tooling_session(
-                root.path(),
-                &worktree,
-            )
-            .expect("inject tooling session into worktree");
-            let jar_path = worktree.join(".aria/aria-session-cookie");
-            let jar = std::fs::read_to_string(&jar_path).expect("worktree jar");
-            assert!(
-                jar.starts_with("aria_session="),
-                "jar 内容为 cookie 形式：{jar}"
-            );
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = std::fs::metadata(&jar_path)
-                    .expect("jar metadata")
-                    .permissions()
-                    .mode();
-                assert_eq!(mode & 0o777, 0o600, "worktree jar 必须 0600");
-            }
-
-            // 认证开启的真实 evidence 路由（evidence_enabled=true 挂载）。
             let app = build_web_router_with_evidence(state(root.path()).with_api_auth(auth), true);
-            let script_style_request = |cookie_header: Option<&str>| {
-                let mut builder = Request::builder()
-                    .method("POST")
-                    .uri("/api/evidence-query")
-                    .header("host", trusted_host())
-                    .header("origin", trusted_origin())
-                    .header("content-type", "application/json");
-                if let Some(cookie_header) = cookie_header {
-                    builder = builder.header("cookie", cookie_header);
-                }
-                builder.body(Body::from("{}")).expect("evidence request")
+
+            let dedicated_token_request =
+                |host: Option<&str>, origin: Option<&str>, token: &str| {
+                    let mut builder = Request::builder()
+                        .method("POST")
+                        .uri("/api/evidence-query")
+                        .header("content-type", "application/json");
+                    if let Some(host) = host {
+                        builder = builder.header("host", host);
+                    }
+                    if let Some(origin) = origin {
+                        builder = builder.header("origin", origin);
+                    }
+                    builder
+                        .body(Body::from(
+                            json!({ "token": token, "role": "coder", "query": "some_symbol" })
+                                .to_string(),
+                        ))
+                        .expect("evidence request")
+                };
+            let response_code = |response: axum::response::Response| async move {
+                let text = body_text(response).await;
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .expect("handler-domain JSON body")
+                    .get("code")
+                    .and_then(|code| code.as_str())
+                    .expect("code field")
+                    .to_string()
             };
 
-            // 带注入 jar：穿越中间件进入 handler（业务层返回 4xx/5xx 均可，不得 401/403）。
+            // 1) 合法专用 token、无任何管理会话 → 穿过中间件进入 handler
+            //    证据链（无 target snapshot → handler 域结果 evidence_not_available，
+            //    不是中间件 401 unauthorized / 403）。
             let response = app
                 .clone()
-                .oneshot(script_style_request(Some(&jar)))
+                .oneshot(dedicated_token_request(
+                    Some(trusted_host()),
+                    Some(trusted_origin()),
+                    &token,
+                ))
                 .await
-                .expect("authed evidence response");
-            assert_ne!(
-                response.status(),
-                StatusCode::UNAUTHORIZED,
-                "注入链不得被身份门拦截"
-            );
+                .expect("valid token response");
             assert_ne!(
                 response.status(),
                 StatusCode::FORBIDDEN,
-                "注入链不得被来源门拦截"
+                "Origin/Host 卫生不应拦截受信来源"
+            );
+            let code = response_code(response).await;
+            assert_eq!(
+                code, "evidence_not_available",
+                "合法 token 必须由 handler 证据链应答（而非管理会话门）"
             );
 
-            // 反例：同请求无 cookie → 401（脚本 jar 缺失时不得放行）。
+            // 2) 非法 token、无会话 → handler 专用链拒绝（evidence_unauthorized），
+            //    仍非中间件 unauthorized。
             let response = app
                 .clone()
-                .oneshot(script_style_request(None))
+                .oneshot(dedicated_token_request(
+                    Some(trusted_host()),
+                    Some(trusted_origin()),
+                    "deadbeef",
+                ))
                 .await
-                .expect("anon evidence response");
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                .expect("invalid token response");
+            let code = response_code(response).await;
+            assert_eq!(
+                code, "evidence_unauthorized",
+                "非法 token 由专用 token 链拒绝，不是管理会话门"
+            );
+
+            // 3) 缺 Host / 伪造 Host → 中间件 403（先于专用链）。
+            let response = app
+                .clone()
+                .oneshot(dedicated_token_request(
+                    None,
+                    Some(trusted_origin()),
+                    &token,
+                ))
+                .await
+                .expect("missing host response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let response = app
+                .clone()
+                .oneshot(dedicated_token_request(
+                    Some("evil.example:4317"),
+                    Some(trusted_origin()),
+                    &token,
+                ))
+                .await
+                .expect("evil host response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+            // 4) 恶意 / null Origin → 中间件 403（mutation 来源卫生保留）。
+            for evil in ["http://evil.example", "null"] {
+                let response = app
+                    .clone()
+                    .oneshot(dedicated_token_request(
+                        Some(trusted_host()),
+                        Some(evil),
+                        &token,
+                    ))
+                    .await
+                    .expect("evil origin response");
+                assert_eq!(
+                    response.status(),
+                    StatusCode::FORBIDDEN,
+                    "Origin={evil} 须 403"
+                );
+            }
         }
     }
 }

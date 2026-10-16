@@ -280,7 +280,7 @@ cd web && pnpm dev --port 5173
 
 平台 API 默认启用入站认证（无条件前置，localhost 不豁免）：
 
-- 仅 `GET /api/health` 公开；其余 `/api/**` 与 `/ws/**`（含 test/evidence 路由与别名）都要求已认证会话，且在进入 handler / WebSocket upgrade 之前校验 Host 与 Origin。
+- 仅 `GET /api/health` 公开；其余 `/api/**` 与 `/ws/**`（含 test 路由与别名）都要求已认证会话，且在进入 handler / WebSocket upgrade 之前校验 Host 与 Origin（唯一例外：`POST /api/evidence-query` 按专用 evidence token 语义鉴权，见下节）。
 - 服务启动时生成一次性 bootstrap token（OS CSPRNG 32 字节），**只在 owner 受信终端（交互 TTY stderr）显示一次**。首次打开页面会看到认证入口，把终端显示的 token 粘贴进去完成交换；服务端通过 `aria_session` cookie（`HttpOnly; SameSite=Strict; Path=/`）建立会话。token 一次性消费，进程重启后会话与 token 全部失效，需要重启后在终端重新获取。
 - 长期运行建议在 `tmux`/`screen` 或交互终端中启动。`nohup ... > log 2>&1` 这类无 TTY 启动**无法交付 token**：服务会显式报告缺少受信终端交付前提，且绝不把 token 写入日志、文件或环境变量。
 - 状态变更（POST/PUT/DELETE）与 WebSocket 必须携带受信精确 Origin；敏感 GET 无 Origin 也可访问（仍需会话）；非法 / `null` Origin、伪造 Host 一律 403。
@@ -288,9 +288,9 @@ cd web && pnpm dev --port 5173
 - 非浏览器自动化（CLI/脚本）：先显式携带受信 Origin 头，`POST /api/auth/session`（body：`{"token": "<终端获取的 token>"}`）交换后保存 cookie jar 再访问；收到 401 时回到认证流程，不要盲目重发副作用请求。
 - 前端刷新页面直接复用 cookie 会话（`GET /api/auth/session`：204 已认证 / 401 未认证）；WebSocket URL 一律不带任何令牌。
 
-#### 注入工具会话（evidence 查询脚本）
+#### evidence 查询脚本（专用 token，不与管理会话混用）
 
-worktree 内的 `.aria/bin/aria-evidence-query` 脚本同样受平台认证约束：服务启动时会铸造一枚进程内工具会话，写入 workspace 根 `.aria/aria-session-cookie`（0600），并在每次 worktree 准备时复制进 worktree 同路径；脚本自动携带 `Origin: http://127.0.0.1:<port>` 与该 cookie 调用 `/api/evidence-query`（服务重启后由注入链自动刷新）。残余边界（R9/GC8，与鉴权设计一致）：该 cookie 文件与 evidence token 一样是同 UID 可读材料——平台鉴权阻止未授权/跨站调用，不抵御同 UID 恶意进程的读取与复用。
+worktree 内的 `.aria/bin/aria-evidence-query` 脚本走**专用 evidence token 语义**：鉴权由 handler 既有的 token→attempt→role→预算链承担（与运行中 attempt 绑定、仅证据只读），不持有也不需要管理会话。平台认证中间件对该端点保留 Host/Origin 来源卫生（脚本自动携带 `Origin: http://127.0.0.1:<port>`），body 内的 evidence token 由 `.aria/evidence-token`（0600）提供。残余边界（R9/GC8，与鉴权设计一致）：该 token 文件是同 UID 可读材料——平台鉴权阻止未授权/跨站调用，不抵御同 UID 恶意进程截获或复用。
 
 #### 首次启动依赖自检
 

@@ -516,21 +516,6 @@ impl CodingWorkspaceEngine {
                             "inject web endpoint failed; degrading without blocking worktree prepare"
                         );
                     }
-                    // 批2 T1（审查 F2）：随端口文件复制注入工具会话 cookie jar
-                    // （0600），供 evidence 查询脚本携带穿越平台认证。源缺失
-                    //（认证未装配测试态）warn 降级、不阻断 attempt 启动。
-                    if let Err(error) =
-                        crate::product::logical_codebase::evidence_injection::inject_tooling_session(
-                            workspace_root,
-                            &journal.worktree_path,
-                        )
-                    {
-                        tracing::warn!(
-                            %error,
-                            attempt_id = %updated.id,
-                            "inject tooling session failed; degrading without blocking worktree prepare"
-                        );
-                    }
                 }
                 None => {
                     tracing::warn!(
