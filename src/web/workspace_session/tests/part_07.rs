@@ -432,6 +432,8 @@ fn bound_enrollment(
         updated_at: "2026-09-27T00:00:00Z".to_string(),
         binding_history: None,
         command_ledger: Vec::new(),
+        terminated_at: None,
+        attention_facts: Vec::new(),
     }
 }
 
