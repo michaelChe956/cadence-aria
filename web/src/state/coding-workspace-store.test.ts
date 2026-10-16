@@ -573,6 +573,49 @@ describe("coding workspace store", () => {
     });
   });
 
+  // Bug2-C(修复轮 F1):live provider 完成帧按字段重建 run 时,权威快照
+ // 已携带的 gate_origin 关联事实不得丢失(与 retry_metadata/reason_code
+ // 等可选字段同款保留约定)。
+  it("keeps gate origin when a completed provider entry rebuilds the role run", () => {
+    const store = useCodingWorkspaceStore.getState();
+    store.setSessionState(
+      sessionState({
+        role_runs: [
+          roleRun({
+            id: "coding_role_run_0002",
+            status: "running",
+            trigger: "retry_review",
+            gate_origin: {
+              gate_id: "coding_blocked_gate_0001",
+              generation: 0,
+              action_id: "retry_review",
+            },
+          }),
+        ],
+      }),
+    );
+
+    store.replacePendingEntry({
+      id: "coding_chat_entry_0002",
+      type: "provider_stream",
+      role: "code_reviewer",
+      content: "provider completion",
+      timestamp: "2026-06-12T00:01:00Z",
+      node_id: "coding_node_0003",
+      metadata: { role_run_id: "coding_role_run_0002" },
+    });
+
+    expect(useCodingWorkspaceStore.getState().roleRuns[0]).toMatchObject({
+      id: "coding_role_run_0002",
+      status: "completed",
+      gate_origin: {
+        gate_id: "coding_blocked_gate_0001",
+        generation: 0,
+        action_id: "retry_review",
+      },
+    });
+  });
+
   it("marks automatic retries exhausted only when their blocked gate is present", () => {
     const store = useCodingWorkspaceStore.getState();
     const thirdTransportFailure = roleRun({

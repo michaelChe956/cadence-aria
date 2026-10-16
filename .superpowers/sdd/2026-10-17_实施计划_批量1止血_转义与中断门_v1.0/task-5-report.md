@@ -27,3 +27,23 @@
 
 1. vitest 默认不 typecheck(esbuild 剥离类型),类型门的日常保障是 `pnpm build` 的 tsc -b——本次已实跑通过;若未来把 `vitest --typecheck` 纳入门禁,新 describe 可直接复用。
 2. roleRuns 中 gate_origin 仅作关联事实透传,前端无按钮逻辑消费它(消费方是 Task 4 服务端补偿);RoleRunHistoryPanel 等展示组件不特例渲染,符合「无特例按钮逻辑」约束。
+
+## 修复轮 1(F1,P2,审查必修)
+
+**问题**:`upsertRoleRunFromCompletedProviderEntry`(coding-workspace-store.ts:843-884)在 live provider 完成帧按字段逐项重建 CodingRoleRun 时,复制了 retry_metadata/retry_exhausted/supersede_*/reason_code 全部可选字段,唯缺 `gate_origin`——权威快照已携带的关联事实在该窗口丢失(store 中变 undefined),直到下一次权威快照。
+
+**修复**(按 reviewer 指定,:875 补一行,与既有可选字段保留约定同形):
+```ts
+gate_origin: existing?.gate_origin ?? null,
+```
+
+**覆盖测试**(新增 `keeps gate origin when a completed provider entry rebuilds the role run`,TDD 红→绿):
+- 红:run 带含 gate_origin 的权威快照入 store → provider 完成帧(`replacePendingEntry` provider_stream+role_run_id)重建 → 断言 gate_origin 保留 → 实录 1 failed(丢失为 undefined);
+- 绿:修复后 run 转 completed 且 gate_origin 三元组原样保留。
+
+**命令与输出**:
+- `pnpm exec vitest run useCodingWorkspaceWs coding-workspace-store` → 4 文件 63 用例全过
+- `pnpm exec tsc -b` → 0 错
+- `pnpm test` 全量 → **230 文件 / 2362 用例全过**(较修复前 +1 用例)
+
+**Commit**:单独提交 `fix(web): live 完成重建保留 gate_origin 投影`。

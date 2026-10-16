@@ -872,6 +872,7 @@ function upsertRoleRunFromCompletedProviderEntry(
     supersedes_run_id: existing?.supersedes_run_id ?? null,
     superseded_by_run_id: existing?.superseded_by_run_id ?? null,
     reason_code: existing?.reason_code ?? null,
+    gate_origin: existing?.gate_origin ?? null,
     raw_provider_output_refs: uniqueStrings([
       ...(existing?.raw_provider_output_refs ?? []),
       ...(rawProviderOutputRef ? [rawProviderOutputRef] : []),
