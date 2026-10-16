@@ -27,3 +27,22 @@
 3. `resolve_blocked_gate`(None shim)保留:仅旧测试(coding_attention_info 等)与手动场景调用;生产恢复链已改显式动作。
 4. Task 4 就绪接口:`resolve_blocked_gate_for_origin` / `get_archived_blocked_gate_facts` / `open_blocked_gate_generation` / `GateOrigin`(coding_models 导出);origin 关门对「异动作已关」返回 None(不与人工决策互抢),与原语直关的 Conflict 语义有意不同。
 5. 已归档旧数据缺 resolved_at 按 None 解释(历史时间不伪造);Task 4 的「按 journal 证据补 action」属启动对账职责,本任务未做按证据回填。
+
+## 修复轮 1(F1,P2,审查必修)
+
+**问题**:统一关闭原语 `root_exists && archive_exists` 分支未看根 status,无条件「以归档为首关事实、删根」。reopen 半完成路径(写重开根→删归档)崩溃后产生「根 open+上一代残留归档」态,此时任何关门调用会删掉新代次 open 根、返回上一代 resolved 事实;异动作时对该旧事实永久 Conflict 卡门;与 reopen 原语对同态的收敛方向相反。
+
+**修复**(gate.rs `resolve_blocked_gate_record_unlocked`,按 reviewer 建议):该分支先读根记录——根非 open(崩溃残留根)→维持原收敛(归档为首关事实,清理根);根 open(重开半完成残留)→删上一代残留归档,落回下方 root_exists 的 open 首关路径(以根为当前事实,新写完整 resolved 事实)。与 reopen 的「根已 open⇒仅清残留归档」同向收敛。
+
+**覆盖测试**(新增 `resolve_blocked_gate_prefers_open_root_over_reopen_residual_archive`,TDD 红→绿):
+- 红:首关(gen0/retry_review)→reopen(gen1)→手工重建残留归档→以 `abort` 关门 → 旧代码 `Conflict{coding_blocked_gate_resolved_action}` panic(红测实录:`open root must close despite residual archive: Conflict {...}`);
+- 绿:同场景修复后关门成功,断言 `resolved_action=abort`、`resolution_generation=1`、根删除、归档为新事实(action=abort/gen=1)——不复活旧事实。
+
+**命令与输出**:
+- `cargo test --locked --lib resolve_blocked_gate_prefers_open_root` → 1 passed(修复前 1 failed:Conflict)
+- `cargo test --locked --lib coding_attempt_store` → 217+1=218 passed, 0 failed
+- `cargo test --locked --lib failed_review_recovery` → 57 passed, 0 failed
+
+**Commit**:单独提交 `fix(gate): 关门原语区分重开残留归档与崩溃残留根——根 open 时以根为当前事实`(消息最新一条为准)。
+
+**连带核查**:`resolve_blocked_gate_for_origin` 对同态先读根(open→代次比对→按根关门),不受残留归档影响;origin 代次失配仍零误关。审查遗留 O2(plan_terminated×在飞恢复交错)、O4(generation 读取不在锁内)已记录,归 Task 4。

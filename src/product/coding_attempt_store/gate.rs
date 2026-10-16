@@ -1149,11 +1149,18 @@ fn resolve_blocked_gate_record_unlocked(
     }
 
     if root_exists && archive_exists {
-        // 崩溃前缀「归档完根仍在」:归档是首关事实,清理残留根记录。
-        let record: BlockedGateRecord = read_json(&archive_path)?;
-        ensure_resolved_action_consistent(&record, resolved_action, gate_id)?;
-        super::remove_file_if_exists(&root_path)?;
-        return Ok(resolve_outcome_from_record(record));
+        let root_record: BlockedGateRecord = read_json(&root_path)?;
+        if root_record.status != BlockedGateStatus::Open {
+            // 崩溃前缀「归档完根仍在」:归档是首关事实,清理残留根记录。
+            let record: BlockedGateRecord = read_json(&archive_path)?;
+            ensure_resolved_action_consistent(&record, resolved_action, gate_id)?;
+            super::remove_file_if_exists(&root_path)?;
+            return Ok(resolve_outcome_from_record(record));
+        }
+        // 重开半完成残留(reopen 已写新代次 open 根、旧归档未删):根是
+        // 当前事实,丢弃上一代残留归档后按首次关闭处理——与 reopen 原语
+        // 的「根已 open⇒仅清残留归档」同向收敛。
+        super::remove_file_if_exists(&archive_path)?;
     }
 
     if root_exists {
@@ -1892,6 +1899,68 @@ mod tests {
                 "{missing}"
             );
         }
+    }
+
+    /// Bug2-A(修复轮 F1):重开半完成残留态——reopen 写好新代次 open 根
+    /// 后、删旧归档前崩溃,留下「根 open+上一代归档」。关门必须以 open
+    /// 根为当前事实正常首关:不复活上一代归档事实、不对旧动作异动作
+    /// Conflict(与 reopen 原语「根已 open⇒仅清残留归档」同向收敛)。
+    #[test]
+    fn resolve_blocked_gate_prefers_open_root_over_reopen_residual_archive() {
+        let (_tmp, store, attempt) = fixture_attempt();
+        let gate = store
+            .create_blocked_gate(&attempt, interrupted_gate_input(&attempt))
+            .unwrap();
+        let project_id = attempt.project_id.as_str();
+        let issue_id = attempt.issue_id.as_str();
+        let attempt_id = attempt.id.as_str();
+        let gates_root = store.blocked_gates_root(project_id, issue_id, attempt_id);
+        let root_path = gates_root.join(format!("{}.json", gate.gate_id));
+        let archive_path = gates_root
+            .join("resolved")
+            .join(format!("{}.json", gate.gate_id));
+
+        // 首轮关闭(gen 0, retry_review)→ 重开(gen 1)。
+        store
+            .resolve_blocked_gate_with_action(
+                project_id,
+                issue_id,
+                attempt_id,
+                &gate.gate_id,
+                Some("retry_review"),
+            )
+            .unwrap();
+        let stale_archive = std::fs::read_to_string(&archive_path).unwrap();
+        store
+            .reopen_failed_code_review_gate_for_plan_repair(
+                project_id,
+                issue_id,
+                attempt_id,
+                &gate.gate_id,
+            )
+            .unwrap();
+        assert!(root_path.exists() && !archive_path.exists());
+
+        // 手工重建残留归档(模拟 reopen 写根后、删归档前崩溃)。
+        std::fs::write(&archive_path, stale_archive).unwrap();
+
+        // 关门(异动作):必须成功首关 open 根,而非对旧归档 Conflict。
+        let outcome = store
+            .resolve_blocked_gate_with_action(
+                project_id,
+                issue_id,
+                attempt_id,
+                &gate.gate_id,
+                Some("abort"),
+            )
+            .expect("open root must close despite residual archive");
+        assert_eq!(outcome.resolved_action.as_deref(), Some("abort"));
+        assert_eq!(outcome.resolution_generation, 1);
+        assert!(!root_path.exists(), "open root closed by fresh close");
+        let archived: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&archive_path).unwrap()).unwrap();
+        assert_eq!(archived["resolved_action"], serde_json::json!("abort"));
+        assert_eq!(archived["resolution_generation"], serde_json::json!(1));
     }
 
     fn interrupted_gate_input(attempt: &CodingExecutionAttempt) -> CreateBlockedGateInput {
