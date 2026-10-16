@@ -317,10 +317,16 @@ export function useIssueLifecycleGeneration({
         },
         // B2-P1（REQ-WIGA-02）：自动化入口显式提交 auto——GET 投影与
         // prepare 同源解析、plan_approval 恒为缺省 manual，Enable 的冻结
-        // 位由入口选择覆盖，其余选项仍取投影原样；手动链路不经本函数。
+        // 位由入口选择覆盖；F2 修复：require_execution_plan_confirm 显式
+        // 压 false（与后端 normalized_for_enrollment_freeze 同值），wire
+        // 与冻结值一致，投影解析的旧表单值不上 wire；手动链路不经本函数。
         options: {
           ...target.resolved_options,
           plan_approval: "auto",
+          plan_options: {
+            ...target.resolved_options.plan_options,
+            require_execution_plan_confirm: false,
+          },
         },
         // C5 Task 1：Enable 只回传服务端投影的 enrollment target（必带、
         // 不再发送 logical_repository_id 冗余字段，不从前端拼凑）。

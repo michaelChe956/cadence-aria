@@ -263,7 +263,7 @@ describe("useIssueLifecycleGeneration plan_approval（B2-P1 前端段）", () =>
     expect("automation_mode" in prepare).toBe(false);
   });
 
-  it("passes the confirmation checkbox through in automatic mode instead of pressing it client-side", async () => {
+  it("pins require_execution_plan_confirm=false on the Enable wire in automatic mode", async () => {
     const captured = stubLifecycleFetch();
     const actions = renderGeneration({
       include_integration_tests: true,
@@ -281,16 +281,18 @@ describe("useIssueLifecycleGeneration plan_approval（B2-P1 前端段）", () =>
       automation_mode: "automatic",
     });
 
-    // 复选框仍参与 target 投影解析（弹窗行为不变）。
+    // 表单值仍参与 target 投影解析（弹窗不篡改表单值；复选框在
+    // automatic 下由弹窗置灰固定关闭，此处兜底旧表单值/投影解析值）。
     expect(captured.targetGets).toHaveLength(1);
     expect(captured.targetGets[0]).toContain("require_execution_plan_confirm=true");
-    // 前端不压 false：Enable 携带投影原值，auto 冻结归一归后端
-    // （`EnrollmentOptions::normalized_for_enrollment_freeze`）。
+    // F2 修复：Enable wire 与后端冻结值一致——auto 一律显式 false
+    // （`EnrollmentOptions::normalized_for_enrollment_freeze` 同值），
+    // 不再依赖服务端归一，投影解析的 true 不上 wire。
     expect(captured.enableBodies).toHaveLength(1);
     const options = captured.enableBodies[0].command.options;
     expect(options.plan_approval).toBe("auto");
     expect(options.plan_options).toMatchObject({
-      require_execution_plan_confirm: true,
+      require_execution_plan_confirm: false,
     });
   });
 });

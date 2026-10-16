@@ -186,10 +186,21 @@ export function WorkItemPlanOptionsDialog({
           />
           <OptionCheckbox
             label="子 Work Item 执行前需要确认 Plan"
-            checked={options.require_execution_plan_confirm}
-            disabled={submitting}
+            checked={!automatic && options.require_execution_plan_confirm}
+            disabled={submitting || automatic}
             onChange={() => updateOption("require_execution_plan_confirm")}
           />
+          {/* B2-P1 F2（REQ-WIGA-02）：automatic 下后端冻结一律压 false，
+              勾选无效——置灰＋固定关闭显示并说明；不篡改表单值，切回
+              手动即恢复用户原勾选（manual 行为不变）。 */}
+          {automatic ? (
+            <p
+              data-testid="plan-approval-auto-note"
+              className="text-xs font-normal text-[var(--aria-ink-muted)]"
+            >
+              自动化模式下无需执行前确认，plan 自动批准
+            </p>
+          ) : null}
           {/* REQ-PPS-01：创建即快照 provider，不再依赖创建后页面补发选择；
               不可用项置灰禁选，缺省项沿用服务端兼容默认。 */}
           <ProviderSelect
