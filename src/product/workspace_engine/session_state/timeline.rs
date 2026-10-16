@@ -19,6 +19,16 @@ impl WorkspaceEngine {
     }
 
     pub(crate) async fn finish_failed_run(&mut self) {
+        // 批 2 T2（REQ-WIGA-09）：durable 已 Terminated 的 session，迟到失败
+        // 收口不覆盖状态、不重置 stage（终止终态；store 层另有第二道防线）。
+        if let Some(store) = &self.lifecycle_store
+            && let Ok(record) = store.get_workspace_session(&self.session.session_id)
+            && record.status == WorkspaceSessionStatus::Terminated
+        {
+            self.session.session_status = WorkspaceSessionStatus::Terminated;
+            self.active_run_id = None;
+            return;
+        }
         // P2 GAP-E/G（Task 0.1）：SC 已收敛 durable 终态 Failed 的会话保留
         // Failed（人工显式重驱的恢复现场），其他 flow 维持旧 Open 重置。
         let status = if self.session.flow_kind

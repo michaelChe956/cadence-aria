@@ -117,6 +117,30 @@ pub(crate) fn deliver_attempt2_frozen_prompt(
     joined
 }
 
+/// 批 2 T2（REQ-WIGA-09）：session 精确绑定的 enrollment 已 terminated 时
+/// 拒绝 provider run spawn。仅当 enrollment 显式绑定该 session（session_id
+/// 全等）才拦；manual/无绑定/异 session 不拦（手动路径零变化）。
+fn ensure_session_enrollment_not_terminated(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    session_record: &crate::product::models::WorkspaceSessionRecord,
+) -> Result<(), String> {
+    let store =
+        crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone());
+    let enrollment = store
+        .get(&session_record.project_id, &session_record.issue_id)
+        .map_err(|error| format!("automation enrollment read failed: {error}"))?;
+    if let Some(enrollment) = enrollment
+        && enrollment.session_id.as_deref() == Some(session_record.id.as_str())
+        && let Some(terminated_at) = enrollment.terminated_at
+    {
+        return Err(format!(
+            "automation_plan_terminated: session {} plan terminated at {terminated_at}",
+            session_record.id
+        ));
+    }
+    Ok(())
+}
+
 pub(super) async fn spawn_provider_run_with_start_mode(
     run_context: ProviderRunContext,
     run_kind: ProviderRunKind,
@@ -160,6 +184,10 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                 format!("entity_admission_failed: workspace session run admission failed: {inner}")
             }
         })?;
+    // 批 2 T2（REQ-WIGA-09）：自动化绑定的 plan session 在任何真实 spawn 前
+    // 重验 enrollment——已 terminated（终止在途/已完成）一律拒绝新 provider
+    // run（迟到事件/续驱不得复活终止链）；非自动化绑定 session 原样放行。
+    ensure_session_enrollment_not_terminated(&app_paths, &session_record)?;
 
     // Handler-originated starts always supersede the active provider run: a user
     // message must cancel a streaming run before waiting for the engine mutex

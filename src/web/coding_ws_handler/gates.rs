@@ -200,6 +200,20 @@ pub(crate) async fn await_stage_gate(
                         emit_stage_gate(engine, event_tx, coding_store, &current, &gate).await?;
                     }
                     CodingRunnerCommand::AbortAttempt => {
+                        // 批 2 T2（C2/C5，REQ-WIGA-09）：终止发起或已
+                        // terminated——只干净退出（Ok(None)：runner 结束、
+                        // completion 由 registration guard 发出），让位终止
+                        // 编排的专用收口：不改门状态（收口统一关门）、不走
+                        // 旧 handle_abort、不倒计时续跑、零 provider；
+                        // manual/未终止保持原 stage 门 abort 语义。
+                        let paths = coding_store.paths();
+                        if crate::product::coding_attempt_store::automation_plan_terminated_for_attempt(
+                            &paths, &current,
+                        )?
+                        .is_some()
+                        {
+                            return Ok(None);
+                        }
                         let _ = coding_store.update_stage_gate_status(
                             &current.project_id,
                             &current.issue_id,

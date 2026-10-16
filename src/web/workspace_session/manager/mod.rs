@@ -64,6 +64,10 @@ pub(super) struct ManagerState {
     pub(super) attachments: HashMap<String, Attachment>,
     next_run_id: u64,
     active_run: Option<ActiveRun>,
+    /// 批 2 T2（REQ-WIGA-09）：run token → completion watch——任务真实收口
+    /// 点 `finish_run` 按 token 发信号；`abort_active_run_and_wait_completion`
+    /// 在锁外等待真实 completion（不以 is_active_run()==false 冒充退出）。
+    pub(super) run_completions: HashMap<u64, tokio::sync::watch::Sender<bool>>,
     pub(super) journal: EventJournal,
     lease: LeaseState,
     recovery_error: Option<String>,
@@ -158,6 +162,7 @@ impl WorkspaceSessionManager {
                 attachments: HashMap::new(),
                 next_run_id: 0,
                 active_run: None,
+                run_completions: HashMap::new(),
                 choice_claims: HashMap::new(),
                 finished_choice_status: std::collections::VecDeque::new(),
                 lease: LeaseState::default(),
@@ -207,6 +212,7 @@ impl WorkspaceSessionManager {
                 pending_attachments: HashMap::new(),
                 attachments: HashMap::new(),
                 next_run_id: 0,
+                run_completions: HashMap::new(),
                 active_run: None,
                 choice_claims: HashMap::new(),
                 finished_choice_status: std::collections::VecDeque::new(),
@@ -484,6 +490,7 @@ impl WorkspaceSessionManager {
             state: StdMutex::new(ManagerState {
                 pending_attachments: HashMap::new(),
                 attachments: HashMap::new(),
+                run_completions: HashMap::new(),
                 next_run_id: 0,
                 active_run: None,
                 choice_claims: HashMap::new(),
@@ -629,6 +636,7 @@ impl WorkspaceSessionManager {
             engine_tx,
             state: StdMutex::new(ManagerState {
                 pending_attachments: HashMap::new(),
+                run_completions: HashMap::new(),
                 attachments: HashMap::new(),
                 next_run_id: 0,
                 active_run: None,
@@ -671,6 +679,162 @@ impl WorkspaceSessionManager {
         manager
     }
 }
+
+/// 批 2 T2（REQ-WIGA-09）：plan 终止引擎侧收口的单 attempt 结果（T3 REST
+/// 投影的内部形态；status: aborted/already_terminal/cleanup_failed）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanTerminationAttemptOutcome {
+    pub attempt_id: String,
+    pub status: &'static str,
+    pub reason_code: Option<String>,
+    pub message: Option<String>,
+}
+
+/// 批 2 T2：终止引擎侧整体结果（session 终止事实＋逐 attempt 收口）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanTerminationEngineOutcome {
+    pub session_terminated: bool,
+    pub session_confirmed_preserved: bool,
+    pub session_error: Option<String>,
+    pub attempts: Vec<PlanTerminationAttemptOutcome>,
+}
+
+/// 批 2 T2（REQ-WIGA-09，§4 终止顺序①之后的引擎侧收口）：plan 终止的
+/// 专用取消契约——T3 统一终止服务在 enrollment CAS（`terminate_plan`）落
+/// 盘后调用。步骤：②失效 CodingPlanRun（禁新 run，无 run 幂等）；③取消
+/// plan session 活跃 run、等**真实 completion**（不持 engine 锁）、CAS
+/// Terminated（已 Confirmed 不改）；④逐 attempt 经 coding registry abort
+///（runner 内 AbortAttempt 干净退出，见 runner_support/gates）；⑤逐
+/// attempt 专用收口（关门/Aborted/保留文件），单仓异常继续后仓。
+pub(crate) async fn terminate_plan_engine_side(
+    app_paths: ProductAppPaths,
+    session_registry: WorkspaceSessionRegistry,
+    coding_runs: crate::web::state::CodingRunRegistry,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+    bound_session_id: Option<&str>,
+) -> PlanTerminationEngineOutcome {
+    let mut outcome = PlanTerminationEngineOutcome {
+        session_terminated: false,
+        session_confirmed_preserved: false,
+        session_error: None,
+        attempts: Vec::new(),
+    };
+    // ②禁新 run：失效 CodingPlanRun。
+    if let Err(error) =
+        crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone())
+            .invalidate_run_for_plan(project_id, issue_id, plan_id)
+    {
+        outcome.session_error =
+            Some(format!("invalidate coding plan run failed: {error}"));
+    }
+    // ③取消 plan session 活跃 run（真实 completion 等待）＋CAS Terminated。
+    if let Some(session_id) = bound_session_id {
+        if let Some(manager) = session_registry.get(session_id).await {
+            manager.abort_active_run_and_wait_completion().await;
+        }
+        let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(app_paths.clone());
+        for _ in 0..3 {
+            let record = match lifecycle.get_workspace_session(session_id) {
+                Ok(record) => record,
+                Err(error) => {
+                    outcome
+                        .session_error
+                        .get_or_insert_with(|| format!("session read failed: {error}"));
+                    break;
+                }
+            };
+            match record.status {
+                crate::product::models::workspace::WorkspaceSessionStatus::Terminated => {
+                    outcome.session_terminated = true;
+                    break;
+                }
+                crate::product::models::workspace::WorkspaceSessionStatus::Confirmed => {
+                    outcome.session_confirmed_preserved = true;
+                    break;
+                }
+                _ => {
+                    match lifecycle.compare_and_update_workspace_session_status(
+                        &record,
+                        crate::product::models::workspace::WorkspaceSessionStatus::Terminated,
+                    ) {
+                        Ok(_) => {
+                            outcome.session_terminated = true;
+                            break;
+                        }
+                        Err(crate::product::json_store::ProductStoreError::IdentityMismatch {
+                            ..
+                        }) => continue,
+                        Err(error) => {
+                            outcome.session_error.get_or_insert_with(|| {
+                                format!("session terminate CAS failed: {error}")
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // ④⑤逐 attempt：registry abort（取消 token＋AbortAttempt＋等 completion）
+    // 后专用收口；单仓异常继续后仓。
+    let coding_store =
+        crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
+    let attempts = match coding_store.list_attempts_for_plan(project_id, issue_id, plan_id) {
+        Ok(attempts) => attempts,
+        Err(error) => {
+            outcome.attempts.push(PlanTerminationAttemptOutcome {
+                attempt_id: plan_id.to_string(),
+                status: "cleanup_failed",
+                reason_code: Some("list_attempts_failed".to_string()),
+                message: Some(error.to_string()),
+            });
+            return outcome;
+        }
+    };
+    let (event_tx, _event_rx) = mpsc::channel::<
+        crate::web::coding_ws_handler::CodingWsOutMessage,
+    >(64);
+    let engine = crate::product::coding_workspace_engine::CodingWorkspaceEngine::new(
+        coding_store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        event_tx,
+    );
+    for attempt in attempts {
+        let attempt_key = crate::web::state::CodingAttemptRunKey::new(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        );
+        coding_runs.abort_attempt(&attempt_key).await;
+        let pre_terminal = matches!(
+            attempt.status,
+            crate::product::coding_models::CodingAttemptStatus::Completed
+                | crate::product::coding_models::CodingAttemptStatus::Failed
+                | crate::product::coding_models::CodingAttemptStatus::Aborted
+        );
+        match engine
+            .finalize_attempt_for_plan_termination(project_id, issue_id, &attempt.id)
+            .await
+        {
+            Ok(_) => outcome.attempts.push(PlanTerminationAttemptOutcome {
+                attempt_id: attempt.id.clone(),
+                status: if pre_terminal { "already_terminal" } else { "aborted" },
+                reason_code: None,
+                message: None,
+            }),
+            Err(error) => outcome.attempts.push(PlanTerminationAttemptOutcome {
+                attempt_id: attempt.id.clone(),
+                status: "cleanup_failed",
+                reason_code: Some("finalize_failed".to_string()),
+                message: Some(error.to_string()),
+            }),
+        }
+    }
+    outcome
+}
+
 
 /// 保持 `WsOutMessage` schema 不变，在 JSON 顶层增加可选 `event_seq`。
 pub(super) fn inject_event_seq(message: String, seq: u64) -> Option<String> {

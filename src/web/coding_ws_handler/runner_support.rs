@@ -65,6 +65,20 @@ pub(super) async fn handle_pending_runner_commands(
     while let Ok(command) = command_rx.try_recv() {
         match command {
             CodingRunnerCommand::AbortAttempt => {
+                // 批 2 T2（C2，REQ-WIGA-09）：终止发起或已 terminated
+                //（enrollment terminated_at 已落盘）时，runner 内
+                // AbortAttempt 只干净退出（返回 true 结束 runner，completion
+                // 由 registration guard 发出），让位终止编排的专用收口——
+                // 不走旧 handle_abort/clean、不写 attempt 状态、不递归终止；
+                // manual/未终止路径保持原单 attempt abort 语义。
+                let paths = coding_store.paths();
+                if crate::product::coding_attempt_store::automation_plan_terminated_for_attempt(
+                    &paths, attempt,
+                )?
+                .is_some()
+                {
+                    return Ok(true);
+                }
                 let updated = engine
                     .handle_abort(&attempt.project_id, &attempt.issue_id, &attempt.id)
                     .await?;

@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::{ActiveRun, WorkspaceSessionManager};
@@ -112,6 +113,10 @@ impl WorkspaceSessionManager {
             let run_id = state.next_run_id;
             let token = crate::web::workspace_ws_handler::NEXT_ACTIVE_RUN_TOKEN
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // 批 2 T2：completion watch 随 run 登记——finish_run 按 token 发
+            // 真实收口信号（abort 等待者在锁外订阅）。
+            let (completion_tx, _completion_rx) = watch::channel(false);
+            state.run_completions.insert(token, completion_tx);
             let node_id = requested_node_id;
             let lease_epoch = state.lease.epoch;
             state.active_run = Some(ActiveRun {
@@ -158,8 +163,62 @@ impl WorkspaceSessionManager {
                     state.active_run = Some(run);
                 }
             }
+            // 批 2 T2（REQ-WIGA-09）：真实 completion——任务收口点按 token
+            // 发信号（含 abort 已摘除活跃 run 的迟到收口；等待者锁外解除）。
+            if let Some(completion_tx) = state.run_completions.remove(&token) {
+                completion_tx.send_replace(true);
+            }
         }
         self.maybe_recycle().await;
+    }
+
+    /// 批 2 T2（REQ-WIGA-09）：取消当前活跃 run 并等待**真实 completion**——
+    /// 只有该 run 任务自身的收口点（`finish_run` 按 token 发信号）才解除
+    /// 等待；`is_active_run()==false` 只是状态摘除，不构成完成证据。取消在
+    /// 状态锁内完成、等待在锁外（不持 engine 锁）；无活跃 run 直接返回
+    /// false。30s 兜底超时防任务失联（打点后放行，终止收口继续）。
+    pub async fn abort_active_run_and_wait_completion(&self) -> bool {
+        let completion = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let run = state.active_run.take();
+            if let Some(run) = run.as_ref() {
+                super::choices::retire_claims_for_run(&mut state, &run.run_incarnation);
+                state.journal.mark_run_terminal();
+            }
+            run.map(|run| {
+                let token = run.token;
+                let completion_rx = state.run_completions.get(&token).map(|tx| tx.subscribe());
+                Self::cancel_run(&run);
+                (token, completion_rx)
+            })
+        };
+        let Some((token, completion_rx)) = completion else {
+            return false;
+        };
+        let Some(mut completion_rx) = completion_rx else {
+            // 无 completion 登记（旧 fixture/已被收口）：视作已完成。
+            return true;
+        };
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if *completion_rx.borrow() {
+                    break;
+                }
+                if completion_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+        if waited.is_err() {
+            eprintln!(
+                "[aria-termination] workspace run completion wait timed out run_token={token}"
+            );
+        }
+        true
     }
 
     pub async fn abort_active_run(&self) -> bool {
@@ -246,6 +305,9 @@ impl WorkspaceSessionManager {
         let run_id = state.next_run_id;
         let token = crate::web::workspace_ws_handler::NEXT_ACTIVE_RUN_TOKEN
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // 批 2 T2：同 start_run_from_attachment——completion watch 随 run 登记。
+        let (completion_tx, _completion_rx) = watch::channel(false);
+        state.run_completions.insert(token, completion_tx);
         let node_id = requested_node_id;
         let lease_epoch = state.lease.epoch;
         state.active_run = Some(ActiveRun {
@@ -296,5 +358,76 @@ impl WorkspaceSessionManager {
         );
         let _ = run.command_tx.try_send(ProviderCommand::Abort);
         run.cancel.cancel();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 批 2 T2（REQ-WIGA-09）：run completion 真等待与 plan 终止引擎侧收口。
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod termination_tests {
+    use std::time::Duration;
+
+    use super::WorkspaceSessionManager;
+    use crate::web::workspace_ws_handler::ProviderRunKind;
+
+    /// 红测①：completion 真等待——abort 摘除活跃 run 后，任务真实收口点
+    /// `finish_run`（按 token 发 completion）未发生前等待不得返回；
+    /// `is_active_run()==false` 只是状态摘除，不构成完成证据。
+    #[tokio::test]
+    async fn workspace_run_completion_waits_for_real_finish_run() {
+        let manager = WorkspaceSessionManager::test_fixture("session_completion_wait_t2");
+        let (_run_id, token, _cancel, _command_rx, _node) = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run");
+        assert!(manager.is_active_run());
+
+        let wait = manager.abort_active_run_and_wait_completion();
+        tokio::pin!(wait);
+        // 任务尚未收口（无人调 finish_run）：100ms 内不得返回。
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            _ = &mut wait => panic!(
+                "completion must wait for the real finish_run, not is_active_run()==false"
+            ),
+        }
+        // 真实收口点 finish_run 发 completion：等待立即解除。
+        manager.finish_run(token).await;
+        tokio::time::timeout(Duration::from_secs(5), &mut wait)
+            .await
+            .expect("completion must be signalled by finish_run");
+    }
+
+    /// 取消等待不持 engine 锁：provider task 长持 engine 锁时，取消+等待
+    /// 仍能推进（等待点在状态锁外）。
+    #[tokio::test]
+    async fn workspace_run_completion_wait_does_not_hold_engine_lock() {
+        let manager = WorkspaceSessionManager::test_fixture("session_completion_lock_t2");
+        let (_run_id, token, _cancel, _command_rx, _node) = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run");
+        // 模拟 provider run 持有 engine 锁直到收口。
+        let engine_for_holder = manager.engine();
+        let holder_token = token;
+        let holder = tokio::spawn(async move {
+            let _guard = engine_for_holder.lock().await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        });
+        // 取消等待与 engine 锁持有并行：不得死锁。
+        let manager_for_wait = manager.clone();
+        let wait = tokio::spawn(async move {
+            manager_for_wait.abort_active_run_and_wait_completion().await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        manager.finish_run(holder_token).await;
+        let had_run = tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .expect("completion wait must not deadlock on the engine lock")
+            .expect("wait task alive");
+        assert!(had_run);
+        let _ = holder.await;
     }
 }

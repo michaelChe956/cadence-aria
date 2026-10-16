@@ -687,6 +687,13 @@ impl LifecycleStore {
         let (session_path, scope) = self.resolve_session_scope(session_id)?;
         self.with_optional_entity_live_write(scope.as_ref(), move || {
             let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            // 批 2 T2（REQ-WIGA-09）：Terminated 是终止终态——run 取消后的
+            // 迟到 Failed/Open 收口写不得覆盖；再次写 Terminated 幂等保留。
+            if session.status == WorkspaceSessionStatus::Terminated
+                && status != WorkspaceSessionStatus::Terminated
+            {
+                return Ok(session);
+            }
             session.status = status;
             if matches!(
                 session.status,
@@ -1066,6 +1073,13 @@ impl LifecycleStore {
                 });
             }
             if stored.status == status {
+                return Ok(stored);
+            }
+            // 批 2 T2（REQ-WIGA-09）：CAS Terminated 不覆盖已 Confirmed——
+            // 人工确认是比终止 CAS 更晚的最终事实，幂等保留 Confirmed。
+            if status == WorkspaceSessionStatus::Terminated
+                && stored.status == WorkspaceSessionStatus::Confirmed
+            {
                 return Ok(stored);
             }
             stored.status = status;
@@ -1560,3 +1574,97 @@ impl LcFreshClaimOutcome {
 #[cfg(test)]
 #[path = "workspace_tests.rs"]
 mod tests;
+
+// ---------------------------------------------------------------------------
+// 批 2 T2（REQ-WIGA-09）：Terminated 终态防迟到覆盖与 Confirmed 保留。
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod termination_tests {
+    use super::*;
+    use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
+    use crate::product::models::ProviderName;
+    use crate::product::models::WorkspaceType;
+
+    fn session_fixture() -> (tempfile::TempDir, LifecycleStore, WorkspaceSessionRecord) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
+            tmp.path().join(".aria"),
+        ));
+        let record = store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "plan_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            })
+            .unwrap();
+        (tmp, store, record)
+    }
+
+    /// 红测①：Terminated 粘性——run 取消后的迟到 Failed/Open 收口写不覆盖
+    /// Terminated（终态保留）；写 Terminated 幂等。
+    #[test]
+    fn workspace_session_terminated_is_sticky_against_late_failed_writes() {
+        let (_tmp, store, record) = session_fixture();
+        let terminated = store
+            .update_workspace_session_status(&record.id, WorkspaceSessionStatus::Terminated)
+            .unwrap();
+        assert_eq!(terminated.status, WorkspaceSessionStatus::Terminated);
+
+        let late_failed = store
+            .update_workspace_session_status(&record.id, WorkspaceSessionStatus::Failed)
+            .unwrap();
+        assert_eq!(
+            late_failed.status,
+            WorkspaceSessionStatus::Terminated,
+            "late failed finish must not overwrite terminated"
+        );
+        let late_open = store
+            .update_workspace_session_status(&record.id, WorkspaceSessionStatus::Open)
+            .unwrap();
+        assert_eq!(late_open.status, WorkspaceSessionStatus::Terminated);
+        // 幂等：重复写 Terminated 保持。
+        let again = store
+            .update_workspace_session_status(&record.id, WorkspaceSessionStatus::Terminated)
+            .unwrap();
+        assert_eq!(again.status, WorkspaceSessionStatus::Terminated);
+    }
+
+    /// 红测②：已 Confirmed 不改——CAS Terminated 不覆盖 Confirmed（人工
+    /// 确认是更晚的最终事实）；普通状态 CAS 回归不变。
+    #[test]
+    fn workspace_session_terminated_cas_preserves_confirmed() {
+        let (_tmp, store, record) = session_fixture();
+        let confirmed = store
+            .update_workspace_session_status(&record.id, WorkspaceSessionStatus::Confirmed)
+            .unwrap();
+        let preserved = store
+            .compare_and_update_workspace_session_status(
+                &confirmed,
+                WorkspaceSessionStatus::Terminated,
+            )
+            .unwrap();
+        assert_eq!(
+            preserved.status,
+            WorkspaceSessionStatus::Confirmed,
+            "termination CAS must not overwrite a confirmed plan session"
+        );
+
+        // 非 Confirmed 会话 CAS Terminated 正常（终止主路径回归）。
+        let (_tmp2, store2, record2) = session_fixture();
+        let terminated = store2
+            .compare_and_update_workspace_session_status(
+                &record2,
+                WorkspaceSessionStatus::Terminated,
+            )
+            .unwrap();
+        assert_eq!(terminated.status, WorkspaceSessionStatus::Terminated);
+    }
+}
