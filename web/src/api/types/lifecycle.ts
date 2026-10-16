@@ -325,12 +325,19 @@ export type EnrollmentPlanOptions = {
   require_execution_plan_confirm: boolean;
 };
 
+// B2-R3 波 1（REQ-WIGA-02）：镜像 `src/product/models/automation.rs::
+// PlanApprovalPolicy` 的 serde snake_case wire；缺省 manual。
+export type PlanApprovalPolicy = "manual" | "auto";
+
 export type EnrollmentOptions = {
   author_provider: WorkspaceProviderName;
   reviewer_provider: WorkspaceProviderName;
   review_rounds: number;
   superpowers_enabled: boolean;
   openspec_enabled: boolean;
+  // 可选缺省 manual：后端 `#[serde(default)]`，旧 JSON/旧客户端 payload
+  // 不含该字段按 manual 读；新自动化入口显式提交 "auto"。
+  plan_approval?: PlanApprovalPolicy;
   plan_options: EnrollmentPlanOptions;
 };
 
