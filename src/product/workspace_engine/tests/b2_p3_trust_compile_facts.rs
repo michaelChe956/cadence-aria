@@ -618,3 +618,99 @@ async fn b2_p3_manual_require_execution_plan_confirm_true_survives_auto_confirm(
         "manual true 原值仍拦（finalizer 原值回归）：{compiled:?}"
     );
 }
+
+/// k3 波1 F1：trust 停等落门前必须补建 SC 门快照——否则 AutoIfValid 会话
+/// （ContinueToCompleted 路由只落 (Running, None)）人工按「修复后重新
+/// 确认」走 close_human_gate(Approve) 会被静态资格（要求快照在场）恒拒，
+/// 自动链在 compile 前永久停滞。端到端：停等→人工 approve→Confirmed。
+async fn b2_p3_trust_waiting_then_human_gate_close_approve_confirms() {
+    use crate::product::models::SingleCandidatePhase;
+    use crate::product::workspace_engine::HumanGateCloseDecision;
+
+    // SC Approval 相位＋AutoIfValid（ContinueToCompleted 自动路由形态）：
+    // 铺 durable SC source/IR/report refs，快照保持 None（路由只落
+    // (Running, None)，正是 F1 现场）。
+    let (root, lifecycle, _plan_id, mut base) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    let app_paths = lifecycle.app_paths();
+    super::single_candidate_recovery::single_candidate_recovery_record(
+        &lifecycle,
+        &mut base,
+        SingleCandidatePhase::Approval,
+        RunPolicy::AutoIfValid,
+    );
+    let plan_id = base.session().entity_id.clone();
+    let session_id = base.session().session_id.clone();
+    let store = b2_p3_enable_and_bind(&app_paths, &plan_id, &session_id);
+    let durable_before = lifecycle.get_workspace_session(&session_id).unwrap();
+    assert_eq!(durable_before.human_gate_snapshot, None);
+
+    // LC 会话谓词＝注入 gateway、缺确认 trust 上下文 → typed
+    // ContextWaiting 停等（trust 停等注入载体；人工关门→compile→
+    // Confirmed 的 LC 全链路由 anchor_t17/aggregate_ir_target 覆盖）。
+    let gateway_root = root.path().join("b2-p3-f1-aggregate-root");
+    std::fs::create_dir_all(&gateway_root).expect("create gateway authority root");
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let mut record = lifecycle.get_workspace_session(&session_id).unwrap();
+    record.human_gate_snapshot = None;
+    let mut session = WorkspaceSession::from_record(record);
+    session.artifact = base.session.artifact.clone();
+    let mut engine = WorkspaceEngine::new_persistent(
+        base.checkpoint_store.clone(),
+        lifecycle.clone(),
+        event_tx,
+        session,
+    )
+    .with_logical_provider_gateway(b2_p3_presence_gateway(
+        &app_paths,
+        gateway_root,
+    ));
+
+    // trust 非 Ready：停等落门（k3 F1 修复：落门前补建 SC 门快照）。
+    engine.enter_policy_valid_work_item_plan_compile().await;
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    let waiting = lifecycle.get_workspace_session(&session_id).unwrap();
+    assert_eq!(waiting.status, WorkspaceSessionStatus::WaitingForHuman);
+    assert!(
+        waiting.human_gate_snapshot.is_some(),
+        "k3 F1：停等落门前必须补建 SC 门快照，人工 approve 才有静态资格"
+    );
+    assert_eq!(b2_p3_facts(&store).len(), 1, "停等事实在场");
+
+    // 人工「修复后重新确认」：以非 LC 引擎从 durable 重载（修复路径不依赖
+    // 停等载体），close_human_gate(Approve)——静态资格（快照在场）→ trust
+    // （非 LC 免登记）→ close CAS → trust_ready compile → 自动 Confirmed，
+    // 停等事实随之 resolve。
+    let record = lifecycle.get_workspace_session(&session_id).unwrap();
+    let (human_tx, _human_rx) = mpsc::channel(64);
+    let mut human = WorkspaceEngine::new_persistent(
+        engine.checkpoint_store.clone(),
+        lifecycle.clone(),
+        human_tx,
+        WorkspaceSession::from_record(record),
+    );
+    let outcome = human
+        .handle_human_gate_termination(HumanGateCloseDecision::Approve)
+        .await
+        .expect("人工 approve 必须能走通（k3 F1 修复后不再恒 Conflict）");
+    assert_eq!(
+        outcome,
+        crate::product::workspace_engine::HumanGateCloseOutcome::Confirmed,
+        "停等后人工 approve 必须真实关门确认"
+    );
+    let confirmed = lifecycle.get_workspace_session(&session_id).unwrap();
+    assert_eq!(
+        confirmed.status,
+        WorkspaceSessionStatus::Confirmed,
+        "停等后人工 approve 必须端到端 Confirmed"
+    );
+    assert_eq!(
+        confirmed.single_candidate_phase,
+        Some(SingleCandidatePhase::Completed)
+    );
+    assert_eq!(human.session().stage, WorkspaceStage::Completed);
+    assert!(
+        b2_p3_facts(&store).is_empty(),
+        "人工 approve 确认成功后停等事实必须 resolve 消失"
+    );
+}

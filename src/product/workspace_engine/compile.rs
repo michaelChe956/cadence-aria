@@ -715,6 +715,13 @@ impl WorkspaceEngine {
                         })
                         .await;
                 }
+                // k3 波1 F1：停等落门前补建 SC 门快照（幂等助手，与 compile
+                // 失败第三分支同构、预算自 durable 计数接续）——AutoIfValid
+                // 经 ContinueToCompleted 路由只落 (Running, None)，人工按
+                // 「修复后重新确认」走 close_human_gate(Approve) 会被静态
+                // 资格（要求快照在场）恒拒，自动链在 compile 前永久停滞。
+                self.ensure_human_gate_snapshot_after_compile_failure()
+                    .await;
                 self.enter_human_confirm(Some(format!(
                     "确认 trust 未就绪（{}），已暂停自动 Final Compile，等待人工确认",
                     waiting.reason_code()
