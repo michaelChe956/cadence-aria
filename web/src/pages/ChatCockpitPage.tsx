@@ -714,13 +714,18 @@ export function ChatCockpitPage({
   // takeover 拒绝/收件箱隐藏同源），未知（null）不猜。
   const sessionManagedByAutomation =
     state.automation?.owner === "server" && state.automation.enabled === true;
-  // 停点形态门：Failed/停点的 completed 投影是红测靶点；generation_needs_human
-  // 的 durable session 侧同样停在 completed/failed 形态。
+  // 停点形态门（k3 波4 F2 修订）：Failed/停点的 completed 投影之外，
+  // GenerationNeedsHuman 只可能由 resolve_plan_stop 兜底臂产出（durable
+  // status Open/Running/…＋intent NeedsHuman，投影为 prepare_context/
+  // running）——open/running 必须纳入，否则第三张恢复卡永不渲染；恢复
+  // 资格仍由 control 的 stop_key＋allowed_actions 收口（无资格不出面）。
   const planStopShaped =
     state.workspaceType === "work_item_plan" &&
     (state.stage === "completed" ||
       state.sessionStatus === "failed" ||
-      state.sessionStatus === "stopped_needs_human");
+      state.sessionStatus === "stopped_needs_human" ||
+      state.sessionStatus === "open" ||
+      state.sessionStatus === "running");
   const planContinueEligible =
     isCurrentSession && sessionManagedByAutomation && planStopShaped;
 

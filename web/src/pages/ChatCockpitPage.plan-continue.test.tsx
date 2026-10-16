@@ -14,7 +14,7 @@ import {
   getAutomationEnrollmentControl,
   postAutomationContinuePlan,
 } from "../api/client";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { selectCockpitInbox } from "../state/workspace-cockpit-projection";
@@ -342,6 +342,66 @@ describe("ChatCockpitPage plan continue (批2 P5)", () => {
     expect(rows).toHaveLength(1);
     expect(within(rows[0]!).queryByRole("button", { name: "接管" })).toBeNull();
     expect(within(rows[0]!).getByTestId("stopped-managed-hint")).toBeVisible();
+  });
+
+  // k3 波4 F2（fix loop r1）：GenerationNeedsHuman 只可能由 resolve_plan_stop
+  // 兜底臂产出（durable status Open/Running/…＋intent NeedsHuman；经
+  // workspace_stage_for_status 投影为 prepare_context/running）——形态门必须
+  // 纳入 open/running，否则第三张恢复卡永不渲染，与「control 为权威」矛盾。
+  it("renders the recovery input for a generation-needs-human stop on open/running sessions", async () => {
+    for (const sessionStatus of ["open", "running"] as const) {
+      cleanup();
+      useWorkspaceStore.setState({
+        sessionId: "session_001",
+        workspaceType: "work_item_plan",
+        stage: sessionStatus === "open" ? "prepare_context" : "running",
+        sessionStatus,
+        flowKind: "single_candidate",
+        chatEntries: [],
+        automation: {
+          owner: "server",
+          enrollment_id: "enrollment_0001",
+          policy_revision: 1,
+          enabled: true,
+        },
+      });
+      vi.mocked(getAutomationEnrollmentControl).mockResolvedValue(
+        controlStatus({
+          stage: "generation_needs_human",
+          stop_key: "plan_generation_failed:plan_0001",
+        }),
+      );
+
+      renderCockpitPlanContinue();
+
+      expect(await screen.findByTestId("plan-continue-card")).toBeVisible();
+      expect(screen.getByTestId("plan-continue-submit")).toBeEnabled();
+    }
+  });
+
+  it("does not render the recovery input on open/running sessions without control qualification", async () => {
+    useWorkspaceStore.setState({
+      sessionId: "session_001",
+      workspaceType: "work_item_plan",
+      stage: "running",
+      sessionStatus: "running",
+      flowKind: "single_candidate",
+      chatEntries: [],
+      automation: {
+        owner: "server",
+        enrollment_id: "enrollment_0001",
+        policy_revision: 1,
+        enabled: true,
+      },
+    });
+    // 缺省 mock：unmanaged、无 allowed_actions——不出恢复面。
+
+    renderCockpitPlanContinue();
+    await waitFor(() => {
+      expect(getAutomationEnrollmentControl).toHaveBeenCalled();
+    });
+    expect(screen.queryByTestId("plan-continue-card")).toBeNull();
+    expect(screen.queryByTestId("plan-continue-submit")).toBeNull();
   });
 
   it("keeps the inbox takeover path untouched for non-managed sessions", () => {
