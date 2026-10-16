@@ -738,19 +738,12 @@ mod termination_finalize_tests {
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::coding_attempt_store::{
         CodingAttemptStore, CreateBlockedGateInput, CreateChoiceGateInput,
-        CreateCodingAttemptInput, CreateGroupCodingAttemptInput,
+        CreateCodingAttemptInput,
     };
-    use crate::product::coding_models::AttemptTargetSnapshot;
-    use crate::product::lifecycle_store::{LifecycleStore, UpsertRepoSharedWorktreeInput};
-    use crate::product::logical_codebase::{
-        IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
-        LogicalCodebaseStore, LogicalRepositoryId,
-    };
-    use uuid::Uuid;
+    use crate::product::lifecycle_store::{LifecycleStore, UpsertIssueSharedWorktreeInput};
 
     const PROJECT_ID: &str = "project_0001";
     const ISSUE_ID: &str = "issue_0001";
-    const PLAN_ID: &str = "plan_0001";
 
     fn run_git(cwd: &std::path::Path, args: &[&str]) {
         let status = std::process::Command::new("git")
@@ -775,7 +768,13 @@ mod termination_finalize_tests {
         CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
     }
 
-    fn terminated_group_attempt_with_dirty_worktree()
+    /// 红测现场：WorkItem scope attempt + issue 级 shared worktree（Legacy
+    /// 路由，`target_snapshot=None`），与生产单仓终止现场同构。刻意不用
+    /// group attempt：group 非终态收口会触发 plan projection bundle 深链
+    /// （`coding_group_attempt_incomplete`），与本两例要验证的 clean 门/
+    /// 关门语义无关；WorkItem + issue 级 worktree 走同一
+    /// `ensure_issue_shared_worktree_clean` 门，复现同一对照红锚。
+    fn terminated_work_item_attempt_with_dirty_issue_worktree()
     -> (
         tempfile::TempDir,
         ProductAppPaths,
@@ -785,47 +784,18 @@ mod termination_finalize_tests {
     ) {
         let root = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(root.path().join(".aria"));
-        let logical_id = LogicalRepositoryId(Uuid::new_v4());
-        LogicalCodebaseStore::new(paths.clone())
-            .save_manifest(
-                PROJECT_ID,
-                &LogicalCodebaseManifest::new(
-                    PROJECT_ID,
-                    root.path().join("aggregate-root"),
-                    vec![logical_id],
-                ),
-            )
-            .unwrap();
-        IssueCodebaseSelectionStore::new(paths.clone())
-            .save(&IssueCodebaseSelection::all_members(PROJECT_ID, ISSUE_ID, None))
-            .unwrap();
         let store = CodingAttemptStore::new(paths.clone());
         let attempt = store
-            .create_group_attempt(CreateGroupCodingAttemptInput {
+            .create_attempt(CreateCodingAttemptInput {
                 project_id: PROJECT_ID.to_string(),
                 issue_id: ISSUE_ID.to_string(),
-                plan_id: PLAN_ID.to_string(),
-                current_work_item_id: "work_item_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
                 base_branch: "HEAD".to_string(),
                 branch_name: "aria/issues/issue_0001".to_string(),
                 worktree_path: None,
                 provider_config_snapshot: provider_snapshot(),
-                target_snapshot: Some(AttemptTargetSnapshot {
-                    logical_repository_id: logical_id,
-                    checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(
-                        Uuid::new_v4(),
-                    ),
-                    physical_repository_id: "repository_0001".to_string(),
-                    canonical_path: root.path().join("repo"),
-                    git_dir_identity: "sha256:test".to_string(),
-                    revision: Some("abcdef".to_string()),
-                    policy_digest: "policy_digest".to_string(),
-                    membership_revision: 1,
-                    captured_at: "2026-10-16T00:00:00Z".to_string(),
-                    capture_source: "test".to_string(),
-                }),
+                target_snapshot: None,
                 max_auto_rework: 1,
-                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             })
             .unwrap();
         // 脏工作树：真实 git worktree＋未提交文件（旧 handle_abort 在此被
@@ -842,76 +812,22 @@ mod termination_finalize_tests {
         std::fs::write(&dirty_file, "dirty\n").unwrap();
         let lifecycle = LifecycleStore::new(paths.clone());
         lifecycle
-            .upsert_repo_shared_worktree(UpsertRepoSharedWorktreeInput {
+            .upsert_issue_shared_worktree(UpsertIssueSharedWorktreeInput {
                 project_id: PROJECT_ID.to_string(),
                 issue_id: ISSUE_ID.to_string(),
-                repository_id: logical_id,
+                repository_id: "repository_0001".to_string(),
                 branch_name: attempt.branch_name.clone(),
                 worktree_path: worktree_root,
                 base_branch: attempt.base_branch.clone(),
             })
             .unwrap();
+        // 一步获取锁并直接以 attempt 为 owner（与生产 acquire+bind 语义
+        // 等价，少一次 lease 中转）。
         lifecycle
-            .try_acquire_repo_worktree_lock(
+            .try_acquire_issue_worktree_lock(
                 PROJECT_ID,
                 ISSUE_ID,
-                logical_id,
-                "work_item_group_active",
-                "repo_worktree_lease_0001",
-            )
-            .unwrap();
-        // group 终态收口需 plan binding 事实（生产由初始化落盘）。
-        store
-            .save_plan_binding(
-                &attempt,
-                &crate::product::coding_models::plan_repair::CodingAttemptPlanBinding {
-                    attempt_id: attempt.id.clone(),
-                    plan_id: PLAN_ID.to_string(),
-                    bound_plan_revision_id: "work_item_plan_revision_0001".to_string(),
-                    applied_amendment_ids: Vec::new(),
-                    updated_at: "2026-10-16T00:00:00Z".to_string(),
-                },
-            )
-            .unwrap();
-        let revision_store =
-            crate::product::work_item_revision_store::WorkItemRevisionStore::new(paths.clone());
-        let lineage =
-            crate::product::models::work_item_revision::WorkItemPlanLineage {
-                id: PLAN_ID.to_string(),
-                project_id: PROJECT_ID.to_string(),
-                issue_id: ISSUE_ID.to_string(),
-                story_spec_refs: Vec::new(),
-                design_spec_refs: Vec::new(),
-                active_revision_id: Some("work_item_plan_revision_0001".to_string()),
-                active_amendment_id: None,
-                created_at: "2026-10-16T00:00:00Z".to_string(),
-                updated_at: "2026-10-16T00:00:00Z".to_string(),
-            };
-        revision_store.put_plan_lineage(&lineage).unwrap();
-        revision_store
-            .put_plan_revision(
-                &lineage,
-                &crate::product::models::work_item_revision::WorkItemPlanRevision {
-                id: "work_item_plan_revision_0001".to_string(),
-                plan_id: PLAN_ID.to_string(),
-                revision_no: 1,
-                supersedes: None,
-                reason: crate::product::models::work_item_revision::PlanRevisionReason::InitialCompile,
-                work_item_bindings: Default::default(),
-                dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
-                validation_report_ref: "validation".to_string(),
-                plan_projection_bundle_id: "bundle".to_string(),
-                publication_provenance_ref: None,
-                created_at: "2026-10-16T00:00:00Z".to_string(),
-                },
-            )
-            .unwrap();
-        lifecycle
-            .bind_repo_worktree_lock_to_attempt(
-                PROJECT_ID,
-                ISSUE_ID,
-                logical_id,
-                "work_item_group_active",
+                "work_item_0001",
                 &attempt.id,
             )
             .unwrap();
@@ -924,7 +840,7 @@ mod termination_finalize_tests {
     #[tokio::test]
     async fn plan_termination_finalization_keeps_dirty_files_and_aborts() {
         let (_root, _paths, store, attempt, dirty_file) =
-            terminated_group_attempt_with_dirty_worktree();
+            terminated_work_item_attempt_with_dirty_issue_worktree();
 
         // 对照红锚：旧 handle_abort 在同一现场被 clean 检查阻断。
         let abort_error = engine(&store)
@@ -968,7 +884,7 @@ mod termination_finalize_tests {
     #[tokio::test]
     async fn plan_termination_finalization_closes_all_open_gates_and_keeps_terminal() {
         let (_root, _paths, store, attempt, _dirty) =
-            terminated_group_attempt_with_dirty_worktree();
+            terminated_work_item_attempt_with_dirty_issue_worktree();
         // 开齐三类门。
         store
             .create_stage_gate(
@@ -1075,7 +991,7 @@ mod termination_finalize_tests {
 
         // Completed 终态保留：Completed 的 attempt 不被改写为 Aborted。
         let (_root2, _paths2, store2, attempt2, _dirty2) =
-            terminated_group_attempt_with_dirty_worktree();
+            terminated_work_item_attempt_with_dirty_issue_worktree();
         let running = store2
             .admit_and_transition_attempt_to_executable(
                 &attempt2.project_id,
