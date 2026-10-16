@@ -10,7 +10,8 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::{
-    CodebaseMemberRecord, LogicalRepositoryId, RepositoryCheckoutId, RepositoryCheckoutRecord,
+    CodebaseMemberRecord, IdentityRegistryStore, LogicalRepositoryId, RepositoryCheckoutId,
+    RepositoryCheckoutRecord, RepositorySourceIdentity,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +78,15 @@ pub struct LogicalCodebaseCreateInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LogicalCodebaseTombstone {
     deleted_at: String,
+}
+
+/// Bug3 修复①：`LogicalCodebaseStore::restore` 的结果形态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogicalCodebaseRestoreOutcome {
+    /// 墓碑已摘除，LC 恢复可见（子树原样）。
+    Restored(LogicalCodebaseRecord),
+    /// 幂等：无墓碑且存活，返回现状记录。
+    AlreadyActive(LogicalCodebaseRecord),
 }
 
 /// Resolves the durable subtree root a logical-codebase-scoped store must
@@ -298,7 +308,99 @@ impl LogicalCodebaseStore {
             &LogicalCodebaseTombstone {
                 deleted_at: Utc::now().to_rfc3339(),
             },
-        )
+        )?;
+        // Bug3 症状2（2026-10-16）：墓碑落地后同步释放 identity-registry 条目
+        // （Active→Released），否则软删后重建同名 LC 登记同 source 会被
+        // already_registered 自锁。墓碑先写（删除必须生效）、释放后行：释放
+        // 失败时删除已生效并报错呈现，残留 Active 条目可由 restore 对称复活
+        // 收敛。注册表读改写与登记链共用 project 级 identity 迁移锁串行化。
+        let sources: Vec<RepositorySourceIdentity> = self
+            .list_lc_members(project_id, logical_codebase_id)?
+            .into_iter()
+            .map(|member| member.source_identity)
+            .collect();
+        with_exact_exclusive_lock(&self.paths.identity_migration_lock_path(project_id), || {
+            IdentityRegistryStore::new(self.paths.clone()).release_sources(
+                project_id,
+                &sources,
+                &Utc::now().to_rfc3339(),
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Bug3 修复①（2026-10-16）：摘除 tombstone 恢复软删的 LC（子树原样保留，
+    /// id 不变，issue/成员引用不断裂）。幂等：无墓碑且存活 → 返回现状；
+    /// 未知 id → NotFound。摘墓碑前校验子树完整（record.json 必在；有成员则
+    /// manifest 必在——空 LC 无 manifest 合法），并先按 (source,
+    /// logical_repository_id) 复活 Released 注册条目：source 已被其他 LC 重新
+    /// 登记占用 → Conflict 整体失败、墓碑保留；复活成功而摘墓碑失败时重跑
+    /// restore 幂等收敛。
+    pub fn restore(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<LogicalCodebaseRestoreOutcome, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(logical_codebase_id)?;
+        self.migrate_legacy(project_id)?;
+        let tombstone_path = self.tombstone_path(project_id, logical_codebase_id)?;
+        if !path_exists(&tombstone_path)? {
+            return match self.get_existing(project_id, logical_codebase_id)? {
+                Some(record) => Ok(LogicalCodebaseRestoreOutcome::AlreadyActive(record)),
+                None => Err(ProductStoreError::NotFound {
+                    kind: "logical_codebase",
+                    id: logical_codebase_id.to_string(),
+                }),
+            };
+        }
+        if !path_exists(&self.record_path(project_id, logical_codebase_id)?)? {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "logical_codebase_restore",
+                reason: "record.json missing; logical codebase subtree is incomplete".to_string(),
+            });
+        }
+        let members = self.list_lc_members(project_id, logical_codebase_id)?;
+        if !members.is_empty()
+            && self
+                .load_lc_manifest(project_id, logical_codebase_id)?
+                .is_none()
+        {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "logical_codebase_restore",
+                reason: "manifest.json missing while members exist; logical codebase subtree is incomplete"
+                    .to_string(),
+            });
+        }
+        let claims: Vec<(RepositorySourceIdentity, LogicalRepositoryId)> = members
+            .into_iter()
+            .map(|member| (member.source_identity, member.logical_repository_id))
+            .collect();
+        let reclaimed_at = Utc::now().to_rfc3339();
+        with_exact_exclusive_lock(&self.paths.identity_migration_lock_path(project_id), || {
+            IdentityRegistryStore::new(self.paths.clone()).reclaim_released_sources(
+                project_id,
+                &claims,
+                &reclaimed_at,
+            )
+        })?;
+        match std::fs::remove_file(&tombstone_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "remove {}: {error}",
+                    tombstone_path.display()
+                )));
+            }
+        }
+        let record = self
+            .get_existing(project_id, logical_codebase_id)?
+            .ok_or_else(|| ProductStoreError::InvalidRecord {
+                kind: "logical_codebase_restore",
+                reason: "record.json unreadable after tombstone removal".to_string(),
+            })?;
+        Ok(LogicalCodebaseRestoreOutcome::Restored(record))
     }
 
     /// Migrates the v1.2 project-scoped logical-codebase subtree once. The old

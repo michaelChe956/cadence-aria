@@ -489,6 +489,107 @@ mod tests {
     }
 
     #[test]
+    fn soft_deleted_lc_releases_sources_for_recreated_codebase_registration() {
+        // Bug3 症状2 现场（2026-10-16）：LC 软删不释放 identity-registry，
+        // 重建同名 LC 后预检/登记同 source 被 already_registered 自锁。
+        // 期望：delete_soft 同步释放条目，重建 LC 可完成登记（成员落新子树）。
+        let fixture = attach_fixture();
+        let paths = fixture.paths.clone();
+        let aggregate_root = fixture._root.path().to_path_buf();
+        let store = LogicalCodebaseStore::new(paths.clone());
+        let first = store
+            .create(
+                "project_0001",
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "platform".into(),
+                    aggregate_root: aggregate_root.clone(),
+                },
+            )
+            .unwrap();
+        LogicalCodebaseStore::for_lc(paths.clone(), &first.id)
+            .save_manifest(
+                "project_0001",
+                &LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), Vec::new()),
+            )
+            .unwrap();
+        LogicalCodebaseRegistrationCoordinator::for_lc(paths.clone(), &first.id)
+            .attach_member(AttachOnlyRegistrationInput {
+                project_id: "project_0001".into(),
+                alias: "api".into(),
+                role: "service".into(),
+                canonical_path: fixture.git_root.clone(),
+                repo_type: RepositoryType::Backend,
+                tech_stack: vec!["rust".into()],
+                idempotency_key: "lc1:item-api".into(),
+            })
+            .unwrap();
+
+        store.delete_soft("project_0001", &first.id).unwrap();
+
+        // 重建同名 LC（tombstone 不占名）。
+        let second = store
+            .create(
+                "project_0001",
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "platform".into(),
+                    aggregate_root: aggregate_root.clone(),
+                },
+            )
+            .unwrap();
+        assert_ne!(second.id, first.id);
+        LogicalCodebaseStore::for_lc(paths.clone(), &second.id)
+            .save_manifest(
+                "project_0001",
+                &LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), Vec::new()),
+            )
+            .unwrap();
+        let recreated = LogicalCodebaseRegistrationCoordinator::for_lc(paths.clone(), &second.id);
+
+        // 预检：释放后的 source 不再 already_registered（红测现状：Duplicate）。
+        let preflight = recreated
+            .preflight(RegistrationPreflightInput {
+                project_id: "project_0001".into(),
+                aggregate_root: CanonicalAggregateRoot {
+                    canonical_path: aggregate_root.clone(),
+                },
+                paths: vec![fixture.git_root.clone()],
+            })
+            .unwrap();
+        assert_eq!(
+            preflight.candidates.len(),
+            1,
+            "{:?}",
+            preflight.candidates
+        );
+        assert_eq!(
+            preflight.candidates[0].state,
+            RegistrationCandidateState::Eligible,
+            "released source must be re-registerable after its owning LC is soft-deleted"
+        );
+
+        // 登记：成员落重建 LC 子树，且不被旧条目 IdentityMismatch 拒绝。
+        let member = recreated
+            .attach_member(AttachOnlyRegistrationInput {
+                project_id: "project_0001".into(),
+                alias: "api".into(),
+                role: "service".into(),
+                canonical_path: fixture.git_root.clone(),
+                repo_type: RepositoryType::Backend,
+                tech_stack: vec!["rust".into()],
+                idempotency_key: "lc2:item-api".into(),
+            })
+            .unwrap();
+        let members = LogicalCodebaseStore::for_lc(paths.clone(), &second.id)
+            .list_members("project_0001")
+            .unwrap();
+        assert_eq!(members.len(), 1, "{members:?}");
+        assert_eq!(
+            members[0].logical_repository_id,
+            member.logical_repository_id
+        );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn aggregate_root_preflight_rejects_git_root_symlink_escape_and_ownership_conflicts() {
         let fixture = aggregate_root_fixture();

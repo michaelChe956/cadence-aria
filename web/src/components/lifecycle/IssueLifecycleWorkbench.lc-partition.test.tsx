@@ -287,6 +287,11 @@ describe("IssueLifecycleWorkbench 逻辑代码库按 LC 分区（R8）", () => {
       screen.getByRole("button", { name: "删除逻辑代码库 platform" }),
     );
     expect(confirmSpy).toHaveBeenCalledTimes(1);
+    // Bug3 ③：删除确认文案必须注明「软删除、可恢复」——旧文案声称
+    // 「无法在界面内撤销」与恢复端点语义相悖。
+    const confirmText = String(confirmSpy.mock.calls[0]?.[0] ?? "");
+    expect(confirmText).toMatch(/软删除/);
+    expect(confirmText).toMatch(/恢复/);
     expect(
       calls.some((call) => call.startsWith("DELETE /api/projects/project_0001/logical-codebases/lc_0001")),
     ).toBe(false);

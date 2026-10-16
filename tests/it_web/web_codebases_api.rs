@@ -292,6 +292,105 @@ async fn codebases_endpoints_reject_unknown_project_and_lc() {
     assert_eq!(body["code"], "logical_codebase_not_found");
 }
 
+#[tokio::test]
+async fn logical_codebase_restore_restores_tombstoned_lc_idempotently() {
+    // Bug3 症状1（2026-10-16 bug 报告）：软删无恢复端点，误删只能手工摘墓碑。
+    // POST /logical-codebases/{lc_id}/restore 摘墓碑恢复原子树（id 不变，保住
+    // issue.json 等对 LC id / 成员 repo id 的引用）；幂等（已 active 返回现状）。
+    let root = tempdir().expect("root");
+    let aggregate_root = tempdir().expect("aggregate root");
+    let state = WebAppState::with_events(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        EventHub::new(),
+    );
+    let app = build_web_router(state);
+
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Restore","description":null}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, logical) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/logical-codebases",
+        json!({"name":"Platform","aggregate_root":aggregate_root.path()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{logical}");
+    let logical_id = logical["id"].as_str().expect("logical id").to_string();
+
+    // 软删 → 墓碑；详情 404。
+    let (status, deleted) = request_json(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/projects/project_0001/logical-codebases/{logical_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    let (status, missing) = request_json(
+        app.clone(),
+        Method::GET,
+        &format!("/api/projects/project_0001/logical-codebases/{logical_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+
+    // 恢复：墓碑摘除，子树原样回归（重建同名会换新 UUID 子树，引用断裂）。
+    let (status, restored) = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/projects/project_0001/logical-codebases/{logical_id}/restore"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["status"], "restored");
+    assert_eq!(restored["codebase"]["id"], logical_id.as_str());
+    assert_eq!(restored["codebase"]["name"], "Platform");
+
+    let (status, detail) = request_json(
+        app.clone(),
+        Method::GET,
+        &format!("/api/projects/project_0001/logical-codebases/{logical_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["id"], logical_id.as_str());
+    assert_eq!(detail["name"], "Platform");
+
+    // 幂等：无墓碑且存活 → 返回现状，不再变更。
+    let (status, active) = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/projects/project_0001/logical-codebases/{logical_id}/restore"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{active}");
+    assert_eq!(active["status"], "active");
+    assert_eq!(active["codebase"]["id"], logical_id.as_str());
+
+    // 未知 id → 404 logical_codebase_not_found。
+    let (status, missing) = request_json(
+        app,
+        Method::POST,
+        "/api/projects/project_0001/logical-codebases/logical_codebase_nope/restore",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    assert_eq!(missing["code"], "logical_codebase_not_found");
+}
+
 async fn request_json(
     app: axum::Router,
     method: Method,

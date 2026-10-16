@@ -7,7 +7,8 @@ use super::*;
 
 use crate::product::logical_codebase::{
     CodebaseMemberRecord, LogicalCodebaseCreateInput, LogicalCodebaseFeature,
-    LogicalCodebaseManifest, LogicalCodebaseRecord, LogicalCodebaseStore, MemberStatus,
+    LogicalCodebaseManifest, LogicalCodebaseRecord, LogicalCodebaseRestoreOutcome,
+    LogicalCodebaseStore, MemberStatus,
 };
 use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
@@ -147,6 +148,54 @@ pub async fn delete_logical_codebase(
         .delete_soft(&project_id, &logical_codebase_id)
         .map_err(product_store_api_error)?;
     Ok(Json(json!({"status":"deleted"})))
+}
+
+/// Bug3 修复①（2026-10-16）：软删 LC 恢复端点。摘墓碑恢复原子树（id 不变，
+/// issue/成员引用不断裂）；幂等（已 active 返回现状）；子树不完整 / source
+/// 被其他 LC 重新登记占用 → 409。
+pub async fn restore_logical_codebase(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let app_paths = product_app_paths(&state);
+    ProjectStore::new(app_paths.clone())
+        .get(&project_id)
+        .map_err(product_store_api_error)?;
+    let outcome = LogicalCodebaseStore::new(app_paths)
+        .restore(&project_id, &logical_codebase_id)
+        .map_err(logical_codebase_restore_api_error)?;
+    let (status, record) = match outcome {
+        LogicalCodebaseRestoreOutcome::Restored(record) => ("restored", record),
+        LogicalCodebaseRestoreOutcome::AlreadyActive(record) => ("active", record),
+    };
+    Ok(Json(json!({
+        "status": status,
+        "codebase": logical_codebase_dto(record),
+    })))
+}
+
+fn logical_codebase_restore_api_error(
+    error: crate::product::json_store::ProductStoreError,
+) -> ApiError {
+    match error {
+        crate::product::json_store::ProductStoreError::InvalidRecord {
+            kind: "logical_codebase_restore",
+            reason,
+        } => ApiError::runtime(
+            "logical_codebase_restore_subtree_incomplete",
+            "logical codebase subtree is incomplete; restore aborted before tombstone removal",
+            json!({ "reason": reason }),
+        ),
+        crate::product::json_store::ProductStoreError::Conflict {
+            kind: "logical_codebase_restore_source_taken",
+            id,
+        } => ApiError::runtime(
+            "logical_codebase_restore_source_taken",
+            "member source was re-registered elsewhere while this logical codebase was soft-deleted",
+            json!({ "source_key_digest": id }),
+        ),
+        other => product_store_api_error(other),
+    }
 }
 
 fn logical_codebase_not_found() -> ApiError {

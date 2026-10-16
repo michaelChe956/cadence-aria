@@ -68,7 +68,12 @@ impl RepositoryStore {
 
         let registry = IdentityRegistryStore::new(self.paths.clone());
         let authority = LogicalCodebaseStore::new(self.paths.clone());
-        let identity = match registry.find_by_source(&input.project_id, &source_identity)? {
+        // Bug3 症状2（清单外补丁）：Released（所属 LC 已软删释放）视同未登记
+        // ——释放语义对单仓 /repositories 创建路径一致；Active/Tombstoned 判定不变。
+        let identity = match registry
+            .find_by_source(&input.project_id, &source_identity)?
+            .filter(|entry| entry.state != IdentityRegistryState::Released)
+        {
             Some(entry) if entry.state == IdentityRegistryState::Active => {
                 if entry.created_by_key != input.idempotency_key {
                     return Err(ProductStoreError::Conflict {

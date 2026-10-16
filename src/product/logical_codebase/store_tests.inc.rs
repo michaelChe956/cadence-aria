@@ -269,6 +269,189 @@ mod tests {
     }
 
     #[test]
+    fn logical_codebase_restore_round_trips_and_is_idempotent() {
+        // Bug3 修复①：摘墓碑恢复原子树（id 不变）；已 active 幂等返回现状；
+        // 未知 id → NotFound。
+        let temp = tempfile::tempdir().unwrap();
+        let store = LogicalCodebaseStore::new(ProductAppPaths::new(temp.path()));
+        let record = store
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "Platform".to_string(),
+                    aggregate_root: temp.path().to_path_buf(),
+                },
+            )
+            .unwrap();
+
+        store.delete_soft("project_0001", &record.id).unwrap();
+        assert_eq!(store.get("project_0001", &record.id).unwrap(), None);
+
+        match store.restore("project_0001", &record.id).unwrap() {
+            LogicalCodebaseRestoreOutcome::Restored(restored) => {
+                assert_eq!(restored, record);
+            }
+            other => panic!("expected Restored, got {other:?}"),
+        }
+        assert_eq!(
+            store.get("project_0001", &record.id).unwrap(),
+            Some(record.clone())
+        );
+        assert_eq!(store.list("project_0001").unwrap(), vec![record.clone()]);
+
+        match store.restore("project_0001", &record.id).unwrap() {
+            LogicalCodebaseRestoreOutcome::AlreadyActive(active) => {
+                assert_eq!(active, record);
+            }
+            other => panic!("expected AlreadyActive, got {other:?}"),
+        }
+
+        assert!(matches!(
+            store.restore("project_0001", "logical_codebase_missing"),
+            Err(ProductStoreError::NotFound {
+                kind: "logical_codebase",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn logical_codebase_restore_rejects_incomplete_subtree() {
+        // Bug3 修复①：摘墓碑前校验子树完整——record.json 缺失、或成员存在而
+        // manifest 缺失，均拒绝且墓碑保留（可人工修复后重试）。
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = LogicalCodebaseStore::new(paths.clone());
+        let record = store
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "Platform".to_string(),
+                    aggregate_root: temp.path().to_path_buf(),
+                },
+            )
+            .unwrap();
+        let subtree = paths
+            .logical_codebases_root("project_0001")
+            .join(&record.id);
+
+        // record.json 缺失。
+        store.delete_soft("project_0001", &record.id).unwrap();
+        std::fs::remove_file(subtree.join("record.json")).unwrap();
+        assert!(matches!(
+            store.restore("project_0001", &record.id),
+            Err(ProductStoreError::InvalidRecord {
+                kind: "logical_codebase_restore",
+                ..
+            })
+        ));
+        assert!(
+            subtree.join("tombstone.json").exists(),
+            "tombstone must survive a rejected restore"
+        );
+
+        // 成员存在而 manifest 缺失（正常首批登记会原子创建 manifest；手工
+        // 落成员不落 manifest 模拟子树残缺）。
+        let member_id = LogicalRepositoryId(Uuid::new_v4());
+        let second = store
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "Second".to_string(),
+                    aggregate_root: temp.path().to_path_buf(),
+                },
+            )
+            .unwrap();
+        LogicalCodebaseStore::for_lc(paths.clone(), &second.id)
+            .save_member(
+                "project_0001",
+                &member_fixture(member_id, RepositoryCheckoutId(Uuid::new_v4())),
+            )
+            .unwrap();
+        store.delete_soft("project_0001", &second.id).unwrap();
+        assert!(matches!(
+            store.restore("project_0001", &second.id),
+            Err(ProductStoreError::InvalidRecord {
+                kind: "logical_codebase_restore",
+                ..
+            })
+        ));
+        assert!(
+            paths
+                .logical_codebases_root("project_0001")
+                .join(&second.id)
+                .join("tombstone.json")
+                .exists(),
+            "tombstone must survive a rejected restore"
+        );
+    }
+
+    #[test]
+    fn logical_codebase_delete_soft_releases_identity_registry_entries() {
+        // Bug3 症状2：delete_soft 同步把成员 source 的注册条目 Active→Released；
+        // 条目缺席（空 LC）不报错、零注册表写入。
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = LogicalCodebaseStore::new(paths.clone());
+        let record = store
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "Platform".to_string(),
+                    aggregate_root: temp.path().to_path_buf(),
+                },
+            )
+            .unwrap();
+
+        // 空 LC 软删：无注册表文件也不失败。
+        store.delete_soft("project_0001", &record.id).unwrap();
+        assert!(!paths
+            .logical_codebase_root("project_0001")
+            .join("identity-registry.json")
+            .exists());
+
+        // 带成员 LC 软删：条目释放为 Released。
+        let registry = crate::product::logical_codebase::IdentityRegistryStore::new(paths.clone());
+        let member_id = LogicalRepositoryId(Uuid::new_v4());
+        let member = member_fixture(member_id, RepositoryCheckoutId(Uuid::new_v4()));
+        let source = member.source_identity.clone();
+        registry
+            .upsert_active(
+                "project_0001",
+                crate::product::logical_codebase::IdentityRegistryEntry::active(
+                    source.clone(),
+                    member_id,
+                    "repository_test".into(),
+                    RepositoryCheckoutId(Uuid::new_v4()),
+                    "test:create".into(),
+                ),
+            )
+            .unwrap();
+        let second = store
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "Second".to_string(),
+                    aggregate_root: temp.path().to_path_buf(),
+                },
+            )
+            .unwrap();
+        LogicalCodebaseStore::for_lc(paths.clone(), &second.id)
+            .save_member("project_0001", &member)
+            .unwrap();
+
+        store.delete_soft("project_0001", &second.id).unwrap();
+        let entry = registry
+            .find_by_source("project_0001", &source)
+            .unwrap()
+            .expect("entry must remain present after release");
+        assert_eq!(
+            entry.state,
+            crate::product::logical_codebase::IdentityRegistryState::Released
+        );
+    }
+
+    #[test]
     fn legacy_logical_codebase_migration_is_stable_and_idempotent() {
         let temp = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(temp.path());

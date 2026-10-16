@@ -608,7 +608,9 @@ impl LogicalCodebaseRegistrationCoordinator {
             Some("duplicate_source_identity")
         } else if IdentityRegistryStore::new(self.paths.clone())
             .find_by_source(project_id, &source_identity)?
-            .is_some()
+            // Bug3 症状2：Released=所属 LC 已软删释放，source 可重新登记，
+            // 不再判 already_registered（否则软删后重建同名 LC 被自锁）。
+            .is_some_and(|entry| entry.state != IdentityRegistryState::Released)
         {
             Some("already_registered")
         } else {
@@ -713,13 +715,16 @@ impl LogicalCodebaseRegistrationCoordinator {
                             id: entry.logical_repository_id.0.to_string(),
                         })?
                 }
-                Some(entry) => {
+                // Bug3 症状2：Tombstoned（repo 级硬删）仍拒绝，需显式复活通道；
+                // Released（所属 LC 已软删释放）不再落此臂——与 None 同走下方
+                // crash-window 恢复/新分配路径，upsert_active 以新身份覆盖之。
+                Some(entry) if entry.state == IdentityRegistryState::Tombstoned => {
                     return Err(ProductStoreError::Conflict {
                         kind: "repository_source_tombstoned",
                         id: entry.physical_repository_id,
                     });
                 }
-                None => {
+                _ => {
                     // Crash-window recovery: a member may exist without a registry
                     // entry. Reuse its identity instead of allocating a second one.
                     let matching = store

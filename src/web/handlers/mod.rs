@@ -130,6 +130,7 @@ pub use automation_enrollment::{
 pub use automation_target::get_automation_target;
 pub use codebases::{
     create_logical_codebase, delete_logical_codebase, get_logical_codebase, list_codebases,
+    restore_logical_codebase,
 };
 /// P1-a（契约 A2）：plan 级聚合最终确认纯投影（块 4 coding_attention_info
 /// 同源调用，不经过 handler）。

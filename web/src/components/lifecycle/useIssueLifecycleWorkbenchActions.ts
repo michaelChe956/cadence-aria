@@ -178,7 +178,11 @@ export function useIssueLifecycleWorkbenchActions({
       setError("缺少 Project");
       return;
     }
-    const confirmed = window.confirm("删除逻辑代码库将软删除其登记成员、聚合索引与指针发布上下文，且无法在界面内撤销。确认删除？");
+    // Bug3 ③：软删除语义如实告知——数据与成员仓保留、可经恢复端点还原
+    //（POST /logical-codebases/{id}/restore），不再误称「无法撤销」。
+    const confirmed = window.confirm(
+      "删除逻辑代码库为软删除：仅从列表隐藏并释放成员登记，成员仓、聚合索引与指针发布上下文保留原样且成员仓 Git 零改动，可经恢复端点还原。确认删除？",
+    );
     if (!confirmed) return;
     setError(null);
     try {

@@ -112,6 +112,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             get(handlers::get_logical_codebase).delete(handlers::delete_logical_codebase),
         )
         .route(
+            "/api/projects/{project_id}/logical-codebases/{logical_codebase_id}/restore",
+            post(handlers::restore_logical_codebase),
+        )
+        .route(
             "/api/projects/{project_id}/logical-codebase/initializations",
             post(handlers::create_aggregate_initialization),
         )

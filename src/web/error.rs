@@ -116,6 +116,10 @@ impl IntoResponse for ApiError {
             | "repo_worktree_active"
             | "cross_target_violation_detected"
             | "registration_batch_not_cancelable"
+            // Bug3（2026-10-16）：LC restore 的两类可操作冲突——子树不完整 /
+            // source 被重新登记占用，均 409（墓碑保留、可人工裁决后重试）。
+            | "logical_codebase_restore_subtree_incomplete"
+            | "logical_codebase_restore_source_taken"
             | "logical_codebase_name_conflict" => StatusCode::CONFLICT,
             "cross_target_baseline_missing" | "cross_target_store_failure" => {
                 StatusCode::INTERNAL_SERVER_ERROR

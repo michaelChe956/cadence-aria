@@ -765,6 +765,9 @@ fn per_lc_issue_member_resolution_synthesizes_record_from_lc_authority() {
                 deleted_at: None,
                 delete_operation_id: None,
                 reactivated_at: None,
+                // Bug3 清单外单行补丁：IdentityRegistryEntry 新增 released_at
+                //（serde default 兼容旧数据）后的编译强制补齐。
+                released_at: None,
             },
         )
         .unwrap();

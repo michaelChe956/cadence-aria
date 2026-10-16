@@ -219,6 +219,15 @@ impl RepositoryStore {
                     });
                 }
             }
+            // Bug3 症状2（清单外补丁，枚举穷尽编译强制）：Released=所属 LC 已
+            // 软删。物理仓硬删不与 LC 软删语义耦合，fail-closed 拒绝——先
+            // restore 该 LC 或维持现状。
+            IdentityRegistryState::Released => {
+                return Err(ProductStoreError::Conflict {
+                    kind: "repository_source_released",
+                    id: physical_repository_id.to_string(),
+                });
+            }
         }
 
         let authority = LogicalCodebaseStore::new(self.paths.clone());
