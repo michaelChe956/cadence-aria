@@ -310,6 +310,21 @@ fn resolve_item_target_repository_id(
         });
     };
 
+    // 批 2 R1（REQ-WIGA-01）：集合 intent（logical_codebase_members）不能
+    // 作为单 WI 归属——任一 WI 必须落恰一成员物理仓；无成员表时同样拒绝
+    // （不以会话级/聚合视图 ID 兜底），语义错 fail-closed。
+    if let Some(EnrollmentTarget::LogicalCodebaseMembers { .. }) =
+        intent.map(|intent| &intent.target)
+    {
+        reject(
+            diagnostics,
+            format!(
+                "work_item_target_missing: `{work_item_id}` 声明了集合 target \
+                 （logical_codebase_members）；单个 work item 的归属必须声明恰一成员"
+            ),
+        );
+        return None;
+    }
     let Some(members) = context.member_targets.as_ref() else {
         if context
             .target_repository_id
@@ -342,6 +357,10 @@ fn resolve_item_target_repository_id(
                 None
             }
         },
+        // 批 2 R1：集合 intent 已在成员表分支前拒绝（无成员表同样拒）。
+        Some(EnrollmentTarget::LogicalCodebaseMembers { .. }) => {
+            unreachable!("集合 intent 已在 resolve_item_target_repository_id 入口拒绝")
+        }
         Some(EnrollmentTarget::SingleRepository { repository_id }) => {
             let effective = members
                 .physical_by_logical

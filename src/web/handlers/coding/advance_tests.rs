@@ -14,6 +14,7 @@ fn replay_record(status: AdvanceStatus) -> AdvanceRecord {
         plan_id: "plan_map_test".to_string(),
         plan_revision_id: "revision_map_test".to_string(),
         attempt_id: Some("attempt_map_test".to_string()),
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         target_attempts: Vec::new(),
         status,
         workspace_entry: Some("/worktree/map-test".to_string()),

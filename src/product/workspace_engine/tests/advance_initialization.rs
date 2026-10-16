@@ -27,7 +27,11 @@ fn input(command_id: &str) -> AdvanceInput {
 fn advance_initialization_record_is_persisted_before_followup_steps() {
     let root = TempDir::new().unwrap();
     let record = store(&root)
-        .persist_advance_record_if_absent(&input("command_1"), REVISION_ID)
+        .persist_advance_record_if_absent(
+            &input("command_1"),
+            REVISION_ID,
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        )
         .unwrap();
     assert_eq!(record.status, AdvanceStatus::Initializing);
     assert_eq!(record.plan_revision_id, REVISION_ID);
@@ -44,10 +48,18 @@ fn advance_initialization_replay_by_command_keeps_record_identity() {
     let root = TempDir::new().unwrap();
     let advance_store = store(&root);
     let first = advance_store
-        .persist_advance_record_if_absent(&input("command_1"), REVISION_ID)
+        .persist_advance_record_if_absent(
+            &input("command_1"),
+            REVISION_ID,
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        )
         .unwrap();
     let replay = advance_store
-        .persist_advance_record_if_absent(&input("command_1"), "revision_changed")
+        .persist_advance_record_if_absent(
+            &input("command_1"),
+            "revision_changed",
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        )
         .unwrap();
     assert_eq!(first, replay);
 }
@@ -57,10 +69,18 @@ fn advance_initialization_replay_by_plan_keeps_original_command() {
     let root = TempDir::new().unwrap();
     let advance_store = store(&root);
     let first = advance_store
-        .persist_advance_record_if_absent(&input("command_1"), REVISION_ID)
+        .persist_advance_record_if_absent(
+            &input("command_1"),
+            REVISION_ID,
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        )
         .unwrap();
     let replay = advance_store
-        .persist_advance_record_if_absent(&input("command_2"), "revision_changed")
+        .persist_advance_record_if_absent(
+            &input("command_2"),
+            "revision_changed",
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        )
         .unwrap();
     assert_eq!(first, replay);
     assert_eq!(replay.command_id, "command_1");
@@ -71,7 +91,11 @@ fn advance_initialization_journal_reuses_same_attempt_id() {
     let root = TempDir::new().unwrap();
     let advance_store = store(&root);
     let record = advance_store
-        .persist_advance_record_if_absent(&input("command_1"), REVISION_ID)
+        .persist_advance_record_if_absent(
+            &input("command_1"),
+            REVISION_ID,
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        )
         .unwrap();
     let first = advance_store
         .put_advance_initialization_if_absent(&record, "attempt_1")
@@ -88,7 +112,11 @@ fn advance_initialization_journal_rejects_attempt_identity_drift() {
     let root = TempDir::new().unwrap();
     let advance_store = store(&root);
     let record = advance_store
-        .persist_advance_record_if_absent(&input("command_1"), REVISION_ID)
+        .persist_advance_record_if_absent(
+            &input("command_1"),
+            REVISION_ID,
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        )
         .unwrap();
     advance_store
         .put_advance_initialization_if_absent(&record, "attempt_1")
@@ -104,7 +132,11 @@ fn advance_initialization_phase_only_advances_contiguously() {
     let root = TempDir::new().unwrap();
     let advance_store = store(&root);
     let record = advance_store
-        .persist_advance_record_if_absent(&input("command_1"), REVISION_ID)
+        .persist_advance_record_if_absent(
+            &input("command_1"),
+            REVISION_ID,
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        )
         .unwrap();
     let journal = advance_store
         .put_advance_initialization_if_absent(&record, "attempt_1")
@@ -131,7 +163,11 @@ fn advance_initialization_failure_is_durable_on_record_and_journal() {
     let root = TempDir::new().unwrap();
     let advance_store = store(&root);
     let record = advance_store
-        .persist_advance_record_if_absent(&input("command_1"), REVISION_ID)
+        .persist_advance_record_if_absent(
+            &input("command_1"),
+            REVISION_ID,
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        )
         .unwrap();
     let journal = advance_store
         .put_advance_initialization_if_absent(&record, "attempt_1")
@@ -149,7 +185,11 @@ fn advance_initialization_journal_rejects_record_identity_drift() {
     let root = TempDir::new().unwrap();
     let advance_store = store(&root);
     let record = advance_store
-        .persist_advance_record_if_absent(&input("command_1"), REVISION_ID)
+        .persist_advance_record_if_absent(
+            &input("command_1"),
+            REVISION_ID,
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        )
         .unwrap();
     let journal = advance_store
         .put_advance_initialization_if_absent(&record, "attempt_1")

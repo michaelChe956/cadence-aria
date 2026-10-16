@@ -241,6 +241,7 @@ fn c1_context_with_target<'a>(
         baseline_tree: baseline,
         existing_work_item_ids: existing_ids,
         enrollment_target,
+        member_targets: None,
         now: "2026-09-29T00:00:00Z",
     }
 }
@@ -545,4 +546,154 @@ fn c1_existing_create_unexecutable_contract_is_rejected_with_facts() {
         &c1_context(&existing, Some(&c1_baseline_tree())),
     )
     .expect("existing provider that resolves must pass");
+}
+
+/// 批 2 R1（REQ-WIGA-01）：集合 target 的意图合同校验——集合 intent 一律
+/// `intent_unexecutable`（单 WI 归属必须恰一成员）；集合绑定按授权上界
+/// 核对（成员 ∈ A、IR 物理 ID 经 member_targets 映射核对）；成员越权与
+/// 映射缺失均 fail-closed 出诊断，不以 None 吞错。
+#[test]
+fn c1_members_target_intent_contract_set_bound_and_set_intent_rejected() {
+    use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
+    use crate::product::work_item_plan_compiler::validate_work_item_intent_contract;
+
+    let member = |n: u128| LogicalRepositoryId(uuid::Uuid::from_u128(n));
+    let set_bound = EnrollmentTarget::LogicalCodebaseMembers {
+        logical_codebase_id: "logical_codebase_0001".to_string(),
+        logical_repository_ids: vec![member(1), member(2)],
+    };
+    let mut mapping = crate::product::work_item_plan_compiler::PlanMemberTargets::default();
+    mapping
+        .physical_by_logical
+        .insert(member(1), C1_TARGET_REPO.to_string());
+    mapping
+        .physical_by_logical
+        .insert(member(2), "repo-c1-other".to_string());
+
+    let mut ir = compile_work_item_plan(
+        &c1_source(CREATE_INTENT, ("src/levels_new/**", "web/**"), "WI-002"),
+        &WorkItemPlanSourceContext {
+            target_repository_id: C1_TARGET_REPO.to_string(),
+            member_targets: None,
+        },
+    )
+    .expect("create intent plan must lower");
+    let set_intent_on = |ir: &mut crate::product::work_item_plan_compiler::PlanCandidateIr,
+                         target: EnrollmentTarget| {
+        ir.items[0]
+            .contract
+            .intent_contract
+            .as_mut()
+            .expect("intent contract present")
+            .target = target;
+    };
+    let validate_with = |ir: &crate::product::work_item_plan_compiler::PlanCandidateIr,
+                         enrollment_target: Option<&EnrollmentTarget>,
+                         member_targets: Option<
+        &crate::product::work_item_plan_compiler::PlanMemberTargets,
+    >| {
+        validate_work_item_intent_contract(
+            ir,
+            &PlanCandidateValidationContext {
+                project_id: "project_c1_0001",
+                issue_id: "issue_c1_0001",
+                plan_id: "plan_c1_0001",
+                source_story_spec_ids: c1_spec_ids().0,
+                source_design_spec_ids: c1_spec_ids().1,
+                repository_profile: Some(c1_profile_ref()),
+                plan_options: c1_options(),
+                baseline_tree: Some(&c1_baseline_tree()),
+                existing_work_item_ids: &[],
+                enrollment_target,
+                member_targets,
+                now: "2026-10-16T00:00:00Z",
+            },
+        )
+    };
+
+    // 1) 集合 intent：即使绑定同为集合也一律拒绝（单 WI 归属恰一成员）。
+    set_intent_on(
+        &mut ir,
+        EnrollmentTarget::LogicalCodebaseMembers {
+            logical_codebase_id: "logical_codebase_0001".to_string(),
+            logical_repository_ids: vec![member(1), member(2)],
+        },
+    );
+    let diagnostics = validate_with(&ir, Some(&set_bound), Some(&mapping))
+        .expect_err("set intent must be rejected");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "intent_unexecutable"
+            && diagnostic.message.contains("集合")),
+        "set intent diagnostic: {diagnostics:#?}"
+    );
+
+    // 2) 集合绑定 + logical intent（成员 1 ∈ A，映射物理 == IR target）→ 通过。
+    set_intent_on(
+        &mut ir,
+        EnrollmentTarget::LogicalCodebase {
+            logical_codebase_id: "logical_codebase_0001".to_string(),
+            logical_repository_id: member(1),
+        },
+    );
+    validate_with(&ir, Some(&set_bound), Some(&mapping))
+        .expect("authorized member intent with matching physical mapping must pass");
+
+    // 3) 成员 ∉ A（member 3 未授权）→ intent_unexecutable。
+    set_intent_on(
+        &mut ir,
+        EnrollmentTarget::LogicalCodebase {
+            logical_codebase_id: "logical_codebase_0001".to_string(),
+            logical_repository_id: member(3),
+        },
+    );
+    let diagnostics = validate_with(&ir, Some(&set_bound), Some(&mapping))
+        .expect_err("unauthorized member must be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("授权集合")),
+        "unauthorized member diagnostic: {diagnostics:#?}"
+    );
+
+    // 4) 映射缺失（集合绑定在场、member_targets=None）→ fail-closed 诊断。
+    set_intent_on(
+        &mut ir,
+        EnrollmentTarget::LogicalCodebase {
+            logical_codebase_id: "logical_codebase_0001".to_string(),
+            logical_repository_id: member(1),
+        },
+    );
+    let diagnostics = validate_with(&ir, Some(&set_bound), None)
+        .expect_err("missing member mapping must fail closed");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("成员归属映射")),
+        "missing mapping diagnostic: {diagnostics:#?}"
+    );
+
+    // 5) physical intent 反查：phys-busi 非授权集成员映射 → 拒绝。
+    let mut physical_ir = compile_work_item_plan(
+        &c1_source(CREATE_INTENT, ("src/levels_new/**", "web/**"), "WI-002"),
+        &WorkItemPlanSourceContext {
+            target_repository_id: C1_TARGET_REPO.to_string(),
+            member_targets: None,
+        },
+    )
+    .expect("physical intent plan must lower");
+    set_intent_on(
+        &mut physical_ir,
+        EnrollmentTarget::SingleRepository {
+            repository_id: "phys-not-in-set".to_string(),
+        },
+    );
+    physical_ir.items[0].target_repository_id = "phys-not-in-set".to_string();
+    let diagnostics = validate_with(&physical_ir, Some(&set_bound), Some(&mapping))
+        .expect_err("physical repo outside the authorized member set must be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("物理仓")),
+        "physical reverse lookup diagnostic: {diagnostics:#?}"
+    );
 }

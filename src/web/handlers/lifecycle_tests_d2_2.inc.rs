@@ -239,6 +239,7 @@ fn d2_2_advance_closure(paths: &ProductAppPaths, plan_id: &str) -> (String, Stri
         plan_id: plan_id.to_string(),
         plan_revision_id: "revision_0001".to_string(),
         attempt_id: Some("attempt_0001".to_string()),
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         target_attempts: Vec::new(),
         status: AdvanceStatus::Ready,
         workspace_entry: Some(format!("/workspaces/attempt_{plan_id}")),

@@ -157,7 +157,6 @@ pub fn validate_work_item_intent_contract(
     ir: &PlanCandidateIr,
     context: &PlanCandidateValidationContext<'_>,
 ) -> Result<(), Vec<CompilerDiagnostic>> {
-    use crate::product::logical_codebase::EnrollmentTarget;
     use crate::product::work_item_contract::{WorkItemIntent, WorkItemIntentContract};
 
     let plan_item_ids: Vec<&str> = ir
@@ -257,32 +256,33 @@ pub fn validate_work_item_intent_contract(
                         ),
                     ));
                 }
+                // 批 2 R1（REQ-WIGA-01）：集合 intent 不能作为单 WI 归属
+                //（lowering 同判；此处兜底拒绝，A/B 各 WI 仍落各物理仓）。
+                if matches!(
+                    &intent.target,
+                    crate::product::logical_codebase::EnrollmentTarget::LogicalCodebaseMembers { .. }
+                ) {
+                    diagnostics.push(unexecutable(
+                        &work_item_id,
+                        "intent target 是集合（logical_codebase_members）；单个 work item \
+                         的 intent 必须声明恰一成员"
+                            .to_string(),
+                    ));
+                }
                 // target 等值核对只在 enrollment 绑定 target 在场时执行
                 //（REQ-C1-PLAN-01 的“target 不符”属绑定层事实；非 enrolled/
                 // Manual 会话零回归）。logical target 的两级存在性由 lowering
                 // fail-closed 保证。
+                //
+                // 批 2 R1：bound 为集合时不再等值比较，而是授权上界核对——
+                // 同 LC、成员 ∈ 授权集；IR 物理 ID 用成员归属映射核对；
+                // physical intent 反查唯一授权成员。映射缺失 fail-closed
+                // 出诊断，不以 None 吞错。
                 if let Some(bound) = context.enrollment_target {
-                    let target_matches = match (&intent.target, bound) {
-                        (EnrollmentTarget::SingleRepository { repository_id }, _) => {
-                            repository_id == &item.target_repository_id
-                        }
-                        (
-                            EnrollmentTarget::LogicalCodebase {
-                                logical_repository_id,
-                                ..
-                            },
-                            _,
-                        ) => logical_repository_id.0.to_string() == item.target_repository_id,
-                    };
-                    if !target_matches {
-                        diagnostics.push(unexecutable(
-                            &work_item_id,
-                            format!(
-                                "intent target 与 enrollment 绑定目标不符：期望 repository {}，实际 {}",
-                                intent_target_repository(&intent.target),
-                                item.target_repository_id
-                            ),
-                        ));
+                    if let Some(message) =
+                        intent_target_bound_violation(&intent.target, bound, context, item)
+                    {
+                        diagnostics.push(unexecutable(&work_item_id, message));
                     }
                 }
             }
@@ -314,6 +314,127 @@ fn unexecutable(work_item_id: &str, message: String) -> CompilerDiagnostic {
     }
 }
 
+/// 批 2 R1（REQ-WIGA-01）：intent target 与 enrollment 绑定的核对。
+/// - 旧单成员/单仓绑定：保持既有等值语义（零回归）；
+/// - 集合绑定：授权上界——同 LC、成员 ∈ 授权集，IR 物理 ID 经成员归属
+///   映射核对；physical intent 反查唯一授权成员。返回 `Some(message)`
+///   表示违规（诊断）；映射缺失也按违规 fail-closed，不以 None 吞错。
+fn intent_target_bound_violation(
+    intent_target: &crate::product::logical_codebase::EnrollmentTarget,
+    bound: &crate::product::logical_codebase::EnrollmentTarget,
+    context: &PlanCandidateValidationContext<'_>,
+    item: &super::PlanCandidateItemIr,
+) -> Option<String> {
+    use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
+
+    let member_targets = || {
+        context.member_targets.ok_or_else(|| {
+            "集合绑定缺少成员归属映射（member_targets）；无法核对 intent 的成员物理仓"
+                .to_string()
+        })
+    };
+    let EnrollmentTarget::LogicalCodebaseMembers {
+        logical_codebase_id: bound_codebase,
+        logical_repository_ids: authorized,
+    } = bound
+    else {
+        // 旧绑定：既有等值语义（logical UUID 与 IR 物理 ID 的历史比较口径
+        // 保持不变，零回归）。
+        let target_matches = match (intent_target, bound) {
+            (EnrollmentTarget::SingleRepository { repository_id }, _) => {
+                repository_id == &item.target_repository_id
+            }
+            (
+                EnrollmentTarget::LogicalCodebase {
+                    logical_repository_id,
+                    ..
+                },
+                _,
+            ) => logical_repository_id.0.to_string() == item.target_repository_id,
+            (EnrollmentTarget::LogicalCodebaseMembers { .. }, _) => {
+                return Some(SET_INTENT_MESSAGE.to_string());
+            }
+        };
+        return (!target_matches).then(|| {
+            format!(
+                "intent target 与 enrollment 绑定目标不符：期望 repository {}，实际 {}",
+                intent_target_repository(intent_target),
+                item.target_repository_id
+            )
+        });
+    };
+    match intent_target {
+        EnrollmentTarget::LogicalCodebase {
+            logical_codebase_id,
+            logical_repository_id,
+        } => {
+            if logical_codebase_id != bound_codebase {
+                return Some(format!(
+                    "intent target 逻辑代码库 {logical_codebase_id} 不在授权逻辑代码库 \
+                     {bound_codebase} 内；单 WI 归属必须落在授权集合的成员上"
+                ));
+            }
+            if !authorized.contains(logical_repository_id) {
+                return Some(format!(
+                    "intent target 成员 {logical_repository_id:?} 不在 enrollment 授权集合内"
+                ));
+            }
+            match member_targets() {
+                Err(message) => Some(message),
+                Ok(targets) => match targets.physical_by_logical.get(logical_repository_id) {
+                    Some(physical) if physical == &item.target_repository_id => None,
+                    Some(physical) => Some(format!(
+                        "intent target 成员 {logical_repository_id:?} 的物理仓 {physical} 与 \
+                         IR target {} 不符",
+                        item.target_repository_id
+                    )),
+                    None => Some(format!(
+                        "intent target 成员 {logical_repository_id:?} 不在成员归属映射内"
+                    )),
+                },
+            }
+        }
+        EnrollmentTarget::SingleRepository { repository_id } => {
+            if repository_id != &item.target_repository_id {
+                return Some(format!(
+                    "intent target 与 enrollment 绑定目标不符：期望 repository {}，实际 {}",
+                    repository_id, item.target_repository_id
+                ));
+            }
+            // physical intent 反查：该物理仓必须映射自授权集合中的恰一成员。
+            match member_targets() {
+                Err(message) => Some(message),
+                Ok(targets) => {
+                    let matched: Vec<LogicalRepositoryId> = authorized
+                        .iter()
+                        .filter(|logical| {
+                            targets
+                                .physical_by_logical
+                                .get(logical)
+                                .is_some_and(|physical| physical == repository_id)
+                        })
+                        .copied()
+                        .collect();
+                    match matched.as_slice() {
+                        [_] => None,
+                        [] => Some(format!(
+                            "intent target 物理仓 {repository_id} 不映射自授权集合的任何成员"
+                        )),
+                        _ => Some(format!(
+                            "intent target 物理仓 {repository_id} 映射自授权集合的多个成员"
+                        )),
+                    }
+                }
+            }
+        }
+        EnrollmentTarget::LogicalCodebaseMembers { .. } => Some(SET_INTENT_MESSAGE.to_string()),
+    }
+}
+
+/// 批 2 R1：集合 intent 的稳定违规文案（入口早拒与绑定核对兜底共用）。
+const SET_INTENT_MESSAGE: &str =
+    "intent target 是集合（logical_codebase_members）；单个 work item 的 intent 必须声明恰一成员";
+
 fn intent_target_repository(target: &crate::product::logical_codebase::EnrollmentTarget) -> String {
     use crate::product::logical_codebase::EnrollmentTarget;
     match target {
@@ -322,6 +443,13 @@ fn intent_target_repository(target: &crate::product::logical_codebase::Enrollmen
             logical_repository_id,
             ..
         } => logical_repository_id.0.to_string(),
+        EnrollmentTarget::LogicalCodebaseMembers {
+            logical_repository_ids,
+            ..
+        } => format!(
+            "logical_codebase_members({} 个成员)",
+            logical_repository_ids.len()
+        ),
     }
 }
 

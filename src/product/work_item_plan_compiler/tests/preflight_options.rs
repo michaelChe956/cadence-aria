@@ -71,6 +71,7 @@ impl PreflightFixture {
             baseline_tree: None,
             existing_work_item_ids: &[],
             enrollment_target: None,
+            member_targets: None,
 
             now: "2026-08-27T00:00:00Z",
         }

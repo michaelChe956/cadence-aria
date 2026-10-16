@@ -38,6 +38,11 @@ pub struct AdvanceRecord {
     pub plan_id: String,
     pub plan_revision_id: String,
     pub attempt_id: Option<String>,
+    /// 批 2 R1（REQ-WIGA-02/03）：首次 persist 时一次写定的首启策略冻结。
+    /// additive：旧 record 缺字段反序列化读 `Manual`（旧 Manual 不升格）；
+    /// update/replay 不许改（`update_record` 身份断言参与比较）。
+    #[serde(default)]
+    pub start_run_policy: crate::product::coding_models::CodingStartRunPolicy,
     /// REQ-ADV-01/02（OQ1）：多 target 拆分的 per-target attempt 集绑定。
     /// additive（serde default 空集=存量零迁移；空集不序列化）；单 target 场景
     /// 单值 `attempt_id` 承载语义不变。
@@ -471,10 +476,15 @@ impl AdvanceStore {
     /// Persist the first durable anchor for a valid advance. Existing command/plan
     /// records are returned unchanged so callers can safely resume without allocating
     /// another timestamp or identifier.
+    ///
+    /// 批 2 R1（REQ-WIGA-02/03）：`start_run_policy` 显式接策略参数（不留旧
+    /// 签名 shim）——首次 persist 连策略一次写定；既存 record 原样返回
+    /// （冻结值以 record 为准，调用方互证不符即停，不覆盖旧 Manual）。
     pub fn persist_advance_record_if_absent(
         &self,
         input: &AdvanceInput,
         plan_revision_id: &str,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy,
     ) -> Result<AdvanceRecord, ProductStoreError> {
         for id in [
             input.command_id.as_str(),
@@ -502,7 +512,7 @@ impl AdvanceStore {
             {
                 return Ok(record);
             }
-            let record = self.now_record(input, plan_revision_id.to_string());
+            let record = self.now_record(input, plan_revision_id.to_string(), start_run_policy);
             match self.put_record(&record) {
                 Ok(record) => Ok(record),
                 Err(ProductStoreError::Conflict { .. }) => self
@@ -548,6 +558,9 @@ impl AdvanceStore {
                         || current.plan_id != expected.plan_id
                         || current.command_id != expected.command_id
                         || current.plan_revision_id != expected.plan_revision_id
+                        // 批 2 R1：start_run_policy 首次 persist 冻结，update/
+                        // replay 不许改（身份断言 fail-closed）。
+                        || current.start_run_policy != expected.start_run_policy
                     {
                         return Err(ProductStoreError::IdentityMismatch {
                             kind: "advance_record",
@@ -778,7 +791,12 @@ impl AdvanceStore {
             .join(format!("{}.initialization.json", record.plan_id)))
     }
 
-    pub fn now_record(&self, input: &AdvanceInput, plan_revision_id: String) -> AdvanceRecord {
+    pub fn now_record(
+        &self,
+        input: &AdvanceInput,
+        plan_revision_id: String,
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy,
+    ) -> AdvanceRecord {
         let now = Utc::now().to_rfc3339();
         AdvanceRecord {
             id: format!("advance_{}", input.command_id),
@@ -788,6 +806,7 @@ impl AdvanceStore {
             plan_id: input.plan_id.clone(),
             plan_revision_id,
             attempt_id: None,
+            start_run_policy,
             target_attempts: Vec::new(),
             status: AdvanceStatus::Initializing,
             workspace_entry: None,
@@ -1342,6 +1361,7 @@ mod tests {
             plan_id: "plan_0001".into(),
             plan_revision_id: "revision_0001".into(),
             attempt_id: Some("attempt_0001".into()),
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             target_attempts: Vec::new(),
             status: AdvanceStatus::Ready,
             workspace_entry: Some("/workspaces/attempt_0001".into()),
@@ -1382,10 +1402,18 @@ mod tests {
             plan_id: "plan_0001".into(),
         };
         let first = store
-            .persist_advance_record_if_absent(&input, "revision_0001")
+            .persist_advance_record_if_absent(
+                &input,
+                "revision_0001",
+                crate::product::coding_models::CodingStartRunPolicy::Manual,
+            )
             .unwrap();
         let replay = store
-            .persist_advance_record_if_absent(&input, "revision_changed")
+            .persist_advance_record_if_absent(
+                &input,
+                "revision_changed",
+                crate::product::coding_models::CodingStartRunPolicy::Manual,
+            )
             .unwrap();
         assert_eq!(first, replay);
         assert_eq!(replay.plan_revision_id, "revision_0001");
@@ -1407,11 +1435,19 @@ mod tests {
             ..first_input.clone()
         };
         let first = store
-            .persist_advance_record_if_absent(&first_input, "revision_0001")
+            .persist_advance_record_if_absent(
+                &first_input,
+                "revision_0001",
+                crate::product::coding_models::CodingStartRunPolicy::Manual,
+            )
             .unwrap();
         assert_eq!(
             store
-                .persist_advance_record_if_absent(&second_input, "revision_0002")
+                .persist_advance_record_if_absent(
+                    &second_input,
+                    "revision_0002",
+                    crate::product::coding_models::CodingStartRunPolicy::Manual,
+                )
                 .unwrap(),
             first
         );
@@ -1628,6 +1664,7 @@ mod tests {
             plan_id: plan_id.into(),
             plan_revision_id: "revision_0001".into(),
             attempt_id: attempt_id.map(Into::into),
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             target_attempts: Vec::new(),
             status,
             workspace_entry: attempt_id.map(|attempt| format!("/workspaces/{attempt}")),
@@ -1898,13 +1935,21 @@ mod tests {
             issue_id: i.into(),
             plan_id: "plan_0001".into(),
         };
-        assert_deleting(store.persist_advance_record_if_absent(&replay, "revision_0001"));
+        assert_deleting(store.persist_advance_record_if_absent(
+            &replay,
+            "revision_0001",
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        ));
         // 不同 command_id 新 advance → 同样拒绝。
         let replay_fresh = AdvanceInput {
             command_id: "command_0009".into(),
             ..replay.clone()
         };
-        assert_deleting(store.persist_advance_record_if_absent(&replay_fresh, "revision_0001"));
+        assert_deleting(store.persist_advance_record_if_absent(
+            &replay_fresh,
+            "revision_0001",
+            crate::product::coding_models::CodingStartRunPolicy::Manual,
+        ));
         // 迟到 put/update/journal/reopen 全部拒绝且不重建目录。
         let late = cascade_record(
             "advance_command_0009",
@@ -2144,7 +2189,11 @@ mod tests {
         let worker_started = Arc::clone(&started);
         let worker = std::thread::spawn(move || {
             worker_started.wait();
-            worker_store.persist_advance_record_if_absent(&input, "revision_0001")
+            worker_store.persist_advance_record_if_absent(
+                &input,
+                "revision_0001",
+                crate::product::coding_models::CodingStartRunPolicy::Manual,
+            )
         });
         started.wait();
 
@@ -2206,6 +2255,7 @@ mod tests {
             plan_id: plan_id.into(),
             plan_revision_id: "revision_0001".into(),
             attempt_id: targets.first().map(|(_, attempt)| (*attempt).into()),
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             target_attempts: targets
                 .iter()
                 .map(|(target, attempt)| target_binding(target, attempt))

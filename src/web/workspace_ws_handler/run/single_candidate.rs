@@ -299,6 +299,53 @@ fn prevalidate_plan_candidate_ir(
                 .collect::<Vec<_>>(),
             Err(error) => return Some(vec![format!("list existing work items failed: {error}")]),
         };
+    // 批 2 R1（REQ-WIGA-01）：enrolled 会话传真实 binding+成员映射（装载
+    // 失败转预检诊断，权威路径仍 fail-closed）；Manual/非 enrolled 保持
+    // None 零回归。
+    let enrollment_binding =
+        match engine.current_enrollment_binding_for_compile(lifecycle, &session.entity_id) {
+            Ok(binding) => binding,
+            Err(error) => {
+                return Some(vec![format!(
+                    "load enrollment binding for prevalidation failed: {error}"
+                )])
+            }
+        };
+    let validation_member_targets = match &enrollment_binding {
+        Some(_) => {
+            let session_record = match lifecycle.get_workspace_session(&session.session_id) {
+                Ok(record) => record,
+                Err(error) => {
+                    return Some(vec![format!(
+                        "load plan session for member targets failed: {error}"
+                    )])
+                }
+            };
+            let repository = match workspace_repository_for_session(
+                &lifecycle.app_paths(),
+                lifecycle,
+                &session_record,
+            ) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    return Some(vec![format!(
+                        "resolve plan session repository for member targets failed: {error}"
+                    )])
+                }
+            };
+            match crate::product::workspace_engine::draft_batch::compile_support::plan_compile_member_targets(
+                lifecycle, &plan, &repository,
+            ) {
+                Ok(targets) => targets,
+                Err(error) => {
+                    return Some(vec![format!(
+                        "resolve plan member targets for prevalidation failed: {error}"
+                    )])
+                }
+            }
+        }
+        None => None,
+    };
     let validation_now = chrono::Utc::now().to_rfc3339();
     let validation = crate::product::work_item_plan_compiler::validate_plan_candidate_ir(
         ir,
@@ -313,7 +360,8 @@ fn prevalidate_plan_candidate_ir(
             plan_options: &plan.options,
             baseline_tree: baseline_tree.as_ref(),
             existing_work_item_ids: &existing_work_item_ids,
-            enrollment_target: None,
+            enrollment_target: enrollment_binding.as_ref().map(|binding| &binding.target),
+            member_targets: validation_member_targets.as_ref(),
             now: &validation_now,
         },
     );

@@ -219,6 +219,7 @@ fn c1_waiting_items_include_identity_and_actions() {
             plan_id: plan_id.to_string(),
             plan_revision_id: "plan_rev_0001".to_string(),
             attempt_id: Some("attempt_0001".to_string()),
+            start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
             target_attempts: vec![],
             status: AdvanceStatus::Failed,
             workspace_entry: None,

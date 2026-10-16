@@ -47,6 +47,7 @@ fn ready_record(attempt_id: &str, status: AdvanceStatus) -> AdvanceRecord {
         plan_id: "work_item_plan_0001".to_string(),
         plan_revision_id: "plan_revision_0001".to_string(),
         attempt_id: Some(attempt_id.to_string()),
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         target_attempts: Vec::new(),
         status,
         workspace_entry: Some("/tmp/ready-only-worktree".to_string()),
@@ -266,6 +267,7 @@ fn advance_returns_existing_status_for_each_attempt_state() {
                     plan_id: record.plan_id.clone(),
                 },
                 &record.plan_revision_id,
+                crate::product::coding_models::CodingStartRunPolicy::Manual,
             )
             .expect("existing command lookup");
         assert_eq!(replay, record);
@@ -294,6 +296,7 @@ fn advance_failed_or_aborted_attempt_is_not_rebuilt() {
                     plan_id: record.plan_id.clone(),
                 },
                 "changed_revision",
+                crate::product::coding_models::CodingStartRunPolicy::Manual,
             )
             .expect("terminal replay");
         assert_eq!(replay, record);

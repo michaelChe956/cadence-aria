@@ -80,6 +80,7 @@ impl BaselineFixture {
             baseline_tree: self.baseline.as_ref(),
             existing_work_item_ids: &[],
             enrollment_target: None,
+            member_targets: None,
 
             now: "2026-08-27T00:00:00Z",
         }

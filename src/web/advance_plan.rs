@@ -114,6 +114,14 @@ pub async fn advance_plan(
     // 擅自升级。
     let mut enrolled_start_policy: Option<crate::product::coding_models::CodingStartRunPolicy> =
         None;
+    // 批 2 R1：enrolled 集合准入的互证输入——Some((绑定 target, Some(P)))
+    // 表示集合绑定（P=实际桶集，outcome 后做一一对应互证）；Some((_, None))
+    // 表示旧单成员逻辑绑定（沿用单 attempt 语义）；None 表示单仓/非集合
+    // （沿用旧 Replayed 上限检）。
+    let mut enrolled_expected_targets: Option<(
+        crate::product::logical_codebase::EnrollmentTarget,
+        Option<std::collections::BTreeSet<String>>,
+    )> = None;
     if let AdvancePlanOrigin::Enrolled {
         enrollment_id,
         policy_revision,
@@ -218,6 +226,22 @@ pub async fn advance_plan(
                     repository_id: bound_repository,
                 },
             ) => current_repository == bound_repository,
+            // 批 2 R1：集合绑定走 LC 身份全等——权威载体必须解析到 LC 且
+            // LC 身份与绑定声明的 LC 全等（错 LC/跨载体漂移 fail-closed）。
+            // 旧单成员 LogicalCodebase 保持既有「LC 载体 × LC 绑定」语义
+            // （成员级恰一桶判定在下方 target 分派兜底；存量 fixture 的
+            // 合成 LC id 不受影响，零回归）。
+            (
+                crate::web::handlers::AutomationCarrierResolution::LogicalCodebase { resolution },
+                bound @ crate::product::logical_codebase::EnrollmentTarget::LogicalCodebaseMembers {
+                    ..
+                },
+            ) => resolution
+                .target
+                .logical_codebase_id
+                .as_deref()
+                .is_some_and(|authoritative| bound.logical_codebase_id() == Some(authoritative)),
+            // 旧单成员逻辑绑定：既有 LC×LC 匹配语义（零回归）。
             (
                 crate::web::handlers::AutomationCarrierResolution::LogicalCodebase { .. },
                 crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase { .. },
@@ -303,6 +327,55 @@ pub async fn advance_plan(
                          {binding_repository:?} but the plan uniquely targets {unique_target:?}"
                     ));
                 }
+                // 批 2 R1：单成员绑定的实际桶恒 P={该仓}（上面恰一判定已
+                // 保证），replay/Ready 互证沿用单 attempt 语义（下方旧检）。
+                enrolled_expected_targets = Some((binding.target.clone(), None));
+            }
+            crate::product::logical_codebase::EnrollmentTarget::LogicalCodebaseMembers {
+                logical_repository_ids: authorized,
+                ..
+            } => {
+                // 批 2 R1（REQ-WIGA-01/03）：集合准入以 P⊆A 且 unattributed
+                // 为空替代「恰一桶」——授权 A，plan 实际桶 P：∅≠P⊆A；
+                // 无归属 WI（unattributed 非空）与越权桶一律 fail-closed；
+                // A−P 不造空 attempt。
+                if !grouped.unattributed.is_empty() {
+                    return Err(format!(
+                        "enrolled advance requires every plan unit attributed to a target, \
+                         got {} unattributed unit(s)",
+                        grouped.unattributed.len()
+                    ));
+                }
+                if grouped.by_target.is_empty() {
+                    return Err(
+                        "enrolled advance requires a non-empty set of logical targets"
+                            .to_string(),
+                    );
+                }
+                let unauthorized: Vec<String> = grouped
+                    .by_target
+                    .keys()
+                    .filter(|target| !authorized.contains(*target))
+                    .map(|target| target.0.to_string())
+                    .collect();
+                if !unauthorized.is_empty() {
+                    return Err(format!(
+                        "enrolled advance targets fall outside the enrollment authorization: \
+                         {}",
+                        unauthorized.join(", ")
+                    ));
+                }
+                // 记录集合准入的期望 P（一一对应互证在 outcome 后执行）。
+                enrolled_expected_targets = Some((
+                    binding.target.clone(),
+                    Some(
+                        grouped
+                            .by_target
+                            .keys()
+                            .map(|target| target.0.to_string())
+                            .collect::<std::collections::BTreeSet<_>>(),
+                    ),
+                ));
             }
         }
         enrolled_start_policy = Some(
@@ -355,16 +428,97 @@ pub async fn advance_plan(
         }
     };
 
-    // 回放后仍核 target_attempts 不超过一条：engine 支持 split，enrolled
-    // 自动路径不允许出现多 target 绑定结果。
+    // 批 2 R1（REQ-WIGA-01/03）：enrolled 结果互证——集合绑定按 record 的
+    // 完整 target_attempts 与 P 一一对应（Ready/Replay 同规则，删旧「恰一
+    // attempt」上限，不以 attempt_id 代表全 plan）；非集合绑定沿用旧
+    // Replayed 上限检（零回归）。
     if let AdvancePlanOrigin::Enrolled { .. } = origin
-        && let AdvanceOutcome::Replayed { record } = &outcome
-        && record.target_attempts.len() > 1
+        && let Some((binding_target, expected_plan_targets)) =
+            enrolled_expected_targets.as_ref()
     {
-        return Err(format!(
-            "enrolled advance replay produced {} target attempts; expected at most one",
-            record.target_attempts.len()
-        ));
+        let (attempts, record_attempt_id) = match &outcome {
+            AdvanceOutcome::Completed { record, .. } => {
+                (record.target_attempts.clone(), record.attempt_id.clone())
+            }
+            AdvanceOutcome::Replayed { record } => {
+                (record.target_attempts.clone(), record.attempt_id.clone())
+            }
+            AdvanceOutcome::Rejected { .. } => (Vec::new(), None),
+        };
+        match expected_plan_targets {
+            Some(expected) => {
+                if expected.len() > 1 || !attempts.is_empty() {
+                    let mut targets = attempts
+                        .iter()
+                        .map(|binding| binding.target_repository_id.clone())
+                        .collect::<Vec<_>>();
+                    targets.sort_unstable();
+                    targets.dedup();
+                    let expected_sorted = expected.iter().cloned().collect::<Vec<_>>();
+                    if targets != expected_sorted {
+                        return Err(format!(
+                            "enrolled advance target attempts {{ {} }} do not match the plan \
+                             targets {{ {} }} for binding {binding_target:?}",
+                            targets.join(", "),
+                            expected_sorted.join(", ")
+                        ));
+                    }
+                    let mut attempt_ids = attempts
+                        .iter()
+                        .map(|binding| binding.attempt_id.clone())
+                        .collect::<Vec<_>>();
+                    attempt_ids.sort_unstable();
+                    let unique_len = {
+                        let mut unique = attempt_ids.clone();
+                        unique.dedup();
+                        unique.len()
+                    };
+                    if unique_len != attempt_ids.len() {
+                        return Err(format!(
+                            "enrolled advance target attempts reuse an attempt id across \
+                             targets for binding {binding_target:?}"
+                        ));
+                    }
+                    if attempts.len() != expected_sorted.len() {
+                        return Err(format!(
+                            "enrolled advance produced {} target attempt bindings for {} \
+                             plan targets; exactly one attempt per target is required",
+                            attempts.len(),
+                            expected_sorted.len()
+                        ));
+                    }
+                    if let Some(record_attempt) = record_attempt_id.as_deref()
+                        && !attempts
+                            .iter()
+                            .any(|binding| binding.attempt_id == record_attempt)
+                    {
+                        return Err(format!(
+                            "enrolled advance record attempt {record_attempt} is not bound by \
+                             its own target_attempts for binding {binding_target:?}"
+                        ));
+                    }
+                } else if record_attempt_id.is_none() {
+                    // P 恰一桶：引擎单 target 路径 target_attempts 可为空，
+                    // record.attempt_id 承载唯一 attempt（共享服务物化一条
+                    // 绑定）；两者皆空即 fail-closed。
+                    return Err(format!(
+                        "enrolled advance for single-bucket plan has neither target attempts \
+                         nor a durable attempt id for binding {binding_target:?}"
+                    ));
+                }
+            }
+            None => {
+                if let AdvanceOutcome::Replayed { record } = &outcome
+                    && record.target_attempts.len() > 1
+                {
+                    return Err(format!(
+                        "enrolled advance replay produced {} target attempts; expected at most \
+                         one",
+                        record.target_attempts.len()
+                    ));
+                }
+            }
+        }
     }
     Ok(outcome)
 }

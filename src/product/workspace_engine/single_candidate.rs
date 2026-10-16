@@ -446,7 +446,7 @@ impl WorkspaceEngine {
             &source,
             WorkItemPlanSourceContext {
                 target_repository_id,
-                member_targets,
+                member_targets: member_targets.clone(),
             },
         )
         .map_err(|diagnostics| {
@@ -546,6 +546,18 @@ impl WorkspaceEngine {
             .into_iter()
             .map(|record| record.id)
             .collect::<Vec<_>>();
+        // 批 2 R1（REQ-WIGA-01）：enrolled 会话传真实 binding+成员映射——
+        // 装载失败走显式错误（不以 None 吞错）；Manual/非 enrolled 保持
+        // None（intent target 核对不触发，零回归）。
+        let enrollment_binding = self
+            .current_enrollment_binding_for_compile(&lifecycle, &plan_id)
+            .map_err(|error| {
+                format!("load enrollment binding for candidate validation failed: {error}")
+            })?;
+        let validation_member_targets = match &enrollment_binding {
+            Some(_) => member_targets.as_ref(),
+            None => None,
+        };
         let validation_now = chrono::Utc::now().to_rfc3339();
         let report = validate_plan_candidate_ir(
             &ir_record.ir,
@@ -561,7 +573,10 @@ impl WorkspaceEngine {
                 plan_options: &plan.options,
                 baseline_tree: baseline_tree.as_ref(),
                 existing_work_item_ids: &existing_work_item_ids,
-                enrollment_target: None,
+                enrollment_target: enrollment_binding
+                    .as_ref()
+                    .map(|binding| &binding.target),
+                member_targets: validation_member_targets,
                 now: &validation_now,
             },
         )

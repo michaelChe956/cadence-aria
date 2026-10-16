@@ -844,7 +844,10 @@ impl WorkspaceEngine {
                         issue_id,
                         plan_id,
                     },
-                    crate::product::coding_models::CodingStartRunPolicy::Manual,
+                    // 批 2 R1：从 record 取首次 persist 冻结的策略（不猜
+                    // Manual、不升格；binding 复核已在上方 expected_binding
+                    // 全等校验完成）。
+                    record.start_run_policy.clone(),
                     admission,
                 )
                 .await?;
@@ -969,7 +972,9 @@ impl WorkspaceEngine {
         match self
             .handle_advance_with_start_policy(
                 input,
-                crate::product::coding_models::CodingStartRunPolicy::Manual,
+                // 批 2 R1：从 record 取首次 persist 冻结的策略（不猜 Manual、
+                // 不升格；binding 复核已在上方 expected_binding 全等校验完成）。
+                record.start_run_policy.clone(),
                 admission,
             )
             .await

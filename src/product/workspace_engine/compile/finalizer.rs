@@ -16,7 +16,7 @@ impl WorkspaceEngine {
     /// binding history current 精确指向本 plan/session 时返回 Some；
     /// enrollment 缺失/关闭/指向他处一律 None（manual 链复用语义），不猜
     /// 「最新 plan/session」。
-    fn current_enrollment_binding_for_compile(
+    pub(crate) fn current_enrollment_binding_for_compile(
         &self,
         lifecycle: &LifecycleStore,
         plan_id: &str,
@@ -863,6 +863,14 @@ pub(crate) fn work_item_record_attribution(
     use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
 
     let Some(targets) = member_targets else {
+        // 批 2 R1（REQ-WIGA-01）：无成员表时集合 intent 同样拒绝——集合
+        // target 不能作为单 WI 归属（不落 story 仓兜底，语义错 fail-closed）。
+        if let Some(EnrollmentTarget::LogicalCodebaseMembers { .. }) = intent_target {
+            return Err(format!(
+                "work_item_target_missing: `{logical_work_item_id}` 声明了集合 target\
+                 （logical_codebase_members）；单个 work item 的归属必须是恰一成员"
+            ));
+        }
         return Ok((legacy_repository_id.to_string(), None));
     };
     let reverse_logical = |physical: &str| -> Result<LogicalRepositoryId, String> {
@@ -896,6 +904,12 @@ pub(crate) fn work_item_record_attribution(
             )?;
             Ok((physical.clone(), Some(*logical_repository_id)))
         }
+        // 批 2 R1（REQ-WIGA-01）：集合 intent 拒绝（含成员表在场——集合
+        // target 不能作为单 WI 归属）。
+        Some(EnrollmentTarget::LogicalCodebaseMembers { .. }) => Err(format!(
+            "work_item_target_missing: `{logical_work_item_id}` 声明了集合 target\
+             （logical_codebase_members）；单个 work item 的归属必须是恰一成员"
+        )),
         Some(EnrollmentTarget::SingleRepository { repository_id }) => Ok((
             repository_id.clone(),
             Some(reverse_logical(repository_id)?),

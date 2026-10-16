@@ -521,6 +521,7 @@ async fn start_coding_attempt(
                                 verify_frozen_policy(&attempt, enrollment_id, *policy_revision)
                                     .and_then(|plan_id| {
                                         verify_current_enrollment(
+                                            &paths,
                                             enrollment,
                                             &attempt,
                                             enrollment_id,
@@ -541,7 +542,12 @@ async fn start_coding_attempt(
                                         )
                                     })
                                     .and_then(|()| {
-                                        verify_journal_and_record(&paths, &coding_store, &attempt)
+                                        verify_journal_and_record(
+                                            &paths,
+                                            &coding_store,
+                                            &attempt,
+                                            enrollment.target.as_ref(),
+                                        )
                                     })
                                     .and_then(|()| sc_advance_ready_gate(&paths, &attempt))
                             });
@@ -763,6 +769,7 @@ fn resolve_current_carrier(
 /// 互证按 enrollment 声明 target 分派，caller 传入锁内解析的当前
 /// authority 载体（不另造第二次 issue/repository 读取）。
 fn verify_current_enrollment(
+    paths: &ProductAppPaths,
     enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
     attempt: &CodingExecutionAttempt,
     enrollment_id: &str,
@@ -861,6 +868,80 @@ fn verify_current_enrollment(
                 ));
             }
         }
+        // 批 2 R1（REQ-WIGA-01）：集合 enrollment 互证——snapshot 必须在场、
+        // 成员 ∈ 授权集合 A；当前 authority 载体必须解析到同一 LC；再沿该
+        // LC 的成员/checkout 权威解析互证 snapshot 的物理身份（snapshot 本身
+        // 无 LC 字段）。旧单成员不扩授权（上方 arm 不变）。
+        Some(crate::product::logical_codebase::EnrollmentTarget::LogicalCodebaseMembers {
+            logical_codebase_id,
+            logical_repository_ids: authorized,
+        }) => {
+            let Some(snapshot) = attempt.target_snapshot.as_ref() else {
+                return Err(StartCodingError::new(
+                    "coding_start_enrollment_mismatch",
+                    "set enrollment requires the attempt to carry a logical target snapshot",
+                ));
+            };
+            if !authorized.contains(&snapshot.logical_repository_id) {
+                return Err(StartCodingError::new(
+                    "coding_start_enrollment_mismatch",
+                    format!(
+                        "attempt target snapshot points at logical repository {:?} outside \
+                         the enrollment's authorized member set ({} member(s))",
+                        snapshot.logical_repository_id,
+                        authorized.len()
+                    ),
+                ));
+            }
+            let carrier_lc = match current_carrier {
+                crate::web::handlers::AutomationCarrierResolution::LogicalCodebase {
+                    resolution,
+                } => resolution.target.logical_codebase_id.as_deref(),
+                _ => None,
+            };
+            if carrier_lc != Some(logical_codebase_id.as_str()) {
+                return Err(StartCodingError::new(
+                    "coding_start_enrollment_mismatch",
+                    format!(
+                        "set enrollment carrier drift: enrollment authorizes logical codebase \
+                         {logical_codebase_id} but the issue's authority resolves elsewhere; \
+                         re-bind the automation target"
+                    ),
+                ));
+            }
+            let (_, checkout, repository) =
+                crate::product::repository_store::RepositoryStore::new(paths.clone())
+                    .resolve_logical_repository_for_issue_codebase(
+                        &attempt.project_id,
+                        Some(logical_codebase_id),
+                        snapshot.logical_repository_id,
+                    )
+                    .map_err(|error| {
+                        StartCodingError::new(
+                            "coding_start_enrollment_mismatch",
+                            format!(
+                                "resolve set enrollment member {:?} under logical codebase \
+                                 {logical_codebase_id} failed: {error}",
+                                snapshot.logical_repository_id
+                            ),
+                        )
+                    })?;
+            if repository.id != snapshot.physical_repository_id
+                || checkout.checkout_id != snapshot.checkout_id
+            {
+                return Err(StartCodingError::new(
+                    "coding_start_enrollment_mismatch",
+                    format!(
+                        "attempt target snapshot drifted from the logical codebase authority: \
+                         snapshot ({}, checkout {}) vs resolved ({}, checkout {:?})",
+                        snapshot.physical_repository_id,
+                        snapshot.checkout_id.0,
+                        repository.id,
+                        checkout.checkout_id.0
+                    ),
+                ));
+            }
+        }
         None => {
             // 旧代无 target：任何 LC snapshot 均视为漂移拒绝（既有语义）。
             if let Some(snapshot) = &attempt.target_snapshot {
@@ -915,12 +996,19 @@ fn verify_current_binding(
     Ok(())
 }
 
-/// group journal lineage 与 AdvanceRecord 的 plan/revision/attempt 身份
-/// 互证（多 target fail-closed，REQ-WIGA-03/04、REQ-MTG-03）。
+/// group journal lineage 与 AdvanceRecord 的 plan/revision/attempt 身份互证
+///（REQ-WIGA-03/04、REQ-MTG-03）。
+///
+/// 批 2 R1：多 target 计划按 attempt_id 在 plan 的全部 journal 中唯一匹配
+/// （各自 journal 互证该 attempt 的 lineage/revision；单仓原单 journal 由
+/// list 接口兼容读取）；删「record >1」拒绝——record 的完整
+/// target_attempts 不得含越权成员（按 enrollment 授权 target 核对，
+/// `authorized=None` 为旧代无 target enrollment，仅容空 target_attempts）。
 fn verify_journal_and_record(
     paths: &ProductAppPaths,
     coding_store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
+    authorized: Option<&crate::product::logical_codebase::EnrollmentTarget>,
 ) -> Result<(), StartCodingError> {
     let CodingStartRunPolicy::AutoStartOnce {
         source_plan_revision,
@@ -938,18 +1026,42 @@ fn verify_journal_and_record(
             "enrolled start requires the attempt to be bound to a work item group plan",
         ));
     };
-    let journal = coding_store
-        .get_group_initialization(&attempt.project_id, &attempt.issue_id, plan_id)
+    let mut journals = coding_store
+        .list_group_initialization_journals_for_plan(
+            &attempt.project_id,
+            &attempt.issue_id,
+            plan_id,
+        )
         .map_err(|error| {
             StartCodingError::new(
                 "coding_start_plan_binding_unreadable",
-                format!("load group initialization journal failed: {error}"),
+                format!("load group initialization journals failed: {error}"),
             )
         })?;
-    if journal.attempt.id != attempt.id
-        || journal.plan_binding.attempt_id != attempt.id
-        || journal.plan_binding.plan_id != plan_id
-    {
+    journals.retain(|journal| {
+        journal.attempt.id == attempt.id && journal.plan_binding.attempt_id == attempt.id
+    });
+    let Some(journal) = journals.first() else {
+        return Err(StartCodingError::new(
+            "coding_start_plan_binding_mismatch",
+            format!(
+                "no group initialization journal matches attempt {} for plan {plan_id}",
+                attempt.id
+            ),
+        ));
+    };
+    if journals.len() > 1 {
+        return Err(StartCodingError::new(
+            "coding_start_plan_binding_mismatch",
+            format!(
+                "{} group initialization journals claim attempt {} for plan {plan_id}; the \
+                 attempt must match exactly one journal",
+                journals.len(),
+                attempt.id
+            ),
+        ));
+    }
+    if journal.plan_binding.plan_id != plan_id {
         return Err(StartCodingError::new(
             "coding_start_plan_binding_mismatch",
             format!(
@@ -982,15 +1094,45 @@ fn verify_journal_and_record(
             "no durable advance record exists for plan {plan_id}"
         )));
     };
-    if record.target_attempts.len() > 1 {
-        return Err(StartCodingError::new(
-            "coding_start_multi_target",
-            format!(
-                "advance record for plan {plan_id} carries {} target attempts; automatic \
-                 start requires exactly one",
-                record.target_attempts.len()
-            ),
-        ));
+    // 批 2 R1：完整记录不得含越权成员——授权集合外/跨载体的 target 绑定
+    // 一律拒绝（单仓与旧代无 target enrollment 只容空 target_attempts）。
+    if !record.target_attempts.is_empty() {
+        let authorized_member = |target: &str| -> bool {
+            match authorized {
+                Some(
+                    crate::product::logical_codebase::EnrollmentTarget::LogicalCodebaseMembers {
+                        logical_repository_ids,
+                        ..
+                    },
+                ) => logical_repository_ids.iter().any(|member| {
+                    member.0.to_string() == target
+                }),
+                Some(
+                    crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
+                        logical_repository_id,
+                        ..
+                    },
+                ) => logical_repository_id.0.to_string() == target,
+                Some(crate::product::logical_codebase::EnrollmentTarget::SingleRepository { .. })
+                | None => false,
+            }
+        };
+        let unauthorized: Vec<String> = record
+            .target_attempts
+            .iter()
+            .filter(|binding| !authorized_member(&binding.target_repository_id))
+            .map(|binding| binding.target_repository_id.clone())
+            .collect();
+        if !unauthorized.is_empty() {
+            return Err(StartCodingError::new(
+                "coding_start_multi_target",
+                format!(
+                    "advance record for plan {plan_id} binds target(s) {} outside the \
+                     enrollment authorization",
+                    unauthorized.join(", ")
+                ),
+            ));
+        }
     }
     if record.attempt_id.as_deref() != Some(attempt.id.as_str())
         && !record

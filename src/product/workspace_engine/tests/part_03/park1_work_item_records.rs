@@ -417,6 +417,39 @@ fn attribution_fails_closed_on_missing_or_ineffective_targets() {
     assert!(error.contains("work_item_target_missing"));
 }
 
+/// 批 2 R1（REQ-WIGA-01）：集合 intent 不能作为单 WI 归属——成员表在场与
+/// 缺席（legacy 回落路径）均拒绝，语义错 fail-closed 不落 story 仓兜底。
+#[test]
+fn attribution_rejects_members_set_intent_with_and_without_member_table() {
+    let set_intent = EnrollmentTarget::LogicalCodebaseMembers {
+        logical_codebase_id: "lc-0001".to_string(),
+        logical_repository_ids: vec![
+            LogicalRepositoryId(stable_uuid(1)),
+            LogicalRepositoryId(stable_uuid(2)),
+        ],
+    };
+    let targets = member_targets_fixture();
+    let error = work_item_record_attribution(
+        Some(&targets),
+        "legacy_repo",
+        Some(&set_intent),
+        "WI-set-1",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("work_item_target_missing") && error.contains("集合"),
+        "成员表在场时集合 intent 必须拒绝：{error}"
+    );
+
+    let error =
+        work_item_record_attribution(None, "legacy_repo", Some(&set_intent), "WI-set-2")
+            .unwrap_err();
+    assert!(
+        error.contains("work_item_target_missing") && error.contains("集合"),
+        "无成员表（legacy 回落路径）集合 intent 同样拒绝：{error}"
+    );
+}
+
 #[test]
 fn attribution_legacy_keeps_story_repository_without_logical_target() {
     let intent = EnrollmentTarget::SingleRepository {

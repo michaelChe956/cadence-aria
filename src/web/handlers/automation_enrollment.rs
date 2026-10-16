@@ -25,10 +25,7 @@ use crate::product::models::automation::{
 };
 use crate::product::work_item_plan_policy::RunPolicy;
 use crate::web::error::{ApiError, ApiResult};
-use crate::web::handlers::lifecycle::preflight::{
-    SingleCandidatePreflightDecision, logical_repository_ids_for_preflight,
-    preflight_single_repository_candidate,
-};
+use crate::web::handlers::lifecycle::preflight::logical_repository_ids_for_preflight;
 use crate::web::state::WebAppState;
 use crate::web::types::{EnrollmentBindRequest, EnrollmentPutRequest};
 
@@ -200,17 +197,18 @@ pub async fn post_automation_enrollment_rebind(
     // gateway(读取现有 LC/成员而不猜 issue);缺 checkout 材料列 reason,
     // 不建 worktree/provider。
     if let Some(declared) = enrollment.target.as_ref() {
-        let gateway = match declared {
-            crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
-                logical_codebase_id,
-                ..
-            } => super::automation_gateway_preflight::readonly_preflight_gateway(
-                &state,
-                &project_id,
-                Some(logical_codebase_id),
-            ),
+        // 批 2 R1：集合声明同属 LC 载体——沿声明 LC 组装一次 readonly
+        // gateway（五角色 verdict 复用，不按仓循环、不加健康探测）。
+        let gateway = match declared.logical_codebase_id() {
+            Some(logical_codebase_id) => {
+                super::automation_gateway_preflight::readonly_preflight_gateway(
+                    &state,
+                    &project_id,
+                    Some(logical_codebase_id),
+                )
+            }
             // 单仓声明的载体类别在判定核心内走原跳过,无需 gateway。
-            crate::product::logical_codebase::EnrollmentTarget::SingleRepository { .. } => None,
+            None => None,
         };
         super::automation_gateway_preflight::validate_role_chain_for_declared_enrollment_target(
             gateway.as_ref(),
@@ -388,8 +386,10 @@ fn validate_enrollment_scope(
             Ok(())
         }
         super::support::AutomationCarrierResolution::LogicalCodebase { resolution } => {
-            // 自动授权仅恰一 logical repository/单 attempt（REQ-WIGA-01/02、
-            // REQ-MTG-03）；LC 分支保持既有单 target 约束。
+            // 批 2 R1（REQ-WIGA-01、REQ-MTG-03）：LC 载体按 selection 候选
+            // 构造 canonical target（0 拒/1 旧 kind/N 集合）——提交 target
+            // 必须与 canonical 全等（乱序/重复已在反序列化归一），错配
+            // 422 重选提示，不猜、不降级、不以 plan focus 上界替代授权集。
             let manifest = resolution.manifest.clone().ok_or_else(|| {
                 invalid_scope("automation enrollment requires a logical codebase manifest routing")
             })?;
@@ -399,43 +399,60 @@ fn validate_enrollment_scope(
                 )
             })?;
             let candidate_ids = logical_repository_ids_for_preflight(&manifest, selection);
-            match preflight_single_repository_candidate(&candidate_ids) {
-                SingleCandidatePreflightDecision::Eligible { repository_id }
-                    if matches!(
-                        target,
-                        crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
-                            logical_repository_id: target_repository,
-                            ..
-                        } if target_repository.0.to_string() == repository_id
-                    ) =>
-                {
-                    // C1 Task 1：显式声明的 target 必须与授权域同载体同身份
-                    //（logical 双级齐全且指向同一 logical repository）。
-                    // C5 Task 3/Task 8：唯一 logical target 确认后做完整
-                    // 角色链同源预检——与 GET automation-target 投影同一
-                    // carrier、同一判定,Enable 前拒绝,一次列全全部违规
-                    // 角色。Task 8b:readonly gateway 接线(resolver 冻结的
-                    // 权威 lc_id),组装失败 fail-closed。
-                    let gateway = super::automation_gateway_preflight::readonly_preflight_gateway(
-                        state,
-                        project_id,
-                        resolution.target.logical_codebase_id.as_deref(),
-                    );
-                    super::automation_gateway_preflight::validate_role_chain_for_enrollment(
-                        gateway.as_ref(),
-                        &options.author_provider,
-                        &options.reviewer_provider,
-                        &carrier,
-                        true,
-                        state.test_provider_enabled,
-                    )
-                }
-                _ => Err(invalid_scope(
-                    "automation enrollment target must match the issue's single logical repository",
-                )),
+            let expected = canonical_lc_enrollment_target(
+                &manifest.logical_codebase_id.to_string(),
+                &candidate_ids,
+            )?;
+            if target != &expected {
+                return Err(invalid_scope(
+                    "automation enrollment target must match the issue's authorized logical \
+                     member set; re-select the automation target and retry",
+                ));
             }
+            // C5 Task 3/Task 8：canonical target 确认后做完整角色链同源
+            // 预检——与 GET automation-target 投影同一 carrier、同一判定,
+            // Enable 前拒绝,一次列全全部违规角色。批 2 R1：集合同属 LC，
+            // 一次 LC 预检覆盖全部成员（不按仓循环）。Task 8b:readonly
+            // gateway 接线(resolver 冻结的权威 lc_id),组装失败 fail-closed。
+            let gateway = super::automation_gateway_preflight::readonly_preflight_gateway(
+                state,
+                project_id,
+                resolution.target.logical_codebase_id.as_deref(),
+            );
+            super::automation_gateway_preflight::validate_role_chain_for_enrollment(
+                gateway.as_ref(),
+                &options.author_provider,
+                &options.reviewer_provider,
+                &carrier,
+                true,
+                state.test_provider_enabled,
+            )
         }
     }
+}
+
+/// 批 2 R1：GET 投影与 PUT Enable 共用的 canonical LC target 构造。
+/// 候选（manifest ∩ selection，升序唯一）0 个即拒绝；恰一折叠旧
+/// `LogicalCodebase` kind；多个落 `LogicalCodebaseMembers` 集合。
+pub(crate) fn canonical_lc_enrollment_target(
+    logical_codebase_id: &str,
+    candidate_ids: &[String],
+) -> ApiResult<crate::product::logical_codebase::EnrollmentTarget> {
+    let members = candidate_ids
+        .iter()
+        .map(|candidate| {
+            uuid::Uuid::parse_str(candidate)
+                .map(crate::product::logical_codebase::LogicalRepositoryId)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            invalid_scope("automation enrollment logical repository id is not a valid uuid")
+        })?;
+    crate::product::logical_codebase::EnrollmentTarget::canonical_logical_members(
+        logical_codebase_id.to_string(),
+        members,
+    )
+    .ok_or_else(|| invalid_scope("automation target requires at least one logical repository"))
 }
 
 /// 精确 source 绑定（REQ-WIGA-01）：id 存在、已确认、current_version 与引用一致
@@ -579,8 +596,9 @@ mod tests {
 
     use super::super::automation_enrollment_test_support::{
         ISSUE_ID, PROJECT_ID, SINGLE_LOGICAL_ID, create_plan_and_session, enrollment_body,
-        enrollment_body_with_target, enrollment_file_exists, get_enrollment, post_binding,
-        post_rebind, put_enrollment, rebind_body, response_json, seed_fixture,
+        enrollment_body_with_target, enrollment_file_exists, fixture_logical_codebase_id,
+        get_enrollment, post_binding, post_rebind, put_enrollment, rebind_body, response_json,
+        seed_fixture,
     };
 
     #[tokio::test]
@@ -696,7 +714,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automation_enrollment_http_put_rejects_zero_or_multi_target() {
+    async fn automation_enrollment_http_put_rejects_zero_target_and_mismatched_member_set() {
         // 0 logical member（无 manifest/selection → Legacy 路由）→ 422。
         let fixture = seed_fixture(0, true);
         let app = fixture.router();
@@ -704,7 +722,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert!(!enrollment_file_exists(&fixture));
 
-        // 2 logical member → 422 且 enrollment 文件不存在。
+        // 2 logical member 下提交旧单成员 target → 与 canonical 集合不符，
+        // 422 且零写入（批 2 R1：多成员授权必须全集合匹配）。
         let fixture = seed_fixture(2, true);
         let app = fixture.router();
         let response = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
@@ -712,6 +731,56 @@ mod tests {
         let payload = response_json(response).await;
         assert_eq!(payload["code"], "automation_enrollment_invalid_scope");
         assert!(!enrollment_file_exists(&fixture));
+    }
+
+    /// 批 2 R1 红测⑤：2 成员 selection 的 PUT 集合 target——乱序/重复输入
+    /// 归一后与 canonical 全等即 200 落盘（enrollment/binding 冻结同一规范
+    /// 形态；错配成员子集 422 零写入）。
+    #[tokio::test]
+    async fn automation_enrollment_http_put_accepts_normalized_member_set() {
+        let fixture = seed_fixture(2, true);
+        let app = fixture.router();
+        let mut body = enrollment_body(&fixture, 1, 1);
+        body["command"]["target"] = serde_json::json!({
+            "kind": "logical_codebase_members",
+            "logical_codebase_id": fixture_logical_codebase_id(&fixture),
+            // 乱序 + 重复：反序列化归一为升序唯一后与 canonical 全等。
+            "logical_repository_ids": [
+                "00000000-0000-0000-0000-000000000002",
+                "00000000-0000-0000-0000-000000000001",
+                "00000000-0000-0000-0000-000000000002"
+            ]
+        });
+        let response = put_enrollment(&app, body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let enrollment = response_json(response).await;
+        assert_eq!(enrollment["target"]["kind"], "logical_codebase_members");
+        assert_eq!(
+            enrollment["target"]["logical_repository_ids"],
+            serde_json::json!([
+                "00000000-0000-0000-0000-000000000001",
+                "00000000-0000-0000-0000-000000000002"
+            ])
+        );
+        assert_eq!(
+            enrollment["binding_history"]["current"]["target"]["kind"],
+            "logical_codebase_members"
+        );
+        assert!(enrollment_file_exists(&fixture));
+
+        // 成员子集（缺一）→ canonical 不全等即 422 零写入。
+        let mut subset = enrollment_body(&fixture, 1, 1);
+        subset["command"]["target"] = serde_json::json!({
+            "kind": "logical_codebase_members",
+            "logical_codebase_id": fixture_logical_codebase_id(&fixture),
+            "logical_repository_ids": ["00000000-0000-0000-0000-000000000001"]
+        });
+        let response = put_enrollment(&app, subset).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response_json(response).await["code"],
+            "automation_enrollment_invalid_scope"
+        );
     }
 
     #[tokio::test]

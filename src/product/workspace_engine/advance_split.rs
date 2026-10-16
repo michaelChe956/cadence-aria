@@ -48,6 +48,7 @@ impl WorkspaceEngine {
         authoritative: AuthoritativeGroupPlanBinding,
         grouped: UnitsByTarget,
         record: AdvanceRecord,
+        start_policy: crate::product::coding_models::CodingStartRunPolicy,
         admission: &AdvancePlanAdmission,
     ) -> Result<AdvanceOutcome, String> {
         // D2.1d 对偶（A2 不静默归属）：≥2 target 桶下无归属 unit 不入任何桶、也
@@ -99,6 +100,15 @@ impl WorkspaceEngine {
                     "existing group initialization is bound to another advance identity"
                         .to_string(),
                 );
+            }
+            // 批 2 R1：existing journal 策略不符即停（不给旧 Manual 原地补
+            // 授权、不降级已冻结 AutoStartOnce）。
+            if journal.attempt.start_run_policy != start_policy {
+                return Err(format!(
+                    "existing split group initialization froze start policy {:?} but the \
+                     advance requests {:?}",
+                    journal.attempt.start_run_policy, start_policy
+                ));
             }
             let target = journal
                 .attempt
@@ -208,9 +218,10 @@ impl WorkspaceEngine {
                 provider_config_snapshot: provider_config,
                 target_snapshot,
                 max_auto_rework: 2,
-                // P2 Task 2：多 target split 是手工语义（enrolled 自动在
-                // advance_plan 服务层已按恰一 target fail-closed）。
-                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+                // 批 2 R1（REQ-WIGA-02/03）：split 穿透调用方策略——每仓
+                // clone 同一冻结值（Enrolled 全仓 AutoStartOnce、Manual 全
+                // Manual；不再逐仓硬编码 Manual）。
+                start_run_policy: start_policy.clone(),
             };
             let journal = match existing {
                 Some(journal) => journal.clone(),

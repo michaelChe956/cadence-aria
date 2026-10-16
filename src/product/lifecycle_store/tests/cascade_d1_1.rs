@@ -169,6 +169,7 @@ fn d1_1_plan_closure(store: &LifecycleStore, plan_id: &str) -> D1_1PlanClosure {
         plan_id: plan_id.to_string(),
         plan_revision_id: "revision_0001".to_string(),
         attempt_id: Some("attempt_0001".to_string()),
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         target_attempts: Vec::new(),
         status: AdvanceStatus::Ready,
         workspace_entry: Some("/workspaces/attempt_0001".to_string()),

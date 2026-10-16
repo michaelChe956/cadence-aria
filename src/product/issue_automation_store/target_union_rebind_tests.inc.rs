@@ -512,3 +512,152 @@ fn legacy_frozen_intents_read_fail_closed_without_target() {
         drifted
     );
 }
+
+/// 批 2 R1 红测②：集合 target 的 Enable/rebind 全链规范化——乱序/重复
+/// 的原始 JSON 归一后 selection_key/绑定 target/digest 全等（同语义
+/// payload 幂等）；空集/非法 UUID 拒绝；磁盘旧 wire（单成员旧 kind）原读。
+#[test]
+fn issue_automation_store_members_target_normalizes_for_digest_and_binding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = IssueAutomationStore::new(ProductAppPaths::new(tmp.path()));
+
+    let shuffled_members = serde_json::json!({
+        "kind": "logical_codebase_members",
+        "logical_codebase_id": "logical_codebase_0001",
+        "logical_repository_ids": [
+            logical_repo(3).0.to_string(),
+            logical_repo(1).0.to_string(),
+            logical_repo(3).0.to_string(),
+            logical_repo(2).0.to_string()
+        ]
+    });
+    let shuffled: EnrollmentTarget = serde_json::from_value(shuffled_members).unwrap();
+    let sorted: EnrollmentTarget = serde_json::from_value(serde_json::json!({
+        "kind": "logical_codebase_members",
+        "logical_codebase_id": "logical_codebase_0001",
+        "logical_repository_ids": [
+            logical_repo(1).0.to_string(),
+            logical_repo(2).0.to_string(),
+            logical_repo(3).0.to_string()
+        ]
+    }))
+    .unwrap();
+    assert_eq!(shuffled, sorted, "乱序/重复输入归一后与 canonical 全等");
+
+    // Enable 冻结同一规范形态：enrollment.target 与 binding current target
+    // 均为归一后的集合，幂等重试（同 selection_key 同语义 payload）不冲突。
+    let created = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            None,
+            enable_with_target("human-choice-set-1", sorted.clone()),
+        )
+        .unwrap();
+    assert_eq!(created.target.as_ref(), Some(&sorted));
+    assert_eq!(
+        created.binding_history.as_ref().unwrap().current.target,
+        sorted
+    );
+    let replay = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            Some(1),
+            enable_with_target("human-choice-set-1", shuffled.clone()),
+        )
+        .unwrap();
+    assert_eq!(replay, created, "乱序/重复语义等价 payload 幂等重放");
+
+    // rebind：同 target 集合（乱序形）→ 与 declared 归一后全等、不扩权；
+    // payload digest 对语义等价集合一致（同 command 同 digest → Replayed）。
+    let mut request = rebind_request(
+        "command_set_1",
+        1,
+        1,
+        "plan_0002",
+        "session_0002",
+        shuffled.clone(),
+    );
+    let first_digest = request.payload_digest();
+    let accepted = store
+        .rebind("project_1", "issue_1", request.clone())
+        .unwrap();
+    assert_eq!(accepted.state, OperationState::Accepted);
+    assert_eq!(
+        accepted
+            .enrollment
+            .binding_history
+            .as_ref()
+            .unwrap()
+            .current
+            .target,
+        sorted
+    );
+    request.binding.target = sorted.clone();
+    assert_eq!(request.payload_digest(), first_digest);
+    let replayed = store.rebind("project_1", "issue_1", request).unwrap();
+    assert_eq!(replayed.state, OperationState::Replayed);
+
+    // 越权 rebind（集合外成员）→ 与 declared 不全等即 InvalidScope。
+    let drifted = rebind_request(
+        "command_set_2",
+        2,
+        2,
+        "plan_0003",
+        "session_0003",
+        EnrollmentTarget::LogicalCodebase {
+            logical_codebase_id: "logical_codebase_0001".into(),
+            logical_repository_id: logical_repo(9),
+        },
+    );
+    assert!(matches!(
+        store.rebind("project_1", "issue_1", drifted),
+        Err(EnrollmentError::InvalidScope(_))
+    ));
+
+    // 空集拒绝；非法 UUID 拒绝。
+    let empty = serde_json::json!({
+        "kind": "logical_codebase_members",
+        "logical_codebase_id": "logical_codebase_0001",
+        "logical_repository_ids": []
+    });
+    assert!(serde_json::from_value::<EnrollmentTarget>(empty).is_err());
+    let invalid = serde_json::json!({
+        "kind": "logical_codebase_members",
+        "logical_codebase_id": "logical_codebase_0001",
+        "logical_repository_ids": ["not-a-uuid"]
+    });
+    assert!(serde_json::from_value::<EnrollmentTarget>(invalid).is_err());
+
+    // 磁盘旧 wire：单成员旧 kind JSON 原读不迁移（读取即归一入口的兼容面）。
+    let legacy_disk = serde_json::json!({
+        "enrollment_id": "enrollment_legacy",
+        "selection_key": "legacy",
+        "project_id": "project_1",
+        "issue_id": "issue_legacy",
+        "enabled": true,
+        "policy_revision": 1,
+        "source": serde_json::to_value(source()).unwrap(),
+        "options": serde_json::to_value(options()).unwrap(),
+        "prepare_intent_id": "prepare_legacy",
+        "created_at": "2026-10-16T00:00:00Z",
+        "updated_at": "2026-10-16T00:00:00Z",
+        "target": {
+            "kind": "logical_codebase",
+            "logical_codebase_id": "logical_codebase_0001",
+            "logical_repository_id": logical_repo(1).0.to_string()
+        }
+    });
+    let path = tmp
+        .path()
+        .join("projects")
+        .join("project_1")
+        .join("issues")
+        .join("issue_legacy")
+        .join("automation-enrollment.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_string(&legacy_disk).unwrap()).unwrap();
+    let loaded = store.get("project_1", "issue_legacy").unwrap().unwrap();
+    assert_eq!(loaded.target, Some(target_logical()));
+}

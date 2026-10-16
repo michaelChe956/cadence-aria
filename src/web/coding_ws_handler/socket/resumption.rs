@@ -367,6 +367,7 @@ mod tests {
                 plan_id: "work_item_plan_0001".to_string(),
                 plan_revision_id: "work_item_revision_0001".to_string(),
                 attempt_id: Some("coding_attempt_split_api".to_string()),
+                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
                 target_attempts: vec![
                     crate::product::advance_store::AdvanceTargetAttemptBinding {
                         target_repository_id: "logical_repo_api".to_string(),

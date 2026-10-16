@@ -203,6 +203,7 @@ fn weak_model_precision_teaching_matches_contract_validator_judgement() {
                 baseline_tree: None,
                 existing_work_item_ids: &[],
                 enrollment_target: None,
+                member_targets: None,
 
                 now: &now,
             },

@@ -10,10 +10,7 @@
 use crate::product::models::IssueWorkItemPlanOptions;
 use crate::product::models::automation::{EnrollmentOptions, PlanApprovalPolicy};
 use crate::web::error::ApiResult;
-use crate::web::handlers::lifecycle::preflight::{
-    SingleCandidatePreflightDecision, logical_repository_ids_for_preflight,
-    preflight_single_repository_candidate,
-};
+use crate::web::handlers::lifecycle::preflight::logical_repository_ids_for_preflight;
 use crate::web::state::WebAppState;
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -108,17 +105,18 @@ pub async fn get_automation_target(
             let selection = resolution.selection.as_ref().ok_or_else(|| {
                 invalid_scope("automation target requires an explicit logical codebase selection")
             })?;
+            // 批 2 R1（REQ-WIGA-01、REQ-MTG-03）：完整授权集合投影——
+            // 候选 0 拒/恰一旧 kind/N 成员集合（canonical 与 PUT Enable 同
+            // 一构造，前端原样回传）。
             let candidates = logical_repository_ids_for_preflight(&manifest, selection);
-            let SingleCandidatePreflightDecision::Eligible { repository_id } =
-                preflight_single_repository_candidate(&candidates)
-            else {
-                return Err(invalid_scope(
-                    "automation target requires exactly one logical repository",
-                ));
-            };
-            // C5 Task 3/Task 8:唯一 logical target 确认后做完整角色链
-            // 同源预检——与最终 PUT Enable 同一 carrier、同一判定,一次
-            // 列全全部违规角色。Task 8b:readonly gateway 接线,lc_id 取
+            let enrollment_target = super::automation_enrollment::canonical_lc_enrollment_target(
+                &manifest.logical_codebase_id.to_string(),
+                &candidates,
+            )?;
+            // C5 Task 3/Task 8:canonical target 确认后做完整角色链同源
+            // 预检——与最终 PUT Enable 同一 carrier、同一判定,一次列全
+            // 全部违规角色。批 2 R1:集合同属 LC,一次 LC 预检覆盖全部
+            // 成员(不按仓循环)。Task 8b:readonly gateway 接线,lc_id 取
             // resolver 冻结的权威身份;组装失败 fail-closed(预检不静默
             // 放行)。
             let gateway = super::automation_gateway_preflight::readonly_preflight_gateway(
@@ -134,17 +132,8 @@ pub async fn get_automation_target(
                 true,
                 state.test_provider_enabled,
             )?;
-            let target_repository = crate::product::logical_codebase::LogicalRepositoryId(
-                uuid::Uuid::parse_str(&repository_id).map_err(|_| {
-                    invalid_scope("automation target logical repository id is not a valid uuid")
-                })?,
-            );
             Ok(Json(AutomationTargetDto {
-                enrollment_target:
-                    crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
-                        logical_codebase_id: manifest.logical_codebase_id.to_string(),
-                        logical_repository_id: target_repository,
-                    },
+                enrollment_target,
                 resolved_options,
             }))
         }
@@ -202,8 +191,168 @@ mod tests {
             .expect("capability bootstrap");
     }
 
+    /// 批 2 R1 测试本地播种：向 0 成员 fixture 追加 N（≥2）成员 logical
+    /// codebase（与 automation_enrollment_test_support 的 seed_logical_
+    /// codebase 同构；support 文件归 R4，本包不并写）——manifest/成员/
+    /// checkout/repos.json/active index/bootstrap policy/selection 全量。
+    fn seed_lc_members(
+        fixture: &super::super::automation_enrollment_test_support::Fixture,
+        members: &[(u128, &str)],
+    ) {
+        use crate::product::logical_codebase::aggregate_index::{
+            AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
+            AggregateIndexStore,
+        };
+        use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+        use crate::product::logical_codebase::{
+            CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
+            IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore,
+            LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
+            RepositorySourceIdentity, RepositoryType,
+        };
+        use crate::product::models::RepositoryRecord;
+
+        let paths = fixture.paths.clone();
+        let member_ids = members
+            .iter()
+            .map(|(n, _)| LogicalRepositoryId(uuid::Uuid::from_u128(*n)))
+            .collect::<Vec<_>>();
+        let manifest = LogicalCodebaseManifest::new(
+            super::super::automation_enrollment_test_support::PROJECT_ID,
+            paths.root().to_path_buf(),
+            member_ids.clone(),
+        );
+        LogicalCodebaseStore::new(paths.clone())
+            .save_manifest(super::super::automation_enrollment_test_support::PROJECT_ID, &manifest)
+            .unwrap();
+        let now = "2026-10-16T00:00:00Z".to_string();
+        let mut repositories = Vec::new();
+        for (index, (n, checkout_name)) in members.iter().enumerate() {
+            let logical_id = LogicalRepositoryId(uuid::Uuid::from_u128(*n));
+            let physical_repository_id = format!("physical-{checkout_name}");
+            let checkout_path = paths.root().join(checkout_name);
+            std::fs::create_dir_all(&checkout_path).unwrap();
+            let source_identity = RepositorySourceIdentity::from_git_parts(
+                &checkout_path,
+                checkout_path.join(".git"),
+                None,
+            );
+            let checkout_id = RepositoryCheckoutId(uuid::Uuid::new_v4());
+            LogicalCodebaseStore::new(paths.clone())
+                .save_member(
+                    super::super::automation_enrollment_test_support::PROJECT_ID,
+                    &CodebaseMemberRecord {
+                        logical_repository_id: logical_id,
+                        physical_repository_id: physical_repository_id.clone(),
+                        alias: super::super::automation_enrollment_test_support::REPOSITORY_ID
+                            .to_string(),
+                        role: "repository".to_string(),
+                        ordinal: (index + 1) as u32,
+                        source_identity: source_identity.clone(),
+                        repo_type: RepositoryType::Unknown,
+                        tech_stack: Vec::new(),
+                        owner: None,
+                        tags: Vec::new(),
+                        default_ref: None,
+                        checkout_ids: vec![checkout_id],
+                        status: MemberStatus::Active,
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                    },
+                )
+                .unwrap();
+            LogicalCodebaseStore::new(paths.clone())
+                .save_checkout(
+                    super::super::automation_enrollment_test_support::PROJECT_ID,
+                    &RepositoryCheckoutRecord {
+                        checkout_id,
+                        logical_repository_id: logical_id,
+                        physical_repository_id: physical_repository_id.clone(),
+                        kind: CheckoutKind::Main,
+                        canonical_path: checkout_path.clone(),
+                        checkout_path_hash: format!("sha256:{checkout_name}"),
+                        git_dir_identity: source_identity.git_dir_identity(),
+                        revision: Some("abcdef".to_string()),
+                        availability: CheckoutAvailability::Available,
+                        observed_at: now.clone(),
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                    },
+                )
+                .unwrap();
+            repositories.push(RepositoryRecord {
+                id: physical_repository_id,
+                project_id: super::super::automation_enrollment_test_support::PROJECT_ID
+                    .to_string(),
+                name: super::super::automation_enrollment_test_support::REPOSITORY_ID.to_string(),
+                path: checkout_path,
+                repo_hash: format!("sha256:{checkout_name}"),
+                runtime_root: paths.root().join(checkout_name).join(".aria/runtime"),
+                default_policy_preset: "manual-write".to_string(),
+                default_provider_mode: "fake".to_string(),
+                created_at: now.clone(),
+                logical_repository_id: Some(logical_id),
+                identity_schema_version: 1,
+                primary_checkout_id: Some(checkout_id),
+                updated_at: now.clone(),
+            });
+        }
+        crate::product::json_store::write_json(
+            &paths
+                .project_root(super::super::automation_enrollment_test_support::PROJECT_ID)
+                .join("repos.json"),
+            &repositories,
+        )
+        .unwrap();
+        let mut index = AggregateIndexRecord::building(
+            "aggregate_index_members_set".to_string(),
+            super::super::automation_enrollment_test_support::PROJECT_ID.to_string(),
+            1,
+            member_ids
+                .iter()
+                .map(|logical_id| {
+                    AggregateIndexMemberSnapshot::indexed(
+                        *logical_id,
+                        RepositoryCheckoutId(uuid::Uuid::nil()),
+                        "abc123".to_string(),
+                        false,
+                        now.clone(),
+                    )
+                })
+                .collect(),
+            now.clone(),
+        );
+        index.status = AggregateIndexStatus::Active;
+        let index_store = AggregateIndexStore::new(paths.clone());
+        index_store
+            .create(super::super::automation_enrollment_test_support::PROJECT_ID, index.clone())
+            .unwrap();
+        index_store
+            .replace_active(super::super::automation_enrollment_test_support::PROJECT_ID, index)
+            .unwrap();
+        index_store
+            .degrade_last_known_good(
+                super::super::automation_enrollment_test_support::PROJECT_ID,
+                "unit-test fixture: no git probing".to_string(),
+            )
+            .unwrap();
+        AggregatePolicyArtifactStore::new(paths.clone())
+            .ensure_bootstrap(&manifest)
+            .unwrap();
+        IssueCodebaseSelectionStore::new(paths.clone())
+            .save(&IssueCodebaseSelection::explicit(
+                super::super::automation_enrollment_test_support::PROJECT_ID,
+                super::super::automation_enrollment_test_support::ISSUE_ID,
+                member_ids,
+                Vec::new(),
+                Vec::new(),
+                None,
+            ))
+            .unwrap();
+    }
+
     #[tokio::test]
-    async fn automation_target_requires_exactly_one_logical_member() {
+    async fn automation_target_projects_single_member_as_legacy_kind_and_rejects_empty() {
         let one = seed_fixture(1, true);
         let ok = get_automation_target(
             &one.router(),
@@ -231,14 +380,89 @@ mod tests {
             false
         );
 
-        for members in [0, 2] {
-            let fixture = seed_fixture(members, true);
-            let response = get_automation_target(&fixture.router(), "?author_provider=fake").await;
-            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-            let payload = response_json(response).await;
-            assert_eq!(payload["code"], "automation_enrollment_invalid_scope");
-            assert!(!enrollment_file_exists(&fixture));
-        }
+        // 0 成员（无 manifest/selection）保持 422。
+        let fixture = seed_fixture(0, true);
+        let response = get_automation_target(&fixture.router(), "?author_provider=fake").await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let payload = response_json(response).await;
+        assert_eq!(payload["code"], "automation_enrollment_invalid_scope");
+        assert!(!enrollment_file_exists(&fixture));
+    }
+
+    /// 批 2 R1 红测（REQ-WIGA-01/REQ-MTG-03）：N（≥2）成员 selection 的
+    /// GET 投影 canonical 集合 target（升序唯一）；PUT Enable 与 canonical
+    /// 全等（乱序/重复归一后）即 200，成员子集错配 422 零写入。预检按
+    /// LC 一次执行（结构性单次组装 readonly gateway，不按仓循环）。
+    #[tokio::test]
+    async fn automation_target_projects_full_member_set_and_enable_matches_canonical() {
+        let fixture = seed_fixture(0, true);
+        seed_lc_members(
+            &fixture,
+            &[
+                (1u128, "checkout-set-a"),
+                (2u128, "checkout-set-b"),
+                (3u128, "checkout-set-c"),
+                (4u128, "checkout-set-d"),
+            ],
+        );
+        let app = fixture.router();
+        let response = get_automation_target(&app, "?author_provider=fake&reviewer_provider=fake")
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(
+            body["enrollment_target"]["kind"],
+            "logical_codebase_members"
+        );
+        assert_eq!(
+            body["enrollment_target"]["logical_repository_ids"],
+            serde_json::json!([
+                "00000000-0000-0000-0000-000000000001",
+                "00000000-0000-0000-0000-000000000002",
+                "00000000-0000-0000-0000-000000000003",
+                "00000000-0000-0000-0000-000000000004"
+            ])
+        );
+
+        // GET 投影原样回传（乱序/重复等价形）PUT → 归一后与 canonical 全等。
+        let mut enable = enrollment_body(&fixture, 1, 1);
+        enable["command"]["target"] = body["enrollment_target"].clone();
+        enable["command"]["target"]["logical_repository_ids"] = serde_json::json!([
+            "00000000-0000-0000-0000-000000000004",
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-0000-0000-000000000004",
+            "00000000-0000-0000-0000-000000000003",
+            "00000000-0000-0000-0000-000000000002"
+        ]);
+        let response = put_enrollment(&app, enable).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let enrollment = response_json(response).await;
+        assert_eq!(enrollment["target"]["kind"], "logical_codebase_members");
+        assert_eq!(
+            enrollment["target"]["logical_repository_ids"]
+                .as_array()
+                .map(Vec::len),
+            Some(4)
+        );
+        assert!(enrollment_file_exists(&fixture));
+
+        // 成员子集（3/4）→ canonical 不全等 422 零写入（不扩权、不缩水）。
+        let mut subset = enrollment_body(&fixture, 1, 1);
+        subset["command"]["target"] = serde_json::json!({
+            "kind": "logical_codebase_members",
+            "logical_codebase_id": body["enrollment_target"]["logical_codebase_id"].clone(),
+            "logical_repository_ids": [
+                "00000000-0000-0000-0000-000000000001",
+                "00000000-0000-0000-0000-000000000002",
+                "00000000-0000-0000-0000-000000000003"
+            ]
+        });
+        let response = put_enrollment(&app, subset).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response_json(response).await["code"],
+            "automation_enrollment_invalid_scope"
+        );
     }
 
     #[tokio::test]

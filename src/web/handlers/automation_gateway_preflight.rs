@@ -367,6 +367,18 @@ mod tests {
         }
     }
 
+    /// 批 2 R1：集合声明 target 同属 LC 载体——rebind 判定与单成员 LC
+    /// declared target 共享同一五角色 verdict（不按仓循环、不误跳过）。
+    fn members_declared_target() -> EnrollmentTarget {
+        EnrollmentTarget::LogicalCodebaseMembers {
+            logical_codebase_id: "logical_codebase_0001".to_string(),
+            logical_repository_ids: vec![
+                crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::nil()),
+                crate::product::logical_codebase::LogicalRepositoryId(uuid::Uuid::from_u128(2)),
+            ],
+        }
+    }
+
     fn violations_of(error: ApiError) -> Vec<serde_json::Value> {
         error
             .details
@@ -830,6 +842,43 @@ mod tests {
         assert!(!get_reasons.is_empty());
         assert_eq!(get_reasons, enable_reasons);
         assert_eq!(enable_reasons, rebind_reasons);
+    }
+
+    /// 批 2 R1（REQ-WIGA-01）：集合 target 的 rebind 预检与单成员 LC 同
+    /// verdict（LC 谓词生效、一次组装，不按仓循环）。
+    #[test]
+    fn lcg_t08_members_target_declared_shares_lc_verdict() {
+        let fixture = role_chain_fixture(&[
+            capability_record(ProviderRefType::Pi, false),
+            capability_record(ProviderRefType::KimiCode, false),
+        ]);
+        let single_reasons = violation_reasons(
+            validate_role_chain_for_declared_enrollment_target(
+                Some(&fixture.gateway),
+                &ProviderName::Pi,
+                &ProviderName::KimiCode,
+                &lc_declared_target(),
+                true,
+                false,
+            )
+            .unwrap_err(),
+        );
+        let members_reasons = violation_reasons(
+            validate_role_chain_for_declared_enrollment_target(
+                Some(&fixture.gateway),
+                &ProviderName::Pi,
+                &ProviderName::KimiCode,
+                &members_declared_target(),
+                true,
+                false,
+            )
+            .unwrap_err(),
+        );
+        assert!(!single_reasons.is_empty());
+        assert_eq!(
+            single_reasons, members_reasons,
+            "集合 declared target 与单成员 LC 共享同一五角色 verdict"
+        );
     }
 
     /// 主链(1a 四家映射后重钉):Pi author + KimiCode reviewer 的全部

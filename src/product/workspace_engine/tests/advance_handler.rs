@@ -236,6 +236,7 @@ fn stored_record(command_id: &str) -> AdvanceRecord {
         plan_id: PLAN_ID.to_string(),
         plan_revision_id: "revision_advance".to_string(),
         attempt_id: Some("attempt_advance".to_string()),
+        start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
         target_attempts: Vec::new(),
         status: AdvanceStatus::Ready,
         workspace_entry: Some("/workspace/attempt_advance".to_string()),

@@ -1037,6 +1037,7 @@ fn c1_serial_context<'a>(
         baseline_tree: baseline,
         existing_work_item_ids: existing_ids,
         enrollment_target: Some(&BOUND_TARGET),
+        member_targets: None,
         now: "2026-09-29T00:00:00Z",
     }
 }

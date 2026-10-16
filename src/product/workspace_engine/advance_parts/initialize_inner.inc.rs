@@ -28,8 +28,22 @@ impl WorkspaceEngine {
             };
         }
         let record = advance_store
-            .persist_advance_record_if_absent(&input, &authoritative.plan_revision_id)
+            .persist_advance_record_if_absent(
+                &input,
+                &authoritative.plan_revision_id,
+                start_policy.clone(),
+            )
             .map_err(|error| format!("persist advance record failed: {error}"))?;
+        // 批 2 R1（REQ-WIGA-02/03）：策略首次 persist 冻结——既存 record 的
+        // 冻结值与本次传入策略不符即停（旧 Manual 不升格、不覆盖；retry
+        // 由 advance.rs 从 record 取冻结值后复核 binding）。
+        if record.start_run_policy != start_policy {
+            return Err(format!(
+                "advance record frozen start policy {:?} differs from the requested {:?}; \
+                 the first durable record owns the policy",
+                record.start_run_policy, start_policy
+            ));
+        }
         maybe_fail_advance_initialization(&input, AdvanceInitializationFailpoint::RecordPersisted)?;
         if record.plan_revision_id != authoritative.plan_revision_id {
             return Err(
@@ -50,10 +64,12 @@ impl WorkspaceEngine {
                     authoritative,
                     grouped,
                     record,
+                    start_policy,
                     admission,
                 )
                 .await;
         }
+
 
         let repository =
             Self::resolve_advance_repository(&advance_store.app_paths(), &input, &authoritative)?;
@@ -74,6 +90,15 @@ impl WorkspaceEngine {
                         "existing group initialization is bound to another advance identity"
                             .to_string(),
                     );
+                }
+                // 批 2 R1：existing journal 策略不符即停——不给旧 Manual 原地
+                // 补授权、也不把已冻结 AutoStartOnce 降级。
+                if journal.attempt.start_run_policy != start_policy {
+                    return Err(format!(
+                        "existing group initialization froze start policy {:?} but the \
+                         advance requests {:?}",
+                        journal.attempt.start_run_policy, start_policy
+                    ));
                 }
                 Some(journal)
             }

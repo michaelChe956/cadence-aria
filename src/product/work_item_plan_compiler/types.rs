@@ -122,6 +122,11 @@ pub struct PlanCandidateValidationContext<'a> {
     /// 会话提供；None＝非 enrolled/Manual——intent target 等值核对不触发，
     /// 既有 fixture/Manual 路径零回归）。
     pub enrollment_target: Option<&'a crate::product::logical_codebase::EnrollmentTarget>,
+    /// 批 2 R1（REQ-WIGA-01）：集合绑定的成员归属映射（logical 成员 →
+    /// 物理成员仓 ID，与 lowering 的 PlanMemberTargets 同源）。仅 enrolled
+    /// 集合绑定的 IR 物理 ID 核对消费；None＝非 enrolled/Manual——集合
+    /// 上界核对所需的映射缺失时 fail-closed 出诊断，不以 None 吞错。
+    pub member_targets: Option<&'a super::PlanMemberTargets>,
     pub now: &'a str,
 }
 
