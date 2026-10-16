@@ -919,23 +919,30 @@ fn normalize_existing_prefix(path: &Path) -> Result<PathBuf, GitWorkspaceError> 
 ///
 /// 与文件清单同一 NUL 协议（Bug1-A）：路径原样保留（不 trim、不剥引号、
 /// 不启发式反转义）；rename/copy 条目在目标路径后紧跟一段无 `XY ` 前缀的
-/// 源路径，按协议消费、不作为独立状态条目；任一条目非有效 UTF-8 整体
-/// fail-closed 返回 Parse 错误，绝不替换后继续。
+/// 源路径——源路径按协议作为独立状态条目上报（与清单命令 `--no-renames`
+/// 的「两路径都报」同约定），否则越界删除可借目标命中绕过 single-scope
+/// 完成门禁（F1/P2）；任一条目非有效 UTF-8 整体 fail-closed 返回 Parse
+/// 错误，绝不替换后继续。
 fn parse_porcelain_z_status(bytes: &[u8]) -> Result<Vec<FileStatus>, GitWorkspaceError> {
     let mut statuses = Vec::new();
-    let mut skip_next_record = false;
+    let mut rename_code: Option<String> = None;
     for record in bytes.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
         let record = str::from_utf8(record).map_err(|error| {
             GitWorkspaceError::Parse(format!(
                 "git status --porcelain -z: file path is not valid UTF-8: {error}"
             ))
         })?;
-        if skip_next_record {
-            skip_next_record = false;
+        if let Some(code) = rename_code.take() {
+            statuses.push(FileStatus {
+                code,
+                path: record.to_string(),
+            });
             continue;
         }
         let code = record.get(0..2).unwrap_or("").trim().to_string();
-        skip_next_record = code.starts_with('R') || code.starts_with('C');
+        if code.starts_with('R') || code.starts_with('C') {
+            rename_code = Some(code.clone());
+        }
         statuses.push(FileStatus {
             code,
             path: record.get(3..).unwrap_or("").to_string(),

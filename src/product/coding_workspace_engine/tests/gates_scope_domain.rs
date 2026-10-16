@@ -319,6 +319,50 @@ async fn lc_gate_fails_closed_when_status_paths_are_not_utf8() {
     );
 }
 
+/// F1（P2）：rename 源路径必须进清单——exclusive=src/** 下把 scope 外
+/// 文件 `git mv` 进 scope 时，越界删除（源路径）不得因目标命中而放行。
+#[tokio::test]
+async fn lc_gate_rejects_rename_whose_source_is_out_of_scope() {
+    let fx = lc_gate_fixture(&["src/**"], &[], true, true);
+    fs::create_dir_all(fx.worktree.join("cadence/verify")).expect("verify dir");
+    fs::create_dir_all(fx.worktree.join("src")).expect("src dir");
+    fs::write(fx.worktree.join("cadence/verify/report.md"), "report\n").expect("write source");
+    run_test_git(&fx.worktree, &["add", "--all"]);
+    run_test_git(&fx.worktree, &["commit", "-m", "base with report"]);
+    run_test_git(
+        &fx.worktree,
+        &["mv", "cadence/verify/report.md", "src/report.md"],
+    );
+
+    let error = fx
+        .engine
+        .run_completion_gates(&fx.attempt)
+        .await
+        .expect_err("越界 rename 源路径必须拒绝");
+    assert!(matches!(
+        &error,
+        CodingWorkspaceEngineError::WorkItemDiffScopeViolation(path)
+            if path == "cadence/verify/report.md"
+    ));
+}
+
+/// F1 对照：同 scope 内重命名（src/a → src/b）源与目标均命中，必须放行
+/// ——堵越界删除不得引入对合法重命名的误拒。
+#[tokio::test]
+async fn lc_gate_allows_rename_within_declared_scope() {
+    let fx = lc_gate_fixture(&["src/**"], &[], true, true);
+    fs::create_dir_all(fx.worktree.join("src")).expect("src dir");
+    fs::write(fx.worktree.join("src/a.ts"), "a\n").expect("write a");
+    run_test_git(&fx.worktree, &["add", "--all"]);
+    run_test_git(&fx.worktree, &["commit", "-m", "base with a"]);
+    run_test_git(&fx.worktree, &["mv", "src/a.ts", "src/b.ts"]);
+
+    fx.engine
+        .run_completion_gates(&fx.attempt)
+        .await
+        .expect("同 scope 重命名：源与目标均命中必须放行");
+}
+
 #[tokio::test]
 async fn lc_gate_fails_closed_when_manifest_is_missing() {
     let fx = lc_gate_fixture(&["busi/**"], &[], true, false);

@@ -492,7 +492,7 @@ async fn plan_final_confirm_post_stops_at_first_failure_and_skips_rest() {
 
 /// Bug1-A 端到端：中文证据提交进入 unit 完成区间后，真实执行完整确认端点，
 /// 全部 target confirmed、durable Completed、GET `final_confirm.state=done`
-/// （采集侧 `-z` NUL 协议返回真实 UTF-8 路径，中文路径不再阻塞确认链；
+/// （中文路径经 commit 区间清单进入范围门禁；
 /// scope 命中的红绿由 gates_scope_domain 直控夹具承载——本夹具冻结契约
 /// write_policy 为空，此用例守确认链路与持久状态）。
 #[tokio::test]
