@@ -1,4 +1,4 @@
-import { ApiRequestError, normalizeApiError } from "./client";
+import { ApiRequestError, normalizeApiError, notifyAuthRequired } from "./client";
 import type {
   CapabilityRevalidateResult,
   ProviderCapabilitiesResponse,
@@ -14,6 +14,9 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
+    if (response.status === 401) {
+      notifyAuthRequired();
+    }
     throw new ApiRequestError(await normalizeApiError(response));
   }
   const text = await response.text();

@@ -1,4 +1,4 @@
-import { ApiRequestError, normalizeApiError } from "./client";
+import { ApiRequestError, normalizeApiError, notifyAuthRequired } from "./client";
 import type { LogicalCodebaseMembersResponse } from "./types";
 
 async function requestJson<T>(path: string): Promise<T> {
@@ -6,6 +6,9 @@ async function requestJson<T>(path: string): Promise<T> {
     headers: { "content-type": "application/json" },
   });
   if (!response.ok) {
+    if (response.status === 401) {
+      notifyAuthRequired();
+    }
     throw new ApiRequestError(await normalizeApiError(response));
   }
   return (await response.json()) as T;

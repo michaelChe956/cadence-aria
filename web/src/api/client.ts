@@ -241,6 +241,7 @@ export async function postRetryFailedScRun(
   const response = await fetch(
     `/api/workspace-sessions/${encodeURIComponent(sessionId)}/failed-sc-runs/${encodeURIComponent(failedNodeId)}/retry`,
     {
+      method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({

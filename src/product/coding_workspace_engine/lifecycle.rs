@@ -516,6 +516,21 @@ impl CodingWorkspaceEngine {
                             "inject web endpoint failed; degrading without blocking worktree prepare"
                         );
                     }
+                    // 批2 T1（审查 F2）：随端口文件复制注入工具会话 cookie jar
+                    // （0600），供 evidence 查询脚本携带穿越平台认证。源缺失
+                    //（认证未装配测试态）warn 降级、不阻断 attempt 启动。
+                    if let Err(error) =
+                        crate::product::logical_codebase::evidence_injection::inject_tooling_session(
+                            workspace_root,
+                            &journal.worktree_path,
+                        )
+                    {
+                        tracing::warn!(
+                            %error,
+                            attempt_id = %updated.id,
+                            "inject tooling session failed; degrading without blocking worktree prepare"
+                        );
+                    }
                 }
                 None => {
                     tracing::warn!(
@@ -524,6 +539,7 @@ impl CodingWorkspaceEngine {
                     );
                 }
             }
+
             // C-4 T7：worktree 创建完成后幂等注入证据查询脚本（T0 审计点 2 首挂点）。
             crate::product::logical_codebase::evidence_injection::write_evidence_query_script(
                 &journal.worktree_path,

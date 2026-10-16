@@ -30,6 +30,7 @@ import {
   recheckProviders,
   restartCodingAttempt,
   rebindAutomationEnrollment,
+  postRetryFailedScRun,
   takeoverWorkspaceSession,
 } from "./client";
 import type {
@@ -1047,5 +1048,35 @@ describe("postAutomationEnrollmentTerminate（T4 统一终止）", () => {
     expect(
       parseAutomationTerminationIdentity({ enrollment_id: "missing-revision" }),
     ).toBeNull();
+  });
+});
+
+describe("postRetryFailedScRun（批2 T1 修复轮 F1：wire 契约防退化）", () => {
+  it("sends POST with same-origin credentials to the failed-sc retry route", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Response(
+          JSON.stringify({
+            command_id: "cmd-sc-retry-node_0007",
+            failed_node_id: "node_0007",
+            state: "accepted",
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+
+    await postRetryFailedScRun("sess_0001", "node_0007");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].input).toBe(
+      "/api/workspace-sessions/sess_0001/failed-sc-runs/node_0007/retry",
+    );
+    expect(calls[0].init?.method).toBe("POST");
+    expect(calls[0].init?.credentials).toBe("same-origin");
+    expect(String(calls[0].init?.body)).toContain("cmd-sc-retry-node_0007");
   });
 });

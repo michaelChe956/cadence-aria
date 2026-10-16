@@ -742,6 +742,22 @@ pub async fn serve_web(
         "{}",
         crate::web::api_auth::delivery_notice(&auth, owner_terminal_attached())
     );
+    // 批2 T1（审查 F2）：铸造注入工具会话并写 workspace 根 cookie jar（0600），
+    // worktree prepare 注入链复制进各 worktree，供 evidence 查询脚本穿越认证。
+    // 残余边界（R9/GC8）：该文件同 UID 可读，鉴权不抵御同 UID 进程。
+    match auth.mint_session_for_injected_tooling() {
+        Some(tooling_cookie) => {
+            if let Err(error) = write_tooling_session_cookie_file(&workspace_root, &tooling_cookie)
+            {
+                eprintln!("[aria-auth] write tooling session cookie failed: {error}");
+            }
+        }
+        None => {
+            eprintln!(
+                "[aria-auth] tooling session unavailable (CSPRNG); evidence-query injection degraded"
+            );
+        }
+    }
     let state = state.with_api_auth(auth);
     let app = build_web_router_with_evidence(state.clone(), evidence_enabled).fallback(
         move |req: axum::extract::Request| {
@@ -770,6 +786,20 @@ pub async fn serve_web(
 /// 不交付（显式报告缺少交付前提），绝不绕道集中日志。
 fn owner_terminal_attached() -> bool {
     unsafe { libc::isatty(libc::STDERR_FILENO) == 1 }
+}
+
+/// 批2 T1（审查 F2）：把工具会话 cookie jar 写入 workspace 根 `.aria/`（0600），
+/// worktree prepare 注入链（`inject_tooling_session`）复制进各 worktree 供
+/// evidence 查询脚本携带。残余边界（R9/GC8）：该文件同 UID 可读。
+fn write_tooling_session_cookie_file(workspace_root: &Path, cookie: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = workspace_root.join(crate::web::api_auth::TOOLING_SESSION_COOKIE_FILE);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, cookie)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 fn orchestrator_wake_subscribe(state: &WebAppState) -> tokio::sync::watch::Receiver<bool> {
@@ -1042,6 +1072,7 @@ mod tests {
         use tower::ServiceExt;
 
         use super::super::build_web_router;
+        use super::super::build_web_router_with_evidence;
         use super::state;
         use crate::web::api_auth::ApiAuthState;
         use crate::web::state::WebAppState;
@@ -1116,20 +1147,6 @@ mod tests {
                 .await
                 .expect("exchange response")
         }
-
-        async fn bootstrap_session(app: &axum::Router, token: &str) -> (String, String) {
-            let response = exchange(app, token).await;
-            assert_eq!(
-                response.status(),
-                StatusCode::NO_CONTENT,
-                "首次交换必须成功：{}",
-                body_text(response).await
-            );
-            let response = exchange(app, token);
-            let _ = response;
-            unreachable!("上一次调用已消费 response，这里不会执行")
-        }
-
         /// T1-RED 表驱动：health 公开；其余 mutation/敏感 GET/三类 WS（含 alias）
         /// 在受信 Host+Origin 下缺会话 → 401；localhost 无豁免。
         #[tokio::test]
@@ -1928,6 +1945,89 @@ mod tests {
                 StatusCode::UNAUTHORIZED,
                 "未装配认证时会话端点不可用"
             );
+        }
+
+        /// 批2 T1 审查 F2：注入脚本链路（jar 复制 + Origin + cookie）在认证
+        /// 开启的真实路由上端到端可达 handler；无 cookie 仍 401。
+        #[tokio::test]
+        async fn api_auth_injected_evidence_script_reaches_handler_end_to_end() {
+            let root = tempdir().expect("root");
+            let bind: std::net::SocketAddr =
+                format!("127.0.0.1:{AUTH_PORT}").parse().expect("bind");
+            let auth = std::sync::Arc::new(
+                crate::web::api_auth::ApiAuthState::for_bind(&bind, &[]).expect("auth"),
+            );
+
+            // serve_web 同款铸造 + workspace 根 jar 写入。
+            let cookie = auth
+                .mint_session_for_injected_tooling()
+                .expect("tooling session mint");
+            super::super::write_tooling_session_cookie_file(root.path(), &cookie)
+                .expect("write workspace jar");
+
+            // worktree prepare 注入链同款复制。
+            let worktree = root.path().join("wt");
+            std::fs::create_dir_all(&worktree).expect("worktree dir");
+            crate::product::logical_codebase::evidence_injection::inject_tooling_session(
+                root.path(),
+                &worktree,
+            )
+            .expect("inject tooling session into worktree");
+            let jar_path = worktree.join(".aria/aria-session-cookie");
+            let jar = std::fs::read_to_string(&jar_path).expect("worktree jar");
+            assert!(
+                jar.starts_with("aria_session="),
+                "jar 内容为 cookie 形式：{jar}"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&jar_path)
+                    .expect("jar metadata")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600, "worktree jar 必须 0600");
+            }
+
+            // 认证开启的真实 evidence 路由（evidence_enabled=true 挂载）。
+            let app = build_web_router_with_evidence(state(root.path()).with_api_auth(auth), true);
+            let script_style_request = |cookie_header: Option<&str>| {
+                let mut builder = Request::builder()
+                    .method("POST")
+                    .uri("/api/evidence-query")
+                    .header("host", trusted_host())
+                    .header("origin", trusted_origin())
+                    .header("content-type", "application/json");
+                if let Some(cookie_header) = cookie_header {
+                    builder = builder.header("cookie", cookie_header);
+                }
+                builder.body(Body::from("{}")).expect("evidence request")
+            };
+
+            // 带注入 jar：穿越中间件进入 handler（业务层返回 4xx/5xx 均可，不得 401/403）。
+            let response = app
+                .clone()
+                .oneshot(script_style_request(Some(&jar)))
+                .await
+                .expect("authed evidence response");
+            assert_ne!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "注入链不得被身份门拦截"
+            );
+            assert_ne!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "注入链不得被来源门拦截"
+            );
+
+            // 反例：同请求无 cookie → 401（脚本 jar 缺失时不得放行）。
+            let response = app
+                .clone()
+                .oneshot(script_style_request(None))
+                .await
+                .expect("anon evidence response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
     }
 }

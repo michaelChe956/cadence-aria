@@ -5,6 +5,8 @@ import type {
   WorkspacePromptResponse,
 } from "./types";
 
+import { notifyAuthRequired } from "./client";
+
 export async function fetchWorkspaceNodeDetail(
   sessionId: string,
   nodeId: string,
@@ -13,6 +15,9 @@ export async function fetchWorkspaceNodeDetail(
     `/api/workspace-sessions/${encodeURIComponent(sessionId)}/timeline-node-details/${encodeURIComponent(nodeId)}`,
   );
   if (!response.ok) {
+    if (response.status === 401) {
+      notifyAuthRequired();
+    }
     throw new Error(`加载节点详情失败：${response.status}`);
   }
   return response.json() as Promise<WorkspaceNodeDetailResponse>;
@@ -26,6 +31,9 @@ export async function fetchWorkspacePrompt(
     `/api/workspace-sessions/${encodeURIComponent(sessionId)}/timeline-node-details/${encodeURIComponent(nodeId)}/prompt`,
   );
   if (!response.ok) {
+    if (response.status === 401) {
+      notifyAuthRequired();
+    }
     throw new Error(`加载 Prompt 失败：${response.status}`);
   }
   return response.json() as Promise<WorkspacePromptResponse>;
@@ -40,6 +48,9 @@ export async function fetchWorkspaceEventOutput(
     `/api/workspace-sessions/${encodeURIComponent(sessionId)}/timeline-node-details/${encodeURIComponent(nodeId)}/events/${encodeURIComponent(eventId)}/output`,
   );
   if (!response.ok) {
+    if (response.status === 401) {
+      notifyAuthRequired();
+    }
     throw new Error(`加载输出失败：${response.status}`);
   }
   return response.json() as Promise<WorkspaceEventOutputResponse>;
@@ -53,6 +64,9 @@ export async function fetchWorkspaceArtifactVersion(
     `/api/workspace-sessions/${encodeURIComponent(sessionId)}/artifact-versions/${String(version)}`,
   );
   if (!response.ok) {
+    if (response.status === 401) {
+      notifyAuthRequired();
+    }
     throw new Error(`加载 Artifact 失败：${response.status}`);
   }
   return response.json() as Promise<WorkspaceArtifactVersionResponse>;

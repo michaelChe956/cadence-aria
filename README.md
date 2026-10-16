@@ -288,6 +288,10 @@ cd web && pnpm dev --port 5173
 - 非浏览器自动化（CLI/脚本）：先显式携带受信 Origin 头，`POST /api/auth/session`（body：`{"token": "<终端获取的 token>"}`）交换后保存 cookie jar 再访问；收到 401 时回到认证流程，不要盲目重发副作用请求。
 - 前端刷新页面直接复用 cookie 会话（`GET /api/auth/session`：204 已认证 / 401 未认证）；WebSocket URL 一律不带任何令牌。
 
+#### 注入工具会话（evidence 查询脚本）
+
+worktree 内的 `.aria/bin/aria-evidence-query` 脚本同样受平台认证约束：服务启动时会铸造一枚进程内工具会话，写入 workspace 根 `.aria/aria-session-cookie`（0600），并在每次 worktree 准备时复制进 worktree 同路径；脚本自动携带 `Origin: http://127.0.0.1:<port>` 与该 cookie 调用 `/api/evidence-query`（服务重启后由注入链自动刷新）。残余边界（R9/GC8，与鉴权设计一致）：该 cookie 文件与 evidence token 一样是同 UID 可读材料——平台鉴权阻止未授权/跨站调用，不抵御同 UID 恶意进程的读取与复用。
+
 #### 首次启动依赖自检
 
 首次启动时 Aria 会检查环境：
