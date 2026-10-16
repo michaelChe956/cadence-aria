@@ -694,6 +694,30 @@ fn maybe_write_web_endpoint_file(evidence_enabled: bool, workspace_root: &Path, 
     }
 }
 
+/// 批2 T1 修复轮 4（N1）：生产 router 装配——静态 fallback 在内、认证层最外。
+///
+/// axum 0.8 中 `layer` 之后挂的 routes/fallback 不经该 middleware：若把静态
+/// fallback 挂在认证层之外（旧生产序），未注册的 `/api/**`（如非回环未挂载的
+/// evidence-query、任意拼错路径）会落 SPA index.html 200 整体绕过认证。故生产
+/// 序固定为：业务 router（内层认证，供 oneshot 测试直用）→ 挂静态 fallback →
+/// 再包最外层 `enforce_api_auth`（非 `/api`、`/ws` 路径直通，静态资源/SPA 公开；
+/// 未注册 `/api/**` 无会话 → 401 fail-closed）。
+pub fn assemble_production_router(
+    state: WebAppState,
+    evidence_enabled: bool,
+    static_service: crate::web::static_assets::StaticDistService,
+) -> Router {
+    build_web_router_with_evidence(state.clone(), evidence_enabled)
+        .fallback(move |req: axum::extract::Request| {
+            let static_service = static_service.clone();
+            async move { crate::web::static_assets::serve_static(static_service, req).await }
+        })
+        // 认证层必须在 fallback 之外（最外层）：见本函数文档注释。
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::web::api_auth::enforce_api_auth,
+        ))
+}
 pub async fn serve_web(
     workspace_root: std::path::PathBuf,
     host: String,
@@ -743,12 +767,7 @@ pub async fn serve_web(
         crate::web::api_auth::delivery_notice(&auth, owner_terminal_attached())
     );
     let state = state.with_api_auth(auth);
-    let app = build_web_router_with_evidence(state.clone(), evidence_enabled).fallback(
-        move |req: axum::extract::Request| {
-            let static_service = static_service.clone();
-            async move { crate::web::static_assets::serve_static(static_service, req).await }
-        },
-    );
+    let app = assemble_production_router(state.clone(), evidence_enabled, static_service);
     // P1 WIGA Task 6：随服务器生命周期启动 autopilot 有界扫描（事件仅唤醒）。
     let wake_rx = orchestrator_wake_subscribe(&state);
     let orchestrator = std::sync::Arc::new(
@@ -2098,9 +2117,11 @@ mod tests {
             }
         }
 
-        /// 批2 T1 修复轮 3（P3）：专用 token 豁免镜像挂载条件（仅回环）——
-        /// 非回环 Host 下 evidence 路由未挂载，无会话请求必须 401 fail-closed，
-        /// 不得经静态 fallback 落 200。
+        /// 批2 T1 修复轮 3（P3）+ 修复轮 4（N1）：专用 token 豁免镜像挂载条件
+        ///（仅回环），且生产装配（静态 fallback 在内、认证层最外）下未注册
+        /// `/api/**` 一律 fail-closed——非回环 Host 的 evidence-query 与任意
+        /// 未注册 /api 路径无会话 → 401，不得经静态 fallback 落 200；
+        /// 非 /api 前缀路径（静态资源/SPA）不受认证层影响。
         #[tokio::test]
         async fn api_auth_evidence_query_exemption_limited_to_loopback() {
             let root = tempdir().expect("root");
@@ -2112,9 +2133,17 @@ mod tests {
                 )
                 .expect("non-loopback auth with explicit origin"),
             );
-            // 非回环部署：evidence 路由不挂载（evidence_enabled=false）。
-            let app = build_web_router_with_evidence(state(root.path()).with_api_auth(auth), false);
+            // 生产同序装配：evidence_enabled=false（非回环不挂载）+ 静态
+            // fallback + 最外层认证。
+            let static_service = crate::web::static_assets::static_dist_service();
+            let app = super::super::assemble_production_router(
+                state(root.path()).with_api_auth(auth),
+                false,
+                static_service,
+            );
 
+            // 1) 非回环 Host + 无会话 POST /api/evidence-query → 401
+            //    （不得 200 静态 SPA / 404）。
             let response = app
                 .clone()
                 .oneshot(
@@ -2137,6 +2166,43 @@ mod tests {
                 StatusCode::UNAUTHORIZED,
                 "非回环 Host 的 evidence-query 无会话必须 401 fail-closed，不得落静态 200"
             );
+
+            // 2) 任意未注册 /api/** 路径无会话 → 401（不落静态 200）。
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/not-a-registered-route")
+                        .header("host", "aria.example:4317")
+                        .body(Body::empty())
+                        .expect("unregistered api request"),
+                )
+                .await
+                .expect("unregistered api response");
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "未注册 /api 路径不得经静态 fallback 绕过认证"
+            );
+
+            // 3) 非 /api、/ws 前缀路径直通认证层（静态资源/SPA 可达不受影响；
+            //    嵌入资源命中与否取决于构建，但绝不能被认证层 401/403 拦截）。
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/")
+                        .body(Body::empty())
+                        .expect("spa request"),
+                )
+                .await
+                .expect("spa response");
+            assert_ne!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "静态/SPA 路径不受认证层影响"
+            );
+            assert_ne!(response.status(), StatusCode::FORBIDDEN);
         }
     }
 }
