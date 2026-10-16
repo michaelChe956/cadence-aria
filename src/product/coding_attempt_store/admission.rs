@@ -557,6 +557,16 @@ impl CodingAttemptStore {
                 CodingAttemptStatus::Running
             )));
         }
+        // 批 2 T1（REQ-WIGA-09）：精确绑定已 terminated 的 plan 一律拒绝进入
+        // Running——含 ManualRecovery/TerminalRestart 通道（终止不可恢复，
+        // restart/recover 不构成豁免）；manual/无绑定 attempt 不拦。
+        if let Some(terminated_at) =
+            super::gate::automation_plan_terminated_for_attempt(&self.paths(), &attempt)?
+        {
+            return Err(ProductStoreError::Io(format!(
+                "automation_plan_terminated: {terminated_at}"
+            )));
+        }
         // C4 Task 2：issue 身份先经唯一 authority resolver 冻结（kind/来源/legacy
         // 布局冲突 fail-closed）；lc 子树与 routing 判定同源。无归属且无 legacy
         // 别名 record 的旧数据回退 Legacy 兼容分支（classify 单元语义不变）。

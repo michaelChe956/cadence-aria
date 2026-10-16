@@ -106,6 +106,15 @@ impl super::CodingAttemptStore {
                 _ => {}
             }
         }
+        // 批 2 T1（REQ-WIGA-09）：精确绑定已 terminated 的 plan 拒绝 provider
+        // 驱动——无 run 文件也关闸（终止事实先于 run 失效可见，不依赖
+        // matching_first_ready_run 命中）；manual/无绑定/异 plan 不拦。
+        let paths = self.paths();
+        if let Some(terminated_at) = automation_plan_terminated_for_attempt(&paths, &current)? {
+            return Err(ProductStoreError::Io(format!(
+                "automation_plan_terminated: {terminated_at}"
+            )));
+        }
         Ok(current)
     }
 
@@ -640,6 +649,79 @@ impl super::CodingAttemptStore {
         Ok(gate)
     }
 
+    /// 批 2 T2（REQ-WIGA-09）：choice 门全量读（含终态 Cancelled/Resolved
+    /// 记录；与 `list_stage_gates` 对称）——终止收口/审计校验用。
+    pub fn list_choice_gates(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<CodingChoiceGate>, ProductStoreError> {
+        super::list_json_records(&self.choice_gates_root(project_id, issue_id, attempt_id))
+    }
+
+    /// 批 2 T2（C5，REQ-WIGA-09）：取消 open choice 门（终止收口专用）——
+    /// 置 `Cancelled`、**不写 response**（不伪造答案）；按 open 门集合调用，
+    /// 幂等由调用方先过滤保证（非 open 门按 NotFound 上抛）。
+    pub fn cancel_choice_gate(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        choice_id: &str,
+    ) -> Result<CodingChoiceGate, ProductStoreError> {
+        let gates_root = self.choice_gates_root(project_id, issue_id, attempt_id);
+        let Some(path) = matching_open_choice_gate_path(&gates_root, choice_id)? else {
+            return Err(ProductStoreError::NotFound {
+                kind: "coding_choice_gate",
+                id: choice_id.to_string(),
+            });
+        };
+        let mut gate: CodingChoiceGate = read_json(&path)?;
+        gate.status = CodingChoiceGateStatus::Cancelled;
+        gate.updated_at = Utc::now().to_rfc3339();
+        write_json(&path, &gate)?;
+        Ok(gate)
+    }
+
+    /// 批 2 T2（C5，REQ-WIGA-09）：终止收口关门——关闭该 attempt 全部
+    /// open blocked/choice/stage 门：stage→Cancelled、choice→Cancelled
+    ///（无 response，不伪造答案）、blocked→Resolved（resolved_action=
+    /// `plan_terminated` 审计标记）。幂等（无 open 门＝0）；返回关闭门数。
+    pub fn close_all_open_gates_for_termination(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<usize, ProductStoreError> {
+        let mut closed = 0;
+        for gate in self.list_open_stage_gates(project_id, issue_id, attempt_id)? {
+            self.update_stage_gate_status(
+                project_id,
+                issue_id,
+                attempt_id,
+                &gate.gate_id,
+                CodingStageGateStatus::Cancelled,
+            )?;
+            closed += 1;
+        }
+        for gate in self.list_open_choice_gates(project_id, issue_id, attempt_id)? {
+            self.cancel_choice_gate(project_id, issue_id, attempt_id, &gate.choice_id)?;
+            closed += 1;
+        }
+        for gate in self.list_open_blocked_gates(project_id, issue_id, attempt_id)? {
+            self.resolve_blocked_gate_with_action(
+                project_id,
+                issue_id,
+                attempt_id,
+                &gate.gate_id,
+                Some("plan_terminated"),
+            )?;
+            closed += 1;
+        }
+        Ok(closed)
+    }
+
     pub fn create_quality_bypass_audit(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -1032,11 +1114,37 @@ fn normalize_blocked_gate(mut gate: CodingGateRequired) -> CodingGateRequired {
     gate
 }
 
+/// 批 2 T1（REQ-WIGA-09）：attempt 所属 plan 是否已被精确绑定的 enrollment
+/// 终止。仅当 enrollment 显式绑定该 attempt 的 `work_item_group_id` 且
+/// `terminated_at` 非空才返回 `Some(terminated_at)`——manual/无绑定/异 plan
+/// 一律 `None`（手动无绑定路径保持原语义）。只读；损坏 JSON fail-closed
+/// 上抛，不当 None 吞错。
+pub(crate) fn automation_plan_terminated_for_attempt(
+    paths: &crate::product::app_paths::ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> Result<Option<String>, ProductStoreError> {
+    let Some(plan_id) = attempt.work_item_group_id.as_deref() else {
+        return Ok(None);
+    };
+    let enrollment =
+        crate::product::issue_automation_store::IssueAutomationStore::new(paths.clone())
+            .get(&attempt.project_id, &attempt.issue_id)?;
+    Ok(enrollment.and_then(|enrollment| {
+        if enrollment.plan_id.as_deref() == Some(plan_id) {
+            enrollment.terminated_at
+        } else {
+            None
+        }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::product::app_paths::ProductAppPaths;
-    use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+    use crate::product::coding_attempt_store::{
+        CodingAttemptStore, CreateCodingAttemptInput, CreateGroupCodingAttemptInput,
+    };
     use crate::product::coding_models::{CodingChoiceOption, CodingChoiceQuestion};
     use crate::product::models::ProviderName;
     use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -1284,5 +1392,126 @@ mod tests {
             crate::product::coding_models::CodingTriageSummary::default(),
         );
         assert!(matches!(missing, Err(ProductStoreError::NotFound { .. })));
+    }
+
+    /// 批 2 T1（REQ-WIGA-09）：ensure_provider_run_allowed 对精确绑定已
+    /// terminated 的 plan 拒绝 provider 驱动——无 CodingPlanRun 也关闸（准入
+    /// 以 enrollment terminated 事实为准）；manual 无绑定 attempt 不拦。
+    #[test]
+    fn ensure_provider_run_allowed_rejects_terminated_plan_even_without_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+        let store = CodingAttemptStore::new(paths.clone());
+        let attempt = store
+            .create_group_attempt(CreateGroupCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                plan_id: "work_item_plan_0001".to_string(),
+                current_work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Fake,
+                    reviewer: Some(ProviderName::Fake),
+                    review_rounds: 1,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+                start_run_policy: crate::product::coding_models::CodingStartRunPolicy::Manual,
+            })
+            .unwrap();
+        assert_eq!(
+            attempt.work_item_group_id.as_deref(),
+            Some("work_item_plan_0001")
+        );
+
+        // manual：无 enrollment 绑定，ensure_provider_run_allowed 不拦（回归）。
+        store
+            .ensure_provider_run_allowed(&attempt)
+            .expect("manual attempt without enrollment is not gated");
+
+        // 绑定该 plan 的 enrollment 终止后：无 run 文件也拒绝 provider 驱动。
+        let enrollment_store =
+            crate::product::issue_automation_store::IssueAutomationStore::new(paths.clone());
+        let enrollment_id = {
+            let created = enrollment_store
+                .compare_and_set(
+                    "project_0001",
+                    "issue_0001",
+                    None,
+                    crate::product::models::automation::EnrollmentWriteCommand::Enable {
+                        selection_key: "human-choice-1".to_string(),
+                        source: automation_source(),
+                        options: automation_options(),
+                        target: automation_target(),
+                    },
+                )
+                .unwrap();
+            let bound = enrollment_store
+                .bind_plan(
+                    "project_0001",
+                    "issue_0001",
+                    created.policy_revision,
+                    "work_item_plan_0001",
+                    "session_0001",
+                )
+                .unwrap();
+            bound.enrollment_id
+        };
+        enrollment_store
+            .terminate_plan(
+                "project_0001",
+                "issue_0001",
+                crate::product::models::automation::EnrollmentTerminationRequest {
+                    command_id: "terminate-command-1".to_string(),
+                    expected_enrollment_id: enrollment_id,
+                    expected_policy_revision: 2,
+                    reason: "user requested termination".to_string(),
+                },
+            )
+            .unwrap();
+
+        let error = store.ensure_provider_run_allowed(&attempt).unwrap_err();
+        assert!(
+            error.to_string().contains("automation_plan_terminated"),
+            "unexpected error: {error}"
+        );
+    }
+
+    fn automation_source() -> crate::product::models::automation::EnrollmentSource {
+        crate::product::models::automation::EnrollmentSource {
+            stories: vec![crate::product::models::automation::SourceRevisionRef {
+                id: "story_spec_0001".into(),
+                version: 1,
+            }],
+            designs: vec![],
+        }
+    }
+
+    fn automation_options() -> crate::product::models::automation::EnrollmentOptions {
+        crate::product::models::automation::EnrollmentOptions {
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            plan_approval: crate::product::models::automation::PlanApprovalPolicy::Manual,
+            plan_options: crate::product::models::lifecycle::IssueWorkItemPlanOptions {
+                include_integration_tests: true,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+        }
+    }
+
+    fn automation_target() -> crate::product::logical_codebase::EnrollmentTarget {
+        use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
+        EnrollmentTarget::LogicalCodebase {
+            logical_codebase_id: "logical_codebase_0001".into(),
+            logical_repository_id: LogicalRepositoryId(uuid::Uuid::new_v4()),
+        }
     }
 }

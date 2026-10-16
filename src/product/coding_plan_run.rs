@@ -883,6 +883,27 @@ impl CodingPlanRunStore {
         })
     }
 
+    /// 批 2 T1（REQ-WIGA-09）：plan 终止失效入口——按 (project,issue,plan)
+    /// 复用 `invalidate_run_file_locked` 核体（幂等置 Invalidated，冻结
+    /// 集合/selection 保留）；无 run 文件不是错误（关闸由 enrollment
+    /// terminated 准入兜底），绝不自动补建 run。
+    pub fn invalidate_run_for_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        let run_path = self.run_path(project_id, issue_id, plan_id)?;
+        if !path_is_regular_file(&run_path)? {
+            return Ok(());
+        }
+        self.with_plan_live_write(project_id, issue_id, plan_id, || {
+            with_exclusive_lock(&run_path, || {
+                self.invalidate_run_file_locked(&run_path, project_id, issue_id, plan_id)
+            })
+        })
+    }
+
     /// 锁内失效核体：重读 run（NotFound 上抛不吞）、核 (project,issue) 身份、
     /// 幂等置 Invalidated（终局，冻结集合/selection 保留不抹除）。
     fn invalidate_run_file_locked(
@@ -3040,5 +3061,72 @@ mod tests {
             ProductStoreError::IdentityMismatch { ref kind, .. }
                 if *kind == "coding_plan_run_lease_scope"
         ));
+    }
+
+    /// 批 2 T1（REQ-WIGA-09）：plan 终止失效入口——按 (project,issue,plan)
+    /// 复用 invalidate 核体；有 run 幂等置 Invalidated（冻结集合保留），
+    /// 无 run 也成功（关闸由 enrollment terminated 准入兜底，不自动补建）。
+    #[test]
+    fn plan_termination_invalidates_run_for_plan_and_tolerates_missing_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CodingPlanRunStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+
+        // 无 run：成功且不补建文件。
+        store
+            .invalidate_run_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .expect("missing run is not an error");
+        assert!(
+            store
+                .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+                .unwrap()
+                .is_none(),
+            "invalidation must not fabricate a run"
+        );
+
+        // 直接落一份活动 run，失效入口置 Invalidated（selection/冻结集合保留）。
+        let run_path = store.run_path(PROJECT_ID, ISSUE_ID, PLAN_ID).unwrap();
+        std::fs::create_dir_all(run_path.parent().unwrap()).unwrap();
+        let run = CodingPlanRun {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            plan_id: PLAN_ID.to_string(),
+            command_id: "cmd_t1_terminate".to_string(),
+            bound_plan_revision_id: "work_item_plan_revision_0001".to_string(),
+            dependency_graph_revision_id: "dependency_graph_revision_0001".to_string(),
+            target_attempts: Vec::new(),
+            mode: PLAN_CODING_MODE_FIRST_READY_UNIT.to_string(),
+            selection: Some(CodingPlanSelection {
+                unit_id: "unit_0001".to_string(),
+                logical_work_item_id: "wi_core".to_string(),
+                attempt_id: "coding_attempt_0001".to_string(),
+                target_repository_id: "11111111-0000-0000-0000-000000000000".to_string(),
+                start_command_id: "plan_start_terminated".to_string(),
+            }),
+            phase: CodingPlanRunPhase::Started,
+            start_outcome: Some(CodingPlanStartOutcome::Started {
+                attempt_id: "coding_attempt_0001".to_string(),
+            }),
+            pause_reason: None,
+            created_at: "2026-10-16T00:00:00Z".to_string(),
+            updated_at: "2026-10-16T00:00:00Z".to_string(),
+        };
+        write_json(&run_path, &run).unwrap();
+        store
+            .invalidate_run_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap();
+        let after = store
+            .get(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap()
+            .expect("run survives invalidation");
+        assert_eq!(after.phase, CodingPlanRunPhase::Invalidated);
+        assert!(after.selection.is_some(), "frozen selection preserved");
+        assert_eq!(after.start_outcome, run.start_outcome);
+
+        // 幂等重入：已 Invalidated 不再写盘（updated_at 不漂移）。
+        store
+            .invalidate_run_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .unwrap();
+        let again = store.get(PROJECT_ID, ISSUE_ID, PLAN_ID).unwrap().unwrap();
+        assert_eq!(again, after);
     }
 }

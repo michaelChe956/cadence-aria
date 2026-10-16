@@ -15,8 +15,9 @@ use crate::product::json_store::{ProductStoreError, read_json, validate_relative
 use crate::product::models::automation::{
     AutomationAttentionFact, EnrollmentBindingHistory, EnrollmentBindingIdentity,
     EnrollmentCommandResult, EnrollmentError, EnrollmentRebindRequest, EnrollmentRebindResult,
-    EnrollmentWriteCommand, IssueAutomationEnrollment, OperationState, PlanGenerationIntent,
-    PlanGenerationPhase, PreparedPlanIntent,
+    EnrollmentTerminationRequest, EnrollmentTerminationResult, EnrollmentWriteCommand,
+    IssueAutomationEnrollment, OperationState, PlanGenerationIntent, PlanGenerationPhase,
+    PreparedPlanIntent,
 };
 
 /// issue 级 enrollment 的唯一持久入口；所有写路径都在目标 JSON 的伴生文件锁内
@@ -103,6 +104,14 @@ impl IssueAutomationStore {
         let resolution = with_exclusive_lock(&path, || {
             let existing = read_optional_enrollment(&path)?;
             let resolution = match (&existing, &command) {
+                // 批 2 T1（REQ-WIGA-09）：terminated 是不可恢复终态——
+                // Enable（含同 payload 幂等面）/Disable 一律 Conflict 零副
+                // 作用；终止命令重放只走 terminate_plan 的账本分支。
+                (Some(saved), _) if saved.terminated_at.is_some() => {
+                    CasResolution::Conflict {
+                        current_revision: Some(saved.policy_revision),
+                    }
+                }
                 (
                     Some(saved),
                     EnrollmentWriteCommand::Enable {
@@ -505,6 +514,85 @@ impl IssueAutomationStore {
         })
     }
 
+    /// 批 2 T1（REQ-WIGA-09）：不可恢复终止 CAS。enrollment 文件锁内：
+    /// 命令账本先判（同 command 同 payload 重放首次 durable 结果、异
+    /// payload Conflict），enrollment/revision 身份互证，随后
+    /// `terminated_at`＋`enabled=false`＋`command_ledger` 同一原子写落盘
+    /// （revision+1）。terminated 是不可恢复终态：此后 Enable/Disable/
+    /// rebind/bind 一律拒绝（守卫见 compare_and_set/rebind），仅 N0
+    /// attention 事实收尾对同一 terminated 绑定放行。锁内禁 await。
+    pub fn terminate_plan(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        request: EnrollmentTerminationRequest,
+    ) -> Result<EnrollmentTerminationResult, EnrollmentError> {
+        let path = self.enrollment_path(project_id, issue_id)?;
+        let digest = request.payload_digest();
+        let resolution = with_exclusive_lock(&path, || {
+            let Some(mut saved) = read_optional_enrollment(&path)? else {
+                return Ok(TerminationResolution::Missing);
+            };
+            // 命令账本先判：同 command 同 payload 幂等重放，异 payload
+            // fail-closed（不猜哪个是"真的"）。
+            if let Some(ledger) = saved
+                .command_ledger
+                .iter()
+                .find(|entry| entry.command_id == request.command_id)
+            {
+                if ledger.payload_digest == digest {
+                    let terminated_at =
+                        saved.terminated_at.clone().unwrap_or_default();
+                    return Ok(TerminationResolution::Replayed {
+                        command_id: request.command_id.clone(),
+                        terminated_at,
+                        enrollment: saved,
+                    });
+                }
+                return Ok(TerminationResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
+            }
+            if saved.enrollment_id != request.expected_enrollment_id
+                || request.expected_policy_revision != saved.policy_revision
+            {
+                return Ok(TerminationResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
+            }
+            // 已 terminated 的异命令终止：终态不再接受新终止命令；未完成
+            // 清理的重试以同 command 重放（上方 Replayed 分支）。
+            if saved.terminated_at.is_some() {
+                return Ok(TerminationResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
+            }
+            let binding_version = saved
+                .binding_history
+                .as_ref()
+                .map(|history| history.current.binding_version)
+                .unwrap_or(0);
+            let now = now_rfc3339();
+            saved.enabled = false;
+            saved.terminated_at = Some(now.clone());
+            saved.policy_revision += 1;
+            saved.updated_at = now.clone();
+            saved.command_ledger.push(EnrollmentCommandResult {
+                command_id: request.command_id.clone(),
+                payload_digest: digest,
+                state: OperationState::Accepted,
+                binding_version,
+            });
+            write_json(&path, &saved)?;
+            Ok(TerminationResolution::Accepted {
+                command_id: request.command_id.clone(),
+                terminated_at: now,
+                enrollment: saved,
+            })
+        })?;
+        resolve_termination(resolution)
+    }
+
     /// C1 Task 1（REQ-WIGA-01、REQ-C1-TARGET-01）：显式重绑/换代。在同一
     /// enrollment 文件锁内：先查命令账本（同 command 同 payload 幂等重放
     /// 首次 durable 结果、异 payload Conflict），再校验 enabled、expected
@@ -526,6 +614,13 @@ impl IssueAutomationStore {
             let Some(mut saved) = read_optional_enrollment(&path)? else {
                 return Ok(RebindResolution::Missing);
             };
+            // 批 2 T1（REQ-WIGA-09）：terminated 是不可恢复终态——任何
+            // rebind（含旧命令账本重放面）一律 Conflict，不换代、不恢复。
+            if saved.terminated_at.is_some() {
+                return Ok(RebindResolution::Conflict {
+                    current_revision: Some(saved.policy_revision),
+                });
+            }
             // 命令账本先判：同 command 同 payload 返回首次 durable 结果，
             // 异 payload 一律 Conflict（fail-closed，不猜哪个是"真的"）。
             if let Some(ledger) = saved
@@ -1049,6 +1144,55 @@ pub(crate) fn read_plan_generation_intent(
         ProductStoreError::Json(format!("plan generation intent parse failed: {error}"))
     })?;
     Ok(PlanGenerationIntentRead::Current(intent))
+}
+
+/// `terminate_plan` 锁内判定；锁外映射为 `EnrollmentTerminationResult`。
+enum TerminationResolution {
+    Accepted {
+        command_id: String,
+        terminated_at: String,
+        enrollment: IssueAutomationEnrollment,
+    },
+    Replayed {
+        command_id: String,
+        terminated_at: String,
+        enrollment: IssueAutomationEnrollment,
+    },
+    Conflict {
+        current_revision: Option<u64>,
+    },
+    Missing,
+}
+
+fn resolve_termination(
+    resolution: TerminationResolution,
+) -> Result<EnrollmentTerminationResult, EnrollmentError> {
+    match resolution {
+        TerminationResolution::Accepted {
+            command_id,
+            terminated_at,
+            enrollment,
+        } => Ok(EnrollmentTerminationResult {
+            command_id,
+            state: OperationState::Accepted,
+            terminated_at,
+            enrollment,
+        }),
+        TerminationResolution::Replayed {
+            command_id,
+            terminated_at,
+            enrollment,
+        } => Ok(EnrollmentTerminationResult {
+            command_id,
+            state: OperationState::Replayed,
+            terminated_at,
+            enrollment,
+        }),
+        TerminationResolution::Conflict { current_revision } => {
+            Err(EnrollmentError::Conflict { current_revision })
+        }
+        TerminationResolution::Missing => Err(EnrollmentError::NotFound),
+    }
 }
 
 /// `rebind` 锁内判定；锁外映射为 `EnrollmentRebindResult`/`EnrollmentError`。

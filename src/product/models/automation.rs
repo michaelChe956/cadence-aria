@@ -253,6 +253,38 @@ pub struct EnrollmentRebindResult {
     pub enrollment: IssueAutomationEnrollment,
 }
 
+/// 批 2 T1（REQ-WIGA-09）：enrollment 不可恢复终止命令（store 级请求体；
+/// REST 确认面/DTO 由 T3 包裹）。`command_id` 进命令账本——同命令同
+/// payload 幂等重放首次 durable 结果，异 payload fail-closed；
+/// `expected_enrollment_id`/`expected_policy_revision` 身份互证。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentTerminationRequest {
+    pub command_id: String,
+    pub expected_enrollment_id: String,
+    pub expected_policy_revision: u64,
+    pub reason: String,
+}
+
+impl EnrollmentTerminationRequest {
+    /// 稳定 payload 摘要：同一 command 的异 payload 必然产生不同 digest。
+    pub fn payload_digest(&self) -> String {
+        let payload =
+            serde_json::to_string(self).expect("termination request payload is serializable");
+        format!("sha256:{:x}", Sha256::digest(payload.as_bytes()))
+    }
+}
+
+/// 批 2 T1：终止结果。`state=Replayed` 返回首次 durable 终止的当前投影
+/// （`terminated_at` 冻结、enrollment 事实不被重放改写）；`Accepted` 为
+/// 本次 CAS 落盘（terminated_at＋enabled=false 同一写）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentTerminationResult {
+    pub command_id: String,
+    pub state: OperationState,
+    pub terminated_at: String,
+    pub enrollment: IssueAutomationEnrollment,
+}
+
 // ─── C1 Task 6：租约三态与确认接管（REQ-WIGA-03）───
 
 /// 租约三态判定。只从现有 lock record、attempt terminal/activity/status

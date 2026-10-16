@@ -10,8 +10,9 @@ use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
 use crate::product::models::automation::{
     AutomationAttentionFact, AutomationAttentionKind, AutomationAttentionStage,
     EnrollmentBindingIdentity, EnrollmentBindingIdentityInput, EnrollmentOptions,
-    EnrollmentRebindRequest, EnrollmentSource, EnrollmentWriteCommand, IssueAutomationEnrollment,
-    OperationState, PlanApprovalPolicy, SourceRevisionRef,
+    EnrollmentRebindRequest, EnrollmentSource, EnrollmentTerminationRequest,
+    EnrollmentWriteCommand, IssueAutomationEnrollment, OperationState, PlanApprovalPolicy,
+    SourceRevisionRef,
 };
 use crate::product::models::lifecycle::IssueWorkItemPlanOptions;
 use crate::product::models::provider::ProviderName;
@@ -1266,5 +1267,252 @@ fn issue_automation_store_attention_fact_corrupt_json_propagates() {
             .unwrap_err(),
         EnrollmentError::Store(_)
     ));
+}
+
+// ---------------------------------------------------------------------------
+// 批 2 T1（REQ-WIGA-09）：终止 CAS、命令账本与不可恢复准入。
+// ---------------------------------------------------------------------------
+
+/// 红测①：terminate CAS——锁内 terminated_at＋enabled=false、revision+1、
+/// 命令账本 Accepted；同 command 同 payload 重入 Replayed（零写入、
+/// terminated_at 冻结）；异 payload/漂移 revision 拒绝且零副作用。
+#[test]
+fn issue_automation_store_terminate_plan_cas_and_idempotent_replay() {
+    let (_tmp, store, _binding, revision) = bound_enrollment_with_binding();
+    let request = EnrollmentTerminationRequest {
+        command_id: "terminate-command-1".to_string(),
+        expected_enrollment_id: store
+            .get("project_1", "issue_1")
+            .unwrap()
+            .expect("enrollment exists")
+            .enrollment_id,
+        expected_policy_revision: revision,
+        reason: "user requested termination".to_string(),
+    };
+    let result = store
+        .terminate_plan("project_1", "issue_1", request.clone())
+        .expect("first terminate applies");
+    assert_eq!(result.state, OperationState::Accepted);
+    let terminated = result.enrollment;
+    assert!(!terminated.enabled, "terminated must disable enrollment");
+    let terminated_at = terminated.terminated_at.clone().expect("terminated_at set");
+    assert_eq!(result.terminated_at, terminated_at);
+    assert_eq!(terminated.policy_revision, revision + 1);
+    assert!(
+        terminated
+            .command_ledger
+            .iter()
+            .any(|entry| entry.command_id == "terminate-command-1"
+                && entry.state == OperationState::Accepted),
+        "termination command must be ledgered"
+    );
+
+    // 同命令同 payload 重入：Replayed，零写入（terminated_at/revision 冻结）。
+    let replay = store
+        .terminate_plan("project_1", "issue_1", request)
+        .expect("same-command replay is idempotent");
+    assert_eq!(replay.state, OperationState::Replayed);
+    assert_eq!(replay.terminated_at, terminated_at);
+    assert_eq!(replay.enrollment.policy_revision, revision + 1);
+    assert_eq!(replay.enrollment, terminated);
+
+    // 异 payload（同 command_id）：fail-closed Conflict。
+    let divergent = EnrollmentTerminationRequest {
+        command_id: "terminate-command-1".to_string(),
+        expected_enrollment_id: terminated.enrollment_id.clone(),
+        expected_policy_revision: revision + 1,
+        reason: "divergent payload".to_string(),
+    };
+    assert_conflict(
+        store
+            .terminate_plan("project_1", "issue_1", divergent)
+            .unwrap_err(),
+        revision + 1,
+    );
+
+    // 预期 revision 漂移：Conflict，零副作用。
+    let stale = EnrollmentTerminationRequest {
+        command_id: "terminate-command-2".to_string(),
+        expected_enrollment_id: terminated.enrollment_id.clone(),
+        expected_policy_revision: revision,
+        reason: "stale revision".to_string(),
+    };
+    assert_conflict(
+        store
+            .terminate_plan("project_1", "issue_1", stale)
+            .unwrap_err(),
+        revision + 1,
+    );
+    let after = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert_eq!(after, terminated, "rejected terminate must not mutate");
+}
+
+/// 红测②：terminated 不可恢复——Enable（同/异 payload）、Disable、rebind、
+/// bind_plan 全拒且零副作用；异 enrollment_id 终止也拒。N0 口径对齐：同一
+/// terminated 绑定仍可写/清终止收尾事实（不被准入拒绝阻断）。
+#[test]
+fn issue_automation_store_terminated_enrollment_is_irrecoverable() {
+    let (_tmp, store, binding, revision) = bound_enrollment_with_binding();
+    let enrollment = store.get("project_1", "issue_1").unwrap().unwrap();
+    store
+        .terminate_plan(
+            "project_1",
+            "issue_1",
+            EnrollmentTerminationRequest {
+                command_id: "terminate-command-1".to_string(),
+                expected_enrollment_id: enrollment.enrollment_id.clone(),
+                expected_policy_revision: revision,
+                reason: "user requested termination".to_string(),
+            },
+        )
+        .unwrap();
+    let terminated = store.get("project_1", "issue_1").unwrap().unwrap();
+
+    // Enable（与原 payload 完全一致也不可重开）→ Conflict 零副作用。
+    assert_conflict(
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(terminated.policy_revision),
+                enable("human-choice-1", logical_repo(1)),
+            )
+            .unwrap_err(),
+        terminated.policy_revision,
+    );
+    // Disable 也拒（terminated 即终态，不再接受任何写命令）。
+    assert_conflict(
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(terminated.policy_revision),
+                EnrollmentWriteCommand::Disable,
+            )
+            .unwrap_err(),
+        terminated.policy_revision,
+    );
+    // rebind → Conflict。
+    assert_conflict(
+        store
+            .rebind(
+                "project_1",
+                "issue_1",
+                rebind_request(
+                    "rebind-command-9",
+                    terminated.policy_revision,
+                    binding.binding_version,
+                    "plan_0002",
+                    "session_0002",
+                    target_logical_at(logical_repo(1)),
+                ),
+            )
+            .unwrap_err(),
+        terminated.policy_revision,
+    );
+    // bind_plan → Conflict。
+    assert_conflict(
+        store
+            .bind_plan(
+                "project_1",
+                "issue_1",
+                terminated.policy_revision,
+                "plan_0003",
+                "session_0003",
+            )
+            .unwrap_err(),
+        terminated.policy_revision,
+    );
+    // 异 enrollment_id 的终止命令 → Conflict（身份互证）。
+    assert_conflict(
+        store
+            .terminate_plan(
+                "project_1",
+                "issue_1",
+                EnrollmentTerminationRequest {
+                    command_id: "terminate-command-8".to_string(),
+                    expected_enrollment_id: "another_enrollment".to_string(),
+                    expected_policy_revision: terminated.policy_revision,
+                    reason: "wrong identity".to_string(),
+                },
+            )
+            .unwrap_err(),
+        terminated.policy_revision,
+    );
+    // 零副作用：durable 记录未被上述任一命令改写。
+    assert_eq!(
+        store.get("project_1", "issue_1").unwrap().unwrap(),
+        terminated
+    );
+
+    // N0 口径对齐：同一 terminated 绑定放行写/清终止收尾事实。
+    store
+        .upsert_automation_attention_fact(
+            "project_1",
+            "issue_1",
+            &binding,
+            AutomationAttentionFact {
+                key: "termination_cleanup".to_string(),
+                kind: AutomationAttentionKind::AutomationFailed,
+                stage: AutomationAttentionStage::Termination,
+                plan_id: Some("plan_0001".to_string()),
+                session_id: Some("session_0001".to_string()),
+                attempt_id: None,
+                reason_code: "cleanup_failed".to_string(),
+                occurred_at: "2026-10-16T00:00:00Z".to_string(),
+                choice_id: None,
+                gate_id: None,
+            },
+        )
+        .expect("terminated binding may still record termination facts");
+    store
+        .resolve_automation_attention_fact("project_1", "issue_1", &binding, "termination_cleanup")
+        .expect("terminated binding may still resolve facts");
+}
+
+/// 红测③：缺失 enrollment 的终止 NotFound；普通 Disable→Enable 重开回归
+/// 保持（终止语义不波及非终止路径）。
+#[test]
+fn issue_automation_store_termination_missing_and_manual_disable_regression() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = IssueAutomationStore::new(ProductAppPaths::new(tmp.path()));
+    assert!(matches!(
+        store
+            .terminate_plan(
+                "project_1",
+                "issue_1",
+                EnrollmentTerminationRequest {
+                    command_id: "c".to_string(),
+                    expected_enrollment_id: "e".to_string(),
+                    expected_policy_revision: 1,
+                    reason: String::new(),
+                },
+            )
+            .unwrap_err(),
+        EnrollmentError::NotFound
+    ));
+    drop(store);
+
+    // 普通 Disable 后 Enable 重开（无 terminated_at）保持既有行为。
+    let (_tmp2, store2, _binding2, revision2) = bound_enrollment_with_binding();
+    let disabled = store2
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            Some(revision2),
+            EnrollmentWriteCommand::Disable,
+        )
+        .unwrap();
+    assert!(!disabled.enabled);
+    assert!(disabled.terminated_at.is_none());
+    let reopened = store2
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            Some(disabled.policy_revision),
+            enable("human-choice-1", logical_repo(1)),
+        )
+        .unwrap();
+    assert!(reopened.enabled, "plain disable still allows re-enable");
 }
 include!("target_union_rebind_tests.inc.rs");
