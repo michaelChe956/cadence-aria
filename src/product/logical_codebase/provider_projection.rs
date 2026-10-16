@@ -163,6 +163,11 @@ pub struct ProviderPolicyProjection {
     boundary_evidence_ref: String,
     capability_projection_digest: String,
     projection_digest: String,
+    /// 批2 Task 2:受信执行合同摘要(非敏感事实;`freeze_provider_execution`
+    /// 产物经 `with_execution_digest` 装饰)。默认空串 = 未绑定(存量构造/
+    /// 旧记录——显式缺失,不默认 HostCoding);绑定后进入 resume 指纹域,
+    /// 旧记录与合同绑定后的指纹永不相等。
+    execution_contract_digest: String,
 }
 
 impl ProviderPolicyProjection {
@@ -212,7 +217,22 @@ impl ProviderPolicyProjection {
             boundary_evidence_ref,
             capability_projection_digest,
             projection_digest,
+            execution_contract_digest: String::new(),
         }
+    }
+
+    /// 批2 Task 2:受信执行合同摘要装饰(crate 内 gateway 绑定冻结合同时
+    /// 应用;projector 产物默认空串,不改 projector 签名)。装饰发生在
+    /// projection_digest 计算之后——合同摘要是独立指纹域,不重算 projector
+    /// 自有的投影摘要。
+    pub(crate) fn with_execution_digest(mut self, digest: impl Into<String>) -> Self {
+        self.execution_contract_digest = digest.into();
+        self
+    }
+
+    /// 冻结的执行合同摘要(未绑定为空串 = 显式缺失)。
+    pub(crate) fn execution_contract_digest(&self) -> &str {
+        &self.execution_contract_digest
     }
 
     /// 以下为等价 `pub(crate)` getter(计划冻结:提供 View 或等价

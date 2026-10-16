@@ -83,6 +83,17 @@ pub struct ValidatedSessionLaunchPolicy {
     /// 与投影同源冻结,spawn 前复验按同一基准重算。
     lc_projection:
         Option<crate::product::logical_codebase::provider_projection::ProviderPolicyProjection>,
+    /// 批2 Task 2:裸 validate 的 gateway 基准投影副本。受信执行合同绑定时
+    /// 以合同摘要装饰该基准(或 full 投影)重算指纹,spawn 前复验按同一
+    /// 装饰重算——绑定前后指纹必然不同,旧记录不可能与合同绑定后的启动
+    /// 比对相等(不默认续接)。
+    basis_projection:
+        crate::product::logical_codebase::provider_projection::ProviderPolicyProjection,
+    /// 批2 Task 2:受信执行合同(`freeze_provider_execution` 产物,crate 内
+    /// `prepare_trusted_*_launch` 绑定;字段 private、无 public constructor)。
+    /// `None` = 新执行合同**显式缺失**(存量构造/旧记录):消费方不得把
+    /// 缺失默认为 HostCoding 续接旧 session,只能走显式标缺/显式新会话路径。
+    execution_contract: Option<crate::cross_cutting::provider_execution::FrozenProviderExecution>,
 }
 
 /// #8 发布链在 validate 时点冻结的 digest 事实(spawn 前复验重读比对)。
@@ -193,6 +204,37 @@ impl ValidatedSessionLaunchPolicy {
     /// 的存量构造为 `None`)。
     pub(crate) fn launch_audit(&self) -> Option<&ProviderLaunchAuditContext> {
         self.launch_audit.as_ref()
+    }
+
+    /// 批2 Task 2:冻结的执行合同。`None` = 新执行合同显式缺失(存量构造/
+    /// 旧记录)——**不是** HostCoding 默认,消费方不得据此续接旧 session。
+    pub fn frozen_execution(
+        &self,
+    ) -> Option<&crate::cross_cutting::provider_execution::FrozenProviderExecution> {
+        self.execution_contract.as_ref()
+    }
+
+    /// 批2 Task 2:受信 builder 绑定执行合同(crate 内,`prepare_trusted_*
+    /// _launch` 专用)。指纹以合同摘要装饰投影基准后重算(spawn 前复验按
+    /// 同一装饰重算):执行合同成为 resume 指纹的非敏感漂移维度,旧记录
+    /// (无合同)与绑定后的指纹永不相等。
+    pub(crate) fn with_frozen_execution(
+        mut self,
+        contract: crate::cross_cutting::provider_execution::FrozenProviderExecution,
+    ) -> Self {
+        let basis = self
+            .lc_projection
+            .clone()
+            .unwrap_or_else(|| self.basis_projection.clone());
+        let decorated = basis.with_execution_digest(contract.contract_digest().to_string());
+        self.fingerprint = SessionResumeFingerprint::from_envelope(
+            &self.envelope,
+            &decorated,
+            &self.projection_digest,
+            &canonical_target_git_identity(&self.envelope.target.worktree),
+        );
+        self.execution_contract = Some(contract);
+        self
     }
 }
 
@@ -558,6 +600,13 @@ impl SessionResumeFingerprint {
         for root in projection.writable_roots() {
             domain(root.to_string_lossy().as_bytes());
         }
+        // 批2 Task 2:受信执行合同摘要(非敏感事实;未绑定为空串)。绑定
+        // 合同后的指纹与任何 pre-合同记录的指纹必然不等——旧记录(无新
+        // 执行合同)不可能默认续接,只能失配走显式新会话路径。schema 常量
+        // 维持 `/2`:追加域本身已保证新旧 digest 永不相等(版本递增规则的
+        // 目的),同时保住 `is_full_projection_v2` 的 prefix 门对新旧 digest
+        // 一致可比(失配走 supersede 而非 unavailable,诊断更精确)。
+        domain(projection.execution_contract_digest().as_bytes());
         let digest = format!(
             "{LC_RESUME_FINGERPRINT_SCHEMA}:sha256:{:x}",
             hasher.finalize()
@@ -924,6 +973,10 @@ pub struct GatewayRunAuditEntry {
     /// 最终传递给 provider 的 argv。启动输入无真实 argv 源时为空 Vec(Task 11 现状,
     /// 记录为空并保留字段以便后续接入 `/status` setting sources)。
     pub argv: Vec<String>,
+    /// 批2 Task 2:该次启动冻结的受信执行合同摘要。`None` = 新执行合同
+    /// 显式缺失(存量启动/旧记录)——缺失如实记录,从不被记为默认
+    /// HostCoding 续接。
+    pub execution_contract_digest: Option<String>,
 }
 
 /// 审计记录的启动栈类别。
@@ -968,6 +1021,7 @@ impl GatewayRunAudit {
         policy_digest: String,
         config_digest: Option<String>,
         argv: Vec<String>,
+        execution_contract_digest: Option<String>,
     ) {
         let mut entries = self.entries.lock().expect("gateway audit mutex poisoned");
         entries.push(GatewayRunAuditEntry {
@@ -975,7 +1029,15 @@ impl GatewayRunAudit {
             policy_digest,
             config_digest,
             argv,
+            execution_contract_digest,
         });
+    }
+
+    /// 批2 Task 2:最近一次成功启动的审计条目(无启动记录为 `None`)。供
+    /// fixture/诊断断言该次启动冻结(或显式缺失)的执行合同摘要。
+    pub fn last_entry(&self) -> Option<GatewayRunAuditEntry> {
+        let entries = self.entries.lock().expect("gateway audit mutex poisoned");
+        entries.last().cloned()
     }
 
     /// 追加一条 managed-settings 标注(Task 11):记录检测到的非 Aria-owned managed
@@ -1449,6 +1511,8 @@ impl LogicalCodebaseProviderGateway {
             policy_locator,
             launch_audit: None,
             lc_projection: None,
+            basis_projection,
+            execution_contract: None,
         })
     }
 
@@ -1680,6 +1744,10 @@ impl LogicalCodebaseProviderGateway {
         }
         let adapter = self.lookup_real_streaming_adapter(&validated)?;
         let policy_digest = validated.envelope().policy_digest.clone();
+        // 批2 Task 2:该次启动冻结(或显式缺失)的执行合同摘要进审计。
+        let execution_contract_digest = validated
+            .frozen_execution()
+            .map(|contract| contract.contract_digest().to_string());
         // Task 7(Step 3 分流收口):LC 启动唯一经 `start_validated` 分发,
         // 1b 过渡期的 prepared/raw 分叉就此取消——未经 prepare 的存量
         // validated 构造同样走 validated trait,绝不回落裸 `start`(raw
@@ -1706,6 +1774,7 @@ impl LogicalCodebaseProviderGateway {
             policy_digest,
             Some(config_digest),
             argv,
+            execution_contract_digest,
         );
         Ok(session)
     }
@@ -1736,6 +1805,10 @@ impl LogicalCodebaseProviderGateway {
             return Err(error);
         }
         let policy_digest = validated.envelope().policy_digest.clone();
+        // 批2 Task 2:该次启动冻结(或显式缺失)的执行合同摘要进审计。
+        let execution_contract_digest = validated
+            .frozen_execution()
+            .map(|contract| contract.contract_digest().to_string());
         let config_artifact_ref = validated.envelope().config_artifact_ref.clone();
         // Task 7(Step 3 分流收口):同步栈唯一经 `run_validated`(生产侧为
         // `GatewaySyncProvider` streaming→sync bridge,只经 streaming
@@ -1762,6 +1835,7 @@ impl LogicalCodebaseProviderGateway {
             policy_digest,
             Some(config_digest),
             argv,
+            execution_contract_digest,
         );
         Ok(output)
     }
@@ -1827,6 +1901,71 @@ impl LogicalCodebaseProviderGateway {
             input,
             validated.with_launch_audit(context),
         ))
+    }
+
+    /// 批2 Task 2:受信执行的 private launch 面(`pub(crate)`,engine 受信
+    /// builder 专用;普通 caller 凭 role 字符串无从铸造)。在既有
+    /// `prepare_streaming_launch` 语义(角色矩阵派生/双向守卫/run-bound
+    /// audit 绑定)之上,先按权威装配矩阵冻结执行合同(职责×profile/窗口/
+    /// 岗位纪律 fail-closed,任何失配都在 validate 与 spawn 之前、零副作用
+    /// 拒绝),再把合同冻结进 validated launch(指纹按合同摘要重算)。
+    ///
+    /// 职责来自 `TrustedRunIdentity`(engine durable run/store 构造);prompt/
+    /// env/canonical_inputs 里的自报角色不参与装配。legacy Direct 由 engine
+    /// 沿同一 builder(`freeze_provider_execution` + 载体绑定)绑等价合同。
+    /// 生产 caller 为 T10+ 受信 engine builder;接线前仅合同测试消费
+    /// (前瞻载体,同 `into_validated_streaming_input` 范式)。
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_trusted_streaming_launch(
+        &self,
+        input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+        request: SessionLaunchRequest,
+        context: ProviderLaunchAuditContext,
+        identity: &crate::cross_cutting::provider_execution::TrustedRunIdentity,
+        profile: crate::cross_cutting::provider_execution::ProviderExecutionProfile,
+        author_policy: Option<crate::cross_cutting::provider_execution::AuthorToolPolicy>,
+        resource_scope_id: String,
+        review_window_id: Option<String>,
+    ) -> Result<ValidatedStreamingProviderInput, ProviderGatewayError> {
+        let contract = crate::cross_cutting::provider_execution::freeze_provider_execution(
+            identity,
+            profile,
+            author_policy,
+            resource_scope_id,
+            review_window_id,
+        )
+        .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.details))?;
+        self.prepare_streaming_launch(input, request, context)
+            .map(|launch| launch.with_frozen_execution(contract))
+    }
+
+    /// 批2 Task 2:同步栈的受信执行 private launch 面(与
+    /// [`Self::prepare_trusted_streaming_launch`] 同一权威装配矩阵与
+    /// fail-closed 顺序;Direct/LC、同步/流式共同消费同一冻结合同)。
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_trusted_sync_launch(
+        &self,
+        input: crate::protocol::contracts::AdapterInput,
+        request: SessionLaunchRequest,
+        context: ProviderLaunchAuditContext,
+        identity: &crate::cross_cutting::provider_execution::TrustedRunIdentity,
+        profile: crate::cross_cutting::provider_execution::ProviderExecutionProfile,
+        author_policy: Option<crate::cross_cutting::provider_execution::AuthorToolPolicy>,
+        resource_scope_id: String,
+        review_window_id: Option<String>,
+    ) -> Result<ValidatedAdapterInput, ProviderGatewayError> {
+        let contract = crate::cross_cutting::provider_execution::freeze_provider_execution(
+            identity,
+            profile,
+            author_policy,
+            resource_scope_id,
+            review_window_id,
+        )
+        .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.details))?;
+        self.prepare_sync_launch(input, request, context)
+            .map(|launch| launch.with_frozen_execution(contract))
     }
 
     /// Task 3.2(B0a2):LC 全上下文公共 prepare 合同。与
@@ -2124,6 +2263,10 @@ impl LogicalCodebaseProviderGateway {
             );
         }
         let policy_digest = validated_full.envelope().policy_digest.clone();
+        // 批2 Task 2:该次启动冻结(或显式缺失)的执行合同摘要进审计。
+        let execution_contract_digest = validated_full
+            .frozen_execution()
+            .map(|contract| contract.contract_digest().to_string());
         let config_artifact_ref = validated_full.envelope().config_artifact_ref.clone();
         let session = candidate
             .adapter
@@ -2150,6 +2293,7 @@ impl LogicalCodebaseProviderGateway {
             policy_digest,
             Some(config_digest),
             argv,
+            execution_contract_digest,
         );
         Ok(session)
     }
@@ -2347,10 +2491,17 @@ impl LogicalCodebaseProviderGateway {
         // Task 9a:按 validated 冻结的指纹基准重算——完整上下文路径冻结了
         // 候选投影则按投影重算,裸 validate 基准则按 gateway 基准投影重算;
         // 任一输入维度的 spawn 时点漂移都会在此 fail-closed。
-        let fingerprint_basis = validated
+        let mut fingerprint_basis = validated
             .lc_projection()
             .cloned()
             .unwrap_or_else(|| Self::lc_basis_projection(&capability, envelope));
+        // 批2 Task 2:绑定执行合同的 policy 按合同摘要装饰同一基准(与
+        // `with_frozen_execution` 的绑定重算同装饰;漏装饰会让每次 spawn
+        // 误报 resume_fingerprint 漂移)。
+        if let Some(contract) = validated.execution_contract.as_ref() {
+            fingerprint_basis =
+                fingerprint_basis.with_execution_digest(contract.contract_digest().to_string());
+        }
         let current_fingerprint = SessionResumeFingerprint::from_envelope(
             envelope,
             &fingerprint_basis,

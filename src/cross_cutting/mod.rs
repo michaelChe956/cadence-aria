@@ -38,6 +38,7 @@ pub use provider_boundary::{
 };
 pub mod provider_capabilities;
 pub mod provider_context_builder;
+pub mod provider_execution;
 pub mod provider_health;
 pub mod provider_registry;
 pub mod provider_router;

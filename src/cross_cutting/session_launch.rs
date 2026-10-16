@@ -40,6 +40,27 @@ impl ValidatedStreamingProviderInput {
     pub(crate) fn into_parts(self) -> (StreamingProviderInput, ValidatedSessionLaunchPolicy) {
         (self.input, self.launch)
     }
+
+    /// 批2 Task 2:绑定冻结合同后返回新载体(crate 内受信 engine builder
+    /// 专用,gateway `prepare_trusted_*_launch` 消费)。普通 caller 无绑定
+    /// 入口——serde 输入/role 字符串不能铸造启动能力。
+    pub(crate) fn with_frozen_execution(
+        mut self,
+        execution: crate::cross_cutting::provider_execution::FrozenProviderExecution,
+    ) -> Self {
+        self.launch = self.launch.with_frozen_execution(execution);
+        self
+    }
+
+    /// 批2 Task 2:冻结的执行合同(REQ-ENV-HOST-01)。`None` = 新执行合同
+    /// **显式缺失**(存量构造/旧记录):消费方(adapter/engine/恢复面)不得
+    /// 把缺失默认为 HostCoding 续接旧 session,只能走显式标缺/显式新会话
+    /// 路径。adapter 消费面(T11–T13)以此读取冻结合同事实。
+    pub fn frozen_execution(
+        &self,
+    ) -> Option<&crate::cross_cutting::provider_execution::FrozenProviderExecution> {
+        self.launch.frozen_execution()
+    }
 }
 
 /// 已绑定 validated policy 的同步 adapter input。spawn 前复验在
@@ -61,5 +82,23 @@ impl ValidatedAdapterInput {
 
     pub(crate) fn into_parts(self) -> (AdapterInput, ValidatedSessionLaunchPolicy) {
         (self.input, self.launch)
+    }
+
+    /// 批2 Task 2:同步载体的冻结合同绑定(crate 内受信 builder 专用,
+    /// gateway `prepare_trusted_sync_launch` 消费)。
+    pub(crate) fn with_frozen_execution(
+        mut self,
+        execution: crate::cross_cutting::provider_execution::FrozenProviderExecution,
+    ) -> Self {
+        self.launch = self.launch.with_frozen_execution(execution);
+        self
+    }
+
+    /// 批2 Task 2:冻结的执行合同;`None` = 显式缺失(不默认 HostCoding),
+    /// 语义同 [`ValidatedStreamingProviderInput::frozen_execution`]。
+    pub fn frozen_execution(
+        &self,
+    ) -> Option<&crate::cross_cutting::provider_execution::FrozenProviderExecution> {
+        self.launch.frozen_execution()
     }
 }
