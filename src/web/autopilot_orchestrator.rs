@@ -247,6 +247,12 @@ pub async fn reconcile_claimed_coding_runs_once(state: &WebAppState) -> Result<u
                 }
             };
             for attempt in attempts {
+                // Bug2-B(Task 4)：每 attempt 分诊前的 gate-only 对账——收敛
+                // 门的崩溃窗口，零 provider 调用；失败显式记录不阻断扫描。
+                if let Err(error) = reconcile_blocked_gates_for_attempt_at_startup(&store, &attempt)
+                {
+                    eprintln!("startup gate reconcile failed for {}: {error}", attempt.id);
+                }
                 match recover_claimed_attempt_at_startup(state, &store, &attempt).await {
                     Ok(true) => resumed += 1,
                     Ok(false) => {}
@@ -261,6 +267,156 @@ pub async fn reconcile_claimed_coding_runs_once(state: &WebAppState) -> Result<u
         }
     }
     Ok(resumed)
+}
+
+/// Bug2-B(Task 4)：每 attempt 分诊前的 gate-only 启动对账（serve_web →
+/// `reconcile_claimed_coding_runs_once` 内嵌）——只动门、零 provider
+/// 调用。规则（修复方案 §三「启动对账」）：
+/// a. 根已写完整关闭事实、归档未落（崩溃前缀）→ 统一关闭原语同动作重放
+///    补齐归档（幂等，首关事实不重写）；open 根 × 上一代残留归档（重开
+///    半完成）→ reopen 原语清理残留归档（代次不动）。
+/// b. open 门与 run gate_origin 接受事实一致 → origin 精确匹配幂等补偿
+///    关门（仅代次一致的终态 run——Completed/Failed/Blocked/Aborted 仅补
+///    记「动作已接受」，不代表业务通过；run 终态已持久化为前提）。
+/// c. 归档缺 action 且恢复 journal（活跃或归档）可证 retry_review →
+///    按证据回填动作（resolved_at 历史不伪造）。
+/// d. 无关联／代次失配／异动作／无证据 → 只告警，durable JSON 不动。
+/// e. 恢复 journal 仲裁中（未 completed 且关联该门）→ 不抢先关。
+/// 返回本轮收敛／补偿／回填的门数。
+fn reconcile_blocked_gates_for_attempt_at_startup(
+    store: &crate::product::coding_attempt_store::CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+) -> Result<usize, String> {
+    use crate::product::coding_models::CodingRoleRunStatus;
+
+    let (project_id, issue_id, attempt_id) = (&attempt.project_id, &attempt.issue_id, &attempt.id);
+    let mut actions = 0usize;
+
+    let active_journal = store
+        .get_failed_code_review_recovery_journal(project_id, issue_id, attempt_id)
+        .map_err(|error| format!("recovery journal unreadable: {error}"))?;
+    let states = store
+        .blocked_gate_states_for_startup_reconcile(project_id, issue_id, attempt_id)
+        .map_err(|error| format!("blocked gate roots unreadable: {error}"))?;
+    let runs = store
+        .list_role_runs(project_id, issue_id, attempt_id)
+        .map_err(|error| format!("role runs unreadable: {error}"))?;
+
+    for state in states {
+        let gate_id = state.gate.gate_id.clone();
+        if let Some(pending) = state.pending_resolution {
+            // a. 崩溃前缀：以根记录首关事实同动作重放补齐归档。
+            store
+                .resolve_blocked_gate_with_action(
+                    project_id,
+                    issue_id,
+                    attempt_id,
+                    &gate_id,
+                    pending.resolved_action.as_deref(),
+                )
+                .map_err(|error| format!("gate {gate_id} archive completion failed: {error}"))?;
+            actions += 1;
+            continue;
+        }
+        if store
+            .get_archived_blocked_gate_facts(project_id, issue_id, attempt_id, &gate_id)
+            .map_err(|error| format!("gate {gate_id} archive unreadable: {error}"))?
+            .is_some()
+        {
+            // a. 重开半完成残留（open 根 + 上一代归档）：按 reopen 原语清理
+            // 残留归档，代次不动——open 根是当前事实，继续走 b 判定。
+            store
+                .reopen_failed_code_review_gate_for_plan_repair(
+                    project_id, issue_id, attempt_id, &gate_id,
+                )
+                .map_err(|error| {
+                    format!("gate {gate_id} residual archive cleanup failed: {error}")
+                })?;
+            actions += 1;
+        }
+        // e. 仲裁中的门不抢先关。
+        let arbitration_in_flight = active_journal
+            .as_ref()
+            .is_some_and(|journal| !journal.is_completed() && journal.expected_gate_id == gate_id);
+        if arbitration_in_flight {
+            eprintln!(
+                "[aria-startup] gate {gate_id} on attempt {attempt_id} is under failed-review recovery arbitration; startup gate reconcile will not preempt"
+            );
+            continue;
+        }
+        // b. origin 精确匹配（gate_id+代次一致）的终态 run → 幂等补偿关。
+        let matching = runs.iter().find(|run| {
+            run.gate_origin.as_ref().is_some_and(|origin| {
+                origin.gate_id == gate_id && origin.generation == state.generation
+            }) && matches!(
+                run.status,
+                CodingRoleRunStatus::Completed
+                    | CodingRoleRunStatus::Failed
+                    | CodingRoleRunStatus::Blocked
+                    | CodingRoleRunStatus::Aborted
+            )
+        });
+        match matching {
+            Some(run) => {
+                let origin = run.gate_origin.as_ref().expect("origin checked above");
+                let outcome = store
+                    .resolve_blocked_gate_for_origin(project_id, issue_id, attempt_id, origin)
+                    .map_err(|error| {
+                        format!("gate {gate_id} origin compensation failed: {error}")
+                    })?;
+                if outcome.is_some() {
+                    actions += 1;
+                } else {
+                    eprintln!(
+                        "[aria-startup] gate {gate_id} origin compensation no-op (closed by another action or generation moved); left for manual attention"
+                    );
+                }
+            }
+            None => {
+                // d. 无关联/旧版本 → 只告警，JSON 不动。
+                eprintln!(
+                    "[aria-startup] open gate {gate_id} (generation {}) on attempt {attempt_id} has no origin-matched terminal run; manual attention required, durable JSON untouched",
+                    state.generation
+                );
+            }
+        }
+    }
+
+    // c. 归档缺 action 且 journal 可证 retry_review → 按证据回填。
+    let archived = store
+        .archived_blocked_gate_facts_for_attempt(project_id, issue_id, attempt_id)
+        .map_err(|error| format!("archived gates unreadable: {error}"))?;
+    for facts in archived {
+        if facts.resolved_action.is_some() {
+            continue;
+        }
+        let gate_id = facts.gate.gate_id.clone();
+        let journal_proves = active_journal.as_ref().is_some_and(|journal| {
+            journal.expected_gate_id == gate_id && journal.retry_role_run_id.is_some()
+        }) || store
+            .get_archived_failed_code_review_recovery_journal(
+                project_id, issue_id, attempt_id, &gate_id,
+            )
+            .map_err(|error| format!("archived journal unreadable: {error}"))?
+            .is_some_and(|journal| journal.retry_role_run_id.is_some());
+        if journal_proves {
+            store
+                .backfill_archived_blocked_gate_action(
+                    project_id,
+                    issue_id,
+                    attempt_id,
+                    &gate_id,
+                    "retry_review",
+                )
+                .map_err(|error| format!("gate {gate_id} evidence backfill failed: {error}"))?;
+            actions += 1;
+        } else {
+            eprintln!(
+                "[aria-startup] archived gate {gate_id} on attempt {attempt_id} lacks resolved_action and no recovery journal proves retry_review; left as-is for manual reconciliation"
+            );
+        }
+    }
+    Ok(actions)
 }
 
 /// 单 attempt 启动恢复分诊（P2 Task 6）：

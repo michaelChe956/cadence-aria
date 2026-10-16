@@ -592,6 +592,95 @@ impl super::CodingAttemptStore {
         }))
     }
 
+    /// Bug2-B(Task 4)：启动 gate-only 对账的根记录视图——open 门（含当前
+    /// 代次）与「已写完整关闭事实但归档未落」的崩溃前缀记录；归档完整的
+    /// 门不在列（另经 `archived_blocked_gate_facts_for_attempt` 枚举）。
+    /// 只读视图，行动一律经统一关闭/reopen 原语在同一 mutations 锁内复核。
+    pub fn blocked_gate_states_for_startup_reconcile(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<StartupBlockedGateState>, ProductStoreError> {
+        let gates_root = self.blocked_gates_root(project_id, issue_id, attempt_id);
+        let mut states = Vec::new();
+        for path in super::json_file_paths(&gates_root)? {
+            let record: BlockedGateRecord = read_json(&path)?;
+            let pending_resolution =
+                (record.status == BlockedGateStatus::Resolved).then(|| ArchivedBlockedGateFacts {
+                    gate: normalize_blocked_gate(record.gate.clone()),
+                    resolved_action: record.resolved_action.clone(),
+                    resolved_at: record.resolved_at.clone(),
+                    resolution_generation: record.resolution_generation,
+                });
+            states.push(StartupBlockedGateState {
+                gate: normalize_blocked_gate(record.gate),
+                generation: record.resolution_generation,
+                pending_resolution,
+            });
+        }
+        Ok(states)
+    }
+
+    /// Bug2-B(Task 4)：resolved 归档清单（含缺 action 的旧档）——启动对账
+    /// 的证据回填扫描面。
+    pub fn archived_blocked_gate_facts_for_attempt(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<ArchivedBlockedGateFacts>, ProductStoreError> {
+        let resolved_root = self
+            .blocked_gates_root(project_id, issue_id, attempt_id)
+            .join("resolved");
+        let mut facts = Vec::new();
+        for path in super::json_file_paths(&resolved_root)? {
+            let record: BlockedGateRecord = read_json(&path)?;
+            facts.push(ArchivedBlockedGateFacts {
+                gate: normalize_blocked_gate(record.gate),
+                resolved_action: record.resolved_action,
+                resolved_at: record.resolved_at,
+                resolution_generation: record.resolution_generation,
+            });
+        }
+        Ok(facts)
+    }
+
+    /// Bug2-B(Task 4)：按证据回填归档动作——仅当归档存在且
+    /// `resolved_action` 缺失（旧数据）时写入动作；已有动作（含异动作）
+    /// 一律不覆盖，`resolved_at` 历史不伪造（保持缺失）。
+    /// blocked-gate-mutations 锁内执行；返回回填后事实（未命中返回 None）。
+    pub fn backfill_archived_blocked_gate_action(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+        action: &str,
+    ) -> Result<Option<ArchivedBlockedGateFacts>, ProductStoreError> {
+        validate_relative_id(gate_id)?;
+        let gates_root = self.blocked_gates_root(project_id, issue_id, attempt_id);
+        let lock_target = gates_root.join("blocked-gate-mutations");
+        with_exclusive_lock(&lock_target, || {
+            let archive_path = gates_root.join("resolved").join(format!("{gate_id}.json"));
+            if !super::path_is_regular_file(&archive_path)? {
+                return Ok(None);
+            }
+            let mut record: BlockedGateRecord = read_json(&archive_path)?;
+            if record.resolved_action.is_some() {
+                return Ok(None);
+            }
+            record.resolved_action = Some(action.to_string());
+            write_json(&archive_path, &record)?;
+            Ok(Some(ArchivedBlockedGateFacts {
+                gate: normalize_blocked_gate(record.gate),
+                resolved_action: record.resolved_action,
+                resolved_at: record.resolved_at,
+                resolution_generation: record.resolution_generation,
+            }))
+        })
+    }
+
     /// C2 Task 4（REQ-CRO-04）：指定 stage 的已解决门中，是否存在以
     /// manual_continue／accept_risk 解决且证据引用了给定报告 id 的记录
     /// ——续跑 runner 跳过已完成 reviewer 的唯一判据（retry_* 解决的门
@@ -1127,6 +1216,16 @@ pub struct ArchivedBlockedGateFacts {
     pub resolved_action: Option<String>,
     pub resolved_at: Option<String>,
     pub resolution_generation: u64,
+}
+
+/// Bug2-B(Task 4)：启动 gate-only 对账的根记录视图——open 门携带当前
+/// 代次；`pending_resolution` 为 Some 表示根已写完整关闭事实但归档未落
+/// （崩溃前缀，待统一原语补齐）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupBlockedGateState {
+    pub gate: CodingGateRequired,
+    pub generation: u64,
+    pub pending_resolution: Option<ArchivedBlockedGateFacts>,
 }
 
 /// 统一关闭原语核心(调用方必须已持有 blocked-gate-mutations 锁):

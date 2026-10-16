@@ -342,6 +342,35 @@ pub(crate) fn should_emit_coding_runner_protocol_error(status: &CodingAttemptSta
     )
 }
 
+/// Bug2-B(Task 4)：下一 stage 残留 open 门只读告警——open 门中 stage 严格
+/// 早于当前 stage 的即为残留（同 stage 门是正常人工等待面）。返回告警行
+/// 由调用侧 eprintln；**绝不自动解门**（门只经动作/统一关闭原语收口），
+/// 读取失败时静默尽力而为（告警面不阻塞推进主链）。
+pub(crate) fn residual_open_blocked_gate_warnings(
+    coding_store: &CodingAttemptStore,
+    current: &CodingExecutionAttempt,
+) -> Vec<String> {
+    let Ok(open_gates) =
+        coding_store.list_open_blocked_gates(&current.project_id, &current.issue_id, &current.id)
+    else {
+        return Vec::new();
+    };
+    open_gates
+        .into_iter()
+        .filter(|gate| {
+            gate.stage
+                .as_ref()
+                .is_some_and(|stage| stage.order() < current.stage.order())
+        })
+        .map(|gate| {
+            format!(
+                "residual open blocked gate {} (stage {:?}) while attempt {} advanced to {:?}: manual attention required; auto-resolution is forbidden",
+                gate.gate_id, gate.stage, current.id, current.stage
+            )
+        })
+        .collect()
+}
+
 pub(crate) async fn start_plan_repair_for_execution_outcome_if_needed(
     engine: &CodingWorkspaceEngine,
     current: &CodingExecutionAttempt,
@@ -843,6 +872,12 @@ pub(crate) async fn execute_start_coding_flow(
                         &current.id,
                         CodingExecutionStage::ReviewRequest,
                     )?;
+                    // Bug2-B(Task 4)：推进检测——进入下一 stage 时扫描残留
+                    // open 门,只读告警绝不自动解门(门只经动作/统一关闭
+                    // 原语收口)。
+                    for warning in residual_open_blocked_gate_warnings(coding_store, &current) {
+                        eprintln!("[aria-runner] {warning}");
+                    }
                 }
             }
         }
@@ -2214,6 +2249,93 @@ mod tests {
         assert!(
             session_state_events > 0,
             "runner must emit session_state for the parked shape before exiting"
+        );
+    }
+
+    /// Bug2-B(Task 4)：残留 open 门告警只标记严格早于当前 stage 的门；
+    /// 同 stage 门不告警；纯读不写盘（告警绝不自动解门）。
+    #[test]
+    fn residual_open_gate_warnings_flag_only_earlier_stage_gates() {
+        let root = tempfile::tempdir().expect("root");
+        let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+        let attempt = store
+            .create_attempt(
+                crate::product::coding_attempt_store::CreateCodingAttemptInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    work_item_id: "work_item_0001".to_string(),
+                    base_branch: "HEAD".to_string(),
+                    branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                    worktree_path: None,
+                    provider_config_snapshot: ProviderConfigSnapshot {
+                        author: ProviderName::Fake,
+                        reviewer: Some(ProviderName::Fake),
+                        review_rounds: 1,
+                        permission_modes: Default::default(),
+                    },
+                    target_snapshot: None,
+                    max_auto_rework: 1,
+                },
+            )
+            .expect("attempt");
+        let gate_input = |stage: crate::product::coding_models::CodingExecutionStage,
+                          reason: &str| {
+            crate::product::coding_attempt_store::CreateBlockedGateInput {
+                attempt_id: attempt.id.clone(),
+                stage,
+                node_id: None,
+                role: Some(crate::product::coding_models::CodingProviderRole::CodeReviewer),
+                title: "残留门".to_string(),
+                description: "residual gate fixture".to_string(),
+                reason_code: Some(reason.to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: Vec::new(),
+            }
+        };
+        let earlier = store
+            .create_blocked_gate(
+                &attempt,
+                gate_input(
+                    crate::product::coding_models::CodingExecutionStage::Coding,
+                    "residual_coding_gate",
+                ),
+            )
+            .expect("earlier-stage gate");
+        let same_stage = store
+            .create_blocked_gate(
+                &attempt,
+                gate_input(
+                    crate::product::coding_models::CodingExecutionStage::ReviewRequest,
+                    "review_request_gate",
+                ),
+            )
+            .expect("same-stage gate");
+        let mut current = attempt.clone();
+        current.stage = crate::product::coding_models::CodingExecutionStage::ReviewRequest;
+
+        let warnings = super::residual_open_blocked_gate_warnings(&store, &current);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains(&earlier.gate_id));
+        assert!(!warnings[0].contains(&same_stage.gate_id));
+
+        // 早阶段门关闭后零告警；同 stage 门保持 open（告警纯读不写盘）。
+        store
+            .resolve_blocked_gate(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &earlier.gate_id,
+            )
+            .expect("close earlier gate");
+        assert!(super::residual_open_blocked_gate_warnings(&store, &current).is_empty());
+        assert_eq!(
+            store
+                .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .expect("open gates")
+                .len(),
+            1,
+            "same-stage gate must remain open (warnings are read-only)"
         );
     }
 }
