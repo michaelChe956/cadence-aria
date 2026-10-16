@@ -276,6 +276,18 @@ cd web && pnpm dev --port 5173
 
 然后访问 `http://127.0.0.1:5173`，开发模式下前端会把 `/api/*` 代理到 `4317` 端口的后端。
 
+#### 控制面认证与浏览器会话（批2 T1）
+
+平台 API 默认启用入站认证（无条件前置，localhost 不豁免）：
+
+- 仅 `GET /api/health` 公开；其余 `/api/**` 与 `/ws/**`（含 test/evidence 路由与别名）都要求已认证会话，且在进入 handler / WebSocket upgrade 之前校验 Host 与 Origin。
+- 服务启动时生成一次性 bootstrap token（OS CSPRNG 32 字节），**只在 owner 受信终端（交互 TTY stderr）显示一次**。首次打开页面会看到认证入口，把终端显示的 token 粘贴进去完成交换；服务端通过 `aria_session` cookie（`HttpOnly; SameSite=Strict; Path=/`）建立会话。token 一次性消费，进程重启后会话与 token 全部失效，需要重启后在终端重新获取。
+- 长期运行建议在 `tmux`/`screen` 或交互终端中启动。`nohup ... > log 2>&1` 这类无 TTY 启动**无法交付 token**：服务会显式报告缺少受信终端交付前提，且绝不把 token 写入日志、文件或环境变量。
+- 状态变更（POST/PUT/DELETE）与 WebSocket 必须携带受信精确 Origin；敏感 GET 无 Origin 也可访问（仍需会话）；非法 / `null` Origin、伪造 Host 一律 403。
+- 默认受信 Origin/Host 从实际监听地址精确推导（如 `http://127.0.0.1:<port>`、`http://localhost:<port>`）。前端开发服务器（5173）或非回环监听必须显式配置：`ARIA_API_TRUSTED_ORIGINS=http://localhost:5173`（逗号分隔多个；精确 `scheme://host:port`，禁止通配符；非回环 bind 未配置时拒绝启动）。
+- 非浏览器自动化（CLI/脚本）：先显式携带受信 Origin 头，`POST /api/auth/session`（body：`{"token": "<终端获取的 token>"}`）交换后保存 cookie jar 再访问；收到 401 时回到认证流程，不要盲目重发副作用请求。
+- 前端刷新页面直接复用 cookie 会话（`GET /api/auth/session`：204 已认证 / 401 未认证）；WebSocket URL 一律不带任何令牌。
+
 #### 首次启动依赖自检
 
 首次启动时 Aria 会检查环境：

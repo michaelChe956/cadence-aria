@@ -53,6 +53,18 @@ import type {
   VerificationTriageRecord,
 } from "./types";
 
+/**
+ * 批2 T1：任一 API 请求返回 401 时派发（AuthGate 监听后回到认证态）。
+ * 副作用请求绝不自动重发。
+ */
+export const AUTH_REQUIRED_EVENT = "aria:auth-required";
+
+/** 401 时广播认证失效事件（非浏览器环境忽略）。 */
+export function notifyAuthRequired(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT));
+  }
+}
 export class ApiRequestError extends Error implements ApiError {
   code: string;
   details: RepositoryRegistrationErrorDetails;
@@ -83,12 +95,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
+    // 批2 T1：aria_session cookie（HttpOnly）随同源请求自动携带。
+    credentials: "same-origin",
     headers: {
       "content-type": "application/json",
       ...(init?.headers ?? {}),
     },
   });
   if (!response.ok) {
+    // 批2 T1：401 回认证态（AuthGate 监听事件），绝不自动重发副作用请求。
+    if (response.status === 401) {
+      notifyAuthRequired();
+    }
     throw new ApiRequestError(await normalizeApiError(response));
   }
   const text = await response.text();
@@ -164,10 +182,14 @@ export async function postWorkspaceHumanAction(
     `/api/workspace-sessions/${encodeURIComponent(sessionId)}/human-actions`,
     {
       method: "POST",
+      credentials: "same-origin",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(action),
     },
   );
+  if (response.status === 401) {
+    notifyAuthRequired();
+  }
   const body: unknown = await response.json().catch(() => null);
   if (isHumanActionStatus(body) && (response.ok || response.status === 409)) {
     return body;
@@ -219,7 +241,7 @@ export async function postRetryFailedScRun(
   const response = await fetch(
     `/api/workspace-sessions/${encodeURIComponent(sessionId)}/failed-sc-runs/${encodeURIComponent(failedNodeId)}/retry`,
     {
-      method: "POST",
+      credentials: "same-origin",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         command_id: `cmd-sc-retry-${failedNodeId}`,
@@ -227,6 +249,9 @@ export async function postRetryFailedScRun(
       }),
     },
   );
+  if (response.status === 401) {
+    notifyAuthRequired();
+  }
   const body: unknown = await response.json().catch(() => null);
   if (
     response.ok &&
@@ -732,9 +757,13 @@ export async function postAutomationContinuePlan(
     {
       method: "POST",
       headers: { "content-type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify(payload),
     },
   );
+  if (response.status === 401) {
+    notifyAuthRequired();
+  }
   const body: unknown = await response.json().catch(() => null);
   if (
     response.ok &&

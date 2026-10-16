@@ -200,6 +200,7 @@ describe("coding attempts api client", () => {
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-item-plans/plan%2F1/coding-start",
       {
         method: "POST",
+        credentials: "same-origin",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           command_id: "plan_start_abc123",
@@ -253,6 +254,7 @@ describe("coding attempts api client", () => {
       "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_plan_0001/coding-attempts",
       {
         method: "POST",
+        credentials: "same-origin",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({}),
       },

@@ -1,4 +1,4 @@
-import { ApiRequestError } from "./client";
+import { ApiRequestError, notifyAuthRequired } from "./client";
 import type {
   CreateSessionRequest,
   GenerateImageRequest,
@@ -46,12 +46,16 @@ async function imageCreateApiError(response: Response): Promise<ApiRequestError>
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
+    credentials: "same-origin",
     headers: {
       "content-type": "application/json",
       ...(init?.headers ?? {}),
     },
   });
   if (!response.ok) {
+    if (response.status === 401) {
+      notifyAuthRequired();
+    }
     throw await imageCreateApiError(response);
   }
   const text = await response.text();
@@ -122,8 +126,12 @@ export async function generateImage(
 
   const response = await fetch(`${sessionPath(sessionId)}/generate`, {
     method: "POST",
+    credentials: "same-origin",
     body: form,
   });
+  if (response.status === 401) {
+    notifyAuthRequired();
+  }
   if (!response.ok) {
     throw await imageCreateApiError(response);
   }

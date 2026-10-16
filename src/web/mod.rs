@@ -1,4 +1,5 @@
 pub mod advance_plan;
+pub mod api_auth;
 pub mod app;
 pub mod automation_attention_info;
 pub mod autopilot_orchestrator;

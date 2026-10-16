@@ -25,6 +25,20 @@ interface CodingWsServerMessage {
   [key: string]: unknown;
 }
 
+/**
+ * 批2 T1：scoped coding WS URL。认证经 aria_session cookie（HttpOnly）自动携带，
+ * URL 一律不加令牌/查询参数。
+ */
+export function scopedCodingAttemptWebSocketUrl(
+  projectId: string,
+  issueId: string,
+  attemptId: string,
+  location: Pick<Location, "protocol" | "host"> = window.location,
+): string {
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${location.host}/ws/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/coding-attempts/${encodeURIComponent(attemptId)}`;
+}
+
 const STREAM_CHUNK_FLUSH_MS = 50;
 
 export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
@@ -277,9 +291,8 @@ export function useCodingWorkspaceWs(address: CodingAttemptAddress | null) {
 
     function connect(reconnecting: boolean) {
       if (disposed) return;
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(
-        `${protocol}//${window.location.host}/ws/projects/${encodeURIComponent(scopedProjectId)}/issues/${encodeURIComponent(scopedIssueId)}/coding-attempts/${encodeURIComponent(scopedAttemptId)}`,
+        scopedCodingAttemptWebSocketUrl(scopedProjectId, scopedIssueId, scopedAttemptId),
       );
       wsRef.current = ws;
       useCodingWorkspaceStore

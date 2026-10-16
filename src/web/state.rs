@@ -152,6 +152,9 @@ pub struct WebAppState {
     pub aggregate_index_rebuilds: AggregateIndexRebuildRegistry,
     pub image_create_run_registry: Arc<ImageCreateRunRegistry>,
     pub image_create_engine: Option<Arc<ImageCreateEngine>>,
+    /// 批2 T1：控制面认证状态。仅生产 `serve_web` 装配；未装配（None）时认证
+    /// 中间件直通，进程内测试保持既有行为。
+    pub api_auth: Option<std::sync::Arc<crate::web::api_auth::ApiAuthState>>,
     pub logical_gateway_factory: Option<Arc<LogicalCodebaseGatewayFactory>>,
     /// add-provider-revalidate-probe：capability 重验证服务（生产缺省由
     /// handler 按请求 paths 构造真实 seam；it_web 注入 fake 版本源/
@@ -234,6 +237,7 @@ impl WebAppState {
             image_create_run_registry,
             image_create_engine,
             logical_gateway_factory: Some(logical_gateway_factory),
+            api_auth: None,
             capability_revalidate_service: None,
         };
         state.aggregate_initialization_dependencies = Some(
@@ -258,6 +262,15 @@ impl WebAppState {
     /// 仅由 `web` 启动入口在构造 state 时设置；运行期不会提供可变控制面。
     pub fn with_work_item_plan_single_candidate(mut self, enabled: bool) -> Self {
         self.work_item_plan_single_candidate = enabled;
+        self
+    }
+
+    /// 批2 T1：装配控制面认证状态（仅生产 `serve_web` 使用）。
+    pub fn with_api_auth(
+        mut self,
+        auth: std::sync::Arc<crate::web::api_auth::ApiAuthState>,
+    ) -> Self {
+        self.api_auth = Some(auth);
         self
     }
 

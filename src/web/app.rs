@@ -21,6 +21,10 @@ pub fn build_web_router(state: WebAppState) -> Router {
 pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool) -> Router {
     let router = Router::new()
         .route("/api/health", get(handlers::health))
+        .route(
+            "/api/auth/session",
+            get(crate::web::api_auth::session_status).post(crate::web::api_auth::create_session),
+        )
         .route("/api/providers/status", get(handlers::providers_status))
         .route("/api/providers/recheck", post(handlers::providers_recheck))
         .route("/api/runtime-info", get(handlers::runtime_info))
@@ -628,7 +632,14 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
         router
     };
 
-    router.with_state(state)
+    // 批2 T1：认证/来源校验中间件挂在最外层——晚于全部 route 注册、先于任何
+    // handler/WS upgrade 执行。`api_auth` 未装配（进程内测试默认）时直通。
+    router
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::web::api_auth::enforce_api_auth,
+        ))
+        .with_state(state)
 }
 
 /// launcher 依赖的就绪行前缀契约。修改即破坏 launcher 解析，须同步更新 bin/aria.js 与回归测试。
@@ -715,6 +726,23 @@ pub async fn serve_web(
     }
     let static_service = crate::web::static_assets::static_dist_service();
     let evidence_enabled = is_loopback_host(&host);
+
+    // 批2 T1：先 bind 拿真实端口，再装配控制面认证（默认受信 Origin/Host 精确
+    // 来自该监听地址；bind 非 loopback 时必须显式配置 ARIA_API_TRUSTED_ORIGINS）。
+    let listener = TcpListener::bind(addr).await?;
+    let bound_addr = listener.local_addr()?;
+    let explicit_origins = crate::web::api_auth::parse_trusted_origins_env(
+        &std::env::var(crate::web::api_auth::TRUSTED_ORIGINS_ENV).unwrap_or_default(),
+    );
+    let auth = std::sync::Arc::new(
+        crate::web::api_auth::ApiAuthState::for_bind(&bound_addr, &explicit_origins)
+            .map_err(|error| anyhow::anyhow!("api auth bootstrap failed: {error}"))?,
+    );
+    eprintln!(
+        "{}",
+        crate::web::api_auth::delivery_notice(&auth, owner_terminal_attached())
+    );
+    let state = state.with_api_auth(auth);
     let app = build_web_router_with_evidence(state.clone(), evidence_enabled).fallback(
         move |req: axum::extract::Request| {
             let static_service = static_service.clone();
@@ -731,13 +759,17 @@ pub async fn serve_web(
     );
     let orchestrator_task = tokio::spawn(async move { orchestrator.run(wake_rx).await });
 
-    let listener = TcpListener::bind(addr).await?;
-    let bound_addr = listener.local_addr()?;
     maybe_write_web_endpoint_file(evidence_enabled, &workspace_root, bound_addr.port());
     eprintln!("{}", listening_line(&bound_addr));
     axum::serve(listener, app).await?;
     orchestrator_task.abort();
     Ok(())
+}
+
+/// 批2 T1：owner 受信终端判定（stderr 是否 TTY）。无 TTY 时 bootstrap token
+/// 不交付（显式报告缺少交付前提），绝不绕道集中日志。
+fn owner_terminal_attached() -> bool {
+    unsafe { libc::isatty(libc::STDERR_FILENO) == 1 }
 }
 
 fn orchestrator_wake_subscribe(state: &WebAppState) -> tokio::sync::watch::Receiver<bool> {
@@ -998,5 +1030,904 @@ mod tests {
             StatusCode::NOT_FOUND,
             "evidence route must be mounted when host is loopback"
         );
+    }
+
+    /// 批2 Task 1：控制面认证真实 router 测试（表驱动 401/403、一次性交换、
+    /// Host/Origin 前置、零副作用、真实 WS 握手、材料不泄漏、未装配直通）。
+    mod api_auth_gates {
+        use axum::body::Body;
+        use axum::http::{HeaderValue, Request, StatusCode};
+        use serde_json::json;
+        use tempfile::tempdir;
+        use tower::ServiceExt;
+
+        use super::super::build_web_router;
+        use super::state;
+        use crate::web::api_auth::ApiAuthState;
+        use crate::web::state::WebAppState;
+
+        const AUTH_PORT: u16 = 39721;
+
+        fn trusted_host() -> &'static str {
+            "127.0.0.1:39721"
+        }
+
+        fn trusted_origin() -> &'static str {
+            "http://127.0.0.1:39721"
+        }
+
+        fn armed_state(root: &std::path::Path) -> (WebAppState, String) {
+            let bind: std::net::SocketAddr =
+                format!("127.0.0.1:{AUTH_PORT}").parse().expect("bind addr");
+            let auth = std::sync::Arc::new(ApiAuthState::for_bind(&bind, &[]).expect("auth"));
+            let token = auth.bootstrap_token_hex();
+            (state(root).with_api_auth(auth), token)
+        }
+
+        fn valid_task_body() -> Body {
+            Body::from(
+                json!({
+                    "request_text": "auth probe",
+                    "change_id": "change_auth_0001",
+                    "policy_preset": "balanced",
+                    "provider_mode": "fake",
+                    "timeout_secs": 60,
+                })
+                .to_string(),
+            )
+        }
+
+        fn ws_headers(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+            builder
+                .header("connection", "upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        }
+
+        async fn body_text(response: axum::response::Response) -> String {
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("body bytes");
+            String::from_utf8(bytes.to_vec()).expect("utf-8 body")
+        }
+
+        async fn exchange(app: &axum::Router, token: &str) -> axum::response::Response {
+            exchange_with(app, token, trusted_host(), trusted_origin()).await
+        }
+
+        async fn exchange_with(
+            app: &axum::Router,
+            token: &str,
+            host: &str,
+            origin: &str,
+        ) -> axum::response::Response {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/auth/session")
+                        .header("host", host)
+                        .header("origin", origin)
+                        .header("content-type", "application/json")
+                        .body(Body::from(json!({ "token": token }).to_string()))
+                        .expect("exchange request"),
+                )
+                .await
+                .expect("exchange response")
+        }
+
+        async fn bootstrap_session(app: &axum::Router, token: &str) -> (String, String) {
+            let response = exchange(app, token).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::NO_CONTENT,
+                "首次交换必须成功：{}",
+                body_text(response).await
+            );
+            let response = exchange(app, token);
+            let _ = response;
+            unreachable!("上一次调用已消费 response，这里不会执行")
+        }
+
+        /// T1-RED 表驱动：health 公开；其余 mutation/敏感 GET/三类 WS（含 alias）
+        /// 在受信 Host+Origin 下缺会话 → 401；localhost 无豁免。
+        #[tokio::test]
+        async fn api_auth_gates_every_non_health_route_without_session() {
+            let root = tempdir().expect("root");
+            let (st, _token) = armed_state(root.path());
+            let app = build_web_router(st);
+
+            let health = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/health")
+                        .body(Body::empty())
+                        .expect("health request"),
+                )
+                .await
+                .expect("health response");
+            assert_eq!(health.status(), StatusCode::OK, "GET /api/health 公开");
+
+            struct Case {
+                method: &'static str,
+                uri: &'static str,
+                ws: bool,
+                body: Option<Body>,
+            }
+            let cases = [
+                Case {
+                    method: "GET",
+                    uri: "/api/providers/status",
+                    ws: false,
+                    body: None,
+                },
+                Case {
+                    method: "GET",
+                    uri: "/api/runtime-info",
+                    ws: false,
+                    body: None,
+                },
+                Case {
+                    method: "GET",
+                    uri: "/api/tasks",
+                    ws: false,
+                    body: None,
+                },
+                Case {
+                    method: "GET",
+                    uri: "/api/workspaces",
+                    ws: false,
+                    body: None,
+                },
+                Case {
+                    method: "POST",
+                    uri: "/api/tasks",
+                    ws: false,
+                    body: Some(valid_task_body()),
+                },
+                Case {
+                    method: "POST",
+                    uri: "/api/providers/recheck",
+                    ws: false,
+                    body: None,
+                },
+                Case {
+                    method: "DELETE",
+                    uri: "/api/workspaces/ws_0001",
+                    ws: false,
+                    body: None,
+                },
+                Case {
+                    method: "GET",
+                    uri: "/api/workspace-sessions/sess_1/ws",
+                    ws: true,
+                    body: None,
+                },
+                Case {
+                    method: "GET",
+                    uri: "/api/ws/workspace/sess_1",
+                    ws: true,
+                    body: None,
+                },
+                Case {
+                    method: "GET",
+                    uri: "/ws/coding-attempts/attempt_1",
+                    ws: true,
+                    body: None,
+                },
+                Case {
+                    method: "GET",
+                    uri: "/ws/projects/project_1/issues/issue_1/coding-attempts/attempt_1",
+                    ws: true,
+                    body: None,
+                },
+                Case {
+                    method: "GET",
+                    uri: "/api/image-create/sessions/img_1/chat",
+                    ws: true,
+                    body: None,
+                },
+            ];
+            for case in cases {
+                let mut builder = Request::builder()
+                    .method(case.method)
+                    .uri(case.uri)
+                    .header("host", trusted_host())
+                    .header("origin", trusted_origin());
+                if case.ws {
+                    builder = ws_headers(builder);
+                }
+                let response = app
+                    .clone()
+                    .oneshot(
+                        builder
+                            .body(case.body.unwrap_or(Body::empty()))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{} {} 缺会话必须 401（localhost 不豁免）",
+                    case.method,
+                    case.uri
+                );
+            }
+        }
+
+        /// T1-RED 一次性交换：仅 body 接 token、原子消费、Strict cookie、
+        /// 会话检查 401/204、复用/错误 token → 401、交换本身需受信 Origin。
+        #[tokio::test]
+        async fn api_auth_exchange_consumes_token_once_and_sets_strict_cookie() {
+            let root = tempdir().expect("root");
+            let (st, token) = armed_state(root.path());
+            let app = build_web_router(st);
+
+            // 仅 body 接 token：query 携带 token + 空 body 不构成交换。
+            let query_attempt = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/auth/session?token={token}"))
+                        .header("host", trusted_host())
+                        .header("origin", trusted_origin())
+                        .header("content-type", "application/json")
+                        .body(Body::empty())
+                        .expect("query attempt"),
+                )
+                .await
+                .expect("query attempt response");
+            assert_ne!(
+                query_attempt.status(),
+                StatusCode::NO_CONTENT,
+                "query 中的 token 不得被消费"
+            );
+            assert!(
+                query_attempt.headers().get("set-cookie").is_none(),
+                "失败交换不得签发 cookie"
+            );
+
+            // 合法首次交换 → 204 + Strict cookie。
+            let response = exchange(&app, &token).await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            let cookie_line = response
+                .headers()
+                .get("set-cookie")
+                .and_then(|value| value.to_str().ok())
+                .expect("set-cookie")
+                .to_string();
+            assert!(
+                cookie_line.contains("HttpOnly"),
+                "cookie 须 HttpOnly：{cookie_line}"
+            );
+            assert!(
+                cookie_line.contains("SameSite=Strict"),
+                "cookie 须 SameSite=Strict"
+            );
+            assert!(cookie_line.contains("Path=/"), "cookie 须 Path=/");
+            assert!(
+                !cookie_line.contains("Secure"),
+                "本地 http 受信来源不加 Secure"
+            );
+            let session = cookie_line
+                .split(';')
+                .next()
+                .expect("cookie pair")
+                .trim()
+                .strip_prefix("aria_session=")
+                .expect("aria_session")
+                .to_string();
+            assert_eq!(session.len(), 64, "会话 ID 为 32 字节 hex");
+            assert_ne!(session, token, "会话 ID 与 bootstrap token 不同值");
+
+            // 会话检查：已认证 204 空体；未认证 401；响应不回显 token。
+            let authed_check = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/auth/session")
+                        .header("host", trusted_host())
+                        .header("cookie", format!("aria_session={session}"))
+                        .body(Body::empty())
+                        .expect("check"),
+                )
+                .await
+                .expect("check response");
+            assert_eq!(authed_check.status(), StatusCode::NO_CONTENT);
+            assert!(
+                body_text(authed_check).await.is_empty(),
+                "204 不回显任何材料"
+            );
+
+            let anon_check = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/auth/session")
+                        .header("host", trusted_host())
+                        .body(Body::empty())
+                        .expect("anon check"),
+                )
+                .await
+                .expect("anon check response");
+            assert_eq!(anon_check.status(), StatusCode::UNAUTHORIZED);
+            assert!(!body_text(anon_check).await.contains(&token));
+
+            // 复用 bootstrap / 错误 token → 401 且不签发 cookie。
+            for bad_token in [&token, "deadbeef", "not-hex"] {
+                let response = exchange(&app, bad_token).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "token={bad_token} 须统一 401"
+                );
+                assert!(response.headers().get("set-cookie").is_none());
+                let body = body_text(response).await;
+                assert!(!body.contains(&token), "错误响应不得回显 token");
+                assert!(!body.contains("deadbeef") || bad_token != "deadbeef");
+            }
+
+            // 交换是状态变更：缺 Origin → 403（先于 handler）。
+            let no_origin = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/auth/session")
+                        .header("host", trusted_host())
+                        .header("content-type", "application/json")
+                        .body(Body::from(json!({ "token": token }).to_string()))
+                        .expect("no origin exchange"),
+                )
+                .await
+                .expect("no origin response");
+            assert_eq!(
+                no_origin.status(),
+                StatusCode::FORBIDDEN,
+                "mutation 缺 Origin 在 handler 前拒绝"
+            );
+        }
+
+        /// T1-RED Host/Origin 前置（已认证会话）：mutation/WS 必须受信精确 Origin，
+        /// 敏感 GET 无 Origin 仍认证；非法/null Origin、非法 Host → 403。
+        #[tokio::test]
+        async fn api_auth_enforces_host_and_origin_before_handlers() {
+            let root = tempdir().expect("root");
+            let (st, token) = armed_state(root.path());
+            let app = build_web_router(st);
+            let response = exchange(&app, &token).await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            let cookie_line = response
+                .headers()
+                .get("set-cookie")
+                .and_then(|value| value.to_str().ok())
+                .expect("set-cookie")
+                .to_string();
+            let session = cookie_line
+                .split(';')
+                .next()
+                .expect("pair")
+                .trim()
+                .strip_prefix("aria_session=")
+                .expect("session")
+                .to_string();
+            let cookie = format!("aria_session={session}");
+
+            let request =
+                |origin: Option<&str>, host: Option<&str>, uri: &'static str, ws: bool| {
+                    let mut builder = Request::builder().uri(uri);
+                    if let Some(origin) = origin {
+                        builder = builder.header("origin", origin);
+                    }
+                    if let Some(host) = host {
+                        builder = builder.header("host", host);
+                    } else {
+                        builder = builder.header("host", trusted_host());
+                    }
+                    builder = builder.header("cookie", cookie.as_str());
+                    if ws {
+                        builder = ws_headers(builder);
+                    }
+                    builder.body(Body::empty()).expect("request")
+                };
+
+            // 敏感 GET：无 Origin 仍认证 + Host 正确 → 200。
+            let response = app
+                .clone()
+                .oneshot(request(None, None, "/api/tasks", false))
+                .await
+                .expect("no-origin GET");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "敏感 GET 无 Origin 仍放行"
+            );
+
+            // 受信 Origin GET → 200。
+            let response = app
+                .clone()
+                .oneshot(request(Some(trusted_origin()), None, "/api/tasks", false))
+                .await
+                .expect("trusted GET");
+            assert_eq!(response.status(), StatusCode::OK);
+
+            // null / 恶意 Origin → 403。
+            for evil in ["null", "http://evil.example", "https://127.0.0.1:39721"] {
+                let response = app
+                    .clone()
+                    .oneshot(request(Some(evil), None, "/api/tasks", false))
+                    .await
+                    .expect("evil GET");
+                assert_eq!(
+                    response.status(),
+                    StatusCode::FORBIDDEN,
+                    "Origin={evil} 须 403"
+                );
+            }
+
+            // 非法 Host（Origin 受信）→ 403。
+            for bad_host in ["evil.example:4317", "127.0.0.1:39722", "localhost"] {
+                let response = app
+                    .clone()
+                    .oneshot(request(
+                        Some(trusted_origin()),
+                        Some(bad_host),
+                        "/api/tasks",
+                        false,
+                    ))
+                    .await
+                    .expect("bad host GET");
+                assert_eq!(
+                    response.status(),
+                    StatusCode::FORBIDDEN,
+                    "Host={bad_host} 须 403"
+                );
+            }
+
+            // loopback Host 变体（带受信端口）→ 200。
+            let response = app
+                .clone()
+                .oneshot(request(None, Some("localhost:39721"), "/api/tasks", false))
+                .await
+                .expect("loopback variant GET");
+            assert_eq!(response.status(), StatusCode::OK);
+
+            // mutation：缺 Origin → 403；恶意 Origin → 403；受信 → 通过认证门。
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/tasks")
+                        .header("host", trusted_host())
+                        .header("cookie", cookie.as_str())
+                        .header("content-type", "application/json")
+                        .body(valid_task_body())
+                        .expect("mutation no origin"),
+                )
+                .await
+                .expect("mutation response");
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "mutation 缺 Origin 须 403"
+            );
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/tasks")
+                        .header("host", trusted_host())
+                        .header("origin", "http://evil.example")
+                        .header("cookie", cookie.as_str())
+                        .header("content-type", "application/json")
+                        .body(valid_task_body())
+                        .expect("mutation evil origin"),
+                )
+                .await
+                .expect("mutation response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/tasks")
+                        .header("host", trusted_host())
+                        .header("origin", trusted_origin())
+                        .header("cookie", cookie.as_str())
+                        .header("content-type", "application/json")
+                        .body(valid_task_body())
+                        .expect("mutation trusted"),
+                )
+                .await
+                .expect("mutation response");
+            assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_ne!(response.status(), StatusCode::FORBIDDEN);
+
+            // WS：无 Origin / 恶意 Origin → 403；受信 Origin+cookie → 非 401/403。
+            let response = app
+                .clone()
+                .oneshot(request(None, None, "/api/workspace-sessions/s1/ws", true))
+                .await
+                .expect("ws no origin");
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "WS 缺 Origin 须 403"
+            );
+
+            let response = app
+                .clone()
+                .oneshot(request(
+                    Some("null"),
+                    None,
+                    "/api/workspace-sessions/s1/ws",
+                    true,
+                ))
+                .await
+                .expect("ws null origin");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+            let response = app
+                .clone()
+                .oneshot(request(
+                    Some(trusted_origin()),
+                    None,
+                    "/api/workspace-sessions/s1/ws",
+                    true,
+                ))
+                .await
+                .expect("ws trusted");
+            assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        }
+
+        /// T1-RED 零副作用：被拒 mutation 不创建对象（副作用/provider 启动为 0）。
+        #[tokio::test]
+        async fn api_auth_rejection_produces_zero_side_effects() {
+            let root = tempdir().expect("root");
+            let (st, token) = armed_state(root.path());
+            let app = build_web_router(st);
+
+            // 401：缺会话的合法 mutation。
+            let rejected = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/tasks")
+                        .header("host", trusted_host())
+                        .header("origin", trusted_origin())
+                        .header("content-type", "application/json")
+                        .body(valid_task_body())
+                        .expect("unauth mutation"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+
+            // 交换会话后确认任务数为 0。
+            let response = exchange(&app, &token).await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            let cookie_line = response
+                .headers()
+                .get("set-cookie")
+                .and_then(|value| value.to_str().ok())
+                .expect("set-cookie")
+                .to_string();
+            let session = cookie_line
+                .split(';')
+                .next()
+                .expect("pair")
+                .trim()
+                .strip_prefix("aria_session=")
+                .expect("session")
+                .to_string();
+            let cookie = format!("aria_session={session}");
+
+            let list_after_401 = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/tasks")
+                        .header("host", trusted_host())
+                        .header("cookie", cookie.as_str())
+                        .body(Body::empty())
+                        .expect("list"),
+                )
+                .await
+                .expect("list response");
+            assert_eq!(list_after_401.status(), StatusCode::OK);
+            let payload: serde_json::Value =
+                serde_json::from_str(&body_text(list_after_401).await).expect("json");
+            assert_eq!(
+                payload["tasks"].as_array().map(Vec::len),
+                Some(0),
+                "被拒请求不得产生副作用"
+            );
+
+            // 403：有会话 + 恶意 Origin 的 mutation 同样零副作用。
+            let rejected = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/tasks")
+                        .header("host", trusted_host())
+                        .header("origin", "http://evil.example")
+                        .header("cookie", cookie.as_str())
+                        .header("content-type", "application/json")
+                        .body(valid_task_body())
+                        .expect("evil mutation"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+
+            let list_after_403 = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/tasks")
+                        .header("host", trusted_host())
+                        .header("cookie", cookie.as_str())
+                        .body(Body::empty())
+                        .expect("list"),
+                )
+                .await
+                .expect("list response");
+            let payload: serde_json::Value =
+                serde_json::from_str(&body_text(list_after_403).await).expect("json");
+            assert_eq!(payload["tasks"].as_array().map(Vec::len), Some(0));
+
+            // 对照组：认证 + 受信 Origin 的同请求创建 1 个任务（探针有效）。
+            let created = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/tasks")
+                        .header("host", trusted_host())
+                        .header("origin", trusted_origin())
+                        .header("cookie", cookie.as_str())
+                        .header("content-type", "application/json")
+                        .body(valid_task_body())
+                        .expect("allowed mutation"),
+                )
+                .await
+                .expect("created response");
+            assert_eq!(created.status(), StatusCode::OK, "对照创建须成功");
+
+            let list_after_create = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/tasks")
+                        .header("host", trusted_host())
+                        .header("cookie", cookie.as_str())
+                        .body(Body::empty())
+                        .expect("list"),
+                )
+                .await
+                .expect("list response");
+            let payload: serde_json::Value =
+                serde_json::from_str(&body_text(list_after_create).await).expect("json");
+            assert_eq!(payload["tasks"].as_array().map(Vec::len), Some(1));
+        }
+
+        /// T1-RED 真实 TCP WS 握手：认证/Origin 在 upgrade 前强制；alias 同样受限。
+        #[tokio::test]
+        async fn api_auth_ws_handshake_enforced_on_real_server() {
+            let root = tempdir().expect("root");
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let auth = std::sync::Arc::new(ApiAuthState::for_bind(&addr, &[]).expect("auth"));
+            let token = auth.bootstrap_token_hex();
+            let app = build_web_router(state(root.path()).with_api_auth(auth));
+            let server_app = app.clone();
+            tokio::spawn(async move {
+                axum::serve(listener, server_app).await.expect("serve");
+            });
+
+            let host = format!("127.0.0.1:{}", addr.port());
+            let origin = format!("http://{host}");
+            let ws_url = format!("ws://{host}/api/workspace-sessions/sess_ws1/ws");
+            let alias_url = format!("ws://{host}/api/ws/workspace/sess_ws1");
+
+            let request_with = |url: &str, cookie: Option<String>, origin: Option<String>| {
+                use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+                let mut request = url.into_client_request().expect("client request");
+                if let Some(cookie) = cookie {
+                    request
+                        .headers_mut()
+                        .insert("cookie", HeaderValue::from_str(&cookie).expect("cookie"));
+                }
+                if let Some(origin) = origin {
+                    request
+                        .headers_mut()
+                        .insert("origin", HeaderValue::from_str(&origin).expect("origin"));
+                }
+                request
+            };
+
+            // 无 cookie → 握手拒绝（401）。
+            let no_cookie = request_with(&ws_url, None, Some(origin.clone()));
+            assert!(
+                tokio_tungstenite::connect_async(no_cookie).await.is_err(),
+                "无会话的 WS upgrade 必须被拒"
+            );
+
+            // 与运行中服务器共享同一 auth 状态完成交换。
+            let response = exchange_with(&app, &token, &host, &origin).await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            let cookie_line = response
+                .headers()
+                .get("set-cookie")
+                .and_then(|value| value.to_str().ok())
+                .expect("set-cookie")
+                .to_string();
+            let session = cookie_line
+                .split(';')
+                .next()
+                .expect("pair")
+                .trim()
+                .strip_prefix("aria_session=")
+                .expect("session")
+                .to_string();
+            let cookie = format!("aria_session={session}");
+
+            // 有会话 + 恶意 Origin → 握手拒绝（403）。
+            let evil = request_with(
+                &ws_url,
+                Some(cookie.clone()),
+                Some("http://evil.example".to_string()),
+            );
+            assert!(
+                tokio_tungstenite::connect_async(evil).await.is_err(),
+                "恶意 Origin 的 WS upgrade 必须被拒"
+            );
+
+            // 有会话 + 受信 Origin → 握手成功（101）。
+            let allowed = request_with(&ws_url, Some(cookie.clone()), Some(origin.clone()));
+            let (stream, response) = tokio_tungstenite::connect_async(allowed)
+                .await
+                .expect("authenticated handshake must succeed");
+            assert_eq!(response.status().as_u16(), 101, "upgrade 必须完成");
+            drop(stream);
+
+            // alias 路径同样受认证保护。
+            let alias_no_cookie = request_with(&alias_url, None, Some(origin.clone()));
+            assert!(
+                tokio_tungstenite::connect_async(alias_no_cookie)
+                    .await
+                    .is_err(),
+                "alias WS 无会话必须被拒"
+            );
+        }
+
+        /// T1-RED 材料不泄漏：token/会话不出现在 env 与任何错误响应体。
+        #[tokio::test]
+        async fn api_auth_token_absent_from_env_and_response_bodies() {
+            let root = tempdir().expect("root");
+            let (st, token) = armed_state(root.path());
+            let app = build_web_router(st);
+            let response = exchange(&app, &token).await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            let cookie_line = response
+                .headers()
+                .get("set-cookie")
+                .and_then(|value| value.to_str().ok())
+                .expect("set-cookie")
+                .to_string();
+            let session = cookie_line
+                .split(';')
+                .next()
+                .expect("pair")
+                .trim()
+                .strip_prefix("aria_session=")
+                .expect("session")
+                .to_string();
+
+            let bodies = [
+                // 401 未认证响应体
+                body_text(
+                    app.clone()
+                        .oneshot(
+                            Request::builder()
+                                .uri("/api/tasks")
+                                .header("host", trusted_host())
+                                .header("origin", trusted_origin())
+                                .body(Body::empty())
+                                .expect("unauth"),
+                        )
+                        .await
+                        .expect("unauth response"),
+                )
+                .await,
+                // 403 恶意 Origin 响应体（带会话）
+                body_text(
+                    app.clone()
+                        .oneshot(
+                            Request::builder()
+                                .method("POST")
+                                .uri("/api/tasks")
+                                .header("host", trusted_host())
+                                .header("origin", "http://evil.example")
+                                .header("cookie", format!("aria_session={session}"))
+                                .header("content-type", "application/json")
+                                .body(valid_task_body())
+                                .expect("evil"),
+                        )
+                        .await
+                        .expect("evil response"),
+                )
+                .await,
+                // 复用 token 的 401 响应体
+                body_text(exchange(&app, &token).await).await,
+            ];
+            for (index, body) in bodies.iter().enumerate() {
+                assert!(!body.contains(&token), "响应 {index} 泄漏 bootstrap token");
+                assert!(!body.contains(&session), "响应 {index} 泄漏会话 ID");
+            }
+
+            // fixture 环境枚举：env 中无任何入站认证材料。
+            for (key, value) in std::env::vars_os() {
+                let value = value.to_string_lossy();
+                assert!(
+                    !value.contains(&token) && !value.contains(&session),
+                    "env 变量 {:?} 含认证材料",
+                    key.to_string_lossy()
+                );
+            }
+        }
+
+        /// T1-RED 未装配 api_auth 的 router 保持既有内嵌测试行为（直通）。
+        #[tokio::test]
+        async fn api_auth_unarmed_router_keeps_legacy_test_behavior() {
+            let root = tempdir().expect("root");
+            let app = build_web_router(state(root.path()));
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/tasks")
+                        .body(Body::empty())
+                        .expect("legacy request"),
+                )
+                .await
+                .expect("legacy response");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "未装配认证时内嵌测试直通"
+            );
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/auth/session")
+                        .body(Body::empty())
+                        .expect("session check"),
+                )
+                .await
+                .expect("session response");
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "未装配认证时会话端点不可用"
+            );
+        }
     }
 }

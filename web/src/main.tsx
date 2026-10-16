@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { AuthGate } from "./api/auth";
 import { AppRouter } from "./router";
 import "./styles.css";
 
@@ -10,7 +11,9 @@ const root = document.getElementById("root");
 if (root) {
   ReactDOM.createRoot(root).render(
     <React.StrictMode>
-      <AppRouter />
+      <AuthGate>
+        <AppRouter />
+      </AuthGate>
     </React.StrictMode>,
   );
 }
