@@ -34,10 +34,25 @@ fn update_workspace_session_status_still_clears_gate_snapshot_on_terminal_status
     let (_tmp, store) = setup();
     let session = create_session(&store, "story_0001", WorkspaceType::Story);
 
+    // 非终态(WaitingForHuman)保留快照——置于终态写之前:批 2 T2 的
+    // Terminated 粘滞守卫使 from-Terminated 的后续通用写原样返回,
+    // 非终态回归段不能以 Terminated 为起点。
+    persist_session_with_gate_snapshot(&store, &session.id);
+    let saved = store
+        .update_workspace_session_status(&session.id, WorkspaceSessionStatus::WaitingForHuman)
+        .unwrap();
+    assert_eq!(saved.status, WorkspaceSessionStatus::WaitingForHuman);
+    assert!(
+        saved.human_gate_snapshot.is_some(),
+        "non-terminal generic write must keep the gate snapshot"
+    );
+
+    // 终态序列 Confirmed→Failed→Terminated:覆盖三个终态、清快照断言
+    // 不变,且全程无 from-Terminated 转换(粘滞守卫只挡 from-Terminated)。
     for status in [
         WorkspaceSessionStatus::Confirmed,
-        WorkspaceSessionStatus::Terminated,
         WorkspaceSessionStatus::Failed,
+        WorkspaceSessionStatus::Terminated,
     ] {
         persist_session_with_gate_snapshot(&store, &session.id);
         let saved = store
@@ -50,13 +65,18 @@ fn update_workspace_session_status_still_clears_gate_snapshot_on_terminal_status
         );
     }
 
+    // 批 2 T2(REQ-WIGA-09)语义钉住:Terminated 粘滞守卫——run 取消后
+    // 迟到的 Failed 通用写不得覆盖终止终态,原样返回 Terminated 记录且
+    // 无落盘副作用(不顺带清 gate 快照)。
     persist_session_with_gate_snapshot(&store, &session.id);
-    let saved = store
-        .update_workspace_session_status(&session.id, WorkspaceSessionStatus::WaitingForHuman)
+    let sticky = store
+        .update_workspace_session_status(&session.id, WorkspaceSessionStatus::Failed)
         .unwrap();
-    assert_eq!(saved.status, WorkspaceSessionStatus::WaitingForHuman);
+    assert_eq!(sticky.status, WorkspaceSessionStatus::Terminated);
+    let reloaded = store.get_workspace_session(&session.id).unwrap();
+    assert_eq!(reloaded.status, WorkspaceSessionStatus::Terminated);
     assert!(
-        saved.human_gate_snapshot.is_some(),
-        "non-terminal generic write must keep the gate snapshot"
+        reloaded.human_gate_snapshot.is_some(),
+        "sticky guard must not write or clear the snapshot"
     );
 }
