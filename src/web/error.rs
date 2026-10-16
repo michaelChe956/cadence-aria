@@ -268,6 +268,17 @@ impl IntoResponse for ApiError {
             "automation_enrollment_not_found" => StatusCode::NOT_FOUND,
             "automation_enrollment_invalid_scope" => StatusCode::UNPROCESSABLE_ENTITY,
             "automation_role_chain_unsupported" => StatusCode::UNPROCESSABLE_ENTITY,
+            // 批 2 P4（REQ-WIGA-10）：plan 继续/control 稳定码——终止/忙/绑定
+            // 漂移/停点键不符/命令账本冲突 409；作用域与形状拒绝 422。
+            "automation_plan_terminated"
+            | "automation_continue_busy"
+            | "automation_continue_binding_mismatch"
+            | "automation_continue_stop_key_mismatch"
+            | "automation_continue_command_conflict"
+            | "automation_continue_gate_reopen_conflict" => StatusCode::CONFLICT,
+            "automation_continue_rejected"
+            | "automation_continue_not_stopped"
+            | "automation_continue_context_required" => StatusCode::UNPROCESSABLE_ENTITY,
             // C5 Task 6（REQ-INIT-C5-RESUME）：resume 前置校验稳定码——
             // 非 Failed 终态与非法 command_id 均 422（不创建 successor）。
             "repository_initialization_resume_not_failed" => StatusCode::UNPROCESSABLE_ENTITY,

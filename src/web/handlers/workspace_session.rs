@@ -68,6 +68,37 @@ pub async fn workspace_session_takeover(
     Path(session_id): Path<String>,
 ) -> ApiResult<Json<WorkspaceSessionTakeoverDto>> {
     let lifecycle = LifecycleStore::new(product_app_paths(&state));
+    // 批 2 P4（REQ-WIGA-08，C1 裁定）：精确绑定当前 enabled enrollment 的
+    // plan 会话一律服务端拒绝 takeover（沿用既有码，不建 Interactive 子
+    // session、不变更绑定）；非该绑定范围（无 enrollment/未绑定/已禁用/
+    // story-design 等非 plan 会话）保持既有接管语义。不以 AutoIfValid 猜
+    // 是否托管——只认 durable enrollment 精确绑定。
+    let parent = lifecycle
+        .get_workspace_session(&session_id)
+        .map_err(product_store_api_error)?;
+    let precisely_managed = crate::product::issue_automation_store::IssueAutomationStore::new(
+        product_app_paths(&state),
+    )
+    .get(&parent.project_id, &parent.issue_id)
+    .map_err(product_store_api_error)?
+    .is_some_and(|enrollment| {
+        enrollment.enabled
+            && enrollment.session_id.as_deref() == Some(session_id.as_str())
+            && enrollment
+                .binding_history
+                .as_ref()
+                .is_some_and(|history| history.current.session_id == session_id)
+    });
+    if precisely_managed {
+        return Err(ApiError::runtime(
+            "workspace_session_takeover_not_allowed",
+            "workspace session takeover is not allowed",
+            json!({
+                "reason": "session is precisely bound to an enabled automation enrollment",
+                "session_id": session_id,
+            }),
+        ));
+    }
     let child = lifecycle
         .takeover_stopped_needs_human(&session_id)
         .map_err(workspace_session_takeover_api_error)?;
@@ -558,5 +589,166 @@ mod tests {
         assert_eq!(value["review_verdict"], "pass");
         assert_eq!(value["confirmed_by"], "user");
         assert_eq!(value["source_node_id"], "timeline_node_001");
+    }
+
+    /// 批 2 P4（REQ-WIGA-08，C1 裁定）：精确绑定 enabled enrollment 的会话
+    /// takeover 一律服务端拒（沿用 `workspace_session_takeover_not_allowed`，
+    /// 409、零子 session）；非托管（无 enrollment）原样放行。
+    #[tokio::test]
+    async fn takeover_rejected_for_precisely_bound_enabled_enrollment() {
+        use crate::product::issue_automation_store::IssueAutomationStore;
+        use crate::product::lifecycle_store::WorkItemPlanSessionOptions;
+        use crate::product::models::IssueWorkItemPlanOptions;
+        use crate::product::models::automation::{
+            EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, PlanApprovalPolicy,
+        };
+        use crate::product::work_item_plan_policy::{
+            HumanGateSnapshot, HumanReason, RunPolicy, WorkItemPlanFlowKind,
+        };
+        use tower::ServiceExt;
+
+        let inner = crate::web::handlers::automation_enrollment_test_support::seed_fixture(1, true);
+        let root_path = inner._root.path().to_path_buf();
+        let state = WebAppState::new(
+            root_path.clone(),
+            crate::web::runtime::WebRuntime::new_fake(root_path.clone()),
+        );
+        let paths = ProductAppPaths::new(root_path.join(".aria"));
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let store = IssueAutomationStore::new(paths.clone());
+        const PROJECT: &str = "project_0001";
+        const ISSUE: &str = "issue_0001";
+
+        store
+            .compare_and_set(
+                PROJECT,
+                ISSUE,
+                None,
+                EnrollmentWriteCommand::Enable {
+                    selection_key: "takeover-reject".to_string(),
+                    source: EnrollmentSource {
+                        stories: Vec::new(),
+                        designs: Vec::new(),
+                    },
+                    options: EnrollmentOptions {
+                        author_provider: ProviderName::Fake,
+                        reviewer_provider: ProviderName::Fake,
+                        review_rounds: 0,
+                        superpowers_enabled: false,
+                        openspec_enabled: false,
+                        plan_approval: PlanApprovalPolicy::Auto,
+                        plan_options: IssueWorkItemPlanOptions {
+                            include_integration_tests: false,
+                            include_e2e_tests: false,
+                            force_frontend_backend_split: false,
+                            require_execution_plan_confirm: false,
+                        },
+                    },
+                    target: crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                        repository_id: "repo-1".to_string(),
+                    },
+                },
+            )
+            .expect("enable enrollment");
+
+        let stopped_record = |entity: &str| {
+            let mut record = lifecycle
+                .create_workspace_session(CreateWorkspaceSessionInput {
+                    project_id: PROJECT.to_string(),
+                    issue_id: ISSUE.to_string(),
+                    entity_id: entity.to_string(),
+                    workspace_type: WorkspaceType::WorkItemPlan,
+                    author_provider: ProviderName::Fake,
+                    reviewer_provider: None,
+                    review_rounds: 0,
+                    superpowers_enabled: false,
+                    openspec_enabled: false,
+                    work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                        flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                        run_policy: RunPolicy::AutoIfValid,
+                        rollout_snapshot: false,
+                    }),
+                })
+                .expect("create session");
+            record.status = WorkspaceSessionStatus::StoppedNeedsHuman;
+            record.single_candidate_phase =
+                Some(crate::product::models::SingleCandidatePhase::Approval);
+            record.human_gate_snapshot = Some(HumanGateSnapshot {
+                candidate_recovery: None,
+                findings: Vec::new(),
+                repeated_fingerprints: Vec::new(),
+                attempts_used: 0,
+                manual_repairs_remaining: 1,
+                trigger: HumanReason::NativeHumanRequired,
+                resumable: true,
+                accepted_feedback_turns: Some(0),
+            });
+            crate::product::json_store::write_json(
+                &lifecycle
+                    .app_paths()
+                    .issue_lifecycle_root(PROJECT, ISSUE)
+                    .join("workspace-sessions")
+                    .join(format!("{}.json", record.id)),
+                &record,
+            )
+            .expect("persist stopped record");
+            record
+        };
+
+        let bound = stopped_record("plan_bound_1");
+        store
+            .bind_plan(PROJECT, ISSUE, 1, "plan_bound_1", &bound.id)
+            .expect("bind managed plan");
+        let unmanaged = stopped_record("plan_unmanaged_1");
+
+        let app = crate::web::app::build_web_router(state.clone());
+        let post_takeover = |session_id: String| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(axum::http::Method::POST)
+                            .uri(format!("/api/workspace-sessions/{session_id}/takeover"))
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+                (status, payload)
+            }
+        };
+
+        // 精确绑定 enabled enrollment → 既有码 409 拒绝、零子 session。
+        let (status, payload) = post_takeover(bound.id.clone()).await;
+        assert_eq!(status, axum::http::StatusCode::CONFLICT, "{payload}");
+        assert_eq!(
+            payload["code"], "workspace_session_takeover_not_allowed",
+            "{payload}"
+        );
+        assert!(
+            lifecycle
+                .get_human_gate_takeover_event(&bound.id)
+                .expect("takeover event read")
+                .is_none(),
+            "rejected takeover must not create a child session"
+        );
+
+        // 非托管（无 enrollment 绑定该会话）→ 原样放行接管。
+        let (status, payload) = post_takeover(unmanaged.id.clone()).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{payload}");
+        assert!(
+            lifecycle
+                .get_human_gate_takeover_event(&unmanaged.id)
+                .expect("takeover event read")
+                .is_some(),
+            "unmanaged takeover must keep legacy behavior"
+        );
     }
 }

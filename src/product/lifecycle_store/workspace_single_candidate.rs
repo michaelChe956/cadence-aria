@@ -250,6 +250,66 @@ impl LifecycleStore {
         })
     }
 
+    /// 批 2 P4（REQ-WIGA-10）：绑定专用 StoppedNeedsHuman 原地重开。仅受理
+    /// durable `StoppedNeedsHuman` 且带 resumable 门快照的 SingleCandidate
+    /// WorkItemPlan 会话（enrollment-bound continue 专用入口，非 takeover
+    /// 子 session）：session 文件锁内 CAS 原地置回 `WaitingForHuman`，候选/
+    /// 快照/历史/run_history 全部保留；manual 预算已耗尽时本次显式继续只
+    /// 开放一个新说明回合（owner A-04：+1 单回合，不重置历史计数、不后台
+    /// 追加预算）。CAS 失败/形状不符原样上抛，零副作用。
+    pub fn reopen_stopped_needs_human_for_bound_continuation(
+        &self,
+        expected: &WorkspaceSessionRecord,
+    ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
+        let admission_scope = self.entity_scope_for_session(expected)?;
+        self.with_optional_entity_live_write(admission_scope.as_ref(), move || {
+            if expected.workspace_type != WorkspaceType::WorkItemPlan
+                || expected.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+                || expected.status
+                    != crate::product::models::WorkspaceSessionStatus::StoppedNeedsHuman
+                || !expected
+                    .human_gate_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.resumable)
+            {
+                return Err(ProductStoreError::InvalidRecord {
+                    kind: "bound_continuation_reopen",
+                    reason: "session is not a resumable stopped SingleCandidate \
+                             WorkItemPlan"
+                        .to_string(),
+                });
+            }
+            let session_path = self.find_workspace_session_path(&expected.id)?;
+            with_exclusive_lock(&session_path, || {
+                let mut stored: WorkspaceSessionRecord = read_json(&session_path)?;
+                if stored != *expected {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "workspace_session",
+                        id: expected.id.clone(),
+                    });
+                }
+                if stored.status
+                    != crate::product::models::WorkspaceSessionStatus::StoppedNeedsHuman
+                {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "bound_continuation_reopen",
+                        id: stored.id.clone(),
+                    });
+                }
+                stored.status = crate::product::models::WorkspaceSessionStatus::WaitingForHuman;
+                if let Some(snapshot) = stored.human_gate_snapshot.as_mut()
+                    && snapshot.manual_repairs_remaining == 0
+                {
+                    // A-04：预算耗尽的显式继续只开放一个新说明回合。
+                    snapshot.manual_repairs_remaining = 1;
+                }
+                stored.updated_at = Utc::now().to_rfc3339();
+                write_json(&session_path, &stored)?;
+                Ok(stored)
+            })
+        })
+    }
+
     /// 在 session 文件锁内冻结 `(failed_node_id, command_id)` 单发认领：
     /// 仅受理 durable Failed 的 SingleCandidate 会话；同键返回 Existing，
     /// 异键 Conflict（409）；认领不可复位。

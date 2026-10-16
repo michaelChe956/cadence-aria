@@ -194,7 +194,10 @@ pub(crate) use workspace_choice::{
     get_workspace_choice_response_status, post_workspace_choice_response,
 };
 pub(crate) use workspace_human_action::post_workspace_human_action;
-pub(crate) use workspace_sc_recovery::post_workspace_failed_sc_run_retry;
+pub(crate) use workspace_sc_recovery::{
+    get_automation_enrollment_control, post_automation_continue_plan,
+    post_workspace_failed_sc_run_retry,
+};
 #[rustfmt::skip]
 pub use runtime::{advance_task, artifact_content, confirm_task, create_task, file_content, file_diff, issue_rollback, issue_rollback_preview, list_tasks, projection, provider_input_content, rollback_preview, rollback_task, stop_task};
 #[rustfmt::skip]

@@ -18,6 +18,146 @@ use crate::web::state::WebAppState;
 use crate::web::workspace_session::WorkspaceSessionManager;
 use crate::web::workspace_ws_handler::ProviderRunKind;
 
+// ─── 批 2 P4（REQ-WIGA-12）：plan 阶段 attention 事实的稳定 key 与写/清 ───
+
+/// 生成检查点派发前失败（intent NeedsHuman / EngineStarted/ProviderDispatched
+/// 无活 run 转 NeedsHuman）的稳定事实 key：与 `PlanGenerationIntent::action_key`
+/// 同源，重复停点不增项。
+pub(crate) fn plan_generation_failed_fact_key(enrollment_id: &str, plan_id: &str) -> String {
+    format!(
+        "{}:needs_human",
+        crate::product::models::automation::PlanGenerationIntent::action_key_for(
+            enrollment_id,
+            plan_id
+        )
+    )
+}
+
+/// plan 人工门（StoppedNeedsHuman/WaitingForHuman 的 HumanConfirm 门）事实 key。
+pub(crate) fn plan_gate_fact_key(session_id: &str) -> String {
+    format!("plan_gate:{session_id}:human_confirm")
+}
+
+/// plan 阶段挂起 choice 的事实 key（逐 choice 一条）。
+pub(crate) fn plan_choice_fact_key(session_id: &str, choice_id: &str) -> String {
+    format!("plan_choice:{session_id}:{choice_id}")
+}
+
+/// plan 会话 durable Failed（provider 失败收敛）的稳定事实 key：单会话一条，
+/// 重复停点 upsert 不增项、`occurred_at` 首次冻结。
+pub(crate) fn plan_failed_node_fact_key(session_id: &str) -> String {
+    format!("plan_failed_node:{session_id}")
+}
+
+/// 批 2 P4（REQ-WIGA-12）：plan 事实写/清的精确绑定互证。仅当 enrollment
+/// 存在、enabled、冻结 auto 授权且当前代绑定精确指向该 session 时才可写
+///（手动/未绑定/禁用/旧代零写入）；绑定读取复用 advance 的
+/// `load_current_enrollment_binding`（漂移 fail-closed）。
+pub(crate) fn bound_auto_enrollment_for_plan_session(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    session_id: &str,
+) -> Result<
+    Option<(
+        IssueAutomationEnrollment,
+        crate::product::models::automation::EnrollmentBindingIdentity,
+    )>,
+    String,
+> {
+    let enrollment = IssueAutomationStore::new(app_paths.clone())
+        .get(project_id, issue_id)
+        .map_err(|error| format!("automation enrollment unreadable: {error}"))?;
+    let Some(enrollment) = enrollment else {
+        return Ok(None);
+    };
+    if !enrollment.enabled
+        || !matches!(
+            enrollment.options.plan_approval,
+            crate::product::models::automation::PlanApprovalPolicy::Auto
+        )
+    {
+        return Ok(None);
+    }
+    if enrollment.session_id.as_deref() != Some(session_id) {
+        return Ok(None);
+    }
+    let binding = crate::web::advance_plan::load_current_enrollment_binding(&enrollment)?;
+    if binding.session_id != session_id {
+        return Ok(None);
+    }
+    Ok(Some((enrollment, binding)))
+}
+
+/// 批 2 P4（REQ-WIGA-12）：按精确绑定 upsert plan 阶段事实；写失败原样上抛
+///（不假成功）。时间戳由 store 首写冻结（重入保留）。
+pub(crate) fn upsert_plan_attention_fact(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    binding: &crate::product::models::automation::EnrollmentBindingIdentity,
+    fact: crate::product::models::automation::AutomationAttentionFact,
+) -> Result<(), String> {
+    IssueAutomationStore::new(app_paths.clone())
+        .upsert_automation_attention_fact(project_id, issue_id, binding, fact)
+        .map_err(|error| format!("plan attention fact upsert failed: {error}"))
+}
+
+/// 批 2 P4（REQ-WIGA-12）：按稳定 key 清除 plan 阶段事实（继续成功/关门
+/// resolve）；key 不存在幂等成功；写失败原样上抛。
+pub(crate) fn resolve_plan_attention_fact(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    binding: &crate::product::models::automation::EnrollmentBindingIdentity,
+    key: &str,
+) -> Result<(), String> {
+    IssueAutomationStore::new(app_paths.clone())
+        .resolve_automation_attention_fact(project_id, issue_id, binding, key)
+        .map_err(|error| format!("plan attention fact resolve failed: {error}"))
+}
+
+/// 批 2 P4（REQ-WIGA-12）：`start_plan_generation_once` 的 intent NeedsHuman /
+/// EngineStarted/ProviderDispatched 无活 run 两分支写 `automation_failed`
+/// 事实（稳定 key：`{action_key}:needs_human`，重复停点不增项、零重复
+/// provider）。仅精确绑定的 auto 授权写（绑定读取失败/手动零写入，不阻断
+/// NeedsHuman 停等本身）；事实写入失败原样上抛（不假成功）。
+fn record_generation_needs_human_fact(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    enrollment: &IssueAutomationEnrollment,
+    reason_code: &str,
+) -> Result<(), String> {
+    if !matches!(
+        enrollment.options.plan_approval,
+        crate::product::models::automation::PlanApprovalPolicy::Auto
+    ) || !enrollment.enabled
+    {
+        return Ok(());
+    }
+    let Ok(binding) = crate::web::advance_plan::load_current_enrollment_binding(enrollment) else {
+        return Ok(());
+    };
+    let fact = crate::product::models::automation::AutomationAttentionFact {
+        key: plan_generation_failed_fact_key(&enrollment.enrollment_id, &binding.plan_id),
+        kind: crate::product::models::automation::AutomationAttentionKind::AutomationFailed,
+        stage: crate::product::models::automation::AutomationAttentionStage::Plan,
+        plan_id: Some(binding.plan_id.clone()),
+        session_id: Some(binding.session_id.clone()),
+        attempt_id: None,
+        reason_code: reason_code.to_string(),
+        occurred_at: chrono::Utc::now().to_rfc3339(),
+        choice_id: None,
+        gate_id: None,
+    };
+    upsert_plan_attention_fact(
+        app_paths,
+        &enrollment.project_id,
+        &enrollment.issue_id,
+        &binding,
+        fact,
+    )
+}
+
 /// 生成动作的观察结果；状态只从 durable 事实与 manager 临界区快照推导。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanGenerationOutcome {
@@ -108,7 +248,17 @@ pub async fn start_plan_generation_once(
         )
         .map_err(|error| format!("plan generation claim failed: {error}"))?;
     match intent.phase {
-        PlanGenerationPhase::NeedsHuman => return Ok(PlanGenerationOutcome::NeedsHuman),
+        PlanGenerationPhase::NeedsHuman => {
+            // 批 2 P4（REQ-WIGA-12）：派发前失败/停等落 durable 事实——无活
+            // 窗口仍可通知（N1 只读投影）；精确绑定才写、手动零写入、写失败
+            // 上抛不假成功。
+            record_generation_needs_human_fact(
+                &app_paths,
+                enrollment,
+                "plan_generation_needs_human",
+            )?;
+            return Ok(PlanGenerationOutcome::NeedsHuman);
+        }
         PlanGenerationPhase::EngineStarted | PlanGenerationPhase::ProviderDispatched => {
             // 无活 run 却已越过 EngineStarted：SC ledger/外部 provider 是否已被
             // 触达不可证明——持久 NeedsHuman，绝不重复 spawn。
@@ -118,6 +268,11 @@ pub async fn start_plan_generation_once(
                 &enrollment.enrollment_id,
                 PlanGenerationPhase::NeedsHuman,
             );
+            record_generation_needs_human_fact(
+                &app_paths,
+                enrollment,
+                "plan_generation_dispatch_unproven",
+            )?;
             return Ok(PlanGenerationOutcome::NeedsHuman);
         }
         PlanGenerationPhase::Claimed => {}

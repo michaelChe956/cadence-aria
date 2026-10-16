@@ -11,6 +11,127 @@ use crate::web::workspace_ws_types::WsOutMessage;
 
 use super::manager::{DurableProjectionError, WorkspaceSessionManager, inject_event_seq};
 
+
+// ─── 批 2 P4（REQ-WIGA-12）：plan 阶段停点/失败事实写清（router 观察面）───
+
+/// 批 2 P4：精确绑定 enabled auto 授权的 plan 会话才写事实（手动/未绑定/
+/// 禁用/旧代零写入）；键由写点从 durable 事实派生（稳定 key，重复不增项）。
+/// router 无调用方可回传写失败——打点留痕、不吞静默；写者上抛语义由
+/// continue/control 调用方承担。
+fn upsert_plan_stop_fact(
+    manager: &WorkspaceSessionManager,
+    key: String,
+    kind: crate::product::models::automation::AutomationAttentionKind,
+    reason_code: &str,
+    choice_id: Option<String>,
+) {
+    use crate::product::models::automation::AutomationAttentionFact;
+    let record = &manager.session_record;
+    let Ok(Some((_enrollment, binding))) =
+        crate::web::plan_generation::bound_auto_enrollment_for_plan_session(
+            &manager.app_paths,
+            &record.project_id,
+            &record.issue_id,
+            &manager.session_id,
+        )
+    else {
+        return;
+    };
+    let fact = AutomationAttentionFact {
+        key,
+        kind,
+        stage: crate::product::models::automation::AutomationAttentionStage::Plan,
+        plan_id: Some(binding.plan_id.clone()),
+        session_id: Some(binding.session_id.clone()),
+        attempt_id: None,
+        reason_code: reason_code.to_string(),
+        occurred_at: chrono::Utc::now().to_rfc3339(),
+        choice_id,
+        gate_id: None,
+    };
+    if let Err(message) = crate::web::plan_generation::upsert_plan_attention_fact(
+        &manager.app_paths,
+        &record.project_id,
+        &record.issue_id,
+        &binding,
+        fact,
+    ) {
+        eprintln!(
+            "[aria-plan-attention] upsert failed session={}: {message}",
+            manager.session_id
+        );
+    }
+}
+
+/// 批 2 P4：关门/继续成功后按稳定 key 清事实（幂等；清失败打点留痕）。
+fn resolve_plan_stop_fact(manager: &WorkspaceSessionManager, key: &str) {
+    let record = &manager.session_record;
+    let Ok(Some((_enrollment, binding))) =
+        crate::web::plan_generation::bound_auto_enrollment_for_plan_session(
+            &manager.app_paths,
+            &record.project_id,
+            &record.issue_id,
+            &manager.session_id,
+        )
+    else {
+        return;
+    };
+    if let Err(message) = crate::web::plan_generation::resolve_plan_attention_fact(
+        &manager.app_paths,
+        &record.project_id,
+        &record.issue_id,
+        &binding,
+        key,
+    ) {
+        eprintln!(
+            "[aria-plan-attention] resolve failed session={}: {message}",
+            manager.session_id
+        );
+    }
+}
+
+/// HumanGateOpened 的 durable 门快照预算读取：manual 预算已耗尽 →
+/// review_limit（评审超限停点），否则 plan_question（choice/主动人工门同族
+/// 的对话停点）；读不到快照时按 plan_question 通知（fail-open）。
+fn plan_gate_fact_kind(manager: &WorkspaceSessionManager) -> crate::product::models::automation::AutomationAttentionKind {
+    let snapshot_budget = crate::product::lifecycle_store::LifecycleStore::new(
+        manager.app_paths.clone(),
+    )
+    .get_workspace_session(&manager.session_id)
+    .ok()
+    .and_then(|record| record.human_gate_snapshot)
+    .map(|snapshot| snapshot.manual_repairs_remaining);
+    match snapshot_budget {
+        Some(0) => crate::product::models::automation::AutomationAttentionKind::ReviewLimit,
+        _ => crate::product::models::automation::AutomationAttentionKind::PlanQuestion,
+    }
+}
+
+/// TimelineNodeUpdated(Failed) 的 durable Failed 收敛核验：仅当会话已 durable
+/// Failed（SC phase Failed）才写 provider 失败事实（键不含节点 id——单会话
+/// 一条，重复停点 upsert 不增项、occurred_at 首写冻结）。
+fn record_plan_provider_failure_if_durable(manager: &WorkspaceSessionManager) {
+    let Ok(record) = crate::product::lifecycle_store::LifecycleStore::new(
+        manager.app_paths.clone(),
+    )
+    .get_workspace_session(&manager.session_id) else {
+        return;
+    };
+    if record.workspace_type != crate::product::models::WorkspaceType::WorkItemPlan
+        || record.status != crate::product::models::WorkspaceSessionStatus::Failed
+        || record.single_candidate_phase
+            != Some(crate::product::models::SingleCandidatePhase::Failed)
+    {
+        return;
+    }
+    upsert_plan_stop_fact(
+        manager,
+        crate::web::plan_generation::plan_failed_node_fact_key(&manager.session_id),
+        crate::product::models::automation::AutomationAttentionKind::AutomationFailed,
+        "plan_provider_failed",
+        None,
+    );
+}
 impl WorkspaceSessionManager {
     /// session-owned event router：只持有 manager 弱引用，registry 回收最后一个强引用后
     /// 即退出，避免 router 与 engine sender 构成自引用环。
@@ -68,6 +189,20 @@ impl WorkspaceSessionManager {
                         // C3/REQ-HTR-01：锁无关门开标志（Abort 矩阵在 engine 锁
                         // 被 in-flight 修订 run 持有时的非阻塞判定源）。
                         manager.set_human_confirm_gate_open(stage == "human_confirm");
+                        // 批 2 P4（REQ-WIGA-12）：plan 人工门开 = durable 对话停点
+                        // 事实（review_limit/plan_question 按 durable 预算判别；
+                        // 精确绑定 auto 授权才写，手动零写入）。
+                        if stage == "human_confirm" {
+                            upsert_plan_stop_fact(
+                                &manager,
+                                crate::web::plan_generation::plan_gate_fact_key(
+                                    &manager.session_id,
+                                ),
+                                plan_gate_fact_kind(&manager),
+                                "plan_human_gate_open",
+                                None,
+                            );
+                        }
                         let mut session_state = manager.engine.lock().await.build_session_state();
                         manager.project_automation_ownership(&mut session_state);
                         manager.broadcast(session_state);
@@ -92,6 +227,21 @@ impl WorkspaceSessionManager {
                         questions,
                         source,
                     } => {
+                        // 批 2 P4（REQ-WIGA-12）：挂起 choice = durable plan 对话
+                        // 停点事实（逐 choice 一条；text_fallback 的恢复面是
+                        // pending_author_choice 投影，不写事实）。
+                        if source != ChoiceRequestSource::TextFallback {
+                            upsert_plan_stop_fact(
+                                &manager,
+                                crate::web::plan_generation::plan_choice_fact_key(
+                                    &manager.session_id,
+                                    &id,
+                                ),
+                                crate::product::models::automation::AutomationAttentionKind::PlanQuestion,
+                                "plan_choice_pending",
+                                Some(id.clone()),
+                            );
+                        }
                         let message = WsOutMessage::ChoiceRequest {
                             id,
                             prompt,
@@ -143,6 +293,22 @@ impl WorkspaceSessionManager {
                         // C3/REQ-HTR-01：任何门关闭即摘门开标志（会话至多一个
                         // Active 门，见 enter_human_confirm 收口注释）。
                         manager.set_human_confirm_gate_open(false);
+                        // 批 2 P4（REQ-WIGA-12）：门关闭 = plan 停点事实 resolve
+                        //（通知消失；幂等）。
+                        resolve_plan_stop_fact(
+                            &manager,
+                            &crate::web::plan_generation::plan_gate_fact_key(&manager.session_id),
+                        );
+                        if let Some(message) = map_engine_event(event) {
+                            manager.broadcast(message);
+                        }
+                    }
+                    EngineEvent::TimelineNodeUpdated { ref status, .. } => {
+                        // 批 2 P4（REQ-WIGA-12）：durable Failed 收敛（provider
+                        // 失败）→ automation_failed 事实（无活窗口仍可通知）。
+                        if *status == crate::web::workspace_ws_types::TimelineNodeStatus::Failed {
+                            record_plan_provider_failure_if_durable(&manager);
+                        }
                         if let Some(message) = map_engine_event(event) {
                             manager.broadcast(message);
                         }

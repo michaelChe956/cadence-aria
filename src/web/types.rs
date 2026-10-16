@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use serde_json::Value;
 use std::path::PathBuf;
@@ -1103,6 +1104,64 @@ pub struct RetryFailedScRunStatus {
     pub command_id: String,
     pub failed_node_id: String,
     pub state: String,
+}
+
+/// 批 2 P4（REQ-WIGA-10）：plan 阶段失败继续请求。`expected_binding` 复用
+/// durable 绑定身份（与 enrollment 当前代全等才可继续）；`expected_stop_key`
+/// 取服务端当前停点（失败节点/人工门/生成检查点派生键），防止把旧说明
+/// 送给新停点；`context` 为对话窗口补充说明（provider 失败继续可空、
+/// 评审超限继续必须非空）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationContinuePlanRequest {
+    pub command_id: String,
+    pub expected_binding: crate::product::models::automation::EnrollmentBindingIdentity,
+    pub expected_stop_key: String,
+    #[serde(default)]
+    pub context: Option<String>,
+}
+
+impl AutomationContinuePlanRequest {
+    /// 稳定 payload 摘要（命令账本按此判同 command 异 payload，fail-closed）。
+    pub fn payload_digest(&self) -> String {
+        let payload =
+            serde_json::to_string(self).expect("continue-plan request payload is serializable");
+        format!("sha256:{:x}", sha2::Sha256::digest(payload.as_bytes()))
+    }
+}
+
+/// 批 2 P4（REQ-WIGA-10）：继续受理回执。accepted=首次受理并推进；
+/// replayed=同键同负载重放读首次结果（不重复写 note/派发）；
+/// needs_human=派发副作用不明或收尾写入失败，人工分诊（不自动重试）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AutomationContinuePlanStatus {
+    pub command_id: String,
+    pub state: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
+/// 批 2 P4（REQ-WIGA-10）：只读 control 管理投影。按 durable
+/// session/门/生成检查点及 N0 持久事实判定；初版 allowed_actions 只含
+/// continue_plan 与既有门动作，不含 takeover；GET 不写任何事实。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AutomationControlStatus {
+    pub managed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<crate::product::models::automation::EnrollmentBindingIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_key: Option<String>,
+    pub stage: String,
+    pub allowed_actions: Vec<String>,
+    pub context_required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
