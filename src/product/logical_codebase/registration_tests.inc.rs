@@ -953,6 +953,85 @@ mod tests {
         git(path, &["commit", "--quiet", "-m", "initial"]);
     }
 
+    /// Bug45/T4 fixture 根:遵守批2 GC5(测试临时物在 /tmp/aria-bug45/<task>
+    /// 私有子目录,不散落 owner HOME 或真实仓库)。
+    fn bridge_fixture_dir() -> tempfile::TempDir {
+        let base = Path::new("/tmp/aria-bug45/t4");
+        fs::create_dir_all(base).expect("create /tmp/aria-bug45/t4 fixture base");
+        tempfile::tempdir_in(base).expect("fixture dir under /tmp/aria-bug45/t4")
+    }
+
+    /// Bug45:registration 生产 git_probe/git_stdout(capture 链)是平台
+    /// 受信启动面,不得执行 coder 可写的仓库执行桥——`core.fsmonitor` 探针
+    /// 与 `.git/hooks`;allowlist 命令合同必须原样保留。
+    #[test]
+    fn registration_probe_and_capture_do_not_execute_repo_bridges() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = bridge_fixture_dir();
+        let repo = temp.path().join("member");
+        init_git_repository(&repo);
+
+        let pre_commit_probe = repo.join(".git/aria-pre-commit-fired");
+        fs::write(
+            repo.join(".git/hooks/pre-commit"),
+            format!("#!/bin/sh\n: > {}\nexit 0\n", pre_commit_probe.display()),
+        )
+        .expect("write pre-commit probe");
+        fs::set_permissions(
+            repo.join(".git/hooks/pre-commit"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod pre-commit probe");
+        let fsmonitor_probe = repo.join(".git/aria-fsmonitor-fired");
+        let fsmonitor_hook = repo.join(".git/aria-fsmonitor-hook.sh");
+        fs::write(
+            &fsmonitor_hook,
+            format!("#!/bin/sh\n: > {}\nexit 1\n", fsmonitor_probe.display()),
+        )
+        .expect("write fsmonitor probe script");
+        fs::set_permissions(&fsmonitor_hook, fs::Permissions::from_mode(0o755))
+            .expect("chmod fsmonitor probe script");
+        git(
+            &repo,
+            &[
+                "config",
+                "core.fsmonitor",
+                fsmonitor_hook.to_str().expect("utf8 fsmonitor hook path"),
+            ],
+        );
+
+        // capture 全链(status/rev-parse/for-each-ref/worktree list/config)零触发。
+        RepositoryGitSnapshot::capture(&repo).expect("capture snapshot");
+        assert!(
+            !fsmonitor_probe.exists(),
+            "Bug45: registration capture 内 git status 不得执行仓库 fsmonitor 探针"
+        );
+
+        // git_probe 的允许清单命令零触发。
+        git_probe(&repo, &["status", "--porcelain"])
+            .expect("probe allowed status")
+            .expect("status output");
+        assert!(
+            !fsmonitor_probe.exists(),
+            "Bug45: git_probe status 不得执行仓库 fsmonitor 探针"
+        );
+
+        // allowlist 合同保留:清单外命令仍拒绝(禁桥参数不放松命令面)。
+        let rejected = git_probe(&repo, &["log", "--oneline"]).unwrap_err();
+        assert!(
+            matches!(rejected, ProductStoreError::InvalidRecord { .. }),
+            "allowlist 合同必须保留,rejected={rejected:?}"
+        );
+
+        // 夹具有效性对照:coder 域(无禁桥)git 下探针会触发。
+        git(&repo, &["status", "--porcelain"]);
+        assert!(
+            fsmonitor_probe.exists(),
+            "对照失败:coder 域 status 应触发其自身 fsmonitor 探针,夹具失效"
+        );
+    }
+
     fn attach_fixture() -> AttachFixture {
         let root = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(root.path());

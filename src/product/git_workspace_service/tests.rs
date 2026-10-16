@@ -1,6 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::time::Duration;
 
@@ -355,18 +355,40 @@ async fn commit_range_commits_uses_topological_order_for_merge_history() {
     );
 }
 
+/// Bug45/T4 改写说明:原两测试以「平台 commit 执行 coder 仓 pre-commit」为
+/// 挂起观察点——该前提已被平台受信禁桥(`core.hooksPath=/dev/null`)废除。
+/// kill/reap/进程组合同不变,挂起点迁至夹具自有 bare 远端的 pre-receive:
+/// 本地传输下 `git push` 仍以 receive-pack→hook 子进程树运行于
+/// ManagedProcessChild 的受管进程组内,观察面等价;且远端侧 hook 不属
+/// 本地禁桥范围(见 multi_target_delivery/retry_push 同型用法)。
 #[tokio::test]
-async fn cancelled_git_commit_is_killed_reaped_and_never_commits_late() {
+async fn cancelled_platform_push_is_killed_reaped_and_never_lands_late() {
     let tmp = tempdir().expect("tempdir");
-    let repo = tmp.path();
-    let before = initialize_commit_fixture(repo);
-    let entered = repo.join("hook-entered");
-    let release = repo.join("hook-release");
-    let hook = repo.join(".git/hooks/pre-commit");
+    let repo = tmp.path().join("repo");
+    let remote = tmp.path().join("origin.git");
+    let branch = "aria/work-items/work_item_0001/attempt-1";
+    fs::create_dir_all(&repo).expect("create repo dir");
+    fs::create_dir_all(&remote).expect("create remote dir");
+    git(&remote, &["init", "--bare"]);
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    git(&repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-m", "base"]);
+    git(&repo, &["branch", branch]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().expect("remote path")],
+    );
+
+    let entered = tmp.path().join("push-hook-entered");
+    let release = tmp.path().join("push-hook-release");
+    let hook = remote.join("hooks/pre-receive");
     fs::write(
         &hook,
         format!(
-            "#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\n",
+            "#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nexit 0\n",
             entered.display(),
             release.display()
         ),
@@ -376,33 +398,52 @@ async fn cancelled_git_commit_is_killed_reaped_and_never_commits_late() {
 
     let cancellation = CancellationToken::new();
     let service = GitWorkspaceService::new().with_cancellation(cancellation.clone());
-    let commit = tokio::spawn({
+    let push = tokio::spawn({
         let repo = repo.to_path_buf();
-        async move { service.git_commit(&repo, "cancelled commit").await }
+        async move { service.git_push(&repo, "origin", branch).await }
     });
     wait_for_path(&entered).await;
     cancellation.cancel();
-    let result = tokio::time::timeout(Duration::from_millis(500), commit)
+    let result = tokio::time::timeout(Duration::from_millis(500), push)
         .await
-        .expect("cancelled git commit must be reaped")
-        .expect("git commit task");
+        .expect("cancelled git push must be reaped")
+        .expect("git push task");
     assert!(matches!(result, Err(GitWorkspaceError::Cancelled { .. })));
 
     fs::write(&release, "release\n").expect("release hook if process survived");
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(before, head(repo), "cancelled git process committed late");
+    assert!(
+        !remote_has_branch(&remote, branch),
+        "cancelled git push landed late"
+    );
 }
 
 #[tokio::test]
-async fn aborted_git_commit_future_kills_hook_process_group_without_late_side_effects() {
+async fn aborted_platform_push_kills_hook_process_group_without_late_side_effects() {
     let tmp = tempdir().expect("tempdir");
-    let repo = tmp.path();
-    let before = initialize_commit_fixture(repo);
-    let entered = repo.join("abort-hook-entered");
-    let hook_pid_path = repo.join("abort-hook.pid");
-    let grandchild_pid_path = repo.join("abort-hook-grandchild.pid");
-    let late_marker = repo.join("abort-hook-late");
-    let hook = repo.join(".git/hooks/pre-commit");
+    let repo = tmp.path().join("repo");
+    let remote = tmp.path().join("origin.git");
+    let branch = "aria/work-items/work_item_0001/attempt-1";
+    fs::create_dir_all(&repo).expect("create repo dir");
+    fs::create_dir_all(&remote).expect("create remote dir");
+    git(&remote, &["init", "--bare"]);
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    git(&repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-m", "base"]);
+    git(&repo, &["branch", branch]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().expect("remote path")],
+    );
+
+    let entered = tmp.path().join("abort-push-hook-entered");
+    let hook_pid_path = tmp.path().join("abort-push-hook.pid");
+    let grandchild_pid_path = tmp.path().join("abort-push-hook-grandchild.pid");
+    let late_marker = tmp.path().join("abort-push-hook-late");
+    let hook = remote.join("hooks/pre-receive");
     fs::write(
         &hook,
         format!(
@@ -417,14 +458,14 @@ async fn aborted_git_commit_future_kills_hook_process_group_without_late_side_ef
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod hook");
 
     let service = GitWorkspaceService::new();
-    let commit = tokio::spawn({
+    let push = tokio::spawn({
         let repo = repo.to_path_buf();
-        async move { service.git_commit(&repo, "aborted future commit").await }
+        async move { service.git_push(&repo, "origin", branch).await }
     });
     wait_for_path(&entered).await;
     wait_for_path(&grandchild_pid_path).await;
-    commit.abort();
-    assert!(commit.await.expect_err("abort commit task").is_cancelled());
+    push.abort();
+    assert!(push.await.expect_err("abort push task").is_cancelled());
 
     let hook_pid = read_pid(&hook_pid_path);
     let grandchild_pid = read_pid(&grandchild_pid_path);
@@ -447,7 +488,10 @@ async fn aborted_git_commit_future_kills_hook_process_group_without_late_side_ef
         !late_marker.exists(),
         "aborted git hook wrote a late marker"
     );
-    assert_eq!(before, head(repo), "aborted git commit changed HEAD late");
+    assert!(
+        !remote_has_branch(&remote, branch),
+        "aborted git push landed late"
+    );
 }
 
 fn remote_has_branch(remote: &Path, branch: &str) -> bool {
@@ -806,4 +850,184 @@ async fn create_worktree_replaces_unregistered_leftover_directory() {
         .await
         .expect("remove registered worktree after recreation");
     assert!(!worktree_path.exists());
+}
+
+// ---- Bug45/T4:平台受信 Git 启动禁 hooks/fsmonitor 桥 ----
+
+/// Bug45/T4 fixture 根:遵守批2 GC5(测试临时物在 /tmp/aria-bug45/<task>
+/// 私有子目录,不散落 owner HOME 或真实仓库)。
+fn bridge_fixture_dir() -> tempfile::TempDir {
+    let base = Path::new("/tmp/aria-bug45/t4");
+    fs::create_dir_all(base).expect("create /tmp/aria-bug45/t4 fixture base");
+    tempfile::tempdir_in(base).expect("fixture dir under /tmp/aria-bug45/t4")
+}
+
+fn write_executable_script(path: &Path, body: &str) {
+    fs::write(path, body).expect("write executable fixture");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .expect("chmod executable fixture");
+}
+
+/// coder 域 git config 读取(exit 1 = 未设置)。
+fn git_config_value(repo: &Path, key: &str) -> Option<String> {
+    let output = StdCommand::new("git")
+        .args(["config", "--get", key])
+        .current_dir(repo)
+        .output()
+        .expect("read git config");
+    if output.status.success() {
+        Some(
+            String::from_utf8(output.stdout)
+                .expect("utf8 config value")
+                .trim()
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+/// Bug45 夹具:模拟 coder 植入的「仓库执行桥」——pre-commit /
+/// post-checkout hook 与 `core.fsmonitor` 探针脚本,只落标记文件、恒
+/// exit 0/1,不影响 git 自身成败;平台受信 git 不得触发任何一个。
+fn repo_with_execution_bridges() -> (
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+) {
+    let temp = bridge_fixture_dir();
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    git(&repo, &["config", "user.email", "aria-t4@example.invalid"]);
+    git(&repo, &["config", "user.name", "Aria T4"]);
+    fs::write(repo.join("README.md"), "# bridge fixture\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "--quiet", "-m", "initial"]);
+
+    let pre_commit_probe = repo.join(".git/aria-pre-commit-fired");
+    write_executable_script(
+        &repo.join(".git/hooks/pre-commit"),
+        &format!("#!/bin/sh\n: > {}\nexit 0\n", pre_commit_probe.display()),
+    );
+    let post_checkout_probe = repo.join(".git/aria-post-checkout-fired");
+    write_executable_script(
+        &repo.join(".git/hooks/post-checkout"),
+        &format!("#!/bin/sh\n: > {}\nexit 0\n", post_checkout_probe.display()),
+    );
+    let fsmonitor_probe = repo.join(".git/aria-fsmonitor-fired");
+    let fsmonitor_hook = repo.join(".git/aria-fsmonitor-hook.sh");
+    write_executable_script(
+        &fsmonitor_hook,
+        &format!("#!/bin/sh\n: > {}\nexit 1\n", fsmonitor_probe.display()),
+    );
+    git(
+        &repo,
+        &[
+            "config",
+            "core.fsmonitor",
+            fsmonitor_hook.to_str().expect("utf8 fsmonitor hook path"),
+        ],
+    );
+    (temp, repo, pre_commit_probe, post_checkout_probe, fsmonitor_probe)
+}
+
+#[tokio::test]
+async fn platform_status_does_not_spawn_repo_fsmonitor_probe() {
+    let (_temp, repo, _pre_commit_probe, _post_checkout_probe, fsmonitor_probe) =
+        repo_with_execution_bridges();
+
+    GitWorkspaceService::new()
+        .git_status(&repo)
+        .await
+        .expect("platform git_status must succeed");
+    assert!(
+        !fsmonitor_probe.exists(),
+        "Bug45: 平台 git_status 不得执行仓库 core.fsmonitor 探针"
+    );
+}
+
+#[tokio::test]
+async fn platform_commit_does_not_execute_repo_pre_commit_hook() {
+    let (_temp, repo, pre_commit_probe, _post_checkout_probe, fsmonitor_probe) =
+        repo_with_execution_bridges();
+    let service = GitWorkspaceService::new();
+    fs::write(repo.join("platform-change.txt"), "staged by platform\n").unwrap();
+    service.git_add_all(&repo).await.expect("platform add");
+
+    let commit = service
+        .git_commit(&repo, "aria: platform bridge")
+        .await
+        .expect("platform git_commit must succeed");
+    assert!(!commit.commit_sha.is_empty());
+    assert!(
+        !pre_commit_probe.exists(),
+        "Bug45: 平台 git_commit 不得执行仓库 pre-commit hook"
+    );
+    assert!(
+        !fsmonitor_probe.exists(),
+        "Bug45: 平台 git_commit 亦不得执行仓库 core.fsmonitor 探针"
+    );
+    // 平台禁桥是命令级覆盖,不改仓库 config:fsmonitor 配置原样保留、
+    // core.hooksPath 未被写入。
+    assert_eq!(
+        git_config_value(&repo, "core.fsmonitor")
+            .expect("coder 的 core.fsmonitor 配置必须原样保留"),
+        repo.join(".git/aria-fsmonitor-hook.sh")
+            .to_str()
+            .expect("utf8 hook path"),
+    );
+    assert!(
+        git_config_value(&repo, "core.hooksPath").is_none(),
+        "平台禁桥不得把 core.hooksPath 写入仓库 config"
+    );
+}
+
+#[tokio::test]
+async fn platform_worktree_add_does_not_execute_repo_post_checkout_hook() {
+    let (_temp, repo, _pre_commit_probe, post_checkout_probe, _fsmonitor_probe) =
+        repo_with_execution_bridges();
+    let service = GitWorkspaceService::new();
+    let branch = "aria/issues/t4-bridge";
+    service
+        .create_branch(&repo, branch, "main")
+        .await
+        .expect("create branch");
+    let worktree_path = repo.join(".worktrees/aria-issues/t4-bridge");
+    service
+        .create_worktree(&repo, branch, &worktree_path)
+        .await
+        .expect("platform create_worktree must succeed");
+    assert!(
+        worktree_path.join(".git").exists(),
+        "worktree must actually be created"
+    );
+    assert!(
+        !post_checkout_probe.exists(),
+        "Bug45: 平台 worktree add 不得执行仓库 post-checkout hook"
+    );
+}
+
+/// 信任域对照:coder 自己的 git(无禁桥)仍执行其仓库 hooks 与
+/// fsmonitor 探针——平台禁桥不得外溢成「禁 Git 能力」或改仓库语义。
+#[test]
+fn coder_domain_git_still_runs_repo_hooks_and_fsmonitor() {
+    let (_temp, repo, pre_commit_probe, _post_checkout_probe, fsmonitor_probe) =
+        repo_with_execution_bridges();
+
+    git(&repo, &["status", "--porcelain"]);
+    assert!(
+        fsmonitor_probe.exists(),
+        "coder 域 status 应触发其自身 fsmonitor 探针"
+    );
+
+    fs::write(repo.join("coder-change.txt"), "coder keeps hooks\n").unwrap();
+    git(&repo, &["add", "coder-change.txt"]);
+    git(&repo, &["commit", "--quiet", "-m", "coder keeps hooks"]);
+    assert!(
+        pre_commit_probe.exists(),
+        "coder 域 commit 应执行其自身 pre-commit hook(开发提交保护不被绕过)"
+    );
 }

@@ -8,6 +8,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
+use crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS;
 use crate::cross_cutting::process_manager::ManagedProcessChild;
 use crate::product::coding_models::{PushStatus, RemoteKind};
 
@@ -663,7 +664,11 @@ impl GitWorkspaceService {
         args: &[&str],
     ) -> Result<GitCommandOutput, GitWorkspaceError> {
         let mut command = git_command(cwd, args);
-        let args_display = args.join(" ");
+        // 审计串必须反映实际执行 argv:禁桥参数固定在最前(与 git_command
+        // 的注入顺序一致),其后才是调用方子命令。
+        let mut argv_display: Vec<&str> = TRUSTED_GIT_BRIDGE_ARGS.to_vec();
+        argv_display.extend_from_slice(args);
+        let args_display = argv_display.join(" ");
         let cwd_display = cwd.display().to_string();
         let mut child = ManagedProcessChild::spawn(&mut command).map_err(|error| {
             GitWorkspaceError::Io(format!("git {args_display} in {cwd_display}: {error}"))
@@ -750,9 +755,17 @@ impl Default for GitWorkspaceService {
 /// （如 `push --delete` 的 `remote ref does not exist`）会随 locale 本地化，
 /// 而 `remote_delete_output_is_missing_ref` 仅匹配英文短语，因此必须强制英文输出，
 /// 否则非 C locale 下 `delete_remote_branch` 的幂等判定会误报真实失败。
+///
+/// 同时在子命令之前注入平台受信禁桥参数（Bug45/T4，与
+/// [`crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS`] 同源）：
+/// coder 可写的 `.git/hooks`（经 `core.hooksPath` 定位）与
+/// `core.fsmonitor` 探针命令不得借平台 Git 在 owner 上下文自动执行。
+/// `-c` 命令级覆盖不落盘：不改仓库 config，也不影响 coder 自己域内
+/// git 的 hooks 语义（两个信任域不得混用）。
 fn git_command(cwd: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
     command
+        .args(TRUSTED_GIT_BRIDGE_ARGS)
         .args(args)
         .current_dir(cwd)
         .kill_on_drop(true)

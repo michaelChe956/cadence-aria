@@ -106,8 +106,12 @@ fn git_probe(
             reason: format!("Git command is not allowed: {arguments:?}"),
         });
     }
+    // Bug45/T4:allowlist 判定保持调用方逻辑子命令不变;实际执行在子命令
+    // 之前注入平台受信禁桥参数(与 cross_cutting::git_command 同源),coder
+    // 可写的 `.git/hooks` 与 `core.fsmonitor` 探针不得借登记探测执行。
     let output = Command::new("git")
         .current_dir(repository_path)
+        .args(crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS)
         .args(arguments)
         .output()
         .map_err(|error| {
@@ -137,8 +141,11 @@ fn git_stdout(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, ProductStoreEr
             reason: format!("Git command is not allowed: {arguments:?}"),
         });
     }
+    // Bug45/T4:同 git_probe——禁桥参数固定在子命令之前,allowlist 与
+    // UTF-8 字节合同保持不变。
     let output = Command::new("git")
         .current_dir(root)
+        .args(crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS)
         .args(arguments)
         .output()
         .map_err(|error| {

@@ -309,7 +309,11 @@ fn git_status(path: &Path) -> Result<String, StableCode> {
 }
 
 fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String, StableCode> {
+    // Bug45/T4:cross_target 是平台受信启动面,禁桥参数固定在子命令之前
+    // (与 crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS 同源):
+    // coder 可写的 `.git/hooks` 与 `core.fsmonitor` 探针不得借平台进程执行。
     let output = Command::new("git")
+        .args(crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS)
         .args(args)
         .current_dir(cwd)
         .output()
@@ -391,6 +395,56 @@ mod tests {
         fs::write(path.join("README.md"), "initial\n").expect("seed file");
         run_git(path, &["add", "."]);
         run_git(path, &["commit", "-m", "initial"]);
+    }
+
+    /// Bug45/T4 fixture 根:遵守批2 GC5(测试临时物在 /tmp/aria-bug45/<task>
+    /// 私有子目录,不散落 owner HOME 或真实仓库)。
+    fn bridge_fixture_dir() -> tempfile::TempDir {
+        let base = Path::new("/tmp/aria-bug45/t4");
+        fs::create_dir_all(base).expect("create /tmp/aria-bug45/t4 fixture base");
+        tempfile::tempdir_in(base).expect("fixture dir under /tmp/aria-bug45/t4")
+    }
+
+    /// Bug45:cross_target 生产 git_status 是平台受信启动面,不得执行
+    /// coder 可写的仓库执行桥(`core.fsmonitor` 探针命令)。
+    #[test]
+    fn cross_target_status_does_not_spawn_repo_fsmonitor_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = bridge_fixture_dir();
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+
+        let fsmonitor_probe = repo.join(".git/aria-fsmonitor-fired");
+        let fsmonitor_hook = repo.join(".git/aria-fsmonitor-hook.sh");
+        fs::write(
+            &fsmonitor_hook,
+            format!("#!/bin/sh\n: > {}\nexit 1\n", fsmonitor_probe.display()),
+        )
+        .expect("write fsmonitor probe script");
+        fs::set_permissions(&fsmonitor_hook, fs::Permissions::from_mode(0o755))
+            .expect("chmod fsmonitor probe script");
+        run_git(
+            &repo,
+            &[
+                "config",
+                "core.fsmonitor",
+                fsmonitor_hook.to_str().expect("utf8 fsmonitor hook path"),
+            ],
+        );
+
+        let status = git_status(&repo).expect("cross-target git_status must succeed");
+        assert!(
+            !fsmonitor_probe.exists(),
+            "Bug45: cross_target git_status 不得执行仓库 core.fsmonitor 探针,status={status}"
+        );
+
+        // 夹具有效性对照:coder 域(无禁桥)git 下探针会触发。
+        run_git(&repo, &["status", "--porcelain"]);
+        assert!(
+            fsmonitor_probe.exists(),
+            "对照失败:coder 域 status 应触发其自身 fsmonitor 探针,夹具失效"
+        );
     }
 
     /// 构造一个双成员多仓 fixture：两个真实 git 仓库作为成员主 checkout，
