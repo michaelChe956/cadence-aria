@@ -412,6 +412,7 @@ fn bound_enrollment(
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
+            plan_approval: crate::product::models::automation::PlanApprovalPolicy::Manual,
             plan_options: crate::product::models::IssueWorkItemPlanOptions {
                 include_integration_tests: true,
                 include_e2e_tests: false,

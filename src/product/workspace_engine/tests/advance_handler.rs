@@ -679,7 +679,7 @@ async fn retry_initialization_preserves_failed_record_and_attempt() {
     use crate::product::logical_codebase::EnrollmentTarget;
     use crate::product::models::automation::{
         EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, OperationState,
-        RetryInitializationRequest, SourceRevisionRef,
+        PlanApprovalPolicy, RetryInitializationRequest, SourceRevisionRef,
     };
 
     let (root, app_paths, _lifecycle, mut engine) = advance_fixture().await;
@@ -754,6 +754,7 @@ async fn retry_initialization_preserves_failed_record_and_attempt() {
                     review_rounds: 1,
                     superpowers_enabled: false,
                     openspec_enabled: false,
+                    plan_approval: PlanApprovalPolicy::Manual,
                     plan_options: plan_options(),
                 },
                 target: EnrollmentTarget::SingleRepository {

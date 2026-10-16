@@ -127,7 +127,8 @@
     fn lease_enrollment_binding(fixture: &Fixture) -> crate::product::models::automation::EnrollmentBindingIdentity {
         use crate::product::issue_automation_store::IssueAutomationStore;
         use crate::product::models::automation::{
-            EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, SourceRevisionRef,
+            EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, PlanApprovalPolicy,
+            SourceRevisionRef,
         };
 
         let store = IssueAutomationStore::new(fixture.paths.clone());
@@ -151,6 +152,7 @@
                         review_rounds: 1,
                         superpowers_enabled: false,
                         openspec_enabled: false,
+                        plan_approval: PlanApprovalPolicy::Manual,
                         plan_options: crate::product::models::IssueWorkItemPlanOptions {
                             include_integration_tests: true,
                             include_e2e_tests: false,

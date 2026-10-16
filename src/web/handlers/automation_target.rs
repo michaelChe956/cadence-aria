@@ -8,7 +8,7 @@
 //! 只读，不写 enrollment。
 
 use crate::product::models::IssueWorkItemPlanOptions;
-use crate::product::models::automation::EnrollmentOptions;
+use crate::product::models::automation::{EnrollmentOptions, PlanApprovalPolicy};
 use crate::web::error::ApiResult;
 use crate::web::handlers::lifecycle::preflight::{
     SingleCandidatePreflightDecision, logical_repository_ids_for_preflight,
@@ -66,6 +66,7 @@ pub(crate) fn resolve_enrollment_options_with_provider_workspace_config(
         review_rounds: config.review_rounds,
         superpowers_enabled: config.superpowers_enabled,
         openspec_enabled: config.openspec_enabled,
+        plan_approval: PlanApprovalPolicy::Manual,
         plan_options: IssueWorkItemPlanOptions {
             include_integration_tests: query.include_integration_tests.unwrap_or(true),
             include_e2e_tests: query.include_e2e_tests.unwrap_or(false),

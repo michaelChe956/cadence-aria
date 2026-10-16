@@ -194,7 +194,8 @@ fn automation_test_record(
 
 fn automation_enable_command() -> crate::product::models::automation::EnrollmentWriteCommand {
     use crate::product::models::automation::{
-        EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, SourceRevisionRef,
+        EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, PlanApprovalPolicy,
+        SourceRevisionRef,
     };
     use crate::product::models::lifecycle::IssueWorkItemPlanOptions;
     use crate::product::models::provider::ProviderName;
@@ -217,6 +218,7 @@ fn automation_enable_command() -> crate::product::models::automation::Enrollment
             review_rounds: 1,
             superpowers_enabled: false,
             openspec_enabled: false,
+            plan_approval: PlanApprovalPolicy::Manual,
             plan_options: IssueWorkItemPlanOptions {
                 include_integration_tests: true,
                 include_e2e_tests: false,

@@ -11,7 +11,7 @@ use crate::product::lifecycle_store::{
 use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
 use crate::product::models::automation::{
     EnrollmentBindingIdentityInput, EnrollmentOptions, EnrollmentRebindRequest, EnrollmentSource,
-    EnrollmentWriteCommand,
+    EnrollmentWriteCommand, PlanApprovalPolicy,
 };
 use crate::product::models::lifecycle::{
     IssueWorkItemPlan, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
@@ -51,6 +51,7 @@ fn enrollment_options() -> EnrollmentOptions {
         review_rounds: 1,
         superpowers_enabled: false,
         openspec_enabled: false,
+        plan_approval: PlanApprovalPolicy::Manual,
         plan_options: IssueWorkItemPlanOptions {
             include_integration_tests: true,
             include_e2e_tests: false,

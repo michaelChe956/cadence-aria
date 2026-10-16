@@ -40,7 +40,7 @@ use crate::product::logical_codebase::EnrollmentTarget;
 use crate::product::models::WorkspaceSessionStatus;
 use crate::product::models::automation::{
     EnrollmentBindingIdentityInput, EnrollmentOptions, EnrollmentRebindRequest, EnrollmentSource,
-    EnrollmentWriteCommand, LeaseDisposition, SourceRevisionRef,
+    EnrollmentWriteCommand, LeaseDisposition, PlanApprovalPolicy, SourceRevisionRef,
 };
 use crate::product::models::lifecycle::IssueWorkItemPlanOptions;
 use crate::product::models::outline::{
@@ -489,6 +489,7 @@ fn serial_enrollment_options() -> EnrollmentOptions {
         review_rounds: 1,
         superpowers_enabled: false,
         openspec_enabled: false,
+        plan_approval: PlanApprovalPolicy::Manual,
         plan_options: IssueWorkItemPlanOptions {
             include_integration_tests: true,
             include_e2e_tests: false,
