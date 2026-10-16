@@ -77,6 +77,11 @@ pub enum CodingWsOutMessage {
         verification_commands: Box<Vec<String>>,
         work_item_execution_plan: Box<Option<WorkItemExecutionPlan>>,
         linked_plan_repair: Box<Option<PlanRepairSessionSnapshotDto>>,
+        /// 批 2 T3（REQ-WIGA-08/09）：同源管理投影——attempt 权威 plan 被
+        /// enrollment 精确绑定即 managed（含 terminated），前端据此隐藏
+        /// 局部 abort/接管并呈现终止态；manual/无绑定缺省 None 兼容旧帧。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        automation: Option<crate::product::models::automation::AutomationOwnership>,
     },
     CodingStageChange {
         stage: CodingExecutionStage,

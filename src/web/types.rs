@@ -934,6 +934,71 @@ pub struct EnrollmentBindRequest {
     pub plan_id: String,
     pub session_id: String,
 }
+/// 批 2 T3（REQ-WIGA-09，块 3 §4）：统一「终止自动化」REST 请求体。
+/// `confirmed=true` 表示统一二次确认已接受；未带确认零副作用（返回
+/// `automation_plan_termination_required`＋身份 details）。`expected_binding`
+/// 为提示性绑定互证（与 enrollment 当前代全等，不符 → 409，零副作用）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationEnrollmentTerminateRequest {
+    pub command_id: String,
+    pub expected_enrollment_id: String,
+    pub expected_policy_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_binding: Option<crate::product::models::automation::EnrollmentBindingIdentity>,
+    #[serde(default)]
+    pub confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// 批 2 T3：统一终止逐 attempt 收口结果（透传引擎侧专用收口状态）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationEnrollmentTerminateAttemptResult {
+    pub attempt_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// 批 2 T3：统一终止响应。`outcome=terminated|cleanup_required`
+/// （cleanup_required 仍不可继续，重试只重做收口，同 command 重放）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationEnrollmentTerminateResponse {
+    pub command_id: String,
+    pub state: crate::product::models::automation::OperationState,
+    pub enrollment_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    pub terminated_at: String,
+    pub outcome: String,
+    pub results: Vec<AutomationEnrollmentTerminateAttemptResult>,
+}
+
+/// 批 2 T3（块 3 §4）：advance/coding_start 停点的第三种显式继续请求
+/// （不是 plan 对话继续也不是 coder 门，不携带说明文本）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationContinueChainRequest {
+    pub command_id: String,
+    pub expected_binding: crate::product::models::automation::EnrollmentBindingIdentity,
+    pub expected_stop_key: String,
+    #[serde(default)]
+    pub confirm_unknown_side_effect: bool,
+}
+
+/// 批 2 T3：continue-chain 结果。`resolved=true` 表示原停点事实已解除并
+/// 已发 autopilot 唤醒（auto 保留）；NeedsHuman/失败保留原事实。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationContinueChainResponse {
+    pub command_id: String,
+    pub state: crate::product::models::automation::OperationState,
+    pub stop_key: String,
+    pub stage: String,
+    pub resolved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

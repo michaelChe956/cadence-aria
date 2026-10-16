@@ -74,7 +74,7 @@ use crate::web::workspace_ws_types::{ArtifactVersion, ProviderConfigSnapshot, Re
 
 mod aggregate_index;
 pub mod aggregate_initialization;
-mod automation_enrollment;
+pub(crate) mod automation_enrollment;
 #[cfg(test)]
 pub(crate) mod automation_enrollment_test_support;
 mod automation_gateway_preflight;
@@ -124,7 +124,8 @@ pub(crate) use coding::{
 };
 pub use automation_enrollment::{
     get_automation_enrollment, post_automation_enrollment_binding,
-    post_automation_enrollment_lease_takeover, post_automation_enrollment_rebind,
+    post_automation_enrollment_continue_chain, post_automation_enrollment_lease_takeover,
+    post_automation_enrollment_rebind, post_automation_enrollment_terminate,
     put_automation_enrollment,
 };
 pub use automation_target::get_automation_target;
@@ -178,6 +179,7 @@ pub use aggregate_initialization::{
     get_lc_aggregate_initialization_active,
 };
 pub(crate) use coding::map_advance_outcome;
+pub(crate) use coding::ws_gate_response_routes_termination;
 pub(crate) use coding_choice::{get_coding_choice_response_status, post_coding_choice_response};
 pub(crate) use dto::{coding_attempt_scope_text, coding_execution_unit_dto};
 pub use pointer_publication::{

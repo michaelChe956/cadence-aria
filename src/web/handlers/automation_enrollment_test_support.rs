@@ -587,3 +587,76 @@ pub(crate) fn enrollment_file_exists(fixture: &Fixture) -> bool {
         .join("automation-enrollment.json")
         .exists()
 }
+
+/// 批 2 T3：store 级播种「已终止且绑定指定 plan」的 enrollment（不经
+/// HTTP 作用域校验；Enable→bind_plan→terminate_plan）。返回 enrollment_id。
+/// 供 runner/gates 干净退出等定向测试复用。
+pub(crate) fn seed_terminated_plan_enrollment(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    plan_id: &str,
+    session_id: &str,
+) -> String {
+    use crate::product::issue_automation_store::IssueAutomationStore;
+    use crate::product::models::automation::{
+        EnrollmentOptions, EnrollmentSource, EnrollmentTerminationRequest, EnrollmentWriteCommand,
+        PlanApprovalPolicy, SourceRevisionRef,
+    };
+    use crate::product::models::provider::ProviderName;
+
+    let store = IssueAutomationStore::new(paths.clone());
+    let enrollment = store
+        .compare_and_set(
+            project_id,
+            issue_id,
+            None,
+            EnrollmentWriteCommand::Enable {
+                selection_key: "t3-termination".into(),
+                source: EnrollmentSource {
+                    stories: vec![SourceRevisionRef {
+                        id: "story_0001".into(),
+                        version: 1,
+                    }],
+                    designs: vec![SourceRevisionRef {
+                        id: "design_0001".into(),
+                        version: 1,
+                    }],
+                },
+                options: EnrollmentOptions {
+                    author_provider: ProviderName::Fake,
+                    reviewer_provider: ProviderName::Fake,
+                    review_rounds: 1,
+                    superpowers_enabled: false,
+                    openspec_enabled: false,
+                    plan_approval: PlanApprovalPolicy::Manual,
+                    plan_options: crate::product::models::lifecycle::IssueWorkItemPlanOptions {
+                        include_integration_tests: true,
+                        include_e2e_tests: false,
+                        force_frontend_backend_split: false,
+                        require_execution_plan_confirm: false,
+                    },
+                },
+                target: crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                    repository_id: "repository_0001".to_string(),
+                },
+            },
+        )
+        .expect("enable enrollment");
+    let bound = store
+        .bind_plan(project_id, issue_id, 1, plan_id, session_id)
+        .expect("bind plan");
+    store
+        .terminate_plan(
+            project_id,
+            issue_id,
+            EnrollmentTerminationRequest {
+                command_id: format!("cmd-t3-terminate-{plan_id}"),
+                expected_enrollment_id: bound.enrollment_id.clone(),
+                expected_policy_revision: bound.policy_revision,
+                reason: "test termination".to_string(),
+            },
+        )
+        .expect("terminate plan");
+    enrollment.enrollment_id
+}

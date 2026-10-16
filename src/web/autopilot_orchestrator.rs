@@ -93,7 +93,9 @@ impl AutopilotOrchestrator {
         else {
             return Ok(ReconcileOutcome::NoEnrollment);
         };
-        if !enrollment.enabled {
+        // 批 2 T3（REQ-WIGA-09）：terminated 是不可恢复终态——显式跳过
+        // （enabled=false 已拦，此处再按 terminated_at 收口，防复活）。
+        if enrollment.terminated_at.is_some() || !enrollment.enabled {
             return Ok(ReconcileOutcome::NoEnrollment);
         }
 
@@ -282,6 +284,18 @@ async fn recover_claimed_attempt_at_startup(
     if state
         .coding_runs
         .attempt_is_reserved_or_running(&attempt_key)
+    {
+        return Ok(false);
+    }
+    // 批 2 T3（REQ-WIGA-09）：重启后终止状态不复活——attempt 所属 plan
+    // 已被精确绑定 enrollment 终止时零恢复（T1 admission/gate 已拒执行，
+    // 此处补启动扫描面）；manual/无绑定原语义。
+    if crate::product::coding_attempt_store::automation_plan_terminated_for_attempt(
+        &store.paths(),
+        attempt,
+    )
+    .map_err(|error| format!("termination admission check failed: {error}"))?
+    .is_some()
     {
         return Ok(false);
     }

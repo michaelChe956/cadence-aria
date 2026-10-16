@@ -10,7 +10,7 @@ use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
     CodingAdmissionKind, CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage,
 };
-use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
+use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
 use crate::product::git_workspace_service::GitWorkspaceService;
 use crate::web::state::{CodingAttemptRunKey, WebAppState};
@@ -78,7 +78,7 @@ async fn handle_coding_socket(
 ) {
     let (mut socket_tx, mut socket_rx) = socket.split();
     let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
-    let coding_store = CodingAttemptStore::new(app_paths);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
     let advance_store = AdvanceStore::new(ProductAppPaths::new(state.workspace_root.join(".aria")));
     let attempt_result = match scope.as_ref() {
         Some((project_id, issue_id)) => coding_store.get_attempt(project_id, issue_id, &attempt_id),
@@ -663,6 +663,44 @@ async fn handle_coding_socket(
                         let _ = send_coding_json(&mut socket_tx, &snapshot).await;
                     }
                 } else if inbound == CodingWsInMessage::AbortAttempt {
+                    // 批 2 T3（C2，REQ-WIGA-09）：自动绑定 plan 上的 WS Abort
+                    // 统一路由整 plan 终止——零副作用（不取消 runner、不写
+                    // attempt/门状态），按 code+JSON 身份打开同一二次确认面，
+                    // 确认后经统一终止 REST 提交；manual/无绑定原语义。
+                    let managed_identity =
+                        crate::web::handlers::automation_enrollment::automation_identity_for_attempt(
+                            &app_paths,
+                            &current_attempt,
+                        )
+                        .map_err(CodingWorkspaceEngineError::Store);
+                    match managed_identity {
+                        Err(error) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_automation_lookup_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                        Ok(Some(identity)) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "automation_plan_termination_required".to_string(),
+                                    message: crate::web::handlers::automation_enrollment::
+                                        automation_plan_termination_required_message(&identity),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                        Ok(None) => {}
+                    }
                     let attempt_key = CodingAttemptRunKey::from_attempt(&current_attempt);
                     drop(mutation_lease);
                     state
@@ -802,6 +840,44 @@ async fn handle_coding_socket(
                     extra_context,
                 } = inbound
                 {
+                    // 批 2 T3（C2，REQ-WIGA-09）：自动绑定 plan 上的门动作
+                    // Abort 执行语义改整 plan 终止——落门前统一路由（零
+                    // 副作用）；非 Abort 动作/manual/无绑定原语义。
+                    let managed_abort = crate::web::handlers::ws_gate_response_routes_termination(
+                        &app_paths,
+                        &coding_store,
+                        &current_attempt,
+                        &gate_id,
+                        &action_id,
+                    )
+                    .map_err(CodingWorkspaceEngineError::Store);
+                    match managed_abort {
+                        Err(error) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "coding_automation_lookup_failed".to_string(),
+                                    message: error.to_string(),
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                        Ok(Some(termination_message)) => {
+                            drop(mutation_lease);
+                            let _ = send_coding_json(
+                                &mut socket_tx,
+                                &CodingWsOutMessage::CodingProtocolError {
+                                    code: "automation_plan_termination_required".to_string(),
+                                    message: termination_message,
+                                },
+                            )
+                            .await;
+                            continue;
+                        }
+                        Ok(None) => {}
+                    }
                     let engine = CodingWorkspaceEngine::new(
                         coding_store.clone(),
                         GitWorkspaceService::new(),

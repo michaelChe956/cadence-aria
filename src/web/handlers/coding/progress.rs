@@ -444,6 +444,7 @@ mod tests {
             verification_commands: Box::new(Vec::new()),
             work_item_execution_plan: Box::new(None),
             linked_plan_repair: Box::new(None),
+            automation: None,
         };
 
         let http_roundtrip: CodingAttemptSnapshotResponse =

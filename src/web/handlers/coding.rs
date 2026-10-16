@@ -588,6 +588,18 @@ pub(crate) async fn abort_coding_attempt(
         path.issue_id.as_deref(),
         &path.attempt_id,
     )?;
+    // 批 2 T3（C2，REQ-WIGA-09）：自动绑定 plan 上的旧 abort REST 统一路由
+    // 整 plan 终止——未确认零副作用（不取消 runner、不写 attempt 状态），
+    // 客户端按 details 打开同一二次确认面后经统一终止 REST 提交；
+    // manual/无绑定/异 plan 保持原单 attempt abort 语义。
+    if let Some(identity) =
+        super::automation_enrollment::automation_identity_for_attempt(&app_paths, &attempt)
+            .map_err(product_store_api_error)?
+    {
+        return Err(
+            super::automation_enrollment::automation_plan_termination_required_error(&identity),
+        );
+    }
     let attempt_key = CodingAttemptRunKey::from_attempt(&attempt);
     state.coding_runs.abort_attempt(&attempt_key).await;
     let _mutation_lease = state.coding_runs.lock_attempt_mutation(&attempt_key).await;
@@ -717,6 +729,30 @@ pub(crate) async fn post_coding_gate_response(
             "coding_gate_response_invalid_identity",
             "gate_id and action_id must not be blank",
         ));
+    }
+    // 批 2 T3（C2，REQ-WIGA-09）：门动作集合不变，但自动绑定 plan 上的
+    // Abort 动作执行语义改整 plan 终止——在写命令账本/落门/续跑之前统一
+    // 路由（零副作用），非 Abort 动作原样；manual/无绑定保持原语义。
+    if let Some(identity) =
+        super::automation_enrollment::automation_identity_for_attempt(&app_paths, &attempt)
+            .map_err(product_store_api_error)?
+        && gate_response_action_is_abort(
+            &coding_store,
+            &attempt,
+            &request.gate_id,
+            &request.action_id,
+        )
+        .map_err(|error| {
+            ApiError::runtime(
+                "coding_gate_lookup_failed",
+                format!("pending gate lookup failed: {error}"),
+                serde_json::json!({}),
+            )
+        })?
+    {
+        return Err(
+            super::automation_enrollment::automation_plan_termination_required_error(&identity),
+        );
     }
 
     // 命令账本（Task 2）：payload digest 覆盖对象身份＋gate／action／版本
@@ -854,6 +890,64 @@ pub(crate) async fn post_coding_gate_response(
         )
         .map_err(store_error)?;
     Ok((StatusCode::OK, Json(result(OperationState::Accepted, None))))
+}
+
+/// 批 2 T3（C2，REQ-WIGA-09）：gate response 的目标动作是否为 Abort——按
+/// attempt 当前 open 门解析 action_id → action_type；门/动作不存在返回
+/// false（交由引擎按原语义拒绝，不改判）。
+fn gate_response_action_is_abort(
+    coding_store: &CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    gate_id: &str,
+    action_id: &str,
+) -> Result<bool, crate::product::coding_workspace_engine::CodingWorkspaceEngineError> {
+    Ok(crate::web::coding_ws_handler::coding_pending_gates(coding_store, attempt)?
+        .into_iter()
+        .any(|gate| {
+            gate.gate_id == gate_id
+                && gate.available_actions.iter().any(|action| {
+                    action.action_id == action_id
+                        && action.action_type
+                            == crate::product::coding_models::CodingGateActionType::Abort
+                })
+        }))
+}
+
+/// 批 2 T3（C2，REQ-WIGA-09）：WS GateResponse 的统一终止路由判定——
+/// 自动绑定 plan（精确绑定 attempt 权威 plan）且目标动作是 Abort 时返回
+/// `Some(termination_required JSON 身份载荷)`；其余（manual/无绑定/非
+/// Abort 动作/门或动作不存在）返回 `None` 走原语义。REST gate-responses
+/// 复用同一判定（`gate_response_action_is_abort`＋identity 组合）。
+pub(crate) fn ws_gate_response_routes_termination(
+    app_paths: &crate::product::app_paths::ProductAppPaths,
+    coding_store: &CodingAttemptStore,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+    gate_id: &str,
+    action_id: &str,
+) -> Result<Option<String>, crate::product::json_store::ProductStoreError> {
+    let Some(identity) =
+        super::automation_enrollment::automation_identity_for_attempt(app_paths, attempt)?
+    else {
+        return Ok(None);
+    };
+    let action_is_abort = crate::web::coding_ws_handler::coding_pending_gates(coding_store, attempt)
+        .map_err(|error| crate::product::json_store::ProductStoreError::Json(error.to_string()))?
+        .into_iter()
+        .any(|gate| {
+            gate.gate_id == gate_id
+                && gate.available_actions.iter().any(|action| {
+                    action.action_id == action_id
+                        && action.action_type
+                            == crate::product::coding_models::CodingGateActionType::Abort
+                })
+        });
+    Ok(if action_is_abort {
+        Some(
+            super::automation_enrollment::automation_plan_termination_required_message(&identity),
+        )
+    } else {
+        None
+    })
 }
 
 pub(crate) async fn delete_coding_attempt(

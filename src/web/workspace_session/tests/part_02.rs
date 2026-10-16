@@ -265,12 +265,8 @@ fn automation_ownership_store_projects_only_precisely_bound_session() {
     // 默认 off：无 enrollment 即 client/manual。
     assert_eq!(
         store.ownership_for_session(&bound).unwrap(),
-        AutomationOwnership {
-            owner: AutomationOwner::Client,
-            enrollment_id: None,
-            policy_revision: None,
-            enabled: false,
-        }
+        // 批 2 T3 additive：client_default 补 plan_id/terminated_at 缺省 None。
+        AutomationOwnership::client_default()
     );
 
     let enrollment = store
@@ -308,12 +304,7 @@ fn automation_ownership_store_projects_only_precisely_bound_session() {
     // 同 issue 其他会话恒 client。
     assert_eq!(
         store.ownership_for_session(&other).unwrap(),
-        AutomationOwnership {
-            owner: AutomationOwner::Client,
-            enrollment_id: None,
-            policy_revision: None,
-            enabled: false,
-        }
+        AutomationOwnership::client_default()
     );
 
     // 关闭：绑定仍在但 owner 退位 client、enabled=false、revision+1。
@@ -342,12 +333,7 @@ fn automation_ownership_store_projects_only_precisely_bound_session() {
     .unwrap();
     assert_eq!(
         store.ownership_for_session(&bound).unwrap(),
-        AutomationOwnership {
-            owner: AutomationOwner::Client,
-            enrollment_id: None,
-            policy_revision: None,
-            enabled: false,
-        }
+        AutomationOwnership::client_default()
     );
 
     // 损坏文件 → 显式 projection error，绝不伪作 client。

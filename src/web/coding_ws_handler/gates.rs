@@ -314,3 +314,99 @@ pub(crate) fn stage_gate_required(gate: CodingStageGateState) -> CodingGateRequi
         triage_summary: None,
     }
 }
+
+#[cfg(test)]
+mod t3_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+    use crate::product::coding_models::CodingAttemptStatus;
+    use crate::product::git_workspace_service::GitWorkspaceService;
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+    /// 批 2 T3（T1T2 遗留①，REQ-WIGA-09）：stage 门等待中 plan 终止——
+    /// runner 内 AbortAttempt 只干净退出（Ok(None)），不旧 abort、不改门
+    /// 状态（收口统一关门）、不倒计时续跑；attempt 状态零写入。
+    #[tokio::test]
+    async fn stage_gate_abort_attempt_exits_cleanly_for_terminated_plan() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store = CodingAttemptStore::new(paths.clone());
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: crate::product::models::provider::ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+            })
+            .unwrap();
+        let mut bound = attempt.clone();
+        bound.work_item_group_id = Some("plan_t3_stage".to_string());
+        store.write_coding_attempt_for_test(&bound).unwrap();
+        // 生产中 group attempt 创建时 plan lineage 已由 plan 流程落盘；
+        // 快照装配的 plan-repair reconcile 需读它（最小 lineage 即可）。
+        crate::product::work_item_revision_store::WorkItemRevisionStore::new(paths.clone())
+            .put_plan_lineage(
+                &crate::product::models::work_item_revision::WorkItemPlanLineage {
+                    id: "plan_t3_stage".to_string(),
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    story_spec_refs: Vec::new(),
+                    design_spec_refs: Vec::new(),
+                    active_revision_id: None,
+                    active_amendment_id: None,
+                    created_at: "2026-10-16T00:00:00Z".to_string(),
+                    updated_at: "2026-10-16T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        crate::web::handlers::automation_enrollment_test_support::seed_terminated_plan_enrollment(
+            &paths,
+            "project_0001",
+            "issue_0001",
+            "plan_t3_stage",
+            "session_t3_stage",
+        );
+
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let engine =
+            CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx.clone());
+        let (command_tx, mut command_rx) = mpsc::channel(4);
+        command_tx
+            .send(CodingRunnerCommand::AbortAttempt)
+            .await
+            .unwrap();
+
+        let outcome = await_stage_gate(
+            &mut command_rx,
+            &store,
+            &engine,
+            &event_tx,
+            &bound,
+            crate::product::coding_models::CodingExecutionStage::Coding,
+        )
+        .await
+        .expect("terminated stage-gate abort exits cleanly");
+        assert!(outcome.is_none(), "runner must end without resuming");
+
+        // 门仍 Open（不 Cancelled——关门归专用收口），attempt 零状态写入。
+        let gates = store
+            .list_open_stage_gates("project_0001", "issue_0001", &bound.id)
+            .unwrap();
+        assert_eq!(gates.len(), 1, "stage gate stays open for the finalizer");
+        let after = store
+            .get_attempt("project_0001", "issue_0001", &bound.id)
+            .unwrap();
+        assert_eq!(after.status, CodingAttemptStatus::Created);
+    }
+}

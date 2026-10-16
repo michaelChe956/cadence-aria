@@ -499,14 +499,20 @@ impl IssueAutomationStore {
             Some(enrollment) => match enrollment.session_id.as_deref() {
                 Some(bound_session) if bound_session == session_id => {
                     crate::product::models::automation::AutomationOwnership {
-                        owner: if enrollment.enabled {
+                        // 批 2 T3（REQ-WIGA-08，清单外 additive 披露）：
+                        // terminated 后仍 managed（owner 保持 Server）——
+                        // 仅 Disable（未终止）退位 client；同源投影补绑定
+                        // plan 与终止事实（REST/WS 一致）。
+                        owner: if enrollment.enabled || enrollment.terminated_at.is_some() {
                             crate::product::models::automation::AutomationOwner::Server
                         } else {
                             crate::product::models::automation::AutomationOwner::Client
                         },
-                        enrollment_id: Some(enrollment.enrollment_id),
+                        enrollment_id: Some(enrollment.enrollment_id.clone()),
                         policy_revision: Some(enrollment.policy_revision),
                         enabled: enrollment.enabled,
+                        plan_id: enrollment.plan_id.clone(),
+                        terminated_at: enrollment.terminated_at.clone(),
                     }
                 }
                 _ => crate::product::models::automation::AutomationOwnership::client_default(),

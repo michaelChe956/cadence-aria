@@ -141,6 +141,13 @@ pub struct AutomationOwnership {
     pub enrollment_id: Option<String>,
     pub policy_revision: Option<u64>,
     pub enabled: bool,
+    /// 批 2 T3（REQ-WIGA-08，清单外 additive 披露）：同源管理投影补绑定
+    /// plan 与终止事实——REST/WS 一致、terminated 后仍 managed（owner 保持
+    /// Server）；serde 缺省 None 兼容旧 wire/旧客户端。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminated_at: Option<String>,
 }
 
 impl AutomationOwnership {
@@ -152,6 +159,8 @@ impl AutomationOwnership {
             enrollment_id: None,
             policy_revision: None,
             enabled: false,
+            plan_id: None,
+            terminated_at: None,
         }
     }
 }

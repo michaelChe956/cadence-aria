@@ -336,4 +336,133 @@ mod tests {
         let request = requests.last().expect("review request after retry");
         assert_eq!(request.push_status, PushStatus::Pushed);
     }
+
+    /// 批 2 T3（T1T2 遗留①，REQ-WIGA-09）：plan 已终止时 runner 内
+    /// AbortAttempt 只干净退出——不调旧 handle_abort、不写 attempt 状态
+    ///（专用收口独占），manual/未终止路径回归见 T1/T2 既有测试。
+    #[tokio::test]
+    async fn abort_attempt_command_exits_cleanly_for_terminated_plan() {
+        use crate::product::coding_models::CodingAttemptStatus;
+
+        let root = tempdir().expect("root");
+        let paths = crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria"));
+        let store = CodingAttemptStore::new(paths.clone());
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+            })
+            .expect("attempt");
+        // 绑定到终止 plan：直接改写 attempt 的权威 group 指向（分支只读
+        // work_item_group_id；完整 group 深链与本判定无关）。
+        let mut bound = attempt.clone();
+        bound.work_item_group_id = Some("plan_t3_0001".to_string());
+        store.write_coding_attempt_for_test(&bound).expect("bind group");
+
+        let automation = crate::product::issue_automation_store::IssueAutomationStore::new(
+            paths.clone(),
+        );
+        automation
+            .compare_and_set("project_0001", "issue_0001", None, {
+                use crate::product::models::automation::{
+                    EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand,
+                    PlanApprovalPolicy, SourceRevisionRef,
+                };
+                EnrollmentWriteCommand::Enable {
+                    selection_key: "t3-termination".into(),
+                    source: EnrollmentSource {
+                        stories: vec![SourceRevisionRef {
+                            id: "story_0001".into(),
+                            version: 1,
+                        }],
+                        designs: vec![SourceRevisionRef {
+                            id: "design_0001".into(),
+                            version: 1,
+                        }],
+                    },
+                    options: EnrollmentOptions {
+                        author_provider: ProviderName::Fake,
+                        reviewer_provider: ProviderName::Fake,
+                        review_rounds: 1,
+                        superpowers_enabled: false,
+                        openspec_enabled: false,
+                        plan_approval: PlanApprovalPolicy::Manual,
+                        plan_options: crate::product::models::lifecycle::IssueWorkItemPlanOptions {
+                            include_integration_tests: true,
+                            include_e2e_tests: false,
+                            force_frontend_backend_split: false,
+                            require_execution_plan_confirm: false,
+                        },
+                    },
+                    target:
+                    crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                        repository_id: "repository_0001".to_string(),
+                    },
+                }
+            })
+            .expect("enable enrollment");
+        automation
+            .bind_plan(
+                "project_0001",
+                "issue_0001",
+                1,
+                "plan_t3_0001",
+                "session_t3_0001",
+            )
+            .expect("bind plan");
+        automation
+            .terminate_plan(
+                "project_0001",
+                "issue_0001",
+                crate::product::models::automation::EnrollmentTerminationRequest {
+                    command_id: "cmd-t3-runner-clean-exit".to_string(),
+                    expected_enrollment_id: automation
+                        .get("project_0001", "issue_0001")
+                        .unwrap()
+                        .unwrap()
+                        .enrollment_id,
+                    expected_policy_revision: 2,
+                    reason: "test termination".to_string(),
+                },
+            )
+            .expect("terminate plan");
+
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let engine =
+            CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx.clone());
+        let (command_tx, mut command_rx) = mpsc::channel(4);
+        command_tx
+            .send(CodingRunnerCommand::AbortAttempt)
+            .await
+            .expect("send abort");
+
+        let stopped = handle_pending_runner_commands(
+            &mut command_rx,
+            &store,
+            &engine,
+            &event_tx,
+            &bound,
+        )
+        .await
+        .expect("terminated plan abort exits cleanly");
+        assert!(stopped, "AbortAttempt on terminated plan must end the runner");
+
+        // 干净退出零状态写入：attempt 仍 Created（专用收口独占 Aborted 写入）。
+        let after = store
+            .get_attempt("project_0001", "issue_0001", &bound.id)
+            .expect("attempt after");
+        assert_eq!(after.status, CodingAttemptStatus::Created);
+    }
 }

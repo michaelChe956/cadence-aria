@@ -587,6 +587,590 @@ pub(crate) fn enrollment_api_error(error: EnrollmentError) -> ApiError {
         EnrollmentError::Store(error) => product_store_api_error(error),
     }
 }
+
+// ─── 批 2 T3：统一 plan 终止服务（REQ-WIGA-09/11、REQ-WIGA-08/12）───
+
+/// attempt 的托管身份（统一终止路由用）：enrollment 显式绑定该 attempt
+/// 的权威 plan（`work_item_group_id`）即托管——enabled 或 terminated 均算
+/// （terminated 仍 managed）；manual/无绑定/异 plan 一律 `None`。
+pub(crate) struct AutomationPlanTerminationIdentity {
+    pub enrollment_id: String,
+    pub policy_revision: u64,
+    pub plan_id: Option<String>,
+    pub session_id: Option<String>,
+    pub binding_version: Option<u64>,
+    pub terminated_at: Option<String>,
+    pub enabled: bool,
+}
+
+/// 统一终止路由判定（REST abort / gate-responses / WS Abort/门动作 Abort
+/// 共用）：读当前 enrollment，按 attempt 的权威 plan＋冻结绑定识别托管。
+/// 只读；损坏 JSON fail-closed 上抛（不当未托管吞错）。
+pub(crate) fn automation_identity_for_attempt(
+    paths: &crate::product::app_paths::ProductAppPaths,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+) -> Result<Option<AutomationPlanTerminationIdentity>, ProductStoreError> {
+    let Some(plan_id) = attempt.work_item_group_id.clone() else {
+        return Ok(None);
+    };
+    let enrollment = IssueAutomationStore::new(paths.clone())
+        .get(&attempt.project_id, &attempt.issue_id)?;
+    Ok(enrollment
+        .filter(|enrollment| enrollment.plan_id.as_deref() == Some(plan_id.as_str()))
+        .map(|enrollment| AutomationPlanTerminationIdentity {
+            enrollment_id: enrollment.enrollment_id.clone(),
+            policy_revision: enrollment.policy_revision,
+            plan_id: enrollment.plan_id.clone(),
+            session_id: enrollment.session_id.clone(),
+            binding_version: enrollment
+                .binding_history
+                .as_ref()
+                .map(|history| history.current.binding_version),
+            terminated_at: enrollment.terminated_at.clone(),
+            enabled: enrollment.enabled,
+        }))
+}
+
+fn termination_identity_details(identity: &AutomationPlanTerminationIdentity) -> serde_json::Value {
+    json!({
+        "confirm_required": true,
+        "plan_id": identity.plan_id,
+        "session_id": identity.session_id,
+        "enrollment_id": identity.enrollment_id,
+        "policy_revision": identity.policy_revision,
+        "binding_version": identity.binding_version,
+        "terminated_at": identity.terminated_at,
+    })
+}
+
+/// 统一二次确认要求（REST 面）：未确认零副作用，只返回确认要求与
+/// plan/enrollment/binding 身份（客户端打开同一二次确认面）。
+pub(crate) fn automation_plan_termination_required_error(
+    identity: &AutomationPlanTerminationIdentity,
+) -> ApiError {
+    ApiError::validation_with_details(
+        "automation_plan_termination_required",
+        "automation plan termination requires unified confirmation",
+        termination_identity_details(identity),
+    )
+}
+
+/// WS 面同语义：`CodingProtocolError.code=automation_plan_termination_required`，
+/// message 为 JSON 身份载荷（wire 契约：前端按 code 打开统一二次确认面，
+/// 确认后经统一终止 REST 提交，不在 WS 侧产生任何终止副作用）。
+pub(crate) fn automation_plan_termination_required_message(
+    identity: &AutomationPlanTerminationIdentity,
+) -> String {
+    serde_json::to_string(&termination_identity_details(identity))
+        .unwrap_or_else(|_| "{}".to_string())
+}
+
+/// 统一终止 REST（块 3 §4）：①未带 `confirmed:true` 零副作用返回
+/// `automation_plan_termination_required`＋身份；②确认后 T1 store CAS
+/// `terminate_plan`（幂等可重入，同 command 同 payload 重放首次 durable
+/// 结果）→ T2 `terminate_plan_engine_side`（失效 run/取消 session run/
+/// CAS Terminated/逐 attempt 干净退出＋专用收口）→ ③批量清当前绑定 plan
+/// 三类旧事实，清理失败写 `automation_failed(stage=termination)`（重清
+/// 成功即消失）；cleanup_required 仍不可继续，同 command 重放只重做收口。
+pub async fn post_automation_enrollment_terminate(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id)): Path<(String, String)>,
+    Json(request): Json<crate::web::types::AutomationEnrollmentTerminateRequest>,
+) -> ApiResult<Json<crate::web::types::AutomationEnrollmentTerminateResponse>> {
+    use crate::web::types::{
+        AutomationEnrollmentTerminateAttemptResult, AutomationEnrollmentTerminateResponse,
+    };
+
+    validate_request_ids(&project_id, &issue_id)?;
+    ensure_issue_exists(&state, &project_id, &issue_id)?;
+    let paths = product_app_paths(&state);
+    let store = IssueAutomationStore::new(paths.clone());
+    let enrollment = store
+        .get(&project_id, &issue_id)
+        .map_err(product_store_api_error)?
+        .ok_or_else(enrollment_not_found)?;
+    let identity = AutomationPlanTerminationIdentity {
+        enrollment_id: enrollment.enrollment_id.clone(),
+        policy_revision: enrollment.policy_revision,
+        plan_id: enrollment.plan_id.clone(),
+        session_id: enrollment.session_id.clone(),
+        binding_version: enrollment
+            .binding_history
+            .as_ref()
+            .map(|history| history.current.binding_version),
+        terminated_at: enrollment.terminated_at.clone(),
+        enabled: enrollment.enabled,
+    };
+    if !request.confirmed {
+        return Err(automation_plan_termination_required_error(&identity));
+    }
+    if request.expected_enrollment_id != enrollment.enrollment_id {
+        return Err(enrollment_conflict(
+            Some(enrollment.policy_revision),
+            "termination enrollment identity mismatch",
+        ));
+    }
+    // 提示性绑定互证：请求携带的 expected_binding 必须与当前代全等。
+    if let Some(expected_binding) = request.expected_binding.as_ref()
+        && let Some(history) = enrollment.binding_history.as_ref()
+        && expected_binding != &history.current
+    {
+        return Err(enrollment_conflict(
+            Some(enrollment.policy_revision),
+            "termination binding identity mismatch",
+        ));
+    }
+
+    // ①T1 store CAS：terminated_at＋enabled=false 同一原子写（命令账本
+    // 幂等/冲突；terminated 异命令 → Conflict，未完成清理同 command 重放）。
+    let store_request = crate::product::models::automation::EnrollmentTerminationRequest {
+        command_id: request.command_id.clone(),
+        expected_enrollment_id: request.expected_enrollment_id.clone(),
+        expected_policy_revision: request.expected_policy_revision,
+        reason: request
+            .reason
+            .clone()
+            .unwrap_or_else(|| "automation plan termination confirmed by user".to_string()),
+    };
+    let result = store
+        .terminate_plan(&project_id, &issue_id, store_request)
+        .map_err(enrollment_api_error)?;
+    let terminated_enrollment = result.enrollment.clone();
+
+    // ②T2 引擎侧收口（专用取消契约；仅调用不并写其文件）。
+    let mut cleanup_required = false;
+    let mut results: Vec<AutomationEnrollmentTerminateAttemptResult> = Vec::new();
+    if let Some(plan_id) = terminated_enrollment.plan_id.clone() {
+        let engine_outcome = crate::web::workspace_session::terminate_plan_engine_side(
+            paths.clone(),
+            state.workspace_sessions.clone(),
+            state.coding_runs.clone(),
+            &project_id,
+            &issue_id,
+            &plan_id,
+            terminated_enrollment.session_id.as_deref(),
+        )
+        .await;
+        if engine_outcome.session_error.is_some() {
+            cleanup_required = true;
+            results.push(AutomationEnrollmentTerminateAttemptResult {
+                attempt_id: plan_id.clone(),
+                status: "cleanup_failed".to_string(),
+                reason_code: Some("session_termination_failed".to_string()),
+                message: engine_outcome.session_error.clone(),
+            });
+        }
+        results.extend(engine_outcome.attempts.into_iter().map(|attempt| {
+            if attempt.status == "cleanup_failed" {
+                cleanup_required = true;
+            }
+            AutomationEnrollmentTerminateAttemptResult {
+                attempt_id: attempt.attempt_id,
+                status: attempt.status.to_string(),
+                reason_code: attempt.reason_code,
+                message: attempt.message,
+            }
+        }));
+    }
+
+    // ③批量清当前绑定 plan 三类旧事实（plan_question/automation_failed/
+    // review_limit）；清理失败写 automation_failed(stage=termination)，
+    // 重清成功即消失（outcome 回到 terminated）。
+    let fresh = store
+        .get(&project_id, &issue_id)
+        .map_err(product_store_api_error)?
+        .unwrap_or(terminated_enrollment.clone());
+    if let Some(binding) = fresh
+        .binding_history
+        .as_ref()
+        .map(|history| history.current.clone())
+    {
+        let stale_keys: Vec<String> = fresh
+            .attention_facts
+            .iter()
+            .filter(|fact| {
+                fact.plan_id.as_deref() == Some(binding.plan_id.as_str())
+                    || (fact.plan_id.is_none()
+                        && fact.session_id.as_deref() == Some(binding.session_id.as_str()))
+            })
+            .map(|fact| fact.key.clone())
+            .collect();
+        let mut clear_errors: Vec<String> = Vec::new();
+        for key in &stale_keys {
+            if let Err(error) = store.resolve_automation_attention_fact(
+                &project_id,
+                &issue_id,
+                &binding,
+                key,
+            ) {
+                clear_errors.push(format!("{key}: {error}"));
+            }
+        }
+        if cleanup_required || !clear_errors.is_empty() {
+            let termination_fact = crate::product::models::automation::AutomationAttentionFact {
+                key: format!(
+                    "{}:{}:termination_cleanup_failed",
+                    binding.plan_id, request.command_id
+                ),
+                kind: crate::product::models::automation::AutomationAttentionKind::AutomationFailed,
+                stage: crate::product::models::automation::AutomationAttentionStage::Termination,
+                plan_id: Some(binding.plan_id.clone()),
+                session_id: fresh.session_id.clone(),
+                attempt_id: None,
+                reason_code: "termination_cleanup_failed".to_string(),
+                occurred_at: chrono::Utc::now().to_rfc3339(),
+                choice_id: None,
+                gate_id: None,
+            };
+            if let Err(error) = store.upsert_automation_attention_fact(
+                &project_id,
+                &issue_id,
+                &binding,
+                termination_fact,
+            ) {
+                clear_errors.push(format!("termination fact upsert failed: {error}"));
+            }
+        }
+        if !clear_errors.is_empty() {
+            cleanup_required = true;
+            results.push(AutomationEnrollmentTerminateAttemptResult {
+                attempt_id: fresh
+                    .plan_id
+                    .clone()
+                    .unwrap_or_else(|| "attention-facts".to_string()),
+                status: "cleanup_failed".to_string(),
+                reason_code: Some("attention_fact_cleanup_failed".to_string()),
+                message: Some(clear_errors.join("; ")),
+            });
+        }
+    }
+
+    Ok(Json(AutomationEnrollmentTerminateResponse {
+        command_id: result.command_id,
+        state: result.state,
+        enrollment_id: result.enrollment.enrollment_id,
+        plan_id: result.enrollment.plan_id,
+        terminated_at: result.terminated_at,
+        outcome: if cleanup_required {
+            "cleanup_required".to_string()
+        } else {
+            "terminated".to_string()
+        },
+        results,
+    }))
+}
+
+/// 批 2 T3（块 3 §4）：continue-chain——advance/coding_start 停点的第三种
+/// 显式继续。advance 沿 R1 冻结 policy 复用引擎 retry-initialization；
+/// coding_start 仅重放原 Claimed/RunnerRegistered claim（越 barrier 不清
+/// claim，走既有 RecoverCoding/RestartCoding 恢复并核 auto）。成功 resolve
+/// 原事实＋wake（auto 保留）；NeedsHuman/失败保留原事实。
+pub async fn post_automation_enrollment_continue_chain(
+    State(state): State<WebAppState>,
+    Path((project_id, issue_id)): Path<(String, String)>,
+    Json(request): Json<crate::web::types::AutomationContinueChainRequest>,
+) -> ApiResult<Json<crate::web::types::AutomationContinueChainResponse>> {
+    use crate::product::models::automation::{AutomationAttentionKind, AutomationAttentionStage};
+    use crate::web::types::AutomationContinueChainResponse;
+
+    validate_request_ids(&project_id, &issue_id)?;
+    for id in [&request.command_id, &request.expected_stop_key] {
+        validate_relative_id(id).map_err(|error| {
+            ApiError::validation(
+                "automation_continue_chain_invalid_id",
+                format!("invalid continue-chain id: {error}"),
+            )
+        })?;
+    }
+    ensure_issue_exists(&state, &project_id, &issue_id)?;
+    let paths = product_app_paths(&state);
+    let store = IssueAutomationStore::new(paths.clone());
+    let enrollment = store
+        .get(&project_id, &issue_id)
+        .map_err(product_store_api_error)?
+        .ok_or_else(enrollment_not_found)?;
+    if enrollment.terminated_at.is_some() {
+        return Err(enrollment_conflict(
+            Some(enrollment.policy_revision),
+            "terminated enrollment cannot continue",
+        ));
+    }
+    if !enrollment.enabled {
+        return Err(enrollment_conflict(
+            Some(enrollment.policy_revision),
+            "automation enrollment is disabled",
+        ));
+    }
+    let binding = enrollment
+        .binding_history
+        .as_ref()
+        .map(|history| history.current.clone())
+        .ok_or_else(|| {
+            invalid_scope("enrollment has no versioned binding; cannot continue the chain")
+        })?;
+    if binding != request.expected_binding {
+        return Err(enrollment_conflict(
+            Some(enrollment.policy_revision),
+            "continue-chain binding expired",
+        ));
+    }
+    let Some(fact) = enrollment
+        .attention_facts
+        .iter()
+        .find(|fact| fact.key == request.expected_stop_key)
+        .cloned()
+    else {
+        return Err(ApiError::runtime(
+            "automation_continue_chain_stop_key_not_found",
+            "expected_stop_key does not match an open attention fact",
+            json!({ "stop_key": request.expected_stop_key }),
+        ));
+    };
+    if fact.kind != AutomationAttentionKind::AutomationFailed
+        || !matches!(
+            fact.stage,
+            AutomationAttentionStage::Advance | AutomationAttentionStage::CodingStart
+        )
+        || fact.plan_id.as_deref() != Some(binding.plan_id.as_str())
+    {
+        return Err(ApiError::runtime(
+            "automation_continue_chain_stop_key_not_replayable",
+            "stop key is not an advance/coding_start drive failure for the bound plan",
+            json!({ "stop_key": request.expected_stop_key, "stage": fact.stage }),
+        ));
+    }
+
+    let resolve_and_wake = |store: IssueAutomationStore| {
+        let outcome = store.resolve_automation_attention_fact(
+            &project_id,
+            &issue_id,
+            &binding,
+            &request.expected_stop_key,
+        );
+        let _ = state.autopilot_wake.send(true);
+        outcome
+    };
+
+    match fact.stage {
+        AutomationAttentionStage::Advance => {
+            let advance_store = crate::product::advance_store::AdvanceStore::new(paths.clone());
+            let Some(record) = advance_store
+                .get_advance_for_plan(&project_id, &issue_id, &binding.plan_id)
+                .map_err(product_store_api_error)?
+            else {
+                return Err(ApiError::runtime(
+                    "automation_continue_chain_stop_key_not_replayable",
+                    "no advance record for the bound plan",
+                    json!({}),
+                ));
+            };
+            if record.status != crate::product::advance_store::AdvanceStatus::Failed {
+                // 停点事实已过期（advance 已非 Failed）：幂等解除并唤醒。
+                resolve_and_wake(store).map_err(enrollment_api_error)?;
+                return Ok(Json(AutomationContinueChainResponse {
+                    command_id: request.command_id,
+                    state: crate::product::models::automation::OperationState::Replayed,
+                    stop_key: request.expected_stop_key,
+                    stage: "advance".to_string(),
+                    resolved: true,
+                    detail: None,
+                }));
+            }
+            let journal = advance_store
+                .get_advance_initialization(&record)
+                .map_err(product_store_api_error)?
+                .ok_or_else(|| {
+                    ApiError::runtime(
+                        "automation_continue_chain_stop_key_not_replayable",
+                        "failed advance has no initialization journal",
+                        json!({}),
+                    )
+                })?;
+            let retry_request = crate::product::models::automation::RetryInitializationRequest {
+                command_id: request.command_id.clone(),
+                expected_binding: binding.clone(),
+                expected_attempt_id: journal.attempt_id.clone(),
+                expected_checkpoint: journal.phase,
+                confirm_unknown_side_effect: request.confirm_unknown_side_effect,
+            };
+            // 与 retry-initialization REST 同一引擎链（借用 R1 冻结 policy：
+            // record.start_run_policy 首次冻结，不猜 Manual、不覆盖）。
+            let lifecycle = crate::product::lifecycle_store::LifecycleStore::new(paths.clone());
+            let session_record = lifecycle
+                .list_workspace_sessions(&project_id, &issue_id)
+                .map_err(product_store_api_error)?
+                .into_iter()
+                .find(|record| {
+                    record.workspace_type == crate::product::models::WorkspaceType::WorkItemPlan
+                        && record.entity_id == binding.plan_id
+                })
+                .ok_or_else(|| {
+                    ApiError::runtime(
+                        "automation_continue_chain_session_not_found",
+                        "no workspace session bound to the plan",
+                        json!({}),
+                    )
+                })?;
+            let admission =
+                crate::product::workspace_engine::AdvancePlanAdmission::acquire(
+                    &paths,
+                    &project_id,
+                    &issue_id,
+                    &binding.plan_id,
+                )
+                .map_err(|error| {
+                    ApiError::runtime(
+                        "automation_continue_chain_admission_failed",
+                        format!("continue-chain admission rejected: {error:?}"),
+                        json!({}),
+                    )
+                })?;
+            let retry = match state.workspace_sessions.peek(&session_record.id).await {
+                Some(manager) => {
+                    let engine_arc = manager.engine();
+                    let mut engine = engine_arc.lock().await;
+                    engine
+                        .retry_initialization_with_lease(&retry_request, &admission)
+                        .await
+                }
+                None => {
+                    let full_record = lifecycle
+                        .get_workspace_session(&session_record.id)
+                        .map_err(product_store_api_error)?;
+                    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+                    let mut engine = crate::product::workspace_engine::WorkspaceEngine::new_persistent(
+                        std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                            state.workspace_root.join("advance-engine-checkpoints"),
+                        )),
+                        lifecycle,
+                        event_tx,
+                        crate::product::workspace_engine::WorkspaceSession::from_record(full_record),
+                    );
+                    engine
+                        .retry_initialization_with_lease(&retry_request, &admission)
+                        .await
+                }
+            }
+            .map_err(|error| {
+                ApiError::runtime(
+                    "automation_continue_chain_rejected",
+                    error,
+                    json!({}),
+                )
+            })?;
+            let succeeded = matches!(
+                retry.state,
+                crate::product::models::automation::OperationState::Accepted
+                    | crate::product::models::automation::OperationState::Replayed
+            ) && retry
+                .outcome
+                .as_ref()
+                .is_some_and(|outcome| {
+                    matches!(
+                        outcome,
+                        crate::product::advance_store::AdvanceOutcome::Completed { .. }
+                            | crate::product::advance_store::AdvanceOutcome::Replayed { .. }
+                    )
+                });
+            if succeeded {
+                resolve_and_wake(store).map_err(enrollment_api_error)?;
+            }
+            Ok(Json(AutomationContinueChainResponse {
+                command_id: retry.command_id,
+                state: retry.state,
+                stop_key: request.expected_stop_key,
+                stage: "advance".to_string(),
+                resolved: succeeded,
+                detail: if succeeded {
+                    None
+                } else {
+                    Some("advance retry stopped at needs_human; fact kept".to_string())
+                },
+            }))
+        }
+        AutomationAttentionStage::CodingStart => {
+            let Some(attempt_id) = fact.attempt_id.clone() else {
+                return Err(ApiError::runtime(
+                    "automation_continue_chain_stop_key_not_replayable",
+                    "coding_start fact carries no attempt id",
+                    json!({}),
+                ));
+            };
+            let coding_store =
+                crate::product::coding_attempt_store::CodingAttemptStore::new(paths.clone());
+            let attempt = coding_store
+                .get_attempt(&project_id, &issue_id, &attempt_id)
+                .map_err(product_store_api_error)?;
+            let Some(claim) = attempt.start_claim.clone() else {
+                return Err(ApiError::runtime(
+                    "automation_continue_chain_stop_key_not_replayable",
+                    "attempt has no start claim; use the existing recovery paths",
+                    json!({}),
+                ));
+            };
+            if !matches!(
+                claim.phase,
+                crate::product::coding_models::CodingStartPhase::Claimed
+                    | crate::product::coding_models::CodingStartPhase::RunnerRegistered
+            ) {
+                // 越屏障（ProviderMayHaveStarted/NeedsHuman）不清 claim——
+                // 走既有 RecoverCoding/RestartCoding 恢复（服务端核 auto）。
+                return Err(ApiError::runtime(
+                    "automation_continue_chain_stop_key_not_replayable",
+                    "start claim passed the replay barrier; use the existing recovery paths",
+                    json!({ "claim_phase": format!("{:?}", claim.phase) }),
+                ));
+            }
+            let outcome = crate::web::coding_start::start_coding_once(
+                &state,
+                &project_id,
+                &issue_id,
+                crate::web::coding_start::StartCodingCommand {
+                    attempt_id: attempt.id.clone(),
+                    command_id: claim.command_id.clone(),
+                    origin: claim.origin.clone(),
+                },
+            )
+            .await;
+            match outcome {
+                Ok(
+                    crate::web::coding_start::StartCodingOutcome::Started { .. }
+                    | crate::web::coding_start::StartCodingOutcome::AlreadyStarted { .. },
+                ) => {
+                    resolve_and_wake(store).map_err(enrollment_api_error)?;
+                    Ok(Json(AutomationContinueChainResponse {
+                        command_id: request.command_id,
+                        state: crate::product::models::automation::OperationState::Accepted,
+                        stop_key: request.expected_stop_key,
+                        stage: "coding_start".to_string(),
+                        resolved: true,
+                        detail: None,
+                    }))
+                }
+                Ok(crate::web::coding_start::StartCodingOutcome::NeedsHuman {
+                    attempt_id,
+                    reason,
+                }) => Ok(Json(AutomationContinueChainResponse {
+                    command_id: request.command_id,
+                    state: crate::product::models::automation::OperationState::NeedsHuman,
+                    stop_key: request.expected_stop_key,
+                    stage: "coding_start".to_string(),
+                    resolved: false,
+                    detail: Some(format!("{attempt_id}: {reason}")),
+                })),
+                Err(error) => Err(ApiError::runtime(
+                    "automation_continue_chain_start_failed",
+                    format!("coding start replay failed: {}", error.message()),
+                    json!({ "code": error.code() }),
+                )),
+            }
+        }
+        AutomationAttentionStage::Plan | AutomationAttentionStage::Termination => {
+            // 上方 stage 过滤已排除； unreachable 分支保持穷尽。
+            unreachable!("stage filtered above")
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
@@ -1392,5 +1976,331 @@ mod tests {
         assert_eq!(plans[0].id, plan_before.id);
         assert_eq!(plans[0].created_at, plan_before.created_at);
         assert_eq!(plans[0].options, plan_before.options);
+    }
+
+    // ─── 批 2 T3：统一终止 REST（REQ-WIGA-09/11、REQ-WIGA-08/12）───
+
+    async fn post_terminate(
+        app: &axum::Router,
+        body: &serde_json::Value,
+    ) -> axum::http::Response<axum::body::Body> {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/automation-enrollment/terminate"
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// T3 红测①：未带 confirmed:true → 428 `automation_plan_termination_required`
+    ///（details 含 confirm_required/plan/enrollment 身份），零副作用。
+    #[tokio::test]
+    async fn terminate_rest_requires_confirmation_with_zero_side_effects() {
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        assert_eq!(enable.status(), StatusCode::OK);
+        let enrollment = response_json(enable).await;
+        let revision = enrollment["policy_revision"].as_u64().unwrap();
+        let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let bound = post_binding(
+            &app,
+            serde_json::json!({
+                "expected_revision": revision,
+                "plan_id": plan_id,
+                "session_id": session_id,
+            }),
+        )
+        .await;
+        assert_eq!(bound.status(), StatusCode::OK);
+
+        let response = post_terminate(
+            &app,
+            &serde_json::json!({
+                "command_id": "cmd-t3-terminate-1",
+                "expected_enrollment_id": enrollment["enrollment_id"],
+                "expected_policy_revision": revision + 1,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
+        let payload = response_json(response).await;
+        assert_eq!(payload["code"], "automation_plan_termination_required");
+        assert_eq!(payload["details"]["confirm_required"], true);
+        assert_eq!(payload["details"]["plan_id"], plan_id.as_str());
+        assert_eq!(
+            payload["details"]["enrollment_id"],
+            enrollment["enrollment_id"]
+        );
+
+        // 零副作用：enrollment 未终止未禁用，session 仍 Open。
+        let current = IssueAutomationStore::new(fixture.paths.clone())
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap();
+        assert!(current.enabled);
+        assert!(current.terminated_at.is_none());
+        assert_eq!(
+            crate::product::lifecycle_store::LifecycleStore::new(fixture.paths.clone())
+                .get_workspace_session(&session_id)
+                .unwrap()
+                .status,
+            crate::product::models::WorkspaceSessionStatus::Open,
+        );
+    }
+
+    /// T3 红测①②⑤⑥⑧：确认后整 plan 终止（session Terminated、三类旧事实
+    /// 清空）、同 command 重放幂等（terminated_at 冻结、不复活）、terminated
+    /// 仍 managed（同源管理投影）。
+    #[tokio::test]
+    async fn terminate_rest_confirmed_terminates_and_replays_idempotently() {
+        use crate::product::models::automation::{
+            AutomationAttentionFact, AutomationAttentionKind, AutomationAttentionStage,
+        };
+        use crate::product::models::WorkspaceSessionStatus;
+
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        let enrollment = response_json(enable).await;
+        let revision = enrollment["policy_revision"].as_u64().unwrap();
+        let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let bound = response_json(
+            post_binding(
+                &app,
+                serde_json::json!({
+                    "expected_revision": revision,
+                    "plan_id": plan_id,
+                    "session_id": session_id,
+                }),
+            )
+            .await,
+        )
+        .await;
+        let bound_revision = bound["policy_revision"].as_u64().unwrap();
+
+        // 播种当前绑定 plan 的三类旧事实之一（plan_question）。
+        let store = IssueAutomationStore::new(fixture.paths.clone());
+        let durable = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+        let binding = durable.binding_history.as_ref().unwrap().current.clone();
+        store
+            .upsert_automation_attention_fact(
+                PROJECT_ID,
+                ISSUE_ID,
+                &binding,
+                AutomationAttentionFact {
+                    key: format!("{plan_id}:cmd-seed:plan_question"),
+                    kind: AutomationAttentionKind::PlanQuestion,
+                    stage: AutomationAttentionStage::Plan,
+                    plan_id: Some(plan_id.clone()),
+                    session_id: Some(session_id.clone()),
+                    attempt_id: None,
+                    reason_code: "test".to_string(),
+                    occurred_at: "2026-10-16T00:00:00Z".to_string(),
+                    choice_id: None,
+                    gate_id: None,
+                },
+            )
+            .unwrap();
+
+        let body = serde_json::json!({
+            "command_id": "cmd-t3-terminate-2",
+            "expected_enrollment_id": enrollment["enrollment_id"],
+            "expected_policy_revision": bound_revision,
+            "confirmed": true,
+        });
+        let response = post_terminate(&app, &body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let first = response_json(response).await;
+        assert_eq!(first["outcome"], "terminated");
+        assert_eq!(first["state"], "accepted");
+        assert_eq!(first["plan_id"], plan_id.as_str());
+        let terminated_at = first["terminated_at"].as_str().unwrap().to_string();
+
+        // session Terminated；enrollment 不可恢复终止；三类旧事实清空。
+        assert_eq!(
+            crate::product::lifecycle_store::LifecycleStore::new(fixture.paths.clone())
+                .get_workspace_session(&session_id)
+                .unwrap()
+                .status,
+            WorkspaceSessionStatus::Terminated,
+        );
+        let durable = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+        assert!(!durable.enabled);
+        assert_eq!(durable.terminated_at.as_deref(), Some(terminated_at.as_str()));
+        assert!(
+            durable.attention_facts.is_empty(),
+            "termination must clear the bound plan's stale attention facts"
+        );
+
+        // terminated 仍 managed（同源管理投影；REST/WS 同一口径）。
+        let ownership = store
+            .ownership_for_ids(PROJECT_ID, ISSUE_ID, &session_id)
+            .unwrap();
+        assert_eq!(
+            ownership.owner,
+            crate::product::models::automation::AutomationOwner::Server
+        );
+        assert_eq!(ownership.terminated_at.as_deref(), Some(terminated_at.as_str()));
+
+        // 同 command 同 payload 重放：Replayed、terminated_at 冻结、幂等。
+        let replay = post_terminate(&app, &body).await;
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replayed = response_json(replay).await;
+        assert_eq!(replayed["state"], "replayed");
+        assert_eq!(replayed["terminated_at"], terminated_at.as_str());
+
+        // 重启后不复活：新进程替身 reconcile → NoEnrollment（terminated）。
+        let state = crate::web::state::WebAppState::new(
+            fixture._root.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(fixture._root.path().to_path_buf()),
+        );
+        let worker = crate::web::autopilot_orchestrator::AutopilotOrchestrator::new(
+            state,
+            Default::default(),
+        );
+        let outcome = worker
+            .reconcile(
+                &crate::web::state::WebAppState::new(
+                    fixture._root.path().to_path_buf(),
+                    crate::web::runtime::WebRuntime::new_fake(fixture._root.path().to_path_buf()),
+                ),
+                PROJECT_ID,
+                ISSUE_ID,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, crate::web::autopilot_orchestrator::ReconcileOutcome::NoEnrollment);
+    }
+
+    /// T3 红测②（C2 旧 abort REST 路由）：自动绑定 plan 上的旧 abort 入口
+    /// 统一返回终止确认要求（零副作用）；manual/无绑定不走 428。
+    #[tokio::test]
+    async fn abort_rest_routes_managed_attempt_to_unified_termination() {
+        use tower::ServiceExt;
+
+        use crate::product::coding_attempt_store::{
+            CodingAttemptStore, CreateCodingAttemptInput,
+        };
+        use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        let enrollment = response_json(enable).await;
+        let revision = enrollment["policy_revision"].as_u64().unwrap();
+        let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let bound = post_binding(
+            &app,
+            serde_json::json!({
+                "expected_revision": revision,
+                "plan_id": plan_id,
+                "session_id": session_id,
+            }),
+        )
+        .await;
+        assert_eq!(bound.status(), StatusCode::OK);
+
+        let coding_store = CodingAttemptStore::new(fixture.paths.clone());
+        let attempt = coding_store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: crate::product::models::provider::ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+            })
+            .unwrap();
+        // 独立 manual 对照 attempt（不同 work_item，无 group 绑定）。
+        let manual_attempt = coding_store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_0002".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0002/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: crate::product::models::provider::ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+            })
+            .unwrap();
+        let mut managed = attempt.clone();
+        managed.work_item_group_id = Some(plan_id.clone());
+        coding_store.write_coding_attempt_for_test(&managed).unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/coding-attempts/{}/abort",
+                        managed.id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
+        let payload = response_json(response).await;
+        assert_eq!(payload["code"], "automation_plan_termination_required");
+        assert_eq!(payload["details"]["plan_id"], plan_id.as_str());
+        // 零副作用：attempt 状态未被单 attempt abort 改写。
+        assert_eq!(
+            coding_store
+                .get_attempt(PROJECT_ID, ISSUE_ID, &managed.id)
+                .unwrap()
+                .status,
+            crate::product::coding_models::CodingAttemptStatus::Created,
+        );
+
+        // manual 对照：无绑定 attempt 不返回 428（原语义错误面或成功）。
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/coding-attempts/{}/abort",
+                        manual_attempt.id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let manual_payload = response_json(response).await;
+        assert_ne!(
+            manual_payload["code"],
+            "automation_plan_termination_required",
+            "manual attempt abort must keep the original semantics"
+        );
     }
 }

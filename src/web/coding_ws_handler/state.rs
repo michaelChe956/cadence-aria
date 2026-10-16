@@ -120,6 +120,21 @@ pub(crate) fn build_coding_session_state(
         } else {
             (None, None)
         };
+    // 批 2 T3（REQ-WIGA-08/09）：同源管理投影（REST/WS 一致，terminated
+    // 仍 managed）；读取失败置 None 保持未知（前端不猜），打点不吞快照。
+    let automation = crate::web::handlers::automation_enrollment::automation_identity_for_attempt(
+        &coding_store.paths(),
+        &attempt,
+    )
+    .map_err(CodingWorkspaceEngineError::Store)?
+    .map(|identity| crate::product::models::automation::AutomationOwnership {
+        owner: crate::product::models::automation::AutomationOwner::Server,
+        enrollment_id: Some(identity.enrollment_id),
+        policy_revision: Some(identity.policy_revision),
+        enabled: identity.enabled,
+        plan_id: identity.plan_id,
+        terminated_at: identity.terminated_at,
+    });
 
     Ok(CodingWsOutMessage::CodingSessionState {
         project_id: attempt.project_id.clone(),
@@ -159,6 +174,7 @@ pub(crate) fn build_coding_session_state(
         verification_commands: Box::new(execution_context.verification_commands),
         work_item_execution_plan: Box::new(work_item_execution_plan),
         linked_plan_repair: Box::new(linked_plan_repair),
+        automation,
     })
 }
 

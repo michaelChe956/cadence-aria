@@ -58,6 +58,9 @@ impl IntoResponse for ApiError {
             | "coding_gate_response_command_conflict"
             // P0 1.3（Task 9）：coding choice 应答同映射语义。
             | "coding_choice_conflict" => StatusCode::CONFLICT,
+            // 批 2 T3（REQ-WIGA-09）：统一终止二次确认要求——未确认零副作用，
+            // 428 Precondition Required（REST/gate-responses 共用同一码）。
+            "automation_plan_termination_required" => StatusCode::PRECONDITION_REQUIRED,
             "coding_attempt_active"
             | "coding_attempt_ambiguous"
             | "coding_attempt_scope_mismatch"

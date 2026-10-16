@@ -561,3 +561,90 @@ impl WorkspaceEngine {
         }
     }
 }
+
+#[cfg(test)]
+mod t3_termination_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::{
+        CreateWorkspaceSessionInput, LifecycleStore,
+    };
+    use crate::product::models::provider::ProviderName;
+    use crate::product::models::{WorkspaceType, WorkspaceSessionStatus};
+
+    fn persistent_engine_with_status(
+        root: &std::path::Path,
+        durable_status: WorkspaceSessionStatus,
+    ) -> (
+        LifecycleStore,
+        WorkspaceEngine,
+    ) {
+        let paths = ProductAppPaths::new(root.join(".aria"));
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let record = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "entity_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            })
+            .unwrap();
+        if durable_status != WorkspaceSessionStatus::Open {
+            lifecycle
+                .compare_and_update_workspace_session_status(&record, durable_status)
+                .unwrap();
+        }
+        // 引擎内存态保持 Open（模拟迟到收口现场），durable 已是目标状态。
+        let mut in_memory = record.clone();
+        in_memory.status = WorkspaceSessionStatus::Open;
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        let engine = WorkspaceEngine::new_persistent(
+            std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                root.join("advance-checkpoints"),
+            )),
+            LifecycleStore::new(paths),
+            event_tx,
+            WorkspaceSession::from_record(in_memory),
+        );
+        (lifecycle, engine)
+    }
+
+    /// 批 2 T3（T1T2 遗留③，REQ-WIGA-09）：durable 已 Terminated 的
+    /// session，迟到 `finish_aborted_run` 不覆盖状态（不以 Open/Failed
+    /// 复活）、不重置 stage；对照：durable Open 的迟到收口仍写 Open。
+    #[tokio::test]
+    async fn finish_aborted_run_preserves_durable_terminated_session() {
+        let root = tempfile::tempdir().unwrap();
+        let (lifecycle, mut engine) =
+            persistent_engine_with_status(root.path(), WorkspaceSessionStatus::Terminated);
+        let session_id = engine.session.session_id.clone();
+
+        engine.finish_aborted_run().await;
+
+        assert_eq!(
+            engine.session.session_status,
+            WorkspaceSessionStatus::Terminated,
+            "late abort finalization must not resurrect a terminated session"
+        );
+        assert_eq!(
+            lifecycle.get_workspace_session(&session_id).unwrap().status,
+            WorkspaceSessionStatus::Terminated,
+        );
+
+        // 对照：durable Open 的迟到收口维持旧语义（Open 重置写盘）。
+        let (lifecycle, mut engine) =
+            persistent_engine_with_status(root.path(), WorkspaceSessionStatus::Open);
+        let session_id = engine.session.session_id.clone();
+        engine.finish_aborted_run().await;
+        assert_eq!(
+            lifecycle.get_workspace_session(&session_id).unwrap().status,
+            WorkspaceSessionStatus::Open,
+        );
+    }
+}
