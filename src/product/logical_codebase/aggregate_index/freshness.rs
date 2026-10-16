@@ -997,7 +997,27 @@ mod tests {
             &self,
             request: BoundedCommandRequest,
         ) -> Result<BoundedCommandResult, BoundedCommandError> {
-            let stdout = match request.argv.as_slice() {
+            // Bug45/T4 修复轮:平台 git argv 以受信禁桥参数开头(见
+            // snapshot.rs 生产 git()),codegraph 请求不受影响;先断言并
+            // 剥离 git 禁桥前缀,再按同一 argv 匹配面分发。
+            let bridge = crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS;
+            let bridge_len = bridge.len();
+            let argv: &[String] = if request.executable == "git" {
+                let prefixed = request.argv.len() > bridge_len
+                    && request.argv[..bridge_len]
+                        .iter()
+                        .zip(bridge.iter())
+                        .all(|(actual, expected)| actual == expected);
+                assert!(
+                    prefixed,
+                    "git argv missing trusted bridge prefix: {:?}",
+                    request.argv
+                );
+                &request.argv[bridge_len..]
+            } else {
+                request.argv.as_slice()
+            };
+            let stdout = match argv {
                 [version] if version == "--version" => "1.6.0\n".to_string(),
                 [rev_parse, head] if rev_parse == "rev-parse" && head == "HEAD" => {
                     self.member_head(&request.working_dir)

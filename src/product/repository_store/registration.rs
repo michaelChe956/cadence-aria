@@ -951,10 +951,22 @@ impl RepositoryRegistrationCoordinator {
         argv: Vec<String>,
         cancellation: CancellationToken,
     ) -> Result<BoundedCommandResult, String> {
+        // Bug45/T4 修复轮:registration/git_finalize 对 coder 提交的注册仓
+        // 执行 rev-parse/status/add/commit/push,属平台受信启动面;argv
+        // 前置平台受信禁桥参数(与 cross_cutting::git_command::
+        // TRUSTED_GIT_BRIDGE_ARGS 同源):status 不得询问仓库
+        // core.fsmonitor 探针,平台 commit 不执行仓库 hooks。命令诊断
+        // (command_summary)按完整 argv 呈现,审计反映实际禁桥参数。
+        let mut full_argv: Vec<String> =
+            crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
+                .iter()
+                .map(|argument| (*argument).to_string())
+                .collect();
+        full_argv.extend(argv);
         self.runner
             .run(BoundedCommandRequest {
                 executable: "git".to_string(),
-                argv,
+                argv: full_argv,
                 working_dir: working_dir.to_path_buf(),
                 timeout: self.git_command_timeout,
                 cancellation,

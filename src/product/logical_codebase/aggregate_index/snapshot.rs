@@ -155,12 +155,19 @@ impl AggregateIndexSnapshotCollector {
     }
 
     fn git(&self, cwd: &Path, argv: &[&str]) -> Result<String, AggregateIndexError> {
-        let request = BoundedCommandRequest {
-            executable: "git".to_string(),
-            argv: argv
+        // Bug45/T4 修复轮:聚合索引对成员主 checkout(coder/reviewer 可写
+        // 仓)执行 rev-parse/status,属平台受信启动面;argv 前置平台受信
+        // 禁桥参数(与 cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
+        // 同源),status 不得询问仓库 core.fsmonitor 探针。
+        let mut full_argv: Vec<String> =
+            crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
                 .iter()
                 .map(|argument| (*argument).to_string())
-                .collect(),
+                .collect();
+        full_argv.extend(argv.iter().map(|argument| (*argument).to_string()));
+        let request = BoundedCommandRequest {
+            executable: "git".to_string(),
+            argv: full_argv,
             working_dir: cwd.to_path_buf(),
             timeout: Duration::from_secs(GIT_TIMEOUT_SECS),
             cancellation: CancellationToken::new(),
@@ -268,7 +275,8 @@ fn command_failure_message(argv: &[&str], output: &BoundedCommandResult) -> Stri
 mod tests {
     use std::collections::VecDeque;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
 
     use uuid::Uuid;
 
@@ -509,6 +517,7 @@ mod tests {
     struct RecordingGitState {
         outputs: VecDeque<BoundedCommandResult>,
         cwd_calls: Vec<PathBuf>,
+        argv_calls: Vec<Vec<String>>,
     }
 
     impl RecordingGitRunner {
@@ -521,13 +530,32 @@ mod tests {
                 state: Arc::new(Mutex::new(RecordingGitState {
                     outputs: outputs.into_iter().collect(),
                     cwd_calls: Vec::new(),
+                    argv_calls: Vec::new(),
                 })),
             }
         }
 
         fn cwd_calls(&self) -> Vec<PathBuf> {
-            self.state.lock().unwrap().cwd_calls.clone()
+            self.state.lock().cwd_calls.clone()
         }
+
+        fn argv_calls(&self) -> Vec<Vec<String>> {
+            self.state.lock().argv_calls.clone()
+        }
+    }
+
+    /// Bug45/T4 修复轮:生产 git() 在 argv 前置平台受信禁桥参数;runner
+    /// 断言该前缀在位(审计 argv 反映)后按逻辑子命令匹配。
+    fn strip_trusted_bridge(argv: &[String]) -> &[String] {
+        let bridge = crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS;
+        let bridge_len = bridge.len();
+        let prefixed = argv.len() > bridge_len
+            && argv[..bridge_len]
+                .iter()
+                .zip(bridge.iter())
+                .all(|(actual, expected)| actual == expected);
+        assert!(prefixed, "argv missing trusted bridge prefix: {argv:?}");
+        &argv[bridge_len..]
     }
 
     #[async_trait::async_trait]
@@ -537,21 +565,54 @@ mod tests {
             request: BoundedCommandRequest,
         ) -> Result<BoundedCommandResult, BoundedCommandError> {
             assert_eq!(request.executable, "git");
-            if !matches!(
-                request.argv.as_slice(),
-                [rev_parse, head] if rev_parse == "rev-parse" && head == "HEAD"
-            ) && !matches!(
-                request.argv.as_slice(),
-                [status, porcelain] if status == "status" && porcelain == "--porcelain=v1"
-            ) {
+            let argv = strip_trusted_bridge(&request.argv);
+            if !matches!(argv, [rev_parse, head] if rev_parse == "rev-parse" && head == "HEAD")
+                && !matches!(
+                    argv,
+                    [status, porcelain] if status == "status" && porcelain == "--porcelain=v1"
+                )
+            {
                 panic!("unexpected Git argv: {:?}", request.argv);
             }
-            let mut state = self.state.lock().unwrap();
-            state.cwd_calls.push(request.working_dir);
+            let mut state = self.state.lock();
+            state.cwd_calls.push(request.working_dir.clone());
+            state.argv_calls.push(request.argv.clone());
             Ok(state
                 .outputs
                 .pop_front()
                 .unwrap_or_else(|| panic!("missing scripted Git output")))
         }
+    }
+
+    /// Bug45/T4 修复轮:聚合索引 argv 必须以平台受信禁桥参数开头(审计
+    /// argv 反映实际禁桥),其后才是逻辑子命令。
+    #[test]
+    fn git_argv_carries_trusted_bridge_prefix() {
+        let runner = RecordingGitRunner::with_output(
+            "api",
+            "0123456789012345678901234567890123456789\n",
+            "",
+        );
+        let collector = AggregateIndexSnapshotCollector::new(Arc::new(runner.clone()));
+        collector.current(&main_checkout("api")).unwrap();
+
+        let bridge: Vec<String> = crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
+            .iter()
+            .map(|argument| (*argument).to_string())
+            .collect();
+        assert_eq!(
+            runner.argv_calls(),
+            vec![
+                bridge
+                    .clone()
+                    .into_iter()
+                    .chain(["rev-parse".to_string(), "HEAD".to_string()])
+                    .collect::<Vec<String>>(),
+                bridge
+                    .into_iter()
+                    .chain(["status".to_string(), "--porcelain=v1".to_string()])
+                    .collect::<Vec<String>>(),
+            ]
+        );
     }
 }

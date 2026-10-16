@@ -34,6 +34,21 @@ use crate::product::repository_store::{
     RepositoryInitializationStepKind, RepositoryRegistrationError, RepositoryRegistrationInput,
 };
 
+
+/// Bug45/T4 修复轮:coordinator run_git 在 argv 前置平台受信禁桥参数
+/// (core.hooksPath=/dev/null + core.fsmonitor=false);mock runner 断言
+/// 前缀在位(审计 argv 反映)后按逻辑子命令匹配。
+fn strip_trusted_bridge(argv: &[String]) -> &[String] {
+    let bridge = crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS;
+    let bridge_len = bridge.len();
+    let prefixed = argv.len() > bridge_len
+        && argv[..bridge_len]
+            .iter()
+            .zip(bridge.iter())
+            .all(|(actual, expected)| actual == expected);
+    assert!(prefixed, "argv missing trusted bridge prefix: {argv:?}");
+    &argv[bridge_len..]
+}
 struct AvailableHealth;
 
 impl ProviderHealthSource for AvailableHealth {
@@ -272,7 +287,7 @@ impl BoundedCommandRunner for ConfigRunner {
         request: BoundedCommandRequest,
     ) -> Result<BoundedCommandResult, BoundedCommandError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
-        if request.argv == ["rev-parse", "--show-toplevel"] {
+        if strip_trusted_bridge(&request.argv) == ["rev-parse", "--show-toplevel"] {
             return Ok(self.rev_parse.lock().unwrap().take().unwrap_or_else(|| {
                 command_result(Some(0), &format!("{}\n", self.root.display()), "")
             }));
@@ -421,7 +436,7 @@ impl BoundedCommandRunner for CwdRootRunner {
         &self,
         request: BoundedCommandRequest,
     ) -> Result<BoundedCommandResult, BoundedCommandError> {
-        if request.argv == ["rev-parse", "--show-toplevel"] {
+        if strip_trusted_bridge(&request.argv) == ["rev-parse", "--show-toplevel"] {
             Ok(command_result(
                 Some(0),
                 &format!("{}\n", request.working_dir.display()),
@@ -616,7 +631,7 @@ impl BoundedCommandRunner for RecordingRunner {
         &self,
         request: BoundedCommandRequest,
     ) -> Result<BoundedCommandResult, BoundedCommandError> {
-        let (label, result) = match request.argv.as_slice() {
+        let (label, result) = match strip_trusted_bridge(&request.argv) {
             [first, second] if first == "rev-parse" && second == "--show-toplevel" => (
                 "git_root",
                 command_result(Some(0), &format!("{}\n", self.root.display()), ""),
@@ -684,7 +699,7 @@ impl BoundedCommandRunner for GitFinalizeRunner {
         &self,
         request: BoundedCommandRequest,
     ) -> Result<BoundedCommandResult, BoundedCommandError> {
-        let (label, result) = match request.argv.as_slice() {
+        let (label, result) = match strip_trusted_bridge(&request.argv) {
             [first, second] if first == "rev-parse" && second == "--show-toplevel" => (
                 "git_root",
                 command_result(Some(0), &format!("{}\n", self.root.display()), ""),
@@ -766,8 +781,15 @@ impl BoundedCommandRunner for ScriptedGitRunner {
             .unwrap()
             .pop_front()
             .expect("unexpected extra Git invocation");
-        assert_eq!(request.argv, expected_argv, "unexpected Git argv");
-        self.calls.lock().unwrap().push(request.argv);
+        assert_eq!(
+            strip_trusted_bridge(&request.argv),
+            expected_argv.as_slice(),
+            "unexpected Git argv (logical, after trusted bridge prefix)"
+        );
+        self.calls
+            .lock()
+            .unwrap()
+            .push(strip_trusted_bridge(&request.argv).to_vec());
         Ok(result)
     }
 }
@@ -796,5 +818,52 @@ fn aggregate_initialization_is_isolated_from_single_repository_registration_and_
     assert!(
         coordinator_type.contains("aggregate_initialization_coordinator"),
         "aggregate initialization coordinator must live under its own module"
+    );
+}
+
+/// Bug45/T4 修复轮:coordinator run_git 的 argv 必须以平台受信禁桥参数
+/// 开头(审计 argv 反映实际禁桥:core.hooksPath=/dev/null +
+/// core.fsmonitor=false),其后才是调用方逻辑子命令。ScriptedGitRunner
+/// 的剥桥断言对既有全部 registration 用例同样生效。
+#[tokio::test]
+async fn coordinator_run_git_argv_carries_trusted_bridge_prefix() {
+    let status_argv = vec![
+        "status".to_string(),
+        "--porcelain=v1".to_string(),
+        "-z".to_string(),
+        "--untracked-files=all".to_string(),
+    ];
+    let runner = Arc::new(ScriptedGitRunner::new(vec![(
+        status_argv.clone(),
+        command_result(Some(0), "", ""),
+    )]));
+    let temp = TempDir::new().unwrap();
+    let repository = temp.path().join("repository");
+    std::fs::create_dir_all(&repository).unwrap();
+    let subject = coordinator(
+        Arc::new(ConfigProjectLookup { exists: true }),
+        Arc::new(ConfigRepositoryPersistence::new(vec![], false)),
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(AvailableHealth))),
+        Arc::new(StaticCadence {
+            failure: None,
+            count: AtomicUsize::new(0),
+            source_root: temp.path().join("cadence"),
+        }),
+        Arc::new(|| Ok(())),
+        runner.clone(),
+        Arc::new(StaticInitializer {
+            fail: false,
+            count: AtomicUsize::new(0),
+        }),
+    );
+
+    subject
+        .run_git(&repository, status_argv.clone(), CancellationToken::new())
+        .await
+        .expect("bridged run_git must succeed");
+    assert_eq!(
+        runner.calls.lock().unwrap().as_slice(),
+        &[status_argv],
+        "剥桥后的逻辑 argv 应与调用方一致;前缀在位由 runner 断言保证"
     );
 }

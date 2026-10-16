@@ -832,7 +832,27 @@ mod tests {
         ) -> Result<BoundedCommandResult, BoundedCommandError> {
             let mut state = self.state.lock();
             state.requests.push(request.clone());
-            if request.argv.as_slice() == ["init", "."] {
+            // Bug45/T4 修复轮:平台 git argv 以受信禁桥参数开头(见
+            // snapshot.rs 生产 git()),codegraph 请求不受影响;先断言并
+            // 剥离 git 禁桥前缀,再按同一 argv 匹配面分发。
+            let bridge = crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS;
+            let bridge_len = bridge.len();
+            let argv: &[String] = if request.executable == "git" {
+                let prefixed = request.argv.len() > bridge_len
+                    && request.argv[..bridge_len]
+                        .iter()
+                        .zip(bridge.iter())
+                        .all(|(actual, expected)| actual == expected);
+                assert!(
+                    prefixed,
+                    "git argv missing trusted bridge prefix: {:?}",
+                    request.argv
+                );
+                &request.argv[bridge_len..]
+            } else {
+                request.argv.as_slice()
+            };
+            if argv == ["init", "."] {
                 if state.drift_on_init {
                     state
                         .revision_overrides
@@ -843,7 +863,7 @@ mod tests {
                     observer();
                 }
             }
-            if request.argv.as_slice() == ["sync", "."] && state.drift_on_sync {
+            if argv == ["sync", "."] && state.drift_on_sync {
                 state
                     .revision_overrides
                     .insert("api".to_string(), "b".repeat(40));
@@ -851,7 +871,7 @@ mod tests {
             }
             // A scripted init failure short-circuits before any other argv match
             // so the rebuild path observes a non-zero `codegraph init` exit.
-            if let [init, dot] = request.argv.as_slice()
+            if let [init, dot] = argv
                 && init == "init"
                 && dot == "."
                 && let Some(stderr) = state.fail_next_init.take()
@@ -869,7 +889,7 @@ mod tests {
             }
             // 漂移态现场：库不存在时 `sync` exit 1（`✗ CodeGraph not
             // initialized …`，stderr）。
-            if let [sync, dot] = request.argv.as_slice()
+            if let [sync, dot] = argv
                 && sync == "sync"
                 && dot == "."
                 && let Some(stderr) = state.fail_next_sync_not_initialized.take()
@@ -885,7 +905,7 @@ mod tests {
                     duration_ms: 1,
                 });
             }
-            let stdout = match request.argv.as_slice() {
+            let stdout = match argv {
                 [version] if version == "--version" => "1.6.2\n".to_string(),
                 [rev_parse, head] if rev_parse == "rev-parse" && head == "HEAD" => {
                     match request

@@ -343,11 +343,25 @@ impl CadenceSkillsManager {
         working_dir: PathBuf,
         cancellation: CancellationToken,
     ) -> BoundedCommandRequest {
+        // Bug45/T4 修复轮:skills 克隆虽由平台管理(位置 owner HOME
+        // `.agents/Cadence-skills`,写入面=CadenceSkillsManager 的
+        // clone/fetch/reset,内容源自平台配置的 skills 远端,coder 会话
+        // 不以其为 workspace),但去沙箱后 coder 进程共享 owner HOME,
+        // `.git/hooks` 物理写入面仍在 coder 侧——按「coder 可写仓接桥」
+        // 规则统一前置平台受信禁桥参数(与 cross_cutting::git_command::
+        // TRUSTED_GIT_BRIDGE_ARGS 同源),fetch/reset/checkout 不执行
+        // 仓库 hooks、不询 core.fsmonitor。
         let mut environment = self.environment.clone();
         environment.insert("LC_ALL".to_string(), "C".to_string());
+        let mut full_argv: Vec<String> =
+            crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
+                .iter()
+                .map(|argument| (*argument).to_string())
+                .collect();
+        full_argv.extend(argv);
         BoundedCommandRequest {
             executable: "git".to_string(),
-            argv,
+            argv: full_argv,
             working_dir,
             timeout: GIT_TIMEOUT,
             cancellation,
@@ -600,13 +614,16 @@ mod tests {
     }
 
     fn assert_git_request(request: &BoundedCommandRequest, argv: &[&str], cwd: &Path) {
+        // Bug45/T4 修复轮:git_request 统一前置平台受信禁桥参数;断言
+        // 完整 argv(审计反映),预期值 = 禁桥前缀 + 逻辑子命令。
+        let mut expected: Vec<String> =
+            crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
+                .iter()
+                .map(|argument| (*argument).to_string())
+                .collect();
+        expected.extend(argv.iter().map(|value| (*value).to_string()));
         assert_eq!(request.executable, "git");
-        assert_eq!(
-            request.argv,
-            argv.iter()
-                .map(|value| value.to_string())
-                .collect::<Vec<_>>()
-        );
+        assert_eq!(request.argv, expected);
         assert_eq!(request.working_dir, cwd);
         assert_eq!(request.timeout, Duration::from_secs(180));
         assert_eq!(
@@ -706,8 +723,13 @@ mod tests {
         assert!(result.git_updated);
         let requests = runner.requests();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].argv[1], mirror(0));
-        assert_eq!(requests[1].argv[1], mirror(1));
+        // Bug45/T4 修复轮:git_request 前置禁桥参数,clone 的镜像 URL 位于
+        // 禁桥前缀之后(完整 argv 断言见 assert_git_request)。
+        let bridge_len = crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS.len();
+        assert_eq!(requests[0].argv[bridge_len], "clone");
+        assert_eq!(requests[0].argv[bridge_len + 1], mirror(0));
+        assert_eq!(requests[1].argv[bridge_len], "clone");
+        assert_eq!(requests[1].argv[bridge_len + 1], mirror(1));
     }
 
     #[tokio::test]

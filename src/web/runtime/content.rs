@@ -70,7 +70,12 @@ impl WebRuntime {
         path: &str,
     ) -> Result<FileDiffResponse, TaskRunError> {
         let _ = safe_workspace_path(&self.workspace_root, path)?;
+        // Bug45/T4 修复轮:file_diff 对 coder/reviewer 可写的 workspace 仓
+        // 执行 diff,属平台受信启动面;子命令之前注入禁桥参数(与
+        // cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS 同源),diff
+        // 不得询问仓库 core.fsmonitor 探针。
         let diff = Command::new("git")
+            .args(crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS)
             .args(["diff", base_checkpoint, "--", path])
             .current_dir(&self.workspace_root)
             .output()
@@ -80,5 +85,74 @@ impl WebRuntime {
             path: path.to_string(),
             diff: String::from_utf8_lossy(&diff.stdout).to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::super::WebRuntime;
+    use std::path::Path;
+
+    /// Bug45/T4 修复轮:file_diff 是平台受信启动面,不得执行 coder 可写仓
+    /// 的 core.fsmonitor 探针。
+    #[test]
+    fn file_diff_does_not_spawn_repo_fsmonitor_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = Path::new("/tmp/aria-bug45/t4");
+        std::fs::create_dir_all(base).expect("create /tmp/aria-bug45/t4 fixture base");
+        let temp = tempfile::tempdir_in(base).expect("fixture dir under /tmp/aria-bug45/t4");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let raw = |argv: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(argv)
+                .current_dir(&repo)
+                .output()
+                .expect("raw fixture git");
+            assert!(output.status.success());
+        };
+        raw(&["init", "--quiet", "-b", "main"]);
+        raw(&["config", "user.email", "aria-t4@example.invalid"]);
+        raw(&["config", "user.name", "Aria T4"]);
+        std::fs::write(repo.join("README.md"), "x\n").unwrap();
+        raw(&["add", "."]);
+        raw(&["commit", "--quiet", "-m", "init"]);
+        let head = {
+            let output = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .expect("read head");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+
+        let fsmonitor_probe = repo.join(".git/aria-fsmonitor-fired");
+        let fsmonitor_hook = repo.join(".git/aria-fsmonitor-hook.sh");
+        std::fs::write(
+            &fsmonitor_hook,
+            format!("#!/bin/sh\n: > {}\nexit 1\n", fsmonitor_probe.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fsmonitor_hook, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        raw(&[
+            "config",
+            "core.fsmonitor",
+            fsmonitor_hook.to_str().expect("utf8 hook path"),
+        ]);
+
+        let runtime = WebRuntime::new_fake(repo.clone());
+        runtime.file_diff(&head, "README.md").expect("bridged diff");
+        assert!(
+            !fsmonitor_probe.exists(),
+            "Bug45: file_diff 不得执行仓库 core.fsmonitor 探针"
+        );
+
+        raw(&["status", "--porcelain"]);
+        assert!(
+            fsmonitor_probe.exists(),
+            "对照失败:coder 域 status 应触发其自身 fsmonitor 探针,夹具失效"
+        );
     }
 }
