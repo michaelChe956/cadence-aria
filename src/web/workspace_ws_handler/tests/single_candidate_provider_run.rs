@@ -11,9 +11,34 @@ use crate::product::lifecycle_store::{
 use crate::product::models::{IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, WorkspaceType};
 use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
+use crate::product::logical_codebase::{
+    ProviderTrustPrecondition, ProviderTrustPreparationResult,
+};
+use crate::product::workspace_engine::conversational_gate::ConfirmationTrustContext;
 use crate::web::workspace_session::WorkspaceSessionManager;
 
 use super::single_candidate_lc_admission::AliasLcGatewayExtras;
+
+/// 批 2 P3 夹具对齐：恒 Ready 的确认 trust precondition（生产注入
+/// home-backed precondition；这里只对齐「上下文在场」的装配面，不掩盖
+/// trust 停等语义——后者由 workspace_engine 侧 b2_p3_* 测试覆盖）。
+struct AlwaysReadyTrustPrecondition;
+
+impl ProviderTrustPrecondition for AlwaysReadyTrustPrecondition {
+    fn ensure_ready(
+        &self,
+        _project_id: &str,
+        _operation_id: &str,
+        _lc_id: &str,
+        _canonical_root: &std::path::Path,
+        _providers: &[crate::product::models::provider::ProviderName],
+        _scenario: crate::product::logical_codebase::provider_trust::ProviderTrustScenario,
+    ) -> ProviderTrustPreparationResult {
+        ProviderTrustPreparationResult::Ready {
+            registrations: Vec::new(),
+        }
+    }
+}
 
 struct RecordingOutputProvider {
     output: String,
@@ -593,8 +618,32 @@ impl ProviderRunFixture {
             session,
         );
         // C-1：LogicalAlias 会话注入 gateway（与生产 manager 的注入谓词同源）。
+        // 批 2 P3（REQ-WIGA-02/12）夹具对齐：生产 manager 在 gateway 装配段
+        // 同步注入确认 trust 冻结上下文（T4.3/D2，缺 precondition 才
+        // fail-closed 延后）；本夹具此前只注入 gateway，自动 compile 臂的
+        // P3 trust 门会把「缺上下文」的 LC 会话停等在 compile 之前。此处
+        // 注入恒 Ready 的 precondition 对齐生产装配面（冻结 issue 原始
+        // alias LC 归属＋聚合根）；trust 停等语义由 workspace_engine 侧
+        // b2_p3_* 测试覆盖。
         let engine = match logical {
-            Some(registered) => engine.with_logical_provider_gateway(registered.gateway),
+            Some(registered) => {
+                let alias_lc_id =
+                    crate::product::logical_codebase::store::legacy_logical_codebase_id(
+                        "project_0001",
+                    );
+                let aggregate_root = repository_root
+                    .path()
+                    .parent()
+                    .expect("fixture aggregate root")
+                    .to_path_buf();
+                engine
+                    .with_logical_provider_gateway(registered.gateway)
+                    .with_confirmation_trust_context(ConfirmationTrustContext {
+                        precondition: std::sync::Arc::new(AlwaysReadyTrustPrecondition),
+                        issue_lc_id: Some(alias_lc_id),
+                        frozen_root: aggregate_root,
+                    })
+            }
             None => engine,
         };
         let engine = Arc::new(Mutex::new(engine));
