@@ -616,7 +616,14 @@ pub(crate) fn automation_identity_for_attempt(
     let enrollment = IssueAutomationStore::new(paths.clone())
         .get(&attempt.project_id, &attempt.issue_id)?;
     Ok(enrollment
-        .filter(|enrollment| enrollment.plan_id.as_deref() == Some(plan_id.as_str()))
+        .filter(|enrollment| {
+            // k3 波5 F1 修复：托管判据＝精确绑定 plan 且 enabled 或已终止
+        //（terminated 仍 managed）；仅 Disable（enabled=false 且未终止）
+        // 不是托管——单 attempt abort/门动作保持原语义，与其余投影的
+        // owner=client 同判据（N0 守卫同口径）。
+            enrollment.plan_id.as_deref() == Some(plan_id.as_str())
+                && (enrollment.enabled || enrollment.terminated_at.is_some())
+        })
         .map(|enrollment| AutomationPlanTerminationIdentity {
             enrollment_id: enrollment.enrollment_id.clone(),
             policy_revision: enrollment.policy_revision,
@@ -628,6 +635,37 @@ pub(crate) fn automation_identity_for_attempt(
                 .map(|history| history.current.binding_version),
             terminated_at: enrollment.terminated_at.clone(),
             enabled: enrollment.enabled,
+        }))
+}
+
+/// k3 波5 F1（P2）：coding WS 会话快照的管理投影——精确绑定 plan 即返回
+/// ownership（与 REST `ownership_for_ids` 同判据：owner=Server iff
+ /// enabled||terminated，仅 Disable 为 client；未绑定返回 None 保持旧帧）。
+pub(crate) fn automation_ownership_for_attempt(
+    paths: &crate::product::app_paths::ProductAppPaths,
+    attempt: &crate::product::coding_models::CodingExecutionAttempt,
+) -> Result<
+    Option<crate::product::models::automation::AutomationOwnership>,
+    ProductStoreError,
+> {
+    let Some(plan_id) = attempt.work_item_group_id.clone() else {
+        return Ok(None);
+    };
+    let enrollment = IssueAutomationStore::new(paths.clone())
+        .get(&attempt.project_id, &attempt.issue_id)?;
+    Ok(enrollment
+        .filter(|enrollment| enrollment.plan_id.as_deref() == Some(plan_id.as_str()))
+        .map(|enrollment| crate::product::models::automation::AutomationOwnership {
+            owner: if enrollment.enabled || enrollment.terminated_at.is_some() {
+                crate::product::models::automation::AutomationOwner::Server
+            } else {
+                crate::product::models::automation::AutomationOwner::Client
+            },
+            enrollment_id: Some(enrollment.enrollment_id),
+            policy_revision: Some(enrollment.policy_revision),
+            enabled: enrollment.enabled,
+            plan_id: enrollment.plan_id,
+            terminated_at: enrollment.terminated_at,
         }))
 }
 
@@ -2302,5 +2340,144 @@ mod tests {
             "automation_plan_termination_required",
             "manual attempt abort must keep the original semantics"
         );
+    }
+
+    /// k3 波5 F1（P2）：Disable 态（enabled=false 且未终止）不是托管——
+    /// coding WS 管理投影 owner=client（与 REST ownership 同判据）、abort
+    /// REST 不路由统一终止；Terminate 后 owner 仍 server（terminated 仍
+    /// managed）。
+    #[tokio::test]
+    async fn disabled_enrollment_projects_client_owner_and_keeps_manual_abort() {
+        use crate::product::coding_attempt_store::{
+            CodingAttemptStore, CreateCodingAttemptInput,
+        };
+        use crate::product::models::automation::AutomationOwner;
+        use crate::web::coding_ws_handler::build_coding_session_state;
+        use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+        use tower::ServiceExt;
+
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        let enrollment = response_json(enable).await;
+        let revision = enrollment["policy_revision"].as_u64().unwrap();
+        let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let bound = response_json(
+            post_binding(
+                &app,
+                serde_json::json!({
+                    "expected_revision": revision,
+                    "plan_id": plan_id,
+                    "session_id": session_id,
+                }),
+            )
+            .await,
+        )
+        .await;
+        let bound_revision = bound["policy_revision"].as_u64().unwrap();
+
+        let coding_store = CodingAttemptStore::new(fixture.paths.clone());
+        let attempt = coding_store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: crate::product::models::provider::ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+            })
+            .unwrap();
+        let mut group = attempt.clone();
+        group.work_item_group_id = Some(plan_id.clone());
+        coding_store.write_coding_attempt_for_test(&group).unwrap();
+        // 快照装配的 plan-repair reconcile 需要最小 lineage。
+        crate::product::work_item_revision_store::WorkItemRevisionStore::new(
+            fixture.paths.clone(),
+        )
+        .put_plan_lineage(
+            &crate::product::models::work_item_revision::WorkItemPlanLineage {
+                id: plan_id.clone(),
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                story_spec_refs: Vec::new(),
+                design_spec_refs: Vec::new(),
+                active_revision_id: None,
+                active_amendment_id: None,
+                created_at: "2026-10-16T00:00:00Z".to_string(),
+                updated_at: "2026-10-16T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+
+        let ws_automation = |coding_store: &CodingAttemptStore| {
+            let frame = build_coding_session_state(coding_store, group.clone()).unwrap();
+            match frame {
+                crate::web::coding_ws_handler::CodingWsOutMessage::CodingSessionState {
+                    automation,
+                    ..
+                } => automation,
+                _ => panic!("expected coding session state frame"),
+            }
+        };
+
+        // Disable 态：owner=client（其余投影同判据），abort REST 不路由终止。
+        let disable = serde_json::json!({
+            "expected_revision": bound_revision,
+            "command": {"type": "disable"}
+        });
+        let response = put_enrollment(&app, disable).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let disabled = ws_automation(&coding_store).expect("bound projection present");
+        assert_eq!(disabled.owner, AutomationOwner::Client);
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/coding-attempts/{}/abort",
+                        group.id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let payload = response_json(response).await;
+        assert_ne!(
+            payload["code"],
+            "automation_plan_termination_required",
+            "disabled enrollment must not route single-attempt abort to termination"
+        );
+
+        // 重新 Enable 后终止：terminated 仍 managed（owner=server）。
+        let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+        let enable_status = enable.status();
+        let enable_body = response_json(enable).await;
+        assert_eq!(enable_status, StatusCode::OK, "re-enable body: {enable_body:?}");
+        let enabled_revision = enable_body["policy_revision"].as_u64().unwrap();
+        let terminate = post_terminate(
+            &app,
+            &serde_json::json!({
+                "command_id": "cmd-t3-f1-terminate",
+                "expected_enrollment_id": enrollment["enrollment_id"],
+                "expected_policy_revision": enabled_revision,
+                "confirmed": true,
+            }),
+        )
+        .await;
+        assert_eq!(terminate.status(), StatusCode::OK);
+        let terminated = ws_automation(&coding_store).expect("bound projection present");
+        assert_eq!(terminated.owner, AutomationOwner::Server);
+        assert!(terminated.terminated_at.is_some());
     }
 }

@@ -120,21 +120,14 @@ pub(crate) fn build_coding_session_state(
         } else {
             (None, None)
         };
-    // 批 2 T3（REQ-WIGA-08/09）：同源管理投影（REST/WS 一致，terminated
-    // 仍 managed）；读取失败置 None 保持未知（前端不猜），打点不吞快照。
-    let automation = crate::web::handlers::automation_enrollment::automation_identity_for_attempt(
+    // 批 2 T3（REQ-WIGA-08/09）＋k3 波5 F1：同源管理投影（REST
+    // `ownership_for_ids` 同判据：owner=Server iff enabled||terminated，
+    // 仅 Disable 为 client）；未绑定 None 保持旧帧。
+    let automation = crate::web::handlers::automation_enrollment::automation_ownership_for_attempt(
         &coding_store.paths(),
         &attempt,
     )
-    .map_err(CodingWorkspaceEngineError::Store)?
-    .map(|identity| crate::product::models::automation::AutomationOwnership {
-        owner: crate::product::models::automation::AutomationOwner::Server,
-        enrollment_id: Some(identity.enrollment_id),
-        policy_revision: Some(identity.policy_revision),
-        enabled: identity.enabled,
-        plan_id: identity.plan_id,
-        terminated_at: identity.terminated_at,
-    });
+    .map_err(CodingWorkspaceEngineError::Store)?;
 
     Ok(CodingWsOutMessage::CodingSessionState {
         project_id: attempt.project_id.clone(),
