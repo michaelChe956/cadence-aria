@@ -11,6 +11,7 @@ use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::EnrollmentTarget;
 use crate::product::models::lifecycle::IssueWorkItemPlanOptions;
 use crate::product::models::provider::ProviderName;
+use crate::product::work_item_plan_policy::RunPolicy;
 
 /// 精确 source 引用：id + 确认时的 current_version，禁止回退 latest 猜测。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +29,31 @@ pub struct EnrollmentSource {
     pub designs: Vec<SourceRevisionRef>,
 }
 
+/// 批 2 P1（REQ-WIGA-02 修订）：enrollment 冻结的 plan 批准策略。
+/// `Manual` 保持旧行为（人工批准链，绑定/准入会话只认 Interactive）；
+/// `Auto` 是自动批准——绑定/准入会话期望 `AutoIfValid`，且冻结时把
+/// `require_execution_plan_confirm` 压 false（auto 链不受弹窗「执行前需
+/// 确认」约束）。auto 选项本身不是授权本体：准入仍要求当前 enabled
+/// enrollment 的精确绑定身份，仅客户端传 AutoIfValid 不能获得自动执行权。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanApprovalPolicy {
+    #[default]
+    Manual,
+    Auto,
+}
+
+impl PlanApprovalPolicy {
+    /// 冻结策略 → 会话期望 run policy：manual→Interactive、auto→AutoIfValid。
+    /// binding/rebind 按此互证「冻结策略一致」，错绑/降级一律拒绝。
+    pub fn expected_run_policy(self) -> RunPolicy {
+        match self {
+            Self::Manual => RunPolicy::Interactive,
+            Self::Auto => RunPolicy::AutoIfValid,
+        }
+    }
+}
+
 /// enrollment 携带的 provider/计划选项快照。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollmentOptions {
@@ -39,7 +65,25 @@ pub struct EnrollmentOptions {
     pub superpowers_enabled: bool,
     #[serde(default)]
     pub openspec_enabled: bool,
+    /// 批 2 P1：plan 批准策略冻结位。缺省 manual——旧 JSON/旧客户端按
+    /// manual 读，已绑定旧 Interactive session 不静默改写；新自动化入口
+    /// 显式提交 auto。
+    #[serde(default)]
+    pub plan_approval: PlanApprovalPolicy,
     pub plan_options: IssueWorkItemPlanOptions,
+}
+
+impl EnrollmentOptions {
+    /// 批 2 P1：Enable 冻结前的选项归一——auto 授权不论弹窗旧确认复选框
+    /// 值如何，`require_execution_plan_confirm` 一律压 false；manual 原样
+    /// 保留（手动复选框行为不变）。归一先于幂等比较：同语义 payload 重试
+    /// 仍幂等，授权内容不可借复选框漂移改写。
+    pub fn normalized_for_enrollment_freeze(mut self) -> Self {
+        if matches!(self.plan_approval, PlanApprovalPolicy::Auto) {
+            self.plan_options.require_execution_plan_confirm = false;
+        }
+        self
+    }
 }
 
 /// issue 级自动化授权的 durable 记录；`policy_revision` 0 不落盘（首个有效值为 1）。

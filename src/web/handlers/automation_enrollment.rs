@@ -124,11 +124,14 @@ pub async fn post_automation_enrollment_binding(
             "binding target session entity must match the plan",
         ));
     }
-    if session.run_policy != RunPolicy::Interactive {
-        // REQ-WIGA-02：AutoIfValid 不代表人工授权。
+    // 批 2 P1（REQ-WIGA-02 修订）：绑定会话 run policy 必须与 enrollment
+    // 冻结的 plan_approval 策略一致——auto 冻结放行 AutoIfValid（自动链
+    // 绑定准入），manual 仍只认 Interactive（AutoIfValid 不代表人工授权；
+    // 错绑/降级一律拒绝）。
+    if session.run_policy != enrollment.options.plan_approval.expected_run_policy() {
         return Err(enrollment_conflict(
             None,
-            "binding target session must use the interactive run policy",
+            "binding target session run policy must match the enrollment's frozen plan approval",
         ));
     }
     if created_before(&plan.created_at, &enrollment.created_at) {
@@ -150,7 +153,8 @@ pub async fn post_automation_enrollment_binding(
 }
 
 /// C1 Task 2（REQ-WIGA-01）：显式重绑/换代 REST。先验证 issue/source/
-/// plan/session/target/provider 的精确身份（不猜 latest、不认 AutoIfValid），
+/// plan/session/target/provider 的精确身份（不猜 latest；run policy 须与
+/// enrollment 冻结的 plan_approval 一致——批 2 P1 起 auto 冻结认 AutoIfValid），
 /// 再由 store 在 enrollment 文件锁内按 expected policy/binding CAS 换代；
 /// Accepted 只发唤醒 hint，Replayed 不再触发编排。
 pub async fn post_automation_enrollment_rebind(
@@ -178,10 +182,17 @@ pub async fn post_automation_enrollment_rebind(
     let lifecycle = LifecycleStore::new(paths.clone());
     validate_confirmed_source_refs(&lifecycle, &project_id, &issue_id, &request.binding.source)?;
 
-    // 新代 plan/session 精确身份：存在、同 issue、类型/实体一致且 Interactive
-    //（AutoIfValid 不代表授权，REQ-WIGA-02 同一口径；换代是用户显式提交，
-    // 不按 created_at 排除旧 plan——排除的只是隐式认领）。
-    validate_rebind_binding_target(&lifecycle, &project_id, &issue_id, &request.binding)?;
+    // 新代 plan/session 精确身份：存在、同 issue、类型/实体一致且 run
+    // policy 与 enrollment 冻结的 plan_approval 一致（manual 只认
+    // Interactive、auto 认 AutoIfValid；换代是用户显式提交，不按
+    // created_at 排除旧 plan——排除的只是隐式认领）。
+    validate_rebind_binding_target(
+        &lifecycle,
+        &project_id,
+        &issue_id,
+        enrollment.options.plan_approval.expected_run_policy(),
+        &request.binding,
+    )?;
     // 换代换 provider 同样过完整角色链同源预检(C5 Task 3/Task 8)。
     // rebind 手上只有 enrollment 声明的 target——carrier 取声明值,不
     // 重解析 issue 权威载体;旧代 enrollment(无 target)由 store rebind
@@ -272,11 +283,14 @@ fn lease_takeover_api_error(error: ProductStoreError) -> ApiError {
 }
 
 /// rebind 新代绑定目标的精确身份校验（与显式 binding 同一存在性/一致性
-/// 口径；不含 created_at 旧 plan 排除——那是隐式认领的门，不是显式换代的）。
+/// 口径；run policy 须等于 enrollment 冻结 plan_approval 的期望值——批 2
+/// P1 起 auto 冻结认 AutoIfValid、manual 只认 Interactive；不含 created_at
+/// 旧 plan 排除——那是隐式认领的门，不是显式换代的）。
 fn validate_rebind_binding_target(
     lifecycle: &LifecycleStore,
     project_id: &str,
     issue_id: &str,
+    expected_policy: RunPolicy,
     binding: &EnrollmentBindingIdentityInput,
 ) -> ApiResult<()> {
     let plan = lifecycle
@@ -301,10 +315,10 @@ fn validate_rebind_binding_target(
             "rebind target session entity must match the plan",
         ));
     }
-    if session.run_policy != RunPolicy::Interactive {
+    if session.run_policy != expected_policy {
         return Err(enrollment_conflict(
             None,
-            "rebind target session must use the interactive run policy",
+            "rebind target session run policy must match the enrollment's frozen plan approval",
         ));
     }
     Ok(())
@@ -710,7 +724,8 @@ mod tests {
         let enrollment = response_json(enable).await;
         let revision = enrollment["policy_revision"].as_u64().unwrap();
 
-        // AutoIfValid 会话不得代表授权（REQ-WIGA-02）→ 409。
+        // manual 缺省 enrollment（无 plan_approval 字段）+ AutoIfValid 会话
+        // → 409（REQ-WIGA-02 修订后口径：AutoIfValid 只对 auto 冻结放行）。
         let (auto_plan, auto_session) = create_plan_and_session(&fixture, RunPolicy::AutoIfValid);
         let response = post_binding(
             &app,
@@ -965,6 +980,183 @@ mod tests {
 
         // 全部拒绝后 durable 仍只有一份当前版本。
         assert_eq!(response_json(get_enrollment(&app).await).await, after);
+    }
+
+    // ---- 批 2 P1：plan_approval 冻结与 AutoIfValid 绑定准入（REQ-WIGA-02 修订）----
+
+    /// ①auto 授权冻结 plan_approval，并把 require_execution_plan_confirm 压
+    /// false（不论弹窗复选框原值）；同 payload 幂等；旧 wire 缺字段按
+    /// manual 冻结且手动复选框原样保留（③④）。
+    #[tokio::test]
+    async fn automation_enrollment_http_put_freezes_auto_plan_approval() {
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+
+        // auto + 复选框 true → 冻结 auto 且 require_execution_plan_confirm=false。
+        let mut body = enrollment_body_with_target(&fixture);
+        body["command"]["options"]["plan_approval"] = serde_json::json!("auto");
+        body["command"]["options"]["plan_options"]["require_execution_plan_confirm"] =
+            serde_json::json!(true);
+        let first = put_enrollment(&app, body.clone()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let enrolled = response_json(first).await;
+        assert_eq!(enrolled["options"]["plan_approval"], "auto");
+        assert_eq!(
+            enrolled["options"]["plan_options"]["require_execution_plan_confirm"],
+            false
+        );
+
+        // 同 payload（复选框仍 true）重发 → 幂等：同 enrollment_id/revision。
+        let second = put_enrollment(&app, body).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let replayed = response_json(second).await;
+        assert_eq!(replayed["enrollment_id"], enrolled["enrollment_id"]);
+        assert_eq!(replayed["policy_revision"], enrolled["policy_revision"]);
+        assert_eq!(
+            replayed["options"]["plan_options"]["require_execution_plan_confirm"],
+            false
+        );
+
+        // 旧 wire 缺 plan_approval 字段 → 冻结 manual；复选框 true 原样保留。
+        let manual_fixture = seed_fixture(1, true);
+        let manual_app = manual_fixture.router();
+        let mut manual = enrollment_body_with_target(&manual_fixture);
+        manual["command"]["options"]["plan_options"]["require_execution_plan_confirm"] =
+            serde_json::json!(true);
+        let response = put_enrollment(&manual_app, manual).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let manual_enrolled = response_json(response).await;
+        assert_eq!(manual_enrolled["options"]["plan_approval"], "manual");
+        assert_eq!(
+            manual_enrolled["options"]["plan_options"]["require_execution_plan_confirm"],
+            true
+        );
+    }
+
+    /// ②binding/rebind 只放行与当前 enabled enrollment 冻结策略一致的
+    /// run policy：auto 冻结放行 AutoIfValid（自动链绑定准入）、拒
+    /// Interactive（降级）；manual 冻结的 rebind 对 AutoIfValid 仍拒绝
+    /// （AutoIfValid 不代表人工授权，错绑拒绝）。
+    #[tokio::test]
+    async fn automation_enrollment_binding_and_rebind_follow_frozen_plan_approval() {
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+
+        let mut body = enrollment_body_with_target(&fixture);
+        body["command"]["options"]["plan_approval"] = serde_json::json!("auto");
+        body["command"]["options"]["plan_options"]["require_execution_plan_confirm"] =
+            serde_json::json!(true);
+        let enable = put_enrollment(&app, body).await;
+        assert_eq!(enable.status(), StatusCode::OK);
+        let enrolled = response_json(enable).await;
+        let revision = enrolled["policy_revision"].as_u64().unwrap();
+
+        // 降级绑定：auto 冻结 + Interactive 会话 → 409。
+        let (interactive_plan, interactive_session) =
+            create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let response = post_binding(
+            &app,
+            serde_json::json!({
+                "expected_revision": revision,
+                "plan_id": interactive_plan,
+                "session_id": interactive_session,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        // 冻结策略一致的 AutoIfValid → 显式绑定成功。
+        let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::AutoIfValid);
+        let response = post_binding(
+            &app,
+            serde_json::json!({
+                "expected_revision": revision,
+                "plan_id": plan_id,
+                "session_id": session_id,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bound = response_json(response).await;
+        assert_eq!(bound["plan_id"], plan_id.as_str());
+        assert_eq!(bound["session_id"], session_id.as_str());
+        let bound_revision = bound["policy_revision"].as_u64().unwrap();
+        let binding_version = bound["binding_history"]["current"]["binding_version"]
+            .as_u64()
+            .unwrap();
+
+        // rebind 换代：新代 AutoIfValid → accepted。
+        let (next_plan, next_session) = create_plan_and_session(&fixture, RunPolicy::AutoIfValid);
+        let rebind = rebind_body(
+            &fixture,
+            "rebind_auto_0001",
+            bound_revision,
+            binding_version,
+            &next_plan,
+            &next_session,
+        );
+        let response = post_rebind(&app, rebind.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let accepted = response_json(response).await;
+        assert_eq!(accepted["state"], "accepted");
+        let after_revision = accepted["enrollment"]["policy_revision"].as_u64().unwrap();
+
+        // 同 command 同 payload 重放 → replayed（幂等回归）。
+        let response = post_rebind(&app, rebind).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["state"], "replayed");
+
+        // rebind 降级到 Interactive 新代 → 409，durable 不变。
+        let (downgrade_plan, downgrade_session) =
+            create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let downgrade = rebind_body(
+            &fixture,
+            "rebind_auto_0002",
+            after_revision,
+            binding_version + 1,
+            &downgrade_plan,
+            &downgrade_session,
+        );
+        let response = post_rebind(&app, downgrade).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(get_enrollment(&app).await).await["policy_revision"],
+            after_revision
+        );
+
+        // manual 冻结：rebind 对 AutoIfValid 新代仍拒绝（错绑）。
+        let manual_fixture = seed_fixture(1, true);
+        let manual_app = manual_fixture.router();
+        let enable =
+            put_enrollment(&manual_app, enrollment_body_with_target(&manual_fixture)).await;
+        let manual_revision = response_json(enable).await["policy_revision"]
+            .as_u64()
+            .unwrap();
+        let (manual_plan, manual_session) =
+            create_plan_and_session(&manual_fixture, RunPolicy::Interactive);
+        let response = post_binding(
+            &manual_app,
+            serde_json::json!({
+                "expected_revision": manual_revision,
+                "plan_id": manual_plan,
+                "session_id": manual_session,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let manual_bound = response_json(response).await;
+        let (wrong_plan, wrong_session) =
+            create_plan_and_session(&manual_fixture, RunPolicy::AutoIfValid);
+        let wrong = rebind_body(
+            &manual_fixture,
+            "rebind_manual_0001",
+            manual_bound["policy_revision"].as_u64().unwrap(),
+            1,
+            &wrong_plan,
+            &wrong_session,
+        );
+        let response = post_rebind(&manual_app, wrong).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
     // ---- P1 WIGA Task 4：enrollment-bound 唯一创建与半提交恢复 ----

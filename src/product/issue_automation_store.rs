@@ -82,6 +82,24 @@ impl IssueAutomationStore {
         command: EnrollmentWriteCommand,
     ) -> Result<IssueAutomationEnrollment, EnrollmentError> {
         let path = self.enrollment_path(project_id, issue_id)?;
+        // 批 2 P1（REQ-WIGA-02 修订）：Enable 冻结前统一归一选项——auto
+        // 授权把 require_execution_plan_confirm 压 false。归一先于幂等
+        // 比较：同语义 payload（复选框值漂移）重试仍幂等；Disable 无选项
+        // 原样通过。
+        let command = match command {
+            EnrollmentWriteCommand::Enable {
+                selection_key,
+                source,
+                options,
+                target,
+            } => EnrollmentWriteCommand::Enable {
+                selection_key,
+                source,
+                options: options.normalized_for_enrollment_freeze(),
+                target,
+            },
+            command @ EnrollmentWriteCommand::Disable => command,
+        };
         let resolution = with_exclusive_lock(&path, || {
             let existing = read_optional_enrollment(&path)?;
             let resolution = match (&existing, &command) {

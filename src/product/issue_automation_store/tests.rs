@@ -9,7 +9,8 @@ use crate::product::json_store::{read_json, write_json};
 use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
 use crate::product::models::automation::{
     EnrollmentBindingIdentityInput, EnrollmentOptions, EnrollmentRebindRequest, EnrollmentSource,
-    EnrollmentWriteCommand, IssueAutomationEnrollment, OperationState, SourceRevisionRef,
+    EnrollmentWriteCommand, IssueAutomationEnrollment, OperationState, PlanApprovalPolicy,
+    SourceRevisionRef,
 };
 use crate::product::models::lifecycle::IssueWorkItemPlanOptions;
 use crate::product::models::provider::ProviderName;
@@ -39,6 +40,7 @@ fn options() -> EnrollmentOptions {
         review_rounds: 1,
         superpowers_enabled: false,
         openspec_enabled: false,
+        plan_approval: PlanApprovalPolicy::Manual,
         plan_options: IssueWorkItemPlanOptions {
             include_integration_tests: true,
             include_e2e_tests: false,
@@ -410,6 +412,97 @@ fn issue_automation_store_disable_requires_existing_enrollment() {
         )
         .unwrap_err();
     assert!(matches!(error, EnrollmentError::NotFound));
+}
+
+// ---- 批 2 P1：plan_approval 冻结归一（REQ-WIGA-02 修订）----
+
+/// ①④auto 授权冻结 plan_approval 并把 require_execution_plan_confirm 压
+/// false（不论复选框原值）；同 payload 幂等；③manual 复选框原样保留。
+#[test]
+fn issue_automation_store_freezes_plan_approval_and_normalizes_confirm_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = IssueAutomationStore::new(ProductAppPaths::new(tmp.path()));
+
+    let mut auto_options = options();
+    auto_options.plan_approval = PlanApprovalPolicy::Auto;
+    auto_options.plan_options.require_execution_plan_confirm = true;
+    let enrolled = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            None,
+            enable_with_options("human-choice-1", logical_repo(1), auto_options.clone()),
+        )
+        .unwrap();
+    assert_eq!(enrolled.options.plan_approval, PlanApprovalPolicy::Auto);
+    assert!(!enrolled.options.plan_options.require_execution_plan_confirm);
+
+    // durable 事实与返回一致（冻结归一已落盘）。
+    let on_disk = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert_eq!(on_disk.options, enrolled.options);
+
+    // 同 payload（复选框仍 true）重发 → 幂等 Unchanged：revision 不变。
+    let replayed = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            None,
+            enable_with_options("human-choice-1", logical_repo(1), auto_options),
+        )
+        .unwrap();
+    assert_eq!(replayed.policy_revision, enrolled.policy_revision);
+    assert_eq!(replayed.enrollment_id, enrolled.enrollment_id);
+    assert!(!replayed.options.plan_options.require_execution_plan_confirm);
+
+    // manual + 复选框 true → 原样保留（手动复选框行为不变）。
+    let mut manual_options = options();
+    manual_options.plan_options.require_execution_plan_confirm = true;
+    let manual = store
+        .compare_and_set(
+            "project_2",
+            "issue_1",
+            None,
+            enable_with_options("human-choice-1", logical_repo(1), manual_options),
+        )
+        .unwrap();
+    assert_eq!(manual.options.plan_approval, PlanApprovalPolicy::Manual);
+    assert!(manual.options.plan_options.require_execution_plan_confirm);
+}
+
+/// ①旧 durable JSON 缺 plan_approval 字段按 manual 读（旧记录不迁移，
+/// 已绑定旧 Interactive session 不受影响）。
+#[test]
+fn issue_automation_store_reads_legacy_options_without_plan_approval_as_manual() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = ProductAppPaths::new(tmp.path());
+    let store = IssueAutomationStore::new(paths.clone());
+
+    let mut auto_options = options();
+    auto_options.plan_approval = PlanApprovalPolicy::Auto;
+    let enrolled = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            None,
+            enable_with_options("human-choice-1", logical_repo(1), auto_options),
+        )
+        .unwrap();
+
+    // 抹掉 durable JSON 的 plan_approval 字段，模拟批 2 之前的旧记录。
+    let path = paths
+        .issue_root("project_1", "issue_1")
+        .join("automation-enrollment.json");
+    let mut raw: serde_json::Value = read_json(&path).unwrap();
+    raw["options"]
+        .as_object_mut()
+        .unwrap()
+        .remove("plan_approval");
+    write_json(&path, &raw).unwrap();
+
+    let loaded = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert_eq!(loaded.options.plan_approval, PlanApprovalPolicy::Manual);
+    assert_eq!(loaded.enrollment_id, enrolled.enrollment_id);
+    assert!(!loaded.options.plan_options.require_execution_plan_confirm);
 }
 // ---- P1 WIGA Task 4：enrollment-bound 创建意图、唯一绑定与半提交恢复 ----
 
