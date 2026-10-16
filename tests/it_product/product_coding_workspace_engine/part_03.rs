@@ -70,6 +70,7 @@ async fn retry_code_review_prompt_includes_previous_role_run_diagnostic() {
             CodingRoleRunTrigger::RetryReview,
             None,
             Some("code_review_blocked".to_string()),
+            None,
         )
         .expect("retry run");
     assert_eq!(

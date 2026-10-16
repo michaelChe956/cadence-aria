@@ -617,6 +617,7 @@ fn saves_reads_and_supersedes_coding_role_runs() {
             CodingRoleRunTrigger::RetryReview,
             Some("coding_node_0004".to_string()),
             Some("code_review_timeout".to_string()),
+            None,
         )
         .expect("second role run");
 

@@ -12,6 +12,7 @@ mod context;
 mod gate;
 /// 批 2 T2：终止判定助手 crate 级出口（web 层 runner/stage 门消费）。
 pub(crate) use gate::automation_plan_terminated_for_attempt;
+pub use gate::{ArchivedBlockedGateFacts, ResolveOutcome};
 mod git_operation;
 mod group;
 mod group_final_readiness;

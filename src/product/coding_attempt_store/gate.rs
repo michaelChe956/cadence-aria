@@ -11,7 +11,7 @@ use crate::product::coding_models::{
     CodingAttemptStatus, CodingChoiceGate, CodingChoiceGateResponse, CodingChoiceGateStatus,
     CodingExecutionAttempt, CodingExecutionStage, CodingGateAction, CodingGateActionType,
     CodingGateKind, CodingGateRequired, CodingProviderRole, CodingRoleProviderConfigSnapshot,
-    CodingStageGateState, CodingStageGateStatus, CodingUnitRun, CodingUnitRunStatus,
+    CodingStageGateState, CodingStageGateStatus, CodingUnitRun, CodingUnitRunStatus, GateOrigin,
     QualityGateBypassAudit,
 };
 use crate::product::id::{next_sequential_id_from_existing, next_sequential_id_in_directory};
@@ -38,6 +38,14 @@ struct BlockedGateRecord {
     /// accept_risk／retry_review 等）。旧记录缺字段按 None 解释。
     #[serde(default)]
     resolved_action: Option<String>,
+    /// Bug2-A(Task 3)：首关时间——首次落 Resolved 事实时写入一次,重放
+    /// 与崩溃收敛不重写;旧归档缺字段按 None 解释(历史时间不伪造)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_at: Option<String>,
+    /// Bug2-A(Task 3)：解决代次——重开(resolved→open)递增;旧记录缺
+    /// 字段按 0 解释。run 的 gate_origin.generation 与此比对,失配即拒关。
+    #[serde(default)]
+    resolution_generation: u64,
 }
 
 impl super::CodingAttemptStore {
@@ -359,20 +367,29 @@ impl super::CodingAttemptStore {
                     write_json(&path, &existing)?;
                     return Ok(existing.gate);
                 }
-                existing.status = BlockedGateStatus::Resolved;
-                existing.updated_at = Utc::now().to_rfc3339();
-                write_json(&path, &existing)?;
+                // Bug2-A(Task 3):组门被替代走统一关闭原语,机器原因用
+                // 明确审计值 system_superseded(归档+删根,不再散落赋值)。
+                resolve_blocked_gate_record_unlocked(
+                    &gates_root,
+                    &existing.gate.gate_id,
+                    Some("system_superseded"),
+                )?;
             }
 
             for path in super::json_file_paths(&gates_root)? {
-                let mut record: BlockedGateRecord = read_json(&path)?;
+                let record: BlockedGateRecord = read_json(&path)?;
                 if record.status == BlockedGateStatus::Open
                     && record.attempt_id == input.attempt_id
                     && is_group_review_conclusion_reason(record.gate.reason_code.as_deref())
                 {
-                    record.status = BlockedGateStatus::Resolved;
-                    record.updated_at = Utc::now().to_rfc3339();
-                    write_json(&path, &record)?;
+                    let Some(gate_id) = path.file_stem().and_then(|id| id.to_str()) else {
+                        continue;
+                    };
+                    resolve_blocked_gate_record_unlocked(
+                        &gates_root,
+                        gate_id,
+                        Some("system_superseded"),
+                    )?;
                 }
             }
             let gate = create_blocked_gate_unlocked(&gates_root, attempt, input, Some(diagnostic))?;
@@ -443,13 +460,24 @@ impl super::CodingAttemptStore {
         issue_id: &str,
         attempt_id: &str,
         gate_id: &str,
-    ) -> Result<CodingGateRequired, ProductStoreError> {
+    ) -> Result<ResolveOutcome, ProductStoreError> {
         self.resolve_blocked_gate_with_action(project_id, issue_id, attempt_id, gate_id, None)
     }
 
-    /// C2 Task 4（REQ-CRO-04）：解决门并记录触发动作——manual_continue／
+    /// C2 Task 4（REQ-CRO-04）＋Bug2-A(Task 3)：统一持久化关闭原语——
+    /// blocked-gate-mutations 锁内执行「校验→根记录写完整 resolved 事实
+    /// （resolved_action+resolved_at）→写归档→删根记录」。manual_continue／
     /// accept_risk 等续跑动作被持久化为「已确认结论」的证据，续跑 runner
     /// 据此跳过已完成的 reviewer（复用持久化结论，不重跑）。
+    ///
+    /// 幂等与崩溃收敛（四种前缀）：
+    /// - 根已关、归档未完→按根记录首关事实补齐归档并删根；
+    /// - 归档完、根仍在→清理残留根记录，返回归档首关结果；
+    /// - 都全（仅归档）→同代次同动作重放幂等返回首关结果；
+    /// - 都不存在→NotFound。
+    ///
+    /// 异动作冲突不覆盖：已关闭门的既有动作与传入动作不同时返回
+    /// Conflict，审计保持首关事实（None 传入视作「不指定」，仅收敛）。
     pub fn resolve_blocked_gate_with_action(
         &self,
         project_id: &str,
@@ -457,28 +485,111 @@ impl super::CodingAttemptStore {
         attempt_id: &str,
         gate_id: &str,
         resolved_action: Option<&str>,
-    ) -> Result<CodingGateRequired, ProductStoreError> {
+    ) -> Result<ResolveOutcome, ProductStoreError> {
         validate_relative_id(gate_id)?;
         let gates_root = self.blocked_gates_root(project_id, issue_id, attempt_id);
-        let path = gates_root.join(format!("{gate_id}.json"));
-        if !super::path_is_regular_file(&path)? {
-            return Err(ProductStoreError::NotFound {
-                kind: "coding_blocked_gate",
-                id: gate_id.to_string(),
-            });
-        }
+        let lock_target = gates_root.join("blocked-gate-mutations");
+        with_exclusive_lock(&lock_target, || {
+            resolve_blocked_gate_record_unlocked(&gates_root, gate_id, resolved_action)
+        })
+    }
 
-        let mut record: BlockedGateRecord = read_json(&path)?;
-        record.status = BlockedGateStatus::Resolved;
-        record.updated_at = Utc::now().to_rfc3339();
-        record.resolved_action = resolved_action.map(str::to_string);
-        let gate = normalize_blocked_gate(record.gate.clone());
-        write_json(
-            &gates_root.join("resolved").join(format!("{gate_id}.json")),
-            &record,
-        )?;
-        super::remove_file_if_exists(&path)?;
-        Ok(gate)
+    /// Bug2-A(Task 3)：run 终态迟到的 origin 精确匹配关闭——仅当 open
+    /// 根记录的 gate_id+generation 与 origin 完全一致才关（动作=
+    /// origin.action_id）。重开（代次已增）后的新门对旧 origin 一律
+    /// Ok(None)，不误关；已按同代次同动作关闭则幂等返回首关结果；
+    /// 其余（异动作已关/门不存在）返回 None，零写入。
+    pub fn resolve_blocked_gate_for_origin(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        origin: &GateOrigin,
+    ) -> Result<Option<ResolveOutcome>, ProductStoreError> {
+        validate_relative_id(&origin.gate_id)?;
+        let gates_root = self.blocked_gates_root(project_id, issue_id, attempt_id);
+        let lock_target = gates_root.join("blocked-gate-mutations");
+        with_exclusive_lock(&lock_target, || {
+            let root_path = gates_root.join(format!("{}.json", origin.gate_id));
+            if super::path_is_regular_file(&root_path)? {
+                let record: BlockedGateRecord = read_json(&root_path)?;
+                if record.status == BlockedGateStatus::Open {
+                    if record.resolution_generation != origin.generation {
+                        // 重开后的新门:旧 origin 代次失配,不关。
+                        return Ok(None);
+                    }
+                    let outcome = resolve_blocked_gate_record_unlocked(
+                        &gates_root,
+                        &origin.gate_id,
+                        Some(origin.action_id.as_str()),
+                    )?;
+                    return Ok(Some(outcome));
+                }
+                // 根已带首关事实(崩溃前缀):仅同动作才补齐归档并幂等
+                // 返回;异动作已关不碰(补偿绝不与人工决策互抢审计)。
+                if record.resolved_action.as_deref() != Some(origin.action_id.as_str()) {
+                    return Ok(None);
+                }
+                let outcome = resolve_blocked_gate_record_unlocked(
+                    &gates_root,
+                    &origin.gate_id,
+                    Some(origin.action_id.as_str()),
+                )?;
+                return Ok(Some(outcome));
+            }
+            let Some(record) = read_archived_blocked_gate_record(&gates_root, &origin.gate_id)?
+            else {
+                return Ok(None);
+            };
+            let matches = record.resolution_generation == origin.generation
+                && record.resolved_action.as_deref() == Some(origin.action_id.as_str());
+            Ok(matches.then(|| resolve_outcome_from_record(record)))
+        })
+    }
+
+    /// Bug2-A(Task 3)：open blocked 门根记录的当前解决代次——gate-retry
+    /// 入口构造 GateOrigin 用；门非 open（已关/不存在）返回 None。
+    pub fn open_blocked_gate_generation(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+    ) -> Result<Option<u64>, ProductStoreError> {
+        validate_relative_id(gate_id)?;
+        let path = self
+            .blocked_gates_root(project_id, issue_id, attempt_id)
+            .join(format!("{gate_id}.json"));
+        if !super::path_is_regular_file(&path)? {
+            return Ok(None);
+        }
+        let record: BlockedGateRecord = read_json(&path)?;
+        Ok((record.status == BlockedGateStatus::Open).then_some(record.resolution_generation))
+    }
+
+    /// Bug2-A(Task 3)：resolved 归档记录的只读事实面——补偿对账/测试
+    /// 断言消费；归档不存在返回 None。
+    pub fn get_archived_blocked_gate_facts(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+    ) -> Result<Option<ArchivedBlockedGateFacts>, ProductStoreError> {
+        validate_relative_id(gate_id)?;
+        let Some(record) = read_archived_blocked_gate_record(
+            &self.blocked_gates_root(project_id, issue_id, attempt_id),
+            gate_id,
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(ArchivedBlockedGateFacts {
+            gate: normalize_blocked_gate(record.gate),
+            resolved_action: record.resolved_action,
+            resolved_at: record.resolved_at,
+            resolution_generation: record.resolution_generation,
+        }))
     }
 
     /// C2 Task 4（REQ-CRO-04）：指定 stage 的已解决门中，是否存在以
@@ -512,6 +623,10 @@ impl super::CodingAttemptStore {
         }))
     }
 
+    /// Bug2-A(Task 3):重开(resolved→open)在同一 blocked-gate-mutations
+    /// 锁内递增 resolution_generation、清空关闭字段并移除归档——旧 run
+    /// 的 gate_origin 因代次失配全部失效,迟到终态不会误关新一轮门。
+    /// 根记录已 open 时为幂等清理(仅移除崩溃残留的归档,不动代次)。
     pub(crate) fn reopen_failed_code_review_gate_for_plan_repair(
         &self,
         project_id: &str,
@@ -521,23 +636,28 @@ impl super::CodingAttemptStore {
     ) -> Result<(), ProductStoreError> {
         validate_relative_id(gate_id)?;
         let gates_root = self.blocked_gates_root(project_id, issue_id, attempt_id);
-        let open_path = gates_root.join(format!("{gate_id}.json"));
-        if super::path_is_regular_file(&open_path)? {
+        let lock_target = gates_root.join("blocked-gate-mutations");
+        with_exclusive_lock(&lock_target, || {
+            let open_path = gates_root.join(format!("{gate_id}.json"));
             let resolved_path = gates_root.join("resolved").join(format!("{gate_id}.json"));
-            return super::remove_file_if_exists(&resolved_path);
-        }
-        let resolved_path = gates_root.join("resolved").join(format!("{gate_id}.json"));
-        if !super::path_is_regular_file(&resolved_path)? {
-            return Err(ProductStoreError::NotFound {
-                kind: "coding_blocked_gate",
-                id: gate_id.to_string(),
-            });
-        }
-        let mut record: BlockedGateRecord = read_json(&resolved_path)?;
-        record.status = BlockedGateStatus::Open;
-        record.updated_at = Utc::now().to_rfc3339();
-        write_json(&open_path, &record)?;
-        super::remove_file_if_exists(&resolved_path)
+            if super::path_is_regular_file(&open_path)? {
+                return super::remove_file_if_exists(&resolved_path);
+            }
+            if !super::path_is_regular_file(&resolved_path)? {
+                return Err(ProductStoreError::NotFound {
+                    kind: "coding_blocked_gate",
+                    id: gate_id.to_string(),
+                });
+            }
+            let mut record: BlockedGateRecord = read_json(&resolved_path)?;
+            record.status = BlockedGateStatus::Open;
+            record.resolution_generation = record.resolution_generation.saturating_add(1);
+            record.resolved_action = None;
+            record.resolved_at = None;
+            record.updated_at = Utc::now().to_rfc3339();
+            write_json(&open_path, &record)?;
+            super::remove_file_if_exists(&resolved_path)
+        })
     }
 
     pub fn create_choice_gate(
@@ -964,24 +1084,139 @@ fn is_group_review_conclusion_reason(reason_code: Option<&str>) -> bool {
     )
 }
 
+/// Bug2-A(Task 3):open 组审查失败门批量关闭——逐门走统一关闭原语
+/// (机器原因 system_superseded:归档+删根+完整 resolved 事实),不再
+/// 散落状态赋值。仅在 blocked-gate-mutations 锁内调用。
 fn resolve_open_group_review_failure_gates(
     gates_root: &Path,
     attempt_id: &str,
 ) -> Result<(), ProductStoreError> {
     for path in super::json_file_paths(gates_root)? {
-        let mut record: BlockedGateRecord = read_json(&path)?;
+        let record: BlockedGateRecord = read_json(&path)?;
         if record.status == BlockedGateStatus::Open
             && record.attempt_id == attempt_id
             && is_group_review_failure_reason(
                 record.gate.reason_code.as_deref().unwrap_or_default(),
             )
         {
-            record.status = BlockedGateStatus::Resolved;
-            record.updated_at = Utc::now().to_rfc3339();
-            write_json(&path, &record)?;
+            let Some(gate_id) = path.file_stem().and_then(|id| id.to_str()) else {
+                continue;
+            };
+            resolve_blocked_gate_record_unlocked(gates_root, gate_id, Some("system_superseded"))?;
         }
     }
     Ok(())
+}
+
+/// Bug2-A(Task 3):统一关闭原语的返回事实——携带首关动作/时间与代次;
+/// 同代次同动作重放返回首关结果(不因重放改写)。resolved_at 为 None
+/// 仅见于缺该字段的旧归档(历史时间不伪造)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveOutcome {
+    pub gate: CodingGateRequired,
+    pub resolved_action: Option<String>,
+    pub resolved_at: Option<String>,
+    pub resolution_generation: u64,
+}
+
+/// Bug2-A(Task 3):resolved 归档记录的只读事实面——启动对账/补偿/测试
+/// 断言消费(Task 4 接续)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedBlockedGateFacts {
+    pub gate: CodingGateRequired,
+    pub resolved_action: Option<String>,
+    pub resolved_at: Option<String>,
+    pub resolution_generation: u64,
+}
+
+/// 统一关闭原语核心(调用方必须已持有 blocked-gate-mutations 锁):
+/// 校验→根记录写完整 resolved 事实→写归档→删根记录。四种崩溃前缀
+/// 幂等收敛;异动作冲突返回 Conflict 不覆盖;都不存在返回 NotFound。
+fn resolve_blocked_gate_record_unlocked(
+    gates_root: &Path,
+    gate_id: &str,
+    resolved_action: Option<&str>,
+) -> Result<ResolveOutcome, ProductStoreError> {
+    let root_path = gates_root.join(format!("{gate_id}.json"));
+    let archive_path = gates_root.join("resolved").join(format!("{gate_id}.json"));
+    let root_exists = super::path_is_regular_file(&root_path)?;
+    let archive_exists = super::path_is_regular_file(&archive_path)?;
+    if !root_exists && !archive_exists {
+        return Err(ProductStoreError::NotFound {
+            kind: "coding_blocked_gate",
+            id: gate_id.to_string(),
+        });
+    }
+
+    if root_exists && archive_exists {
+        // 崩溃前缀「归档完根仍在」:归档是首关事实,清理残留根记录。
+        let record: BlockedGateRecord = read_json(&archive_path)?;
+        ensure_resolved_action_consistent(&record, resolved_action, gate_id)?;
+        super::remove_file_if_exists(&root_path)?;
+        return Ok(resolve_outcome_from_record(record));
+    }
+
+    if root_exists {
+        let mut record: BlockedGateRecord = read_json(&root_path)?;
+        if record.status == BlockedGateStatus::Open {
+            // 首次关闭:根记录先落完整 resolved 事实(list_open 不再投影),
+            // 再写归档,最后删根——任意一步崩溃都可由本原语重放收敛。
+            record.status = BlockedGateStatus::Resolved;
+            record.resolved_action = resolved_action.map(str::to_string);
+            record.resolved_at = Some(Utc::now().to_rfc3339());
+            record.updated_at = record.resolved_at.clone().unwrap_or_default();
+            write_json(&root_path, &record)?;
+        } else {
+            // 崩溃前缀「根已关归档未完」:以根记录首关事实补齐归档。
+            ensure_resolved_action_consistent(&record, resolved_action, gate_id)?;
+        }
+        write_json(&archive_path, &record)?;
+        super::remove_file_if_exists(&root_path)?;
+        return Ok(resolve_outcome_from_record(record));
+    }
+
+    // 崩溃前缀「都全」(仅归档):同动作重放幂等返回首关结果。
+    let record: BlockedGateRecord = read_json(&archive_path)?;
+    ensure_resolved_action_consistent(&record, resolved_action, gate_id)?;
+    Ok(resolve_outcome_from_record(record))
+}
+
+/// 已关闭记录的既有动作与传入动作均为 Some 且不同→Conflict(不覆盖审计);
+/// 其余(None 传入或一致)放行收敛。
+fn ensure_resolved_action_consistent(
+    record: &BlockedGateRecord,
+    resolved_action: Option<&str>,
+    gate_id: &str,
+) -> Result<(), ProductStoreError> {
+    if let (Some(existing), Some(incoming)) = (record.resolved_action.as_deref(), resolved_action)
+        && existing != incoming
+    {
+        return Err(ProductStoreError::Conflict {
+            kind: "coding_blocked_gate_resolved_action",
+            id: gate_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn read_archived_blocked_gate_record(
+    gates_root: &Path,
+    gate_id: &str,
+) -> Result<Option<BlockedGateRecord>, ProductStoreError> {
+    let archive_path = gates_root.join("resolved").join(format!("{gate_id}.json"));
+    if !super::path_is_regular_file(&archive_path)? {
+        return Ok(None);
+    }
+    read_json(&archive_path).map(Some)
+}
+
+fn resolve_outcome_from_record(record: BlockedGateRecord) -> ResolveOutcome {
+    ResolveOutcome {
+        gate: normalize_blocked_gate(record.gate),
+        resolved_action: record.resolved_action,
+        resolved_at: record.resolved_at,
+        resolution_generation: record.resolution_generation,
+    }
 }
 
 fn create_blocked_gate_unlocked(
@@ -1031,6 +1266,8 @@ fn create_blocked_gate_unlocked(
         node_id: input.node_id,
         status: BlockedGateStatus::Open,
         resolved_action: None,
+        resolved_at: None,
+        resolution_generation: 0,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -1530,6 +1767,145 @@ mod tests {
         EnrollmentTarget::LogicalCodebase {
             logical_codebase_id: "logical_codebase_0001".into(),
             logical_repository_id: LogicalRepositoryId(uuid::Uuid::new_v4()),
+        }
+    }
+
+    /// Bug2-A(Task 3 Step 2):统一关闭原语的四种崩溃前缀收敛——
+    /// 根已关归档未完→补齐;归档完根仍在→清理;都全→幂等;都不存在→NotFound。
+    #[test]
+    fn resolve_blocked_gate_converges_crash_prefixes_and_preserves_first_close() {
+        let (_tmp, store, attempt) = fixture_attempt();
+        let gate = store
+            .create_blocked_gate(&attempt, interrupted_gate_input(&attempt))
+            .unwrap();
+        let project_id = attempt.project_id.as_str();
+        let issue_id = attempt.issue_id.as_str();
+        let attempt_id = attempt.id.as_str();
+        let gates_root = store.blocked_gates_root(project_id, issue_id, attempt_id);
+        let root_path = gates_root.join(format!("{}.json", gate.gate_id));
+        let archive_path = gates_root
+            .join("resolved")
+            .join(format!("{}.json", gate.gate_id));
+        let read_json_at = |path: &std::path::Path| {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path).unwrap())
+                .unwrap()
+        };
+
+        // 前缀一:根已写完整 resolved 事实、归档未写(崩溃于根写之后)——
+        // 收敛必须以根记录的首关事实补齐归档,不重写时间。
+        {
+            let mut record = read_json_at(&root_path);
+            record["status"] = serde_json::json!("resolved");
+            record["resolved_action"] = serde_json::json!("retry_review");
+            record["resolved_at"] = serde_json::json!("2026-10-17T00:00:00Z");
+            std::fs::write(&root_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+            store
+                .resolve_blocked_gate_with_action(
+                    project_id,
+                    issue_id,
+                    attempt_id,
+                    &gate.gate_id,
+                    Some("retry_review"),
+                )
+                .expect("complete archive from resolved root prefix");
+            let archived = read_json_at(&archive_path);
+            assert_eq!(archived["status"], serde_json::json!("resolved"));
+            assert_eq!(
+                archived["resolved_action"],
+                serde_json::json!("retry_review")
+            );
+            assert_eq!(
+                archived["resolved_at"],
+                serde_json::json!("2026-10-17T00:00:00Z"),
+                "first-close facts must be preserved, not rewritten"
+            );
+            assert!(!root_path.exists(), "root record removed after convergence");
+        }
+
+        // 前缀二:归档完、根仍在(崩溃于删根之前)——清理根记录,首关事实不变。
+        {
+            std::fs::copy(&archive_path, &root_path).unwrap();
+            store
+                .resolve_blocked_gate_with_action(
+                    project_id,
+                    issue_id,
+                    attempt_id,
+                    &gate.gate_id,
+                    Some("retry_review"),
+                )
+                .expect("cleanup leftover root with complete archive");
+            let archived = read_json_at(&archive_path);
+            assert_eq!(
+                archived["resolved_at"],
+                serde_json::json!("2026-10-17T00:00:00Z"),
+                "archive wins over leftover root"
+            );
+            assert!(!root_path.exists());
+        }
+
+        // 前缀三:都全(仅归档)——同动作重放幂等返回首关结果,异动作冲突不覆盖。
+        {
+            store
+                .resolve_blocked_gate_with_action(
+                    project_id,
+                    issue_id,
+                    attempt_id,
+                    &gate.gate_id,
+                    Some("retry_review"),
+                )
+                .expect("idempotent replay returns first-close outcome");
+            let archived = read_json_at(&archive_path);
+            assert_eq!(
+                archived["resolved_at"],
+                serde_json::json!("2026-10-17T00:00:00Z")
+            );
+            let conflict = store
+                .resolve_blocked_gate_with_action(
+                    project_id,
+                    issue_id,
+                    attempt_id,
+                    &gate.gate_id,
+                    Some("abort"),
+                )
+                .expect_err("different action must not overwrite the audit");
+            assert!(
+                conflict.to_string().contains("product_store_conflict"),
+                "{conflict}"
+            );
+            let after = read_json_at(&archive_path);
+            assert_eq!(after["resolved_action"], serde_json::json!("retry_review"));
+        }
+
+        // 前缀四:都不存在——NotFound,零写入。
+        {
+            let missing = store
+                .resolve_blocked_gate_with_action(
+                    project_id,
+                    issue_id,
+                    attempt_id,
+                    "coding_blocked_gate_0999",
+                    Some("retry_review"),
+                )
+                .expect_err("missing gate must be NotFound");
+            assert!(
+                missing.to_string().contains("product_store_not_found"),
+                "{missing}"
+            );
+        }
+    }
+
+    fn interrupted_gate_input(attempt: &CodingExecutionAttempt) -> CreateBlockedGateInput {
+        CreateBlockedGateInput {
+            attempt_id: attempt.id.clone(),
+            stage: CodingExecutionStage::CodeReview,
+            node_id: None,
+            role: Some(CodingProviderRole::CodeReviewer),
+            title: "代码审查中断".to_string(),
+            description: "provider interrupted".to_string(),
+            reason_code: Some("code_review_provider_interrupted".to_string()),
+            evidence_refs: Vec::new(),
+            raw_provider_output_ref: None,
+            available_actions: Vec::new(),
         }
     }
 }

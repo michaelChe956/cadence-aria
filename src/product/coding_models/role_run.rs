@@ -31,6 +31,18 @@ pub struct CodingRoleRunRetryMetadata {
     pub prior_run_id: Option<String>,
 }
 
+/// Bug2-A(Task 3):gate-retry 入口创建 run 时的门关联首写事实——
+/// (gate_id, generation, action_id) 三元组精确锁定该 run 由哪个门的
+/// 哪一代(resolution_generation)哪次动作派生。重开递增代次后,旧
+/// run 的迟到终态经代次比对即失效,不会误关新一轮门。旧 run 缺
+/// origin 按 None 解释,不靠 stage/role/时间补猜。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateOrigin {
+    pub gate_id: String,
+    pub generation: u64,
+    pub action_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodingRoleRun {
     pub id: String,
@@ -51,6 +63,8 @@ pub struct CodingRoleRun {
     pub superseded_by_run_id: Option<String>,
     #[serde(default)]
     pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_origin: Option<GateOrigin>,
     #[serde(default)]
     pub raw_provider_output_refs: Vec<String>,
     #[serde(default)]

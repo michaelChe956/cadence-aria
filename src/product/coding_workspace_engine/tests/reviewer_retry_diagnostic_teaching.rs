@@ -68,6 +68,7 @@ fn previous_blocked_run_with_report(
             CodingRoleRunTrigger::RetryReview,
             None,
             None,
+            None,
         )
         .expect("retry review run")
 }
@@ -171,6 +172,7 @@ fn internal_reviewer_retry_diagnostic_injects_teaching_for_missing_verdict() {
             CodingExecutionStage::InternalPrReview,
             CodingProviderRole::InternalReviewer,
             CodingRoleRunTrigger::RetryInternalReview,
+            None,
             None,
             None,
         )

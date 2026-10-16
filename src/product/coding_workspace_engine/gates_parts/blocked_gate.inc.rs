@@ -46,6 +46,18 @@ impl CodingWorkspaceEngine {
         }
         let should_resolve_gate =
             !matches!(action.action_type, CodingGateActionType::ProvideContext);
+        // Bug2-A(Task 3):gate-retry 入口首写 run 的门关联 origin——读取
+        // open 根记录当前代次,run 创建即携带 (gate_id, generation,
+        // action_id)。重开后代次已增,旧 run 的迟到终态经代次比对失效,
+        // 不会误关新门;门非 open 时 origin 为 None(不虚构关联)。
+        let gate_origin = self
+            .store
+            .open_blocked_gate_generation(project_id, issue_id, attempt_id, gate_id)?
+            .map(|generation| crate::product::coding_models::GateOrigin {
+                gate_id: gate_id.to_string(),
+                generation,
+                action_id: action.action_id.clone(),
+            });
 
         let current = self.store.get_attempt(project_id, issue_id, attempt_id)?;
         let updated = match action.action_type {
@@ -103,6 +115,7 @@ impl CodingWorkspaceEngine {
                         CodingProviderRole::Coder,
                         &failed,
                         gate.reason_code.clone(),
+                        gate_origin.clone(),
                     )?;
                 }
                 resumed
@@ -122,6 +135,7 @@ impl CodingWorkspaceEngine {
                         CodingRoleRunTrigger::RetryInternalReview,
                         None,
                         gate.reason_code.clone(),
+                        gate_origin.clone(),
                     )?;
                     resumed
                 } else {
@@ -136,6 +150,7 @@ impl CodingWorkspaceEngine {
                         CodingRoleRunTrigger::RetryReview,
                         None,
                         gate.reason_code.clone(),
+                        gate_origin.clone(),
                     )?;
                     resumed
                 }
@@ -152,6 +167,7 @@ impl CodingWorkspaceEngine {
                     CodingRoleRunTrigger::RetryInternalReview,
                     None,
                     gate.reason_code.clone(),
+                    gate_origin,
                 )?;
                 resumed
             }

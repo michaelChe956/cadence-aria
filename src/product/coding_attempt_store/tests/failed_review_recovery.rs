@@ -74,6 +74,7 @@ fn manual_retry_store_write_persists_only_a_fully_linked_run() {
             CodingProviderRole::CodeReviewer,
             &stale,
             Some("code_review_provider_interrupted".to_string()),
+            None,
         )
         .expect("atomic manual retry write");
     let persisted = store

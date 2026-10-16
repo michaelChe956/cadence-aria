@@ -2,7 +2,7 @@ use chrono::Utc;
 
 use crate::product::coding_models::{
     CodingExecutionAttempt, CodingExecutionStage, CodingProviderRole, CodingRoleRun,
-    CodingRoleRunRetryMetadata, CodingRoleRunStatus, CodingRoleRunTrigger,
+    CodingRoleRunRetryMetadata, CodingRoleRunStatus, CodingRoleRunTrigger, GateOrigin,
 };
 use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{
@@ -56,6 +56,7 @@ impl super::CodingAttemptStore {
             supersedes_run_id: None,
             superseded_by_run_id: None,
             reason_code: None,
+            gate_origin: None,
             raw_provider_output_refs: Vec::new(),
             artifact_refs: Vec::new(),
         };
@@ -141,6 +142,9 @@ impl super::CodingAttemptStore {
             supersedes_run_id: None,
             superseded_by_run_id: None,
             reason_code: None,
+            // Bug2-A(Task 3):自动重试继承前驱 run 的门关联(按 origin
+            // 复用);前驱缺 origin 按 None 解释。
+            gate_origin: prior.gate_origin.clone(),
             raw_provider_output_refs: Vec::new(),
             artifact_refs: Vec::new(),
         };
@@ -155,6 +159,7 @@ impl super::CodingAttemptStore {
         role: CodingProviderRole,
         prior: &CodingRoleRun,
         reason_code: Option<String>,
+        gate_origin: Option<GateOrigin>,
     ) -> Result<CodingRoleRun, ProductStoreError> {
         validate_relative_id(&attempt.project_id)?;
         validate_relative_id(&attempt.issue_id)?;
@@ -204,6 +209,7 @@ impl super::CodingAttemptStore {
             supersedes_run_id: None,
             superseded_by_run_id: None,
             reason_code,
+            gate_origin,
             raw_provider_output_refs: Vec::new(),
             artifact_refs: Vec::new(),
         };
@@ -270,6 +276,13 @@ impl super::CodingAttemptStore {
         Ok(run)
     }
 
+    /// Bug2-A(Task 3):完整构造后首存——id/run_no/supersedes/reason/
+    /// gate_origin 一次性落盘,消除「先 create 后补写」的半构造首写
+    /// (旧实现首存不含 supersedes/reason,崩溃窗口内读到的是残缺 run)。
+    /// gate_origin 仅由 gate-retry 入口传入,通用调用保持 None。
+    /// 参数为既有签名的自然追加(gate_origin),无聚合语义,重构为 struct
+    /// 会波及全仓调用点,故允许 clippy::too_many_arguments。
+    #[allow(clippy::too_many_arguments)]
     pub fn supersede_latest_role_run_and_create(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -278,7 +291,14 @@ impl super::CodingAttemptStore {
         trigger: CodingRoleRunTrigger,
         node_id: Option<String>,
         reason_code: Option<String>,
+        gate_origin: Option<GateOrigin>,
     ) -> Result<CodingRoleRun, ProductStoreError> {
+        validate_relative_id(&attempt.project_id)?;
+        validate_relative_id(&attempt.issue_id)?;
+        validate_relative_id(&attempt.id)?;
+        if let Some(node_id) = &node_id {
+            validate_relative_id(node_id)?;
+        }
         let previous = self.latest_role_run(
             &attempt.project_id,
             &attempt.issue_id,
@@ -286,9 +306,42 @@ impl super::CodingAttemptStore {
             stage.clone(),
             role.clone(),
         )?;
-        let mut next = self.create_role_run(attempt, stage, role, trigger, node_id)?;
-        next.supersedes_run_id = previous.as_ref().map(|run| run.id.clone());
-        next.reason_code = reason_code;
+        let role_runs_root =
+            self.role_runs_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
+        let existing = self.list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
+        let id = next_sequential_id_in_directory("coding_role_run", &role_runs_root).map_err(
+            |error| ProductStoreError::Io(format!("read {}: {error}", role_runs_root.display())),
+        )?;
+        let run_no = existing
+            .iter()
+            .filter(|run| run.stage == stage && run.role == role)
+            .map(|run| run.run_no)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let next = CodingRoleRun {
+            id: id.clone(),
+            attempt_id: attempt.id.clone(),
+            stage,
+            role,
+            run_no,
+            status: CodingRoleRunStatus::Running,
+            trigger,
+            retry_metadata: Some(CodingRoleRunRetryMetadata {
+                cycle_id: id,
+                attempt_no: 1,
+                prior_run_id: None,
+            }),
+            node_id,
+            started_at: Utc::now().to_rfc3339(),
+            completed_at: None,
+            supersedes_run_id: previous.as_ref().map(|run| run.id.clone()),
+            superseded_by_run_id: None,
+            reason_code,
+            gate_origin,
+            raw_provider_output_refs: Vec::new(),
+            artifact_refs: Vec::new(),
+        };
         self.save_role_run(&attempt.project_id, &attempt.issue_id, &next)?;
         if let Some(mut previous_run) = previous {
             previous_run.status = CodingRoleRunStatus::Superseded;
@@ -504,5 +557,227 @@ fn invalid_retry_metadata(id: impl Into<String>) -> ProductStoreError {
     ProductStoreError::Conflict {
         kind: "coding_role_run_retry_metadata",
         id: id.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+    use crate::product::models::ProviderName;
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+    fn fixture_attempt() -> (
+        tempfile::TempDir,
+        CodingAttemptStore,
+        CodingExecutionAttempt,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CodingAttemptStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Fake,
+                    reviewer: Some(ProviderName::Fake),
+                    review_rounds: 1,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+            })
+            .unwrap();
+        (tmp, store, attempt)
+    }
+
+    fn origin(generation: u64) -> Option<GateOrigin> {
+        Some(GateOrigin {
+            gate_id: "coding_blocked_gate_0001".to_string(),
+            generation,
+            action_id: "retry_review".to_string(),
+        })
+    }
+
+    /// Bug2-A(Task 3):supersede_latest_role_run_and_create 完整构造后
+    /// 首存——持久化 run 一次到位携带 supersedes/reason/gate_origin。
+    #[test]
+    fn supersede_create_first_save_is_complete_with_gate_origin() {
+        let (_tmp, store, attempt) = fixture_attempt();
+        let previous = store
+            .create_role_run(
+                &attempt,
+                CodingExecutionStage::CodeReview,
+                CodingProviderRole::CodeReviewer,
+                CodingRoleRunTrigger::Initial,
+                None,
+            )
+            .unwrap();
+        let next = store
+            .supersede_latest_role_run_and_create(
+                &attempt,
+                CodingExecutionStage::CodeReview,
+                CodingProviderRole::CodeReviewer,
+                CodingRoleRunTrigger::RetryReview,
+                None,
+                Some("code_review_blocked".to_string()),
+                origin(0),
+            )
+            .unwrap();
+        assert_eq!(
+            next.supersedes_run_id.as_deref(),
+            Some(previous.id.as_str())
+        );
+        assert_eq!(
+            next.reason_code.as_deref(),
+            Some("code_review_blocked"),
+            "reason must be part of the first durable save"
+        );
+        assert_eq!(next.gate_origin, origin(0));
+
+        let persisted = store
+            .get_role_run(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &next.id,
+            )
+            .unwrap();
+        assert_eq!(persisted, next);
+        let superseded = store
+            .get_role_run(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &previous.id,
+            )
+            .unwrap();
+        assert_eq!(superseded.status, CodingRoleRunStatus::Superseded);
+        assert_eq!(
+            superseded.superseded_by_run_id.as_deref(),
+            Some(next.id.as_str())
+        );
+    }
+
+    /// Bug2-A(Task 3):create_manual_retry_role_run 首写 origin。
+    #[test]
+    fn manual_retry_first_writes_gate_origin() {
+        let (_tmp, store, attempt) = fixture_attempt();
+        let prior = store
+            .create_role_run(
+                &attempt,
+                CodingExecutionStage::Coding,
+                CodingProviderRole::Coder,
+                CodingRoleRunTrigger::Initial,
+                None,
+            )
+            .unwrap();
+        store
+            .update_role_run_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &prior.id,
+                CodingRoleRunStatus::Failed,
+                Some("coding_operational_blocker".to_string()),
+            )
+            .unwrap();
+        let retry = store
+            .create_manual_retry_role_run(
+                &attempt,
+                CodingExecutionStage::Coding,
+                CodingProviderRole::Coder,
+                &prior,
+                None,
+                origin(2),
+            )
+            .unwrap();
+        assert_eq!(retry.gate_origin, origin(2));
+    }
+
+    /// Bug2-A(Task 3):create_retry_role_run(自动重试)继承前驱 origin;
+    /// 前驱缺 origin 按 None 解释。
+    #[test]
+    fn automatic_retry_inherits_prior_gate_origin() {
+        let (_tmp, store, attempt) = fixture_attempt();
+        let initial = store
+            .create_role_run(
+                &attempt,
+                CodingExecutionStage::CodeReview,
+                CodingProviderRole::CodeReviewer,
+                CodingRoleRunTrigger::Initial,
+                None,
+            )
+            .unwrap();
+        store
+            .update_role_run_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &initial.id,
+                CodingRoleRunStatus::Failed,
+                None,
+            )
+            .unwrap();
+        // 前驱无 origin → 自动重试同样 None。
+        let first_retry = store
+            .create_retry_role_run(
+                &attempt,
+                CodingExecutionStage::CodeReview,
+                CodingProviderRole::CodeReviewer,
+                CodingRoleRunTrigger::AutomaticRetry,
+                None,
+                CodingRoleRunRetryMetadata {
+                    cycle_id: initial.id.clone(),
+                    attempt_no: 2,
+                    prior_run_id: Some(initial.id.clone()),
+                },
+            )
+            .unwrap();
+        assert_eq!(first_retry.gate_origin, None);
+
+        // 前驱(gate-retry 产物)带 origin → 自动重试原样继承。
+        store
+            .update_role_run_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &first_retry.id,
+                CodingRoleRunStatus::Failed,
+                None,
+            )
+            .unwrap();
+        let mut gate_retry = store
+            .get_role_run(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &first_retry.id,
+            )
+            .unwrap();
+        gate_retry.gate_origin = origin(0);
+        store
+            .save_role_run(&attempt.project_id, &attempt.issue_id, &gate_retry)
+            .unwrap();
+        let inherited = store
+            .create_retry_role_run(
+                &attempt,
+                CodingExecutionStage::CodeReview,
+                CodingProviderRole::CodeReviewer,
+                CodingRoleRunTrigger::AutomaticRetry,
+                None,
+                CodingRoleRunRetryMetadata {
+                    cycle_id: gate_retry.retry_metadata.clone().unwrap().cycle_id,
+                    attempt_no: 3,
+                    prior_run_id: Some(gate_retry.id.clone()),
+                },
+            )
+            .unwrap();
+        assert_eq!(inherited.gate_origin, origin(0));
     }
 }
