@@ -34,10 +34,16 @@ impl WorkspaceEngine {
                 start_policy.clone(),
             )
             .map_err(|error| format!("persist advance record failed: {error}"))?;
-        // 批 2 R1（REQ-WIGA-02/03）：策略首次 persist 冻结——既存 record 的
-        // 冻结值与本次传入策略不符即停（旧 Manual 不升格、不覆盖；retry
-        // 由 advance.rs 从 record 取冻结值后复核 binding）。
-        if record.start_run_policy != start_policy {
+        // 批 2 R1（REQ-WIGA-02/03）：策略首次 persist 冻结——新 record 显式
+        // 字段与传入策略不符即停（不覆盖、不升格）。k3 波2 F1 修正：升级前
+        // 已 durable 的旧 record 无 start_run_policy 字段（serde 读 Manual），
+        // 但 journal 当时已穿透真实策略——record 已绑定 attempt（单值或集
+        // 绑定）时视为「record 策略未指定」，以 journal 冻结值为权威继续
+        //（下方 journal 互证环节按 journal/record 一致性放行或拒绝）；未
+        // 绑定 attempt 的冲突无 durable 授权证据，维持 fail-closed。
+        if record.start_run_policy != start_policy
+            && !Self::record_attempts_bound(&record)
+        {
             return Err(format!(
                 "advance record frozen start policy {:?} differs from the requested {:?}; \
                  the first durable record owns the policy",
@@ -91,9 +97,16 @@ impl WorkspaceEngine {
                             .to_string(),
                     );
                 }
-                // 批 2 R1：existing journal 策略不符即停——不给旧 Manual 原地
-                // 补授权、也不把已冻结 AutoStartOnce 降级。
-                if journal.attempt.start_run_policy != start_policy {
+                // 批 2 R1：existing journal 策略与传入不符时——k3 波2 F1 修正：
+                // record 与 journal 也不一致（升级前旧 record 无策略字段的
+                // 「未指定」形态）→ 以 journal 冻结值为权威放行（当时真实
+                // 授权的 durable 事实，不升格不降级，attempt 原样复用）；
+                // record 与 journal 一致（显式冻结）而与传入冲突 → 真·策略
+                // 漂移，维持 fail-closed（不给旧 Manual 原地补授权、不把已
+                // 冻结 AutoStartOnce 降级）。
+                if journal.attempt.start_run_policy != start_policy
+                    && record.start_run_policy == journal.attempt.start_run_policy
+                {
                     return Err(format!(
                         "existing group initialization froze start policy {:?} but the \
                          advance requests {:?}",
@@ -473,5 +486,13 @@ impl WorkspaceEngine {
             // 单 target 路径：集绑定为空（wire 不发送），单值 attempt_id 承载不变。
             target_attempts: Vec::new(),
         })
+    }
+
+    /// k3 波2 F1：record 是否已绑定 attempt（单值或集绑定）——升级前旧
+    /// record（无 start_run_policy 字段，serde 读 Manual）已 durable 穿越
+    /// attempt 持久化的判定代理：此时 journal 冻结值才是当时的真实策略
+    /// （record 视为「策略未指定」，以 journal 为权威）。
+    fn record_attempts_bound(record: &AdvanceRecord) -> bool {
+        record.attempt_id.is_some() || !record.target_attempts.is_empty()
     }
 }

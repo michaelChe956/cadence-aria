@@ -101,9 +101,14 @@ impl WorkspaceEngine {
                         .to_string(),
                 );
             }
-            // 批 2 R1：existing journal 策略不符即停（不给旧 Manual 原地补
-            // 授权、不降级已冻结 AutoStartOnce）。
-            if journal.attempt.start_run_policy != start_policy {
+            // 批 2 R1：existing journal 策略与传入不符时——k3 波2 F1 修正
+            //（与单 target 路径同型）：record 与 journal 也不一致＝升级前旧
+            // record「策略未指定」形态 → 以 journal 冻结值为权威放行；
+            // record 与 journal 显式一致而与传入冲突 → 真·漂移 fail-closed
+            //（不给旧 Manual 原地补授权、不降级已冻结 AutoStartOnce）。
+            if journal.attempt.start_run_policy != start_policy
+                && record.start_run_policy == journal.attempt.start_run_policy
+            {
                 return Err(format!(
                     "existing split group initialization froze start policy {:?} but the \
                      advance requests {:?}",
