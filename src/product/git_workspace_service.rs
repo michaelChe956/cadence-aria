@@ -490,6 +490,8 @@ impl GitWorkspaceService {
     ///
     /// 当两个提交相同时，没有观察到该 unit 的新提交，因此返回空集合，且不会
     /// 回退为读取单提交或其父提交的 diff。
+    ///
+    /// 清单以 `-z` NUL 协议采集，返回逐项严格 UTF-8 解码的真实路径。
     pub async fn git_commit_range_changed_files(
         &self,
         worktree_path: &Path,
@@ -504,15 +506,12 @@ impl GitWorkspaceService {
         let output = self
             .run_git(
                 worktree_path,
-                &["diff", "--name-only", "--no-renames", &commit_range],
+                &["diff", "--name-only", "--no-renames", "-z", &commit_range],
             )
             .await?;
-        Ok(output
-            .stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
+        let paths = decode_nul_separated_paths(&output.stdout_bytes, "diff --name-only -z")?;
+        Ok(paths
+            .into_iter()
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect())
@@ -552,6 +551,8 @@ impl GitWorkspaceService {
     /// 用于组完成写入范围门禁：每个已完成 unit 的 `completion_commit` 决定该 unit
     /// 实际改了哪些文件，从而保住 per-unit 的归属判定。根提交（无父）返回该提交
     /// 引入的全部文件。
+    ///
+    /// 清单以 `-z` NUL 协议采集，返回逐项严格 UTF-8 解码的真实路径。
     pub async fn git_commit_changed_files(
         &self,
         worktree_path: &Path,
@@ -566,17 +567,12 @@ impl GitWorkspaceService {
                     "--name-only",
                     "--pretty=format:",
                     "--no-renames",
+                    "-z",
                     commit_sha,
                 ],
             )
             .await?;
-        Ok(output
-            .stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect())
+        decode_nul_separated_paths(&output.stdout_bytes, "show --name-only -z")
     }
 
     pub async fn git_diff(
@@ -738,6 +734,7 @@ impl GitWorkspaceService {
             status_success: status.success(),
             stdout: String::from_utf8_lossy(&stdout).to_string(),
             stderr: String::from_utf8_lossy(&stderr).to_string(),
+            stdout_bytes: stdout,
         })
     }
 
@@ -775,6 +772,31 @@ struct GitCommandOutput {
     status_success: bool,
     stdout: String,
     stderr: String,
+    /// stdout 的原始字节。`-z` NUL 协议文件清单必须从这里解析路径，严禁
+    /// 经过 `stdout`（lossy 解码）：无效 UTF-8 要 fail-closed 返回 Parse
+    /// 错误，而不是替换成 U+FFFD 后继续参与 scope 鉴权（Bug1-A）。
+    stdout_bytes: Vec<u8>,
+}
+
+/// NUL 协议（`-z`）文件清单解码：原始字节按 0x00 分割，逐项严格 UTF-8。
+///
+/// 文件名中的引号/空格/换行原样保留（不 trim、不剥引号、不启发式反转义）；
+/// 任何一段不是有效 UTF-8 即整体 fail-closed 返回 Parse 错误。
+fn decode_nul_separated_paths(
+    bytes: &[u8],
+    command_display: &str,
+) -> Result<Vec<String>, GitWorkspaceError> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            str::from_utf8(path).map(str::to_string).map_err(|error| {
+                GitWorkspaceError::Parse(format!(
+                    "git {command_display}: file path is not valid UTF-8: {error}"
+                ))
+            })
+        })
+        .collect()
 }
 
 async fn read_pipe<R>(mut pipe: R) -> std::io::Result<Vec<u8>>

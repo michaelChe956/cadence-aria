@@ -173,6 +173,140 @@ async fn equal_commit_range_is_an_empty_observation() {
 }
 
 #[tokio::test]
+async fn commit_changed_files_return_real_utf8_for_chinese_paths() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(repo, &["add", "README.md"]);
+    let c0 = commit(repo, "base");
+
+    fs::create_dir_all(repo.join("cadence/verify")).expect("create verify dir");
+    fs::write(
+        repo.join("cadence/verify/2026-10-16_验收报告_v1.0.md"),
+        "# 验收报告\n",
+    )
+    .expect("write chinese report");
+    git(repo, &["add", "cadence/verify/2026-10-16_验收报告_v1.0.md"]);
+    let c1 = commit(repo, "chinese report");
+
+    let service = GitWorkspaceService::new();
+    assert_eq!(
+        service
+            .git_commit_changed_files(repo, &c1)
+            .await
+            .expect("read commit changed files"),
+        vec!["cadence/verify/2026-10-16_验收报告_v1.0.md"]
+    );
+    assert_eq!(
+        service
+            .git_commit_range_changed_files(repo, &c0, &c1)
+            .await
+            .expect("read range changed files"),
+        vec!["cadence/verify/2026-10-16_验收报告_v1.0.md"]
+    );
+}
+
+#[tokio::test]
+async fn changed_file_lists_preserve_quotes_backslashes_spaces_and_newlines() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(repo, &["add", "README.md"]);
+    let c0 = commit(repo, "base");
+
+    fs::write(repo.join("plain-ascii-report.md"), "ascii\n").expect("write ascii control");
+    fs::create_dir_all(repo.join("notes")).expect("create notes dir");
+    fs::write(repo.join("notes/a \"quoted\" name.md"), "quote\n").expect("write quoted");
+    fs::write(repo.join("notes/back\\slash.txt"), "slash\n").expect("write backslash");
+    fs::write(repo.join("notes/has space.md"), "space\n").expect("write space");
+    fs::write(repo.join("notes/line\nbreak.md"), "newline\n").expect("write newline");
+    git(repo, &["add", "."]);
+    let c1 = commit(repo, "special characters");
+
+    let expected = vec![
+        "notes/a \"quoted\" name.md",
+        "notes/back\\slash.txt",
+        "notes/has space.md",
+        "notes/line\nbreak.md",
+        "plain-ascii-report.md",
+    ];
+    let service = GitWorkspaceService::new();
+    assert_eq!(
+        service
+            .git_commit_changed_files(repo, &c1)
+            .await
+            .expect("read commit changed files"),
+        expected
+    );
+    assert_eq!(
+        service
+            .git_commit_range_changed_files(repo, &c0, &c1)
+            .await
+            .expect("read range changed files"),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn changed_file_lists_fail_closed_on_invalid_utf8_path_bytes() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::write(repo.join("README.md"), "base\n").expect("write base");
+    git(repo, &["add", "README.md"]);
+    let c0 = commit(repo, "base");
+
+    fs::create_dir_all(repo.join("cadence/verify")).expect("create verify dir");
+    fs::write(
+        repo.join("cadence/verify/2026-10-16_验收报告_v1.0.md"),
+        "# 验收报告\n",
+    )
+    .expect("write chinese report");
+    let invalid_name = OsStr::from_bytes(b"cadence/verify/bad-\xff-report.md");
+    fs::write(repo.join(invalid_name), "bad bytes\n").expect("write invalid utf8 name");
+    let add_output = StdCommand::new("git")
+        .arg("add")
+        .arg("--")
+        .arg(invalid_name)
+        .current_dir(repo)
+        .output()
+        .expect("git add invalid utf8 path");
+    assert!(
+        add_output.status.success(),
+        "git add invalid utf8 path: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+    let c1 = commit(repo, "invalid utf8 path");
+
+    let service = GitWorkspaceService::new();
+    for result in [
+        service.git_commit_changed_files(repo, &c1).await,
+        service.git_commit_range_changed_files(repo, &c0, &c1).await,
+    ] {
+        match result {
+            Err(GitWorkspaceError::Parse(message)) => {
+                assert!(
+                    message.contains("not valid UTF-8"),
+                    "unexpected parse error message: {message}"
+                );
+            }
+            other => panic!("expected Parse error for invalid UTF-8 path, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn commit_range_commits_uses_topological_order_for_merge_history() {
     let tmp = tempdir().expect("tempdir");
     let repo = tmp.path();
