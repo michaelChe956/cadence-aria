@@ -211,6 +211,114 @@ async fn lc_gate_forbidden_scope_in_root_relative_form_takes_effect() {
     ));
 }
 
+/// Bug1-A：中文证据路径（真实 UTF-8，现场 WI-004 形态）必须命中
+/// `cadence/verify/**`；同结构 ASCII 对照同时放行（证明非权限放宽）。
+/// 修复前 porcelain 转义串（带引号八进制）进范围判定，合法交付被误拒。
+#[tokio::test]
+async fn lc_gate_allows_real_utf8_chinese_evidence_paths() {
+    let fx = lc_gate_fixture(&["cadence/verify/**"], &[], true, true);
+    stage_files(
+        &fx.worktree,
+        &[
+            "cadence/verify/2026-10-16_验收报告_v1.0.md",
+            "cadence/verify/2026-10-16_acceptance_report_v1.0.md",
+        ],
+    );
+
+    fx.engine
+        .run_completion_gates(&fx.attempt)
+        .await
+        .expect("真实 UTF-8 中文证据路径命中 cadence/verify/** 必须放行");
+    assert!(
+        fx.store
+            .get_attempt(&fx.attempt.project_id, &fx.attempt.issue_id, &fx.attempt.id)
+            .is_ok()
+    );
+}
+
+/// Bug1-A：中文 forbidden 真实路径命中后稳定拒绝（exclusive 同时声明该目录，
+/// 使拒绝只能来自 forbidden 分支），报错 payload 为真实路径。
+#[tokio::test]
+async fn lc_gate_forbidden_keeps_denying_real_utf8_chinese_paths() {
+    let fx = lc_gate_fixture(&["cadence/verify/**"], &["cadence/verify/**"], true, true);
+    stage_files(
+        &fx.worktree,
+        &["cadence/verify/2026-10-16_验收报告_v1.0.md"],
+    );
+
+    let error = fx
+        .engine
+        .run_completion_gates(&fx.attempt)
+        .await
+        .expect_err("中文 forbidden 命中必须拒绝");
+    assert!(matches!(
+        &error,
+        CodingWorkspaceEngineError::WorkItemDiffScopeViolation(path)
+            if path == "cadence/verify/2026-10-16_验收报告_v1.0.md"
+    ));
+}
+
+/// Bug1-A 洗白反例（WI-003 形态）：scope 未声明证据目录时中文证据路径仍拒，
+/// 报错 payload 为真实路径——采集根修不放宽任何越界判定。
+#[tokio::test]
+async fn lc_gate_rejects_chinese_evidence_dir_when_policy_lacks_it() {
+    let fx = lc_gate_fixture(&["src/**"], &[], true, true);
+    stage_files(
+        &fx.worktree,
+        &["cadence/verify/2026-10-16_验收报告_v1.0.md"],
+    );
+
+    let error = fx
+        .engine
+        .run_completion_gates(&fx.attempt)
+        .await
+        .expect_err("未声明目录必须拒绝");
+    assert!(matches!(
+        &error,
+        CodingWorkspaceEngineError::WorkItemDiffScopeViolation(path)
+            if path == "cadence/verify/2026-10-16_验收报告_v1.0.md"
+    ));
+}
+
+/// Bug1-A Review Focus #2：porcelain `-z` 后状态清单含无效 UTF-8 文件名时
+/// 必须 fail-closed（引擎 `Git(Parse)` 错误），绝不用替换字符继续或因采集
+/// 失败静默放行。
+#[tokio::test]
+async fn lc_gate_fails_closed_when_status_paths_are_not_utf8() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let fx = lc_gate_fixture(&["cadence/verify/**"], &[], true, true);
+    fs::create_dir_all(fx.worktree.join("cadence/verify")).expect("verify dir");
+    let invalid_name = OsStr::from_bytes(b"cadence/verify/bad-\xff-report.md");
+    fs::write(fx.worktree.join(invalid_name), "bad bytes\n").expect("write invalid name");
+    let output = StdCommand::new("git")
+        .arg("add")
+        .arg("--")
+        .arg(invalid_name)
+        .current_dir(&fx.worktree)
+        .output()
+        .expect("git add invalid utf8 path");
+    assert!(
+        output.status.success(),
+        "git add invalid utf8 path: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let error = fx
+        .engine
+        .run_completion_gates(&fx.attempt)
+        .await
+        .expect_err("无效 UTF-8 路径必须 fail-closed");
+    assert!(
+        matches!(
+            error,
+            CodingWorkspaceEngineError::Git(GitWorkspaceError::Parse(_))
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
 #[tokio::test]
 async fn lc_gate_fails_closed_when_manifest_is_missing() {
     let fx = lc_gate_fixture(&["busi/**"], &[], true, false);
@@ -317,6 +425,32 @@ fn single_repo_scope_semantics_are_unchanged_without_member_prefix() {
     // exclusive 为空：不限定，行为不变。
     validate_changed_files_in_scope(&[], &[], &changed, Some(&worktree_path), None)
         .expect("empty exclusive does not constrain");
+}
+
+/// Bug1-A 防回归：带引号八进制转义形态（修复前采集侧产出）不参与 scope
+/// 命中——不做启发式反转义；若该形态重新出现必须以 violation 暴露。
+#[test]
+fn scope_gate_rejects_escaped_octal_paths_instead_of_unescaping() {
+    let root = tempdir().expect("tempdir");
+    let worktree = root.path().join("worktree");
+    fs::create_dir_all(worktree.join("cadence/verify")).expect("verify dir");
+    init_test_git_repo(&worktree);
+    let worktree_path = worktree.clone();
+    let escaped = concat!(
+        "\"cadence/verify/2026-10-16_\\351\\252\\214\\346\\224\\266",
+        "\\346\\212\\245\\345\\221\\212_v1.0.md\""
+    );
+
+    assert!(matches!(
+        validate_changed_files_in_scope(
+            &["cadence/verify/**".to_string()],
+            &[],
+            &[escaped.to_string()],
+            Some(&worktree_path),
+            None,
+        ),
+        Err(CodingWorkspaceEngineError::WorkItemDiffScopeViolation(_))
+    ));
 }
 
 #[test]

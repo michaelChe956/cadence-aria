@@ -297,14 +297,9 @@ impl GitWorkspaceService {
     ) -> Result<Vec<FileStatus>, GitWorkspaceError> {
         self.ensure_git_repo(worktree_path).await?;
         let output = self
-            .run_git(worktree_path, &["status", "--porcelain"])
+            .run_git(worktree_path, &["status", "--porcelain", "-z"])
             .await?;
-        Ok(output
-            .stdout
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(parse_status_line)
-            .collect())
+        parse_porcelain_z_status(&output.stdout_bytes)
     }
 
     pub async fn git_add_all(&self, worktree_path: &Path) -> Result<(), GitWorkspaceError> {
@@ -920,10 +915,33 @@ fn normalize_existing_prefix(path: &Path) -> Result<PathBuf, GitWorkspaceError> 
     }
 }
 
-fn parse_status_line(line: &str) -> FileStatus {
-    let code = line.get(0..2).unwrap_or("").trim().to_string();
-    let path = line.get(3..).unwrap_or("").to_string();
-    FileStatus { code, path }
+/// porcelain `-z` 状态清单解析：原始字节按 0x00 分割，逐条严格 UTF-8。
+///
+/// 与文件清单同一 NUL 协议（Bug1-A）：路径原样保留（不 trim、不剥引号、
+/// 不启发式反转义）；rename/copy 条目在目标路径后紧跟一段无 `XY ` 前缀的
+/// 源路径，按协议消费、不作为独立状态条目；任一条目非有效 UTF-8 整体
+/// fail-closed 返回 Parse 错误，绝不替换后继续。
+fn parse_porcelain_z_status(bytes: &[u8]) -> Result<Vec<FileStatus>, GitWorkspaceError> {
+    let mut statuses = Vec::new();
+    let mut skip_next_record = false;
+    for record in bytes.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
+        let record = str::from_utf8(record).map_err(|error| {
+            GitWorkspaceError::Parse(format!(
+                "git status --porcelain -z: file path is not valid UTF-8: {error}"
+            ))
+        })?;
+        if skip_next_record {
+            skip_next_record = false;
+            continue;
+        }
+        let code = record.get(0..2).unwrap_or("").trim().to_string();
+        skip_next_record = code.starts_with('R') || code.starts_with('C');
+        statuses.push(FileStatus {
+            code,
+            path: record.get(3..).unwrap_or("").to_string(),
+        });
+    }
+    Ok(statuses)
 }
 
 fn should_exclude_from_work_item_commit(path: &str) -> bool {

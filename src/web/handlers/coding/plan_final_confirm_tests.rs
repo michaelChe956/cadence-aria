@@ -93,6 +93,7 @@ fn seed_completed_unit_run(
     unit: &CodingExecutionUnit,
     run_index: usize,
     start_commit: &str,
+    completion_commit: &str,
 ) -> CodingUnitRun {
     let revision_store = WorkItemRevisionStore::new(paths.clone());
     let lineage = revision_store
@@ -139,7 +140,7 @@ fn seed_completed_unit_run(
         operational_retry_count: 0,
         plan_repair_count: 0,
         start_commit: Some(start_commit.to_string()),
-        completion_commit: Some(start_commit.to_string()),
+        completion_commit: Some(completion_commit.to_string()),
         created_at: "2026-10-15T00:00:00Z".to_string(),
         updated_at: "2026-10-15T00:00:00Z".to_string(),
     };
@@ -201,6 +202,18 @@ async fn drive_target_to_final_confirm(
     target: LogicalRepositoryId,
     repo_name: &str,
 ) -> CodingExecutionAttempt {
+    drive_target_to_final_confirm_with_evidence(fixture, target, repo_name, None).await
+}
+
+/// 同 [`drive_target_to_final_confirm`]，可选在 worktree 内提交一份证据文件
+/// （相对路径 + 内容）：该提交成为各 unit 完成区间的 completion_commit
+/// （Bug1-A 中文证据端到端夹具）。
+async fn drive_target_to_final_confirm_with_evidence(
+    fixture: &N3Fixture,
+    target: LogicalRepositoryId,
+    repo_name: &str,
+    evidence: Option<(&str, &str)>,
+) -> CodingExecutionAttempt {
     let store = fixture.coding_store();
     let repo_path = fixture._root.path().join(repo_name);
     let start_commit = git_stdout(&repo_path, &["rev-parse", "HEAD"])
@@ -236,6 +249,25 @@ async fn drive_target_to_final_confirm(
         "{repo_name} worktree not materialized"
     );
 
+    // 可选证据提交：真实路径（含中文）进入 unit 完成区间。
+    let completion_commit = match evidence {
+        Some((relative_path, content)) => {
+            let worktree = attempt
+                .worktree_path
+                .as_ref()
+                .expect("worktree materialized");
+            let evidence_path = worktree.join(relative_path);
+            std::fs::create_dir_all(evidence_path.parent().expect("evidence parent")).unwrap();
+            std::fs::write(&evidence_path, content).unwrap();
+            git_stdout(worktree, &["add", "--all"]);
+            git_stdout(worktree, &["commit", "-m", "evidence commit"]);
+            git_stdout(worktree, &["rev-parse", "HEAD"])
+                .trim()
+                .to_string()
+        }
+        None => start_commit.clone(),
+    };
+
     // per-unit 完成事实（completed run + handoff + Approve 报告 + Completed 状态）。
     let units = store
         .list_coding_units(PROJECT_ID, ISSUE_ID, &attempt.id)
@@ -245,8 +277,15 @@ async fn drive_target_to_final_confirm(
         .get_plan_lineage(PROJECT_ID, ISSUE_ID, PLAN_ID)
         .unwrap();
     for (index, unit) in units.iter().enumerate() {
-        let run =
-            seed_completed_unit_run(&store, &fixture.paths, &attempt, unit, index, &start_commit);
+        let run = seed_completed_unit_run(
+            &store,
+            &fixture.paths,
+            &attempt,
+            unit,
+            index,
+            &start_commit,
+            &completion_commit,
+        );
         let handoff = HandoffRevision {
             id: format!(
                 "handoff_revision_{}_{}",
@@ -258,7 +297,7 @@ async fn drive_target_to_final_confirm(
             provided_contracts: Vec::new(),
             provided_capabilities: std::collections::BTreeMap::new(),
             contract_hash: "handoff_contract_hash".to_string(),
-            commit_sha: start_commit.clone(),
+            commit_sha: completion_commit.clone(),
             created_at: "2026-10-15T00:00:00Z".to_string(),
         };
         revision_store
@@ -292,7 +331,7 @@ async fn drive_target_to_final_confirm(
                 ISSUE_ID,
                 &attempt.id,
                 &unit.id,
-                Some(start_commit.clone()),
+                Some(completion_commit.clone()),
             )
             .unwrap();
     }
@@ -302,7 +341,7 @@ async fn drive_target_to_final_confirm(
     let mut stored = store
         .get_attempt(PROJECT_ID, ISSUE_ID, &attempt.id)
         .unwrap();
-    stored.head_commit = Some(start_commit.clone());
+    stored.head_commit = Some(completion_commit);
     store.write_coding_attempt_for_test(&stored).unwrap();
     store
         .seed_running_attempt_for_test(PROJECT_ID, ISSUE_ID, &stored.id)
@@ -449,6 +488,56 @@ async fn plan_final_confirm_post_stops_at_first_failure_and_skips_rest() {
         .get_attempt(PROJECT_ID, ISSUE_ID, &bindings[2].1)
         .unwrap();
     assert_eq!(third.status, CodingAttemptStatus::WaitingForHuman);
+}
+
+/// Bug1-A 端到端：中文证据提交进入 unit 完成区间后，真实执行完整确认端点，
+/// 全部 target confirmed、durable Completed、GET `final_confirm.state=done`
+/// （采集侧 `-z` NUL 协议返回真实 UTF-8 路径，中文路径不再阻塞确认链；
+/// scope 命中的红绿由 gates_scope_domain 直控夹具承载——本夹具冻结契约
+/// write_policy 为空，此用例守确认链路与持久状态）。
+#[tokio::test]
+async fn plan_final_confirm_post_confirms_chinese_evidence_commit_end_to_end() {
+    let fixture = frozen_plan_fixture().await;
+    for (target, repo_name, evidence) in [
+        (
+            fixture.busi,
+            "n3-busi",
+            Some((
+                "cadence/verify/2026-10-16_验收报告_v1.0.md",
+                "# 验收报告\n",
+            )),
+        ),
+        (fixture.web, "n3-web", None),
+        (fixture.gateway, "n3-gateway", None),
+        (fixture.frontend, "n3-frontend", None),
+    ] {
+        drive_target_to_final_confirm_with_evidence(&fixture, target, repo_name, evidence).await;
+    }
+
+    let result = post_final_confirm(&fixture.state).await.unwrap();
+    assert_eq!(result.outcome, "all_confirmed");
+    assert_eq!(result.results.len(), 4);
+    for item in &result.results {
+        assert_eq!(item.status, "confirmed");
+        assert!(item.error_code.is_none());
+    }
+
+    // durable：全部成员 attempt Completed；GET 投影 done + confirmed 集齐。
+    for (target, _) in [
+        (fixture.busi, "n3-busi"),
+        (fixture.web, "n3-web"),
+        (fixture.gateway, "n3-gateway"),
+        (fixture.frontend, "n3-frontend"),
+    ] {
+        assert_eq!(
+            fixture.target_attempt(target).status,
+            CodingAttemptStatus::Completed
+        );
+    }
+    let progress = get_progress(&fixture.state).await.unwrap();
+    assert_eq!(progress.final_confirm.state, "done");
+    assert!(progress.final_confirm.ready_attempt_ids.is_empty());
+    assert_eq!(progress.final_confirm.confirmed_attempt_ids.len(), 4);
 }
 
 /// ④ 预检失败（一个 target 未进 FinalConfirm）→ outcome not_ready，

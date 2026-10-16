@@ -740,10 +740,15 @@ impl CodingWorkspaceEngine {
         if !worktree_path.exists() {
             return Ok(Vec::new());
         }
-        match self._git_service.git_status(&worktree_path).await {
-            Ok(status) => Ok(status.into_iter().map(|file| file.path).collect()),
-            Err(_) => Ok(Vec::new()),
-        }
+        // Bug1-A Review Focus #2：porcelain -z 下的解码失败（无效 UTF-8 路径）
+        // 必须向范围门禁 fail-closed 传播，不得用空清单静默空转；其余采集
+        // 失败沿用既有容错语义（存量流程存在非 git 目录的 worktree 物化形态）。
+        let status = match self._git_service.git_status(&worktree_path).await {
+            Ok(status) => status,
+            Err(error @ GitWorkspaceError::Parse(_)) => return Err(error.into()),
+            Err(_) => return Ok(Vec::new()),
+        };
+        Ok(status.into_iter().map(|file| file.path).collect())
     }
 
     /// 该 attempt 的 provider 流日志目录（Aria 侧）。
@@ -933,6 +938,9 @@ include!("gates_parts/verification_triage.inc.rs");
 /// forbidden：仓内相对与「根相对带成员前缀」两种写法任一命中即违规；
 /// exclusive：非空且有 worktree 时，任一写法命中才放行。路径卫生
 /// （`.git`/`.aria` 禁写、symlink 逃逸）沿用 `validate_write_path`。
+///
+/// 输入契约（Bug1-A）：`changed_files` 为采集侧 `-z` NUL 协议产出的已解码
+/// 真实 UTF-8 路径；本函数不做剥引号/反转义/trim。
 /// 报错 payload 保持仓内相对路径。
 pub(super) fn validate_changed_files_in_scope(
     exclusive_scopes: &[String],
