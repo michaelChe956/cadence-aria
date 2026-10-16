@@ -208,6 +208,16 @@ export type CodingRoleProviderConfigSnapshot = {
   permission_modes: CodingRolePermissionModes;
 };
 
+// Bug2-C(Task 5)：gate-retry 入口创建 run 时的门关联首写事实——
+// (gate_id, generation, action_id) 三元组。serde 可选字段:旧数据缺省
+// null/缺失(按无关联解释,不猜);generation 对应服务端门的
+// resolution_generation,重开递增后旧 origin 代次失配不误关新门。
+export type CodingRoleRunGateOrigin = {
+  gate_id: string;
+  generation: number;
+  action_id: string;
+};
+
 export type CodingRoleRun = {
   id: string;
   attempt_id: string;
@@ -224,6 +234,7 @@ export type CodingRoleRun = {
   supersedes_run_id?: string | null;
   superseded_by_run_id?: string | null;
   reason_code?: string | null;
+  gate_origin?: CodingRoleRunGateOrigin | null;
   raw_provider_output_refs: string[];
   artifact_refs: string[];
   event_summary?: CodingRoleRunEventSummary | null;

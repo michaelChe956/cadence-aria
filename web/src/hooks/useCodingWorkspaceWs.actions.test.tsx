@@ -1,5 +1,6 @@
 import { act } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { CodingRoleRun } from "../api/types";
 import { useCodingLogStore } from "../state/coding-log-store";
 import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 import { useOperationAuditStore } from "../state/operation-audit-store";
@@ -531,5 +532,158 @@ describe("useCodingWorkspaceWs actions and reconnect", () => {
       });
     });
     expect(useCodingLogStore.getState().lines).toEqual([]);
+  });
+});
+
+// Bug2-C(Task 5)：关门后投影一致性回归锁——snapshot 移除／重连不复活／
+// 事项一致(对照后端 coding_attention_info.rs:317-397:待处理事项只由
+// open 门事实派生,关门归档后事项随权威快照重建自然消失;UI 无特例按钮
+// 逻辑,动作关闭成功→新 snapshot→前端按 pending_gates 重建)。
+describe("coding-attention projection consistency after gate closure", () => {
+  installCodingWorkspaceWsTestHooks();
+
+  const gateRetryRun: CodingRoleRun = {
+    id: "coding_role_run_0002",
+    attempt_id: "coding_attempt_0001",
+    stage: "code_review",
+    role: "code_reviewer",
+    run_no: 2,
+    status: "running",
+    trigger: "retry_review",
+    node_id: null,
+    started_at: "2026-10-17T00:00:00Z",
+    completed_at: null,
+    raw_provider_output_refs: [],
+    artifact_refs: [],
+    // Task 3 gate_origin 首写:serde 可选字段,旧数据缺省 null。
+    gate_origin: {
+      gate_id: "gate_0001",
+      generation: 0,
+      action_id: "retry_review",
+    },
+  };
+
+  it("removes the closed gate on the authoritative snapshot and keeps its origin-linked retry run", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(
+        codingSessionState({
+          status: "blocked",
+          stage: "code_review",
+          pending_gates: [blockedGate()],
+        }),
+      );
+    });
+    expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(1);
+
+    // 动作关闭成功 → 服务端统一关闭原语落盘 → 新 snapshot:门不再投影,
+    // retry run 携带 gate_origin(类型对齐:原样透传,不丢失关联事实)。
+    act(() => {
+      harness.ws.receive(
+        codingSessionState({
+          status: "running",
+          stage: "code_review",
+          pending_gates: [],
+          role_runs: [gateRetryRun],
+        }),
+      );
+    });
+    expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(0);
+    expect(useCodingWorkspaceStore.getState().roleRuns).toEqual([
+      expect.objectContaining({
+        id: "coding_role_run_0002",
+        gate_origin: {
+          gate_id: "gate_0001",
+          generation: 0,
+          action_id: "retry_review",
+        },
+      }),
+    ]);
+  });
+
+  it("does not resurrect the closed gate when the reconnect replays the authoritative snapshot", () => {
+    vi.useFakeTimers();
+    try {
+      const harness = renderCodingHook();
+
+      act(() => {
+        harness.ws.open();
+        harness.ws.receive(
+          codingSessionState({
+            status: "blocked",
+            stage: "code_review",
+            pending_gates: [blockedGate()],
+          }),
+        );
+        harness.api.respondGate("gate_0001", "retry_review");
+      });
+      expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(1);
+
+      // 断连重放窗口:动作已发出、确认快照未达即断线;重连后服务端
+      // (Task 3/4 关门幂等收敛)重放权威快照——门已归档,不再复活。
+      act(() => {
+        harness.ws.close(1006);
+      });
+      expect(useCodingWorkspaceStore.getState().connectionStatus).toBe("reconnecting");
+
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+        MockWebSocket.instances[1].open();
+        MockWebSocket.instances[1].receive(
+          codingSessionState({
+            status: "running",
+            stage: "code_review",
+            pending_gates: [],
+            role_runs: [gateRetryRun],
+          }),
+        );
+      });
+
+      expect(useCodingWorkspaceStore.getState().connectionStatus).toBe("connected");
+      expect(useCodingWorkspaceStore.getState().pendingGates).toHaveLength(0);
+      expect(useCodingWorkspaceStore.getState().roleRuns).toEqual([
+        expect.objectContaining({ id: "coding_role_run_0002" }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("projects legacy role runs without gate origin unchanged", () => {
+    const harness = renderCodingHook();
+
+    act(() => {
+      harness.ws.open();
+      harness.ws.receive(
+        codingSessionState({
+          status: "running",
+          stage: "code_review",
+          pending_gates: [],
+          role_runs: [
+            {
+              id: "coding_role_run_0001",
+              attempt_id: "coding_attempt_0001",
+              stage: "code_review",
+              role: "code_reviewer",
+              run_no: 1,
+              status: "failed",
+              trigger: "initial",
+              node_id: null,
+              started_at: "2026-10-16T00:00:00Z",
+              completed_at: "2026-10-16T00:01:00Z",
+              raw_provider_output_refs: [],
+              artifact_refs: [],
+            },
+          ],
+        }),
+      );
+    });
+
+    // 旧 run 缺 origin 按 null/缺省解释,投影不受影响(不猜关联)。
+    const run = useCodingWorkspaceStore.getState().roleRuns[0];
+    expect(run?.id).toBe("coding_role_run_0001");
+    expect(run?.gate_origin ?? null).toBeNull();
   });
 });
