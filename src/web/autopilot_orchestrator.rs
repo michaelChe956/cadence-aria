@@ -546,9 +546,18 @@ async fn enrolled_lc_coding_chain(
     };
     let (run, step) = match enrolled_plan_coding_start(state, &identity).await {
         Ok(result) => result,
-        // 失败事实已在服务内沿 N0 写入（写失败已优先上抛为 tick 错误）；
-        // 业务失败按停点分诊。
-        Err(_) => return Ok(Some(ReconcileOutcome::NeedsHuman)),
+        Err(error) => {
+            // 业务失败沿 N0 写入事实后按停点分诊；事实写失败
+            //（automation_attention_fact_write_failed）按 Err 上抛——
+            // tick 可见诊断，不吞成静默 NeedsHuman（不冒充已通知）。
+            if error.code == "automation_attention_fact_write_failed" {
+                return Err(format!(
+                    "enrolled plan coding chain attention fact write failed: {}: {}",
+                    error.code, error.message
+                ));
+            }
+            return Ok(Some(ReconcileOutcome::NeedsHuman));
+        }
     };
     match &step {
         EnrolledPlanStartStep::AdvancedToReady => return Ok(Some(ReconcileOutcome::Advancing)),
@@ -1423,6 +1432,76 @@ mod tests {
                     && fact.plan_id.as_deref() == Some(plan_id.as_str())
             }),
             "coding_start failure fact must be persisted: {:?}",
+            saved.attention_facts
+        );
+    }
+
+    /// k3 波3 fix-2：N0 事实写失败（enrollment 文件不可写→upsert Store
+    /// 错误）不得吞成静默 NeedsHuman——该 tick 必须以 Err 产出可见诊断
+    ///（automation_attention_fact_write_failed）；恢复可写后同一现场
+    /// 正常写事实并按停点分诊。
+    #[tokio::test]
+    async fn r2_attention_fact_write_failure_surfaces_as_tick_error() {
+        use crate::product::work_item_revision_store::WorkItemRevisionStore;
+
+        let fixture = crate::web::wiga_gate_fixture::confirmed_enrolled_fixture().await;
+        let enrollment = fixture.enrollment();
+        let plan_id = enrollment.plan_id.clone().expect("bound plan");
+        // 同 r2_advance_failure 用例的在途 amendment 注入：prepare fail-closed
+        // → 服务内尝试写 advance 失败事实。
+        let revision_store = WorkItemRevisionStore::new(fixture.inner.paths.clone());
+        let mut lineage = revision_store
+            .get_plan_lineage(PROJECT_ID, ISSUE_ID, &plan_id)
+            .unwrap();
+        lineage.active_amendment_id = Some("amendment_r2_k3".to_string());
+        crate::product::json_store::write_json(
+            &fixture
+                .inner
+                .paths
+                .issue_root(PROJECT_ID, ISSUE_ID)
+                .join("work-item-revisions")
+                .join(&plan_id)
+                .join("lineage.json"),
+            &lineage,
+        )
+        .unwrap();
+        // N0 写入口不可写（issue 目录只读→锁文件/落盘 IO 失败形态；
+        // write_json 为临时文件+rename，单文件 chmod 拦不住）。
+        let enrollment_dir = fixture.inner.paths.issue_root(PROJECT_ID, ISSUE_ID);
+        let mut readonly = std::fs::metadata(&enrollment_dir).unwrap().permissions();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&enrollment_dir, readonly).unwrap();
+
+        let failure = fixture
+            .reconcile()
+            .await
+            .expect_err("fact write failure must surface as a tick error, not silent needs_human");
+        assert!(
+            failure.contains("automation_attention_fact_write_failed"),
+            "tick diagnostic must carry the fact-write failure code: {failure}"
+        );
+
+        // 恢复可写：同一现场正常写事实并分诊停点（不冒充已通知）。
+        let mut writable = std::fs::metadata(&enrollment_dir).unwrap().permissions();
+        writable.set_readonly(false);
+        std::fs::set_permissions(&enrollment_dir, writable).unwrap();
+        assert_eq!(
+            fixture.reconcile().await.unwrap(),
+            ReconcileOutcome::NeedsHuman
+        );
+        let saved = crate::product::issue_automation_store::IssueAutomationStore::new(
+            fixture.inner.paths.clone(),
+        )
+        .get(PROJECT_ID, ISSUE_ID)
+        .unwrap()
+        .unwrap();
+        assert!(
+            saved.attention_facts.iter().any(|fact| fact.key
+                == format!(
+                    "{plan_id}:wiga-advance-{}-{plan_id}:advance_failed",
+                    enrollment.enrollment_id
+                )),
+            "restored write path must persist the advance failure fact: {:?}",
             saved.attention_facts
         );
     }
