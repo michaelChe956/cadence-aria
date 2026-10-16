@@ -1,8 +1,9 @@
 //! P1 WIGA Task 5：plan 生成动作与真实 manager run 的协调（REQ-WIGA-03）。
 //!
 //! `start_plan_generation_once` 只做：活 run 观察（AlreadyActive，绝不
-//! supersede）→ durable session 准入（Prepare/Interactive/无人工停点）→
-//! enrollment 锁内认领生成检查点（`PlanGenerationIntent`）→ 共用非
+//! supersede）→ durable session 准入（Prepare/冻结期望 run policy/无人工
+//! 停点；批 2 P2 起按 enrollment 冻结 plan_approval 互证）→ enrollment
+//! 锁内认领生成检查点（`PlanGenerationIntent`）→ 共用非
 //! superseding provider 启动（`spawn_provider_run_claiming_idle`）。检查点
 //! 在 `EngineStarted`/`ProviderDispatched` 之后无法证明外部 provider 未被
 //! 触达时持久 `NeedsHuman`，只供人显式恢复——绝不宣称 exactly-once。
@@ -51,7 +52,7 @@ pub async fn start_plan_generation_once(
         return Ok(PlanGenerationOutcome::AlreadyActive);
     }
 
-    // durable session 准入：Prepare/Interactive/无人工或终态停点才可启动。
+    // durable session 准入：Prepare+冻结期望 run policy+无人工或终态停点才可启动。
     let app_paths =
         crate::product::app_paths::ProductAppPaths::new(state.workspace_root.join(".aria"));
     let store = IssueAutomationStore::new(app_paths.clone());
@@ -59,6 +60,16 @@ pub async fn start_plan_generation_once(
     let session = lifecycle
         .get_workspace_session(&session_id)
         .map_err(|error| format!("bound session unreadable: {error}"))?;
+    // 批 2 P2（REQ-WIGA-02 修订）：会话 run policy 必须与 enrollment 冻结
+    // plan_approval 期望一致（auto → AutoIfValid、manual → Interactive）才可
+    // 驱动——错绑/降级一律 NeedsHuman；该互证先于 G8 委托返修重驱，任何
+    // 路径都不得以错绑会话启动 provider。
+    let expected_run_policy = enrollment.options.plan_approval.expected_run_policy();
+    if session.workspace_type != WorkspaceType::WorkItemPlan
+        || session.run_policy != expected_run_policy
+    {
+        return Ok(PlanGenerationOutcome::NeedsHuman);
+    }
     // G8（终局关闸缺口）：generate 相位委托返修接力孤儿——review 裁决返修
     // 后 TriggerAggregateRepair 已原子预领（repair_reservation=Reserved＋
     // ledger 追加），但接力 spawn 未落地（进程重启→manager 重建回落
@@ -84,7 +95,7 @@ pub async fn start_plan_generation_once(
             PlanGenerationOutcome::AlreadyActive
         });
     }
-    if let Some(outcome) = admission_outcome(&session) {
+    if let Some(outcome) = admission_outcome(&session, expected_run_policy) {
         return Ok(outcome);
     }
 
@@ -167,10 +178,14 @@ pub async fn start_plan_generation_once(
 }
 
 /// durable 准入：仅 Prepare+Open（或 Running 但无活 run 的早期窗口）且
-/// Interactive 的 WorkItemPlan session 可启动；停点显式分诊，其余 NeedsHuman。
-fn admission_outcome(session: &WorkspaceSessionRecord) -> Option<PlanGenerationOutcome> {
+/// run policy 与 enrollment 冻结期望一致的 WorkItemPlan session 可启动；
+/// 停点显式分诊，其余 NeedsHuman（错绑/降级不获自动执行权）。
+fn admission_outcome(
+    session: &WorkspaceSessionRecord,
+    expected_run_policy: RunPolicy,
+) -> Option<PlanGenerationOutcome> {
     if session.workspace_type != WorkspaceType::WorkItemPlan
-        || session.run_policy != RunPolicy::Interactive
+        || session.run_policy != expected_run_policy
     {
         return Some(PlanGenerationOutcome::NeedsHuman);
     }
@@ -245,26 +260,26 @@ mod tests {
         session.run_policy = RunPolicy::Interactive;
         session.single_candidate_phase = Some(SingleCandidatePhase::Prepare);
         session.status = WorkspaceSessionStatus::Open;
-        assert_eq!(admission_outcome(&session), None);
+        assert_eq!(admission_outcome(&session, RunPolicy::Interactive), None);
 
         session.status = WorkspaceSessionStatus::WaitingForHuman;
         assert_eq!(
-            admission_outcome(&session),
+            admission_outcome(&session, RunPolicy::Interactive),
             Some(PlanGenerationOutcome::WaitingForHuman)
         );
         session.status = WorkspaceSessionStatus::StoppedNeedsHuman;
         assert_eq!(
-            admission_outcome(&session),
+            admission_outcome(&session, RunPolicy::Interactive),
             Some(PlanGenerationOutcome::WaitingForHuman)
         );
         session.status = WorkspaceSessionStatus::Failed;
         assert_eq!(
-            admission_outcome(&session),
+            admission_outcome(&session, RunPolicy::Interactive),
             Some(PlanGenerationOutcome::NeedsHuman)
         );
         session.status = WorkspaceSessionStatus::Confirmed;
         assert_eq!(
-            admission_outcome(&session),
+            admission_outcome(&session, RunPolicy::Interactive),
             Some(PlanGenerationOutcome::NeedsHuman)
         );
 
@@ -272,16 +287,48 @@ mod tests {
         session.status = WorkspaceSessionStatus::Open;
         session.single_candidate_phase = Some(SingleCandidatePhase::Generate);
         assert_eq!(
-            admission_outcome(&session),
+            admission_outcome(&session, RunPolicy::Interactive),
             Some(PlanGenerationOutcome::WaitingForHuman)
         );
-        // 非 Interactive 不代表授权（REQ-WIGA-02）。
+        // 错绑：manual 冻结（期望 Interactive）对 AutoIfValid 会话不获准
+        //（REQ-WIGA-02 修订——AutoIfValid 只对 auto 冻结放行）。
         session.single_candidate_phase = Some(SingleCandidatePhase::Prepare);
         session.run_policy = RunPolicy::AutoIfValid;
         assert_eq!(
-            admission_outcome(&session),
+            admission_outcome(&session, RunPolicy::Interactive),
             Some(PlanGenerationOutcome::NeedsHuman)
         );
+    }
+
+    // 批 2 P2（REQ-WIGA-02 修订）：生成准入按 enrollment 冻结策略互证——
+    // auto 冻结放行 AutoIfValid 会话进入生成；错绑/降级（实际与期望
+    // 不一致）一律 NeedsHuman，仅客户端传 AutoIfValid 不获自动执行权。
+    #[test]
+    fn admission_follows_enrollment_expected_run_policy() {
+        let mut session = crate::web::workspace_session::test_session_record("s");
+        session.workspace_type = WorkspaceType::WorkItemPlan;
+        session.single_candidate_phase = Some(SingleCandidatePhase::Prepare);
+        session.status = WorkspaceSessionStatus::Open;
+
+        // auto 冻结 + AutoIfValid 会话：准入放行（None = 继续生成链）。
+        session.run_policy = RunPolicy::AutoIfValid;
+        assert_eq!(admission_outcome(&session, RunPolicy::AutoIfValid), None);
+
+        // 错绑：期望 Interactive 而会话 AutoIfValid → 拒绝。
+        assert_eq!(
+            admission_outcome(&session, RunPolicy::Interactive),
+            Some(PlanGenerationOutcome::NeedsHuman)
+        );
+
+        // 降级：auto 冻结对 Interactive 会话不代为执行 → 拒绝。
+        session.run_policy = RunPolicy::Interactive;
+        assert_eq!(
+            admission_outcome(&session, RunPolicy::AutoIfValid),
+            Some(PlanGenerationOutcome::NeedsHuman)
+        );
+
+        // manual 回归：Interactive 会话 + Interactive 期望 → 准入。
+        assert_eq!(admission_outcome(&session, RunPolicy::Interactive), None);
     }
 
     // G8：委托返修接力孤儿判据——仅 Generate 相位＋Reserved 预领未被消费

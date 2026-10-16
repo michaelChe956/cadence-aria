@@ -15,7 +15,6 @@ use crate::product::models::automation::IssueAutomationEnrollment;
 use crate::product::models::lifecycle::IssueWorkItemPlanStatus;
 use crate::product::models::outline::{WorkItemPlanCommitState, WorkItemPlanCompileStatus};
 use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus};
-use crate::product::work_item_plan_policy::RunPolicy;
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 use crate::product::work_item_plan_store::WorkItemPlanStore;
 
@@ -51,7 +50,9 @@ pub fn plan_confirmed_info(
     let session = lifecycle.get_workspace_session(session_id)?;
     if session.project_id != enrollment.project_id
         || session.issue_id != enrollment.issue_id
-        || session.run_policy != RunPolicy::Interactive
+        // 批 2 P2（REQ-WIGA-02 修订）：按冻结 plan_approval 期望互证——auto
+        // 冻结认 AutoIfValid、manual 只认 Interactive；错绑不投影成功。
+        || session.run_policy != enrollment.options.plan_approval.expected_run_policy()
         || session.status != WorkspaceSessionStatus::Confirmed
         || session.single_candidate_phase != Some(SingleCandidatePhase::Completed)
     {

@@ -364,27 +364,15 @@ impl LifecycleStore {
 
     /// P1 WIGA Task 3：绑定创建——既存 session 必须与完整创建快照一致
     /// （基础 `create_workspace_session_with_id` 只核对五个身份字段，不足以
-    /// 作为授权校验）；bound plan session 强制 Interactive（REQ-WIGA-02）。
+    /// 作为授权校验）。批 2 P2（REQ-WIGA-02 修订）：run policy 的授权口径
+    /// 移至 enrollment 冻结策略——创建/binding/准入/确认投影各接缝互证，
+    /// 本入口接受明确的 AutoIfValid（auto 冻结意图），保留完整身份比较
+    /// （含 run_policy，漂移即 IdentityMismatch）。
     pub fn create_workspace_session_bound(
         &self,
         input: CreateWorkspaceSessionInput,
         id: String,
     ) -> Result<WorkspaceSessionRecord, ProductStoreError> {
-        if input.workspace_type == WorkspaceType::WorkItemPlan
-            && input
-                .work_item_plan_options
-                .as_ref()
-                .is_some_and(|options| {
-                    options.run_policy
-                        != crate::product::work_item_plan_policy::RunPolicy::Interactive
-                })
-        {
-            return Err(ProductStoreError::InvalidRecord {
-                kind: "workspace_session",
-                reason: "bound work item plan session must use the interactive run policy"
-                    .to_string(),
-            });
-        }
         let root = self.workspace_sessions_root(&input.project_id, &input.issue_id);
         let target_path = root.join(format!("{id}.json"));
         if path_exists(&target_path)? {

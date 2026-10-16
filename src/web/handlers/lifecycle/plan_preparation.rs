@@ -46,7 +46,8 @@ pub struct PreparedPlanRecords {
 
 /// 统一 prepare 数据面：manual（`ids=None`）保持现有 sequential id 与覆盖式
 /// 创建；bound（`ids=Some`）先核对既存 plan/session 的冻结身份，绝不覆盖
-/// 已有内容，且绑定 plan session 一律 `RunPolicy::Interactive`（REQ-WIGA-02）。
+/// 已有内容，bound 会话 run policy 取请求冻结值（auto 意图 → AutoIfValid、
+/// manual/缺省 → Interactive；REQ-WIGA-02 修订，授权互证在 enrollment 侧）。
 pub fn prepare_plan_records(
     state: &WebAppState,
     project_id: &str,
@@ -220,8 +221,10 @@ pub fn prepare_plan_records(
                     work_item_plan_options: Some(
                         crate::product::lifecycle_store::WorkItemPlanSessionOptions {
                             flow_kind,
-                            // REQ-WIGA-02：绑定 plan session 永远 Interactive。
-                            run_policy: RunPolicy::Interactive,
+                            // 批 2 P2（REQ-WIGA-02 修订）：bound 会话 run policy
+                            // 取请求冻结值（auto 意图 → AutoIfValid、manual →
+                            // Interactive）；授权互证在 enrollment 冻结策略侧。
+                            run_policy: request.run_policy.unwrap_or(RunPolicy::Interactive),
                             rollout_snapshot,
                         },
                     ),
@@ -363,7 +366,8 @@ pub async fn ensure_enrolled_plan(
 }
 
 /// 冻结意图 → 共用 prepare 请求：provider/选项只取意图冻结值（补偿时绝不
-/// 重新取环境默认）；绑定 plan session 一律 Interactive（REQ-WIGA-02）。
+/// 重新取环境默认）；run policy 按 enrollment 冻结 plan_approval 期望派生
+///（auto → AutoIfValid、manual/旧缺省 → Interactive；REQ-WIGA-02 修订）。
 fn intent_request(
     intent: &crate::product::models::automation::PreparedPlanIntent,
 ) -> PrepareWorkItemPlanRequest {
@@ -393,7 +397,7 @@ fn intent_request(
         review_rounds: Some(options.review_rounds),
         superpowers_enabled: Some(options.superpowers_enabled),
         openspec_enabled: Some(options.openspec_enabled),
-        run_policy: Some(RunPolicy::Interactive),
+        run_policy: Some(options.plan_approval.expected_run_policy()),
         include_integration_tests: Some(options.plan_options.include_integration_tests),
         include_e2e_tests: Some(options.plan_options.include_e2e_tests),
         force_frontend_backend_split: Some(options.plan_options.force_frontend_backend_split),
