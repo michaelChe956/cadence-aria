@@ -193,6 +193,7 @@ mod tests {
 
     fn policy_role_input() -> AdapterInput {
         AdapterInput {
+            env_vars: Default::default(),
             working_directory: None,
             prompt: "legacy policy run".to_string(),
             provider_type: crate::protocol::contracts::ProviderType::Fake,

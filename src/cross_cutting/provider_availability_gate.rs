@@ -476,6 +476,7 @@ mod tests {
 
     fn adapter_input() -> AdapterInput {
         AdapterInput {
+            env_vars: Default::default(),
             working_directory: None,
             provider_type: ProviderType::ClaudeCode,
             role: AdapterRole::Executor,

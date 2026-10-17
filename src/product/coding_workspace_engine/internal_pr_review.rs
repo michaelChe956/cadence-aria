@@ -76,6 +76,7 @@ pub(crate) fn internal_pr_review_streaming_input(
     permission_mode: ProviderPermissionMode,
 ) -> (AdapterInput, StreamingProviderInput) {
     let legacy_input = AdapterInput {
+        env_vars: Default::default(),
         working_directory: None,
         provider_type: provider_type_for_name(reviewer),
         role: AdapterRole::Reviewer,

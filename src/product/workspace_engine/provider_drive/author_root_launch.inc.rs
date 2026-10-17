@@ -233,6 +233,16 @@ impl WorkspaceEngine {
             None,
         )
         .map_err(|error| format!("author execution contract freeze failed: {}", error.details))?;
+        // 批2 T3→T11 集成轮(b45 现场):受信启动构造链统一接环境——
+        // author root launch 的 spawn env 唯一由 build_provider_environment
+        // 产出(裸名 CLI 靠最终 PATH 可解析;owner_home 与 trust adapter
+        // 同源),caller 传入 env_vars 被覆盖,构造点不复制白名单。
+        let launch_environment =
+            crate::cross_cutting::provider_environment::trusted_launch_environment(&contract)
+                .map_err(|error| {
+                    format!("author launch environment build failed: {}", error.details)
+                })?;
+        input.env_vars = launch_environment.env().clone();
         // 受信装配独占 deny 投影：按 duty 强制覆盖（与
         // prepare_trusted_streaming_launch 同一口径）。
         input.tool_policy =

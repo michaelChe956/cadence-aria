@@ -84,16 +84,15 @@ impl ProviderAdapter for CliProviderAdapter {
                 sink: Arc::clone(sink),
             });
         let stream_log_dir = input.provider_stream_log_dir.as_deref().map(Path::new);
-        // 批2 Task 3(§环境精确合同):同步 CLI 旁路不隐式全继承——
-        // AdapterInput 无 env 传输字段,fail-closed 为显式空环境
-        // (env_clear);engine T11/T12 接线后由受信 launch 注入
-        // build_provider_environment 产物。
-        let frozen_env_transport: BTreeMap<String, String> = BTreeMap::new();
+        // 批2 Task 3→T11 集成轮:同步 CLI 旁路消费 `AdapterInput::env_vars`
+        // 传输的冻结白名单环境(受信构造点注入 build_provider_environment
+        // 产物,裸名 CLI 靠最终 PATH 可解析);空 = 显式空环境(env_clear +
+        // 零注入,fail-closed),adapter 不隐式全继承、不自行复制白名单。
         let raw = run_command_capture_with_stream(
             &command,
             worktree_path,
             stream_log_dir,
-            Some(&frozen_env_transport),
+            Some(&input.env_vars),
             Some(&input.prompt),
             Some(Duration::from_secs(input.timeout)),
             stream_context,

@@ -214,6 +214,7 @@ mod tests {
 
     fn input(provider_type: ProviderType) -> AdapterInput {
         AdapterInput {
+            env_vars: Default::default(),
             working_directory: None,
             provider_type,
             role: crate::protocol::contracts::AdapterRole::Executor,

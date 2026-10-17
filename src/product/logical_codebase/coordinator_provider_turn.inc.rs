@@ -212,6 +212,69 @@ impl GatewayBackedAggregateProviderTurnDriver {
         }
     }
 
+    /// 批2 T3→T11 集成轮(b45 现场):聚合 root recipe turn 的受信环境构造
+    /// ——以 durable operation 事实(操作 id + step)构造 `TrustedRunIdentity`
+    /// (职责恒 Coder/承载 Executor,与 runtime_units Direct 同裁定),按
+    /// 权威装配矩阵冻结 HostCoding 执行合同,再产出统一白名单环境
+    /// (`build_provider_environment`,裸名 CLI 靠最终 PATH 可解析)。任何
+    /// 失配/owner home 缺失都在 spawn 之前零副作用拒绝(fail-closed)。
+    fn trusted_turn_environment(
+        &self,
+        operation_id: &str,
+        step: AggregateInitializationStepKind,
+    ) -> Result<std::collections::BTreeMap<String, String>, String> {
+        use crate::cross_cutting::provider_execution::{
+            ProviderExecutionProfile, TrustedProviderRole, TrustedRunIdentity,
+            freeze_provider_execution,
+        };
+        let run_record = crate::protocol::contracts::ProviderRunRecord {
+            provider_run_id: format!("aggregate_{operation_id}_{step:?}"),
+            node_id: format!("aggregate_root_recipe_{step:?}"),
+            provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
+            runtime_role: crate::protocol::contracts::RuntimeRole::Executor,
+            adapter_role: crate::protocol::contracts::AdapterRole::Executor,
+            provider_capability_ref: "cap_managed_snapshot".to_string(),
+            adapter_compatibility_ref: "compat_1".to_string(),
+            context_package_ref: format!("ctx_aggregate_root_recipe_{operation_id}"),
+            adapter_input_ref: format!("ain_aggregate_root_recipe_{operation_id}"),
+            adapter_output_ref: format!("aout_aggregate_root_recipe_{operation_id}"),
+            raw_artifact_refs: Vec::new(),
+            exit_code: None,
+            error_code: None,
+            error_details: None,
+            stdout_ref: None,
+            stderr_ref: None,
+            structured_output_ref: None,
+            files_modified: Vec::new(),
+            status: crate::protocol::contracts::ProviderRunStatus::Running,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            duration_ms: None,
+            timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
+            retry_count: 0,
+            approval_policy: crate::protocol::contracts::ApprovalPolicy::OnRequest,
+            sandbox_mode: crate::protocol::contracts::SandboxMode::FullAccess,
+            constraint_check_ref: None,
+            traceability_binding_refs: Vec::new(),
+        };
+        let identity = TrustedRunIdentity::from_durable_run(
+            &run_record,
+            &format!("aggregate-{operation_id}"),
+            TrustedProviderRole::Coder,
+        );
+        let contract = freeze_provider_execution(
+            &identity,
+            ProviderExecutionProfile::HostCoding,
+            None,
+            format!("aggregate_initialization_{operation_id}"),
+            None,
+        )
+        .map_err(|error| format!("aggregate turn execution contract freeze failed: {}", error.details))?;
+        crate::cross_cutting::provider_environment::trusted_launch_environment(&contract)
+            .map(|environment| environment.env().clone())
+            .map_err(|error| format!("aggregate turn launch environment build failed: {}", error.details))
+    }
+
     /// OracleAggInitScope 裁决 scope 纪律线(r57 attempt1 cmd4 receipt 10
     /// 变更 unknown_path DENY 全落 alpha/beta=wrong-scope flavor;r57b
     /// attempt1 四命令零变更白烧=zero-action flavor;oracle 定性 2026-10-08
@@ -475,7 +538,21 @@ impl AggregateProviderTurnDriver for GatewayBackedAggregateProviderTurnDriver {
                 });
             }
         }
-        let input = self.streaming_input(step, &aggregate_root, Some(tool_policy));
+        // 批2 T3→T11 集成轮(b45 现场:聚合初始化 pre_check→start_streaming
+        // →ProviderCommandMissing "claude"):受信启动构造统一接环境——以
+        // durable operation 事实冻结 HostCoding/Coder 执行合同(矩阵失配在
+        // spawn 前零副作用拒绝;与 runtime_units Direct 同裁定),spawn env
+        // 唯一由 build_provider_environment 产出(裸名 claude 靠最终 PATH
+        // 可解析;owner_home 与 trust adapter 同源)。合同绑定进 launch 归
+        // T16 装配,本轮只以它为环境构造权威,不改 launch 语义。
+        let mut input = self.streaming_input(step, &aggregate_root, Some(tool_policy));
+        input.env_vars = self
+            .trusted_turn_environment(operation_id, step)
+            .map_err(|reason| AggregateInitializationError::ProviderTurn {
+                step,
+                reason,
+                retryable: true,
+            })?;
         // Task 1c(credential phase 准备):admission paths 在场(生产主路径)
         // 时,root recipe turn 改经 gateway 冻结接口 `prepare_root_recipe_launch`
         // (计划「准备与同步」节冻结;impl 落本文件,gateway 主文件归 1a/2b

@@ -388,6 +388,7 @@
         // sync spawn：AdapterInput 的独立 working_directory=root 优先于
         // worktree_path，spawn 复验按 root cwd 通过；写证据仍只含 target。
         let adapter_input = AdapterInput {
+            env_vars: Default::default(),
             working_directory: Some(authority.clone()),
             provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
             role: crate::protocol::contracts::AdapterRole::WorkItemSplitter,
@@ -1502,6 +1503,7 @@
             )
             .unwrap();
         let input = AdapterInput {
+            env_vars: Default::default(),
             working_directory: Some(fixture.canonical_root()),
             provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
             role: crate::protocol::contracts::AdapterRole::Executor,

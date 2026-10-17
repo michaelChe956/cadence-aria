@@ -5753,6 +5753,7 @@ impl MatrixEnvironment {
         let _ = std::fs::create_dir_all(&split_log_dir);
         let split_log_dir = split_log_dir.canonicalize().unwrap_or(split_log_dir);
         let adapter_input = AdapterInput {
+            env_vars: Default::default(),
             provider_type: provider_type_for(&self.provider),
             role: AdapterRole::WorkItemSplitter,
             // cwd=canonical root(gateway 冻结);worktree_path=target 成员路径。

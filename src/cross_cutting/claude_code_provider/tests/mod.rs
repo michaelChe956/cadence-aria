@@ -152,6 +152,7 @@ fn adapter_input(prompt: &str) -> AdapterInput {
     // 非策略 legacy 直连 fixture（Task 3.1/3.2）：策略角色经 bridge 会派生策略并
     // 要求 durable sink；bridge 机制测试使用 Executor 保持非策略路径。
     AdapterInput {
+        env_vars: Default::default(),
         working_directory: None,
         provider_type: ProviderType::ClaudeCode,
         role: AdapterRole::Executor,

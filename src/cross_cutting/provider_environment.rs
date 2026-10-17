@@ -299,7 +299,6 @@ impl FrozenProviderEnvironment {
 ///   ——一律不进);
 /// - `approved`:受信配置解析器按§环境键表构造的精确批准表;表外键
 ///   fail-closed 拒绝,不能由模型/任意 caller map 冒充。
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_provider_environment(
     execution: &FrozenProviderExecution,
     owner_home: &Path,
@@ -409,6 +408,40 @@ pub(crate) fn build_provider_environment(
         kimi_trust_ref,
         env_policy_digest: execution.env_policy_digest().to_string(),
     })
+}
+
+/// 受信启动构造链的统一环境接线(T3→T11/T12 集成轮,b45 现场):为已冻结
+/// 执行合同产出统一白名单环境,供 `prepare_trusted_streaming_launch`/
+/// `prepare_trusted_sync_launch`/LC 受信装配(engine author root launch、
+/// aggregate root recipe turn)与 runtime_units freeze 点消费。
+///
+/// - `owner_home`:经 [`resolve_trusted_owner_home_from_env`] 同源解析(与
+///   trust adapter `production()` 同一入口,禁止两处各自解析);缺失/
+///   非绝对路径 fail-closed,不静默改用 worktree/进程 cwd。
+/// - `inherited`:平台进程 env 受信快照(平台自身=受信源;只按
+///   [`PROVIDER_ENV_BASE_INHERIT_KEYS`] 精确复制,表外键零透传);
+/// - `approved`:恒空——生产尚无受信配置解析器源(默认仅基础白名单+
+///   PATH;后续 T6/T11/T12 接线后由受信配置解析器按§环境键表构造)。
+///
+/// 各构造点禁止复制白名单或自行拼 env:键表单一来源在本模块,spawn 侧
+/// 仍统一 `env_clear` + 仅注入本产物(裸名 CLI 靠最终 PATH 可解析)。
+pub(crate) fn trusted_launch_environment(
+    execution: &FrozenProviderExecution,
+) -> Result<FrozenProviderEnvironment, ProviderAdapterError> {
+    let owner_home = resolve_trusted_owner_home_from_env().ok_or_else(|| {
+        ProviderAdapterError::provider_unavailable(
+            "provider_environment_owner_home_unresolved: HOME/USERPROFILE absent or not absolute; cannot freeze the launch environment",
+        )
+    })?;
+    let inherited: BTreeMap<String, String> = std::env::vars_os()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    build_provider_environment(execution, &owner_home, &inherited, &BTreeMap::new())
 }
 
 /// 受信 owner home 的环境解析(HOME/USERPROFILE,仅绝对路径):trust

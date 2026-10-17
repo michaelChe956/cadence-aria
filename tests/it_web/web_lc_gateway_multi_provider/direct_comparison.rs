@@ -143,6 +143,7 @@ pub(crate) struct SyncDirectTopology {
 
 fn sync_input(provider_type: ProviderType, prompt: &str, worktree: &Path) -> AdapterInput {
     AdapterInput {
+        env_vars: Default::default(),
         provider_type,
         role: AdapterRole::Executor,
         worktree_path: Some(worktree.to_string_lossy().into_owned()),

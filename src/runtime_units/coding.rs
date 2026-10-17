@@ -262,6 +262,18 @@ impl ExecutionChainState {
             &request.provider_run_id,
         )?;
         let execution_contract_digest = execution_contract.contract_digest().to_string();
+        // 批2 T3→T11 集成轮(b45 现场):受信启动构造链统一接环境——
+        // freeze 点产出统一白名单环境并经 `AdapterInput::env_vars` 传输到
+        // `CliProviderAdapter` spawn(env_clear + 仅注入该表;裸名 CLI 靠
+        // 最终 PATH 可解析),构造点不复制白名单。
+        let adapter_input = crate::protocol::contracts::AdapterInput {
+            env_vars: crate::cross_cutting::provider_environment::trusted_launch_environment(
+                &execution_contract,
+            )?
+            .env()
+            .clone(),
+            ..adapter_input
+        };
         let output = match provider.run(&adapter_input) {
             Ok(output) => output,
             Err(error) => {

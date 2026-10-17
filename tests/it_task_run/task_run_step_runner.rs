@@ -130,6 +130,7 @@ fn scripted_step_runner_rejects_mismatched_step_without_consuming_queue() {
 #[test]
 fn provider_step_from_adapter_input_maps_node_write_class_and_schema() {
     let input = AdapterInput {
+        env_vars: Default::default(),
         working_directory: None,
         provider_type: ProviderType::Codex,
         role: AdapterRole::Executor,
@@ -155,6 +156,7 @@ fn provider_step_from_adapter_input_maps_node_write_class_and_schema() {
 #[test]
 fn provider_step_from_adapter_input_exposes_web_confirmation_metadata() {
     let input = AdapterInput {
+        env_vars: Default::default(),
         working_directory: None,
         provider_type: ProviderType::Codex,
         role: AdapterRole::Executor,

@@ -678,6 +678,7 @@ mod tests {
         );
         let validated = gateway.validate(request).expect("validate policy");
         let input = crate::protocol::contracts::AdapterInput {
+            env_vars: Default::default(),
             provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
             role: crate::protocol::contracts::AdapterRole::WorkItemSplitter,
             working_directory: Some(aggregate_root),

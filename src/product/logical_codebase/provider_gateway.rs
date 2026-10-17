@@ -1977,6 +1977,15 @@ impl LogicalCodebaseProviderGateway {
                 review_window_id.as_deref(),
             )
             .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.to_string()))?;
+        // 批2 T3→T11 集成轮(b45 现场):受信启动构造链统一接环境——
+        // spawn env 唯一由 `build_provider_environment` 产出(env_clear +
+        // 白名单;裸名 CLI 靠最终 PATH 可解析),caller/env_vars 传入值被
+        // 覆盖,各构造点不复制白名单。owner_home 与 trust adapter 同源解析,
+        // 缺失 fail-closed(合同零副作用拒绝,先于 validate/spawn)。
+        let launch_environment =
+            crate::cross_cutting::provider_environment::trusted_launch_environment(&contract)
+                .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.details))?;
+        input.env_vars = launch_environment.env().clone();
         self.prepare_streaming_launch(input, request, context)
             .map(|launch| launch.with_frozen_execution(contract))
     }
@@ -2011,6 +2020,18 @@ impl LogicalCodebaseProviderGateway {
             review_window_id,
         )
         .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.details))?;
+        // 批2 T3→T11 集成轮:同步栈同源接线——冻结白名单环境经
+        // `AdapterInput::env_vars` 既有 env map 传输,`GatewaySyncProvider`
+        // 桥透传到 streaming spawn(env_clear + 仅注入该表);caller 传入
+        // 值被覆盖,构造点不复制白名单。owner_home 缺失 fail-closed
+        // (先于 validate/spawn,零副作用)。
+        let launch_environment =
+            crate::cross_cutting::provider_environment::trusted_launch_environment(&contract)
+                .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.details))?;
+        let input = crate::protocol::contracts::AdapterInput {
+            env_vars: launch_environment.env().clone(),
+            ..input
+        };
         self.prepare_sync_launch(input, request, context)
             .map(|launch| launch.with_frozen_execution(contract))
     }

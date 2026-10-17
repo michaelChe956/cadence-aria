@@ -58,6 +58,10 @@ fn execution_worktask_input(workspace_root: &std::path::Path) -> ExecutionWorkta
 struct ScriptedExecutionProvider {
     output_schemas: Mutex<Vec<String>>,
     seen_prompts: Mutex<Vec<(String, String)>>,
+    /// 批2 T3→T11 集成轮:捕获每次 provider.run 收到的冻结环境 PATH
+    /// (freeze 点注入 build_provider_environment 产物后经
+    /// `AdapterInput::env_vars` 传输到达)。
+    seen_env_paths: Mutex<Vec<Option<String>>>,
     review_decisions: Mutex<VecDeque<String>>,
     candidate_refs: Vec<String>,
     fail_review_with_provider_error: bool,
@@ -99,11 +103,16 @@ impl ScriptedExecutionProvider {
         Self {
             output_schemas: Mutex::new(Vec::new()),
             seen_prompts: Mutex::new(Vec::new()),
+            seen_env_paths: Mutex::new(Vec::new()),
             review_decisions: Mutex::new(reviews.into_iter().map(ToOwned::to_owned).collect()),
             candidate_refs: Vec::new(),
             fail_review_with_provider_error: false,
             review_artifact_ref: None,
         }
+    }
+
+    fn seen_env_paths(&self) -> Vec<Option<String>> {
+        self.seen_env_paths.lock().expect("env paths").clone()
     }
 
     fn seen_output_schemas(&self) -> Vec<String> {
@@ -131,6 +140,10 @@ impl ProviderAdapter for ScriptedExecutionProvider {
             .lock()
             .expect("prompts")
             .push((input.output_schema.clone(), input.prompt.clone()));
+        self.seen_env_paths
+            .lock()
+            .expect("env paths")
+            .push(input.env_vars.get("PATH").cloned());
         let payload = match input.output_schema.as_str() {
             "schema://aria/artifacts/coding_report/v1" => json!({
                 "artifact_kind": "coding_report",

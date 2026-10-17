@@ -19,6 +19,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn make_input(prompt: &str) -> AdapterInput {
     AdapterInput {
+        env_vars: Default::default(),
         working_directory: None,
         prompt: prompt.to_string(),
         provider_type: crate::protocol::contracts::ProviderType::Fake,

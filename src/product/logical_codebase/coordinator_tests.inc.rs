@@ -959,6 +959,7 @@ mod tests {
             crate::cross_cutting::provider_adapter::ProviderAdapterError,
         > {
             self.run(&crate::protocol::contracts::AdapterInput {
+                env_vars: Default::default(),
                 provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
                 role: crate::protocol::contracts::AdapterRole::Orchestrator,
                 worktree_path: None,

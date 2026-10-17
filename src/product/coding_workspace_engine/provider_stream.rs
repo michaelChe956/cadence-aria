@@ -1852,6 +1852,7 @@ mod lcg_t07_validated_dispatch_tests {
         worktree: std::path::PathBuf,
     ) -> crate::protocol::contracts::AdapterInput {
         crate::protocol::contracts::AdapterInput {
+            env_vars: Default::default(),
             working_directory: Some(authority_root),
             prompt: "lcg t07 legacy probe".to_string(),
             provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
@@ -1893,6 +1894,7 @@ mod lcg_t07_validated_dispatch_tests {
         >(32);
         std::mem::forget(command_tx);
         let legacy_input = crate::protocol::contracts::AdapterInput {
+            env_vars: Default::default(),
             working_directory: None,
             prompt: "lcg t07 legacy probe".to_string(),
             provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,

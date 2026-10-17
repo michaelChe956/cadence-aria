@@ -153,6 +153,7 @@ impl WorkItemSplitEngine {
         let provider_type = provider_name_to_type(&author_provider);
         let worktree_path = repository.path.to_string_lossy().to_string();
         let adapter_input = AdapterInput {
+            env_vars: Default::default(),
             provider_type,
             role: AdapterRole::WorkItemSplitter,
             // Legacy 单仓直连路径：不注入独立 cwd（None → 沿用 worktree_path，
@@ -242,6 +243,7 @@ impl WorkItemSplitEngine {
         let provider_type = provider_name_to_type(&author_provider);
         let worktree_path = repository.path.to_string_lossy().to_string();
         let adapter_input = AdapterInput {
+            env_vars: Default::default(),
             provider_type,
             role: AdapterRole::WorkItemSplitter,
             // Task 2.6(REQ-ENV-10,split sync 行):cwd 重绑 canonical root——

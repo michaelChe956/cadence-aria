@@ -652,6 +652,61 @@
         assert_eq!(fixture.gateway_audit().stream_launches(), 3);
     }
 
+    /// 批2 T3→T11 集成轮(b45 现场:聚合初始化 pre_check→start_streaming→
+    /// ProviderCommandMissing "claude"):聚合 root recipe turn 的受信启动
+    /// 构造统一接环境——每个 turn 的 env_vars 必须携带冻结白名单产物
+    /// (裸名 claude 靠最终 PATH 可解析、HOME=受信 owner home、CODEX_HOME
+    /// 同源冻结、表外宿主键零透传),驱动不得各自复制白名单。
+    #[tokio::test]
+    async fn lc_aggregate_recipe_turns_carry_frozen_environment_with_path() {
+        let fixture = gateway_aggregate_fixture();
+        fixture
+            .coordinator()
+            .execute(
+                "project_0001",
+                "aggregate_initialization_0001",
+                CancellationToken::new(),
+            )
+            .await
+            .expect("claude-only recipe must complete with the frozen environment");
+        let inputs = fixture.streaming_inputs();
+        assert_eq!(inputs.len(), 3, "three provider turns must have been launched");
+
+        let owner_home =
+            crate::cross_cutting::provider_environment::resolve_trusted_owner_home_from_env()
+                .expect("test host must provide an absolute HOME for the frozen environment");
+        let allowed: std::collections::BTreeSet<&str> =
+            crate::cross_cutting::provider_environment::PROVIDER_ENV_BASE_INHERIT_KEYS
+                .iter()
+                .copied()
+                .chain(["HOME", "CODEX_HOME"])
+                .collect();
+        for input in &inputs {
+            assert_eq!(
+                input.env_vars.get("PATH"),
+                std::env::var_os("PATH")
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .as_ref(),
+                "every aggregate recipe turn must carry the inherited host PATH"
+            );
+            assert_eq!(
+                input.env_vars.get("HOME").map(String::as_str),
+                Some(owner_home.display().to_string().as_str()),
+                "HOME must be frozen to the trusted owner home"
+            );
+            assert_eq!(
+                input.env_vars.get("CODEX_HOME").map(String::as_str),
+                Some(owner_home.join(".codex").display().to_string().as_str()),
+                "CODEX_HOME must be frozen from the trust-adapter discovery source"
+            );
+            assert!(
+                input.env_vars.keys().all(|key| allowed.contains(key.as_str())),
+                "env keys must stay within the frozen whitelist: {:?}",
+                input.env_vars.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
     /// OracleAggInitScope 红绿测(镜像 r54 worktree_discipline.rs 形态):
     /// r57 attempt1 cmd4 receipt 10 变更 unknown_path DENY 全落 alpha/beta
     /// (wrong-scope flavor),r57b attempt1 四命令零变更白烧(zero-action

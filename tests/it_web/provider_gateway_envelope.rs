@@ -1276,6 +1276,7 @@ fn lcg_t13_single_repository_sync_claude_codex_direct_topology_unchanged() {
     // ③ 路由分发对照:同一 input 两次分发,captured args/cwd/output 不变。
     let worktree = std::path::PathBuf::from("/tmp/lcg-t13-sync-direct-worktree");
     let mut input = AdapterInput {
+        env_vars: Default::default(),
         working_directory: None,
         provider_type: ProviderType::ClaudeCode,
         role: cadence_aria::protocol::contracts::AdapterRole::Executor,

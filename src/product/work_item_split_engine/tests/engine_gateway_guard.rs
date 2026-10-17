@@ -314,6 +314,7 @@ fn sync_probe_input(
     worktree_path: Option<String>,
 ) -> AdapterInput {
     AdapterInput {
+        env_vars: Default::default(),
         provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
         role: crate::protocol::contracts::AdapterRole::WorkItemSplitter,
         working_directory,

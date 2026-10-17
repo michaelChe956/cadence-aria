@@ -630,6 +630,25 @@ async fn logical_revision_rebinds_root_cwd_and_preserves_revision_target() {
         input.audit_sink.is_some(),
         "策略 provider run 必须绑定 durable tool-policy audit sink"
     );
+    // 批2 T3→T11 集成轮(b45 现场):受信启动构造链统一接环境——author
+    // root launch 的 env_vars 必须是 build_provider_environment 冻结白名单
+    // 产物(裸名 CLI 靠最终 PATH 可解析;HOME/CODEX_HOME 同源冻结;表外
+    // 宿主键零透传)。
+    let owner_home =
+        crate::cross_cutting::provider_environment::resolve_trusted_owner_home_from_env()
+            .expect("test host must provide an absolute HOME for the frozen environment");
+    assert_eq!(
+        input.env_vars.get("PATH"),
+        std::env::var_os("PATH")
+            .map(|value| value.to_string_lossy().into_owned())
+            .as_ref(),
+        "author root launch env must carry the inherited host PATH"
+    );
+    assert_eq!(
+        input.env_vars.get("HOME").map(String::as_str),
+        Some(owner_home.display().to_string().as_str()),
+        "HOME must be frozen to the trusted owner home"
+    );
     // 批2 Task 11（Author 独立入口·revision 面）：LC revision launch 同样
     // 冻结 duty=Author 的执行合同（HostCoding + AuthorToolPolicy，经
     // Orchestrator 承载 audit 面仍 Author）——fresh 与 resume 同一口径，

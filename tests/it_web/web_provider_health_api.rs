@@ -336,6 +336,7 @@ async fn provider_health_shared_gate_controls_lifecycle_coding_and_routing_entri
     );
     let error = routing
         .run(&AdapterInput {
+            env_vars: Default::default(),
             working_directory: None,
             provider_type: ProviderType::Codex,
             role: AdapterRole::Executor,

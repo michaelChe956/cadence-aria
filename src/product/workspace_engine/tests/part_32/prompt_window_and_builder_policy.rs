@@ -928,6 +928,7 @@ async fn workspace_builder_family_pairs_role_with_tool_policy() {
     ] {
         let worktree = tempfile::tempdir().expect("coding worktree").keep();
         let legacy_input = AdapterInput {
+            env_vars: Default::default(),
             working_directory: None,
             provider_type: ProviderType::Codex,
             role: role.clone(),

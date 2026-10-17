@@ -106,6 +106,7 @@ pub fn build_provider_context(
     };
 
     let adapter_input = AdapterInput {
+        env_vars: Default::default(),
         working_directory: None,
         provider_type: context_package.provider_type.clone(),
         role: context_package.adapter_role.clone(),

@@ -237,6 +237,13 @@ pub struct AdapterInput {
     pub output_schema: String,
     pub timeout: u64,
     pub max_retries: u32,
+    /// 冻结白名单环境(批2 T3→T11 集成轮):受信启动构造点注入的
+    /// `build_provider_environment` 产物,经本 env map 传输到同步旁路 spawn
+    /// (`CliProviderAdapter`/`GatewaySyncProvider` 桥;spawn 仍 env_clear +
+    /// 仅注入本表,不隐式继承宿主环境)。空 = 显式空环境(fail-closed),
+    /// 由构造点决定,adapter 不得自行补白名单或回退宿主 PATH。
+    #[serde(default)]
+    pub env_vars: std::collections::BTreeMap<String, String>,
 }
 
 impl AdapterInput {
