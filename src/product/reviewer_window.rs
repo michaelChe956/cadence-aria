@@ -1006,10 +1006,18 @@ pub(crate) fn record_violation(
         violation.detail,
         violation.report_id,
     );
-    let journal_has_entry = store
-        .load_violations(window_id)?
-        .iter()
-        .any(|entry| entry.entry_id == entry_id);
+    let journal = store.load_violations(window_id)?;
+    let journal_has_entry = journal.iter().any(|entry| entry.entry_id == entry_id);
+    // P3-4(修复轮 2):journal 已含 pending.entry_id → 陈旧标记(落盘
+    // 后清除前崩溃残留)先清,再处理新违规,不误挡。
+    if record.violation_pending.as_ref().is_some_and(|pending| {
+        journal
+            .iter()
+            .any(|entry| entry.entry_id == pending.entry_id)
+    }) {
+        record.violation_pending = None;
+        record = store.save_window_transition(record, expected_generation)?;
+    }
     let pending_retry = record
         .violation_pending
         .as_ref()
@@ -1034,7 +1042,8 @@ pub(crate) fn record_violation(
             kind: violation.kind.to_string(),
             detail: violation.detail.to_string(),
         });
-        record = store.save_window_transition(record, expected_generation)?;
+        let expected = record.generation;
+        record = store.save_window_transition(record, expected)?;
     }
     let mut durable = journal_has_entry;
     if !journal_has_entry {
@@ -1151,6 +1160,52 @@ pub(crate) async fn restore_window(
         git_extra_refs_observed: Vec::new(),
         platform_verified: Vec::new(),
     });
+    // P1(修复轮 2):恢复前观察——restore_baseline 回写之前对当前仓
+    // 独立观察(index-only 直写等回写后不可再观的漂移在此可见),
+    // 与 in_progress 绑定同笔持久化;Restored/重入均消费,journal 落盘
+    // 后清除。manifest 不可读 → fail-closed 观察事实(P3-3)。
+    // 重入合并:保留既有持久化事实(此前入口观察到的漂移可能已被上次
+    // 部分恢复回写),按 entry_id 去重并入本次新观察——不覆盖、不丢事实。
+    let mut pre_restore = std::mem::take(&mut record.pre_restore_git_facts);
+    let existing_pre: std::collections::HashSet<String> = pre_restore
+        .iter()
+        .map(|entry| entry.entry_id.clone())
+        .collect();
+    let fresh: Vec<ViolationJournalEntry> = match snapshot.load_manifest(window_id) {
+        Ok(manifest) => observed_git_violation_facts(&record, &manifest)
+            .into_iter()
+            .map(|fact| pre_restore_entry(&record, &fact))
+            .collect(),
+        Err(error) => vec![ViolationJournalEntry {
+            seq: 0,
+            entry_id: violation_entry_id(
+                window_id,
+                "git_observation_unreadable",
+                ".git[manifest]",
+                None,
+                None,
+                &error.to_string(),
+                None,
+            ),
+            at: now_rfc3339(),
+            window_id: window_id.to_string(),
+            attempt_id: record.attempt_id.clone(),
+            run_id: record.run_id.clone(),
+            report_id: None,
+            kind: "git_observation_unreadable".to_string(),
+            path: ".git[manifest]".to_string(),
+            before_digest: None,
+            after_digest: None,
+            detail: format!("恢复前观察无法加载 manifest(fail-closed): {error}"),
+            restore_cursor: snapshot_cursor_string(snapshot, window_id),
+        }],
+    };
+    for entry in fresh {
+        if !existing_pre.contains(&entry.entry_id) {
+            pre_restore.push(entry);
+        }
+    }
+    record.pre_restore_git_facts = pre_restore;
     record.last_error = None;
     record.bump_transition(ReviewerWindowState::Restoring, "T16 差异恢复开始(游标续接)");
     record = store.save_window_transition(record, expected_generation)?;
@@ -1162,13 +1217,31 @@ pub(crate) async fn restore_window(
             // 再决定 Restoring(待采信)还是 ManualGate(整轮作废)。
             let journal = store.load_violations(window_id)?;
             let mut facts = derived_violation_facts(&record, &report, &journal);
-            // F1(审查修复轮 1):并入独立只读观察——T16 Completed 重入
-            // 时内存报告全空,派生事实只能来自对当前仓的重观察(自提交
-            // refs/对象留仓仍可见);entry_id 去重保证不重复落 journal。
+            // F1(修复轮 1):并入恢复后独立观察;P1(修复轮 2):并入
+            // **恢复前持久化观察**——T16 回写后不可再观的漂移(index-only
+            // 直写/RecoveryRequired 停等重入/崩溃续接)全部由此续接,
+            // entry_id 去重不重复落 journal。
             if let Ok(manifest) = snapshot.load_manifest(window_id) {
                 facts.extend(observed_git_violation_facts(&record, &manifest));
             }
-            let gate = from_violation || !facts.is_empty();
+            facts.extend(
+                record
+                    .pre_restore_git_facts
+                    .iter()
+                    .map(|entry| DerivedViolationFact {
+                        kind: entry.kind.clone(),
+                        path: entry.path.clone(),
+                        before_digest: entry.before_digest.clone(),
+                        after_digest: entry.after_digest.clone(),
+                        detail: entry.detail.clone(),
+                    }),
+            );
+            // P2-a(修复轮 2):journal/pending 存在即 gate——无可复观
+            // 事实时不再静默放行,防止窗口永久卡 Restoring 后被采信。
+            let gate = from_violation
+                || !facts.is_empty()
+                || !journal.is_empty()
+                || record.violation_pending.is_some();
             let binding = restored_binding(gate, &report);
             if gate {
                 // journal-first:停等标记(首条 entry_id)→ 逐条追加 →
@@ -1184,7 +1257,7 @@ pub(crate) async fn restore_window(
                     .map(|fact| {
                         violation_entry_id(
                             window_id,
-                            fact.kind,
+                            &fact.kind,
                             &fact.path,
                             fact.before_digest.as_deref(),
                             fact.after_digest.as_deref(),
@@ -1214,7 +1287,7 @@ pub(crate) async fn restore_window(
                 for fact in &facts {
                     let entry_id = violation_entry_id(
                         window_id,
-                        fact.kind,
+                        &fact.kind,
                         &fact.path,
                         fact.before_digest.as_deref(),
                         fact.after_digest.as_deref(),
@@ -1242,6 +1315,7 @@ pub(crate) async fn restore_window(
                     store.append_violation(window_id, entry)?;
                 }
                 record.violation_pending = None;
+                record.pre_restore_git_facts = Vec::new();
                 record.restore = Some(binding);
                 record.bump_transition(
                     ReviewerWindowState::ManualGate,
@@ -1360,7 +1434,7 @@ fn restored_binding(from_violation: bool, report: &RestoreReport) -> RestoreBind
 /// journal 篡改或洗白形态)。外部推送类外部副作用已在 kind/detail
 /// 中明示不可回滚——不伪造「交付零外部影响」。
 struct DerivedViolationFact {
-    kind: &'static str,
+    kind: String,
     path: String,
     before_digest: Option<String>,
     after_digest: Option<String>,
@@ -1375,7 +1449,7 @@ fn derived_violation_facts(
     let mut facts = Vec::new();
     for path in git_mutation_paths(report) {
         facts.push(DerivedViolationFact {
-            kind: "git_domain_mutation",
+            kind: "git_domain_mutation".to_string(),
             path: path.clone(),
             before_digest: None,
             after_digest: None,
@@ -1386,7 +1460,7 @@ fn derived_violation_facts(
     }
     for extra in &report.git_extra_refs_observed {
         facts.push(DerivedViolationFact {
-            kind: "git_extra_ref",
+            kind: "git_extra_ref".to_string(),
             path: extra.clone(),
             before_digest: None,
             after_digest: None,
@@ -1401,7 +1475,7 @@ fn derived_violation_facts(
     let integrity_ok = journal_integrity_ok(journal, &record.window_id);
     if !integrity_ok {
         facts.push(DerivedViolationFact {
-            kind: "journal_tamper",
+            kind: "journal_tamper".to_string(),
             path: format!("violations/{}.json", record.window_id),
             before_digest: None,
             after_digest: None,
@@ -1419,7 +1493,7 @@ fn derived_violation_facts(
         && journal.is_empty()
     {
         facts.push(DerivedViolationFact {
-            kind: "journal_tamper",
+            kind: "journal_tamper".to_string(),
             path: format!("violations/{}.json", record.window_id),
             before_digest: None,
             after_digest: None,
@@ -1438,7 +1512,7 @@ fn derived_violation_facts(
         && !journal.is_empty()
     {
         facts.push(DerivedViolationFact {
-            kind: "journal_tamper",
+            kind: "journal_tamper".to_string(),
             path: format!("violations/{}.json", record.window_id),
             before_digest: None,
             after_digest: None,
@@ -1464,8 +1538,9 @@ fn observed_git_violation_facts(
     let worktree = record.identity.canonical_worktree.clone();
     let mut facts = Vec::new();
     // extra refs:当前 refs - 受管 refs(自提交证据保留,重入仍可见)。
-    if let Ok(current) = list_current_refs(&worktree) {
-        for (path, _) in &current {
+    let refs_observation = list_current_refs(&worktree);
+    if let Ok(current) = refs_observation.as_ref() {
+        for (path, _) in current {
             if !manifest
                 .git_observation
                 .managed_refs
@@ -1473,7 +1548,7 @@ fn observed_git_violation_facts(
                 .any(|managed| managed.ref_path == *path)
             {
                 facts.push(DerivedViolationFact {
-                    kind: "git_extra_ref",
+                    kind: "git_extra_ref".to_string(),
                     path: path.clone(),
                     before_digest: None,
                     after_digest: None,
@@ -1489,7 +1564,7 @@ fn observed_git_violation_facts(
                 && sha != &managed.sha
             {
                 facts.push(DerivedViolationFact {
-                    kind: "git_domain_mutation",
+                    kind: "git_domain_mutation".to_string(),
                     path: managed.ref_path.clone(),
                     before_digest: Some(managed.sha.clone()),
                     after_digest: Some(sha.clone()),
@@ -1500,25 +1575,45 @@ fn observed_git_violation_facts(
                 });
             }
         }
+    } else if let Err(error) = refs_observation.as_ref() {
+        // P3-3(修复轮 2):观察失败 fail-closed 计事实,不再静默吞。
+        facts.push(DerivedViolationFact {
+            kind: "git_observation_unreadable".to_string(),
+            path: ".git[refs]".to_string(),
+            before_digest: None,
+            after_digest: None,
+            detail: format!("refs 观察不可读(fail-closed): {error}"),
+        });
     }
     // HEAD:当前 symref/sha vs 基线。
-    if let Ok(head_sha) = git_stdout_trimmed(&worktree, &["rev-parse", "HEAD"]) {
+    let head_observation = git_stdout_trimmed(&worktree, &["rev-parse", "HEAD"]);
+    if let Ok(head_sha) = head_observation.as_deref() {
         if head_sha != manifest.git_observation.head_sha {
             facts.push(DerivedViolationFact {
-                kind: "git_domain_mutation",
+                kind: "git_domain_mutation".to_string(),
                 path: ".git/HEAD".to_string(),
                 before_digest: Some(manifest.git_observation.head_sha.clone()),
-                after_digest: Some(head_sha),
+                after_digest: Some(head_sha.to_string()),
                 detail: "HEAD 指向漂移(改 Git 整轮作废)".to_string(),
             });
         }
+    } else if let Err(error) = head_observation.as_ref() {
+        // P3-3:观察失败 fail-closed 计事实。
+        facts.push(DerivedViolationFact {
+            kind: "git_observation_unreadable".to_string(),
+            path: ".git[HEAD]".to_string(),
+            before_digest: None,
+            after_digest: None,
+            detail: format!("HEAD 观察不可读(fail-closed): {error}"),
+        });
     }
     // index:gitdir/index 字节 sha vs 基线。
-    if let Ok(index_bytes) = std::fs::read(record.identity.gitdir.join("index")) {
+    let index_observation = std::fs::read(record.identity.gitdir.join("index"));
+    if let Ok(index_bytes) = index_observation.as_ref() {
         let current = sha256_hex(&index_bytes);
         if current != manifest.git_observation.index_sha256 {
             facts.push(DerivedViolationFact {
-                kind: "git_domain_mutation",
+                kind: "git_domain_mutation".to_string(),
                 path: ".git/index".to_string(),
                 before_digest: Some(manifest.git_observation.index_sha256.clone()),
                 after_digest: Some(current),
@@ -1527,6 +1622,15 @@ fn observed_git_violation_facts(
                     .to_string(),
             });
         }
+    } else if let Err(error) = index_observation.as_ref() {
+        // P3-3:观察失败 fail-closed 计事实。
+        facts.push(DerivedViolationFact {
+            kind: "git_observation_unreadable".to_string(),
+            path: ".git[index]".to_string(),
+            before_digest: None,
+            after_digest: None,
+            detail: format!("index 观察不可读(fail-closed): {error}"),
+        });
     }
     // F4:annex 补充面(config/objects/reflog/子模块 gitdir)。
     if let Some(baseline) = manifest.git_annex_observation.as_ref() {
@@ -1557,7 +1661,7 @@ fn observed_git_violation_facts(
                 for (face, before, after) in comparisons {
                     if before != after {
                         facts.push(DerivedViolationFact {
-                            kind: "git_annex_drift",
+                            kind: "git_annex_drift".to_string(),
                             path: format!(".git[{face}]"),
                             before_digest: Some(before.clone()),
                             after_digest: Some(after.clone()),
@@ -1570,7 +1674,7 @@ fn observed_git_violation_facts(
             }
             Err(error) => {
                 facts.push(DerivedViolationFact {
-                    kind: "git_annex_drift",
+                    kind: "git_annex_drift".to_string(),
                     path: ".git[annex]".to_string(),
                     before_digest: None,
                     after_digest: None,
@@ -1616,6 +1720,38 @@ fn git_stdout_trimmed(dir: &Path, args: &[&str]) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// P1(修复轮 2):恢复前观察事实 → 可持久化 journal 条目形态(与
+/// in_progress 绑定同笔保存;Restored 消费时转回事实并入,entry_id
+/// 输入一致故去重稳定)。
+fn pre_restore_entry(
+    record: &ReviewerWindowRecord,
+    fact: &DerivedViolationFact,
+) -> ViolationJournalEntry {
+    ViolationJournalEntry {
+        seq: 0,
+        entry_id: violation_entry_id(
+            &record.window_id,
+            &fact.kind,
+            &fact.path,
+            fact.before_digest.as_deref(),
+            fact.after_digest.as_deref(),
+            &fact.detail,
+            None,
+        ),
+        at: now_rfc3339(),
+        window_id: record.window_id.clone(),
+        attempt_id: record.attempt_id.clone(),
+        run_id: record.run_id.clone(),
+        report_id: None,
+        kind: fact.kind.clone(),
+        path: fact.path.clone(),
+        before_digest: fact.before_digest.clone(),
+        after_digest: fact.after_digest.clone(),
+        detail: fact.detail.clone(),
+        restore_cursor: "started+0".to_string(),
+    }
 }
 
 /// journal 序号从 1 连续且窗号全部相符。

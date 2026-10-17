@@ -378,6 +378,11 @@ pub(crate) struct ReviewerWindowRecord {
     /// 采信关闭;journal 落盘成功后清除)。
     #[serde(default)]
     pub(crate) violation_pending: Option<ViolationPending>,
+    /// 恢复前观察(P1 修复轮 2):restore_baseline **之前**对当前仓的
+    /// 独立 Git 观察事实——T16 回写后不可再观的漂移(index-only 直写
+    /// 等)在此持久化;恢复重入/崩溃后续接消费,journal 落盘后清除。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) pre_restore_git_facts: Vec<ViolationJournalEntry>,
     pub(crate) transitions: Vec<TransitionEntry>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
@@ -412,6 +417,7 @@ impl ReviewerWindowRecord {
             recovery: None,
             last_error: None,
             violation_pending: None,
+            pre_restore_git_facts: Vec::new(),
             transitions: vec![TransitionEntry {
                 from: None,
                 to: ReviewerWindowState::Preparing.as_str().to_string(),

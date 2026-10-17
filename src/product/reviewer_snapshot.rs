@@ -285,7 +285,7 @@ pub(crate) struct ReviewerBaselineManifest {
     pub(crate) platform_write_baseline: Vec<PlatformWriteBaselineEntry>,
     /// T18(F4):Git 观察域补充面(config/objects/reflog/子模块 gitdir)
     /// 的基线摘要;旧 manifest 无此字段 → None(该面不对比,报告披露)。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) git_annex_observation: Option<GitAnnexObservation>,
 
     pub(crate) scope_key: ResourceScopeKey,
@@ -304,6 +304,9 @@ pub(crate) struct GitAnnexObservation {
     pub(crate) config_sha256: String,
     /// common-dir/config 内容 sha256。
     pub(crate) common_config_sha256: String,
+    /// gitdir/config.worktree 内容 sha256(P3-1:per-worktree 配置面;
+    /// 合法缺失记 "absent")。
+    pub(crate) worktree_config_sha256: String,
     /// objects 域摘要(loose 对象相对名 + pack 文件名与大小的有序拼接
     /// sha256;对象名即内容寻址,摘要对新增/删除敏感)。
     pub(crate) objects_digest: String,
@@ -1720,10 +1723,24 @@ pub(crate) fn observe_git_annex(
             )));
         }
     };
+    // P3-1(修复轮 2):worktree 私有 config.worktree(gitdir 下;
+    // gitrepository-layout 口径,per-worktree 配置逃逸面)。合法缺失记
+    // "absent",两侧(capture/复观)同源。
+    let worktree_config_sha256 = match std::fs::read(gitdir.join("config.worktree")) {
+        Ok(bytes) => sha256_hex(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "absent".to_string(),
+        Err(error) => {
+            return Err(ReviewerSnapshotError::ReadFailure(format!(
+                "read {}: {error}",
+                gitdir.join("config.worktree").display()
+            )));
+        }
+    };
 
-    // objects:loose 对象相对名(XX/sha…)与 pack 文件名+大小,有序拼接。
+    // objects:相对路径+大小元数据摘要(P2-c:loose/pack 文件名即内容
+    // 寻址,足以发现增删;不全文读,不绕 SnapshotBudget)。
     let mut object_lines = Vec::new();
-    collect_relative_files(&common_dir.join("objects"), &mut object_lines)?;
+    collect_relative_file_meta(&common_dir.join("objects"), &mut object_lines)?;
     object_lines.sort();
     let objects_digest = sha256_hex(object_lines.join("\n").as_bytes());
 
@@ -1736,37 +1753,95 @@ pub(crate) fn observe_git_annex(
     reflog_lines.sort();
     let reflogs_digest = sha256_hex(reflog_lines.join("\n").as_bytes());
 
-    // 子模块 gitdir:modules 下目录名 + 各 config 内容 sha。
+    // 子模块 gitdir(P2-b:嵌套路径如 modules/vendor/foo):递归收集
+    // modules 下全部 config 文件,以相对路径为键取内容 sha——浅层/嵌套
+    // 同形,不再按一级目录名硬取。
     let mut submodule_lines = Vec::new();
-    let modules = common_dir.join("modules");
-    if modules.is_dir() {
-        let entries = std::fs::read_dir(&modules).map_err(|error| {
-            ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", modules.display()))
-        })?;
-        let mut names = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|error| {
-                ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", modules.display()))
-            })?;
-            if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
-                names.push(entry.file_name().to_string_lossy().into_owned());
-            }
-        }
-        names.sort();
-        for name in names {
-            let config_sha = file_sha(&modules.join(&name).join("config"))?;
-            submodule_lines.push(format!("{name}:{config_sha}"));
-        }
-    }
+    collect_named_files_sha(&common_dir.join("modules"), "config", &mut submodule_lines)?;
+    submodule_lines.sort();
     let submodule_gitdirs_digest = sha256_hex(submodule_lines.join("\n").as_bytes());
 
     Ok(GitAnnexObservation {
         config_sha256,
         common_config_sha256,
+        worktree_config_sha256,
         objects_digest,
         reflogs_digest,
         submodule_gitdirs_digest,
     })
+}
+
+/// 递归收集全部「相对路径:大小」行(仅元数据,不读内容;目录缺失空)。
+fn collect_relative_file_meta(
+    root: &Path,
+    out: &mut Vec<String>,
+) -> Result<(), ReviewerSnapshotError> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(root).map_err(|error| {
+        ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", root.display()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", root.display()))
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            ReviewerSnapshotError::ReadFailure(format!("stat {}: {error}", path.display()))
+        })?;
+        if file_type.is_dir() {
+            collect_relative_file_meta(&path, out)?;
+        } else if file_type.is_file() {
+            let size = entry.metadata().map_err(|error| {
+                ReviewerSnapshotError::ReadFailure(format!("stat {}: {error}", path.display()))
+            })?;
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push(format!("{rel}:{}", size.len()));
+        }
+    }
+    Ok(())
+}
+
+/// 递归收集目录下全部名为 `name` 的文件的「相对路径:内容sha256」行。
+fn collect_named_files_sha(
+    root: &Path,
+    name: &str,
+    out: &mut Vec<String>,
+) -> Result<(), ReviewerSnapshotError> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(root).map_err(|error| {
+        ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", root.display()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", root.display()))
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            ReviewerSnapshotError::ReadFailure(format!("stat {}: {error}", path.display()))
+        })?;
+        if file_type.is_dir() {
+            collect_named_files_sha(&path, name, out)?;
+        } else if file_type.is_file() && path.file_name().map(|n| n == name).unwrap_or(false) {
+            let bytes = std::fs::read(&path).map_err(|error| {
+                ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", path.display()))
+            })?;
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push(format!("{rel}:{}", sha256_hex(&bytes)));
+        }
+    }
+    Ok(())
 }
 
 /// 递归收集目录下全部文件的「相对路径:内容sha256:大小」行(不追随

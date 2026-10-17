@@ -1807,4 +1807,343 @@ mod tests {
             AcceptanceRecommendation::Invalidated { .. }
         ));
     }
+
+    // ---------- 审查修复轮 2(P1/P2/P3)钉测 ----------
+
+    /// P1:index-only 直写(回写后不可再观)经平台漂移停等续接后
+    /// 仍 ManualGate——恢复前持久化观察兜底,不静默放行。
+    #[test]
+    fn p1_index_only_drift_survives_platform_recovery_detour() {
+        let fx = fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let platform_dir = fx.base.join("platform");
+        fs::create_dir_all(&platform_dir).unwrap();
+        let platform_file = platform_dir.join("report.json");
+        fs::write(&platform_file, "v0\n").unwrap();
+        let scope = open_scope(&fx.base, "coder");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let mut request = begin_request("w-p1", "attempt-1", &fx.worktree, &targets);
+        request.platform_write_paths = vec![PlatformWritePath {
+            path: platform_file.clone(),
+            ownership: "report-store".to_string(),
+        }];
+        let handle = block_on(begin_review_window(&store, &snapshot, &request)).expect("begin");
+
+        // Reviewer 直写 .git/index(追加字节:无新对象/无 ref 痕迹——
+        // 恢复回写后不可再观)+ 平台域漂移(逼 RecoveryRequired 分支)。
+        let index_path = fx.worktree.join(".git").join("index");
+        let mut index_bytes = fs::read(&index_path).unwrap();
+        index_bytes.extend_from_slice(b"evil");
+        fs::write(&index_path, index_bytes).unwrap();
+        fs::write(&platform_file, "v1-drift\n").unwrap();
+
+        let quiescing = begin_quiesce(&store, "w-p1", handle.generation, "end").unwrap();
+        let err = block_on(restore_window(
+            &store,
+            &snapshot,
+            "w-p1",
+            quiescing.generation,
+        ))
+        .expect_err("平台漂移按 T16 停等");
+        assert!(
+            matches!(
+                &err,
+                crate::product::reviewer_window::ReviewerWindowError::RecoveryStopped { reason, .. }
+                    if reason.contains("platform")
+            ),
+            "{err:?}"
+        );
+        // 恢复前观察已持久化(index 事实在,虽 index 已被 T16 回写)。
+        let record = store.load_window("w-p1").unwrap();
+        assert!(
+            record
+                .pre_restore_git_facts
+                .iter()
+                .any(|entry| entry.path == ".git/index"),
+            "pre_restore 必须含 index 事实: {:?}",
+            record.pre_restore_git_facts
+        );
+
+        // 人工稳定平台 → 重入:内存报告空(index 已回写),持久化恢复
+        // 前观察兜底 → ManualGate,不 Accepted。
+        fs::write(&platform_file, "v0\n").unwrap();
+        let summary = block_on(restore_window(&store, &snapshot, "w-p1", record.generation))
+            .expect("reentry");
+        assert!(summary.manual_gate, "index-only 直写不得被洗白");
+        assert_eq!(summary.record.state, ReviewerWindowState::ManualGate);
+        let journal = store.load_violations("w-p1").unwrap();
+        assert!(
+            journal.iter().any(|entry| entry.path == ".git/index"),
+            "{journal:?}"
+        );
+        assert!(
+            record_report_acceptance(
+                &store,
+                &snapshot,
+                "w-p1",
+                summary.record.generation,
+                ReportAcceptance::Accepted,
+            )
+            .is_err()
+        );
+    }
+
+    /// P1 崩溃变体:恢复入口观察+in_progress 落盘后、gate 收口前 kill
+    /// → 重入以持久化恢复前观察续接,仍 ManualGate。
+    #[test]
+    fn p1_crash_variant_persisted_pre_restore_gates_on_reentry() {
+        let fx = fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = block_on(begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-p1c", "attempt-1", &fx.worktree, &targets),
+        ))
+        .expect("begin");
+
+        let index_path = fx.worktree.join(".git").join("index");
+        let mut index_bytes = fs::read(&index_path).unwrap();
+        index_bytes.extend_from_slice(b"evil");
+        fs::write(&index_path, index_bytes).unwrap();
+        let quiescing = begin_quiesce(&store, "w-p1c", handle.generation, "end").unwrap();
+
+        // 第一次入口:观察+in_progress 已持久化;journal 阻断使收口
+        // 失败(等价 kill 现场:Restoring+pre_restore 已在 durable 态)。
+        let journal_path = fx.window_root.join("violations").join("w-p1c.json");
+        fs::create_dir_all(&journal_path).unwrap();
+        let err = block_on(restore_window(
+            &store,
+            &snapshot,
+            "w-p1c",
+            quiescing.generation,
+        ))
+        .expect_err("journal 阻断,收口必须失败");
+        assert!(
+            matches!(
+                &err,
+                crate::product::reviewer_window::ReviewerWindowError::Store(_)
+            ),
+            "{err:?}"
+        );
+        let record = store.load_window("w-p1c").unwrap();
+        assert!(
+            record
+                .pre_restore_git_facts
+                .iter()
+                .any(|entry| entry.path == ".git/index")
+        );
+
+        // 崩溃后重入(durable 现场续接)→ 仍 ManualGate。
+        fs::remove_dir(&journal_path).unwrap();
+        let summary = block_on(restore_window(
+            &store,
+            &snapshot,
+            "w-p1c",
+            record.generation,
+        ))
+        .expect("reentry");
+        assert!(summary.manual_gate, "崩溃重入后持久化观察必须兜底");
+    }
+
+    /// P2-a:pending/journal 存在但无可复观事实 → 仍 gate,不永久卡
+    /// Restoring 也不被采信。
+    #[test]
+    fn p2a_pending_without_reobservable_facts_still_gates() {
+        let fx = fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = block_on(begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-p2a", "attempt-1", &fx.worktree, &targets),
+        ))
+        .expect("begin");
+        let quiescing = begin_quiesce(&store, "w-p2a", handle.generation, "end").unwrap();
+
+        // 造 pending(A)+ journal 阻断(无可复观 git 事实的纯净仓库)。
+        let journal_path = fx.window_root.join("violations").join("w-p2a.json");
+        fs::create_dir_all(&journal_path).unwrap();
+        assert!(
+            record_violation(
+                &store,
+                &snapshot,
+                "w-p2a",
+                quiescing.generation,
+                ViolationRecord {
+                    kind: "channel_bypass",
+                    path: "channels/push",
+                    before_digest: None,
+                    after_digest: None,
+                    detail: "push 绕过",
+                    report_id: None,
+                },
+            )
+            .is_err()
+        );
+        fs::remove_dir(&journal_path).unwrap();
+        let mut record = store.load_window("w-p2a").unwrap();
+        assert!(record.violation_pending.is_some());
+
+        // 白盒构造 P2-a 现场:恢复入口已落(Restoring+in_progress)后、
+        // journal 落盘前 kill——pending 残留且无可复观事实(journal 空、
+        // 仓库干净)。重入必须 gate 而非永久卡 Restoring/被采信。
+        record.state = ReviewerWindowState::Restoring;
+        record.restore = Some(crate::product::reviewer_window_store::RestoreBinding {
+            completed: false,
+            from_violation: false,
+            outcome: "in_progress".to_string(),
+            cursor_phase: None,
+            entry_index: None,
+            detail: String::new(),
+            git_restored_mutation_paths: Vec::new(),
+            git_extra_refs_observed: Vec::new(),
+            platform_verified: Vec::new(),
+        });
+        record.bump_transition(ReviewerWindowState::Restoring, "白盒:恢复入口后 kill 现场");
+        let expected = record.generation;
+        let record = store.save_window_transition(record, expected).unwrap();
+
+        // 重入恢复 → P2-a gate → 清 pending → ManualGate。
+        let summary = block_on(restore_window(
+            &store,
+            &snapshot,
+            "w-p2a",
+            record.generation,
+        ))
+        .expect("reentry");
+        assert!(summary.manual_gate, "pending 存在即 gate,不得静默放行");
+        assert_eq!(summary.record.state, ReviewerWindowState::ManualGate);
+        assert!(summary.record.violation_pending.is_none());
+    }
+
+    /// P2-b:嵌套路径子模块(modules/vendor/foo)capture/复观不报错。
+    #[test]
+    fn p2b_nested_submodule_gitdir_observed_without_error() {
+        let fx = fixture();
+        let nested = fx
+            .worktree
+            .join(".git")
+            .join("modules")
+            .join("vendor")
+            .join("foo");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("config"), "[core]\n\tbare = false\n").unwrap();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = block_on(begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-p2b", "attempt-1", &fx.worktree, &targets),
+        ))
+        .expect("嵌套子模块 capture 不得失败");
+        let quiescing = begin_quiesce(&store, "w-p2b", handle.generation, "end").unwrap();
+        let summary = block_on(restore_window(
+            &store,
+            &snapshot,
+            "w-p2b",
+            quiescing.generation,
+        ))
+        .expect("restore");
+        assert!(!summary.manual_gate, "无漂移不得误报");
+    }
+
+    /// P3-2:git_annex_observation=None 不序列化(旧 manifest JSON 形状不变)。
+    #[test]
+    fn p3_2_none_annex_omitted_from_json() {
+        let manifest = minimal_manifest("w-p32");
+        let serialized = serde_json::to_string(&manifest).expect("serialize");
+        assert!(!serialized.contains("git_annex_observation"));
+        let deserialized: crate::product::reviewer_snapshot::ReviewerBaselineManifest =
+            serde_json::from_str(&serialized).expect("deserialize");
+        assert!(deserialized.git_annex_observation.is_none());
+    }
+
+    /// P3-4:journal 已含 pending.entry_id(陈旧标记)→ 先清再处理新违规。
+    #[test]
+    fn p3_4_stale_pending_cleared_before_new_violation() {
+        let fx = fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = block_on(begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-p34", "attempt-1", &fx.worktree, &targets),
+        ))
+        .expect("begin");
+        let quiescing = begin_quiesce(&store, "w-p34", handle.generation, "end").unwrap();
+
+        // 造 pending(A)+ journal 阻断。
+        let journal_path = fx.window_root.join("violations").join("w-p34.json");
+        fs::create_dir_all(&journal_path).unwrap();
+        assert!(
+            record_violation(
+                &store,
+                &snapshot,
+                "w-p34",
+                quiescing.generation,
+                ViolationRecord {
+                    kind: "platform_domain_write",
+                    path: ".aria/a.json",
+                    before_digest: None,
+                    after_digest: None,
+                    detail: "A",
+                    report_id: None,
+                },
+            )
+            .is_err()
+        );
+        let record = store.load_window("w-p34").unwrap();
+        let stale_entry_id = record.violation_pending.as_ref().unwrap().entry_id.clone();
+
+        // 白盒补落 A 条目(模拟「落盘成功但清除前崩溃」),再记 B:
+        // 陈旧 pending 先清,B 正常推进(不再被挡)。
+        fs::remove_dir(&journal_path).unwrap();
+        store
+            .append_violation(
+                "w-p34",
+                ViolationJournalEntry {
+                    seq: 0,
+                    entry_id: stale_entry_id,
+                    at: "2026-10-17T00:00:00Z".to_string(),
+                    window_id: "w-p34".to_string(),
+                    attempt_id: "attempt-1".to_string(),
+                    run_id: "run-1".to_string(),
+                    report_id: None,
+                    kind: "platform_domain_write".to_string(),
+                    path: ".aria/a.json".to_string(),
+                    before_digest: None,
+                    after_digest: None,
+                    detail: "A".to_string(),
+                    restore_cursor: "started+0".to_string(),
+                },
+            )
+            .unwrap();
+        let violated = record_violation(
+            &store,
+            &snapshot,
+            "w-p34",
+            record.generation,
+            ViolationRecord {
+                kind: "git_domain_write",
+                path: ".git/x",
+                before_digest: None,
+                after_digest: None,
+                detail: "B",
+                report_id: None,
+            },
+        )
+        .expect("陈旧 pending 已清,B 必须可推进");
+        assert_eq!(violated.state, ReviewerWindowState::ViolationRecorded);
+        assert_eq!(store.load_violations("w-p34").unwrap().len(), 2);
+    }
 }
