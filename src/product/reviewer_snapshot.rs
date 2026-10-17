@@ -2171,15 +2171,18 @@ fn restore_git_domain(ctx: &mut RestoreCtx<'_>) -> Result<(), ReviewerSnapshotEr
             .map_err(|error| io_error_string("read index", error))?;
         current_index_sha = sha256_hex(&bytes);
     }
-    // B1(修复轮 4):回写由 raw 字节差异决定(保证恢复完整性);但
-    // `git_index_restored` **事实位**仅在语义内容漂移被回写时置位——
-    // stat-refresh(raw 变、语义不变)回写后不算恢复事实,不推违规。
-    let semantic_drift = match baseline.index_semantic_sha256.as_ref() {
-        Some(expected) => index_semantic_digest(&worktree)? != *expected,
-        // 旧 manifest 无语义摘要:回退 raw 判定(该面兼容披露)。
-        None => current_index_sha != baseline.index_sha256,
-    };
+    // B1(修复轮 4)/P1(修复轮 5):回写由 raw 字节差异决定(损坏 index
+    // 由基线 blob 覆盖修复);`git_index_restored` 事实位仅在语义内容漂移
+    // 被回写时置位。语义判定**只在 raw 差异分支内**执行且 Err 保守视为
+    // 漂移(index 损坏不可被 git 解析时不再 `?` 中止——否则游标停在
+    // WorktreeExtra 永久卡死,而修复源(基线 blob)回写恰在其后);
+    // raw 一致时不依赖 git 解析。stat-refresh(raw 变、语义不变)回写
+    // 后不算恢复事实,不推违规。
     if current_index_sha != baseline.index_sha256 {
+        let semantic_drift = match baseline.index_semantic_sha256.as_ref() {
+            Some(expected) => index_semantic_digest(&worktree).map_or(true, |cur| cur != *expected),
+            None => true,
+        };
         let bytes = ctx.blob_bytes(&baseline.index_blob)?;
         write_bytes_atomic(&gitdir_fd, OsStr::new("index"), &bytes, 0o644, "index")
             .map_err(|error| io_error_string("写 index", error))?;

@@ -2418,4 +2418,55 @@ mod tests {
             other => panic!("期望 Invalidated,得到 {other:?}"),
         }
     }
+
+    /// P1(修复轮 5):index 损坏(直写垃圾)不可被 git 解析——恢复不
+    /// 卡死:基线 blob 回写修复 + 违规事实在 + raw 归位基线。
+    #[test]
+    fn p1r_corrupt_index_restored_not_stuck() {
+        let fx = fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = block_on(begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-p1r", "attempt-1", &fx.worktree, &targets),
+        ))
+        .expect("begin");
+        let baseline_index_sha = snapshot
+            .load_manifest("w-p1r")
+            .unwrap()
+            .git_observation
+            .index_sha256
+            .clone();
+
+        // 直写垃圾字节:index 不可被 git 解析。
+        fs::write(
+            fx.worktree.join(".git").join("index"),
+            b"garbage-not-an-index",
+        )
+        .unwrap();
+        let quiescing = begin_quiesce(&store, "w-p1r", handle.generation, "end").unwrap();
+        let summary = block_on(restore_window(
+            &store,
+            &snapshot,
+            "w-p1r",
+            quiescing.generation,
+        ))
+        .expect("损坏 index 不得中止恢复(基线 blob 是修复源)");
+
+        // index 已被基线字节修复(raw 归位)。
+        assert_eq!(
+            sha256_of_file(&fx.worktree.join(".git").join("index")),
+            baseline_index_sha
+        );
+        // 违规事实在(语义不可解析保守视为漂移→恢复事实→人工门)。
+        assert!(summary.manual_gate, "损坏 index 必须按漂移收口");
+        let journal = store.load_violations("w-p1r").unwrap();
+        assert!(
+            journal.iter().any(|entry| entry.path == ".git/index"),
+            "{journal:?}"
+        );
+    }
 }
