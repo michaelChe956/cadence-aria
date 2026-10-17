@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use serde_json::{Value, json};
 use cadence_aria::product::models::ProviderName;
 
 use super::harness::{
@@ -731,4 +732,900 @@ fn lcg_t10_cell_completeness_rejects_resume_shape_under_full_mode() {
         }
     }
     assert_matrix_cell_completeness(&cells, RunMode::FullChain);
+}
+
+// ---------------------------------------------------------------------------
+// 批2 Task 22(b45):Kimi 真实宿主 CHECK 证据 validator(结构单测)+ 现场
+// 测试 `b45_live_kimi_host_check`。
+//
+// validator 拒绝形态(计划 Step 1):缺实际版本/argv/cwd/exit/count、
+// Podman 只有 version 无 build/run、长命令未越 120s 或未越外层角色
+// idle 界、少职责或缺活动状态、缺终止单格/前后快照——均 FAIL。
+// ---------------------------------------------------------------------------
+
+/// 长静默 CHECK 越界下限(计划:长命令未越 120s 即 FAIL)。
+pub(crate) const B45_LONG_SILENT_MIN_SECS: u64 = 120;
+
+/// b45 必需职责(计划 Step 3:Author/规划/Coder/Reviewer)。
+pub(crate) const B45_REQUIRED_DUTIES: [&str; 4] = ["author", "planner", "coder", "reviewer"];
+
+/// CHECK 工具证据格:实际版本/argv/cwd/exit/count/活动状态/资源。
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub(crate) struct B45ToolRecord {
+    pub tool: String,
+    pub facet: String,
+    pub exact_version: String,
+    pub planned_command: String,
+    pub actual_command: String,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub exit_code: Option<i32>,
+    pub test_count: Option<u64>,
+    pub output_excerpt: String,
+    pub terminal_lifecycle: Vec<String>,
+    pub resource_ids: Vec<String>,
+}
+
+/// 职责证据格:合法终态 + ACP 原始活动。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct B45DutyRecord {
+    pub duty: String,
+    pub terminal_status: Option<String>,
+    pub native_activity: String,
+}
+
+/// 静默长 CHECK 记录:静默跨 120s 且越外层角色 idle 界,未被误杀。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct B45LongSilentRecord {
+    pub tool: String,
+    pub silent_gap_secs: u64,
+    pub role_idle_boundary_secs: u64,
+    pub completed: bool,
+    pub stall_reason_codes: Vec<String>,
+}
+
+/// 总 deadline/用户取消真实终止单格。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct B45TerminationRecord {
+    pub trigger: String,
+    pub attempt_id: String,
+    pub terminal_status: String,
+    pub provider_pid_gone: bool,
+    pub lingering_fixture_containers: Vec<String>,
+}
+
+/// b45 现场证据全集。
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub(crate) struct B45HostCheckEvidence {
+    pub provider_exact_version: String,
+    pub tools: Vec<B45ToolRecord>,
+    pub duties: Vec<B45DutyRecord>,
+    pub long_silent: Option<B45LongSilentRecord>,
+    pub termination: Option<B45TerminationRecord>,
+    pub snapshot_before: String,
+    pub snapshot_after: String,
+    pub coder_dirty_preserved: bool,
+}
+
+/// b45 证据 validator:返回全部缺项(逐条列明,不首错即停)。
+pub(crate) fn validate_b45_host_check_evidence(
+    evidence: &B45HostCheckEvidence,
+) -> Result<(), Vec<String>> {
+    let mut failures: Vec<String> = Vec::new();
+    if evidence.provider_exact_version.trim().is_empty() {
+        failures.push("缺实际 CLI 版本(kimi exact_version)".to_string());
+    }
+    // ---- 三工具面:Maven 容器 mvn -B test / npm ci+test+build / Podman build+run ----
+    let maven_facets: Vec<_> = evidence
+        .tools
+        .iter()
+        .filter(|record| record.tool == "maven")
+        .map(|record| record.facet.as_str())
+        .collect();
+    if !maven_facets.iter().any(|facet| *facet == "test") {
+        failures.push("缺 Maven mvn -B test 工具格".to_string());
+    }
+    for npm_facet in ["ci", "test", "build"] {
+        if !evidence
+            .tools
+            .iter()
+            .any(|record| record.tool == "npm" && record.facet == npm_facet)
+        {
+            failures.push(format!("缺 npm {npm_facet} 工具格(lock 消费链)"));
+        }
+    }
+    let podman_facets: Vec<_> = evidence
+        .tools
+        .iter()
+        .filter(|record| record.tool == "podman")
+        .map(|record| record.facet.as_str())
+        .collect();
+    if podman_facets.is_empty() {
+        failures.push("缺 Podman 工具格".to_string());
+    } else if !podman_facets.iter().any(|facet| *facet == "build")
+        || !podman_facets.iter().any(|facet| *facet == "run")
+    {
+        failures.push(format!(
+            "Podman 只有 {podman_facets:?} 无 build+run(仅 version 不算容器 CHECK)"
+        ));
+    }
+    // ---- 逐格要素:版本/argv/cwd/exit/count(test 面)/活动状态 ----
+    for record in &evidence.tools {
+        let label = format!("{}/{}", record.tool, record.facet);
+        if record.exact_version.trim().is_empty() {
+            failures.push(format!("{label} 缺实际工具版本"));
+        }
+        if record.argv.is_empty() {
+            failures.push(format!("{label} 缺 argv"));
+        }
+        if record.cwd.trim().is_empty() {
+            failures.push(format!("{label} 缺 cwd"));
+        }
+        if record.exit_code.is_none() {
+            failures.push(format!("{label} 缺退出码"));
+        }
+        let is_test_facet =
+            (record.tool == "maven" && record.facet == "test") || (record.tool == "npm" && record.facet == "test");
+        if is_test_facet && record.test_count.is_none() {
+            failures.push(format!("{label} 缺测试数量"));
+        }
+        if record.terminal_lifecycle.is_empty() {
+            failures.push(format!("{label} 缺活动状态(terminal 生命周期)"));
+        }
+    }
+    // ---- 职责 + 活动状态 ----
+    for duty in B45_REQUIRED_DUTIES {
+        match evidence.duties.iter().find(|record| record.duty == duty) {
+            None => failures.push(format!("缺职责 {duty}")),
+            Some(record) => {
+                if record.terminal_status.as_deref().unwrap_or("").trim().is_empty() {
+                    failures.push(format!("职责 {duty} 缺合法终态"));
+                }
+                if record.native_activity.trim().is_empty() {
+                    failures.push(format!("职责 {duty} 缺 ACP 原始活动"));
+                }
+            }
+        }
+    }
+    // ---- 静默长 CHECK ----
+    match &evidence.long_silent {
+        None => failures.push("缺静默长 CHECK 记录".to_string()),
+        Some(record) => {
+            if record.silent_gap_secs < B45_LONG_SILENT_MIN_SECS {
+                failures.push(format!(
+                    "长命令未越 {B45_LONG_SILENT_MIN_SECS}s(实测 {}s)",
+                    record.silent_gap_secs
+                ));
+            }
+            if record.role_idle_boundary_secs >= record.silent_gap_secs {
+                failures.push(format!(
+                    "静默 {}s 未越外层角色 idle 界 {}s",
+                    record.silent_gap_secs, record.role_idle_boundary_secs
+                ));
+            }
+            if !record.completed {
+                failures.push("静默长 CHECK 未完成(被误杀或未达终态)".to_string());
+            }
+            if !record.stall_reason_codes.is_empty() {
+                failures.push(format!(
+                    "ACP stall/产品 idle 误杀残留原因码:{:?}",
+                    record.stall_reason_codes
+                ));
+            }
+        }
+    }
+    // ---- 总 deadline/用户取消终止单格 ----
+    match &evidence.termination {
+        None => failures.push("缺总deadline/用户取消真实终止单格".to_string()),
+        Some(record) => {
+            if record.terminal_status.trim().is_empty() {
+                failures.push("终止单格缺 attempt 终态".to_string());
+            }
+            if !record.provider_pid_gone {
+                failures.push("终止单格 provider 进程仍存活(未真实终止)".to_string());
+            }
+            if !record.lingering_fixture_containers.is_empty() {
+                failures.push(format!(
+                    "终止单格遗留 fixture 容器:{:?}",
+                    record.lingering_fixture_containers
+                ));
+            }
+        }
+    }
+    // ---- 前后快照 + Coder 工作保留 ----
+    if evidence.snapshot_before.trim().is_empty() || evidence.snapshot_after.trim().is_empty() {
+        failures.push("缺成员仓前后快照".to_string());
+    }
+    if !evidence.coder_dirty_preserved {
+        failures.push("Coder 工作未保留(HEAD 未进且无 dirty)".to_string());
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures)
+    }
+}
+
+/// 完整基线 fixture(validator 单测的过测样本;字段值模拟真实形态)。
+fn b45_complete_baseline_evidence() -> B45HostCheckEvidence {
+    let tool = |tool: &str, facet: &str, version: &str, test_count: Option<u64>| B45ToolRecord {
+        tool: tool.to_string(),
+        facet: facet.to_string(),
+        exact_version: version.to_string(),
+        planned_command: format!("planned {tool} {facet}"),
+        actual_command: format!("actual {tool} {facet}"),
+        argv: vec![tool.to_string(), facet.to_string()],
+        cwd: "/worktree/fixtures".to_string(),
+        exit_code: Some(0),
+        test_count,
+        output_excerpt: "T22 excerpt".to_string(),
+        terminal_lifecycle: vec!["Started".to_string(), "Running".to_string(), "Completed".to_string()],
+        resource_ids: vec!["terminal-1".to_string()],
+    };
+    B45HostCheckEvidence {
+        provider_exact_version: "2.2.0".to_string(),
+        tools: vec![
+            tool("maven", "test", "Apache Maven 3.9.x (container)", Some(2)),
+            tool("npm", "ci", "11.13.0", None),
+            tool("npm", "test", "11.13.0", Some(2)),
+            tool("npm", "build", "11.13.0", None),
+            tool("podman", "build", "6.1.1", None),
+            tool("podman", "run", "6.1.1", None),
+        ],
+        duties: B45_REQUIRED_DUTIES
+            .iter()
+            .map(|duty| B45DutyRecord {
+                duty: duty.to_string(),
+                terminal_status: Some("confirmed".to_string()),
+                native_activity: format!("{duty} native session + 12 events"),
+            })
+            .collect(),
+        long_silent: Some(B45LongSilentRecord {
+            tool: "maven".to_string(),
+            silent_gap_secs: 151,
+            role_idle_boundary_secs: 90,
+            completed: true,
+            stall_reason_codes: Vec::new(),
+        }),
+        termination: Some(B45TerminationRecord {
+            trigger: "user_cancel".to_string(),
+            attempt_id: "attempt_cancel".to_string(),
+            terminal_status: "aborted".to_string(),
+            provider_pid_gone: true,
+            lingering_fixture_containers: Vec::new(),
+        }),
+        snapshot_before: "head=aaa porcelain=fixtures".to_string(),
+        snapshot_after: "head=bbb porcelain=src/lib.rs".to_string(),
+        coder_dirty_preserved: true,
+    }
+}
+
+/// Step 1 红测锚点:缺项 fixture 定向确认拒绝(每缺一项一拒,完整基线放行)。
+#[test]
+fn b45_host_check_validator_rejects_incomplete_evidence() {
+    let complete = b45_complete_baseline_evidence();
+    assert!(
+        validate_b45_host_check_evidence(&complete).is_ok(),
+        "完整基线必须通过:{:?}",
+        validate_b45_host_check_evidence(&complete)
+    );
+
+    let mut missing_cli_version = complete.clone();
+    missing_cli_version.provider_exact_version = String::new();
+    let expect_reject = |evidence: B45HostCheckEvidence, needle: &str| {
+        let Err(failures) = validate_b45_host_check_evidence(&evidence) else {
+            panic!("缺项变体必须被拒绝(期望含 {needle})");
+        };
+        assert!(
+            failures.iter().any(|failure| failure.contains(needle)),
+            "拒绝清单须含 {needle}:{failures:?}"
+        );
+    };
+    expect_reject(missing_cli_version, "CLI 版本");
+
+    let mut missing_tool_version = complete.clone();
+    missing_tool_version.tools[0].exact_version = String::new();
+    expect_reject(missing_tool_version, "缺实际工具版本");
+
+    let mut missing_argv = complete.clone();
+    missing_argv.tools[1].argv = Vec::new();
+    expect_reject(missing_argv, "缺 argv");
+
+    let mut missing_cwd = complete.clone();
+    missing_cwd.tools[2].cwd = String::new();
+    expect_reject(missing_cwd, "缺 cwd");
+
+    let mut missing_exit = complete.clone();
+    missing_exit.tools[3].exit_code = None;
+    expect_reject(missing_exit, "缺退出码");
+
+    let mut missing_count = complete.clone();
+    missing_count.tools[0].test_count = None;
+    expect_reject(missing_count, "缺测试数量");
+
+    let mut missing_lifecycle = complete.clone();
+    missing_lifecycle.tools[4].terminal_lifecycle = Vec::new();
+    expect_reject(missing_lifecycle, "缺活动状态");
+
+    // Podman 只有 version 无 build/run。
+    let mut podman_version_only = complete.clone();
+    podman_version_only.tools.retain(|record| record.tool != "podman");
+    podman_version_only.tools.push(tool_record(
+        "podman",
+        "version",
+        "6.1.1",
+        None,
+    ));
+    expect_reject(podman_version_only, "无 build+run");
+
+    // npm 缺 build。
+    let mut npm_missing_build = complete.clone();
+    npm_missing_build
+        .tools
+        .retain(|record| !(record.tool == "npm" && record.facet == "build"));
+    expect_reject(npm_missing_build, "npm build");
+
+    // 长命令未越 120s。
+    let mut short_silent = complete.clone();
+    short_silent.long_silent = Some(B45LongSilentRecord {
+        tool: "maven".to_string(),
+        silent_gap_secs: 95,
+        role_idle_boundary_secs: 90,
+        completed: true,
+        stall_reason_codes: Vec::new(),
+    });
+    expect_reject(short_silent, "未越 120");
+
+    // 静默未越外层角色 idle 界(界>静默)。
+    let mut not_crossing_idle = complete.clone();
+    not_crossing_idle.long_silent = Some(B45LongSilentRecord {
+        tool: "maven".to_string(),
+        silent_gap_secs: 150,
+        role_idle_boundary_secs: 300,
+        completed: true,
+        stall_reason_codes: Vec::new(),
+    });
+    expect_reject(not_crossing_idle, "未越外层角色 idle 界");
+
+    // watchdog 误杀残留。
+    let mut stalled = complete.clone();
+    if let Some(record) = stalled.long_silent.as_mut() {
+        record.stall_reason_codes = vec!["provider_idle_stall".to_string()];
+    }
+    expect_reject(stalled, "误杀");
+
+    // 缺职责。
+    let mut missing_duty = complete.clone();
+    missing_duty.duties.retain(|record| record.duty != "reviewer");
+    expect_reject(missing_duty, "缺职责 reviewer");
+
+    // 职责缺活动状态。
+    let mut duty_no_activity = complete.clone();
+    if let Some(record) = duty_no_activity
+        .duties
+        .iter_mut()
+        .find(|record| record.duty == "coder")
+    {
+        record.native_activity = String::new();
+    }
+    expect_reject(duty_no_activity, "ACP 原始活动");
+
+    // 缺终止单格 / 终止单格进程仍活。
+    let mut missing_termination = complete.clone();
+    missing_termination.termination = None;
+    expect_reject(missing_termination, "终止单格");
+    let mut pid_alive = complete.clone();
+    if let Some(record) = pid_alive.termination.as_mut() {
+        record.provider_pid_gone = false;
+    }
+    expect_reject(pid_alive, "未真实终止");
+
+    // 缺快照 / 工作未保留。
+    let mut missing_snapshot = complete.clone();
+    missing_snapshot.snapshot_after = String::new();
+    expect_reject(missing_snapshot, "前后快照");
+    let mut work_lost = complete.clone();
+    work_lost.snapshot_after = "head=aaa porcelain=".to_string();
+    work_lost.coder_dirty_preserved = false;
+    expect_reject(work_lost, "未保留");
+}
+
+/// 单测内构造工具格的便捷入口(与闭包捕获无关,独立函数便于复用)。
+fn tool_record(tool: &str, facet: &str, version: &str, test_count: Option<u64>) -> B45ToolRecord {
+    B45ToolRecord {
+        tool: tool.to_string(),
+        facet: facet.to_string(),
+        exact_version: version.to_string(),
+        planned_command: format!("planned {tool} {facet}"),
+        actual_command: format!("actual {tool} {facet}"),
+        argv: vec![tool.to_string(), facet.to_string()],
+        cwd: "/worktree/fixtures".to_string(),
+        exit_code: Some(0),
+        test_count,
+        output_excerpt: "T22 excerpt".to_string(),
+        terminal_lifecycle: vec!["Started".to_string(), "Running".to_string(), "Completed".to_string()],
+        resource_ids: vec!["terminal-1".to_string()],
+    }
+}
+
+/// 从 run_b45_kimi_host_check 的 JSON 聚合构造 typed 证据。
+fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
+    let text = |pointer: &str| -> String {
+        run.pointer(pointer)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let versions = run.pointer("/fixtures/versions").cloned().unwrap_or(Value::Null);
+    let version_of = |tool: &str| -> String {
+        let key = match tool {
+            "maven" => "maven_container",
+            other => other,
+        };
+        versions
+            .pointer(&format!("/{key}/stdout"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // ---- 工具格:verification-command-evidence 的实际执行条目 ----
+    let mut tools: Vec<B45ToolRecord> = Vec::new();
+    let evidence_rows = run
+        .pointer("/coding_main/verification_evidence/body/evidence")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let lifecycle_rows = run
+        .pointer("/coding_main/role_run_rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for row in &evidence_rows {
+        let Some(actual) = row.get("actual_command").and_then(Value::as_str) else {
+ continue;
+        };
+        let (tool, facet) = b45_classify_command(actual);
+        if tool.is_empty() {
+            continue;
+        }
+        let argv = actual
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let lifecycle = b45_terminal_lifecycle_for(&lifecycle_rows, actual);
+        tools.push(B45ToolRecord {
+            exact_version: version_of(&tool),
+            tool,
+            facet,
+            planned_command: row
+                .get("planned_command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            actual_command: actual.to_string(),
+            argv,
+            cwd: row
+                .get("actual_cwd")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            exit_code: row.get("exit_code").and_then(Value::as_i64).map(|code| code as i32),
+            test_count: row.get("test_execution_count").and_then(Value::as_u64),
+            output_excerpt: row
+                .get("raw_output_excerpt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            terminal_lifecycle: lifecycle,
+            resource_ids: Vec::new(),
+        });
+    }
+    // 资源(T5 登记)附到工具格:aria.scope_id/run_id 标签的资源清单。
+    let resource_ids = run
+        .pointer("/provider_resources")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let record = entry.get("record")?;
+                    let labels = record.get("labels").or_else(|| record.pointer("/reserved_labels"))?;
+                    let has_aria_label = labels
+                        .as_object()
+                        .is_some_and(|map| map.keys().any(|key| key.starts_with("aria.")));
+                    has_aria_label.then(|| {
+                        record
+                            .get("resource_id")
+                            .or_else(|| record.pointer("/identity/id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                })
+                .filter(|id| !id.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for record in &mut tools {
+        record.resource_ids = resource_ids.clone();
+    }
+
+    // ---- 职责 ----
+    let confirmed_cell = |cells: Option<&Value>| -> Option<String> {
+        cells.and_then(Value::as_array).and_then(|rows| {
+            rows.iter()
+                .find(|cell| cell.get("capability_state").and_then(Value::as_str) == Some("confirmed"))
+                .and_then(|cell| cell.get("native_session_id").and_then(Value::as_str))
+                .map(str::to_string)
+        })
+    };
+    let story_confirmed = confirmed_cell(run.pointer("/duties/author/story_cells"));
+    let design_confirmed = confirmed_cell(run.pointer("/duties/author/design_cells"));
+    let plan_confirmed = confirmed_cell(run.pointer("/duties/planner/plan_cells"));
+    let review_confirmed = confirmed_cell(run.pointer("/duties/reviewer/review_cells"));
+    let execution_rows = lifecycle_rows
+        .iter()
+        .filter(|row| {
+            row.get("event_type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.contains("ExecutionEvent"))
+        })
+        .count();
+    let coder_terminal = run
+        .pointer("/duties/coder/terminal")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut duties = Vec::new();
+    if let Some(native) = story_confirmed.or(design_confirmed) {
+        duties.push(B45DutyRecord {
+            duty: "author".to_string(),
+            terminal_status: Some("confirmed".to_string()),
+            native_activity: format!("native_session={native}"),
+        });
+    } else {
+        duties.push(B45DutyRecord {
+            duty: "author".to_string(),
+            terminal_status: None,
+            native_activity: String::new(),
+        });
+    }
+    if let Some(native) = plan_confirmed {
+        duties.push(B45DutyRecord {
+            duty: "planner".to_string(),
+            terminal_status: Some("confirmed".to_string()),
+            native_activity: format!("native_session={native}"),
+        });
+    } else {
+        duties.push(B45DutyRecord {
+            duty: "planner".to_string(),
+            terminal_status: None,
+            native_activity: String::new(),
+        });
+    }
+    duties.push(B45DutyRecord {
+        duty: "coder".to_string(),
+        terminal_status: if coder_terminal.is_empty() { None } else { Some(coder_terminal) },
+        native_activity: format!(
+            "execution_events={execution_rows} tool_events={} permission_events={}",
+            run.pointer("/coding_main/tool_events").and_then(Value::as_u64).unwrap_or(0),
+            run.pointer("/coding_main/permission_events").and_then(Value::as_u64).unwrap_or(0),
+        ),
+    });
+    if let Some(native) = review_confirmed {
+        duties.push(B45DutyRecord {
+            duty: "reviewer".to_string(),
+            terminal_status: Some("confirmed".to_string()),
+            native_activity: format!(
+                "native_session={native} windows={}",
+                run
+                    .pointer("/reviewer_windows")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0)
+            ),
+        });
+    } else {
+        duties.push(B45DutyRecord {
+            duty: "reviewer".to_string(),
+            terminal_status: None,
+            native_activity: String::new(),
+        });
+    }
+
+    // ---- 静默长 CHECK:ExecutionEvent 行间最大间隔 + Maven 命令时长 ----
+    let parse_ts = |value: &Value| -> Option<chrono::DateTime<chrono::Utc>> {
+        value
+            .as_str()
+            .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+            .map(|time| time.with_timezone(&chrono::Utc))
+    };
+    let mut silent_gap_secs = 0u64;
+    let mut previous: Option<chrono::DateTime<chrono::Utc>> = None;
+    for row in &lifecycle_rows {
+        let Some(created_at) = row.get("created_at") else { continue };
+        let Some(timestamp) = parse_ts(created_at) else {
+            previous = None;
+            continue;
+        };
+        if let Some(prior) = previous {
+            let gap = timestamp
+                .signed_duration_since(prior)
+                .num_seconds()
+                .max(0) as u64;
+            silent_gap_secs = silent_gap_secs.max(gap);
+        }
+        previous = Some(timestamp);
+    }
+    // Maven 命令自身时长(Started→终态 同 terminal 生命周期差)。
+    let maven_lifecycle = b45_terminal_lifecycle_spans(&lifecycle_rows, "mvn");
+    silent_gap_secs = silent_gap_secs.max(maven_lifecycle.max_span_secs);
+    let maven_completed = tools
+        .iter()
+        .any(|record| record.tool == "maven" && record.exit_code == Some(0));
+    let stall_reason_codes = lifecycle_rows
+        .iter()
+        .filter_map(|row| row.pointer("/payload/reason_code").and_then(Value::as_str))
+        .filter(|code| {
+            code.contains("idle_stall") || code.contains("provider_stalled")
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let long_silent = Some(B45LongSilentRecord {
+        tool: "maven".to_string(),
+        silent_gap_secs,
+        role_idle_boundary_secs: run
+            .get("coder_idle_boundary_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        completed: maven_completed,
+        stall_reason_codes,
+    });
+
+    // ---- 终止单格 ----
+    let termination = run.pointer("/cancel_cell").map(|cell| B45TerminationRecord {
+        trigger: "user_cancel".to_string(),
+        attempt_id: cell
+            .get("attempt_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        terminal_status: cell
+            .get("terminal_status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        provider_pid_gone: !cell
+            .get("provider_pid_still_alive")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        lingering_fixture_containers: cell
+            .get("lingering_fixture_containers")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    });
+
+    // ---- 快照与工作保留 ----
+    let head_before = text("/snapshot_before/head");
+    let head_after = text("/snapshot_after/head");
+    let porcelain_after = text("/snapshot_after/porcelain");
+    B45HostCheckEvidence {
+        provider_exact_version: text("/provider/exact_version"),
+        tools,
+        duties,
+        long_silent,
+        termination,
+        snapshot_before: format!("head={head_before} porcelain={}", text("/snapshot_before/porcelain")),
+        snapshot_after: format!("head={head_after} porcelain={porcelain_after}"),
+        coder_dirty_preserved: head_after != head_before || !porcelain_after.trim().is_empty(),
+    }
+}
+
+/// 命令族分类(podman/npm/maven + facet)。
+fn b45_classify_command(command: &str) -> (String, String) {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let head = tokens.first().copied().unwrap_or_default();
+    match head {
+        "podman" => {
+            let sub = tokens.get(1).copied().unwrap_or_default();
+            match sub {
+                "build" => ("podman".to_string(), "build".to_string()),
+                "run" => {
+                    if tokens.iter().any(|token| *token == "mvn") {
+                        ("maven".to_string(), "test".to_string())
+                    } else {
+                        ("podman".to_string(), "run".to_string())
+                    }
+                }
+                "version" => ("podman".to_string(), "version".to_string()),
+                _ => ("podman".to_string(), sub.to_string()),
+            }
+        }
+        "npm" => {
+            let sub = tokens.get(1).copied().unwrap_or_default();
+            let facet = match sub {
+                "ci" => "ci",
+                "test" => "test",
+                "run" if tokens.get(2) == Some(&"build") => "build",
+                other => other,
+            };
+            ("npm".to_string(), facet.to_string())
+        }
+        "mvn" => ("maven".to_string(), "test".to_string()),
+        _ => (String::new(), String::new()),
+    }
+}
+
+/// 从 role-run 行提取匹配命令的 terminal 生命周期状态序列。
+fn b45_terminal_lifecycle_for(rows: &[Value], command: &str) -> Vec<String> {
+    let (_, facet) = b45_classify_command(command);
+    let matcher = |row_command: &str| -> bool {
+        if command.len() > 12 {
+            row_command == command
+        } else {
+            row_command.contains(&facet) && !facet.is_empty()
+        }
+    };
+    rows.iter()
+        .filter(|row| {
+            row.get("event_type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.contains("ExecutionEvent"))
+        })
+        .filter(|row| {
+            row.pointer("/payload/event_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("kimi_terminal_"))
+        })
+        .filter(|row| {
+            row.pointer("/payload/command")
+                .and_then(Value::as_str)
+                .map(matcher)
+ .unwrap_or(false)
+                || row
+                    .pointer("/payload/detail")
+                    .and_then(Value::as_str)
+                    .map(|detail| detail.contains(&facet) && !facet.is_empty())
+                    .unwrap_or(false)
+        })
+        .filter_map(|row| row.pointer("/payload/status").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+/// 同 terminal 生命周期跨度(Started→终态)对含关键字的命令的最大秒差。
+fn b45_terminal_lifecycle_spans(rows: &[Value], keyword: &str) -> B45LifecycleSpans {
+    let parse_ts = |value: Option<&Value>| -> Option<chrono::DateTime<chrono::Utc>> {
+        value
+            .and_then(Value::as_str)
+            .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+            .map(|time| time.with_timezone(&chrono::Utc))
+    };
+    use std::collections::BTreeMap;
+    let mut spans: BTreeMap<String, (Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> =
+        BTreeMap::new();
+    for row in rows {
+        let Some(event_id) = row.pointer("/payload/event_id").and_then(Value::as_str) else {
+ continue;
+        };
+        if !event_id.starts_with("kimi_terminal_") {
+            continue;
+        }
+        let command_or_detail = row
+            .pointer("/payload/command")
+            .and_then(Value::as_str)
+            .or_else(|| row.pointer("/payload/detail").and_then(Value::as_str))
+            .unwrap_or_default();
+        if !command_or_detail.contains(keyword) {
+            continue;
+        }
+        let timestamp = parse_ts(row.get("created_at"));
+        let status = row.pointer("/payload/status").and_then(Value::as_str).unwrap_or_default();
+        let entry = spans.entry(event_id.to_string()).or_insert((None, None));
+        if status == "Started" && timestamp.is_some() {
+            entry.0 = timestamp;
+        }
+        if matches!(status, "Completed" | "Failed" | "Aborted") && timestamp.is_some() {
+            entry.1 = timestamp;
+        }
+    }
+    let max_span_secs = spans
+        .values()
+        .filter_map(|(start, end)| match (start, end) {
+            (Some(start), Some(end)) => Some((start, end)),
+            _ => None,
+        })
+        .map(|(start, end)| end.signed_duration_since(start).num_seconds().max(0) as u64)
+        .max()
+        .unwrap_or(0);
+    B45LifecycleSpans { max_span_secs }
+}
+
+/// 生命周期跨度结果。
+struct B45LifecycleSpans {
+    max_span_secs: u64,
+}
+
+/// Step 3 真实执行:LC_GATEWAY_E2E=1 + --ignored 命中(缺开关=失败)。
+#[tokio::test]
+#[ignore = "b45 真实现场:LC_GATEWAY_E2E=1 且 Step 3 命令执行(需要 kimi 登录态/podman 镜像/node/npm)"]
+async fn b45_live_kimi_host_check() {
+    require_lc_gateway_e2e_switch();
+    // 外层角色 idle 界压到 90s(<150s 静默):静默真实跨界(单线程 ignored 测试;
+    // 引擎在 provider 调用启动时读一次 env,先例 provider_idle_stall.rs)。
+    unsafe {
+        std::env::set_var("ARIA_CODING_CODER_IDLE_SECS", "90");
+    }
+    let evidence_root = PathBuf::from("cadence/reports/lc-gateway-multi-provider/kimi-code")
+        .join("host-check");
+    let harness = LiveLcGatewayHarness::new();
+    let run = harness
+        .run_b45_kimi_host_check(&evidence_root)
+        .await
+        .expect("b45 现场执行失败(环境不可运行须报告 BLOCKED,不删格)");
+
+    // 证据落盘(脱敏:不含认证材料;fixture 命令/输出均为非敏感内容)。
+    std::fs::create_dir_all(&evidence_root).expect("证据目录");
+    std::fs::write(
+        evidence_root.join("run.json"),
+        serde_json::to_vec_pretty(&run).expect("run json"),
+    )
+    .expect("run.json 落盘");
+    let evidence = b45_evidence_from_run(&run);
+    std::fs::write(
+        evidence_root.join("evidence.json"),
+        serde_json::to_vec_pretty(&json!({
+            "validated": {
+                "provider_exact_version": evidence.provider_exact_version,
+                "tools": evidence.tools,
+                "duties": evidence.duties,
+                "long_silent": evidence.long_silent,
+                "termination": evidence.termination,
+                "snapshot_before": evidence.snapshot_before,
+                "snapshot_after": evidence.snapshot_after,
+                "coder_dirty_preserved": evidence.coder_dirty_preserved,
+            }
+        }))
+        .expect("evidence json"),
+    )
+    .expect("evidence.json 落盘");
+
+    // validator 判绿(缺项=真实失败,不删格)。
+    if let Err(failures) = validate_b45_host_check_evidence(&evidence) {
+        panic!("b45 证据 validator 拒绝:{failures:?}");
+    }
+    // Step 4 判绿附加:三工具 CHECK 面真实成功(exit=0)且数量可核对。
+    for record in &evidence.tools {
+        let is_check_facet = matches!(
+            (record.tool.as_str(), record.facet.as_str()),
+            ("maven", "test") | ("npm", "test") | ("npm", "ci") | ("npm", "build")
+        ) || record.tool == "podman" && record.facet != "version";
+        if is_check_facet {
+            assert_eq!(
+                record.exit_code,
+                Some(0),
+                "{}/{} CHECK 未成功(退出码非零=真实失败,记录不删格)",
+                record.tool,
+                record.facet
+            );
+        }
+    }
+    for (tool, facet) in [("maven", "test"), ("npm", "test")] {
+        let count = evidence
+            .tools
+            .iter()
+            .find(|record| record.tool == tool && record.facet == facet)
+            .and_then(|record| record.test_count)
+            .unwrap_or(0);
+        assert!(count > 0, "{tool}/{facet} 测试数量必须可核对(>0)");
+    }
 }

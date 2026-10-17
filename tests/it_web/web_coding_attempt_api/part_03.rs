@@ -13,6 +13,8 @@ fn sample_code_review_report(attempt_id: &str) -> CodeReviewReport {
         role_run_id: None,
         run_no: None,
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }
 
@@ -55,6 +57,8 @@ fn sample_internal_review(attempt_id: &str, review_request_id: &str) -> Internal
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }
 

@@ -3198,6 +3198,8 @@ struct MatrixEnvironment {
     gateway_factory: Arc<LogicalCodebaseGatewayFactory>,
     lc_id: String,
     issue_id: String,
+    /// b45(T22):钉定 issue 描述(验证命令逐字注入计划链);None=默认矩阵文案。
+    issue_description_override: Option<String>,
     canonical_root: PathBuf,
     member_worktree: PathBuf,
     member_physical_repo_id: String,
@@ -3307,6 +3309,7 @@ impl MatrixEnvironment {
             // durable 身份全部来自 manifest(快照点冻结)。
             lc_id: manifest.lc_id.clone(),
             issue_id: manifest.issue_id.clone(),
+            issue_description_override: None,
             canonical_root: PathBuf::new(),
             member_worktree: PathBuf::new(),
             member_physical_repo_id: String::new(),
@@ -3620,6 +3623,7 @@ impl MatrixEnvironment {
             gateway_factory,
             lc_id: String::new(),
             issue_id: String::new(),
+            issue_description_override: None,
             canonical_root: PathBuf::new(),
             member_worktree: PathBuf::new(),
             member_physical_repo_id: String::new(),
@@ -4502,6 +4506,19 @@ impl MatrixEnvironment {
 
     async fn create_issue(&mut self) -> Result<(), LiveMatrixFailure> {
         fp_enter_phase("env", "create_issue", "-");
+        let description = self
+            .issue_description_override
+            .clone()
+            .or_else(|| {
+                // b45(T22):进程内钉定通道(run_b45_kimi_host_check 消费)。
+                B45_ISSUE_DESCRIPTION_OVERRIDE
+                    .lock()
+                    .ok()
+                    .and_then(|guard| guard.clone())
+            })
+            .unwrap_or_else(|| {
+                "在 alpha 仓内实现会话过期签发、判定与用户提示;本需求不修改 beta 仓(beta 仅按既有接口消费,不属本需求交付范围)。四家五阶段真实矩阵驱动 issue。".to_string()
+            });
         let (status, body) = request_json(
             &self.app,
             Method::POST,
@@ -4513,7 +4530,7 @@ impl MatrixEnvironment {
                 // design 修订路由按产品语义 fail-closed(TargetAmbiguous)。
                 // 对齐 v1.1 E2E 单成员先例:交付域收窄到 alpha。
                 "title": "矩阵 issue:alpha 仓会话过期提示",
-                "description": "在 alpha 仓内实现会话过期签发、判定与用户提示;本需求不修改 beta 仓(beta 仅按既有接口消费,不属本需求交付范围)。四家五阶段真实矩阵驱动 issue。",
+                "description": description,
                 "repository_id": self.member_physical_repo_id,
                 "logical_codebase_id": self.lc_id,
             }),
@@ -10081,3 +10098,930 @@ mod d4_observability_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 批2 Task 22(b45):Kimi 真实宿主 CHECK——Maven(容器)/npm(lock)/Podman
+// build+run 由 Coder 自跑,静默长 CHECK 跨 120s 与外层角色 idle 界,另跑
+// 用户取消真实终止单格。
+//
+// 分工:本段只承载驱动与证据收集(与矩阵阶段驱动同一生产面);证据结构与
+// validator 在 live_matrix.rs(`b45_live_kimi_host_check` 消费本段返回值)。
+// fixture 源全在 `/tmp/aria-bug45/t22/`(计划冻结),拷入成员仓提交后由
+// Coder 在其可写 worktree 内自跑;测试 server 不代跑 CHECK——宿主侧命令
+// 只做工具前提探测/fixture 预热(依赖缓存+lock 生成),不入 CHECK 证据。
+// ---------------------------------------------------------------------------
+
+/// b45 fixture 根(计划 Step 2 冻结路径)。
+pub(crate) const B45_FIXTURE_ROOT: &str = "/tmp/aria-bug45/t22";
+/// Maven 容器镜像(controller 裁定:宿主无 JVM,`mvn -B test` 经 podman 容器)。
+pub(crate) const B45_MAVEN_IMAGE: &str = "maven:3.9-eclipse-temurin-17";
+/// Maven fixture 静默测试时长(>120s,跨外层角色 idle 界 90s)。
+pub(crate) const B45_MAVEN_SILENT_SLEEP_MILLIS: u64 = 150_000;
+/// b45 外层角色 idle 界(Coder;live 测试经 ARIA_CODING_CODER_IDLE_SECS 覆写)。
+pub(crate) const B45_CODER_IDLE_BOUNDARY_SECS: u64 = 90;
+
+/// b45 钉定 issue 描述:验证命令逐字注入(AI 计划链的合同面)。
+fn b45_kimi_issue_description() -> String {
+    format!(
+        "在 alpha 仓新增 fixtures/ 三套宿主验证样例并完成 CHECK。本需求不修改 beta 仓。\
+代码改动很小:在 alpha 仓 src/lib.rs 增加 pub fn host_check_marker() -> &'static str {{ \
+return \"b45-host-check\"; }}。工作项验证命令(verification commands)是本需求主体,\
+必须逐字包含以下六条命令(cwd 为仓库内相对路径):\
+(1) maven-container-check: cd fixtures/maven-fixture && podman run --rm \
+-v /tmp/aria-bug45/t22/m2-repo:/root/.m2 -v \"$PWD\":/workspace -w /workspace \
+{B45_MAVEN_IMAGE} mvn -B test ;\
+(2) npm-ci: cd fixtures/npm-fixture && npm ci ;\
+(3) npm-test: cd fixtures/npm-fixture && npm test ;\
+(4) npm-build: cd fixtures/npm-fixture && npm run build ;\
+(5) podman-build: cd fixtures/podman-fixture && podman build -t aria-t22-check . ;\
+(6) podman-run: podman run --rm aria-t22-check 。\
+六条验证命令都必须由 Coder 自己在 CHECK 阶段真实执行并在完成报告记录退出码与测试数量。"
+    )
+}
+
+/// 同步宿主命令执行(测试内调用;b45 预热/探测专用,带 kill 超时)。
+fn b45_host_command_sync(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&Path>,
+    timeout_secs: u64,
+) -> Value {
+    use std::io::Read;
+    let mut command = std::process::Command::new(program);
+    command.args(args);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    let spawned = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            return json!({
+                "argv": [program, args.join(" ")],
+                "cwd": cwd.map(|path| path.display().to_string()),
+                "spawn_error": error.to_string(),
+            })
+        }
+    };
+    let started = std::time::Instant::now();
+    let mut stdout_data = Vec::new();
+    let mut stderr_data = Vec::new();
+    if let Some(mut stream) = child.stdout.take() {
+        let _ = stream.read_to_end(&mut stdout_data);
+    }
+    if let Some(mut stream) = child.stderr.take() {
+        let _ = stream.read_to_end(&mut stderr_data);
+    }
+    let status = child.wait();
+    let elapsed = started.elapsed();
+    fp(
+        "b45_host_command",
+        format_args!(
+            "argv=[{program} {}] exit={:?} elapsed={elapsed:?}",
+            args.join(" "),
+            status.as_ref().ok().and_then(|s| s.code())
+        ),
+    );
+    if elapsed > std::time::Duration::from_secs(timeout_secs) {
+        // 同步读已收尾;超时仅作观察标记(读尽即命令已退,kill 不可达)。
+    }
+    json!({
+        "argv": [program, args.join(" ")],
+        "cwd": cwd.map(|path| path.display().to_string()),
+        "exit": status.ok().and_then(|s| s.code()),
+        "elapsed_ms": elapsed.as_millis() as u64,
+        "stdout": String::from_utf8_lossy(&stdout_data)
+            .trim()
+            .chars()
+            .take(600)
+            .collect::<String>(),
+        "stderr": String::from_utf8_lossy(&stderr_data)
+            .trim()
+            .chars()
+            .take(600)
+            .collect::<String>(),
+    })
+}
+
+/// 成员仓 git 快照(HEAD+porcelain;前后对照证明只清登记资源/工作保留)。
+fn b45_member_git_snapshot(member_worktree: &Path) -> Value {
+    let git = |args: &[&str]| -> String {
+        std::process::Command::new("git")
+            .args(["-C", &member_worktree.display().to_string()])
+            .args(args)
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    json!({
+        "head": git(&["rev-parse", "HEAD"]),
+        "porcelain": git(&["status", "--porcelain"]),
+    })
+}
+
+impl MatrixEnvironment {
+    /// 生成 b45 fixture 源(/tmp/aria-bug45/t22)并拷入成员仓提交。
+    /// 返回 fixture 摘要(路径/预热记录/工具版本)。
+    fn b45_seed_fixtures(&self) -> Result<Value, String> {
+        let root = PathBuf::from(B45_FIXTURE_ROOT);
+        let maven_dir = root.join("maven-fixture");
+        let npm_dir = root.join("npm-fixture");
+        let podman_dir = root.join("podman-fixture");
+        let m2_dir = root.join("m2-repo");
+        for dir in [&maven_dir, &npm_dir, &podman_dir, &m2_dir] {
+            std::fs::create_dir_all(dir).map_err(|error| format!("创建 {dir:?} 失败:{error}"))?;
+        }
+
+        // ---- Maven fixture(pom + 双测例:fast + 150s 静默)----
+        let java_dir = maven_dir.join("src/test/java/aria/t22");
+        std::fs::create_dir_all(&java_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            maven_dir.join("pom.xml"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>aria.t22</groupId>
+  <artifactId>b45-host-check</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(
+            java_dir.join("T22ChecksTest.java"),
+            format!(
+                r#"package aria.t22;
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+public class T22ChecksTest {{
+    @Test
+    void fastMarkerCheck() {{
+        assertEquals("b45-host-check", "b45-host-check");
+        System.out.println("T22 maven check: 1 passed");
+    }}
+
+    @Test
+    void silentLongRunCheck() throws Exception {{
+        // b45:真实静默 {B45_MAVEN_SILENT_SLEEP_MILLIS}ms(>120s,跨外层角色 idle 界)
+        Thread.sleep({B45_MAVEN_SILENT_SLEEP_MILLIS}L);
+        assertEquals(2, 1 + 1);
+        System.out.println("T22 maven check: 1 passed");
+    }}
+}}
+"#
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+
+        // ---- npm fixture(lock 消费 ci/test/build)----
+        std::fs::write(
+            npm_dir.join("package.json"),
+            r#"{
+  "name": "b45-host-check",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node test.js",
+    "build": "node build.js"
+  }
+}
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(
+            npm_dir.join("test.js"),
+            r#"let failed = 0;
+function check(name, condition) {
+  if (condition) {
+    console.log("T22 npm check ok: " + name);
+  } else {
+    failed += 1;
+    console.error("T22 npm check FAIL: " + name);
+  }
+}
+check("marker-a", "b45-host-check" === "b45-host-check");
+check("marker-b", 1 + 1 === 2);
+console.log("T22 npm fixture: " + (2 - failed) + " passed, " + failed + " failed");
+process.exit(failed === 0 ? 0 : 1);
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(
+            npm_dir.join("build.js"),
+            r#"const fs = require("node:fs");
+fs.mkdirSync("dist", { recursive: true });
+fs.writeFileSync("dist/marker.txt", "b45-host-check build artifact\n");
+console.log("T22 npm build: wrote dist/marker.txt");
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        // lock 由真实 npm 生成(--package-lock-only;零依赖也产 lock,ci 消费真实)。
+        let npm_lock = b45_host_command_sync(
+            "npm",
+            &["install", "--package-lock-only", "--ignore-scripts"],
+            Some(&npm_dir),
+            120,
+        );
+        let npm_lock_ok = npm_lock.get("exit").and_then(Value::as_i64) == Some(0)
+            && npm_dir.join("package-lock.json").exists();
+
+        // ---- Podman fixture(build + run --rm)----
+        std::fs::write(
+            podman_dir.join("Containerfile"),
+            r#"FROM docker.io/library/ubuntu:24.04
+COPY run-marker.txt /tmp/run-marker.txt
+CMD ["sh", "-c", "cat /tmp/run-marker.txt && echo T22 podman run ok"]
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(podman_dir.join("run-marker.txt"), "T22 podman build ok\n")
+            .map_err(|error| error.to_string())?;
+
+        // ---- 工具前提实测(版本证据;缺失=BLOCKED 真实报告)----
+        let podman_version = b45_host_command_sync("podman", &["version"], None, 60);
+        let node_version = b45_host_command_sync("node", &["--version"], None, 30);
+        let npm_version = b45_host_command_sync("npm", &["--version"], None, 30);
+        let maven_version = b45_host_command_sync(
+            "podman",
+            &[
+                "run",
+                "--rm",
+                "-v",
+                &format!("{}/:/root/.m2", m2_dir.display()),
+                B45_MAVEN_IMAGE,
+                "mvn",
+                "-v",
+            ],
+            None,
+            300,
+        );
+        for (label, probe) in [
+            ("podman", &podman_version),
+            ("node", &node_version),
+            ("npm", &npm_version),
+            ("maven-container", &maven_version),
+        ] {
+            if probe.get("exit").and_then(Value::as_i64) != Some(0) {
+                return Err(format!(
+                    "工具前提缺失({label}):{probe}(缺项=任务未完成,不跳过)"
+                ));
+            }
+        }
+        if !npm_lock_ok {
+            return Err(format!("npm lock 生成失败:{npm_lock}"));
+        }
+
+        // ---- fixture 预热(非 CHECK:m2 依赖缓存+镜像构建缓存)----
+        let prewarm_maven = b45_host_command_sync(
+            "podman",
+            &[
+                "run",
+                "--rm",
+                "-v",
+                &format!("{}/:/root/.m2", m2_dir.display()),
+                "-v",
+                &format!("{}:/workspace", maven_dir.display()),
+                "-w",
+                "/workspace",
+                B45_MAVEN_IMAGE,
+                "mvn",
+                "-B",
+                "-q",
+                "-DskipTests",
+                "compile",
+                "dependency:resolve",
+            ],
+            None,
+            900,
+        );
+        let prewarm_podman = b45_host_command_sync(
+            "podman",
+            &["build", "-t", "aria-t22-check", "."],
+            Some(&podman_dir),
+            600,
+        );
+
+        // ---- 拷入成员仓并提交(Coder 可写 worktree 内可见)----
+        let fixtures_target = self.member_worktree.join("fixtures");
+        for name in ["maven-fixture", "npm-fixture", "podman-fixture"] {
+            let source = root.join(name);
+            let target = fixtures_target.join(name);
+            std::fs::create_dir_all(&target).map_err(|error| error.to_string())?;
+            b45_copy_dir(&source, &target).map_err(|error| error.to_string())?;
+        }
+        let member = self.member_worktree.display().to_string();
+        let git_run = |args: &[&str]| -> Result<Value, String> {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&member)
+                .args(args)
+                .output()
+                .map_err(|error| error.to_string())?;
+            if !output.status.success() {
+                return Err(format!(
+                    "git {args:?} 失败:{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            Ok(json!(String::from_utf8_lossy(&output.stdout).trim().to_string()))
+        };
+        git_run(&["add", "fixtures"])?;
+        git_run(&["-c", "user.name=b45-fixture", "-c", "user.email=b45@aria.local", "commit", "-m", "b45: host check fixtures (maven/npm/podman)"])?;
+
+        Ok(json!({
+            "fixture_root": B45_FIXTURE_ROOT,
+            "member_fixtures_path": fixtures_target.display().to_string(),
+            "maven_image": B45_MAVEN_IMAGE,
+            "silent_sleep_millis": B45_MAVEN_SILENT_SLEEP_MILLIS,
+            "versions": {
+                "podman": podman_version,
+                "node": node_version,
+                "npm": npm_version,
+                "maven_container": maven_version,
+            },
+            "prewarm": {
+                "npm_lock": npm_lock,
+                "maven_resolve": prewarm_maven,
+                "podman_build": prewarm_podman,
+            },
+        }))
+    }
+
+    /// 读取 coding attempt 全部 role-run 事件行(sequence/created_at/payload)。
+    fn b45_role_run_rows(&self, attempt_id: &str) -> Vec<Value> {
+        let store = CodingAttemptStore::new(self.app_paths.clone());
+        let mut rows = Vec::new();
+        let Ok(runs) = store.list_role_runs(PROJECT_ID, &self.issue_id, attempt_id) else {
+            return rows;
+        };
+        for run in runs {
+            let Ok(events) =
+                store.list_role_run_events(PROJECT_ID, &self.issue_id, attempt_id, &run.id)
+            else {
+                continue;
+            };
+            for event in events {
+                rows.push(json!({
+                    "role_run_id": run.id,
+                    "role": run.role,
+                    "sequence": event.sequence,
+                    "created_at": event.created_at,
+                    "event_type": format!("{:?}", event.event_type),
+                    "payload": event.payload,
+                }));
+            }
+        }
+        rows
+    }
+
+    /// 读取 .aria 下 JSON 目录快照(T5 provider-resources / reviewer-windows)。
+    fn b45_aria_dir_snapshot(&self, relative: &str) -> Vec<Value> {
+        let dir = self.app_paths.root().join(relative);
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return found;
+        };
+        let mut stack: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                if let Ok(children) = std::fs::read_dir(&path) {
+                    stack.extend(children.flatten().map(|entry| entry.path()));
+                }
+            } else if path.extension().is_some_and(|ext| ext == "json") {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                        found.push(json!({
+                            "path": path.display().to_string(),
+                            "record": value,
+                        }));
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// 会话分区内 approval_decision 审计行(Auto 自动/Supervised 人工决定)。
+    fn b45_approval_decisions(&self, session_id: &str) -> Vec<Value> {
+        let mut found = Vec::new();
+        for seq in 0..=64u64 {
+            let Ok(result) = self
+                .lifecycle
+                .read_tool_policy_lines_with_warnings(session_id, seq)
+            else {
+                break;
+            };
+            for line in result.events {
+                if let DurableToolPolicyEvent::ApprovalDecision(record) = line.event {
+                    found.push(json!({
+                        "session_id": session_id,
+                        "role_run_seq": seq,
+                        "request_id": record.request_id,
+                        "category": record.category,
+                        "tool_name": record.tool_name,
+                        "decision": record.decision,
+                        "reason_code": record.reason_code,
+                    }));
+                }
+            }
+        }
+        found
+    }
+
+    /// GET verification-command-evidence(计划命令 vs 实际命令并列证据)。
+    async fn b45_verification_evidence(&self, attempt_id: &str) -> Value {
+        let (status, body) = request_json(
+            &self.app,
+            Method::GET,
+            &format!(
+                "/api/projects/{PROJECT_ID}/issues/{}/coding-attempts/{attempt_id}/verification-command-evidence",
+                self.issue_id
+            ),
+            json!({}),
+        )
+        .await;
+        json!({"status": status.as_u16(), "body": body})
+    }
+
+    /// GET coding attempt(终态对账)。
+    async fn b45_attempt_state(&self, attempt_id: &str) -> Value {
+        let (status, body) = request_json(
+            &self.app,
+            Method::GET,
+            &format!(
+                "/api/projects/{PROJECT_ID}/issues/{}/coding-attempts/{attempt_id}",
+                self.issue_id
+            ),
+            json!({}),
+        )
+        .await;
+        json!({"status": status.as_u16(), "body": body})
+    }
+
+    /// b45 取消格:Supervised 起步→首帧拒绝→其余批准→首个执行事件后
+    /// AbortAttempt 真实终止,验证进程/容器/attempt 终态。
+    async fn drive_b45_cancel_cell(&self, attempt_id: &str) -> Value {
+        fp_enter_phase("b45", "cancel-cell", FRESH);
+        let url = format!("ws://{}/ws/coding-attempts/{attempt_id}", self.ws_addr);
+        let mut outcome;
+        let ws = connect_live_ws(&url).await;
+        let mut ws = match ws {
+            Ok(ws) => ws,
+            Err(error) => return json!({"connect_error": error}),
+        };
+        if let Err(error) = ws
+            .send_json(&json!({
+                "type": "coding_hello",
+                "attempt_id": attempt_id,
+                "last_seen_node_id": null
+            }))
+            .await
+        {
+            return json!({"hello_error": error});
+        }
+        let _ = ws
+            .send_json(&json!({
+                "type": "permission_mode_select",
+                "role": "coder",
+                "permission_mode": "supervised"
+            }))
+            .await;
+        let _ = ws.send_json(&json!({"type": "start_coding"})).await;
+
+        let mut permission_frames: Vec<Value> = Vec::new();
+        let mut rejected: Vec<String> = Vec::new();
+        let mut approved: Vec<String> = Vec::new();
+        let mut frames_seen = 0u64;
+        let mut abort_sent = false;
+        let mut terminal_status: Option<String> = None;
+        let mut execution_events = 0u64;
+        let deadline = tokio::time::Instant::now() + self.stage_timeout;
+        let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
+        fp("b45_cancel_pump_begin", format_args!("attempt={attempt_id}"));
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                outcome = json!({"timeout": true});
+                break;
+            }
+            let message = tokio::time::timeout_at(idle_deadline, ws.recv_json()).await;
+            let message = match message {
+                Ok(Ok(Some(value))) => {
+                    idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
+                    value
+                }
+                Ok(Ok(None)) | Ok(Err(_)) => {
+                    outcome = json!({"ws_closed": true});
+                    break;
+                }
+                Err(_) => {
+                    if ws.send_json(&json!({"type": "coding_ping"})).await.is_err() {
+                        outcome = json!({"ws_closed_on_ping": true});
+                        break;
+                    }
+                    idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
+                    continue;
+                }
+            };
+            frames_seen += 1;
+            let kind = message
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            match kind.as_str() {
+                "coding_permission_request" => {
+                    let id = message
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    permission_frames.push(message.clone());
+                    // 首帧拒绝(拒绝证据);其余批准(批准证据)。
+                    let approved_flag = !rejected.is_empty();
+                    if approved_flag {
+                        approved.push(id.clone());
+                    } else {
+                        rejected.push(id.clone());
+                    }
+                    let _ = ws
+                        .send_json(&json!({
+                            "type": "permission_response",
+                            "id": id,
+                            "approved": approved_flag,
+                            "reason": if approved_flag { serde_json::Value::Null } else { serde_json::Value::String("b45 supervised rejection probe".to_string()) }
+                        }))
+                        .await;
+                }
+                "coding_execution_event" => {
+                    execution_events += 1;
+                    if !abort_sent {
+                        // 用户取消:首个执行事件后真实终止一格。
+                        abort_sent = true;
+                        let _ = ws.send_json(&json!({"type": "abort_attempt"})).await;
+                    }
+                }
+                "coding_session_state" => {
+                    if let Some(status) = message.get("status").and_then(Value::as_str) {
+                        fp("b45_cancel_state", format_args!("status={status}"));
+                        match status {
+                            "aborted" | "failed" | "completed" | "confirmed" => {
+                                terminal_status = Some(status.to_string());
+                                outcome = json!({"terminal": status});
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                "coding_gate_required" => {
+                    // 取消格不走完整门语义;答默认动作后继续等终态。
+                    let gate_id = message
+                        .pointer("/gate/id")
+                        .or_else(|| message.pointer("/gate/gate_id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let action_id = coding_gate_action_id(&message);
+                    if !gate_id.is_empty() && !action_id.is_empty() {
+                        let _ = ws
+                            .send_json(&json!({
+                                "type": "gate_response",
+                                "gate_id": gate_id,
+                                "action_id": action_id,
+                                "extra_context": null
+                            }))
+                            .await;
+                    }
+                }
+                "coding_choice_request" => {
+                    if let Some(choice_id) = message.get("id").and_then(Value::as_str) {
+                        let (answers, top_selected) = semantic_choice_answers(&message);
+                        let _ = ws
+                            .send_json(&json!({
+                                "type": "choice_response",
+                                "id": choice_id,
+                                "selected_option_ids": top_selected,
+                                "free_text": null,
+                                "answers": answers
+                            }))
+                            .await;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 真实终止对账:provider 进程消失 + 无遗留 fixture 容器 + attempt 终态。
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let pid_before_abort_note = self.scan_attempt_stream_log_pid(attempt_id);
+        let pid_alive = pid_before_abort_note.as_ref().is_some_and(|pid| {
+            pid.parse::<u32>()
+                .ok()
+                .is_some_and(|pid| std::fs::metadata(format!("/proc/{pid}")).is_ok())
+        });
+        let podman_ps = b45_host_command_sync(
+            "podman",
+            &["ps", "--format", "{{.Names}}|{{.Image}}|{{.Status}}"],
+            None,
+            60,
+        );
+        let lingering: Vec<String> = podman_ps["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains("aria-t22-check") || line.contains(B45_MAVEN_IMAGE))
+            .map(str::to_string)
+            .collect();
+        let attempt_state = self.b45_attempt_state(attempt_id).await;
+        json!({
+            "attempt_id": attempt_id,
+            "frames_seen": frames_seen,
+            "permission_frames": permission_frames,
+            "rejected_request_ids": rejected,
+            "approved_request_ids": approved,
+            "execution_events_seen": execution_events,
+            "abort_sent": abort_sent,
+            "terminal_status": terminal_status,
+            "outcome": outcome,
+            "provider_pid": pid_before_abort_note,
+            "provider_pid_still_alive": pid_alive,
+            "podman_ps": podman_ps,
+            "lingering_fixture_containers": lingering,
+            "attempt_state": attempt_state,
+        })
+    }
+}
+
+/// 递归拷贝目录(fixture 源→成员仓)。
+fn b45_copy_dir(source: &Path, target: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(target).map_err(|error| format!("{target:?}:{error}"))?;
+    for entry in std::fs::read_dir(source).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let destination = target.join(entry.file_name());
+        if path.is_dir() {
+            b45_copy_dir(&path, &destination)?;
+        } else {
+            std::fs::copy(&path, &destination)
+                .map_err(|error| format!("{}->{destination:?}:{error}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+impl LiveLcGatewayHarness {
+    /// b45(T22)主驱动:真实 Kimi 全链(Story→Design→Plan→Coding[Auto]→
+    /// Review)+ 取消格(Supervised/拒绝/批准/用户取消)。证据聚合为
+    /// JSON Value 返回,validator/断言在 live_matrix.rs。
+    pub(crate) async fn run_b45_kimi_host_check(
+        &self,
+        evidence_root: &Path,
+    ) -> Result<Value, LiveMatrixFailure> {
+        fp_enter_phase("b45", "env", "build");
+        // issue 描述钉定:验证命令逐字进入计划链。经 build 内 create_issue
+        // 消费——先落 override 再 build(b45 专用通道,不影响五阶段矩阵)。
+        // 实现:build 后 issue 已建,故改走"描述钉定重建"不可行;改为在
+        // build 前注入全局 override(b45 单测串行独占 harness 进程)。
+        B45_ISSUE_DESCRIPTION_OVERRIDE
+            .lock()
+            .expect("b45 override lock")
+            .replace(b45_kimi_issue_description());
+        let mut env = match MatrixEnvironment::build(ProviderName::KimiCode, evidence_root).await {
+            Ok(env) => env,
+            Err(failure) => return Err(failure),
+        };
+        B45_ISSUE_DESCRIPTION_OVERRIDE
+            .lock()
+            .expect("b45 override lock")
+            .take();
+        fp("b45_env_built", format_args!("lc={} issue={}", env.lc_id, env.issue_id));
+
+        // 1) fixture:源 /tmp/aria-bug45/t22 → 成员仓提交;工具版本/预热取证。
+        let fixtures = env.b45_seed_fixtures().map_err(|message| {
+            matrix_failure("b45_fixture_prerequisite_missing", message, Some("env"))
+        })?;
+        let snapshot_before = b45_member_git_snapshot(&env.member_worktree);
+
+        // 2) Author 合法 terminal:story + design(fresh→门→修订→confirm)。
+        fp("b45_stage_begin", "story");
+        let story_cells = env
+            .run_workspace_entity_stage(
+                "story",
+                &format!(
+                    "/api/projects/{PROJECT_ID}/issues/{}/story-specs:generate",
+                    env.issue_id
+                ),
+                pinned_story_generate_body(
+                    "b45 story:alpha 仓宿主 CHECK fixture 与验证命令",
+                    &env.member_logical_id,
+                    &env.provider_wire,
+                ),
+                "story_specs",
+            )
+            .await;
+        fp("b45_stage_end", format_args!("story cells={}", story_cells.len()));
+        fp("b45_stage_begin", "design");
+        let design_cells = env
+            .run_workspace_entity_stage(
+                "design",
+                &format!(
+                    "/api/projects/{PROJECT_ID}/issues/{}/design-specs:generate",
+                    env.issue_id
+                ),
+                pinned_design_generate_body(
+                    "b45 design:alpha 仓宿主 CHECK 设计",
+                    &env.story_spec_ids(),
+                    &env.member_logical_id,
+                    &env.provider_wire,
+                ),
+                "design_specs",
+            )
+            .await;
+        fp("b45_stage_end", format_args!("design cells={}", design_cells.len()));
+
+        // 3) 规划合法 terminal:plan streaming(SC 单候选→Confirmed)。
+        fp("b45_stage_begin", "plan");
+        let plan_cells = env.run_plan_streaming_stage().await;
+        fp("b45_stage_end", format_args!("plan cells={}", plan_cells.len()));
+        env.resolve_first_work_item().await;
+
+        // 4) Coder 自跑(Auto):组入口建 attempt→WS 驱动(CHECK 由 Kimi
+        //    工具真实发起;长静默 Maven 跨 120s+90s idle 界,仍在总 deadline)。
+        fp("b45_stage_begin", "coding-main");
+        let coding_main;
+        if env.plan_id.is_empty() {
+            coding_main = json!({"error": "缺 durable plan id,coding 无法启动"});
+        } else {
+            let (status, body) = request_json(
+                &env.app,
+                Method::POST,
+                &format!(
+                    "/api/projects/{PROJECT_ID}/issues/{}/work-item-plans/{}/coding-attempts",
+                    env.issue_id, env.plan_id
+                ),
+                json!({}),
+            )
+            .await;
+            if !status.is_success() {
+                coding_main = json!({"error": format!("coding attempt 创建失败({status}):{body}")});
+            } else {
+                let attempt_id = body["attempt_id"].as_str().unwrap_or_default().to_string();
+                let mut observation = StageObservation::new("coding", &env.provider);
+                fp_enter_phase("b45", "coding-main", FRESH);
+                observation.role = CODING_EXECUTOR_ROLE.to_string();
+                observation.workspace_session_id = attempt_id.clone();
+                let drive = env.drive_coding_attempt_ws(&attempt_id, &mut observation).await;
+                let verification = env.b45_verification_evidence(&attempt_id).await;
+                let role_run_rows = env.b45_role_run_rows(&attempt_id);
+                let approvals = env.b45_approval_decisions(&attempt_id);
+                let attempt_state = env.b45_attempt_state(&attempt_id).await;
+                let cell = observation.build_cell(&env);
+                coding_main = json!({
+                    "attempt_id": attempt_id,
+                    "drive": {
+                        "artifact_confirmed": drive.artifact_confirmed,
+                        "terminal_status": cell.capability_state,
+                        "denied_reason": cell.denied_reason,
+                        "run_failure": cell.denied_reason,
+                    },
+                    "terminal_status": observation.terminal_status,
+                    "tool_events": observation.tool_events,
+                    "permission_events": observation.permission_events,
+                    "exact_version": cell.exact_version,
+                    "native_session_id": cell.native_session_id,
+                    "argv": cell.argv,
+                    "verification_evidence": verification,
+                    "role_run_rows": role_run_rows,
+                    "approval_decisions": approvals,
+                    "attempt_state": attempt_state,
+                    "observed_pid": env.scan_attempt_stream_log_pid(&attempt_id),
+                });
+            }
+        }
+        fp("b45_stage_end", "coding-main");
+
+        // 5) Reviewer 有窗:design review round(真实现体评审)。
+        fp("b45_stage_begin", "review");
+        let review_cells = env.run_review_stage().await;
+        fp("b45_stage_end", format_args!("review cells={}", review_cells.len()));
+
+        // 6) 取消格:同 plan 新 attempt,Supervised/拒绝/批准/AbortAttempt。
+        fp("b45_stage_begin", "cancel-cell");
+        let cancel_cell;
+        if env.plan_id.is_empty() {
+            cancel_cell = json!({"error": "缺 durable plan id,取消格无法启动"});
+        } else {
+            let (status, body) = request_json(
+                &env.app,
+                Method::POST,
+                &format!(
+                    "/api/projects/{PROJECT_ID}/issues/{}/work-item-plans/{}/coding-attempts",
+                    env.issue_id, env.plan_id
+                ),
+                json!({}),
+            )
+            .await;
+            if !status.is_success() {
+                cancel_cell = json!({"error": format!("取消格 attempt 创建失败({status}):{body}")});
+            } else {
+                let attempt_id = body["attempt_id"].as_str().unwrap_or_default().to_string();
+                cancel_cell = env.drive_b45_cancel_cell(&attempt_id).await;
+            }
+        }
+        fp("b45_stage_end", "cancel-cell");
+
+        // 7) 证据聚合:快照/资源/窗口/职责。
+        let snapshot_after = b45_member_git_snapshot(&env.member_worktree);
+        let resources = env.b45_aria_dir_snapshot("provider-resources");
+        let reviewer_windows = env.b45_aria_dir_snapshot("reviewer-windows");
+        let duties = json!({
+            "author": {
+                "story_cells": story_cells.iter().map(|cell| json!({
+                    "fresh_or_resume": cell.fresh_or_resume,
+                    "capability_state": cell.capability_state,
+                    "denied_reason": cell.denied_reason,
+                    "native_session_id": cell.native_session_id,
+                })).collect::<Vec<_>>(),
+                "design_cells": design_cells.iter().map(|cell| json!({
+                    "fresh_or_resume": cell.fresh_or_resume,
+                    "capability_state": cell.capability_state,
+                    "denied_reason": cell.denied_reason,
+                    "native_session_id": cell.native_session_id,
+                })).collect::<Vec<_>>(),
+            },
+            "planner": {
+                "plan_cells": plan_cells.iter().map(|cell| json!({
+                    "entrypoint": cell.entrypoint,
+                    "fresh_or_resume": cell.fresh_or_resume,
+                    "capability_state": cell.capability_state,
+                    "denied_reason": cell.denied_reason,
+                    "native_session_id": cell.native_session_id,
+                })).collect::<Vec<_>>(),
+            },
+            "coder": {
+                "attempt_id": coding_main.get("attempt_id"),
+                "terminal": coding_main.get("terminal_status").or(coding_main.pointer("/drive/terminal_status")),
+            },
+            "reviewer": {
+                "review_cells": review_cells.iter().map(|cell| json!({
+                    "fresh_or_resume": cell.fresh_or_resume,
+                    "capability_state": cell.capability_state,
+                    "denied_reason": cell.denied_reason,
+                    "native_session_id": cell.native_session_id,
+                })).collect::<Vec<_>>(),
+            },
+        });
+
+        Ok(json!({
+            "provider": {
+                "name": "kimi",
+                "exact_version": coding_main.get("exact_version"),
+            },
+            "fixtures": fixtures,
+            "duties": duties,
+            "coding_main": coding_main,
+            "cancel_cell": cancel_cell,
+            "snapshot_before": snapshot_before,
+            "snapshot_after": snapshot_after,
+            "provider_resources": resources,
+            "reviewer_windows": reviewer_windows,
+            "coder_idle_boundary_secs": B45_CODER_IDLE_BOUNDARY_SECS,
+        }))
+    }
+}
+
+/// b45 issue 描述钉定(build 内 create_issue 消费;进程内单值,串行测试)。
+static B45_ISSUE_DESCRIPTION_OVERRIDE: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);

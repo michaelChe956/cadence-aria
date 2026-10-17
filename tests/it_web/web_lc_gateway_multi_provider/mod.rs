@@ -5,6 +5,8 @@
 //! 契约来源:实施计划 Task 10/11(Files/Interfaces/Step1-5/每格证据形态)
 //! 与 spec delta REQ-LCG-07。harness 复用 `web_lc_operations_api` 的 HTTP
 //! 形态与真实 git fixture 建法;不复用 Noop/Fake 驱动当真实证据。
+//! 批2 Task 22(b45):Kimi 真实宿主 CHECK(Maven 容器/npm lock/Podman
+//! build+run)与静默长 CHECK 现场(live_matrix `b45_live_kimi_host_check`)。
 pub(crate) mod boundary_matrix;
 pub(crate) mod direct_comparison;
 pub(crate) mod failure_matrix;
