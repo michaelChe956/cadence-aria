@@ -37,8 +37,8 @@ use crate::product::reviewer_snapshot::{
 };
 use crate::product::reviewer_window::manifest_fingerprint;
 use crate::product::reviewer_window_store::{
-    ReportAcceptance, ReviewerWindowRecord, ReviewerWindowState,
-    ReviewerWindowStore, ViolationJournalEntry,
+    ReportAcceptance, ReviewerWindowRecord, ReviewerWindowState, ReviewerWindowStore,
+    ViolationJournalEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -556,6 +556,12 @@ mod tests {
             .expect("spawn git");
         assert!(out.status.success(), "git {args:?} failed");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn sha256_of_file(path: &Path) -> String {
+        use sha2::{Digest, Sha256};
+        let bytes = fs::read(path).unwrap_or_default();
+        hex::encode(Sha256::digest(&bytes))
     }
 
     struct Fixture {
@@ -2268,8 +2274,27 @@ mod tests {
         ))
         .expect("begin");
 
-        // 场景 1:评审 agent 常规 git status(触发 index stat-refresh 写)。
+        // 场景 1(B2 修复轮 4):touch 已跟踪文件(同内容新 mtime)→
+        // git status 触发真实 stat-refresh(index 字节重写)。
+        let baseline_index_sha = snapshot
+            .load_manifest("w-n4a")
+            .unwrap()
+            .git_observation
+            .index_sha256
+            .clone();
+        let touched = fx.worktree.join("tracked.txt");
+        let content = fs::read_to_string(&touched).unwrap();
+        // 触发 stat 过期:同内容经临时文件 rename 回(必然更新 mtime)。
+        let tmp = fx.worktree.join("tracked.txt.tmp");
+        fs::write(&tmp, &content).unwrap();
+        fs::rename(&tmp, &touched).unwrap();
         git_ok(&fx.worktree, &["status", "--porcelain"]);
+        // 证明 stat-refresh 确实发生:raw index 字节已≠基线。
+        let raw_now = sha256_of_file(&fx.worktree.join(".git").join("index"));
+        assert_ne!(
+            raw_now, baseline_index_sha,
+            "前置失效:git status 未触发 stat-refresh(需 mtime 变化)"
+        );
         let quiescing = begin_quiesce(&store, "w-n4a", handle.generation, "end").unwrap();
         let summary = block_on(restore_window(
             &store,
@@ -2280,8 +2305,13 @@ mod tests {
         .expect("restore");
         assert!(
             !summary.manual_gate,
-            "stat-refresh 不得整轮作废: {:?}",
+            "stat-refresh(raw 变、语义不变)不得整轮作废: {:?}",
             store.load_violations("w-n4a").unwrap()
+        );
+        // 回写后 raw 恢复基线字节(B1:回写仍按 raw 差异执行)。
+        assert_eq!(
+            sha256_of_file(&fx.worktree.join(".git").join("index")),
+            baseline_index_sha
         );
 
         // 场景 2:git add(新对象入 index,OID 变)仍被检出。

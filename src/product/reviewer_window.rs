@@ -1333,33 +1333,38 @@ pub(crate) async fn restore_window(
                 if let Some(pending) = record.violation_pending.as_ref()
                     && facts.is_empty()
                 {
-                    let entry = ViolationJournalEntry {
-                        seq: 0,
-                        entry_id: violation_entry_id(
-                            window_id,
-                            &pending.kind,
-                            &format!("pending:{}", pending.entry_id),
-                            None,
-                            None,
-                            &pending.detail,
-                            None,
-                        ),
-                        at: now_rfc3339(),
-                        window_id: window_id.to_string(),
-                        attempt_id: record.attempt_id.clone(),
-                        run_id: record.run_id.clone(),
-                        report_id: None,
-                        kind: pending.kind.clone(),
-                        path: format!("pending:{}", pending.entry_id),
-                        before_digest: None,
-                        after_digest: None,
-                        detail: format!(
-                            "违规已观测但无可复观事实(停等标记占位落盘): {}",
-                            pending.detail
-                        ),
-                        restore_cursor: cursor.clone(),
-                    };
-                    store.append_violation(window_id, entry)?;
+                    // B3(修复轮 4):占位幂等——崩溃于 append 后保存前,
+                    // 重入时 journal 已含占位(entry_id 键不同,须显式查)。
+                    let placeholder_id = violation_entry_id(
+                        window_id,
+                        &pending.kind,
+                        &format!("pending:{}", pending.entry_id),
+                        None,
+                        None,
+                        &pending.detail,
+                        None,
+                    );
+                    if !existing_ids.contains(&placeholder_id) {
+                        let entry = ViolationJournalEntry {
+                            seq: 0,
+                            entry_id: placeholder_id,
+                            at: now_rfc3339(),
+                            window_id: window_id.to_string(),
+                            attempt_id: record.attempt_id.clone(),
+                            run_id: record.run_id.clone(),
+                            report_id: None,
+                            kind: pending.kind.clone(),
+                            path: format!("pending:{}", pending.entry_id),
+                            before_digest: None,
+                            after_digest: None,
+                            detail: format!(
+                                "违规已观测但无可复观事实(停等标记占位落盘): {}",
+                                pending.detail
+                            ),
+                            restore_cursor: cursor.clone(),
+                        };
+                        store.append_violation(window_id, entry)?;
+                    }
                 }
                 record.violation_pending = None;
                 record.pre_restore_git_facts = Vec::new();

@@ -997,10 +997,10 @@ fn validate_manifest(manifest: &ReviewerBaselineManifest) -> Result<(), Reviewer
             && !parent.is_empty()
             && !rels.contains(parent)
         {
-                return Err(ReviewerSnapshotError::Integrity(format!(
-                    "{}: 父目录 {parent} 不在 manifest",
-                    entry.rel_path
-                )));
+            return Err(ReviewerSnapshotError::Integrity(format!(
+                "{}: 父目录 {parent} 不在 manifest",
+                entry.rel_path
+            )));
         }
     }
     if !is_object_id(&manifest.git_observation.head_sha)
@@ -2171,11 +2171,21 @@ fn restore_git_domain(ctx: &mut RestoreCtx<'_>) -> Result<(), ReviewerSnapshotEr
             .map_err(|error| io_error_string("read index", error))?;
         current_index_sha = sha256_hex(&bytes);
     }
+    // B1(修复轮 4):回写由 raw 字节差异决定(保证恢复完整性);但
+    // `git_index_restored` **事实位**仅在语义内容漂移被回写时置位——
+    // stat-refresh(raw 变、语义不变)回写后不算恢复事实,不推违规。
+    let semantic_drift = match baseline.index_semantic_sha256.as_ref() {
+        Some(expected) => index_semantic_digest(&worktree)? != *expected,
+        // 旧 manifest 无语义摘要:回退 raw 判定(该面兼容披露)。
+        None => current_index_sha != baseline.index_sha256,
+    };
     if current_index_sha != baseline.index_sha256 {
         let bytes = ctx.blob_bytes(&baseline.index_blob)?;
         write_bytes_atomic(&gitdir_fd, OsStr::new("index"), &bytes, 0o644, "index")
             .map_err(|error| io_error_string("写 index", error))?;
-        ctx.report.git_index_restored = true;
+        if semantic_drift {
+            ctx.report.git_index_restored = true;
+        }
     }
     // 受管 ref
     let current_refs = list_current_refs(&worktree)?;
@@ -2327,11 +2337,27 @@ fn verify_all(
         file.read_to_end(&mut index_bytes)
             .map_err(|error| io_error_string("read index", error))?;
     }
-    if sha256_hex(&index_bytes) != ctx.manifest.git_observation.index_sha256 {
-        return Ok(Err((
-            "git_index_mismatch".to_string(),
-            "index sha 不符".to_string(),
-        )));
+    // B1(修复轮 4):index 终验按语义摘要(有基线语义摘要时)——
+    // stat-refresh 后 raw≠基线但语义一致,不得判 mismatch;raw 比对
+    // 仅用于回写路径。旧 manifest 无语义摘要 → 回退 raw(兼容披露)。
+    match ctx.manifest.git_observation.index_semantic_sha256.as_ref() {
+        Some(expected) => {
+            let current = index_semantic_digest(&ctx.worktree)?;
+            if current != *expected {
+                return Ok(Err((
+                    "git_index_mismatch".to_string(),
+                    "index 语义内容不符(模式/OID/路径)".to_string(),
+                )));
+            }
+        }
+        None => {
+            if sha256_hex(&index_bytes) != ctx.manifest.git_observation.index_sha256 {
+                return Ok(Err((
+                    "git_index_mismatch".to_string(),
+                    "index sha 不符".to_string(),
+                )));
+            }
+        }
     }
     // 平台合法写入域
     for baseline in &ctx.manifest.platform_write_baseline {

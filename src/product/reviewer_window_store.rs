@@ -1411,11 +1411,11 @@ mod tests {
         // 有界等待进入 Z 态(条件等待,非计时断言)
         let mut zombified = false;
         for _ in 0..500 {
-            if let Some((state, _)) = proc_stat(pid) {
-                if state == 'Z' {
-                    zombified = true;
-                    break;
-                }
+            if let Some((state, _)) = proc_stat(pid)
+                && state == 'Z'
+            {
+                zombified = true;
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
