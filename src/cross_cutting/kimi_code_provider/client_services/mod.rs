@@ -54,7 +54,6 @@ struct ClientServiceState {
     session_id: String,
     root: PathBuf,
     policy: ClientServicePolicy,
-    permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode,
     bridge: Arc<ApprovalBridge>,
     event_tx: mpsc::Sender<ProviderEvent>,
     terminal: TerminalManager,
@@ -164,8 +163,7 @@ where
         let state = Arc::new(ClientServiceState {
             session_id,
             root,
-            policy: ClientServicePolicy::new(role, permission_mode.clone()),
-            permission_mode,
+            policy: ClientServicePolicy::new(role, permission_mode),
             session_env,
             bridge,
             event_tx,

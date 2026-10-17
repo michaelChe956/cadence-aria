@@ -23,7 +23,9 @@ use super::sandbox::{canonical_path_of_fd, open_dir_no_follow};
 use super::terminal::{TerminalCommand, TerminalResult};
 use super::{ClientServiceError, ClientServiceState, check_session, evaluate_policy};
 
-use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoundaryPlan};
+use crate::cross_cutting::provider_boundary::ProviderBoundaryMode;
+#[cfg(test)]
+use crate::cross_cutting::provider_boundary::ProviderBoundaryPlan;
 
 #[cfg(test)]
 use super::policy::ClientServicePolicy;
@@ -337,7 +339,6 @@ mod tests {
             session_id: "client-service-test".to_string(),
             root: std::env::temp_dir(),
             policy: ClientServicePolicy::new(role, ProviderPermissionMode::Auto),
-            permission_mode: ProviderPermissionMode::Auto,
             bridge: Arc::new(ApprovalBridge::new(
                 ProviderPermissionMode::Auto,
                 event_tx.clone(),
@@ -410,7 +411,6 @@ mod tests {
             session_id: "client-service-test".to_string(),
             root: root.clone(),
             policy: ClientServicePolicy::new(AdapterRole::Executor, ProviderPermissionMode::Auto),
-            permission_mode: ProviderPermissionMode::Auto,
             bridge: Arc::new(ApprovalBridge::new(
                 ProviderPermissionMode::Auto,
                 event_tx.clone(),
@@ -542,7 +542,6 @@ mod tests {
                 .canonicalize()
                 .expect("canonical aggregate"),
             policy: ClientServicePolicy::new(AdapterRole::Executor, ProviderPermissionMode::Auto),
-            permission_mode: ProviderPermissionMode::Auto,
             bridge: Arc::new(ApprovalBridge::new(
                 ProviderPermissionMode::Auto,
                 event_tx.clone(),
@@ -600,7 +599,6 @@ mod tests {
             session_id: "client-service-test".to_string(),
             root,
             policy: ClientServicePolicy::new(role, ProviderPermissionMode::Auto),
-            permission_mode: ProviderPermissionMode::Auto,
             bridge: Arc::new(ApprovalBridge::new(
                 ProviderPermissionMode::Auto,
                 event_tx.clone(),
@@ -633,7 +631,6 @@ mod tests {
             session_id: "client-service-test".to_string(),
             root,
             policy: ClientServicePolicy::new(role, ProviderPermissionMode::Supervised),
-            permission_mode: ProviderPermissionMode::Supervised,
             bridge,
             event_tx,
             terminal: TerminalManager::new(),
@@ -941,7 +938,6 @@ mod tests {
                     AdapterRole::Executor,
                     ProviderPermissionMode::Auto,
                 ),
-                permission_mode: ProviderPermissionMode::Auto,
                 bridge: Arc::new(ApprovalBridge::new(
                     ProviderPermissionMode::Auto,
                     event_tx.clone(),

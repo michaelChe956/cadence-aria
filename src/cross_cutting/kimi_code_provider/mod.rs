@@ -260,7 +260,9 @@ impl KimiCodeProvider {
                     // 批2 Task 3 修复轮(F2):探测环境显式携带宿主 PATH(平台观察
                     // 语义,provider_health::probe_provider 同款)——裸名 CLI 不因
                     // env_clear 后缺 PATH 而恒 Unavailable。
-                    environment: crate::cross_cutting::provider_environment::platform_observation_environment(),
+                    environment:
+                        crate::cross_cutting::provider_environment::platform_observation_environment(
+                        ),
                     stdout_limit: 64 * 1024,
                     stderr_limit: 64 * 1024,
                 };
@@ -688,7 +690,7 @@ impl StreamingProviderAdapter for KimiCodeProvider {
 
         // 握手等待上界先于会话任务的 move 计算(input.timeout_secs);
         // 会话任务持有独立的 cancel 克隆,start 侧继续等待/响应当前 token。
-        let handshake_bound = Duration::from_secs(u64::from(input.timeout_secs.max(1)));
+        let handshake_bound = Duration::from_secs(input.timeout_secs.max(1));
         let session_cancel = cancel.clone();
 
         // 8) 会话任务(与 direct `start` 同构:stderr 收集 + MCP 注入决策
