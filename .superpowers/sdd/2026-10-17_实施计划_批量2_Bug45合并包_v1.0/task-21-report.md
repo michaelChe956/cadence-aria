@@ -88,3 +88,13 @@
 | ⚠5 resolve 后不续接补偿 | ✅ 注释固化单一归属:补偿续接统一归启动驱动/终止收敛面,人工裁决面零 git mutation |
 
 修复轮 1 终验:`cargo test --locked --lib -- startup_window_compensation` → **16 passed / 0 failed**;受影响面 14 套件 → **551 passed / 1 failed**(唯一红仍为登记存量 `plan_repair_cancel_replay_requires_authoritative_terminal_state`);`cargo fmt --check` 零差异;clippy all-targets 本面文件 0 命中。
+
+# 微修复轮 2(F2b 终轮,只改测试,单独 commit)
+
+**F2b(P2)✅** 次序钉测重写为阻塞判别式(`startup_reconcile_refreshes_provider_health_before_triage`):
+- 经 `WebAppState::with_provider_health` 注入**门控记录型 `BoundedCommandRunner`**(每次探测记数并挂起,watch 广播放行);
+- spawn `reconcile_claimed_coding_runs_once`,探活被阻塞期间断言:该 attempt **零 runner 注册 + 零 role run**(分诊未开始);放行后 reconcile 完成分诊(resumed=1、runner 注册、attempt 保持 Running 未误转 AMR);
+- **判别力已人工实证**:临时把 refresh 挪到分诊循环之后 → 该测试红(「探活阻塞期间分诊未开始」runner 零注册断言命中 left=1)→ 还原后复绿;
+- 注释同步改为实际断言语义(旧「generation≥1/非 degraded」口径废弃)。
+
+微修复轮 2 终验:`cargo test --locked --lib -- startup_window_compensation` → **16 passed / 0 failed**;`cargo fmt --check` 零差异;clippy all-targets 本面 0 命中;生产码零改动(仅测试重写,autopilot_orchestrator.rs 还原后 git diff 为空)。

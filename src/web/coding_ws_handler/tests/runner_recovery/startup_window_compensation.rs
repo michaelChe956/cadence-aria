@@ -1109,24 +1109,109 @@ async fn directory_scope_residue_cleaned_without_parking() {
     );
 }
 
-/// F2(修复轮 1):补偿之后、分诊之前刷新 provider 健康——分诊恢复的
-/// runner 不再撞初始 degraded 闸门被误转 AwaitingManualRecovery。
+/// F2b(微修复轮 2,判别性时序):探活被阻塞期间,分诊必须尚未开始——
+/// 该 attempt 零 runner 注册、零 role run(provider 会话/材料采集);放行
+/// 后 reconcile 才完成分诊恢复 runner。若把 refresh 挪到分诊循环之后,
+/// 探活阻塞期间 runner 已被 spawn,本测试必红(判别力回归已人工验证)。
 #[tokio::test]
 async fn startup_reconcile_refreshes_provider_health_before_triage() {
+    use crate::cross_cutting::aria_state_paths::AriaStatePaths;
+    use crate::cross_cutting::bounded_command_runner::{
+        BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
+    };
+    use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
+    use crate::cross_cutting::provider_health::{ProviderHealthService, SystemProviderHealthClock};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 记录型 + 门控探活 runner:每次探测先记数并挂起,直到放行
+    /// (watch 广播:并发多家探测同时解冻)。
+    struct GatedProbeRunner {
+        probes: AtomicUsize,
+        release: tokio::sync::watch::Sender<bool>,
+    }
+
+    #[async_trait::async_trait]
+    impl BoundedCommandRunner for GatedProbeRunner {
+        async fn run(
+            &self,
+            request: BoundedCommandRequest,
+        ) -> Result<BoundedCommandResult, BoundedCommandError> {
+            self.probes.fetch_add(1, Ordering::SeqCst);
+            let mut released = self.release.subscribe();
+            if !*released.borrow() {
+                let _ = released.changed().await;
+            }
+            Err(BoundedCommandError::CommandMissing {
+                executable: request.executable,
+                details: "gated probe release".to_string(),
+            })
+        }
+    }
+
     let fx = WindowStartupFixture::new("health");
-    let mut state = fx.restart_state();
+    let (release_tx, _release_rx) = tokio::sync::watch::channel(false);
+    let runner = Arc::new(GatedProbeRunner {
+        probes: AtomicUsize::new(0),
+        release: release_tx.clone(),
+    });
+    let health = Arc::new(ProviderHealthService::with_dependencies(
+        AriaStatePaths::from_workspace_root(&fx.root),
+        runner.clone(),
+        Arc::new(SystemProviderHealthClock),
+        std::time::Duration::from_secs(5),
+        4096,
+    ));
+    let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
+    let mut state = fx
+        .restart_state()
+        .with_provider_health(health, gate, runner.clone());
     // F2 竞态仅存在于真实 provider 可用性强制面(fake runtime 默认
     // test_provider_enabled=true 会跳过刷新)——显式关闭以驱动「补偿
     // 后、分诊前」的刷新路径。
     state.test_provider_enabled = false;
-    let resumed = crate::web::autopilot_orchestrator::reconcile_claimed_coding_runs_once(&state)
-        .await
-        .expect("reconcile");
-    assert_eq!(resumed, 1, "无窗树分诊恢复 runner");
+    let attempt_key = fx.attempt_key();
+    let state = Arc::new(state);
+    let reconcile_state = state.clone();
+    let mut reconcile = tokio::spawn(async move {
+        crate::web::autopilot_orchestrator::reconcile_claimed_coding_runs_once(&reconcile_state)
+            .await
+            .expect("reconcile")
+    });
+
+    // 探活已进入(≥1 次探测被阻塞)且尚未放行:分诊必须未开始——
+    // 零 runner 注册、零 provider 会话(role run)。若 refresh 被挪到
+    // 分诊之后,此刻 runner 已 spawn,断言即红。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while runner.probes.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "探活必须先于分诊启动(5s 内无探测即次序破坏)"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        state.coding_runs.runner_count(&attempt_key),
+        0,
+        "F2b:探活阻塞期间分诊未开始(runner 零注册)"
+    );
     assert!(
-        state.provider_health.latest_diagnostic().generation >= 1,
-        "F2:分诊前 provider 健康已刷新(诊断代次≥1;测试环境缺真实 \
-         CLI 探测可合法 degraded,断言刷新先于分诊而非结果本身)"
+        fx.role_runs_empty(),
+        "F2b:探活阻塞期间零 provider 会话/材料采集"
+    );
+
+    // 放行探活:reconcile 完成分诊,恢复 runner(顺序:探活→分诊)。
+    release_tx.send(true).expect("release probes");
+    let resumed = tokio::time::timeout(std::time::Duration::from_secs(10), &mut reconcile)
+        .await
+        .expect("reconcile finishes after release")
+        .expect("reconcile join");
+    assert_eq!(resumed, 1, "探活完成后分诊恢复 runner");
+    assert_eq!(
+        state.coding_runs.runner_count(&attempt_key),
+        1,
+        "放行后 runner 注册(分诊在探活之后)"
     );
     assert_eq!(
         fx.reload_attempt().status,
