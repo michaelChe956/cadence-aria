@@ -435,6 +435,19 @@ fn approved_environment_keys() -> Vec<&'static str> {
     .concat()
 }
 
+/// 批2 Task 3 修复轮(F1/F2):平台侧观察/受信启动调用的显式 PATH 注入
+/// (与 `provider_health::probe_provider` 同款语义,单一来源)。仅供平台
+/// 观察面(四家版本探测、注册/终审 git 启动)在 env map 中显式携带宿主
+/// PATH;Provider 子进程环境不回退宿主 PATH 的合同不变——spawn 仍是
+/// env_clear + 仅注入 env map。
+pub fn platform_observation_environment() -> BTreeMap<String, String> {
+    let mut environment = BTreeMap::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        environment.insert("PATH".to_string(), path.to_string_lossy().into_owned());
+    }
+    environment
+}
+
 /// 长度前缀域哈希(与 `provider_execution::hash_domains` 同型:8 字节大端
 /// 长度前缀 + 域字节,schema 前置;无边界歧义)。
 fn hash_domains(schema: &str, domains: &[Vec<u8>]) -> String {

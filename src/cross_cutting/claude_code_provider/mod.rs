@@ -65,7 +65,6 @@ pub async fn probe_claude_version(
         BoundedCommandRequest, TokioBoundedCommandRunner,
     };
     use crate::cross_cutting::streaming_provider::VersionProbeError;
-    use std::collections::BTreeMap;
     use tokio_util::sync::CancellationToken;
 
     let request = BoundedCommandRequest {
@@ -74,7 +73,10 @@ pub async fn probe_claude_version(
         working_dir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         timeout,
         cancellation: CancellationToken::new(),
-        environment: BTreeMap::new(),
+        // 批2 Task 3 修复轮(F2):探测环境显式携带宿主 PATH(平台观察
+        // 语义,provider_health::probe_provider 同款)——裸名 CLI 不因
+        // env_clear 后缺 PATH 而恒 Unavailable。
+        environment: crate::cross_cutting::provider_environment::platform_observation_environment(),
         stdout_limit: 64 * 1024,
         stderr_limit: 64 * 1024,
     };

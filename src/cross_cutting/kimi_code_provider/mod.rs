@@ -115,7 +115,10 @@ pub async fn probe_kimi_version(command: &std::path::Path) -> KimiVersion {
         working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         timeout: KIMI_VERSION_PROBE_TIMEOUT,
         cancellation: CancellationToken::new(),
-        environment: Default::default(),
+        // 批2 Task 3 修复轮(F2):探测环境显式携带宿主 PATH(平台观察
+        // 语义,provider_health::probe_provider 同款)——裸名 CLI 不因
+        // env_clear 后缺 PATH 而恒 Unavailable。
+        environment: crate::cross_cutting::provider_environment::platform_observation_environment(),
         stdout_limit: 64 * 1024,
         stderr_limit: 64 * 1024,
     };
@@ -254,7 +257,10 @@ impl KimiCodeProvider {
                     working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                     timeout: KIMI_VERSION_PROBE_TIMEOUT,
                     cancellation: CancellationToken::new(),
-                    environment: Default::default(),
+                    // 批2 Task 3 修复轮(F2):探测环境显式携带宿主 PATH(平台观察
+                    // 语义,provider_health::probe_provider 同款)——裸名 CLI 不因
+                    // env_clear 后缺 PATH 而恒 Unavailable。
+                    environment: crate::cross_cutting::provider_environment::platform_observation_environment(),
                     stdout_limit: 64 * 1024,
                     stderr_limit: 64 * 1024,
                 };

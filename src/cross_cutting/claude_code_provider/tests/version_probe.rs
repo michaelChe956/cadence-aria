@@ -72,3 +72,54 @@ fn version_probe_is_fail_closed_for_success_empty_and_timeout() {
         "bounded timeout must be Timeout"
     );
 }
+
+/// 批2 Task 3 修复轮(F2):版本探测裸名形态回归——探测请求经
+/// `platform_observation_environment` 显式携带 PATH,裸名 executable 在
+/// env_clear 后仍可解析执行(生产 claude/codex 等裸名 CLI 同形态)。
+#[cfg(unix)]
+#[tokio::test]
+async fn bare_name_version_probe_resolves_via_explicit_path_environment() {
+    use crate::cross_cutting::bounded_command_runner::{
+        BoundedCommandRequest, TokioBoundedCommandRunner,
+    };
+    use crate::cross_cutting::provider_environment::platform_observation_environment;
+
+    let root = std::path::Path::new("/tmp/aria-bug45/t3");
+    std::fs::create_dir_all(root).expect("t3 fixture root");
+    let dir = tempfile::tempdir_in(root).expect("t3 fixture dir");
+    let script = dir.path().join("aria-t3-bare-version");
+    std::fs::write(&script, "#!/bin/sh\necho 'provider 9.9.9'\n").expect("write fixture");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fixture");
+
+    // 探测形态=裸名 executable;环境显式携带 PATH(平台观察注入),
+    // fixture 目录前置保证确定性。
+    let mut environment = platform_observation_environment();
+    assert!(
+        environment.contains_key("PATH"),
+        "platform_observation_environment 必须显式携带 PATH"
+    );
+    let path = environment.get("PATH").cloned().unwrap_or_default();
+    environment.insert(
+        "PATH".to_string(),
+        format!("{}:{path}", dir.path().display()),
+    );
+
+    let request = BoundedCommandRequest {
+        executable: "aria-t3-bare-version".to_string(),
+        argv: vec!["--version".to_string()],
+        working_dir: dir.path().to_path_buf(),
+        timeout: std::time::Duration::from_secs(10),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+        environment,
+        stdout_limit: 64 * 1024,
+        stderr_limit: 64 * 1024,
+    };
+    let result = TokioBoundedCommandRunner
+        .run_inherited(request)
+        .await
+        .expect("裸名探测必须经显式 PATH 可解析执行");
+    assert_eq!(result.exit_code, Some(0));
+    assert_eq!(result.stdout.trim(), "provider 9.9.9");
+}

@@ -963,6 +963,19 @@ impl RepositoryRegistrationCoordinator {
                 .map(|argument| (*argument).to_string())
                 .collect();
         full_argv.extend(argv);
+        // 批2 Task 3 修复轮(F1):ProcessManager 已统一 env_clear 且不回退
+        // 宿主 PATH——平台受信 git 启动在 env map 显式合并宿主 PATH,裸名
+        // git 不因缺 PATH 在 spawn 前断链;Provider 子进程环境不回退宿主
+        // PATH 的合同不变(此处为平台侧显式注入,注入/默认环境任一形态
+        // 均由此单点兜底)。
+        let mut environment = self.git_environment.clone();
+        if !environment.contains_key("PATH") {
+            for (key, value) in
+                crate::cross_cutting::provider_environment::platform_observation_environment()
+            {
+                environment.insert(key, value);
+            }
+        }
         self.runner
             .run(BoundedCommandRequest {
                 executable: "git".to_string(),
@@ -970,7 +983,7 @@ impl RepositoryRegistrationCoordinator {
                 working_dir: working_dir.to_path_buf(),
                 timeout: self.git_command_timeout,
                 cancellation,
-                environment: self.git_environment.clone(),
+                environment,
                 stdout_limit: GIT_OUTPUT_LIMIT,
                 stderr_limit: GIT_OUTPUT_LIMIT,
             })
