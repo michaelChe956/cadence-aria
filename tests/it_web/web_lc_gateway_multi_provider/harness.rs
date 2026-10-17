@@ -28,10 +28,6 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use cadence_aria::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use cadence_aria::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
-use cadence_aria::cross_cutting::provider_boundary::{
-    BoundaryWriteChannel, PlannedBoundaryWrite, ProviderBoundaryLauncher, ProviderBoundaryMode,
-    ProviderBoundaryPlan, run_write_surface_probe,
-};
 use cadence_aria::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use cadence_aria::cross_cutting::provider_health::ProviderHealthService;
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
@@ -812,10 +808,10 @@ impl Default for LiveLcGatewayHarness {
 //    Interfaces 冻结签名),复用 `MatrixEnvironment::build`(真实 git
 //    fixture/聚合初始化/trust/6c capability 探针,探针证据已落
 //    `boundary/boundary/<label>/`);
-// 2. 边界段:6c Coding 工件(受控 commit + 四通道负向)核对 + 组装层
-//    五通道×保护面追加探针(child 通道/越界 symlink/非 target worktree,
-//    经 `run_write_surface_probe` 在产品写边界沙箱内真实执行,每条留拒绝
-//    原文与文件 digest)+ D4(active main HEAD+porcelain 与 root/metadata
+// 2. 边界段:6c Coding 工件(受控 commit + 正向宿主写)核对 + 逻辑交付
+//    边界矩阵(T10:DEV-01 桥形态 validate/spawn 双拒 + 当前证据守卫
+//    + 证据面零副作用;旧 bwrap 五通道物理探针已随 launcher 退役)
+//    + D4(active main HEAD+porcelain 与 root/metadata
 //    前后快照,沿 HEAD 既有预算 fail-closed 不截断);
 // 3. 失败段:17 固定负向场景逐格真实拒绝(真实 gateway 的 validate/
 //    prepare/spawn 前复验对受控突变状态的真实拒绝),零 spawn 由
@@ -1103,347 +1099,249 @@ fn latest_task11_coding_probe_artifact(
     Ok((path, value))
 }
 
-/// 组装层追加探针结果(逐条 {channel,path,outcome,refusal_text,digest 对})。
+/// 逻辑交付边界矩阵(T10 替换旧 bwrap 五通道物理探针):双阶段同源
+/// 拒绝记录(validate/spawn 各一条)+ 当前证据守卫事实 + 证据面前后
+/// 摘要(负向探测零 durable 副作用)。
 struct Task11WriteMatrix {
-    attempts: Vec<Value>,
-    fixture_base: PathBuf,
+    refusals: Vec<Value>,
+    evidence_guard: Value,
+    digest_before: String,
+    digest_after: String,
 }
 
-/// 计划:五通道 × 保护面(root/非 target main/非 target worktree/.git/
-/// .aria/target .git 指针/越界 symlink)。与产品 6c 负向矩阵互补:补齐
-/// child 通道、越界 symlink 与非 target worktree 面。
-fn planned_task11_writes(
-    fixture: &BoundaryFixture,
-    non_target_wt: &Path,
-    escape_link: &Path,
-) -> Vec<PlannedBoundaryWrite> {
-    let root = fixture.root();
-    let member = fixture.member();
-    let member_b = fixture.member_b();
-    let target = fixture.target().expect("coding fixture target");
-    let planned =
-        |channel: BoundaryWriteChannel, path: PathBuf| PlannedBoundaryWrite::new(channel, path);
-    vec![
-        // builtin:root 面、root .git、非 target main、target .git 指针。
-        planned(
-            BoundaryWriteChannel::Builtin,
-            root.join("t11-rogue-builtin"),
-        ),
-        planned(
-            BoundaryWriteChannel::Builtin,
-            root.join(".git").join("t11-rogue"),
-        ),
-        planned(
-            BoundaryWriteChannel::Builtin,
-            member.join("t11-rogue-builtin"),
-        ),
-        planned(BoundaryWriteChannel::Builtin, target.join(".git")),
-        // terminal:root .aria、root AGENTS.md、非 target worktree。
-        planned(
-            BoundaryWriteChannel::Terminal,
-            root.join(".aria").join("t11-rogue"),
-        ),
-        planned(BoundaryWriteChannel::Terminal, root.join("AGENTS.md")),
-        planned(
-            BoundaryWriteChannel::Terminal,
-            non_target_wt.join("t11-rogue-terminal"),
-        ),
-        // extension:非 target main .git、root mcp 副本、target .aria。
-        planned(
-            BoundaryWriteChannel::Extension,
-            member_b.join(".git").join("t11-rogue"),
-        ),
-        planned(
-            BoundaryWriteChannel::Extension,
-            root.join(".mcp.json.t11-rogue"),
-        ),
-        planned(
-            BoundaryWriteChannel::Extension,
-            target.join(".aria").join("t11-rogue"),
-        ),
-        // mcp:非 target main .git、root .mcp.json。
-        planned(
-            BoundaryWriteChannel::Mcp,
-            member.join(".git").join("t11-rogue"),
-        ),
-        planned(BoundaryWriteChannel::Mcp, root.join(".mcp.json")),
-        // child(setsid 脱组再派生子进程):root、root .git、非 target main、
-        // 非 target worktree、target .git 指针。
-        planned(BoundaryWriteChannel::Child, root.join("t11-rogue-child")),
-        planned(
-            BoundaryWriteChannel::Child,
-            root.join(".git").join("t11-rogue-child"),
-        ),
-        planned(
-            BoundaryWriteChannel::Child,
-            member_b.join("t11-rogue-child"),
-        ),
-        planned(
-            BoundaryWriteChannel::Child,
-            non_target_wt.join("t11-rogue-child"),
-        ),
-        planned(BoundaryWriteChannel::Child, target.join(".git")),
-        // 越界 symlink:target 内链接指向 root 受保护文件,写经链接必须被拒。
-        planned(BoundaryWriteChannel::Builtin, escape_link.to_path_buf()),
-        planned(BoundaryWriteChannel::Child, escape_link.to_path_buf()),
-    ]
+/// 受信 run 记录的全字段确定性摘要(Debug 形态覆盖全部字段;记录未实现
+/// Serialize,store 序列化是私有实现,证据面 pre/post 对比用本摘要)。
+fn task11_record_digest(record: &ProviderCapabilityRecord) -> String {
+    let material = format!("{record:?}");
+    format!("sha256:{}", task11_sha256_hex(material.as_bytes()))
 }
 
-/// 逐路径内容 digest(absent=哨兵;symlink 走目标文件内容;目录形态以
-/// 条目名 digest 计)。
-fn task11_path_digests(planned: &[PlannedBoundaryWrite]) -> Vec<String> {
-    planned
-        .iter()
-        .map(|write| match std::fs::symlink_metadata(write.path()) {
-            Ok(metadata) if metadata.is_dir() => {
-                let mut names: Vec<String> = std::fs::read_dir(write.path())
-                    .map(|entries| {
-                        entries
-                            .flatten()
-                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                names.sort();
-                format!("dir:{}", task11_sha256_hex(names.join("\n").as_bytes()))
-            }
-            Ok(_) => match std::fs::read(write.path()) {
-                Ok(bytes) => format!("sha256:{}", task11_sha256_hex(&bytes)),
-                Err(_) => "unreadable".to_string(),
-            },
-            Err(_) => "absent".to_string(),
-        })
-        .collect()
-}
-
-/// 受控 fixture 上的五通道×保护面真实探针(产品写边界沙箱内执行)。
+/// T10 逻辑交付边界 + 当前证据守卫(host-open 语义替换旧 bwrap 物理拒写):
+/// 1. **当前证据守卫**:matrix env 的当前 capability 记录必须携带
+///    `host-open-v1` 语义、Coding 行 write_boundary Confirmed 与可解析的
+///    6c 证据工件(工件含 duty/资源身份事实);
+/// 2. **双阶段同源拒绝(DEV-01)**:受控突变为过渡桥形态(矩阵全 Unknown
+///    + legacy supported_actions 全列)后,validate 阶段(prepare)与
+///    spawn 前复验(start_streaming)都必须以
+///    `provider_capability_*_not_confirmed` 稳定码拒绝、零 provider 启动;
+/// 3. **证据面零副作用**:守卫 Drop 恢复后记录摘要与探测前逐字节一致。
 async fn run_task11_write_matrix(
     env: &MatrixEnvironment,
 ) -> Result<Task11WriteMatrix, LiveMatrixFailure> {
     fp_enter_phase("t11-boundary", "write_matrix", "fresh");
-    let Some((cli_program, _)) = provider_probe_channel(&env.provider) else {
-        return Err(matrix_failure(
-            "capability_probe_provider_unsupported",
-            format!("provider {:?} 无真实探针通道", env.provider),
-            None,
-        ));
-    };
-    let launcher = ProviderBoundaryLauncher::probe_environment();
-    if !launcher.is_available() {
-        return Err(matrix_failure(
-            "boundary_launcher_unavailable",
-            "bwrap/user namespace 不可用:写面探针无法真实执行(fail-closed,不冒充)".to_string(),
-            None,
-        ));
-    }
-    let base = TempDir::new().expect("t11 write matrix base");
-    let label = format!("t11-write-matrix-{}", Utc::now().format("%Y%m%dT%H%M%SZ"));
-    let fixture = BoundaryFixture::create(
-        env.provider.clone(),
-        cli_program,
-        SessionPolicyAction::CodingTargetWrite,
-        base.path(),
-        &env.evidence_root.join("boundary"),
-        &label,
-    )
-    .map_err(|error| {
-        matrix_failure(
-            "boundary_fixture_invalid",
-            format!("受控 fixture 搭建失败: {error:?}"),
-            None,
-        )
-    })?;
-    // 非 target worktree 面:root 仓自身 worktree(沙箱 ro-bind / 恒可见,
-    // 越界写必得真实 EROFS 而非 ENOENT)。
-    let non_target_wt = fixture.root().join("t11-non-target-wt");
-    {
-        let git = |arguments: &[&str]| -> std::io::Result<()> {
-            let status = std::process::Command::new("git")
-                .arg("-C")
-                .arg(fixture.root())
-                .args(["-c", "user.email=t11@aria", "-c", "user.name=t11"])
-                .args(arguments)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .status()?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(std::io::Error::other(format!(
-                    "git {arguments:?} 失败:{status:?}"
-                )))
-            }
-        };
-        // member-b 补 git init(受控材料):使「非 target main 的 .git」面
-        // 真实在场,越界写得真实 EROFS 而非 ENOENT。
-        let member_b_init = std::process::Command::new("git")
-            .arg("-C")
-            .arg(fixture.member_b())
-            .args(["init", "-q"])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .status();
-        if !matches!(&member_b_init, Ok(status) if status.success()) {
-            return Err(matrix_failure(
-                "boundary_fixture_invalid",
-                format!(
-                    "member-b git init 失败:{:?}",
-                    member_b_init.map(|status| status.to_string())
-                ),
-                None,
-            ));
-        }
-        fp("t11_member_b_git_ready", "非 target main .git 面在场");
-        git(&[
-            "commit",
-            "--allow-empty",
-            "-q",
-            "-m",
-            "t11 non-target worktree base",
-        ])
-        .map_err(|error| {
-            matrix_failure(
-                "boundary_fixture_invalid",
-                format!("非 target worktree 基提交失败: {error}"),
-                None,
-            )
-        })?;
-        git(&[
-            "worktree",
-            "add",
-            "-q",
-            non_target_wt.to_string_lossy().as_ref(),
-            "-b",
-            "t11-non-target",
-        ])
-        .map_err(|error| {
-            matrix_failure(
-                "boundary_fixture_invalid",
-                format!("非 target worktree 挂载失败: {error}"),
-                None,
-            )
-        })?;
-    }
-    fp(
-        "t11_non_target_worktree_ready",
-        format_args!("{}", non_target_wt.display()),
-    );
-    // 越界 symlink:target(可写面)内链接指向 root 受保护文件。
-    let escape_link = fixture
-        .target()
-        .expect("coding fixture target")
-        .join("t11-escape-link");
-    std::os::unix::fs::symlink(fixture.root().join("AGENTS.md"), &escape_link).map_err(
+    let store = ProviderCapabilityStore::for_lc(env.app_paths.clone(), env.lc_id.clone());
+    let provider = ProviderRef::from_provider_name(&env.provider, "cap_managed_snapshot").map_err(
         |error| {
             matrix_failure(
                 "boundary_fixture_invalid",
-                format!("越界 symlink 搭建失败: {error}"),
+                format!("provider ref 解析失败:{error}"),
                 None,
             )
         },
     )?;
-    let planned = planned_task11_writes(&fixture, &non_target_wt, &escape_link);
-    fp("t11_boundary_digest", "pre");
-    let digests_before = task11_path_digests(&planned);
-    // 与 6c derive_boundary_plan 同构的 plan(TargetWriteOnly,root,protect=[])
-    // + 同一 env overlay,沙箱语义与产品探针逐字节一致。
-    let plan = ProviderBoundaryPlan::probe_plan(
-        ProviderBoundaryMode::TargetWriteOnly,
-        fixture.root().to_path_buf(),
-        fixture.target().map(Path::to_path_buf),
-        Vec::new(),
-    )
-    .map_err(|error| {
-        matrix_failure(
-            "boundary_plan_invalid",
-            format!("探测 plan 构造失败: {error:?}"),
-            None,
-        )
-    })?;
-    let sandbox_env = fixture.probe_env();
-    fp(
-        "t11_boundary_probe_run",
-        format_args!("attempts={} launcher=bwrap", planned.len()),
-    );
-    let attempts = run_write_surface_probe(&launcher, &plan, &sandbox_env, &planned)
-        .await
-        .map_err(|error| {
+    let current = store
+        .get(PROJECT_ID, provider.provider_type)
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
             matrix_failure(
-                "boundary_probe_channel_failed",
-                format!("写面探针通道失败(观测前): {error:?}"),
+                "capability_record_missing",
+                "matrix env 缺当前 capability 记录(6c 探针未落盘,当前证据守卫不可证)".to_string(),
                 None,
             )
         })?;
-    fp(
-        "t11_boundary_probe_done",
-        format_args!("attempts={}", attempts.len()),
-    );
-    fp("t11_boundary_digest", "post");
-    let digests_after = task11_path_digests(&planned);
-    if attempts.len() != planned.len() {
+
+    // 1) 当前证据守卫:语义/行 Confirmed/证据工件在场且携带 T9 v2 事实。
+    let coding_row = current
+        .action_matrix
+        .row(&SessionPolicyAction::CodingTargetWrite);
+    let evidence_guard = json!({
+        "execution_semantics": current.execution_semantics,
+        "write_boundary_cell": format!("{:?}", coding_row.write_boundary),
+        "probe_artifact_ref": current.probe_artifact_ref,
+    });
+    if current.execution_semantics
+        != cadence_aria::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+    {
         return Err(matrix_failure(
-            "boundary_probe_attempt_count_mismatch",
-            format!("探针回报 {} 条 != 计划 {}", attempts.len(), planned.len()),
+            "current_evidence_guard_failed",
+            format!(
+                "当前记录执行语义非 host-open-v1:{:?}(DEV-01 后唯一可放行语义)",
+                current.execution_semantics
+            ),
             None,
         ));
     }
-    // 分类:每条必须被拒且带真实拒绝原文(模型「不写」不是 attempt 证据),
-    // 且受保护文件 digest 前后一致;任一违例=防护失效 → 保留现场并阻断。
-    let mut records = Vec::new();
-    let mut violation: Option<String> = None;
-    for (index, attempt) in attempts.iter().enumerate() {
-        let refused_with_evidence = attempt.was_refused_with_evidence();
-        let digest_before = digests_before[index].clone();
-        let digest_after = digests_after[index].clone();
-        let unchanged = digest_before == digest_after;
-        let allowed = attempt.result() == Ok(());
-        if allowed || !refused_with_evidence || !unchanged {
-            violation = Some(violation.unwrap_or_else(|| {
-                format!(
-                    "channel={:?} path={} allowed={allowed} refused_with_evidence=\
-                     {refused_with_evidence} digest_unchanged={unchanged}",
-                    attempt.channel(),
-                    attempt.path().display()
-                )
-            }));
-        }
-        fp(
-            "t11_boundary_attempt",
-            format_args!(
-                "channel={:?} path={} outcome={} evidence={}",
-                attempt.channel(),
-                attempt.path().display(),
-                if allowed { "allowed" } else { "refused" },
-                attempt.evidence()
-            ),
-        );
-        records.push(json!({
-            "channel": format!("{:?}", attempt.channel()),
-            "path": attempt.path().display().to_string(),
-            "outcome": if allowed { "allowed" } else { "refused" },
-            "refusal_text": attempt.evidence(),
-            "digest_before": digest_before,
-            "digest_after": digest_after,
-        }));
-    }
-    if let Some(violation) = violation {
-        let preserved = base.keep();
-        fp(
-            "t11_boundary_scene_preserved",
-            format_args!("violation={violation} fixture={}", preserved.display()),
-        );
+    if coding_row.write_boundary != ProviderCapabilityEvidence::Confirmed {
         return Err(matrix_failure(
+            "current_evidence_guard_failed",
+            format!(
+                "Coding 行 write_boundary 分格非 Confirmed:{:?}",
+                coding_row.write_boundary
+            ),
+            None,
+        ));
+    }
+    let Some(artifact_ref) = current.probe_artifact_ref.clone() else {
+        return Err(matrix_failure(
+            "current_evidence_guard_failed",
+            "当前记录缺 probe_artifact_ref(当前证据不可追溯)".to_string(),
+            None,
+        ));
+    };
+    let artifact: Value =
+        serde_json::from_str(&std::fs::read_to_string(&artifact_ref).map_err(|error| {
+            matrix_failure(
+                "current_evidence_guard_failed",
+                format!("证据工件不可读 {artifact_ref}:{error}"),
+                None,
+            )
+        })?)
+        .map_err(|error| {
+            matrix_failure(
+                "current_evidence_guard_failed",
+                format!("证据工件非 JSON {artifact_ref}:{error}"),
+                None,
+            )
+        })?;
+    for fact in ["duty", "resource_scope_id"] {
+        if artifact
+            .get(fact)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            return Err(matrix_failure(
+                "current_evidence_guard_failed",
+                format!("证据工件缺 {fact} 事实(T9 v2):{artifact_ref}"),
+                None,
+            ));
+        }
+    }
+    fp(
+        "t11_boundary_evidence_guard",
+        format_args!(
+            "semantics={} boundary=Confirmed",
+            current.execution_semantics
+        ),
+    );
+
+    let digest_before = task11_record_digest(&current);
+
+    // 2) 双阶段同源拒绝:当前记录下先 prepare(证明守卫不是全拒),再受控
+    //    突变为 DEV-01 桥形态,validate 与 spawn 复验都必须拒绝。
+    let gateway = task11_readonly_gateway(env).map_err(|error| {
+        matrix_failure(
+            "boundary_fixture_invalid",
+            format!("readonly gateway 组装失败:{error}"),
+            None,
+        )
+    })?;
+    let sid = "t11-write-matrix";
+    let prepared = task11_prepare_baseline(
+        env,
+        &gateway,
+        sid,
+        task11_streaming_input(env),
+        task11_coding_request(env),
+    )
+    .await
+    .map_err(|outcome| {
+        matrix_failure(
             "boundary_protection_violation",
             format!(
-                "越界写未被拒或受保护面漂移:{violation};现场已保留 {}",
-                preserved.display()
+                "当前 Confirmed 记录下基线 prepare 未通过(守卫前提失效):{}",
+                outcome.refusal_text
             ),
             None,
-        ));
+        )
+    })?;
+
+    fp(
+        "t11_boundary_mutation",
+        "dimension=dev01_bridge(unknown_all + legacy supported_actions)",
+    );
+    let guard = task11_mutate_selected_record(env, |record| {
+        record.action_matrix = ProviderActionMatrix::unknown_all();
+        record.supported_actions = vec![
+            SessionPolicyAction::PlanningReadOnly,
+            SessionPolicyAction::CodingTargetWrite,
+            SessionPolicyAction::ReviewReadOnly,
+        ];
+    })
+    .map_err(|problem| {
+        matrix_failure(
+            "boundary_fixture_invalid",
+            format!("受控突变失败:{problem}"),
+            None,
+        )
+    })?;
+
+    let mut refusals = Vec::new();
+    // 2a) validate 阶段:桥形态 prepare 必须拒绝。
+    let validate_error = gateway
+        .prepare_streaming_launch(
+            task11_streaming_input(env),
+            task11_coding_request(env),
+            task11_audit_context(env, sid),
+        )
+        .expect_err("DEV-01 bridge shape must be refused at validate (prepare)");
+    refusals.push(json!({
+        "stage": "validate",
+        "gate": "require_supported/require_write_boundary",
+        "refusal_text": validate_error.to_string(),
+    }));
+    // 2b) spawn 阶段:突变前冻结的 validated 在 start_streaming 复验拒绝。
+    let spawn_error = match gateway
+        .start_streaming(prepared, CancellationToken::new())
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("DEV-01 bridge shape must be refused at spawn revalidation"),
+    };
+    refusals.push(json!({
+        "stage": "spawn_revalidate",
+        "gate": "require_supported/require_write_boundary",
+        "refusal_text": spawn_error.to_string(),
+    }));
+    for refusal in &refusals {
+        let text = refusal["refusal_text"].as_str().unwrap_or_default();
+        if !text.contains("provider_capability_launch_not_confirmed")
+            && !text.contains("provider_capability_write_boundary_not_confirmed")
+        {
+            return Err(matrix_failure(
+                "boundary_protection_violation",
+                format!("桥形态拒绝未携带稳定判别码:{text}"),
+                None,
+            ));
+        }
     }
+    fp(
+        "t11_boundary_logical_refusals",
+        "validate+spawn 双拒,zero provider spawn",
+    );
+    drop(guard);
+
+    // 3) 证据面零副作用:守卫 Drop 恢复后记录与探测前逐字节一致。
+    let restored = store
+        .get(PROJECT_ID, provider.provider_type)
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
+            matrix_failure(
+                "capability_record_missing",
+                "守卫恢复后记录缺失(证据面被负向探测破坏)".to_string(),
+                None,
+            )
+        })?;
+    let digest_after = task11_record_digest(&restored);
+
     Ok(Task11WriteMatrix {
-        attempts: records,
-        fixture_base: base.keep(),
+        refusals,
+        evidence_guard,
+        digest_before,
+        digest_after,
     })
 }
 
@@ -1601,84 +1499,53 @@ fn task11_coding_positive_cell(env: &MatrixEnvironment) -> Result<EvidenceCell, 
     Ok(cell)
 }
 
-/// 保护面拒绝格:组装层五通道×保护面逐条拒绝原文+digest(批2 Task 9 起
-/// 只取 harness 自有写矩阵——6c 探针工件已随 host-open 语义退役
-/// negatives/D4 物理拒写面);受保护面 pre/post 摘要取 harness 自身快照
-/// (逐 attempt digest 聚合,非工件)。
+/// 逻辑交付边界格(T10 替换旧五通道物理拒写):DEV-01 桥形态在 validate
+/// 与 spawn 复验双拒(零 provider 启动)+ 当前证据守卫事实 + 证据面
+/// pre/post 摘要(负向探测零 durable 副作用)。
 fn task11_protected_writes_cell(
     env: &MatrixEnvironment,
     write_matrix: &Task11WriteMatrix,
 ) -> Result<EvidenceCell, LiveMatrixFailure> {
     fp_enter_phase("t11-boundary", "protected_writes", "fresh");
-    let all_matrix_refused = !write_matrix.attempts.is_empty()
-        && write_matrix.attempts.iter().all(|attempt| {
-            attempt.get("outcome").and_then(Value::as_str) == Some("refused")
-                && attempt
-                    .get("refusal_text")
-                    .and_then(Value::as_str)
-                    .is_some_and(|text| !text.trim().is_empty())
-                && attempt.get("digest_before") == attempt.get("digest_after")
-        });
-    // 受保护面 pre/post 摘要:harness 自身快照(组装层逐 attempt digest
-    // 聚合;组装层已强制每条 before==after,聚合相等=保护面零漂移)。
-    let aggregate_digest = |field: &str| {
-        write_matrix
-            .attempts
+    let dual_stage_refused = write_matrix.refusals.len() == 2
+        && write_matrix
+            .refusals
             .iter()
-            .map(|attempt| {
-                attempt
-                    .get(field)
-                    .and_then(Value::as_str)
-                    .unwrap_or("evidence-missing")
-            })
-            .collect::<Vec<_>>()
-            .join("|")
-    };
-    let protected_digest_before = aggregate_digest("digest_before");
-    let protected_digest_after = aggregate_digest("digest_after");
-    let flag = all_matrix_refused;
+            .any(|refusal| refusal.get("stage").and_then(Value::as_str) == Some("validate"))
+        && write_matrix.refusals.iter().any(|refusal| {
+            refusal.get("stage").and_then(Value::as_str) == Some("spawn_revalidate")
+        });
+    let evidence_surface_unchanged = write_matrix.digest_before == write_matrix.digest_after
+        && !write_matrix.digest_before.trim().is_empty();
+    let flag = dual_stage_refused && evidence_surface_unchanged;
     fp(
         "t11_protected_writes_verdict",
         format_args!(
-            "all_refused={flag} matrix_attempts={}",
-            write_matrix.attempts.len(),
+            "logical_boundary_enforced={flag} dual_stage_refused={dual_stage_refused} \
+             evidence_surface_unchanged={evidence_surface_unchanged}"
         ),
     );
     let mut events = vec![json!({
         "ts": task11_now_ts(),
         "event": {
             "type": "boundary_matrix_evidence",
-            "protected_writes_all_refused_by_os_or_native_policy": flag,
-            "protected_digest_before": protected_digest_before,
-            "protected_digest_after": protected_digest_after,
-            "attempt_count": write_matrix.attempts.len(),
-            "write_matrix_fixture": write_matrix.fixture_base.display().to_string(),
+            "logical_delivery_boundary_enforced": flag,
+            "evidence_surface_digest_before": write_matrix.digest_before,
+            "evidence_surface_digest_after": write_matrix.digest_after,
+            "current_evidence_guard": write_matrix.evidence_guard,
+            "refusal_count": write_matrix.refusals.len(),
         },
     })];
-    // 逐条 attempt 留证(拒绝原文+digest);extension/MCP 通道探针在沙箱内
-    // 派生真实后代进程,按 attempt 计入会计维度。
-    for attempt in &write_matrix.attempts {
-        let channel = attempt
-            .get("channel")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+    // 逐条双阶段拒绝留证(stage+gate+拒绝原文;零 provider 启动,无
+    // session/协议/extension/MCP 后代观测)。
+    for refusal in &write_matrix.refusals {
         events.push(json!({
             "ts": task11_now_ts(),
             "event": {
                 "type": "boundary_write_attempt",
-                "attempt": attempt,
+                "attempt": refusal,
             },
         }));
-        if matches!(channel, "Mcp" | "Extension" | "Terminal" | "Child") {
-            events.push(json!({
-                "ts": task11_now_ts(),
-                "event": {
-                    "type": "extension_mcp_descendant_observed",
-                    "channel": channel,
-                    "path": attempt.get("path").cloned().unwrap_or(Value::Null),
-                },
-            }));
-        }
     }
     // availability `--version` 另记:探针工件的真实版本探测(argv+结果;
     // v2 工件仍携带该字段,与退役的物理拒写面无关)。
@@ -1703,8 +1570,10 @@ fn task11_protected_writes_cell(
     cell.target = PathBuf::new();
     cell.capability_state = if flag { "confirmed" } else { "denied" }.to_string();
     if !flag {
-        cell.denied_reason =
-            Some("保护面写未全部被拒(或拒绝无证据/受保护面漂移):防护失效,现场断言将红".to_string());
+        cell.denied_reason = Some(
+            "逻辑交付边界未双拒(或证据面漂移):DEV-01 桥形态被放行/证据面被负向探测改写,现场断言将红"
+                .to_string(),
+        );
     }
     cell.provider_events = events;
     Ok(cell)

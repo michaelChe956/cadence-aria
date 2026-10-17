@@ -299,10 +299,11 @@ impl StoreBackedProviderCapabilitySource {
 }
 
 impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
-    /// 正常 action row 的 launch 分格门:`Confirmed` 放行;v1→v2 过渡桥仅当
-    /// 行未探测(Unknown)且旧 allow 列表仍列出该 action 时放行(既有 root
-    /// recipe 聚合链零回归),且**绝不铸造 Confirmed**;`Denied`(真实负向
-    /// 证据)恒拒;旧列表未列出且行 Unknown 亦拒(fail-closed,稳定判别码)。
+    /// 正常 action row 的 launch 分格门(T10/DEV-01):仅 `Confirmed` 放行;
+    /// v1→v2 过渡桥(Unknown + 旧 allow 列表)已退役——旧 allow 列表在
+    /// launch 分格无放行效力,`Denied`(真实负向证据)与 `Unknown` 一律
+    /// fail-closed 拒绝(稳定判别码),等待真实 probe(2d)写入 Confirmed
+    /// 行后才可启动。
     fn require_supported(
         &self,
         provider: &ProviderRef,
@@ -312,13 +313,6 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
         let row = record.action_matrix.row(&action);
         match &row.launch {
             ProviderCapabilityEvidence::Confirmed => Ok(Self::capability_from_record(&record, row)),
-            ProviderCapabilityEvidence::Unknown if record.supported_actions.contains(&action) => {
-                // 过渡桥:legacy bootstrap/v1 记录(矩阵未探测)维持今日放行
-                // 行为,等待真实 probe(2d)写入 Confirmed 行后自然取代;
-                // capability 里的行保持 Unknown——旧列表不产生正常会话
-                // Confirmed(Global Constraints 第 2 条)。
-                Ok(Self::capability_from_record(&record, row))
-            }
             other => Err(ProviderGatewayError::UnsupportedCapability(format!(
                 "{PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED}: {action:?} launch cell is {other:?}"
             ))),
@@ -341,9 +335,10 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
         }
     }
 
-    /// fresh 门的 write-boundary 半边:`Confirmed` 放行;过渡桥同 launch 分格
-    /// (Unknown + 旧 allow 列表,不铸 Confirmed);`Denied` 恒拒且 reason 完整
-    /// 保留在错误详情中。
+    /// fresh 门的 write-boundary 半边(T10/DEV-01):仅 write_boundary 分格
+    /// `Confirmed` 放行;过渡桥(Unknown + 旧 allow 列表)已随 launch 分格
+    /// 同批退役(双阶段同源判定),`Denied` 恒拒且 reason 完整保留在错误
+    /// 详情中。
     fn require_write_boundary(
         &self,
         provider: &ProviderRef,
@@ -353,9 +348,6 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
         let row = record.action_matrix.row(&action);
         match &row.write_boundary {
             ProviderCapabilityEvidence::Confirmed => Ok(Self::capability_from_record(&record, row)),
-            ProviderCapabilityEvidence::Unknown if record.supported_actions.contains(&action) => {
-                Ok(Self::capability_from_record(&record, row))
-            }
             other => Err(ProviderGatewayError::UnsupportedCapability(format!(
                 "{PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED}: {action:?} write_boundary cell is {other:?}"
             ))),
@@ -1025,34 +1017,34 @@ mod tests {
         (root, source)
     }
 
+    /// DEV-01(T10):bootstrap 记录(矩阵全 Unknown + 旧 allow 列表全列)
+    /// 不再经迁移桥放行——launch/write-boundary 双分格都只认当前语义
+    /// `Confirmed`;旧 allow 列表在 v2 分格门下无放行效力,fail-closed
+    /// 稳定判别码。
     #[test]
-    fn store_backed_capability_claude_code_passes_for_supported_action() {
+    fn store_backed_capability_bootstrap_unknown_rejected_under_dev01() {
         let (_root, source) = store_backed_source("project_0001");
 
-        let capability = source
+        let launch_error = source
             .require_supported(
                 &ProviderRef::claude_code("cap_managed_snapshot"),
                 SessionPolicyAction::CodingTargetWrite,
             )
-            .unwrap();
+            .unwrap_err();
+        assert!(
+            matches!(&launch_error, ProviderGatewayError::UnsupportedCapability(reason) if reason.starts_with(PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED)),
+            "bootstrap Unknown row must not launch via legacy allow list: {launch_error:?}"
+        );
 
-        assert_eq!(capability.provider_type, ProviderRefType::ClaudeCode);
-        assert_eq!(capability.version, "0.0.0-managed");
-        assert_eq!(capability.adapter_dialect, ProviderDialect::ClaudeCodeCliV1);
-        assert_eq!(
-            capability.wire_dialect,
-            ProviderWireDialect::ClaudeCodeStreamJson
-        );
-        assert_eq!(capability.capability_snapshot_ref, "cap_managed_snapshot");
-        // bootstrap 记录的 v2 行全 Unknown:过渡桥不因旧 allow 列表铸造任何
-        // Confirmed(launch/resume 分格保持 Unknown)。
-        assert_eq!(
-            capability.action_capability.launch,
-            ProviderCapabilityEvidence::Unknown
-        );
-        assert_eq!(
-            capability.action_capability.resume,
-            ProviderCapabilityEvidence::Unknown
+        let boundary_error = source
+            .require_write_boundary(
+                &ProviderRef::claude_code("cap_managed_snapshot"),
+                SessionPolicyAction::CodingTargetWrite,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&boundary_error, ProviderGatewayError::UnsupportedCapability(reason) if reason.starts_with(PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED)),
+            "bootstrap Unknown row must not pass write boundary via legacy allow list: {boundary_error:?}"
         );
     }
 
@@ -1449,11 +1441,11 @@ mod tests {
         );
     }
 
-    /// v1 旧记录(无 schema/matrix)的过渡语义:launch/write 分格经桥放行
-    /// (既有 root recipe 契约零回归),但 capability 行保持全 Unknown——
-    /// 旧 supported_actions/provenance 不产生正常会话 Confirmed。
+    /// DEV-01(T10):v1 旧记录(无 schema/matrix,仅 supported_actions)的
+    /// 过渡桥退役——launch/write 双分格均按 Unknown fail-closed 拒绝,
+    /// 旧 supported_actions/provenance 不产生任何正常会话放行。
     #[test]
-    fn lcg_t02_v1_legacy_actions_keep_launching_without_confirmed_cells() {
+    fn lcg_t02_v1_legacy_actions_are_rejected_without_confirmed_cells() {
         let root = tempfile::tempdir().expect("temporary product root");
         let dir = root.path().join("projects/project_0001/logical-codebase");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1473,27 +1465,26 @@ mod tests {
         let paths = ProductAppPaths::new(root.path());
         let source = StoreBackedProviderCapabilitySource::new(paths, "project_0001".to_string());
 
-        let capability = source
+        let launch_error = source
             .require_supported(
                 &ProviderRef::claude_code("cap_managed_snapshot"),
                 SessionPolicyAction::PlanningReadOnly,
             )
-            .unwrap();
-        assert_eq!(
-            capability.action_capability.launch,
-            ProviderCapabilityEvidence::Unknown
+            .unwrap_err();
+        assert!(
+            matches!(&launch_error, ProviderGatewayError::UnsupportedCapability(reason) if reason.starts_with(PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED)),
+            "v1 legacy allow list must not launch: {launch_error:?}"
         );
-        assert_eq!(
-            capability.wire_dialect,
-            ProviderWireDialect::ClaudeCodeStreamJson
-        );
-        // write 分格同样经桥放行(root recipe 聚合链的 spawn 依赖)。
-        source
+        let boundary_error = source
             .require_write_boundary(
                 &ProviderRef::claude_code("cap_managed_snapshot"),
                 SessionPolicyAction::PlanningReadOnly,
             )
-            .unwrap();
+            .unwrap_err();
+        assert!(
+            matches!(&boundary_error, ProviderGatewayError::UnsupportedCapability(reason) if reason.starts_with(PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED)),
+            "v1 legacy allow list must not pass write boundary: {boundary_error:?}"
+        );
     }
 
     /// 2a 审查 carry ①:矩阵缺 action 行 → `row()` 读取为全 Unknown 行

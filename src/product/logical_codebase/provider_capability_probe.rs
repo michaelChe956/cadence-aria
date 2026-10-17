@@ -25,6 +25,7 @@
 use crate::cross_cutting::provider_boundary::{
     PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN, ProviderBoundaryEvidence, ProviderBoundaryMode,
 };
+use crate::cross_cutting::provider_execution::TrustedProviderRole;
 use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::policy::SessionPolicyAction;
 use crate::product::logical_codebase::provider_capability_store::{
@@ -188,7 +189,9 @@ impl ProviderCapabilityProbeService {
                 projection.action()
             )));
         }
-        if evidence.duty() == "reviewer" && evidence.review_window_id().unwrap_or("").is_empty() {
+        if evidence.duty() == TrustedProviderRole::Reviewer.as_str()
+            && evidence.review_window_id().unwrap_or("").is_empty()
+        {
             return Err(ProviderCapabilityProbeError::SemanticsInvalid(
                 "reviewer 证据缺 review 窗口引用(岗位/窗口缺失拒签)".to_string(),
             ));
@@ -447,12 +450,14 @@ fn boundary_mode_for_action(action: SessionPolicyAction) -> ProviderBoundaryMode
 }
 
 /// action 的执行语义 → 受信岗位(批2 Task 9 冻结映射):Coding = Author
-/// 岗位(HostCoding),Planning/Review 只读 = Reviewer 窗口。与 T2
-/// `TrustedProviderRole::as_str` 同口径文本。
+/// 岗位(HostCoding),Planning/Review 只读 = Reviewer 窗口。文本收敛自
+/// T2 `TrustedProviderRole::as_str`(单一事实源,T10/RevB2T9 ⚠3)。
 fn duty_for_action(action: SessionPolicyAction) -> &'static str {
     match action {
-        SessionPolicyAction::CodingTargetWrite => "author",
-        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => "reviewer",
+        SessionPolicyAction::CodingTargetWrite => TrustedProviderRole::Author.as_str(),
+        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
+            TrustedProviderRole::Reviewer.as_str()
+        }
     }
 }
 

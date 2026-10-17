@@ -480,6 +480,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::cross_cutting::provider_boundary::{ProviderBoundaryEvidence, ProviderBoundaryMode};
+    use crate::cross_cutting::provider_execution::TrustedProviderRole;
     use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
     use crate::product::logical_codebase::policy::{
         PolicyTarget, ProviderDialect, ProviderWireDialect,
@@ -635,12 +636,13 @@ mod tests {
         }
     }
 
-    /// action → 受信岗位文本(与 probe 侧 duty 映射同口径)。
+    /// action → 受信岗位文本(收敛自 `TrustedProviderRole::as_str` 单一
+    /// 事实源,T10/RevB2T9 ⚠3)。
     fn duty_for_action_text(action: SessionPolicyAction) -> &'static str {
         match action {
-            SessionPolicyAction::CodingTargetWrite => "author",
+            SessionPolicyAction::CodingTargetWrite => TrustedProviderRole::Author.as_str(),
             SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
-                "reviewer"
+                TrustedProviderRole::Reviewer.as_str()
             }
         }
     }

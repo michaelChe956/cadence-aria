@@ -34,6 +34,10 @@ use sha2::{Digest, Sha256};
 /// 永不相等。
 pub const PROVIDER_EXECUTION_CONTRACT_SCHEMA: &str = "provider-execution-contract/1";
 
+/// resume 稳定摘要的 schema 域版本(T10):与全量合同摘要的域集合不同
+/// (无 `provider_run_id` 域),二者永不相等;纪律事实演进时递增。
+pub const PROVIDER_EXECUTION_CONTRACT_RESUME_SCHEMA: &str = "provider-execution-contract-resume/1";
+
 /// 执行合同自身的 profile 版本（本期冻结为 1）。
 pub const PROVIDER_EXECUTION_PROFILE_VERSION: u32 = 1;
 
@@ -363,6 +367,40 @@ impl FrozenProviderExecution {
     /// 漂移都会改变该摘要）。
     pub fn contract_digest(&self) -> &str {
         &self.contract_digest
+    }
+
+    /// resume 稳定摘要(T10,REQ-ENV-HOST-01 接线前置):覆盖全部**纪律
+    /// 事实**(profile/职责/承载/部署上下文/环境策略/资源归属/原生画像/
+    /// 岗位摘要/窗口),**不含 `provider_run_id`**——同一 workspace 会话的
+    /// 每次 run 换新 run id,run 级身份事实不得进入 resume 指纹维度,
+    /// 否则每次 resume 都 supersede(复验指纹摘要消费本方法;审计面仍用
+    /// 全量 [`Self::contract_digest`],run id 漂移在审计可见)。
+    pub(crate) fn contract_resume_digest(&self) -> String {
+        hash_domains(
+            PROVIDER_EXECUTION_CONTRACT_RESUME_SCHEMA,
+            &[
+                self.profile_version.to_be_bytes().to_vec(),
+                self.profile.as_str().as_bytes().to_vec(),
+                self.duty.as_str().as_bytes().to_vec(),
+                format!("{:?}", self.carrier).into_bytes(),
+                self.workspace_session_id.as_bytes().to_vec(),
+                self.deployment_context.as_str().as_bytes().to_vec(),
+                self.env_policy_version.to_be_bytes().to_vec(),
+                self.env_policy_digest.as_bytes().to_vec(),
+                self.resource_scope_id.as_bytes().to_vec(),
+                self.native_permission_profile_ref.as_bytes().to_vec(),
+                self.author_policy_digest
+                    .as_deref()
+                    .unwrap_or("")
+                    .as_bytes()
+                    .to_vec(),
+                self.review_window_id
+                    .as_deref()
+                    .unwrap_or("")
+                    .as_bytes()
+                    .to_vec(),
+            ],
+        )
     }
 
     /// audit 面非敏感事实快照（durable 审计/诊断消费；不含任何凭据值）。

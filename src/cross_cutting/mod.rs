@@ -30,12 +30,6 @@ pub mod process_manager;
 pub mod provider_adapter;
 pub mod provider_availability_gate;
 pub mod provider_boundary;
-// Task 6a:产品写边界 launcher helper 接入(消费方:adapter start_validated,
-// owner 顺序见 §0 的 1a→6a→1b)。
-pub use provider_boundary::{
-    BoundaryWriteAttempt, BoundaryWriteChannel, PlannedBoundaryWrite, ProviderBoundaryLauncher,
-    provider_runtime_writable_roots, run_builtin_write_probe, run_write_surface_probe,
-};
 pub mod provider_capabilities;
 pub mod provider_context_builder;
 // 批2 Task 3:统一白名单环境构造器与 trust 发现一致性(§环境精确合同)。

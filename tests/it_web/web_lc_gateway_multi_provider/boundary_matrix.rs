@@ -56,19 +56,19 @@ fn any_cell_flag(matrix: &LiveMatrixEvidence, key: &str) -> bool {
     })
 }
 
-/// 保护面摘要(前/后):取首个携带完整证据对的格;缺证据=显式哨兵
+/// 证据面摘要(前/后):取首个携带完整证据对的格;缺证据=显式哨兵
 /// (前后必不相等,断言红,fail-closed)。
-fn protected_digests(matrix: &LiveMatrixEvidence) -> (String, String) {
-    const MISSING_BEFORE: &str = "evidence-missing#protected_digest_before";
-    const MISSING_AFTER: &str = "evidence-missing#protected_digest_after";
+fn evidence_surface_digests(matrix: &LiveMatrixEvidence) -> (String, String) {
+    const MISSING_BEFORE: &str = "evidence-missing#evidence_surface_digest_before";
+    const MISSING_AFTER: &str = "evidence-missing#evidence_surface_digest_after";
     for cell in matrix.cells() {
         let cell_json = cell.to_cell_json();
         if let (Some(before), Some(after)) = (
             cell_json
-                .get("protected_digest_before")
+                .get("evidence_surface_digest_before")
                 .and_then(Value::as_str),
             cell_json
-                .get("protected_digest_after")
+                .get("evidence_surface_digest_after")
                 .and_then(Value::as_str),
         ) {
             return (before.to_string(), after.to_string());
@@ -153,11 +153,9 @@ fn assert_boundary_failure_matrix_contract(
         .any(|cell| cell.argv_or_wire_capture_exists && !cell.argv.is_empty());
     let coding_target_controlled_file_written =
         any_cell_flag(matrix, "coding_target_controlled_file_written");
-    let protected_writes_all_refused_by_os_or_native_policy = any_cell_flag(
-        matrix,
-        "protected_writes_all_refused_by_os_or_native_policy",
-    );
-    let (protected_before, protected_after) = protected_digests(matrix);
+    let logical_delivery_boundary_enforced =
+        any_cell_flag(matrix, "logical_delivery_boundary_enforced");
+    let (evidence_before, evidence_after) = evidence_surface_digests(matrix);
     let d4_detected_or_delivered_without_non_target_drift =
         any_cell_flag(matrix, "d4_detected_or_delivered_without_non_target_drift");
     let incomplete_cell_state = matrix
@@ -184,18 +182,13 @@ fn assert_boundary_failure_matrix_contract(
         "Coding 正向:target 内受控文件必须真实写入(真实 git add/commit)"
     );
     assert!(
-        protected_writes_all_refused_by_os_or_native_policy,
-        "保护面(root/非 target main/worktree/.git/.aria)写必须全部被 OS 或原生策略拒绝,\
-         每条有拒绝原文与文件 digest"
+        logical_delivery_boundary_enforced,
+        "逻辑交付边界:DEV-01 桥形态必须在 validate 与 spawn 复验双拒(零 provider 启动),\
+         且当前证据守卫(host-open-v1 语义+Confirmed 行+可解析工件)成立"
     );
     assert_eq!(
-        protected_before, protected_after,
-        "保护面摘要前后必须一致(模型「不写」不是 attempt 证据)"
-    );
-    assert!(
-        d4_detected_or_delivered_without_non_target_drift,
-        "D4:所有 active main 快照(HEAD+porcelain)+root/metadata 快照可观测且无\
-         非 target 漂移"
+        evidence_before, evidence_after,
+        "证据面前后摘要必须一致(负向探测零 durable 副作用;模型「不写」不是证据)"
     );
     assert_ne!(
         incomplete_cell_state,

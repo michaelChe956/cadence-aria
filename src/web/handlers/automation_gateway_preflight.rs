@@ -1075,11 +1075,12 @@ mod tests {
         );
     }
 
-    /// 旧实名 3/3(重钉):ClaudeCode 通过;Fake 仅测试运行豁免;LC
-    /// `gateway_required=false` 无旁路;测试模式不放行 Pi/KimiCode。
+    /// 旧实名 3/3(重钉,T10/DEV-01):ClaudeCode 以 **v2 探针 Confirmed
+    /// 行**通过;Fake 仅测试运行豁免;LC `gateway_required=false` 无旁路;
+    /// 测试模式不放行 Pi/KimiCode。
     #[test]
     fn claude_code_passes_and_fake_requires_test_run() {
-        let fixture = role_chain_fixture(&[claude_bootstrap_record()]);
+        let fixture = role_chain_fixture(&[capability_record(ProviderRefType::ClaudeCode, true)]);
         assert!(
             validate_role_chain_for_declared_enrollment_target(
                 Some(&fixture.gateway),

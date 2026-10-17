@@ -190,13 +190,28 @@ impl ValidatedSessionLaunchPolicy {
 
     /// Task 9a:以候选 LC 投影与配套全上下文指纹覆写基准(仅
     /// `resume_or_start_with_projection` 内部使用)。
+    ///
+    /// T10(RevB2T2 ⚠2):合同绑定晚于投影冻结时,本方法必须按冻结合同的
+    /// **resume 稳定摘要**重装饰新投影并重算指纹——与
+    /// [`Self::with_frozen_execution`]、spawn 前复验保持同一装饰纪律;
+    /// 漏装饰会让复验指纹恒 `PolicyDrift(resume_fingerprint)`。
     fn with_lc_projection(
         mut self,
         projection: crate::product::logical_codebase::provider_projection::ProviderPolicyProjection,
         fingerprint: SessionResumeFingerprint,
     ) -> Self {
+        self.fingerprint = match self.execution_contract.as_ref() {
+            Some(contract) => SessionResumeFingerprint::from_envelope(
+                &self.envelope,
+                &projection
+                    .clone()
+                    .with_execution_digest(contract.contract_resume_digest()),
+                &self.projection_digest,
+                &canonical_target_git_identity(&self.envelope.target.worktree),
+            ),
+            None => fingerprint,
+        };
         self.lc_projection = Some(projection);
-        self.fingerprint = fingerprint;
         self
     }
 
@@ -215,9 +230,11 @@ impl ValidatedSessionLaunchPolicy {
     }
 
     /// 批2 Task 2:受信 builder 绑定执行合同(crate 内,`prepare_trusted_*
-    /// _launch` 专用)。指纹以合同摘要装饰投影基准后重算(spawn 前复验按
-    /// 同一装饰重算):执行合同成为 resume 指纹的非敏感漂移维度,旧记录
-    /// (无合同)与绑定后的指纹永不相等。
+    /// _launch` 专用)。指纹按合同的 **resume 稳定摘要**(T10:不含
+    /// `provider_run_id`——同一会话的后续 run 换新 run id 不得让每次
+    /// resume 都 supersede;纪律事实漂移仍必然失配)装饰投影基准后重算
+    /// (spawn 前复验按同一装饰重算):执行合同成为 resume 指纹的非敏感
+    /// 漂移维度,旧记录(无合同)与绑定后的指纹永不相等。
     pub(crate) fn with_frozen_execution(
         mut self,
         contract: crate::cross_cutting::provider_execution::FrozenProviderExecution,
@@ -226,7 +243,7 @@ impl ValidatedSessionLaunchPolicy {
             .lc_projection
             .clone()
             .unwrap_or_else(|| self.basis_projection.clone());
-        let decorated = basis.with_execution_digest(contract.contract_digest().to_string());
+        let decorated = basis.with_execution_digest(contract.contract_resume_digest());
         self.fingerprint = SessionResumeFingerprint::from_envelope(
             &self.envelope,
             &decorated,
@@ -1928,6 +1945,12 @@ impl LogicalCodebaseProviderGateway {
         resource_scope_id: String,
         review_window_id: Option<String>,
     ) -> Result<ValidatedStreamingProviderInput, ProviderGatewayError> {
+        Self::assert_trusted_identity_matches_launch(
+            identity.workspace_session_id(),
+            identity.carrier(),
+            &context.workspace_session_id,
+            &input.role,
+        )?;
         let contract = crate::cross_cutting::provider_execution::freeze_provider_execution(
             identity,
             profile,
@@ -1956,6 +1979,12 @@ impl LogicalCodebaseProviderGateway {
         resource_scope_id: String,
         review_window_id: Option<String>,
     ) -> Result<ValidatedAdapterInput, ProviderGatewayError> {
+        Self::assert_trusted_identity_matches_launch(
+            identity.workspace_session_id(),
+            identity.carrier(),
+            &context.workspace_session_id,
+            &input.role,
+        )?;
         let contract = crate::cross_cutting::provider_execution::freeze_provider_execution(
             identity,
             profile,
@@ -1966,6 +1995,31 @@ impl LogicalCodebaseProviderGateway {
         .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.details))?;
         self.prepare_sync_launch(input, request, context)
             .map(|launch| launch.with_frozen_execution(contract))
+    }
+
+    /// T10(RevB2T2 ⚠3):受信 identity 与启动载体的一致性硬门——身份归属
+    /// 的 workspace 会话必须与本次 run-bound audit 上下文同会话;identity
+    /// 的承载角色(wire 面 `carrier`)必须与 input 自带 role 一致。失配在
+    /// freeze/validate 之前零副作用拒绝,防跨会话/跨角色身份错接后铸出
+    /// 可启动合同(legacy Direct 经 `prepare_trusted_*` 载体接线时同一
+    /// 硬门生效)。
+    fn assert_trusted_identity_matches_launch(
+        identity_session: &str,
+        identity_carrier: &crate::protocol::contracts::AdapterRole,
+        launch_session: &str,
+        input_role: &crate::protocol::contracts::AdapterRole,
+    ) -> Result<(), ProviderGatewayError> {
+        if identity_session != launch_session {
+            return Err(ProviderGatewayError::UnsupportedCapability(format!(
+                "provider_execution_identity_session_mismatch: identity={identity_session} launch_context={launch_session}"
+            )));
+        }
+        if identity_carrier != input_role {
+            return Err(ProviderGatewayError::UnsupportedCapability(format!(
+                "provider_execution_identity_carrier_mismatch: identity={identity_carrier:?} input_role={input_role:?}"
+            )));
+        }
+        Ok(())
     }
 
     /// Task 3.2(B0a2):LC 全上下文公共 prepare 合同。与
@@ -2495,12 +2549,13 @@ impl LogicalCodebaseProviderGateway {
             .lc_projection()
             .cloned()
             .unwrap_or_else(|| Self::lc_basis_projection(&capability, envelope));
-        // 批2 Task 2:绑定执行合同的 policy 按合同摘要装饰同一基准(与
-        // `with_frozen_execution` 的绑定重算同装饰;漏装饰会让每次 spawn
-        // 误报 resume_fingerprint 漂移)。
+        // 批2 Task 2/T10:绑定执行合同的 policy 按合同 **resume 稳定摘要**
+        // 装饰同一基准(与 `with_frozen_execution`/`with_lc_projection` 的
+        // 绑定重算同装饰;摘要不含 run id——run 级身份换新不得在 spawn
+        // 复验误报 resume_fingerprint 漂移,纪律事实漂移仍失配)。
         if let Some(contract) = validated.execution_contract.as_ref() {
             fingerprint_basis =
-                fingerprint_basis.with_execution_digest(contract.contract_digest().to_string());
+                fingerprint_basis.with_execution_digest(contract.contract_resume_digest());
         }
         let current_fingerprint = SessionResumeFingerprint::from_envelope(
             envelope,

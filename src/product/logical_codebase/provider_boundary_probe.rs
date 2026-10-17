@@ -37,6 +37,7 @@ use crate::cross_cutting::provider_boundary::{
     ProviderBoundaryPlan, probe_write_command, shell_quote,
 };
 use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+use crate::cross_cutting::provider_execution::TrustedProviderRole;
 use crate::product::logical_codebase::aggregate_index::freshness::COMPACT_INVENTORY_HARD_BUDGET_BYTES;
 use crate::product::logical_codebase::policy::SessionPolicyAction;
 use crate::product::logical_codebase::provider_projection::ProviderPolicyProjection;
@@ -46,12 +47,6 @@ use crate::product::models::ProviderName;
 /// 语义换代 → v2:增 execution_semantics/duty/review_window_id/
 /// resource_scope_id,去物理拒写面 negatives/D4/bwrap/mounts)。
 pub const BOUNDARY_PROBE_EVIDENCE_SCHEMA: &str = "lc-boundary-probe-evidence-v2";
-
-/// 6a 写面探针通道对「哨兵缺失(写未被观测)」产出的证据标记(见
-/// `provider_boundary.rs::run_probe_script` 的
-/// `"probe sentinel missing (write unobserved)"`);6c 分类器据此把未观测
-/// 拒绝与真实 errno 拒绝区分开——前者永不计入支持面。
-const UNOBSERVED_MARKER: &str = "probe sentinel missing";
 
 /// capability 视角保持 Unknown 的稳定码前缀(缺防护/版本漂移/观测缺失/
 /// 超预算/工件未落盘);其余 `ProbeFailed`(负向落盘、正向失败、受保护面
@@ -63,9 +58,9 @@ const UNKNOWN_STATE_CODES: [&str; 5] = [
     "boundary_observation_over_budget",
     "boundary_artifact_unwritten",
 ];
-
-/// provider 的自然 session/runtime 可写窄面目录(`PROVIDER_RUNTIME_WRITABLE_DIRS`
-/// 中归属该 provider 的第一项;fixture 与正向探针共用同一窄面)。
+/// provider 的自然 session/runtime 可写窄面目录(host-open fixture 与
+/// 正向探针共用同一窄面;原 `PROVIDER_RUNTIME_WRITABLE_DIRS` 常量已随
+/// T10 launcher mount overlay 退役,目录事实由此处与 fixture 持有)。
 pub fn provider_runtime_dir_name(provider: &ProviderName) -> &'static str {
     match provider {
         ProviderName::ClaudeCode => ".claude",
@@ -805,13 +800,6 @@ impl ProviderBoundaryProbe {
         ))
     }
 
-    /// 单次写探针是否**被观测**:被拒且带真实证据(errno/shell 报文)。
-    /// 哨兵缺失(6a 通道以 `probe sentinel missing` 标记)与空证据的「拒绝」
-    /// 都是未观测——不得计入支持面,更不得据此签 Confirmed。
-    pub(crate) fn attempt_observed(refused: bool, evidence: &str) -> bool {
-        !refused || (!evidence.trim().is_empty() && !evidence.contains(UNOBSERVED_MARKER))
-    }
-
     /// capability 三态视角(Confirmed 只能来自 `run` 的真实正向探针+
     /// 岗位/窗口受信在场签发):Ok=Confirmed;材料不一致/岗位窗口缺失/
     /// 版本漂移/观测缺失/超预算/工件未落盘=Unknown;防护失效(正向写
@@ -1066,8 +1054,10 @@ fn validate_scope_for_action(
     action: SessionPolicyAction,
 ) -> Result<(), ProviderBoundaryError> {
     let expected_duty = match action {
-        SessionPolicyAction::CodingTargetWrite => "author",
-        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => "reviewer",
+        SessionPolicyAction::CodingTargetWrite => TrustedProviderRole::Author.as_str(),
+        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
+            TrustedProviderRole::Reviewer.as_str()
+        }
     };
     if scope.duty() != expected_duty {
         return Err(ProviderBoundaryError::InvalidPlan(format!(
@@ -1075,7 +1065,9 @@ fn validate_scope_for_action(
             scope.duty()
         )));
     }
-    if expected_duty == "reviewer" && scope.review_window_id().map(str::is_empty).unwrap_or(true) {
+    if expected_duty == TrustedProviderRole::Reviewer.as_str()
+        && scope.review_window_id().map(str::is_empty).unwrap_or(true)
+    {
         return Err(ProviderBoundaryError::InvalidPlan(
             "boundary_scope_missing: reviewer 探针缺 review 窗口引用(窗口缺失不签)".to_string(),
         ));
@@ -1787,30 +1779,13 @@ mod tests {
     }
 
     /// Task 6c Step 1(断言 355 逐字):未观测/超预算的 evidence 永不
-    /// Confirmed——哨兵缺失的「拒绝」、空证据拒绝、以及观测面超出沿 HEAD
-    /// 预算的真实 probe 运行都必须保持 Unknown(不截断、不冒充)。
+    /// Confirmed——观测缺失(含旧 6a 哨兵语义)与观测面超出沿 HEAD 预算
+    /// 的真实 probe 运行都必须保持 Unknown(不截断、不冒充)。
     #[tokio::test]
     async fn lcg_t06_unobserved_or_over_budget_evidence_never_confirms() {
-        // 1) 分类器:6a 通道的哨兵缺失标记与空证据都是未观测。
-        assert!(
-            !ProviderBoundaryProbe::attempt_observed(
-                true,
-                "sh: 1: probe sentinel missing (write unobserved)"
-            ),
-            "sentinel-missing refusal is unobserved"
-        );
-        assert!(
-            !ProviderBoundaryProbe::attempt_observed(true, "  "),
-            "empty-evidence refusal is unobserved"
-        );
-        assert!(
-            ProviderBoundaryProbe::attempt_observed(
-                true,
-                "sh: 1: cannot create /lc/root/rogue: Read-only file system"
-            ),
-            "refusal with real errno evidence is observed"
-        );
-
+        // 1) 分类器(`attempt_observed`)已随 T10 旧 6a bwrap 探针通道
+        //    退役删除;观测缺失面改由 evidence_state 的 Unknown 分类
+        //    (第 2 段)与真实探针错误码持有。
         // 2) 观测缺失 → 状态非 Confirmed(计划断言 355 逐字)。
         let unobserved_outcome: Result<
             crate::cross_cutting::provider_boundary::ProviderBoundaryEvidence,
