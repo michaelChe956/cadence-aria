@@ -95,6 +95,14 @@ impl ApprovalBridge {
         risk_level: RiskLevel,
         cancel: CancellationToken,
     ) -> Result<PermissionDecision, ProviderAdapterError> {
+        // T22 r3 调试基建:permission 决策面 trace(仅 RUST_LOG 开启时产出)。
+        tracing::debug!(
+            target: "aria_acp_frames",
+            tool = tool_name,
+            risk = ?risk_level,
+            mode = ?self.mode,
+            "permission request_tool enter"
+        );
         if self.mode == ProviderPermissionMode::Auto {
             let event_id = next_permission_id();
             let _ = self

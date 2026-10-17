@@ -10824,6 +10824,20 @@ impl LiveLcGatewayHarness {
         evidence_root: &Path,
     ) -> Result<Value, LiveMatrixFailure> {
         fp_enter_phase("b45", "env", "build");
+        // T22 r3 调试基建:RUST_LOG 在场时挂进程级 fmt subscriber(EnvFilter
+        // 消费 RUST_LOG;stderr 落 --nocapture 输出,随重定向进 rerun 日志)。
+        // 已有全局 subscriber(如 tracing_capture fixture)时静默让位。
+        if std::env::var("RUST_LOG").is_ok() {
+            let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+            let _ = tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_ansi(false)
+                    .with_writer(std::io::stderr)
+                    .finish(),
+            );
+        }
         // issue 描述钉定:验证命令逐字进入计划链。经 build 内 create_issue
         // 消费——先落 override 再 build(b45 专用通道,不影响五阶段矩阵)。
         // 实现:build 后 issue 已建,故改走"描述钉定重建"不可行;改为在

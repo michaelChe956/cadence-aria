@@ -315,8 +315,15 @@ impl WorkspaceEngine {
                         events_open = false;
                         continue;
                     };
-
+                    // T22 r3 调试基建:reviewer provider 事件到达路由点 trace
+                    //(仅 RUST_LOG 开启时产出;判别"帧入不达 hub"分支)。
+                    tracing::debug!(
+                        target: "aria_reviewer_routing",
+                        kind = %format!("{event:?}").chars().take(80).collect::<String>(),
+                        "reviewer provider event routed"
+                    );
                     match event {
+
                         ProviderEvent::TextDelta { content } => {
                             if let Some(node_id) = node_id.as_deref() {
                                 let _ = self.buffer_stream_chunk(node_id, content.clone()).await;

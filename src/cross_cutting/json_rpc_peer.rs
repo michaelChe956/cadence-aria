@@ -213,6 +213,16 @@ where
     }
 
     pub async fn send(&self, payload: Value) -> Result<(), ProviderAdapterError> {
+        // T22 r3 调试基建:ACP 发帧级 trace(截断;仅 RUST_LOG 开启时产出)。
+        tracing::debug!(
+            target: "aria_acp_frames",
+            frame = %serde_json::to_string(&payload)
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect::<String>(),
+            "ACP ->"
+        );
         let mut writer = self.writer.lock().await;
         let line = serde_json::to_string(&payload).map_err(|error| {
             ProviderAdapterError::parse_error(
@@ -250,6 +260,12 @@ async fn read_json_rpc_lines<R>(
             Ok(Some(line)) => line,
             Ok(None) | Err(_) => break,
         };
+        // T22 r3 调试基建:ACP 收帧级 trace(截断;仅 RUST_LOG 开启时产出)。
+        tracing::debug!(
+            target: "aria_acp_frames",
+            frame = %line.chars().take(300).collect::<String>(),
+            "ACP <-"
+        );
         if line.trim().is_empty() {
             continue;
         }
