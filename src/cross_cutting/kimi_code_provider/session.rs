@@ -405,6 +405,10 @@ where
         let _ = lc.native_id_tx.send(Ok(session_id.clone()));
     }
 
+    // 批2 Task 7（Bug45）：terminal manager 会话内单例——dispatcher 消费
+    // 它执行 terminal/*；会话 stall 判定读同一真实活动 registry（同一
+    // terminal_id 的 Started→Running→Exited/Killed/Released 状态源）。
+    let terminal = super::client_services::SessionTerminalManager::new();
     let dispatcher = KimiClientServiceDispatcher::new(
         peer.clone(),
         session_id.clone(),
@@ -418,12 +422,25 @@ where
         Arc::clone(&bridge),
         event_tx.clone(),
         cancel.clone(),
+        terminal.clone(),
         // REQ-PIB-02：基线会话锚点透传（fs 读路由基线树 / terminal 拒绝）。
         input.baseline_tree.clone(),
         // LC target 边界(Task 4c):fs read/write 与 terminal 消费同一
         // 不可伪造 plan;direct 入口为 None,行为不变。
         target_boundary,
     );
+
+    // 批2 Task 7（Bug45）：向消费方投递真实终端活动快照——每会话一次、
+    // 经 awaited send 可靠投递（不依赖可能 try_send 丢失的 UI Execution
+    // 日志）；产品双层看门狗在触发点读快照，缺失/重复/乱序终态事件都
+    // 不会留下永久豁免（快照与 terminal manager 进程生命周期同源）。
+    let _ = event_tx
+        .send(ProviderEvent::TerminalActivity(
+            crate::cross_cutting::streaming_provider::TerminalActivityHandle(Arc::new(
+                terminal.clone(),
+            )),
+        ))
+        .await;
 
     let mut next_prompt_id = 4_u64;
     let prompt = peer.request_with_timeout(
@@ -462,6 +479,16 @@ where
                 return Err(aborted_session_error());
             }
             _ = &mut idle_timer => {
+                // 批2 Task 7（Bug45）：真实在途 terminal 暂停「无工作 stall」
+                // 判定——静默长 CHECK（如 mvn）期间无 Progress 事件，但
+                // registry 是真实进程状态（非伪造心跳）；总 deadline 仍由
+                // 上方 `remaining` 收口，本暂停不延长它。terminal 退出后
+                // 无进展，下一轮 idle 即重新计 stall。
+                if terminal.has_active_terminals() {
+                    idle_deadline =
+                        Instant::now() + kimi_idle_timeout(timeout_secs, resume_id.is_some());
+                    continue;
+                }
                 abort_kimi_session(&peer, &session_id, &event_tx).await;
                 return Err(aborted_session_error());
             }

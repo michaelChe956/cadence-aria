@@ -86,7 +86,8 @@ async fn live_claude_ask_user_question_smoke() {
             | ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
-            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
         }
     };
 
@@ -127,7 +128,8 @@ async fn live_claude_ask_user_question_smoke() {
             | ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
-            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
         }
     };
     println!("EVIDENCE completed output={completed_output}");

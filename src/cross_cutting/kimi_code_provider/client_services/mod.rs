@@ -32,6 +32,9 @@ use self::fs_service::FsError;
 use self::policy::{ClientAction, ClientServicePolicy, PolicyDecision};
 use self::sandbox::canonicalize_root;
 use self::terminal::{TerminalError, TerminalManager};
+// 批2 Task 7（Bug45）：会话（kimi_code_provider::session）注入同一
+// manager 实例并读真实活动 registry——同源状态，不另造第二份。
+pub(crate) use self::terminal::TerminalManager as SessionTerminalManager;
 use self::terminal_handlers::{
     handle_terminal_create, handle_terminal_kill, handle_terminal_output, handle_terminal_release,
     handle_terminal_wait,
@@ -121,10 +124,12 @@ impl<W> KimiClientServiceDispatcher<W>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    /// 11 个参数均为构造期一次性注入的运行时依赖（peer/session/working_dir/
-    /// role/permission_mode/session_env/bridge/event_tx/cancel/baseline_tree/
-    /// target_boundary），无自然聚合语义且仅在 `new` 使用一次，重构为
-    /// struct 会引入额外间接层，故允许 clippy::too_many_arguments。
+    /// 12 个参数均为构造期一次性注入的运行时依赖（peer/session/working_dir/
+    /// role/permission_mode/session_env/bridge/event_tx/cancel/terminal/
+    /// baseline_tree/target_boundary），无自然聚合语义且仅在 `new` 使用
+    /// 一次，重构为 struct 会引入额外间接层，故允许 clippy::too_many_arguments。
+    /// 批2 Task 7（Bug45）：`terminal` 由会话注入（会话 stall 判定与产品
+    /// 双层看门狗读同一真实活动 registry，同源不另造状态）。
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer: JsonRpcPeer<W>,
@@ -136,6 +141,7 @@ where
         bridge: Arc<ApprovalBridge>,
         event_tx: mpsc::Sender<ProviderEvent>,
         cancel: CancellationToken,
+        terminal: TerminalManager,
         baseline_tree: Option<BaselineTreeRef>,
         target_boundary: Option<ProviderBoundaryPlan>,
     ) -> Self {
@@ -158,7 +164,6 @@ where
         // Command output is served through `terminal/output`
         // request/response (see `handle_terminal_output`); kimi 0.38.0
         // ignores unsolicited `terminal/output` notifications.
-        let terminal = TerminalManager::new();
 
         let state = Arc::new(ClientServiceState {
             session_id,
@@ -370,6 +375,7 @@ mod tests {
             )),
             event_tx,
             CancellationToken::new(),
+            TerminalManager::new(),
             None,
             None,
         );
@@ -471,6 +477,7 @@ mod tests {
             )),
             event_tx,
             CancellationToken::new(),
+            TerminalManager::new(),
             None,
             None,
         );
@@ -607,6 +614,7 @@ mod tests {
             )),
             event_tx,
             CancellationToken::new(),
+            TerminalManager::new(),
             Some(BaselineTreeRef {
                 repo_path: repo.path().to_path_buf(),
                 branch: "main".to_string(),
@@ -731,6 +739,7 @@ mod tests {
             )),
             event_tx,
             CancellationToken::new(),
+            TerminalManager::new(),
             Some(BaselineTreeRef {
                 repo_path: repo.path().to_path_buf(),
                 branch: "main".to_string(),
@@ -862,6 +871,7 @@ mod tests {
             )),
             event_tx,
             CancellationToken::new(),
+            TerminalManager::new(),
             None,
             Some(plan),
         );
@@ -1037,6 +1047,7 @@ mod tests {
             )),
             event_tx,
             CancellationToken::new(),
+            TerminalManager::new(),
             None,
             Some(plan),
         );

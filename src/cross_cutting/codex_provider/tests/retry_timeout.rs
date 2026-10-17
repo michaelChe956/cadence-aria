@@ -35,7 +35,8 @@ async fn codex_provider_times_out_when_turn_stops_emitting_events() {
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
-            | ProviderEvent::ToolResult(_) => {}
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::Completed(completion) => {
                 let full_output = completion.full_output;
                 panic!("provider completed unexpectedly: {full_output}")
@@ -46,7 +47,8 @@ async fn codex_provider_times_out_when_turn_stops_emitting_events() {
             ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
-            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -86,7 +88,8 @@ async fn codex_provider_reports_resume_stall_when_resumed_turn_emits_no_events()
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
-            | ProviderEvent::ToolResult(_) => {}
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::Completed(completion) => {
                 let full_output = completion.full_output;
                 panic!("provider completed unexpectedly: {full_output}")
@@ -97,7 +100,8 @@ async fn codex_provider_reports_resume_stall_when_resumed_turn_emits_no_events()
             ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
-            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -142,7 +146,8 @@ async fn codex_provider_empty_turn_output_retries_once_and_completes() {
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
             | ProviderEvent::ToolPolicyTerminated(_)
-            | ProviderEvent::ToolResult(_) => {}
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
@@ -191,7 +196,8 @@ async fn codex_provider_empty_output_retry_recovers_when_retry_turn_reuses_item_
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
             | ProviderEvent::ToolPolicyTerminated(_)
-            | ProviderEvent::ToolResult(_) => {}
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
@@ -255,7 +261,8 @@ async fn codex_provider_empty_turn_output_fails_with_provider_empty_output_after
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
             | ProviderEvent::ToolPolicyTerminated(_)
-            | ProviderEvent::ToolResult(_) => {}
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::Completed(completion) => {
                 let full_output = completion.full_output;
                 panic!("provider completed with empty output: {full_output:?}");
@@ -324,7 +331,8 @@ async fn codex_provider_turn_failed_429_surfaces_upstream_error_not_empty_output
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
             | ProviderEvent::ToolPolicyTerminated(_)
-            | ProviderEvent::ToolResult(_) => {}
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::Completed(completion) => {
                 let full_output = completion.full_output;
                 panic!("failed turn must not complete: {full_output:?}");

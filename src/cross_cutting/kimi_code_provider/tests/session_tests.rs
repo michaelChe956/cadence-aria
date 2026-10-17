@@ -452,6 +452,199 @@ async fn resume_stall_aborts_before_total_timeout() {
     server_task.await.expect("server task");
 }
 
+fn host_sleep_bin() -> &'static str {
+    if std::path::Path::new("/bin/sleep").exists() {
+        "/bin/sleep"
+    } else {
+        "/usr/bin/sleep"
+    }
+}
+
+/// 批2 Task 7（Bug45）红测：真实静默长 CHECK 跨 ACP stall 界仍完成。
+///
+/// resume 会话的 stall 界为 `KIMI_RESUME_STALL_TIMEOUT`（测试形态 100ms，
+/// 即线上 60s 的等效界）。server 在 prompt 后发起 terminal/create 执行
+/// 真实 `sleep 0.6`，期间**零 session/update**（静默 CHECK 形态）；
+/// wait_for_exit 返回后才有输出与 end_turn。当前实现把「无 Progress
+/// 事件」当无工作 stall → 100ms 即杀；接线后 ACP stall 必须读真实活动
+/// registry（同一 terminal_id 的 Started→Running→Exited 状态），在途
+/// terminal 暂停 stall 判定——且不延长 10s 总 deadline。
+#[tokio::test]
+async fn silent_terminal_across_resume_stall_boundary_completes() {
+    let (peer, server) = test_peer();
+    let (_commands, mut events, run) = direct_session_events(peer, input(Some("resume"), 10)).await;
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (finish_tx, finish_rx) = oneshot::channel();
+    let server_task = tokio::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(server);
+        let mut reader = tokio::io::BufReader::new(reader);
+        let initialize = read_request(&mut reader).await;
+        send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":initialize["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}
+            })).await;
+        let _initialized = read_request(&mut reader).await;
+        let load = read_request(&mut reader).await;
+        assert_eq!(load["method"], "session/load");
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "id":load["id"], "result":{"sessionId":"terminal_resume"}
+            }),
+        )
+        .await;
+        let prompt = read_request(&mut reader).await;
+        assert_eq!(prompt["method"], "session/prompt");
+        ready_tx.send(()).expect("resume prompt ready");
+
+        // 静默长 CHECK：terminal/create（argv 形态，真实 sleep 0.6s）。
+        send_message(&mut writer, serde_json::json!({
+            "jsonrpc":"2.0", "id":100, "method":"terminal/create",
+            "params":{"sessionId":"terminal_resume", "command":host_sleep_bin(), "args":["0.65"], "cwd":""}
+        })).await;
+        let create_reply = read_request(&mut reader).await;
+        let terminal_id = create_reply["result"]["terminalId"]
+            .as_str()
+            .expect("terminal create reply carries terminalId")
+            .to_string();
+        // wait_for_exit 期间会话无任何 session/update（静默）。
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "id":101, "method":"terminal/wait_for_exit",
+                "params":{"sessionId":"terminal_resume", "terminalId":terminal_id}
+            }),
+        )
+        .await;
+        let wait_reply = read_request(&mut reader).await;
+        assert_eq!(wait_reply["id"], serde_json::json!(101));
+        assert_eq!(wait_reply["result"]["exitCode"], serde_json::json!(0));
+
+        // CHECK 结束才有输出与 turn 终止。
+        send_message(&mut writer, serde_json::json!({
+            "jsonrpc":"2.0", "method":"session/update",
+            "params":{"sessionId":"terminal_resume", "update":{"sessionUpdate":"agent_message_chunk", "content":{"type":"text","text":"check done"}}}
+        })).await;
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "id":prompt["id"], "result":{"stopReason":"end_turn"}
+            }),
+        )
+        .await;
+        finish_rx.await.expect("finish server");
+    });
+
+    ready_rx.await.expect("resume path reached prompt");
+    let started = std::time::Instant::now();
+    let mut saw_completed = false;
+    let mut saw_aborted = false;
+    while !saw_completed && !saw_aborted {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("terminal run must stay inside the 10s total deadline")
+            .expect("event value");
+        saw_completed = matches!(event, ProviderEvent::Completed(_));
+        saw_aborted |= matches!(
+            event,
+            ProviderEvent::StatusChanged(
+                crate::cross_cutting::streaming_provider::ProviderStatus::Aborted
+            )
+        );
+    }
+    assert!(
+        saw_completed,
+        "真实静默 terminal 在途时 ACP stall 必须暂停，run 应正常完成（而非 60s 等效界误杀）"
+    );
+    assert!(started.elapsed() >= std::time::Duration::from_millis(500));
+    finish_tx.send(()).expect("finish server signal");
+    assert!(run.await.expect("run join").is_ok());
+    server_task.await.expect("server task");
+}
+
+/// 批2 Task 7（Bug45）红测：活动 terminal 暂停 stall 判定但不延长总
+/// deadline。
+///
+/// resume 会话（stall 界 100ms 等效），总 deadline 2s；prompt 后发起
+/// 真实 `sleep 5` terminal 并保持静默。接线后：100ms 界被真实在途
+/// terminal 暂停，但 2s 总 deadline 仍收口（Aborted 不早于 ~1.5s）。
+/// 当前实现 100ms 即按无工作 stall 误杀（elapsed < 1s）→ 红。
+/// 资源回收由 dispatcher Drop→cleanup_all 沿既有 kill 链承担（迟到
+/// create 的 spawn 前拒绝见 terminal_handlers 测试）。
+#[tokio::test]
+async fn active_terminal_pause_does_not_extend_total_deadline() {
+    let (peer, server) = test_peer();
+    let (_commands, mut events, run) = direct_session_events(peer, input(Some("resume"), 2)).await;
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (finish_tx, finish_rx) = oneshot::channel();
+    let server_task = tokio::spawn(async move {
+        let (reader, mut writer) = tokio::io::split(server);
+        let mut reader = tokio::io::BufReader::new(reader);
+        let initialize = read_request(&mut reader).await;
+        send_message(&mut writer, serde_json::json!({
+                "jsonrpc":"2.0", "id":initialize["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}
+            })).await;
+        let _initialized = read_request(&mut reader).await;
+        let load = read_request(&mut reader).await;
+        assert_eq!(load["method"], "session/load");
+        send_message(
+            &mut writer,
+            serde_json::json!({
+                "jsonrpc":"2.0", "id":load["id"], "result":{"sessionId":"terminal_deadline"}
+            }),
+        )
+        .await;
+        let prompt = read_request(&mut reader).await;
+        assert_eq!(prompt["method"], "session/prompt");
+        ready_tx.send(()).expect("resume prompt ready");
+
+        // 在途长 CHECK：真实 sleep 5s（超出 2s 总 deadline），会话静默。
+        send_message(&mut writer, serde_json::json!({
+            "jsonrpc":"2.0", "id":100, "method":"terminal/create",
+            "params":{"sessionId":"terminal_deadline", "command":host_sleep_bin(), "args":["5"], "cwd":""}
+        })).await;
+        let create_reply = read_request(&mut reader).await;
+        assert!(
+            create_reply["result"]["terminalId"].is_string(),
+            "create reply: {create_reply}"
+        );
+
+        // 总 deadline 收口：session/cancel 是 abort 的第一个可见信号。
+        let cancel = read_request(&mut reader).await;
+        assert_eq!(cancel["method"], "session/cancel");
+        finish_rx.await.expect("finish server");
+    });
+
+    ready_rx.await.expect("resume path reached prompt");
+    let started = std::time::Instant::now();
+    let mut saw_aborted = false;
+    while !saw_aborted {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("run must stay bounded")
+            .expect("event value");
+        saw_aborted = matches!(
+            event,
+            ProviderEvent::StatusChanged(
+                crate::cross_cutting::streaming_provider::ProviderStatus::Aborted
+            )
+        );
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= std::time::Duration::from_millis(1500),
+        "活动 terminal 只暂停 stall 判定，不得提前于总 deadline 误杀: {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(4),
+        "总 deadline（2s）必须仍然收口: {elapsed:?}"
+    );
+    assert!(run.await.expect("run join").is_err());
+    finish_tx.send(()).expect("finish server signal");
+    server_task.await.expect("server task");
+}
+
 #[tokio::test]
 async fn cancel_write_failure_still_emits_aborted_without_failed() {
     let (client, server) = tokio::io::duplex(16 * 1024);
@@ -768,6 +961,11 @@ async fn prompt_eof_after_buffered_update_returns_stream_ended_error() {
             })).await;
     });
 
+    // 批2 Task 7：会话启动时先投递一次活动快照，跳过后再校验 Running。
+    assert!(matches!(
+        events.recv().await,
+        Some(ProviderEvent::TerminalActivity(_))
+    ));
     assert!(matches!(
         events.recv().await,
         Some(ProviderEvent::StatusChanged(
@@ -853,6 +1051,8 @@ async fn terminal_response_restarts_prompt_for_buffered_free_text_choice() {
         match events.recv().await.expect("choice event") {
             ProviderEvent::ChoiceRequest(choice) => break choice,
             ProviderEvent::StatusChanged(_) => {}
+            // 批2 Task 7：会话启动时一次投递的活动快照，非 choice 前异常。
+            ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected event before choice: {other:?}"),
         }
     };

@@ -700,6 +700,141 @@ async fn choice_response_within_wait_window_completes_run_without_choice_timeout
     assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
 }
 
+/// 批2 Task 7（Bug45）：真实子进程承载的活动快照（try_wait 即真实进程
+/// 生命周期，非伪造心跳）。
+struct RealChildActivity(std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>);
+
+impl crate::cross_cutting::streaming_provider::TerminalActivitySnapshot for RealChildActivity {
+    fn has_active_terminals(&self) -> bool {
+        let mut child = self.0.lock().expect("activity child lock");
+        match child.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+}
+
+/// ⑤ 批2 Task 7（Bug45）红测：真实静默 terminal 跨 workspace 看门狗窗口
+/// 仍完成——story run 拉起后即投递 TerminalActivity 快照（真实 sleep
+/// 0.6s > 150ms 看门狗窗口），期间事件通道零输出（静默 CHECK 形态），
+/// 子进程退出后才产出完整 artifact。当前看门狗无在途状态接线 → 150ms
+/// 即误杀（红）；接线后活动 terminal 暂停无工作 stall 判定。
+#[tokio::test]
+async fn active_terminal_pauses_workspace_idle_watchdog() {
+    let (_tmp, _lifecycle_store, mut engine, mut rx) = persistent_story_engine();
+    let (command_tx, command_rx) = mpsc::channel(8);
+
+    struct TerminalActiveStoryProvider;
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for TerminalActiveStoryProvider {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, mut command_rx) = mpsc::channel(8);
+            let child = std::process::Command::new("/bin/sleep")
+                // 0.7s 非看门狗窗口(150ms)整数倍：避免退出与重检同拍竞速。
+                .arg("0.7")
+                .spawn()
+                .expect("spawn real sleep child");
+            let child_slot = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
+            let activity: std::sync::Arc<
+                dyn crate::cross_cutting::streaming_provider::TerminalActivitySnapshot,
+            > = std::sync::Arc::new(RealChildActivity(std::sync::Arc::clone(&child_slot)));
+            tokio::spawn(async move {
+                let _ = event_tx
+                    .send(ProviderEvent::TerminalActivity(
+                        crate::cross_cutting::streaming_provider::TerminalActivityHandle(
+                            activity.clone(),
+                        ),
+                    ))
+                    .await;
+                let check_running = async {
+                    while crate::cross_cutting::streaming_provider::TerminalActivitySnapshot::has_active_terminals(activity.as_ref()) {
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                };
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        if let Some(mut child) = child_slot.lock().expect("child lock").take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
+                    _ = check_running => {
+                        let _ = event_tx
+                            .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                                complete_story_artifact("F-19 终端活动后完成", "artifact 完整"),
+                                Some("provider-session-terminal".to_string()),
+                            )))
+                            .await;
+                    }
+                }
+                // 命令通道保持打开（模拟真实 adapter 会话寿命）。
+                while command_rx.recv().await.is_some() {}
+            });
+            Ok(ProviderSession {
+                native_session_id: None,
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+
+        async fn run_streaming(
+            &self,
+            _input: &AdapterInput,
+            _cancel: CancellationToken,
+        ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+            Err(ProviderAdapterError::execution_failed(
+                None,
+                String::new(),
+                "run_streaming is not used by WorkspaceEngine",
+                0,
+            ))
+        }
+    }
+
+    let provider = TerminalActiveStoryProvider;
+    let drive = tokio::spawn(async move {
+        engine
+            .handle_user_message(
+                "开始生成 story".to_string(),
+                std::sync::Arc::new(provider),
+                command_rx,
+            )
+            .await;
+        engine
+    });
+
+    let engine = tokio::time::timeout(std::time::Duration::from_secs(8), drive)
+        .await
+        .expect("静默 terminal 在途时看门狗不得误杀，run 必须完成")
+        .expect("drive task join");
+
+    let mut saw_watchdog_error = false;
+    let mut saw_author_confirm = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            EngineEvent::Error { message } if message.contains("provider_idle_watchdog") => {
+                saw_watchdog_error = true;
+            }
+            EngineEvent::StageChange { stage } if stage == "author_confirm" => {
+                saw_author_confirm = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !saw_watchdog_error,
+        "真实在途 terminal 期间看门狗不得触发（应暂停无工作 stall 判定）"
+    );
+    assert!(saw_author_confirm, "terminal 退出后 run 应正常完成");
+    assert_eq!(engine.session().stage, WorkspaceStage::AuthorConfirm);
+    drop(command_tx);
+}
+
 /// ④ F-19b 覆盖面：story/design review 驱动循环（review/drive.rs）此前完全
 /// 无零活动看门狗——reviewer 静默楔死时 run 永久悬置。对照 author 面先例
 /// 补看门狗臂：静默超过窗口 → Abort kill 链 + 可诊断失败。

@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 
@@ -119,6 +118,18 @@ pub(super) async fn handle_terminal_create(
     params: &Value,
 ) -> Result<String, ClientServiceError> {
     check_session(state, params)?;
+    // 批2 Task 7（Bug45）：会话终结（总 deadline 耗尽/用户取消，经
+    // cleanup_cancel 送达）后到达的 terminal/create 在 spawn 前拒绝——
+    // 超剩余总预算的启动是配置问题（启动数 0，不占并发名额）；在途
+    // terminal 的回收由 dispatcher Drop→cleanup_all 沿既有 kill 链承担。
+    if state.cleanup_cancel.is_cancelled() {
+        return Err(ClientServiceError::Rejected(
+            "terminal create rejected: the invocation has ended (total deadline exhausted or \
+             cancelled); starting a command beyond the remaining invocation budget is a \
+             configuration problem"
+                .to_string(),
+        ));
+    }
     let command = params
         .get("command")
         .and_then(Value::as_str)
@@ -169,9 +180,9 @@ pub(super) async fn handle_terminal_create(
         .await
         .map_err(ClientServiceError::Terminal)?;
 
-    emit_execution_event(
+    emit_terminal_lifecycle_event(
         state,
-        ProviderExecutionEventKind::Command,
+        &terminal_id,
         ProviderExecutionEventStatus::Started,
         display,
         Some(format!(
@@ -182,7 +193,8 @@ pub(super) async fn handle_terminal_create(
         Some(terminal_command.cwd.to_string_lossy().into_owned()),
         None,
         None,
-    );
+    )
+    .await;
 
     state
         .terminal
@@ -207,9 +219,9 @@ pub(super) async fn handle_terminal_wait(
         .wait_for_exit(terminal_id)
         .await
         .map_err(ClientServiceError::Terminal)?;
-    emit_execution_event(
+    emit_terminal_lifecycle_event(
         state,
-        ProviderExecutionEventKind::Command,
+        terminal_id,
         if result.timed_out || result.killed {
             ProviderExecutionEventStatus::Failed
         } else {
@@ -228,7 +240,8 @@ pub(super) async fn handle_terminal_wait(
             .to_string(),
         ),
         result.exit_code,
-    );
+    )
+    .await;
     Ok(result)
 }
 
@@ -285,15 +298,17 @@ pub(super) async fn handle_terminal_release(
         .map_err(ClientServiceError::Terminal)
 }
 
-/// Monotonic counter for execution event ids. Timestamp-based ids can
-/// collide when events are emitted concurrently; a process-wide atomic
-/// counter is unique by construction.
-static EXECUTION_EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
-
+/// 批2 Task 7（Bug45）：terminal 生命周期 Execution 事件用稳定
+/// event_id（`kimi_terminal_{terminal_id}`）——Started 与终态同 id，消费方
+/// 据此配对在途状态；不再沿 Started/Completed 各造不同 event_id。发送
+/// 改为 awaited send（可靠投递，通道关闭=会话已终结，忽略），不依赖
+/// 可能 try_send 丢失的 UI 日志；产品看门狗的暂停判定另经
+/// `ProviderEvent::TerminalActivity` 快照（同源 registry），本事件只是
+/// 可观测性投影。
 #[allow(clippy::too_many_arguments)]
-fn emit_execution_event(
+async fn emit_terminal_lifecycle_event(
     state: &ClientServiceState,
-    kind: ProviderExecutionEventKind,
+    terminal_id: &str,
     status: ProviderExecutionEventStatus,
     title: String,
     command: Option<String>,
@@ -301,15 +316,11 @@ fn emit_execution_event(
     output: Option<String>,
     exit_code: Option<i32>,
 ) {
-    let event_id = format!(
-        "kimi_exec_{}",
-        EXECUTION_EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
-    );
     let _ = state
         .event_tx
-        .try_send(ProviderEvent::Execution(ProviderExecutionEvent {
-            event_id,
-            kind,
+        .send(ProviderEvent::Execution(ProviderExecutionEvent {
+            event_id: format!("kimi_terminal_{terminal_id}"),
+            kind: ProviderExecutionEventKind::Command,
             status,
             title,
             detail: None,
@@ -317,9 +328,9 @@ fn emit_execution_event(
             cwd,
             output,
             exit_code,
-        }));
+        }))
+        .await;
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,48 +364,40 @@ mod tests {
         (state, events)
     }
 
+    /// 批2 Task 7（Bug45）改形：terminal 生命周期 Execution 事件改用
+    /// 稳定 event_id（`kimi_terminal_{terminal_id}`）后，唯一性 = 不同
+    /// terminal 不同 id——并发 create 各自登记的 terminal_id 恒异。
+    #[cfg(unix)]
     #[tokio::test]
     async fn execution_event_ids_are_unique_under_concurrency() {
+        let _dir = tempfile::tempdir().expect("dir");
+        // test_state 的 root=系统临时目录已可作 cwd（argv 形态不经 SHELL）。
         let (state, mut events) = test_state(AdapterRole::Executor);
-        let emitter = {
-            let state = Arc::clone(&state);
-            tokio::spawn(async move {
-                for _ in 0..64 {
-                    emit_execution_event(
-                        &state,
-                        ProviderExecutionEventKind::Command,
-                        ProviderExecutionEventStatus::Started,
-                        "t".to_string(),
-                        None,
-                        None,
-                        None,
-                        None,
-                    );
-                }
+        // 并发上限 4：Finished（未 release）仍占并发名额，用满额并发。
+        let creates: Vec<_> = (0..4)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    let params = json!({
+                        "sessionId": "client-service-test",
+                        "command": "/bin/echo",
+                        "args": ["concurrent"],
+                        "cwd": ""
+                    });
+                    handle_terminal_create(&state, &params)
+                        .await
+                        .expect("concurrent create")
+                })
             })
-        };
-        let another = {
-            let state = Arc::clone(&state);
-            tokio::spawn(async move {
-                for _ in 0..64 {
-                    emit_execution_event(
-                        &state,
-                        ProviderExecutionEventKind::Command,
-                        ProviderExecutionEventStatus::Started,
-                        "t".to_string(),
-                        None,
-                        None,
-                        None,
-                        None,
-                    );
-                }
-            })
-        };
-        emitter.await.expect("emitter");
-        another.await.expect("another");
+            .collect();
+        let mut terminals = Vec::new();
+        for create in creates {
+            terminals.push(create.await.expect("create task"));
+        }
         let mut ids = Vec::new();
-        while ids.len() < 128 {
-            match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while ids.len() < 4 {
+            match tokio::time::timeout_at(deadline, events.recv()).await {
                 Ok(Some(ProviderEvent::Execution(event))) => ids.push(event.event_id),
                 other => panic!("unexpected event while collecting ids: {other:?}"),
             }
@@ -403,6 +406,96 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), ids.len(), "event ids must be unique");
+        for terminal in terminals {
+            state.terminal.release(&terminal).await.expect("release");
+        }
+    }
+
+    /// 批2 Task 7（Bug45）红测：同一 terminal 的 Started 与终态 Execution
+    /// 事件必须共用稳定 event_id——不沿 Started/Completed 各造不同
+    /// event_id（现状：进程级自增 seq，两条事件两个 id，消费方无法配对
+    /// 维护在途集合）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_lifecycle_events_share_stable_event_id() {
+        let _dir = tempfile::tempdir().expect("dir");
+        let (state, mut events) = test_state(AdapterRole::Executor);
+        let params = json!({
+            "sessionId": "client-service-test",
+            "command": "/bin/echo",
+            "args": ["stable-id"],
+            "cwd": ""
+        });
+        let terminal_id = handle_terminal_create(&state, &params)
+            .await
+            .expect("create");
+        let wait_params = json!({
+            "sessionId": "client-service-test",
+            "terminalId": terminal_id,
+        });
+        handle_terminal_wait(&state, &wait_params)
+            .await
+            .expect("wait");
+
+        let mut lifecycle = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while lifecycle.len() < 2 {
+            match tokio::time::timeout_at(deadline, events.recv()).await {
+                Ok(Some(ProviderEvent::Execution(event))) => lifecycle.push(event),
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert_eq!(
+            lifecycle[0].status,
+            ProviderExecutionEventStatus::Started,
+            "第一条生命周期事件是 Started"
+        );
+        assert_eq!(
+            lifecycle[1].status,
+            ProviderExecutionEventStatus::Completed,
+            "wait 后终态事件: {:?}",
+            lifecycle[1]
+        );
+        let expected_id = format!("kimi_terminal_{terminal_id}");
+        assert_eq!(
+            lifecycle[0].event_id, expected_id,
+            "Started 事件用 terminal 稳定 id"
+        );
+        assert_eq!(
+            lifecycle[1].event_id, expected_id,
+            "终态事件与 Started 共用同一 event_id（可配对）"
+        );
+        state.terminal.release(&terminal_id).await.expect("release");
+    }
+
+    /// 批2 Task 7（Bug45）红测：会话终结（总 deadline 耗尽/用户取消经
+    /// cleanup_cancel 送达）后到达的 terminal/create 必须在 spawn 前拒绝
+    /// ——超剩余总预算的启动是配置问题，不得占用并发名额（启动数 0）。
+    /// 现状：无该门，迟到 create 会真实 spawn。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_create_after_session_end_is_rejected_before_start() {
+        let _dir = tempfile::tempdir().expect("dir");
+        let (state, _events) = test_state(AdapterRole::Executor);
+        state.cleanup_cancel.cancel();
+        let params = json!({
+            "sessionId": "client-service-test",
+            "command": "/bin/echo",
+            "args": ["late"],
+            "cwd": ""
+        });
+        let error = handle_terminal_create(&state, &params)
+            .await
+            .expect_err("session 结束后的 create 必须在 spawn 前拒绝");
+        let message = error.to_string();
+        assert!(
+            message.contains("invocation"),
+            "拒绝原因必须是预算/配置问题: {message}"
+        );
+        assert!(
+            !state.terminal.has_active_terminals(),
+            "迟到 create 不得登记/启动任何 terminal"
+        );
     }
 
     fn cwd_state(root: PathBuf) -> Arc<ClientServiceState> {

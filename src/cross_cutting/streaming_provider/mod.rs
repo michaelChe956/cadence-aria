@@ -1086,6 +1086,47 @@ impl ProviderCompletion {
     }
 }
 
+/// 批2 Task 7（Bug45）：会话内真实终端活动快照——「活动事件」的载体。
+///
+/// kimi 会话在启动时经事件通道投递一次携带本快照的
+/// `ProviderEvent::TerminalActivity`；消费方（coding/workspace 两层 idle
+/// 看门狗）持有该 handle，在触发点读真实活动 registry：仍有在途
+/// terminal ⇒ 暂停「无工作 stall」判定（不延长总 deadline）。状态与
+/// terminal manager 的进程生命周期同源（同一 terminal_id 的
+/// Started→Running→Exited/Killed/Released），不是伪造心跳或模型自述，
+/// 也不依赖可能 try_send 丢失的 UI Execution 日志——缺失/重复/乱序
+/// 终态事件都不会留下永久豁免。其余 provider 不投递（行为零变化）。
+pub trait TerminalActivitySnapshot: Send + Sync {
+    /// 是否仍有在途（已登记/spawn 后未收口）terminal。
+    fn has_active_terminals(&self) -> bool;
+}
+
+/// `TerminalActivitySnapshot` 的事件载荷包装：为 `ProviderEvent` 的
+/// derive 合同提供 Clone/Debug/PartialEq/Eq（相等性按 Arc 指针同一性）。
+pub struct TerminalActivityHandle(pub std::sync::Arc<dyn TerminalActivitySnapshot>);
+
+impl Clone for TerminalActivityHandle {
+    fn clone(&self) -> Self {
+        Self(std::sync::Arc::clone(&self.0))
+    }
+}
+
+impl std::fmt::Debug for TerminalActivityHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalActivityHandle")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for TerminalActivityHandle {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for TerminalActivityHandle {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderEvent {
     TextDelta {
@@ -1121,6 +1162,10 @@ pub enum ProviderEvent {
     ToolPolicyWarning(CodexProtocolWarningEvent),
     /// 未知审批风暴终止的结构化出口（GC11 canonical `session_terminated` 内存形态）。
     ToolPolicyTerminated(CodexSessionTerminatedEvent),
+    /// 批2 Task 7（Bug45）：会话真实终端活动快照（每会话一次投递；语义见
+    /// [TerminalActivitySnapshot]）。观测性载体：idle 计时语义沿
+    /// `provider_event_is_idle_activity`（本事件算真实活动）。
+    TerminalActivity(TerminalActivityHandle),
 }
 
 /// 一次 provider 会话的 token 用量快照。
@@ -1437,7 +1482,8 @@ pub(crate) async fn run_legacy_bridge_stream<'a>(
                 | ProviderEvent::UsageReport(_)
                 | ProviderEvent::ToolPolicyDecision(_)
                 | ProviderEvent::ToolPolicyWarning(_)
-                | ProviderEvent::ToolPolicyTerminated(_) => {
+                | ProviderEvent::ToolPolicyTerminated(_)
+                | ProviderEvent::TerminalActivity(_) => {
                     continue;
                 }
             };

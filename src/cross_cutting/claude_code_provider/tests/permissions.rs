@@ -177,7 +177,8 @@ done
             ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
-            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }

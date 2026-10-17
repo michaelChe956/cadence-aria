@@ -296,6 +296,7 @@ async fn codex_generic_elicitation_gets_wire_error_reply_and_storm_terminates_se
         {
             ProviderEvent::ToolPolicyWarning(warning) => warnings.push(warning),
             ProviderEvent::ToolPolicyTerminated(termination) => terminations.push(termination),
+            ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::Failed { message } => {
                 assert!(
                     message.contains("unknown_approval_storm"),
@@ -458,7 +459,9 @@ async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
             | ProviderEvent::ToolResult(_)
-            | ProviderEvent::UsageReport(_) => {}
+            | ProviderEvent::UsageReport(_)
+            // 批2 Task 7：终端活动快照——观测性事件，本消费循环不消费。
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::ToolPolicyWarning(warning) => {
                 panic!("classified approvals must not raise protocol warnings: {warning:?}")
             }
@@ -708,7 +711,8 @@ async fn codex_policy_resume_with_missing_record_starts_fresh_and_warns_in_band(
             | ProviderEvent::ToolResult(_)
             | ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolPolicyDecision(_)
-            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
@@ -764,7 +768,8 @@ async fn codex_coder_session_accepts_mcp_elicitation_with_execution_audit() {
             | ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
-            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::Failed { message } => panic!("provider failed: {message}"),
             ProviderEvent::ProtocolError { message, .. } => {
                 panic!("provider protocol error: {message}")
@@ -1037,7 +1042,8 @@ async fn codex_resume_response_missing_thread_id_fails_handshake_not_impersonati
             | ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
-            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::Completed(completion) => {
                 let full_output = completion.full_output;
                 panic!("unconfirmed resume must not complete: {full_output}")

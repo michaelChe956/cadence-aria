@@ -81,7 +81,8 @@ async fn codex_provider_responds_to_current_command_approval_with_json_rpc_resul
             ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
-            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -139,7 +140,8 @@ async fn codex_provider_bridges_request_user_input_and_completes() {
             ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
-            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }
@@ -202,7 +204,8 @@ async fn codex_provider_bridges_all_request_user_input_questions() {
             ProviderEvent::UsageReport(_)
             | ProviderEvent::ToolPolicyDecision(_)
             | ProviderEvent::ToolPolicyWarning(_)
-            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            | ProviderEvent::ToolPolicyTerminated(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             ProviderEvent::PermissionTimeout { permission_id } => {
                 panic!("provider permission timed out: {permission_id}")
             }

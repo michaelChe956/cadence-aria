@@ -421,7 +421,10 @@ impl WorkspaceEngine {
                         // durable 落盘在 Task 3.2 的 LifecycleStore sink 注入。
                         ProviderEvent::ToolPolicyDecision(_)
                         | ProviderEvent::ToolPolicyWarning(_)
-                        | ProviderEvent::ToolPolicyTerminated(_) => {}
+                        | ProviderEvent::ToolPolicyTerminated(_)
+                        // 批2 Task 7：终端活动快照——观测性事件，计划驱动不消费
+                        // （快照消费在 provider_drive/coding 两层看门狗）。
+                        | ProviderEvent::TerminalActivity(_) => {}
                     }
                 }
             }

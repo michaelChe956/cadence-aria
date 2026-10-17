@@ -280,6 +280,13 @@ impl WorkspaceEngine {
             tokio::time::sleep_until(tokio::time::Instant::now() + idle_watchdog_timeout);
         tokio::pin!(idle_watchdog);
         let mut waiting_for_permission = false;
+        // 批2 Task 7（Bug45）：会话投递的真实终端活动快照
+        // （TerminalActivity 事件捕获，见下方事件匹配）；在途 terminal
+        // 暂停零活动 stall 判定——快照与 terminal manager 进程生命周期
+        // 同源，缺失/重复/乱序终态事件不留永久豁免。
+        let mut terminal_activity: Option<
+            std::sync::Arc<dyn crate::cross_cutting::streaming_provider::TerminalActivitySnapshot>,
+        > = None;
         // F-22/F-19b choice 悬置等待界：看门狗对 choice 挂起是「无人应答不是
         // provider 楔死」的设计豁免，但 choice 卡经 broadcast try_send 送达无
         // 重发/无恢复（丢失即永久无应答，v28 0482/0483 三连楔死实测）。本界
@@ -295,6 +302,18 @@ impl WorkspaceEngine {
                 _ = &mut idle_watchdog,
                 if !waiting_for_permission && pending_choice_requests.is_empty() =>
                 {
+                    // 批2 Task 7（Bug45）：真实在途 terminal（与 terminal
+                    // manager 进程生命周期同源的快照）暂停零活动 stall
+                    // 判定；总预算由 ACP 会话总 deadline/choice 界收口，
+                    // 本暂停不延长任何界；terminal 退出后无进展即重新收口。
+                    if let Some(activity) = terminal_activity.as_ref()
+                        && activity.has_active_terminals()
+                    {
+                        idle_watchdog
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + idle_watchdog_timeout);
+                        continue;
+                    }
                     // F-19：provider 会话零活动楔死（触发依据见常量注释）。
                     // 处置对照 handle_permission_timeout 先例：Abort 命令入会话
                     // kill 链 + cancel 触发 adapter 侧 child kill；失败节点带
@@ -591,6 +610,10 @@ impl WorkspaceEngine {
                         ProviderEvent::ToolPolicyDecision(_)
                         | ProviderEvent::ToolPolicyWarning(_)
                         | ProviderEvent::ToolPolicyTerminated(_) => {}
+                        // 批2 Task 7：终端活动快照捕获（看门狗接线消费）。
+                        ProviderEvent::TerminalActivity(handle) => {
+                            terminal_activity = Some(handle.0.clone());
+                        }
                         ProviderEvent::ToolCall(call) => {
                             tool_call_titles.insert(call.id.clone(), call.tool_name.clone());
                             if let Some(command) = extract_tool_command(&call.input) {

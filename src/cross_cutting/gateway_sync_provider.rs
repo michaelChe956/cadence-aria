@@ -372,7 +372,8 @@ async fn drive_validated_session(
                 | ProviderEvent::UsageReport(_)
                 | ProviderEvent::ToolPolicyDecision(_)
                 | ProviderEvent::ToolPolicyWarning(_)
-                | ProviderEvent::ToolPolicyTerminated(_),
+                | ProviderEvent::ToolPolicyTerminated(_)
+                | ProviderEvent::TerminalActivity(_),
             ) => {}
             None => {
                 return Err(ProviderAdapterError::execution_failed(

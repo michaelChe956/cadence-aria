@@ -949,3 +949,265 @@ async fn tool_call_without_result_widens_idle_limit_to_tool_inflight_max() {
     assert_eq!(payload["idle_limit_secs"], 3);
     assert_eq!(payload["open_tool_calls"], 1);
 }
+
+// ---------------------------------------------------------------------------
+// 批2 Task 7（Bug45）：真实活动 terminal 与零活动看门狗的接线。
+// 快照载体 = `ProviderEvent::TerminalActivity`（会话启动时一次投递）；
+// 快照本体 = 真实子进程 try_wait（kimi 链路为 terminal manager 同源
+// registry——见 kimi session_tests；此处钉产品层合同本身）。
+// ---------------------------------------------------------------------------
+
+/// 真实子进程承载的活动快照：`try_wait` 即真实进程生命周期，非伪造心跳。
+struct RealChildActivity(std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>);
+
+impl crate::cross_cutting::streaming_provider::TerminalActivitySnapshot for RealChildActivity {
+    fn has_active_terminals(&self) -> bool {
+        let mut child = self.0.lock().expect("activity child lock");
+        match child.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+}
+
+/// 静默 CHECK 形态：启动即投递 TerminalActivity 快照 + terminal Started
+/// Execution 事件（kimi 终端生命周期形态），此后事件通道静默直到真实
+/// 子进程退出；`complete_after_exit` 决定退出后 Completed 还是恒静默。
+struct TerminalActiveSilentProvider {
+    /// 毫秒粒度：sleep 时长不得是 idle 界的整数倍——否则子进程退出与
+    /// 看门狗重检同拍竞速（退出后 Completed 送达前看门狗先按「退出无
+    /// 进展」收口，语义正确但测不出暂停行为）。
+    sleep_ms: u64,
+    complete_after_exit: bool,
+}
+
+impl TerminalActiveSilentProvider {
+    fn new(sleep_ms: u64, complete_after_exit: bool) -> Self {
+        Self {
+            sleep_ms,
+            complete_after_exit,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for TerminalActiveSilentProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(4);
+        let child = std::process::Command::new("/bin/sleep")
+            .arg(format!("{}.{}", self.sleep_ms / 1000, self.sleep_ms % 1000))
+            .spawn()
+            .expect("spawn real sleep child");
+        let child_slot = std::sync::Arc::new(std::sync::Mutex::new(Some(child)));
+        let activity: std::sync::Arc<
+            dyn crate::cross_cutting::streaming_provider::TerminalActivitySnapshot,
+        > = std::sync::Arc::new(RealChildActivity(std::sync::Arc::clone(&child_slot)));
+        let complete_after_exit = self.complete_after_exit;
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(ProviderEvent::TerminalActivity(
+                    crate::cross_cutting::streaming_provider::TerminalActivityHandle(
+                        activity.clone(),
+                    ),
+                ))
+                .await;
+            let _ = event_tx
+                .send(ProviderEvent::Execution(ProviderExecutionEvent {
+                    event_id: "kimi_terminal_term-1".to_string(),
+                    kind: ProviderExecutionEventKind::Command,
+                    status: ProviderExecutionEventStatus::Started,
+                    title: "/bin/sleep".to_string(),
+                    detail: None,
+                    command: Some("/bin/sleep".to_string()),
+                    cwd: None,
+                    output: None,
+                    exit_code: None,
+                }))
+                .await;
+            // 静默 CHECK：直到真实子进程退出（快照轮询真实状态）。
+            let check_running = async {
+                while crate::cross_cutting::streaming_provider::TerminalActivitySnapshot::has_active_terminals(activity.as_ref()) {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    // kill 链：取消时回收真实子进程（kimi 链 dispatcher Drop 同义）。
+                    if let Some(mut child) = child_slot.lock().expect("child lock").take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
+                _ = check_running => {
+                    if complete_after_exit {
+                        let _ = event_tx
+                            .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                                "terminal check done".to_string(),
+                                Some("provider-session-terminal".to_string()),
+                            )))
+                            .await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        Err(ProviderAdapterError::execution_failed(
+            None,
+            String::new(),
+            "run_streaming is not used by CodingWorkspaceEngine",
+            0,
+        ))
+    }
+}
+
+/// ① 真实静默 terminal 跨产品角色 idle 界仍完成：coder idle=1s，真实
+/// sleep 2s 在途（无任何事件），退出后 Completed。当前实现无在途状态
+/// 接线 → 1s 即误杀（红）。
+#[tokio::test]
+async fn active_terminal_pauses_idle_stall_and_run_completes() {
+    let _env = IdleSecsEnvironment::set(&[(ARIA_CODING_CODER_IDLE_SECS_ENV, "1")]);
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let role_run = coder_role_run(&store, &attempt);
+    let (tx, _rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = TerminalActiveSilentProvider::new(1700, true);
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let started = tokio::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(15),
+        run_coder_invocation(&engine, &attempt, &role_run, &provider, &mut command_rx),
+    )
+    .await
+    .expect("bounded wait for active terminal run");
+
+    assert!(
+        matches!(outcome, ProviderInvocationOutcome::Completed(_)),
+        "真实在途 terminal 必须暂停零活动 stall 判定: {outcome:?}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(1500),
+        "run 必须真实跨越 1s 角色 idle 界（静默 CHECK 在途）: {:?}",
+        started.elapsed()
+    );
+}
+
+/// ② 活动退出后无进展重新触发 stall：terminal 退出（快照翻 false）后
+/// 恒静默 → 必须按角色界收口（缺失终态不留永久豁免——快照同源，无
+/// 事件配对依赖）。
+#[tokio::test]
+async fn terminal_exit_without_progress_retriggers_idle_stall() {
+    let _env = IdleSecsEnvironment::set(&[(ARIA_CODING_CODER_IDLE_SECS_ENV, "1")]);
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let role_run = coder_role_run(&store, &attempt);
+    let (tx, _rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = TerminalActiveSilentProvider::new(0, false);
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(15),
+        run_coder_invocation(&engine, &attempt, &role_run, &provider, &mut command_rx),
+    )
+    .await
+    .expect("bounded wait for post-terminal stall");
+
+    assert!(
+        matches!(
+            outcome,
+            ProviderInvocationOutcome::IdleStall { idle_limit_secs, .. } if idle_limit_secs == 1
+        ),
+        "terminal 退出后无进展必须重新触发 stall: {outcome:?}"
+    );
+}
+
+/// ③ 活动 terminal 不延长总 deadline：总 timeout 1.5s、terminal sleep 4s
+/// 在途——run 必须由 timeout 臂收口（provider_stream_timeout），不是
+/// idle stall 也不是 Completed。
+#[tokio::test]
+async fn active_terminal_does_not_extend_total_deadline() {
+    let _env = IdleSecsEnvironment::set(&[(ARIA_CODING_CODER_IDLE_SECS_ENV, "1")]);
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let role_run = coder_role_run(&store, &attempt);
+    let (tx, _rx) = mpsc::channel(32);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = TerminalActiveSilentProvider::new(4000, false);
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+    let (legacy_input, input) = invocation_inputs(&attempt);
+    let provider_name = ProviderName::Codex;
+
+    let started = tokio::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(15),
+        engine.run_provider_stream_invocation(CodingProviderStreamRun {
+            attempt: &attempt,
+            node_id: "coding_node_idle_watchdog",
+            role_run: Some(&role_run),
+            provider: &provider,
+            legacy_input: &legacy_input,
+            input,
+            provider_name: &provider_name,
+            provider_role: CodingProviderRole::Coder,
+            command_rx: &mut command_rx,
+            allow_legacy_stream_fallback: false,
+            timeout: Some(Duration::from_millis(1500)),
+            timeout_reason_code: Some("provider_stream_timeout"),
+            suppress_failure_side_effects: true,
+            validated_input: None,
+        }),
+    )
+    .await
+    .expect("bounded wait for total deadline");
+
+    assert!(
+        !matches!(outcome, ProviderInvocationOutcome::Completed(_)),
+        "总 deadline 内未完成的 run 不得 Completed"
+    );
+    assert!(
+        !matches!(outcome, ProviderInvocationOutcome::IdleStall { .. }),
+        "活动 terminal 在途时不得以 idle stall 收口（由总 deadline 收口）: {outcome:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "总 deadline（1.5s）必须收口，不得等 terminal 自然结束: {:?}",
+        started.elapsed()
+    );
+    let timeout_payload = store
+        .list_role_run_events(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+        )
+        .expect("role run events")
+        .into_iter()
+        .find(|event| {
+            event.event_type == CodingRoleRunEventType::Timeout
+                && event
+                    .payload
+                    .get("reason_code")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("provider_stream_timeout")
+        })
+        .expect("total deadline timeout event")
+        .payload;
+    assert_eq!(timeout_payload["phase"], "provider_stream");
+}

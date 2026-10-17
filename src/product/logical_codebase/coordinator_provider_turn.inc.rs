@@ -350,7 +350,8 @@ impl GatewayBackedAggregateProviderTurnDriver {
                 | Some(ProviderEvent::UsageReport(_))
                 | Some(ProviderEvent::ToolPolicyDecision(_))
                 | Some(ProviderEvent::ToolPolicyWarning(_))
-                | Some(ProviderEvent::ToolPolicyTerminated(_)) => {}
+                | Some(ProviderEvent::ToolPolicyTerminated(_))
+                | Some(ProviderEvent::TerminalActivity(_)) => {}
                 None => {
                     return Err(AggregateInitializationError::ProviderTurn {
                         step,

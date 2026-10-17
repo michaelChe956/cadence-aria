@@ -250,6 +250,13 @@ impl CodingWorkspaceEngine {
         let idle_watchdog = tokio::time::sleep_until(idle_last_activity_at + idle_limits.role);
         tokio::pin!(idle_watchdog);
         let mut waiting_for_permission = false;
+        // 批2 Task 7（Bug45）：会话投递的真实终端活动快照
+        // （TerminalActivity 事件捕获，见下方 match &event）；在途 terminal
+        // 暂停零活动 stall 判定——不依赖可能 try_send 丢失的 UI Execution
+        // 日志，缺失/重复/乱序终态不留永久豁免。
+        let mut terminal_activity: Option<
+            std::sync::Arc<dyn crate::cross_cutting::streaming_provider::TerminalActivitySnapshot>,
+        > = None;
         // Task 3.2（REQ-ENV-09/D7）：策略会话由 engine 构造 durable 审计 sink
         // （LifecycleStore `tool-policy-run-audit/` 分区）并按 provider run 分配
         // `role_run_seq`（分配随该 run 的 provider_start 首行落盘持久化）；三
@@ -757,6 +764,9 @@ impl CodingWorkspaceEngine {
                             ProviderEvent::PermissionRequest(_) => {
                                 waiting_for_permission = true;
                             }
+                            ProviderEvent::TerminalActivity(handle) => {
+                                terminal_activity = Some(handle.0.clone());
+                            }
                             _ => {}
                         }
                         if provider_event_is_idle_activity(&event) {
@@ -1132,7 +1142,10 @@ impl CodingWorkspaceEngine {
                             // 策略审计出口：观测性事件，主循环不消费。
                             ProviderEvent::ToolPolicyDecision(_)
                             | ProviderEvent::ToolPolicyWarning(_)
-                            | ProviderEvent::ToolPolicyTerminated(_) => {}
+                            | ProviderEvent::ToolPolicyTerminated(_)
+                            // 批2 Task 7：终端活动快照——在上方 &event 匹配中
+                            // 捕获（双层看门狗接线），主消费循环无其他动作。
+                            | ProviderEvent::TerminalActivity(_) => {}
                         }
                     }
                     // P4-a（REQ-PTR-IDLE）：零活动挂起看门狗——置于 biased
@@ -1144,6 +1157,23 @@ impl CodingWorkspaceEngine {
                     _ = &mut idle_watchdog,
                     if !waiting_for_permission && open_choice_ids.is_empty() =>
                     {
+                        // 批2 Task 7（Bug45）：真实在途 terminal（与 terminal
+                        // manager 进程生命周期同源的快照）暂停零活动 stall
+                        // 判定；总 deadline 由上方 timeout 臂收口，本暂停不
+                        // 延长它；terminal 退出后无进展即重新收口。
+                        if let Some(activity) = terminal_activity.as_ref()
+                            && activity.has_active_terminals()
+                        {
+                            idle_last_activity_at = tokio::time::Instant::now();
+                            idle_watchdog.as_mut().reset(
+                                idle_last_activity_at
+                                    + effective_idle_limit(
+                                        idle_limits,
+                                        open_tool_call_ids.len(),
+                                    ),
+                            );
+                            continue;
+                        }
                         let idle_secs = idle_last_activity_at.elapsed().as_secs();
                         let idle_limit_secs =
                             effective_idle_limit(idle_limits, open_tool_call_ids.len()).as_secs();

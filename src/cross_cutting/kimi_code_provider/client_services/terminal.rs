@@ -1,11 +1,12 @@
 //! Terminal execution manager for the kimi `terminal/*` client services.
 //!
-//! Every terminal runs on the host as `pipe` + process group + per-command
-//! timeout + combined stdout/stderr output cap, with a concurrency limit of
-//! `MAX_TERMINALS`. Lifecycle is `created -> running -> (exited|killed) ->
-//! released`; `kill`/`release` are idempotent and unknown ids are
-//! distinguishable errors. 进程/目录先登记(`create` 先于 `start`,spawn
-//! 前占住并发名额),spawn 失败立即释放名额。
+//! Every terminal runs on the host as `pipe` + process group + combined
+//! stdout/stderr output cap, with a concurrency limit of `MAX_TERMINALS`;
+//! 批2 Task 7（Bug45）：命令时长无独立上限，唯一预算是受信 invocation
+//! 总 deadline（经会话取消链 kill 收口）。Lifecycle is `created ->
+//! running -> (exited|killed) -> released`; `kill`/`release` are idempotent
+//! and unknown ids are distinguishable errors. 进程/目录先登记(`create`
+//! 先于 `start`,spawn 前占住并发名额),spawn 失败立即释放名额。
 //!
 //! 批2 Task 6:全角色 Host 单路径——不再有 bwrap/netns/no-new-privs 执行
 //! 隔离,也没有固定解释器/只读 grammar。子进程环境是冻结会话环境(与
@@ -28,7 +29,6 @@ use super::sandbox::open_dir_no_follow_inherit;
 
 pub const MAX_TERMINALS: usize = 4;
 pub const MAX_TERMINAL_OUTPUT_BYTES: usize = 1_048_576;
-pub const TERMINAL_COMMAND_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone)]
 pub struct TerminalCommand {
@@ -116,16 +116,19 @@ struct ManagerInner {
 }
 
 /// The shared terminal manager. Cheap to clone; every clone shares state.
+///
+/// 批2 Task 7（Bug45）：不再有 `TERMINAL_COMMAND_TIMEOUT_SECS=120` 独立
+/// 命令时长上限——命令的唯一预算是受信 invocation 总 deadline（经会话
+/// 取消链 kill 收口），双层看门狗在总 deadline 内对真实在途 terminal
+/// 暂停「无工作 stall」判定（见 `has_active_terminals`）。
 pub struct TerminalManager {
     inner: Arc<Mutex<ManagerInner>>,
-    timeout: Duration,
 }
 
 impl Clone for TerminalManager {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
-            timeout: self.timeout,
         }
     }
 }
@@ -134,14 +137,7 @@ impl TerminalManager {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(ManagerInner::default())),
-            timeout: Duration::from_secs(TERMINAL_COMMAND_TIMEOUT_SECS),
         }
-    }
-
-    #[cfg(test)]
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
     }
 
     /// Register a new terminal. Returns the terminal id once the concurrency
@@ -188,12 +184,11 @@ impl TerminalManager {
             }
             command.take().expect("command checked above")
         };
-        let manager = self.clone();
-        tokio::spawn(run_terminal(entry, command, manager));
+        tokio::spawn(run_terminal(entry, command));
         Ok(())
     }
 
-    /// Wait for a terminal to exit (or be killed / time out).
+    /// Wait for a terminal to exit (or be killed).
     ///
     /// `tokio::sync::Notify` stores no permit, so a terminal that finished
     /// before this call would never wake a late `notified()` registration.
@@ -275,6 +270,31 @@ impl TerminalManager {
             entry.kill.cancel();
         }
     }
+
+    /// 批2 Task 7（Bug45）：真实活动 registry 读口——在途 = Created（已
+    /// 登记，spawn 前）/ Running（spawn 后未收口）；Exited/Killed/
+    /// Released 及 spawn 失败全部移除（与并发名额同一状态源）。ACP
+    /// session 的 stall 判定与产品双层看门狗（经
+    /// `streaming_provider::TerminalActivitySnapshot`）消费同一真实
+    /// 进程状态——不是伪造心跳或模型自述。
+    pub fn has_active_terminals(&self) -> bool {
+        let inner = self.inner.lock().expect("terminal manager lock");
+        inner.terminals.values().any(|entry| {
+            matches!(
+                *entry.state.lock().expect("terminal state lock"),
+                TerminalState::Created | TerminalState::Running
+            )
+        })
+    }
+}
+
+/// 批2 Task 7（Bug45）：terminal manager 即活动快照本体——产品双层
+/// 看门狗经事件通道拿到的是同一 manager 的克隆句柄（共享 registry），
+/// 读取的是真实进程生命周期，不引入第二份状态。
+impl crate::cross_cutting::streaming_provider::TerminalActivitySnapshot for TerminalManager {
+    fn has_active_terminals(&self) -> bool {
+        TerminalManager::has_active_terminals(self)
+    }
 }
 
 struct TerminalChild {
@@ -324,11 +344,7 @@ impl Drop for TerminalChild {
 // 子进程消费冻结会话环境(TerminalCommand::env,与 provider 进程同一
 // env map),不再按授权根另行构造。
 
-async fn run_terminal(
-    entry: Arc<TerminalEntry>,
-    command: TerminalCommand,
-    manager: TerminalManager,
-) {
+async fn run_terminal(entry: Arc<TerminalEntry>, command: TerminalCommand) {
     let started = Instant::now();
     {
         let mut state = entry.state.lock().expect("terminal state lock");
@@ -414,24 +430,20 @@ async fn run_terminal(
         ))
     });
 
+    // 批2 Task 7（Bug45）：Completion 只剩 Exited/Killed——120s 独立超时
+    // 臂已删，命令时长由受信 invocation 总 deadline 经 kill/cancel 收口。
     enum Completion {
         Exited(std::io::Result<std::process::ExitStatus>),
-        TimedOut,
         Killed,
     }
 
     let completion = tokio::select! {
         status = child.wait() => Completion::Exited(status),
-        _ = tokio::time::sleep(manager.timeout) => Completion::TimedOut,
         _ = entry.kill.cancelled() => Completion::Killed,
     };
 
     let (exit_code, timed_out, killed) = match completion {
         Completion::Exited(status) => (status.ok().and_then(|status| status.code()), false, false),
-        Completion::TimedOut => {
-            child.terminate().await;
-            (None, true, false)
-        }
         Completion::Killed => {
             child.terminate().await;
             (None, false, true)
@@ -539,8 +551,8 @@ async fn read_terminal_stream<R>(
 mod tests {
     use super::*;
 
-    fn manager(timeout: Duration) -> TerminalManager {
-        TerminalManager::new().with_timeout(timeout)
+    fn manager() -> TerminalManager {
+        TerminalManager::new()
     }
 
     #[cfg(unix)]
@@ -581,7 +593,7 @@ mod tests {
     async fn full_lifecycle_create_wait_release() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "emit", "printf 'out'; printf 'err' >&2; exit 3");
-        let manager = manager(Duration::from_secs(5));
+        let manager = manager();
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -600,7 +612,7 @@ mod tests {
     async fn kill_while_wait_pending_returns_killed() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "slow", "sleep 30");
-        let manager = manager(Duration::from_secs(30));
+        let manager = manager();
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -624,7 +636,7 @@ mod tests {
     async fn fifth_terminal_is_rejected() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "slow", "sleep 30");
-        let manager = manager(Duration::from_secs(30));
+        let manager = manager();
         let mut ids = Vec::new();
         for _ in 0..MAX_TERMINALS {
             let id = manager
@@ -648,7 +660,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn unknown_id_is_distinguishable() {
-        let manager = manager(Duration::from_secs(5));
+        let manager = manager();
         assert_eq!(
             manager.wait_for_exit("term-missing").await,
             Err(TerminalError::UnknownTerminal("term-missing".to_string()))
@@ -663,22 +675,32 @@ mod tests {
         );
     }
 
+    /// 批2 Task 7（Bug45）：`TERMINAL_COMMAND_TIMEOUT_SECS=120` 独立上限
+    /// 已删——命令时长的唯一收口是 kill/cancel 的进程组终止。本测试钉
+    /// 进程组语义（直接子进程带孙进程；只杀直接子进程会留下孙进程，
+    /// killpg 必须整组收割）；「无 120s 独立上限」由双层看门狗接线测试
+    /// （kimi session_tests / coding provider_idle_stall）钉跨界行为。
     #[cfg(unix)]
     #[tokio::test]
-    async fn timeout_terminates_process_group() {
+    async fn kill_terminates_process_group_tree() {
         let dir = tempfile::tempdir().expect("dir");
-        // The child spawns a grandchild so process-group kill semantics are
-        // exercised: killing only the direct child would leave the grandchild.
         let bin = write_executable(dir.path(), "slow-tree", "sleep 30 & sleep 30; exit 0");
-        let manager = manager(Duration::from_millis(200));
+        let manager = manager();
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
             .expect("create");
         manager.start(&id).expect("start");
-        let result = manager.wait_for_exit(&id).await.expect("wait");
-        assert!(result.timed_out);
+        // 孙进程已起（组内两个 sleep）。
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        manager.kill(&id).await.expect("kill");
+        let result = tokio::time::timeout(Duration::from_secs(10), manager.wait_for_exit(&id))
+            .await
+            .expect("kill must bound the wait")
+            .expect("wait result");
+        assert!(result.killed);
         assert_eq!(result.exit_code, None);
+        assert!(!result.timed_out);
     }
 
     // —— 唯一保留的真实进程端到端用例（DEF-7 桶收敛，D4）——
@@ -693,7 +715,7 @@ mod tests {
             MAX_TERMINAL_OUTPUT_BYTES + 1
         );
         let bin = write_executable(dir.path(), "smoke-cap", &script);
-        let manager = manager(Duration::from_secs(60));
+        let manager = manager();
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -731,7 +753,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(150)).await;
             drop(hold);
         });
-        let manager = manager(Duration::from_secs(30));
+        let manager = manager();
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -751,7 +773,7 @@ mod tests {
     async fn wait_after_fast_exit_returns_immediately() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "fast", "exit 0");
-        let manager = manager(Duration::from_secs(5));
+        let manager = manager();
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -775,7 +797,7 @@ mod tests {
     async fn kill_after_release_is_idempotent() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "slow", "sleep 30");
-        let manager = manager(Duration::from_secs(30));
+        let manager = manager();
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -794,7 +816,7 @@ mod tests {
     async fn failed_start_frees_concurrency_quota() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "slow", "sleep 30");
-        let manager = manager(Duration::from_secs(30));
+        let manager = manager();
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -824,7 +846,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_failure_releases_concurrency_quota() {
         let dir = tempfile::tempdir().expect("dir");
-        let manager = manager(Duration::from_secs(5));
+        let manager = manager();
         let id = manager
             .create(command(
                 &dir.path().join("definitely-missing-bin"),
@@ -855,7 +877,7 @@ mod tests {
     async fn cleanup_all_kills_live_terminals() {
         let dir = tempfile::tempdir().expect("dir");
         let bin = write_executable(dir.path(), "slow", "sleep 30");
-        let manager = manager(Duration::from_secs(30));
+        let manager = manager();
         let id = manager
             .create(command(&bin, dir.path(), &[]))
             .await
@@ -864,6 +886,70 @@ mod tests {
         manager.cleanup_all();
         let result = manager.wait_for_exit(&id).await.expect("wait");
         assert!(result.killed);
+    }
+
+    /// 批2 Task 7（Bug45）：真实活动 registry 生命周期钉——同一
+    /// terminal_id 的 Started（登记）→ Running → 终态（Exited/Killed/
+    /// Released/spawn 失败）全链在途性正确。双层看门狗消费的就是这份
+    /// 状态（经 `TerminalActivitySnapshot`），不是事件日志。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn activity_registry_tracks_lifecycle_states() {
+        let dir = tempfile::tempdir().expect("dir");
+        let fast = write_executable(dir.path(), "fast", "exit 0");
+        let slow = write_executable(dir.path(), "slow", "sleep 30");
+        let manager = manager();
+
+        // Started（已登记，未 spawn）→ 在途。
+        let fast_id = manager
+            .create(command(&fast, dir.path(), &[]))
+            .await
+            .expect("create");
+        assert!(manager.has_active_terminals(), "登记即 Started（在途）");
+
+        // Running → 退出（Exited）→ 移除。
+        manager.start(&fast_id).expect("start");
+        assert!(manager.has_active_terminals(), "Running 在途");
+        manager.wait_for_exit(&fast_id).await.expect("wait");
+        assert!(
+            !manager.has_active_terminals(),
+            "Exited 移除在途状态（不留永久豁免）"
+        );
+
+        // Running → kill（Killed）→ 移除。
+        let slow_id = manager
+            .create(command(&slow, dir.path(), &[]))
+            .await
+            .expect("create slow");
+        manager.start(&slow_id).expect("start slow");
+        assert!(manager.has_active_terminals());
+        manager.kill(&slow_id).await.expect("kill");
+        manager.wait_for_exit(&slow_id).await.expect("wait slow");
+        assert!(!manager.has_active_terminals(), "Killed 移除在途状态");
+
+        // Running → release（Released）→ 移除（幂等重复 release 不复活）。
+        let rel_id = manager
+            .create(command(&slow, dir.path(), &[]))
+            .await
+            .expect("create rel");
+        manager.start(&rel_id).expect("start rel");
+        manager.release(&rel_id).await.expect("release");
+        manager.release(&rel_id).await.expect("idempotent release");
+        manager.wait_for_exit(&rel_id).await.expect("wait rel");
+        assert!(!manager.has_active_terminals(), "Released 移除在途状态");
+
+        // spawn 失败（创建失败）→ 移除（不占名额也不在途）。
+        let fail_id = manager
+            .create(command(
+                &dir.path().join("definitely-missing-bin"),
+                dir.path(),
+                &[],
+            ))
+            .await
+            .expect("create doomed");
+        manager.start(&fail_id).expect("start doomed");
+        manager.wait_for_exit(&fail_id).await.expect("wait doomed");
+        assert!(!manager.has_active_terminals(), "创建失败移除在途状态");
     }
     // —— DEF-7 桶确定性边界族（D4/kimi-acp MODIFIED 确定性验证条款）——
     // 受控内存流（tokio::io::duplex）直接驱动 read_terminal_stream 的预算/截断
