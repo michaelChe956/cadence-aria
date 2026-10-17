@@ -86,6 +86,96 @@ impl CodingGitOperationJournal {
     }
 }
 
+// ---------------------------------------------------------------------------
+// T19:平台 git mutation 写通道守卫(stage/commit/push/补偿共用单一收口)
+//
+// 约定:窗口 store 根 = `<aria>/reviewer-windows`(与
+// coding_workspace_engine::code_review 的 `REVIEWER_WINDOW_STORE_DIR`
+// 字面量同源一致——两处 mod 均私有,常量各持一份并互相锚定,改动须同步)。
+// 闸门按 common-dir 键控:窗口冻结(Frozen/Draining)期间一律拒绝新 writer;
+// enter 为非阻塞判定/登记,不在 attempt 仲裁锁内等待窗口释放(无死锁面)。
+// 残留 writer(崩溃于 enter/exit 之间)由窗口排空按 PID-start 收割或停等,
+// fail-closed。
+// ---------------------------------------------------------------------------
+
+const REVIEWER_WINDOW_STORE_DIR_NAME: &str = "reviewer-windows";
+
+fn enter_review_write_channel(
+    paths: &crate::product::app_paths::ProductAppPaths,
+    worktree: &Path,
+    channel: crate::product::reviewer_window_store::WriteChannelKind,
+    attempt_id: &str,
+) -> Result<(), ProductStoreError> {
+    let store = crate::product::reviewer_window_store::ReviewerWindowStore::new(
+        paths.root().join(REVIEWER_WINDOW_STORE_DIR_NAME),
+    );
+    // writer 身份与 engine 侧补偿守卫同方案(platform-git-{attempt_id} +
+    // 本进程 PID-start),两侧 exit-all 自愈互认;改动须双侧同步。
+    let writer = crate::product::reviewer_window_store::ChannelWriter {
+        writer_id: format!("platform-git-{attempt_id}"),
+        boot_identity: format!("aria-platform-{}", std::process::id()),
+        pid: std::process::id(),
+        start_time_ticks: crate::cross_cutting::process_manager::process_start_time_ticks(
+            std::process::id(),
+        )
+        .unwrap_or(0),
+        entered_at: Utc::now().to_rfc3339(),
+    };
+    crate::product::reviewer_window::enter_platform_write(&store, worktree, channel, writer)
+        .map_err(|error| {
+            ProductStoreError::Io(format!("reviewer_window_channel_blocked: {}", error))
+        })
+}
+
+fn channel_exit_set() -> [crate::product::reviewer_window_store::WriteChannelKind; 4] {
+    crate::product::reviewer_window_store::ALL_WRITE_CHANNELS
+}
+
+fn exit_review_write_channels_best_effort(
+    paths: &crate::product::app_paths::ProductAppPaths,
+    worktree: &Path,
+    attempt_id: &str,
+    channels: &[crate::product::reviewer_window_store::WriteChannelKind],
+) {
+    let store = crate::product::reviewer_window_store::ReviewerWindowStore::new(
+        paths.root().join(REVIEWER_WINDOW_STORE_DIR_NAME),
+    );
+    let writer_id = format!("platform-git-{attempt_id}");
+    for channel in channels {
+        if let Err(error) = crate::product::reviewer_window::exit_platform_write(
+            &store, worktree, *channel, &writer_id,
+        ) {
+            tracing::warn!(
+                ?error,
+                channel = channel.as_str(),
+                "reviewer_window_channel_exit_failed"
+            );
+        }
+    }
+}
+
+/// ReviewRequest 类 journal 相位 → 「该相位期间即将发生的平台 mutation」
+/// 所属通道(None = 其间只有读操作/无 mutation)。enter 在相位落盘后、
+/// mutation 发生前登记;下一相位推进时退出上一通道。
+fn review_request_channel_for(
+    phase: CodingGitOperationPhase,
+) -> Option<crate::product::reviewer_window_store::WriteChannelKind> {
+    use crate::product::reviewer_window_store::WriteChannelKind;
+    match phase {
+        // Before:git_add(Stage)。
+        CodingGitOperationPhase::Before => Some(WriteChannelKind::Stage),
+        // CommitStarted:git_commit(Commit)。
+        CodingGitOperationPhase::CommitStarted => Some(WriteChannelKind::Commit),
+        // CommitCreated→PushStarted 之间只有远端读探测;PushStarted:git_push。
+        CodingGitOperationPhase::CommitCreated => None,
+        CodingGitOperationPhase::PushStarted => Some(WriteChannelKind::Push),
+        CodingGitOperationPhase::Compensated
+        | CodingGitOperationPhase::Completed
+        | CodingGitOperationPhase::BranchCreated
+        | CodingGitOperationPhase::WorktreeCreated => None,
+    }
+}
+
 impl super::CodingAttemptStore {
     pub fn prepare_coding_git_operation(
         &self,
@@ -100,7 +190,20 @@ impl super::CodingAttemptStore {
             &current_attempt.id,
         );
 
-        with_exclusive_lock(&path, || {
+        // T19 通道守卫(自愈式):进入前清本 writer 全部残留(崩溃残留/
+        // 上一相位;同 attempt 流程经 journal 锁串行,无误清并发),
+        // durable 写意图落盘后、mutation 发生前登记 writer;窗口冻结
+        // 期间拒绝(journal 停在原相位,重入幂等续接)。
+        {
+            let paths = self.paths();
+            exit_review_write_channels_best_effort(
+                &paths,
+                &candidate.worktree_path,
+                &current_attempt.id,
+                &channel_exit_set(),
+            );
+        }
+        let journal = with_exclusive_lock(&path, || {
             if path.is_file() {
                 let existing: CodingGitOperationJournal = read_json(&path)?;
                 validate_journal(&existing, &current_attempt)?;
@@ -113,7 +216,18 @@ impl super::CodingAttemptStore {
             }
             write_json(&path, &candidate)?;
             Ok(candidate)
-        })
+        })?;
+        if journal.kind == CodingGitOperationKind::ReviewRequest
+            && let Some(channel) = review_request_channel_for(journal.phase)
+        {
+            enter_review_write_channel(
+                &self.paths(),
+                &journal.worktree_path,
+                channel,
+                &current_attempt.id,
+            )?;
+        }
+        Ok(journal)
     }
 
     pub fn get_coding_git_operation(
@@ -147,8 +261,18 @@ impl super::CodingAttemptStore {
             &current_attempt.issue_id,
             &current_attempt.id,
         );
-
-        with_exclusive_lock(&path, || {
+        // T19 通道守卫(自愈式,与 prepare 同款):清残留→durable 推进→
+        // 登记新相位通道(冻结即拒;早退相位重入同样登记)。
+        {
+            let paths = self.paths();
+            exit_review_write_channels_best_effort(
+                &paths,
+                &expected.worktree_path,
+                &current_attempt.id,
+                &channel_exit_set(),
+            );
+        }
+        let journal = with_exclusive_lock(&path, || {
             if !path.is_file() {
                 return Err(identity_mismatch(&current_attempt.id));
             }
@@ -182,7 +306,31 @@ impl super::CodingAttemptStore {
             validate_phase_state(&current)?;
             write_json(&path, &current)?;
             Ok(current)
-        })
+        })?;
+        if journal.kind == CodingGitOperationKind::ReviewRequest {
+            let paths = self.paths();
+            if let Some(next_channel) = review_request_channel_for(journal.phase) {
+                enter_review_write_channel(
+                    &paths,
+                    &journal.worktree_path,
+                    next_channel,
+                    &current_attempt.id,
+                )?;
+            }
+            // 终相位:全通道退出(含补偿)。
+            if matches!(
+                journal.phase,
+                CodingGitOperationPhase::Completed | CodingGitOperationPhase::Compensated
+            ) {
+                exit_review_write_channels_best_effort(
+                    &paths,
+                    &journal.worktree_path,
+                    &current_attempt.id,
+                    &channel_exit_set(),
+                );
+            }
+        }
+        Ok(journal)
     }
 
     pub fn complete_review_coding_git_operation(
@@ -199,7 +347,7 @@ impl super::CodingAttemptStore {
             &current_attempt.id,
         );
 
-        with_exclusive_lock(&path, || {
+        let journal = with_exclusive_lock(&path, || {
             if !path.is_file() {
                 return Err(identity_mismatch(&current_attempt.id));
             }
@@ -233,7 +381,15 @@ impl super::CodingAttemptStore {
             validate_phase_state(&current)?;
             write_json(&path, &current)?;
             Ok(current)
-        })
+        })?;
+        // T19:Completed 终相位——全通道退出(幂等)。
+        exit_review_write_channels_best_effort(
+            &self.paths(),
+            &journal.worktree_path,
+            &current_attempt.id,
+            &channel_exit_set(),
+        );
+        Ok(journal)
     }
 
     /// 重推（RetryPush）专用重开：仅当 journal 为 `Completed(Failed)` 时重开为
@@ -254,7 +410,7 @@ impl super::CodingAttemptStore {
             &current_attempt.id,
         );
 
-        with_exclusive_lock(&path, || {
+        let journal = with_exclusive_lock(&path, || {
             if !path.is_file() {
                 return Err(identity_mismatch(&current_attempt.id));
             }
@@ -277,7 +433,25 @@ impl super::CodingAttemptStore {
             validate_phase_state(&current)?;
             write_json(&path, &current)?;
             Ok(current)
-        })
+        })?;
+        // T19:RetryPush 重开为 PushStarted——清残留后登记 Push 通道
+        // (冻结即拒,journal 已在 PushStarted,重入续接)。
+        {
+            let paths = self.paths();
+            exit_review_write_channels_best_effort(
+                &paths,
+                &journal.worktree_path,
+                &current_attempt.id,
+                &channel_exit_set(),
+            );
+            enter_review_write_channel(
+                &paths,
+                &journal.worktree_path,
+                crate::product::reviewer_window_store::WriteChannelKind::Push,
+                &current_attempt.id,
+            )?;
+        }
+        Ok(journal)
     }
 
     // 签名按 C-5 Task 8 简报逐字定义（9 参数），保留既定接口，不放宽参数上限。

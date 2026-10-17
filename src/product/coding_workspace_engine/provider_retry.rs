@@ -40,6 +40,9 @@ pub(crate) struct CodeReviewerRetryCycleInput<'a> {
     pub(crate) worktree_path: &'a Path,
     pub(crate) initial_resume_provider_session_id: Option<String>,
     pub(crate) command_rx: &'a mut mpsc::Receiver<CodingRunnerCommand>,
+    /// T19:当前 reviewer 窗口句柄(调用方在材料采集前已开窗;技术失败
+    /// 重试在原「首次+最多两次自动重试」预算内旋转新窗)。
+    pub(crate) review_window: &'a mut crate::product::reviewer_window::ReviewerWindowHandle,
 }
 
 /// Provider 调用中允许交给外层协调器自动恢复的技术失败。
@@ -431,6 +434,7 @@ impl CodingWorkspaceEngine {
             worktree_path,
             initial_resume_provider_session_id,
             command_rx,
+            review_window,
         } = input;
         let permission_mode = role_permission_mode_for_attempt(
             &self.store,
@@ -452,7 +456,36 @@ impl CodingWorkspaceEngine {
                         &role_run,
                     )
                     .await?;
+                // T19:技术失败重试——前窗必须无违规且恢复完整才以原
+                // 「首次+最多两次自动重试」预算建新窗;违规→人工门,
+                // 新窗口不加次数;provider 特有恢复/换新会话仍占本预算
+                // (invocation 计数不因窗口旋转增加)。
+                let rotated = self
+                    .rotate_reviewer_window_for_retry(
+                        review_window,
+                        attempt,
+                        &role_run,
+                        reviewer,
+                        worktree_path,
+                    )
+                    .await;
+                if let Err(error) = rotated {
+                    let _ = self
+                        .finalize_retry_cycle_state_change(attempt, &node, &role_run)
+                        .await;
+                    return Err(error);
+                }
+                *review_window = rotated.expect("checked Err above");
             }
+            // T19:材料采集(reviewer_context 渲染/prompt 构建/Git diff)
+            // 之前同源复验——窗口 Running 且材料与 baseline 同指纹。
+            self.assert_reviewer_window_running(
+                review_window,
+                attempt,
+                &role_run.id,
+                reviewer,
+                worktree_path,
+            )?;
 
             let retry_diagnostic = self.retry_diagnostic_for_previous_run(attempt, &role_run)?;
             let nonce = crate::product::workspace_engine::structured_output_nonce();
@@ -1094,6 +1127,29 @@ impl CodingWorkspaceEngine {
         )
         .await?;
         Ok(())
+    }
+    /// T19:窗口旋转——回收前窗(必须无违规且恢复完整)后以 retry run
+    /// 建新窗。回收失败(违规人工门/恢复停等)即 Err:不重试、不加次数。
+    async fn rotate_reviewer_window_for_retry(
+        &self,
+        window: &mut crate::product::reviewer_window::ReviewerWindowHandle,
+        attempt: &CodingExecutionAttempt,
+        retry_run: &CodingRoleRun,
+        reviewer: &ProviderName,
+        worktree_path: &Path,
+    ) -> Result<crate::product::reviewer_window::ReviewerWindowHandle, CodingWorkspaceEngineError>
+    {
+        self.recycle_reviewer_window(window, "technical_retry_window_recycle")
+            .await?;
+        let window_id = format!("{}-w01", retry_run.id);
+        self.begin_reviewer_window_for_run(
+            &window_id,
+            attempt,
+            &retry_run.id,
+            reviewer,
+            worktree_path,
+        )
+        .await
     }
 }
 

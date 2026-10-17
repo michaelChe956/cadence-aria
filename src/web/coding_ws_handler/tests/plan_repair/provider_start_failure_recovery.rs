@@ -173,8 +173,11 @@ async fn coding_plan_repair_provider_start_failure_recovery_legacy_can_retry_aga
 
 async fn assert_provider_start_failure_can_recover_again(mode: ProviderStreamMode) {
     let fixture = plan_repair_fixture_with_dependency(false);
-    fs::create_dir_all(fixture.attempt.worktree_path.as_ref().expect("worktree"))
-        .expect("create worktree");
+    let fixture_worktree = fixture.attempt.worktree_path.clone().expect("worktree");
+    fs::create_dir_all(&fixture_worktree).expect("create worktree");
+    // T19:review 窗口硬前提是 git 身份(T17);生产 coding worktree 恒为
+    // git 树,fixture 补齐 init+种子提交。
+    super::support::init_plan_repair_worktree_git(&fixture_worktree);
     let (recovered, initial_gate_id) = seed_completed_recovery_candidate(&fixture).await;
 
     run_recovered_reviewer(

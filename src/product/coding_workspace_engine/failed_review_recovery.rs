@@ -177,6 +177,13 @@ impl CodingWorkspaceEngine {
             &CodingExecutionStage::CodeReview,
             "failed_review_recovery",
         )?;
+        // T19 lock order(窗口 worktree lease → attempt mutation/recovery
+        // arbitration → store/Git):窗口检查在进入恢复仲裁之前——树上
+        // 存在未终态窗口(停等/人工门/崩溃残留保持锁)时人工重试
+        // fail-closed,先由 T21 恢复驱动/人工裁决收口该窗口。
+        if let Some(worktree) = current.worktree_path.as_ref() {
+            self.ensure_no_open_reviewer_window(worktree)?;
+        }
         let Some(recovery) = recoverable_failed_code_review(&self.store, &current)? else {
             return Err(recovery_state_changed());
         };

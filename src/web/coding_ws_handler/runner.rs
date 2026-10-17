@@ -391,6 +391,21 @@ pub(crate) async fn start_plan_repair_for_execution_outcome_if_needed(
         .map(Some)
 }
 
+/// T19 采信门:报告采信投影是否允许 approve 交付推进。缺字段(None)=
+/// 历史未核验报告(不改历史行为);仅显式 Accepted 放行,
+/// PendingAcceptance/Invalidated 一律停人工面。
+fn review_acceptance_permits_delivery(
+    acceptance: Option<crate::product::coding_models::ReviewReportAcceptance>,
+) -> bool {
+    !matches!(
+        acceptance,
+        Some(
+            crate::product::coding_models::ReviewReportAcceptance::PendingAcceptance
+                | crate::product::coding_models::ReviewReportAcceptance::Invalidated
+        )
+    )
+}
+
 async fn handle_internal_review_flow_decision(
     coding_store: &CodingAttemptStore,
     engine: &CodingWorkspaceEngine,
@@ -398,9 +413,18 @@ async fn handle_internal_review_flow_decision(
     current: &CodingExecutionAttempt,
     internal_review: &crate::product::coding_models::InternalPrReview,
 ) -> Result<(), CodingWorkspaceEngineError> {
-    let current = match engine
-        .internal_review_flow_decision_for_attempt(current, internal_review)?
+    let raw_decision =
+        engine.internal_review_flow_decision_for_attempt(current, internal_review)?;
+    // T19 采信门:Pending/Invalidated 报告即使内容 approve 也不驱动
+    // 交付推进(完成/整组完成一律停在人工面)。
+    let decision = if raw_decision == CodeReviewFlowDecision::ContinueAfterApprove
+        && !review_acceptance_permits_delivery(internal_review.acceptance)
     {
+        CodeReviewFlowDecision::StopForHumanTriage
+    } else {
+        raw_decision
+    };
+    let current = match decision {
         CodeReviewFlowDecision::ContinueAfterApprove => {
             // Only pre-existing attempts that had already entered InternalPrReview may
             // reach this compatibility path. Fresh groups bypass it for human
@@ -522,6 +546,12 @@ pub(crate) async fn execute_start_coding_flow(
                 .coder;
             let author_provider =
                 provider_for(state, &author_provider_name, "coding author provider")?;
+            // T14/T19 合同预留:Coder 写入不得与 Reviewer 窗口重叠——
+            // 窗口冻结期间(Coder 窗外)fail-closed;不依赖 T14 实现,
+            // 由窗口租约面直接判定。
+            if let Some(worktree) = current.worktree_path.as_ref() {
+                engine.ensure_no_open_reviewer_window(worktree)?;
+            }
             let coding_outcome = engine
                 .execute_coding_with_commands_outcome(
                     &current,
@@ -733,7 +763,19 @@ pub(crate) async fn execute_start_coding_flow(
                 return Ok(());
             }
             let reviewer_projection = engine.reviewer_projection_for_attempt(&current)?;
-            match code_review_flow_decision(&review_report, &reviewer_projection) {
+            // T19 采信门:Pending/Invalidated 报告即使内容 approve 也不
+            // 驱动交付推进(ReviewRequest/完成链一律停在人工面)。
+            let review_flow_decision = {
+                let raw = code_review_flow_decision(&review_report, &reviewer_projection);
+                if raw == CodeReviewFlowDecision::ContinueAfterApprove
+                    && !review_acceptance_permits_delivery(review_report.acceptance)
+                {
+                    CodeReviewFlowDecision::StopForHumanTriage
+                } else {
+                    raw
+                }
+            };
+            match review_flow_decision {
                 CodeReviewFlowDecision::RunCoderFix => {
                     let coder_provider_name = coding_store
                         .get_role_provider_config_snapshot(
@@ -747,6 +789,12 @@ pub(crate) async fn execute_start_coding_flow(
                         &coder_provider_name,
                         "coding coder provider (reviewer feedback fix)",
                     )?;
+                    // T14/T19 合同预留:返修 Coder 写入同样不得与 Reviewer
+                    // 窗口重叠(review 窗口已收口,此处拦的是他 attempt
+                    // 残留窗口/兄弟树窗口)。
+                    if let Some(worktree) = current.worktree_path.as_ref() {
+                        engine.ensure_no_open_reviewer_window(worktree)?;
+                    }
                     let rework_outcome = engine
                         .execute_coder_fix_from_review_outcome(
                             &current,

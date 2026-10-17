@@ -753,3 +753,229 @@ async fn termination_reconcile_completes_push_started_journal_when_remote_not_co
     // 收敛只补 journal 终态，不动本地：head 保持原位。
     assert_eq!(git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(), head);
 }
+
+// ---------------------------------------------------------------------------
+// T19:平台写通道守卫(窗口冻结期间 stage/commit/push/补偿拒绝;窗外不变)
+// ---------------------------------------------------------------------------
+
+use crate::cross_cutting::provider_resources::{
+    ProviderRunResourceScope, ResourceScopeKey, new_boot_identity,
+};
+use crate::product::reviewer_snapshot::{ReviewerSnapshotStore, SnapshotBudget as T19Budget};
+use crate::product::reviewer_window::{ReviewerWindowBeginRequest, begin_review_window};
+use crate::product::reviewer_window_store::ReviewerWindowStore as T19WindowStore;
+
+/// T17 API 直连开窗(单主 scope;空登记 Quiescent 即合法静止证明)。
+async fn t19_open_window(
+    root: &Path,
+    attempt: &CodingExecutionAttempt,
+    worktree: &Path,
+    window_id: &str,
+) -> crate::product::reviewer_window::ReviewerWindowHandle {
+    let window_store = T19WindowStore::new(root.join(".aria").join("reviewer-windows"));
+    let snapshot_store = ReviewerSnapshotStore::new(root.join(".aria").join("reviewer-snapshots"));
+    let private = root.join("t19-scope-private").join(window_id);
+    fs::create_dir_all(&private).expect("scope private root");
+    let scope_store_root = root.join("t19-scope-store");
+    let key = ResourceScopeKey {
+        scope_id: format!("t19-{window_id}"),
+        run_id: format!("run-{window_id}"),
+        boot_identity: new_boot_identity(),
+    };
+    let scope = ProviderRunResourceScope::open_for_recovery(
+        &key,
+        Some(window_id),
+        &private,
+        &scope_store_root,
+        None,
+    )
+    .expect("open scope");
+    let targets: [&ProviderRunResourceScope; 1] = [&scope];
+    begin_review_window(
+        &window_store,
+        &snapshot_store,
+        &ReviewerWindowBeginRequest {
+            window_id,
+            attempt_id: &attempt.id,
+            run_id: &format!("run-{window_id}"),
+            provider: "claude_code",
+            worktree,
+            quiesce_targets: &targets,
+            platform_write_paths: Vec::new(),
+            budget: T19Budget::generous(),
+            drain_timeout: std::time::Duration::from_secs(5),
+        },
+    )
+    .await
+    .expect("open reviewer window")
+}
+
+#[tokio::test]
+async fn review_request_platform_write_rejected_while_window_frozen_resumes_after_release() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    fs::write(worktree.join("deliver.rs"), "pub fn deliver() {}\n").expect("coder delivery");
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    let handle = t19_open_window(&root.path(), &attempt, &worktree, "t19-guard-window").await;
+    let head_before = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let staged_before = git_stdout(&worktree, &["diff", "--cached", "--name-only"]);
+
+    // 窗口冻结期间平台交付(stage/commit/push)拒绝,无 Git mutation。
+    let error = engine
+        .execute_review_request(&attempt, "origin", "feat: t19 delivery")
+        .await
+        .expect_err("frozen window must reject platform git write");
+    assert!(
+        error.to_string().contains("reviewer_window_channel"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        head_before,
+        "no commit may land while frozen"
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["diff", "--cached", "--name-only"]),
+        staged_before,
+        "no stage may land while frozen"
+    );
+
+    // 干净回收释放锁(T19 生命周期面)。
+    engine
+        .recycle_reviewer_window(&handle, "t19_teardown")
+        .await
+        .expect("clean recycle releases the tree");
+
+    // 正常 Coder 窗外交付不变:交付照常完成。
+    let request = engine
+        .execute_review_request(&attempt, "origin", "feat: t19 delivery")
+        .await
+        .expect("delivery outside window succeeds");
+    assert_eq!(request.push_status, PushStatus::SkippedNotConfigured);
+    assert_ne!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        head_before,
+        "delivery commit must land after window release"
+    );
+    assert!(
+        store
+            .get_coding_git_operation(&attempt)
+            .expect("journal")
+            .expect("journal persisted")
+            .is_terminal()
+    );
+}
+
+#[tokio::test]
+async fn cancelled_review_commit_compensation_rejected_while_window_frozen() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    let base_branch = git_stdout(&worktree, &["branch", "--show-current"])
+        .trim()
+        .to_string();
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    // journal 推进到 CommitCreated(真实 commit 已存在;通道依次进出,
+    // CommitCreated 相位无在途登记)。
+    let before_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let base_branch = attempt.base_branch.clone();
+    fs::write(worktree.join("committed.rs"), "pub fn committed() {}\n").expect("staged change");
+    git_stdout(&worktree, &["add", "."]);
+    git_stdout(
+        &worktree,
+        &[
+            "-c",
+            "user.email=t19@aria.invalid",
+            "-c",
+            "user.name=t19",
+            "commit",
+            "-qm",
+            "t19 commit",
+        ],
+    );
+    let commit_sha = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let journal = store
+        .prepare_coding_git_operation(
+            &attempt,
+            crate::product::coding_attempt_store::PrepareCodingGitOperationInput {
+                kind: crate::product::coding_attempt_store::CodingGitOperationKind::ReviewRequest,
+                repo_path: worktree.clone(),
+                worktree_path: worktree.clone(),
+                branch_name: attempt.branch_name.clone(),
+                base_branch,
+                before_head: before_head.clone(),
+                remote: Some("origin".to_string()),
+                commit_message: Some("t19 commit".to_string()),
+            },
+        )
+        .expect("prepare journal");
+    let journal = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitStarted,
+            None,
+        )
+        .expect("commit started");
+    let journal = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitCreated,
+            Some(commit_sha),
+        )
+        .expect("commit created");
+
+    // 冻结窗口(无在途 writer,直接 Frozen)。
+    let handle = t19_open_window(&root.path(), &attempt, &worktree, "t19-comp-window").await;
+
+    // 补偿(reset)被拒:窗口冻结期间平台补偿同样拒绝。
+    let error = engine
+        .compensate_cancelled_review_commit(&attempt, &journal)
+        .await
+        .expect_err("frozen window must reject compensation");
+    assert!(
+        error.to_string().contains("reviewer_window_channel"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        journal.commit_sha.clone().expect("commit sha"),
+        "compensation reset must not run while frozen"
+    );
+    assert_eq!(
+        store
+            .get_coding_git_operation(&attempt)
+            .expect("journal")
+            .expect("journal persisted")
+            .phase,
+        CodingGitOperationPhase::CommitCreated,
+        "journal stays at CommitCreated for later compensation retry"
+    );
+
+    // 释放后补偿可续接(终止收敛面)。
+    engine
+        .recycle_reviewer_window(&handle, "t19_teardown")
+        .await
+        .expect("recycle");
+    engine
+        .compensate_cancelled_review_commit(&attempt, &journal)
+        .await
+        .expect("compensation resumes after window release");
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        before_head,
+        "reset restores before_head after release"
+    );
+}

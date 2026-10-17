@@ -119,9 +119,18 @@ async fn reviewer_three_transport_failures_open_one_human_gate_after_third_run()
             .all(|input| input.prompt.contains("reviewed.rs")
                 && input.prompt.contains("pub fn reviewed"))
     );
+    // T19 旧只读 retry 上下文移除:技术失败的前窗经「干净恢复+回收」后
+    // 才建新窗——首轮失败后的 worktree 部分写入在重试 prompt 中不可见
+    // (baseline 恢复完整后才准入新材料),三轮均只见基线内容。
     assert!(!inputs[0].prompt.contains("reviewed_after_retry"));
-    assert!(inputs[1].prompt.contains("reviewed_after_retry"));
-    assert!(inputs[2].prompt.contains("reviewed_after_retry"));
+    assert!(
+        !inputs[1].prompt.contains("reviewed_after_retry"),
+        "retry material must come from the recycled window's fresh baseline"
+    );
+    assert!(
+        !inputs[2].prompt.contains("reviewed_after_retry"),
+        "retry material must come from the recycled window's fresh baseline"
+    );
     let nonces = inputs
         .iter()
         .map(|input| {

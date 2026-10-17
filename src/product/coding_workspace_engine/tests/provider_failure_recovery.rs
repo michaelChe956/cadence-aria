@@ -1030,3 +1030,4 @@ mod logical_legacy_fallback;
 mod provider_idle_stall;
 mod retry_and_gate;
 mod reviewer_recovery;
+mod t19_window_lifecycle;

@@ -662,3 +662,22 @@ pub(super) fn plan_defect_report(finding: ReviewFinding) -> CodeReviewReport {
         review_window_id: None,
     }
 }
+
+/// T19:plan repair fixture worktree 补 git 身份(review 窗口硬前提)。
+pub(super) fn init_plan_repair_worktree_git(worktree: &std::path::Path) {
+    std::fs::write(worktree.join("t19-seed.txt"), "seed\n").expect("seed file");
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "t19@aria.invalid"],
+        vec!["config", "user.name", "t19"],
+        vec!["add", "-A"],
+        vec!["commit", "-qm", "t19 base"],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(worktree)
+            .output()
+            .expect("git fixture init");
+        assert!(output.status.success(), "git {args:?} failed: {output:?}");
+    }
+}

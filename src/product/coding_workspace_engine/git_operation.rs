@@ -121,6 +121,34 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         journal: &CodingGitOperationJournal,
     ) -> Result<(), CodingWorkspaceEngineError> {
+        // T19:补偿 mutation(git reset)走 Compensation 通道——窗口冻结
+        // 期间拒绝,补偿由终止重试/T21 恢复驱动续接(补偿面与 runner 共用
+        // 同一守卫,不在 REST/WS 按钮层各自拦)。
+        self.guard_platform_write_channel(
+            &journal.worktree_path,
+            crate::product::reviewer_window_store::WriteChannelKind::Compensation,
+            &attempt.id,
+        )?;
+        let outcome = self
+            .compensate_cancelled_review_commit_inner(attempt, journal)
+            .await;
+        if outcome.is_err() {
+            // 失败回退:释放通道登记(成功路径由 advance(Compensated) 的
+            // 全通道退出收口)。
+            self.release_platform_write_channel(
+                &journal.worktree_path,
+                crate::product::reviewer_window_store::WriteChannelKind::Compensation,
+                &attempt.id,
+            );
+        }
+        outcome
+    }
+
+    async fn compensate_cancelled_review_commit_inner(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        journal: &CodingGitOperationJournal,
+    ) -> Result<(), CodingWorkspaceEngineError> {
         let git = GitWorkspaceService::new();
         let current_head = git.git_current_head(&journal.worktree_path).await?;
         let mut journal = journal.clone();

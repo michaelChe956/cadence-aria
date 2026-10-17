@@ -293,6 +293,25 @@ impl CodingWorkspaceEngine {
                 Some(node.id.clone()),
             )?,
         };
+        // T19:开窗必须在材料采集(prepare_group_reviewer_context/Git diff/
+        // prompt 构建)之前。
+        let review_window_id = format!("{}-w01", role_run.id);
+        let review_window = self
+            .begin_reviewer_window_for_run(
+                &review_window_id,
+                &attempt,
+                &role_run.id,
+                &reviewer,
+                worktree_path,
+            )
+            .await?;
+        self.assert_reviewer_window_running(
+            &review_window,
+            &attempt,
+            &role_run.id,
+            &reviewer,
+            worktree_path,
+        )?;
 
         let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
         let is_group_final_review = attempt.scope == CodingAttemptScope::WorkItemGroup;
@@ -387,7 +406,7 @@ impl CodingWorkspaceEngine {
                 provider_input.clone(),
             )
             .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
-        let full_output = self
+        let full_output = match self
             .run_provider_stream_to_completion(CodingProviderStreamRun {
                 attempt: &attempt,
                 node_id: &node.id,
@@ -405,7 +424,19 @@ impl CodingWorkspaceEngine {
                 suppress_failure_side_effects: false,
                 validated_input,
             })
-            .await?;
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                // T19:失败/取消——窗口收口恢复,锁保持到恢复完成。
+                self.close_reviewer_window_after_failure(
+                    &review_window,
+                    "internal_pr_review_failed_or_cancelled",
+                )
+                .await;
+                return Err(error);
+            }
+        };
         let raw_provider_output_ref = self.store.save_provider_raw_output(
             &attempt,
             CodingExecutionStage::InternalPrReview,
@@ -424,13 +455,31 @@ impl CodingWorkspaceEngine {
             vec![raw_provider_output_ref.clone()],
             Vec::new(),
         )?;
-        let review = self.build_internal_pr_review(
+        // T19:收口先于 save(可消费完成事实);采信投影入报告 DTO。
+        let window_outcome = self
+            .finalize_reviewer_window_with_report(&review_window)
+            .await?;
+        let mut review = self.build_internal_pr_review(
             &attempt,
             &review_request,
             &full_output,
             Some(raw_provider_output_ref.clone()),
             &role_run,
         )?;
+        review.review_window_id = Some(window_outcome.window_id.clone());
+        review.acceptance = Some(crate::product::reviewer_window_store::wire_acceptance(
+            window_outcome.acceptance,
+        ));
+        // T19 采信门:未采信报告即使内容 approve 也不驱动推进——runner
+        // 侧 flow 门与本侧 blocked gate 双面收口(复用既有门链)。
+        let review_blocks_on_acceptance = review.verdict == ReviewVerdict::Approve
+            && matches!(
+                review.acceptance,
+                Some(
+                    crate::product::coding_models::ReviewReportAcceptance::PendingAcceptance
+                        | crate::product::coding_models::ReviewReportAcceptance::Invalidated
+                )
+            );
         let review_flow_decision = match prepared_group_context.as_ref() {
             Some(context) => {
                 internal_review_flow_decision_with_bindings(&review, &context.bindings)
@@ -516,8 +565,11 @@ impl CodingWorkspaceEngine {
             role_run_status,
             reason_code,
         )?;
-        let blocked_gate_reason =
-            internal_review_blocked_gate_reason(review_flow_decision, is_group_final_review);
+        let blocked_gate_reason = if review_blocks_on_acceptance {
+            Some("internal_review_report_not_accepted")
+        } else {
+            internal_review_blocked_gate_reason(review_flow_decision, is_group_final_review)
+        };
         if let Some(blocked_gate_reason) = blocked_gate_reason {
             let title = match (blocked_gate_reason, is_group_final_review) {
                 ("group_final_review_blocked", _) => "GroupFinalReview change requested",

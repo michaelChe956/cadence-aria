@@ -742,3 +742,128 @@ async fn blocked_provider_interrupted_recovery_prefixes_converge_idempotently() 
         assert_eq!(stale.status, CodingRoleRunStatus::Failed, "{prefix:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// T19:人工重试与 reviewer 窗口互斥(锁序:窗口租约先于恢复仲裁)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn manual_retry_fail_closed_while_reviewer_window_holds_the_tree() {
+    let fixture = provider_interrupted_review_fixture(CodingAttemptScope::WorkItem).await;
+    let gate = fixture
+        .dirty_gate
+        .as_ref()
+        .expect("provider interrupted gate");
+    // T16 baseline 捕获需要至少一个 commit(fixture 只 init 未提交)。
+    for args in [
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.email=t19@aria.invalid",
+            "-c",
+            "user.name=t19",
+            "commit",
+            "-qm",
+            "t19 base",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(
+                fixture
+                    .attempt
+                    .worktree_path
+                    .as_ref()
+                    .expect("worktree path"),
+            )
+            .output()
+            .expect("git fixture commit");
+        assert!(output.status.success(), "git {args:?} failed: {output:?}");
+    }
+    let worktree = fixture
+        .attempt
+        .worktree_path
+        .clone()
+        .expect("worktree path");
+    let aria_root = fixture._tmp.path().join(".aria");
+
+    // T17 API 直连开窗(崩溃/停等残留窗口形态:Running 持锁)。
+    let window_store = crate::product::reviewer_window_store::ReviewerWindowStore::new(
+        aria_root.join("reviewer-windows"),
+    );
+    let snapshot_store = crate::product::reviewer_snapshot::ReviewerSnapshotStore::new(
+        aria_root.join("reviewer-snapshots"),
+    );
+    let scope_private = fixture._tmp.path().join("t19-manual-private");
+    std::fs::create_dir_all(&scope_private).expect("scope private");
+    let scope_key = crate::cross_cutting::provider_resources::ResourceScopeKey {
+        scope_id: "t19-manual-retry".to_string(),
+        run_id: "run-t19-manual".to_string(),
+        boot_identity: crate::cross_cutting::provider_resources::new_boot_identity(),
+    };
+    let scope =
+        crate::cross_cutting::provider_resources::ProviderRunResourceScope::open_for_recovery(
+            &scope_key,
+            Some("t19-manual-window"),
+            &scope_private,
+            &fixture._tmp.path().join("t19-scope-store"),
+            None,
+        )
+        .expect("open scope");
+    let targets: [&crate::cross_cutting::provider_resources::ProviderRunResourceScope; 1] =
+        [&scope];
+    let handle = crate::product::reviewer_window::begin_review_window(
+        &window_store,
+        &snapshot_store,
+        &crate::product::reviewer_window::ReviewerWindowBeginRequest {
+            window_id: "t19-manual-window",
+            attempt_id: &fixture.attempt.id,
+            run_id: "run-t19-manual",
+            provider: "claude_code",
+            worktree: &worktree,
+            quiesce_targets: &targets,
+            platform_write_paths: Vec::new(),
+            budget: crate::product::reviewer_snapshot::SnapshotBudget::generous(),
+            drain_timeout: std::time::Duration::from_secs(5),
+        },
+    )
+    .await
+    .expect("open stale reviewer window");
+
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let engine =
+        CodingWorkspaceEngine::new(fixture.store.clone(), GitWorkspaceService::new(), event_tx);
+    let error = engine
+        .recover_failed_code_review_for_attempt(&fixture.attempt, &gate.gate_id)
+        .await
+        .expect_err("manual retry must fail closed while window holds the tree");
+    assert!(
+        error.to_string().contains("reviewer_window"),
+        "unexpected error: {error}"
+    );
+    // 恢复 journal 不得被推进(窗口先收口)。
+    assert!(
+        fixture
+            .store
+            .get_failed_code_review_recovery_journal(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id
+            )
+            .expect("journal read")
+            .is_none(),
+        "recovery arbitration must not start behind an open window"
+    );
+
+    // 干净回收释放后人工重试照常可用。
+    engine
+        .recycle_reviewer_window(&handle, "t19 teardown")
+        .await
+        .expect("recycle releases the tree");
+    let updated = engine
+        .recover_failed_code_review_for_attempt(&fixture.attempt, &gate.gate_id)
+        .await
+        .expect("manual retry resumes after window resolution");
+    assert_eq!(updated.status, CodingAttemptStatus::Running);
+    assert_eq!(updated.stage, CodingExecutionStage::CodeReview);
+}
