@@ -382,8 +382,13 @@ async fn reviewer_gateway_rejection_without_trust_face_stays_bare() {
 // 形态枚举(报告同步):
 // A. Story focus=Some(成员):业务解析→focus 成员 checkout(git)→窗口锚成员;
 // B. Story focus=None(聚合视图回落):无唯一成员→plan_review_window_target_unresolved;
-// C. Design involved 空/WorkItemPlan 多 target 非唯一:同 B(聚合视图/解析失败
-//    →专用码,不以 IdentityDrift 误报)。
+// ---- 批2 Task 20b 修复轮 1(F1,Main 裁定 b):聚合形态窗口目标钉测 ----
+// 形态枚举(报告同步):
+// A. Story focus=Some:业务解析→focus 成员 checkout→窗口锚成员(直选);
+// B. 聚合形态(Story focus=None/Design involved 空/Plan 多 target):主成员锚
+//    (manifest member_ids 首成员,Main 裁定 b)——评审照常走,窗口附注披露
+//    「primary-member anchored;非主成员面未对账」(R8 类已知边界);
+// C. 真零成员(空 manifest):专用码 plan_review_window_target_unresolved 停等。
 mod t20b_f1_plan_window_target {
     use crate::cross_cutting::provider_adapter::ProviderAdapterError;
     use crate::cross_cutting::streaming_provider::{
@@ -393,15 +398,15 @@ mod t20b_f1_plan_window_target {
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::lifecycle_store::LifecycleStore;
     use crate::product::logical_codebase::{
-        IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseStore,
-        LogicalRepositoryId,
+        IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
+        LogicalCodebaseStore, LogicalRepositoryId,
     };
     use crate::product::workspace_engine::types::{EngineEvent, WorkspaceEngine, WorkspaceSession};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
-    /// 最小 verdict provider:approve JSON 按结构化合同回nonce。
+    /// 最小 verdict provider:approve JSON 按结构化合同回 nonce。
     struct ApproveReviewProvider;
     #[async_trait::async_trait]
     impl StreamingProviderAdapter for ApproveReviewProvider {
@@ -412,16 +417,7 @@ mod t20b_f1_plan_window_target {
         ) -> Result<ProviderSession, ProviderAdapterError> {
             let (event_tx, event_rx) = mpsc::channel(8);
             let (command_tx, _command_rx) = mpsc::channel(8);
-            let output = r#"可以确认。
-
-```json
-{
-  "verdict": "approve",
-  "summary": "可以确认",
-  "findings": []
-}
-```"#
-                .to_string();
+            let output = "可以确认。".to_string();
             let contract = input.structured_output_contract;
             tokio::spawn(async move {
                 let _ = event_tx
@@ -453,16 +449,25 @@ mod t20b_f1_plan_window_target {
         }
     }
 
-    /// 逻辑 fixture:project+2 git 成员仓(逻辑特性)+manifest/selection+
-    /// issue(legacy LC)+story spec(focus 可空)。
+    enum FixtureEntity {
+        /// Story:focus=首成员(唯一成员面,直选)。
+        StoryFocusFirstMember,
+        /// Story:focus=None(聚合形态→主成员锚)。
+        StoryNoFocus,
+        /// Design:involved 空(聚合形态→主成员锚)。
+        DesignEmptyInvolved,
+        /// Story:真零成员(manifest 空→专用码停等)。
+        StoryZeroMembers,
+    }
+
     struct PlanWindowFixture {
         _root: tempfile::TempDir,
         paths: ProductAppPaths,
         lifecycle: LifecycleStore,
-        member_a: std::path::PathBuf,
+        member_a: Option<std::path::PathBuf>,
         project_id: String,
         issue_id: String,
-        story_entity_id: String,
+        entity_id: String,
     }
 
     fn git_init(dir: &std::path::Path) {
@@ -482,13 +487,13 @@ mod t20b_f1_plan_window_target {
         }
     }
 
-    fn logical_story_fixture(focus_first_member: bool) -> PlanWindowFixture {
+    fn logical_fixture(entity: FixtureEntity) -> PlanWindowFixture {
         use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
-        use crate::product::lifecycle_store::{
-            AggregateStorySpecScope, CreateStorySpecInput, CreateWorkspaceSessionInput,
+        use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
+        use crate::product::logical_codebase::{
+            AggregatePolicyArtifactStore, LogicalCodebaseFeature,
         };
-        use crate::product::logical_codebase::LogicalCodebaseFeature;
-        use crate::product::models::WorkspaceType;
+        use crate::product::models::{ProviderName, WorkspaceType};
         use crate::product::project_store::{CreateProjectInput, ProjectStore};
         use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 
@@ -502,34 +507,52 @@ mod t20b_f1_plan_window_target {
             .expect("project");
         let project_id = project.id.clone();
 
-        let mut logical_ids = Vec::new();
-        let mut member_paths = Vec::new();
-        for name in ["member-a", "member-b"] {
-            let dir = root.path().join(name);
-            std::fs::create_dir_all(&dir).expect("member dir");
-            git_init(&dir);
-            let record = RepositoryStore::with_logical_codebase_feature(
-                paths.clone(),
-                LogicalCodebaseFeature::enabled(),
-            )
-            .create(CreateRepositoryInput {
-                project_id: project_id.clone(),
-                name: name.to_string(),
-                path: dir.clone(),
-                default_policy_preset: None,
-                default_provider_mode: None,
-                idempotency_key: format!("t20b-f1-{name}"),
-            })
-            .expect("member repository");
-            logical_ids.push(record.logical_repository_id.expect("logical id"));
-            member_paths.push(dir);
+        let zero_members = matches!(entity, FixtureEntity::StoryZeroMembers);
+        let mut logical_ids: Vec<LogicalRepositoryId> = Vec::new();
+        let mut member_paths: Vec<std::path::PathBuf> = Vec::new();
+        let mut physical_ids: Vec<String> = Vec::new();
+        if !zero_members {
+            for name in ["member-a", "member-b"] {
+                let dir = root.path().join(name);
+                std::fs::create_dir_all(&dir).expect("member dir");
+                git_init(&dir);
+                let record = RepositoryStore::with_logical_codebase_feature(
+                    paths.clone(),
+                    LogicalCodebaseFeature::enabled(),
+                )
+                .create(CreateRepositoryInput {
+                    project_id: project_id.clone(),
+                    name: name.to_string(),
+                    path: dir.clone(),
+                    default_policy_preset: None,
+                    default_provider_mode: None,
+                    idempotency_key: format!("t20b-f1-{name}"),
+                })
+                .expect("member repository");
+                logical_ids.push(record.logical_repository_id.expect("logical id"));
+                physical_ids.push(record.id);
+                member_paths.push(dir);
+            }
         }
-        let [a, b] = [logical_ids[0], logical_ids[1]];
 
         let manifest = LogicalCodebaseStore::new(paths.clone())
             .load_manifest(&project_id)
             .expect("manifest io")
-            .expect("manifest");
+            .unwrap_or_else(|| {
+                // 零成员形态:显式落空 manifest(member_ids 空)。
+                let empty = LogicalCodebaseManifest::new(
+                    &project_id,
+                    root.path().to_path_buf(),
+                    Vec::new(),
+                );
+                LogicalCodebaseStore::new(paths.clone())
+                    .save_manifest(&project_id, &empty)
+                    .expect("save empty manifest");
+                empty
+            });
+        AggregatePolicyArtifactStore::new(paths.clone())
+            .ensure_bootstrap(&manifest)
+            .expect("bootstrap policy");
         let legacy_lc = crate::product::logical_codebase::legacy_logical_codebase_id(&project_id);
         let issue = IssueStore::new(paths.clone())
             .create(CreateProductIssueInput {
@@ -547,7 +570,7 @@ mod t20b_f1_plan_window_target {
             .save(&IssueCodebaseSelection::explicit(
                 &project_id,
                 &issue_id,
-                vec![a, b],
+                logical_ids.clone(),
                 Vec::new(),
                 Vec::new(),
                 None,
@@ -555,60 +578,76 @@ mod t20b_f1_plan_window_target {
             .expect("selection");
 
         let lifecycle = LifecycleStore::new(paths.clone());
-        let focus = if focus_first_member {
-            Some(logical_ids[0])
-        } else {
-            None
+        let entity_id = match entity {
+            FixtureEntity::DesignEmptyInvolved => {
+                use crate::product::lifecycle_store::{
+                    AggregateDesignSpecScope, CreateDesignSpecInput,
+                };
+                let design = lifecycle
+                    .create_design_spec(CreateDesignSpecInput {
+                        project_id: project_id.clone(),
+                        issue_id: issue_id.clone(),
+                        story_spec_ids: Vec::new(),
+                        title: "t20b f1 design".to_string(),
+                        aggregate_codebase: Some(AggregateDesignSpecScope {
+                            logical_codebase_ref: manifest.logical_codebase_id,
+                            effective_member_ids: logical_ids.clone(),
+                            involved_repository_ids: Vec::new(),
+                            change_order: Vec::new(),
+                        }),
+                    })
+                    .expect("design spec");
+                design.id
+            }
+            FixtureEntity::StoryFocusFirstMember
+            | FixtureEntity::StoryNoFocus
+            | FixtureEntity::StoryZeroMembers => {
+                use crate::product::lifecycle_store::{
+                    AggregateStorySpecScope, CreateStorySpecInput,
+                };
+                let story = lifecycle
+                    .create_story_spec(CreateStorySpecInput {
+                        project_id: project_id.clone(),
+                        issue_id: issue_id.clone(),
+                        repository_id: physical_ids.first().cloned().unwrap_or_default(),
+                        title: "t20b f1 story".to_string(),
+                        aggregate_codebase: Some(AggregateStorySpecScope {
+                            logical_codebase_ref: manifest.logical_codebase_id,
+                            effective_member_ids: logical_ids.clone(),
+                            involved_repository_ids: logical_ids.clone(),
+                            focus_repository_id: match entity {
+                                FixtureEntity::StoryFocusFirstMember => {
+                                    logical_ids.first().copied()
+                                }
+                                _ => None,
+                            },
+                        }),
+                    })
+                    .expect("story spec");
+                story.id
+            }
         };
-        let story = lifecycle
-            .create_story_spec(CreateStorySpecInput {
-                project_id: project_id.clone(),
-                issue_id: issue_id.clone(),
-                repository_id: record_physical_id(&paths, &project_id),
-                title: "t20b f1 story".to_string(),
-                aggregate_codebase: Some(AggregateStorySpecScope {
-                    logical_codebase_ref: manifest.logical_codebase_id,
-                    effective_member_ids: vec![a, b],
-                    involved_repository_ids: vec![a, b],
-                    focus_repository_id: focus,
-                }),
-            })
-            .expect("story spec");
         PlanWindowFixture {
             _root: root,
             paths,
             lifecycle,
-            member_a: member_paths[0].clone(),
+            member_a: member_paths.first().cloned(),
             project_id,
             issue_id,
-            story_entity_id: story.id,
+            entity_id,
         }
-    }
-
-    fn record_physical_id(paths: &ProductAppPaths, project_id: &str) -> String {
-        // story spec 的 repository_id 传成员 A 的物理仓 id(迁移期投影字段)。
-        crate::product::repository_store::RepositoryStore::with_logical_codebase_feature(
-            paths.clone(),
-            crate::product::logical_codebase::LogicalCodebaseFeature::enabled(),
-        )
-        .list(project_id)
-        .expect("list repositories")
-        .into_iter()
-        .map(|record| record.id)
-        .next()
-        .expect("physical repository id")
     }
 
     fn engine_with_aggregate_view(
         fixture: &PlanWindowFixture,
+        workspace_type: crate::product::models::WorkspaceType,
     ) -> (
         tempfile::TempDir,
         mpsc::Receiver<EngineEvent>,
         WorkspaceEngine,
     ) {
         use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
-        use crate::product::models::{ProviderName, WorkspaceType};
-        use crate::product::workspace_engine::types::WorkspaceSession;
+        use crate::product::models::ProviderName;
         let aggregate_view = tempfile::tempdir().expect("aggregate view");
         std::fs::create_dir_all(aggregate_view.path()).expect("aggregate view dir");
         let record = fixture
@@ -616,8 +655,8 @@ mod t20b_f1_plan_window_target {
             .create_workspace_session(CreateWorkspaceSessionInput {
                 project_id: fixture.project_id.clone(),
                 issue_id: fixture.issue_id.clone(),
-                entity_id: fixture.story_entity_id.clone(),
-                workspace_type: WorkspaceType::Story,
+                entity_id: fixture.entity_id.clone(),
+                workspace_type,
                 author_provider: ProviderName::ClaudeCode,
                 reviewer_provider: Some(ProviderName::ClaudeCode),
                 review_rounds: 2,
@@ -638,9 +677,8 @@ mod t20b_f1_plan_window_target {
             tx,
             WorkspaceSession::from_record(record),
         );
-        // 模拟生产 LC 聚合根视图:session 仓库路径=非 git 的 provider_context_root;
-        // 系统上下文携带聚合 scope marker(生产 LC 聚合会话形态——baseline
-        // 链据此跳过 git 基线解析)。
+        // 生产 LC 聚合根视图形态:仓库路径=非 git provider_context_root;
+        // 系统上下文携带聚合 scope marker(baseline 链据此跳过)。
         engine.session.repository_path = Some(aggregate_view.path().to_path_buf());
         engine
             .session
@@ -659,15 +697,15 @@ mod t20b_f1_plan_window_target {
         (aggregate_view, rx, engine)
     }
 
-    /// 形态 A:Story focus=Some → 窗口锚定 focus 成员 checkout,评审正常走。
+    /// 形态 A:Story focus=Some → 窗口锚 focus 成员(直选),无附注。
     #[tokio::test]
     async fn story_focus_aggregate_view_windows_on_focus_member_and_completes() {
-        let mut fixture = logical_story_fixture(true);
-        let (_view, mut rx, mut engine) = engine_with_aggregate_view(&fixture);
+        let mut fixture = logical_fixture(FixtureEntity::StoryFocusFirstMember);
+        let (_view, mut rx, mut engine) =
+            engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Story);
         let session_id = engine.session().session_id.to_string();
-        let member_a = fixture.member_a.clone();
+        let member_a = fixture.member_a.clone().expect("member a");
         let window_root = fixture.paths.root().join("reviewer-windows");
-        // 根目录 keep(窗口记录断言在 engine 轮次收口后仍可读)。
         let _kept = fixture._root.keep();
 
         engine.start_review_or_skip().await;
@@ -676,18 +714,27 @@ mod t20b_f1_plan_window_target {
             .drive_review_session(Arc::new(ApproveReviewProvider), command_rx)
             .await;
 
-        // 无 Error 事件(窗口解析成功,评审走通)。
         let mut saw_error = None;
+        let mut saw_anchor_note = false;
         while let Ok(event) = rx.try_recv() {
-            if let EngineEvent::Error { message } = event {
-                saw_error = Some(message);
+            match event {
+                EngineEvent::Error { message } => saw_error = Some(message),
+                EngineEvent::ExecutionEvent { event, .. } => {
+                    if event.title.contains("primary-member anchored") {
+                        saw_anchor_note = true;
+                    }
+                }
+                _ => {}
             }
         }
         assert!(
             saw_error.is_none(),
-            "aggregate view with story focus must review on the focus member: {saw_error:?}"
+            "story focus form must review on the focus member: {saw_error:?}"
         );
-        // 窗口记录锚定成员 A(git checkout),非聚合视图/非 IdentityDrift。
+        assert!(
+            !saw_anchor_note,
+            "focus-member direct selection must not carry the primary-anchor note"
+        );
         let window_store =
             crate::product::reviewer_window_store::ReviewerWindowStore::new(window_root);
         let record = window_store
@@ -700,11 +747,127 @@ mod t20b_f1_plan_window_target {
         );
     }
 
-    /// 形态 B:Story focus=None(聚合视图,真无唯一成员)→专用错误码,非静默/非 IdentityDrift。
+    /// 形态 B(Story focus=None):主成员锚——评审照常走+窗口附注披露。
     #[tokio::test]
-    async fn story_without_focus_reports_dedicated_unresolved_code_not_identity_drift() {
-        let fixture = logical_story_fixture(false);
-        let (_view, mut rx, mut engine) = engine_with_aggregate_view(&fixture);
+    async fn story_without_focus_anchors_primary_member_and_completes_with_note() {
+        let mut fixture = logical_fixture(FixtureEntity::StoryNoFocus);
+        let (_view, mut rx, mut engine) =
+            engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Story);
+        let session_id = engine.session().session_id.to_string();
+        let member_a = fixture.member_a.clone().expect("member a");
+        let window_root = fixture.paths.root().join("reviewer-windows");
+        let _kept = fixture._root.keep();
+
+        engine.start_review_or_skip().await;
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        engine
+            .drive_review_session(Arc::new(ApproveReviewProvider), command_rx)
+            .await;
+
+        let mut saw_error = None;
+        let mut saw_anchor_note = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                EngineEvent::Error { message } => saw_error = Some(message),
+                EngineEvent::ExecutionEvent { event, .. } => {
+                    if event.title.contains("primary-member anchored")
+                        && event.title.contains("非主成员面未对账")
+                    {
+                        saw_anchor_note = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_error.is_none(),
+            "no-focus aggregate form must review via the primary-member anchor: {saw_error:?}"
+        );
+        assert!(
+            saw_anchor_note,
+            "primary-member anchoring must carry the R8-class disclosure note"
+        );
+        let window_store =
+            crate::product::reviewer_window_store::ReviewerWindowStore::new(window_root);
+        let record = window_store
+            .load_window(&format!("plan-{session_id}-w01"))
+            .expect("window record must exist");
+        let expected = member_a.canonicalize().expect("member a canonical");
+        assert_eq!(
+            record.identity.canonical_worktree, expected,
+            "window must anchor the primary member checkout (member_ids first)"
+        );
+    }
+
+    /// 形态 B(Design involved 空):主成员锚——评审照常走+附注披露。
+    #[tokio::test]
+    async fn design_empty_involved_anchors_primary_member_and_completes() {
+        let mut fixture = logical_fixture(FixtureEntity::DesignEmptyInvolved);
+        let (_view, mut rx, mut engine) =
+            engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Design);
+        let member_a = fixture.member_a.clone().expect("member a");
+        let window_root = fixture.paths.root().join("reviewer-windows");
+        let _kept = fixture._root.keep();
+
+        engine.start_review_or_skip().await;
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        engine
+            .drive_review_session(Arc::new(ApproveReviewProvider), command_rx)
+            .await;
+
+        let mut saw_error = None;
+        let mut saw_anchor_note = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                EngineEvent::Error { message } => saw_error = Some(message),
+                EngineEvent::ExecutionEvent { event, .. } => {
+                    if event.title.contains("primary-member anchored") {
+                        saw_anchor_note = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_error.is_none(),
+            "design empty-involved form must review via the primary-member anchor: {saw_error:?}"
+        );
+        assert!(
+            saw_anchor_note,
+            "must carry the primary-anchor disclosure note"
+        );
+        // 窗口记录目录扫描:存在锚定主成员的窗口记录(记录文件含成员路径)。
+        let expected = member_a.canonicalize().expect("member a canonical");
+        let mut anchored = false;
+        fn scan(dir: &std::path::Path, expected: &std::path::Path, out: &mut bool) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    scan(&path, expected, out);
+                } else if let Ok(content) = std::fs::read_to_string(&path) {
+                    if content.contains(&expected.display().to_string()) {
+                        *out = true;
+                    }
+                }
+            }
+        }
+        scan(&window_root, &expected, &mut anchored);
+        assert!(
+            anchored,
+            "a window record anchored on the primary member must exist under {}",
+            window_root.display()
+        );
+    }
+
+    /// 形态 C:真零成员(空 manifest)→专用码停等,非静默/非 IdentityDrift。
+    #[tokio::test]
+    async fn zero_member_aggregate_reports_dedicated_unresolved_code() {
+        let fixture = logical_fixture(FixtureEntity::StoryZeroMembers);
+        let (_view, mut rx, mut engine) =
+            engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Story);
 
         engine.start_review_or_skip().await;
         let (_command_tx, command_rx) = mpsc::channel(8);
@@ -718,8 +881,8 @@ mod t20b_f1_plan_window_target {
                 error_message = Some(message);
             }
         }
-        let message = error_message
-            .expect("aggregate view without unique member must surface an explicit error");
+        let message =
+            error_message.expect("zero-member aggregate must stop with an explicit error");
         assert!(
             message.contains("plan_review_window_target_unresolved"),
             "must use the dedicated owner-ruling error code, got: {message}"

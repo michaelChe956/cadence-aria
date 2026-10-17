@@ -42,14 +42,22 @@ impl WorkspaceEngine {
         // `drive_review_session_with_window`,无窗形态=内层测试 seam)。
         // 修复轮 1(F1):窗口目标经聚合根视图感知解析(成员 checkout/
         // direct 原样;聚合视图落唯一/focus 成员;无唯一成员=专用码)。
-        let review_target = match self.plan_review_window_worktree() {
-            Ok(worktree) => worktree,
+        let (review_target, primary_anchored) = match self.plan_review_window_worktree() {
+            Ok(resolved) => resolved,
             Err(message) => {
                 let _ = self.event_tx.send(EngineEvent::Error { message }).await;
                 self.finish_failed_run().await;
                 return;
             }
         };
+        if primary_anchored {
+            Self::emit_primary_member_anchor_note(
+                &self.event_tx,
+                &self.session.session_id,
+                &review_target,
+            )
+            .await;
+        }
         if let Err(message) = self
             .begin_plan_review_window(&reviewer, review_target)
             .await
@@ -348,11 +356,22 @@ impl WorkspaceEngine {
             self.finish_failed_run().await;
             return;
         };
-        let review_target = self
-            .session
-            .repository_path
-            .clone()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let (review_target, primary_anchored) = match self.plan_review_window_worktree() {
+            Ok(resolved) => resolved,
+            Err(message) => {
+                let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                self.finish_failed_run().await;
+                return;
+            }
+        };
+        if primary_anchored {
+            Self::emit_primary_member_anchor_note(
+                &self.event_tx,
+                &self.session.session_id,
+                &review_target,
+            )
+            .await;
+        }
         if let Err(message) = self
             .begin_plan_review_window(&reviewer, review_target)
             .await
@@ -1594,55 +1613,64 @@ impl WorkspaceEngine {
     /// 唯一/focus 成员 checkout;真·无唯一成员面不静默杀——返回专用
     /// 错误码(聚合根规划评审窗口目标待 owner 裁定),不得以
     /// IdentityDrift 形态误报。
-    fn plan_review_window_worktree(&self) -> Result<std::path::PathBuf, String> {
+    fn plan_review_window_worktree(&self) -> Result<(std::path::PathBuf, bool), String> {
         let target = self
             .session
             .repository_path
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         if target.join(".git").exists() {
-            return Ok(target);
+            return Ok((target, false));
         }
-        // 聚合根视图形态:解析业务仓(唯一/focus 成员)。
+        // 聚合根视图形态:优先业务仓唯一/focus 成员;聚合视图/无唯一成员
+        // 回落主成员锚(Main 裁定 b:材料不触成员 diff 的聚合评审以主成员
+        // checkout 作窗口对账域;非主成员面不在对账域=R8 类已知边界,由
+        // EngineEvent 附注披露+T24 评估)。真零成员(空 manifest)→专用码。
         let Some(store) = self.lifecycle_store.as_ref() else {
             return Err(format!(
                 "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: aggregate root view without a persistent lifecycle store; owner ruling pending"
             ));
         };
-        let context = crate::product::workspace_repository::resolve_workspace_repository_context_for_entity(
-            &store.app_paths(),
-            store,
-            &self.session.project_id,
-            &self.session.issue_id,
-            &self.session.entity_id,
-            self.session.workspace_type.clone(),
-        )
-        .map_err(|error| {
-            format!(
-                "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: business repository resolution failed ({error}); owner ruling pending"
+        let business =
+            crate::product::workspace_repository::resolve_workspace_repository_context_for_entity(
+                &store.app_paths(),
+                store,
+                &self.session.project_id,
+                &self.session.issue_id,
+                &self.session.entity_id,
+                self.session.workspace_type.clone(),
             )
-        })?;
-        let repository = context.business_repository.map_err(|error| {
-            format!(
-                "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: business repository unresolved ({error}); owner ruling pending"
-            )
-        })?;
-        if crate::product::workspace_repository::is_aggregate_root_view_repository(&repository) {
-            // Story focus=None / WorkItemPlan 多 target 回落聚合视图:无唯一
-            // 成员面——不静默杀,交 owner 裁定(候选替代=manifest 主成员
-            // checkout 锚,见修复轮 1 报告建议)。
-            return Err(format!(
-                "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: aggregate root view with no unique/focus member (repository id {}); owner ruling pending",
-                repository.id
-            ));
-        }
+            .and_then(|context| context.business_repository);
+        let (repository, primary_anchored) = match business {
+            Ok(repository)
+                if !crate::product::workspace_repository::is_aggregate_root_view_repository(
+                    &repository,
+                ) =>
+            {
+                (repository, false)
+            }
+            _ => {
+                // 聚合视图或无唯一成员:主成员锚(manifest member_ids 首成员)。
+                let primary = crate::product::workspace_repository::resolve_primary_member_repository(
+                    &store.app_paths(),
+                    &self.session.project_id,
+                    &self.session.issue_id,
+                )
+                .map_err(|error| {
+                    format!(
+                        "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: aggregate form without any member to anchor (primary member resolution failed: {error}); owner ruling pending"
+                    )
+                })?;
+                (primary, true)
+            }
+        };
         if !repository.path.join(".git").exists() {
             return Err(format!(
                 "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: resolved member checkout {} is not a git worktree; owner ruling pending",
                 repository.path.display()
             ));
         }
-        Ok(repository.path)
+        Ok((repository.path, primary_anchored))
     }
 
     /// 入口开窗(T17 冻结顺序):必须早于 `ensure_review_invocation_scope`/
@@ -1791,6 +1819,35 @@ impl WorkspaceEngine {
                 tracing::warn!(%error, window = %window.window_id, "plan_review_window_close_kept_lock");
             }
         }
+    }
+}
+
+impl WorkspaceEngine {
+    /// 修复轮 1(Main 裁定 b):聚合形态主成员锚的窗口附注——R8 类已知
+    /// 边界如实披露(该窗内非主成员写入不在对账域;T24 重放/崩溃演练
+    /// 评估项与 owner 报告项)。
+    async fn emit_primary_member_anchor_note(
+        event_tx: &mpsc::Sender<EngineEvent>,
+        session_id: &str,
+        anchor: &std::path::Path,
+    ) {
+        let _ = event_tx
+            .send(EngineEvent::ExecutionEvent {
+                event: crate::cross_cutting::streaming_provider::ProviderExecutionEvent {
+                    event_id: format!("plan_review_window_primary_anchor_{session_id}"),
+                    kind: crate::cross_cutting::streaming_provider::ProviderExecutionEventKind::Provider,
+                    status: crate::cross_cutting::streaming_provider::ProviderExecutionEventStatus::Completed,
+                    title: "审查窗口主成员锚定(primary-member anchored;非主成员面未对账——R8 类已知边界,详 T20b 修复轮1 报告)".to_string(),
+                    detail: Some(format!("anchor: {}", anchor.display())),
+                    command: None,
+                    cwd: None,
+                    output: None,
+                    exit_code: None,
+                },
+                node_id: None,
+                agent: None,
+            })
+            .await;
     }
 }
 #[cfg(test)]
