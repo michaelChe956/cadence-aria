@@ -190,6 +190,8 @@ fn approve_review_report(
         role_run_id: None,
         run_no: Some(1),
         unit_run_id: Some(run.id.clone()),
+        acceptance: None,
+        review_window_id: None,
     }
 }
 

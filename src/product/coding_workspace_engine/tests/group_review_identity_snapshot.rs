@@ -338,6 +338,8 @@ fn code_review_report(
         role_run_id: None,
         run_no: None,
         unit_run_id,
+        acceptance: None,
+        review_window_id: None,
     }
 }
 

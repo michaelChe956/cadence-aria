@@ -4,6 +4,12 @@ use crate::product::coding_models::{
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 
 impl super::CodingAttemptStore {
+    /// T18 采信契约:`CodeReviewReport`/`InternalPrReview` 的可选
+    /// `acceptance`/`review_window_id` 字段由本 store **忠实透传**,
+    /// 缺字段 = 历史未核验(不默认 Accepted,不改历史 JSON)。本 store
+    /// 不建立第二份采信判定——权威记录是 reviewer window store 的
+    /// `report_acceptance`;交付/approve 消费者必须回查 T18 同源窗口
+    /// 记录,不得只看模型 verdict 或本投影字段。
     pub fn save_code_review_report(
         &self,
         attempt: &CodingExecutionAttempt,

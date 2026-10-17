@@ -309,6 +309,8 @@ async fn campaign_stage3_group_projection_reads_every_work_item_result() {
                 role_run_id: None,
                 run_no: None,
                 unit_run_id: Some(completed_run.id.clone()),
+                acceptance: None,
+                review_window_id: None,
             },
         )
         .expect("code review report");

@@ -33,6 +33,7 @@ pub mod project_store;
 pub mod provider_resource_store;
 pub mod provider_workspace_runner;
 pub mod repository_store;
+pub mod reviewer_reconciliation;
 pub mod reviewer_snapshot;
 pub mod reviewer_window;
 pub mod reviewer_window_store;

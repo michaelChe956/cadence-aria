@@ -472,5 +472,7 @@ pub(super) fn review_report_requesting_changes(
         role_run_id: None,
         run_no: None,
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }

@@ -282,6 +282,8 @@ impl CodingWorkspaceEngine {
             } else {
                 None
             },
+            acceptance: None,
+            review_window_id: None,
         })
     }
 
@@ -318,6 +320,8 @@ impl CodingWorkspaceEngine {
             raw_provider_output_ref,
             role_run_id: Some(role_run.id.clone()),
             run_no: Some(role_run.run_no),
+            acceptance: None,
+            review_window_id: None,
         })
     }
 

@@ -1070,6 +1070,8 @@ async fn group_unit_completion_appends_platform_delivery_facts_chat_entry() {
                 role_run_id: None,
                 run_no: None,
                 unit_run_id: Some(source_run.id.clone()),
+                acceptance: None,
+                review_window_id: None,
             },
         )
         .expect("seed review report");

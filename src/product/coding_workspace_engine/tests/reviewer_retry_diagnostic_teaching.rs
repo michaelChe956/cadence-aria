@@ -24,6 +24,8 @@ fn blocked_code_review_report(
         role_run_id: Some(role_run_id.to_string()),
         run_no: Some(1),
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }
 
@@ -162,6 +164,8 @@ fn internal_reviewer_retry_diagnostic_injects_teaching_for_missing_verdict() {
         raw_provider_output_ref: None,
         role_run_id: Some(previous.id.clone()),
         run_no: Some(1),
+        acceptance: None,
+        review_window_id: None,
     };
     store
         .save_internal_pr_review(&attempt, &review)

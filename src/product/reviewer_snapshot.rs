@@ -263,7 +263,7 @@ pub(crate) struct RestoreCursor {
 }
 
 impl RestoreCursor {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         Self {
             phase: RestorePhase::Started,
             entry_index: 0,

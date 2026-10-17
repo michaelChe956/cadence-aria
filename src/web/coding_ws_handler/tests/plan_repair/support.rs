@@ -487,6 +487,8 @@ pub(super) fn internal_plan_defect_review(
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }
 
@@ -656,5 +658,7 @@ pub(super) fn plan_defect_report(finding: ReviewFinding) -> CodeReviewReport {
         role_run_id: None,
         run_no: None,
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }

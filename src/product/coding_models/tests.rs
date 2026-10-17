@@ -60,6 +60,8 @@ fn review_artifacts_round_trip_preserves_evidence() {
         role_run_id: None,
         run_no: None,
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     };
     let review_value = serde_json::to_value(&review).expect("serialize code review");
     assert_eq!(

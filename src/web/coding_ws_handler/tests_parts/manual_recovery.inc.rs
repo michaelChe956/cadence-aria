@@ -267,6 +267,8 @@ fn manual_continue_resolved_gate_skips_completed_reviewer() {
         role_run_id: None,
         run_no: None,
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     };
     store
         .save_code_review_report(&attempt, &report)

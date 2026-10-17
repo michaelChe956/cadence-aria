@@ -243,6 +243,19 @@ export type CodingRoleRun = {
 
 export type CodingReviewVerdict = "approve" | "request_changes" | "blocked";
 export type FindingSeverity = "error" | "warning" | "info";
+// B 档采信投影(T18):与模型 verdict 独立。仅 reviewer 窗口经三域对账+
+// 人工门判定后 accepted;缺字段 = 历史报告未核验(不是 accepted)。
+// 权威记录是 reviewer window 的 report_acceptance,本字段为同源投影。
+export type ReviewReportAcceptance =
+  | "pending_acceptance"
+  | "accepted"
+  | "invalidated";
+// wire 值域运行时锁(review-acceptance.test.ts 消费)。
+export const REVIEW_REPORT_ACCEPTANCE_VALUES = [
+  "pending_acceptance",
+  "accepted",
+  "invalidated",
+] as const satisfies readonly ReviewReportAcceptance[];
 
 export type ReviewFinding = {
   severity: FindingSeverity;
@@ -270,6 +283,9 @@ export type CodeReviewReport = {
   raw_provider_output_ref?: string | null;
   role_run_id?: string | null;
   run_no?: number | null;
+  // T18 采信投影(可选;缺字段 = 历史未核验)。
+  acceptance?: ReviewReportAcceptance;
+  review_window_id?: string;
 };
 
 export type ReviewRequestKind =
@@ -320,6 +336,8 @@ export type InternalPrReview = {
   raw_provider_output_ref?: string | null;
   role_run_id?: string | null;
   run_no?: number | null;
+  acceptance?: ReviewReportAcceptance;
+  review_window_id?: string;
 };
 
 export type GroupReviewArtifactRef = {

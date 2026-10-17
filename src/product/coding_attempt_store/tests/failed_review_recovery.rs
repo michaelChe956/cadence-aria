@@ -228,6 +228,127 @@ fn archived_path(
 }
 
 #[test]
+fn report_dto_round_trips_acceptance_and_window_binding_faithfully() {
+    // T18 采信契约:acceptance/review_window_id 由 store 忠实透传;
+    // 缺字段 = 历史未核验(None),不默认 Accepted,不建立第二份采信
+    // 判定(权威记录在 reviewer window store)。
+    let (_tmp, store, attempt) = setup();
+    let mut report = crate::product::coding_models::CodeReviewReport {
+        id: "code_review_report_0042".to_string(),
+        attempt_id: attempt.id.clone(),
+        round: 1,
+        verdict: crate::product::coding_models::ReviewVerdict::Approve,
+        findings: Vec::new(),
+        tested_evidence_refs: Vec::new(),
+        diff_refs: Vec::new(),
+        summary: "approved".to_string(),
+        created_at: "2026-10-17T00:00:00Z".to_string(),
+        raw_provider_output_ref: None,
+        role_run_id: None,
+        run_no: None,
+        unit_run_id: None,
+        acceptance: Some(crate::product::coding_models::ReviewReportAcceptance::PendingAcceptance),
+        review_window_id: Some("w-t18-1".to_string()),
+    };
+    store
+        .save_code_review_report(&attempt, &report)
+        .expect("save with acceptance projection");
+    let loaded = store
+        .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("list reports")
+        .into_iter()
+        .find(|candidate| candidate.id == report.id)
+        .expect("round trip");
+    assert_eq!(
+        loaded.acceptance,
+        Some(crate::product::coding_models::ReviewReportAcceptance::PendingAcceptance)
+    );
+    assert_eq!(loaded.review_window_id.as_deref(), Some("w-t18-1"));
+
+    // 采信投影随 T18 裁决推进(store 只透传,不改写)。
+    report.acceptance = Some(crate::product::coding_models::ReviewReportAcceptance::Invalidated);
+    store
+        .save_code_review_report(&attempt, &report)
+        .expect("save invalidated projection");
+    let loaded = store
+        .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("list reports")
+        .into_iter()
+        .find(|candidate| candidate.id == report.id)
+        .expect("reload");
+    assert_eq!(
+        loaded.acceptance,
+        Some(crate::product::coding_models::ReviewReportAcceptance::Invalidated)
+    );
+
+    // 历史 JSON(缺字段)反序列化为 None:未核验 ≠ Accepted。
+    let report_path = store
+        .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .join("code-reviews")
+        .join("code_review_report_legacy.json");
+    std::fs::write(
+        &report_path,
+        r#"{
+  "id": "code_review_report_legacy",
+  "attempt_id": "coding_attempt_0001",
+  "round": 1,
+  "verdict": "approve",
+  "findings": [],
+  "tested_evidence_refs": [],
+  "diff_refs": [],
+  "summary": "legacy",
+  "created_at": "2026-06-10T00:00:02Z"
+}"#,
+    )
+    .expect("write legacy report json");
+    let legacy: crate::product::coding_models::CodeReviewReport =
+        read_json(&report_path).expect("legacy json deserializes");
+    assert_eq!(legacy.acceptance, None);
+    assert_eq!(legacy.review_window_id, None);
+    assert_eq!(
+        legacy.verdict,
+        crate::product::coding_models::ReviewVerdict::Approve
+    );
+
+    // InternalPrReview 同形透传。
+    let review = crate::product::coding_models::InternalPrReview {
+        id: "internal_review_t18".to_string(),
+        attempt_id: attempt.id.clone(),
+        review_request_id: "rr-1".to_string(),
+        verdict: crate::product::coding_models::ReviewVerdict::Approve,
+        findings: Vec::new(),
+        impact_scope: Vec::new(),
+        pr_description: String::new(),
+        commit_message_suggestion: String::new(),
+        tested_evidence_refs: Vec::new(),
+        diff_refs: Vec::new(),
+        summary: "ok".to_string(),
+        created_at: "2026-10-17T00:00:00Z".to_string(),
+        raw_provider_output_ref: None,
+        role_run_id: None,
+        run_no: None,
+        acceptance: Some(crate::product::coding_models::ReviewReportAcceptance::Accepted),
+        review_window_id: Some("w-t18-1".to_string()),
+    };
+    store
+        .save_internal_pr_review(&attempt, &review)
+        .expect("save internal review");
+    let loaded = store
+        .get_internal_pr_review(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "internal_review_t18",
+        )
+        .expect("load internal review");
+    assert_eq!(
+        loaded.acceptance,
+        Some(crate::product::coding_models::ReviewReportAcceptance::Accepted)
+    );
+    assert_eq!(loaded.review_window_id.as_deref(), Some("w-t18-1"));
+}
+
+#[test]
 fn prepare_archives_completed_journal_before_creating_new_identity() {
     let (_tmp, store, attempt) = setup();
     let old = journal(

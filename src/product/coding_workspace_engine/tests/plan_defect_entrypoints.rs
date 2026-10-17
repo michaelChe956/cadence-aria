@@ -662,6 +662,8 @@ fn internal_review_with_finding(finding: ReviewFinding) -> InternalPrReview {
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        acceptance: None,
+        review_window_id: None,
     }
 }
 

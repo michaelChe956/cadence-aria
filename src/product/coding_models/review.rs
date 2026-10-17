@@ -84,6 +84,18 @@ pub enum ReviewVerdict {
     Blocked,
 }
 
+/// 报告采信投影 wire 值(T18)。与模型 verdict 独立:仅当 reviewer
+/// 窗口经三域对账+人工门判定后才可能 `accepted`。缺字段 = 历史报告
+/// 未核验(**不是** accepted);权威记录是 reviewer window store 的
+/// `report_acceptance`,本字段只是同源投影。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewReportAcceptance {
+    PendingAcceptance,
+    Accepted,
+    Invalidated,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingSeverity {
@@ -194,6 +206,13 @@ pub struct CodeReviewReport {
     pub run_no: Option<u32>,
     #[serde(default)]
     pub unit_run_id: Option<String>,
+    /// T18 采信投影(同源自窗口记录;缺字段 = 历史未核验,不默认
+    /// Accepted,不改历史 JSON)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance: Option<ReviewReportAcceptance>,
+    /// T18 report/window 绑定(产出该报告的 reviewer 窗口)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_window_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,4 +235,8 @@ pub struct InternalPrReview {
     pub role_run_id: Option<String>,
     #[serde(default)]
     pub run_no: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance: Option<ReviewReportAcceptance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_window_id: Option<String>,
 }

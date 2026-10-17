@@ -155,6 +155,8 @@ async fn schema_v2_group_final_confirm_completes_without_removed_test_artifacts(
                     role_run_id: None,
                     run_no: Some(1),
                     unit_run_id: Some(format!("coding_unit_run_{}", unit.order_index + 1)),
+                    acceptance: None,
+                    review_window_id: None,
                 },
             )
             .expect("code review report");

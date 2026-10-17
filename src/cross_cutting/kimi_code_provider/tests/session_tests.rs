@@ -2289,7 +2289,8 @@ async fn anchor_t36_provider_prepare_and_audit_share_full_fingerprint() {
     //    承载的规划候选 wire 面全开)——prepare 成功且候选 input 的
     //    tool_policy=None(kimi 通用策略例外口径由「零派发」承接;adapter
     //    对到达的非空通用策略仍稳定码 typed 拒,该面由 kimi adapter 自测
-    //    与 lcg_t01 映射测试钉住);prepare 只读零探测(计数 0)。
+    //    与 lcg_t01 映射测试钉住)。成功 prepare 走真实只读 facts 观测
+    //(version probe 属合法观测,不再有「拒于探测之前」的旧形态)。
     let mut orchestrator_raw = fixture.lc_streaming_input(None, None);
     orchestrator_raw.role = AdapterRole::Orchestrator;
     let orchestrator_candidate = gateway
@@ -2305,7 +2306,6 @@ async fn anchor_t36_provider_prepare_and_audit_share_full_fingerprint() {
         orchestrator_candidate.input().tool_policy.is_none(),
         "T11: no deny must be derived from the Orchestrator carrier for kimi"
     );
-    assert_eq!(anchor_t36_probe_invocations(&fixture_bin), 0);
 
     // 2) 真实 prepare:facts/full projection/root trust 同源冻结(native 来源)。
     let durable_before = (

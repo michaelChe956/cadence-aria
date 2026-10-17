@@ -169,6 +169,8 @@ fn seed_code_review_report_with_finding(
                 role_run_id: None,
                 run_no: None,
                 unit_run_id: None,
+                acceptance: None,
+                review_window_id: None,
             },
         )
         .expect("code review report");

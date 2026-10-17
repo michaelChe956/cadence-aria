@@ -251,6 +251,54 @@ pub(crate) struct BaselineBinding {
     pub(crate) captured_at: String,
 }
 
+/// 违规 journal 条目(T18:恢复前先落盘,恢复不可删除/覆盖)。
+/// `entry_id` = 内容确定性哈希(幂等键:同一违规重复收口只落一条);
+/// `seq` = journal 内单调序号(检测可观察范围内的删除/重写:断裂即
+/// fail-closed;不承诺同 UID 恶意重写整文件必被检测——R8 边界)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ViolationJournalEntry {
+    pub(crate) seq: u64,
+    pub(crate) entry_id: String,
+    pub(crate) at: String,
+    pub(crate) window_id: String,
+    pub(crate) attempt_id: String,
+    pub(crate) run_id: String,
+    /// 触发违规判定时绑定的报告(可空:窗口可能尚未产出报告)。
+    pub(crate) report_id: Option<String>,
+    /// `git_domain_write` | `platform_domain_write` | `channel_bypass` |
+    /// `git_self_commit` | `journal_tamper` | `git_domain_mutation` |
+    /// `git_extra_ref` | (观察方自定稳定码)。
+    pub(crate) kind: String,
+    /// 违规涉及的路径(相对 worktree/gitdir 或绝对平台路径)。
+    pub(crate) path: String,
+    /// 前摘要(基线/期望内容指纹;未知为 None)。
+    pub(crate) before_digest: Option<String>,
+    /// 后摘要(观察到的内容指纹;未知为 None)。
+    pub(crate) after_digest: Option<String>,
+    pub(crate) detail: String,
+    /// 记录时的 T16 恢复游标(`phase+index`;恢复尚未开始时为基线游标)。
+    pub(crate) restore_cursor: String,
+}
+
+/// journal 文件(单调追加;整体原子写)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ViolationJournalFile {
+    pub(crate) schema: String,
+    pub(crate) window_id: String,
+    pub(crate) entries: Vec<ViolationJournalEntry>,
+}
+
+pub(crate) const REVIEWER_VIOLATION_JOURNAL_SCHEMA: &str = "reviewer_window_violation_journal_v1";
+
+/// 「违规已观测但 journal 尚未落盘」的 durable 停等标记(先落标记再写
+/// journal;写失败时该标记阻止恢复/采信,直到 journal 落盘成功)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ViolationPending {
+    pub(crate) entry_id: String,
+    pub(crate) kind: String,
+    pub(crate) detail: String,
+}
+
 /// 恢复绑定(T16 恢复结局与游标交接 T18 判定)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RestoreBinding {
@@ -263,6 +311,17 @@ pub(crate) struct RestoreBinding {
     pub(crate) cursor_phase: Option<String>,
     pub(crate) entry_index: Option<usize>,
     pub(crate) detail: String,
+    /// T18 结构化事实:窗口内被恢复的 Git 域 mutation 路径
+    /// (HEAD/index/受管 ref——冻结窗口内任何 Git 域漂移均为违规信号)。
+    #[serde(default)]
+    pub(crate) git_restored_mutation_paths: Vec<String>,
+    /// T18 结构化事实:窗口内新增、恢复后保留取证的 ref
+    /// (Reviewer 自提交对象证据,不抹共享数据)。
+    #[serde(default)]
+    pub(crate) git_extra_refs_observed: Vec<String>,
+    /// T18 结构化事实:恢复核验通过的平台合法写入路径。
+    #[serde(default)]
+    pub(crate) platform_verified: Vec<String>,
 }
 
 /// 停等记录的来源阶段。
@@ -315,6 +374,10 @@ pub(crate) struct ReviewerWindowRecord {
     /// 与 `RecoveryRequired` 状态分离的瞬时 store 错误(T18 约定:
     /// 计入非通过并带出游标;见 `reviewer_window::restore_window` 文档)。
     pub(crate) last_error: Option<String>,
+    /// 违规已观测但 journal 未落盘的停等标记(T18:阻止恢复开始与
+    /// 采信关闭;journal 落盘成功后清除)。
+    #[serde(default)]
+    pub(crate) violation_pending: Option<ViolationPending>,
     pub(crate) transitions: Vec<TransitionEntry>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
@@ -348,6 +411,7 @@ impl ReviewerWindowRecord {
             restore: None,
             recovery: None,
             last_error: None,
+            violation_pending: None,
             transitions: vec![TransitionEntry {
                 from: None,
                 to: ReviewerWindowState::Preparing.as_str().to_string(),
@@ -408,6 +472,24 @@ pub(crate) fn tree_key_of(canonical_worktree: &Path) -> String {
 /// common_key:common-dir 路径的 sha256(通道闸门文件名)。
 pub(crate) fn common_key_of(common_dir: &Path) -> String {
     sha256_hex(common_dir.to_string_lossy().as_bytes())
+}
+
+/// 窗口采信投影 → 公开报告 DTO wire 值。仅形状投影,不是第二份采信
+/// 判定:权威记录是窗口记录的 `report_acceptance`(T18 同源)。
+pub(crate) fn wire_acceptance(
+    value: ReportAcceptance,
+) -> crate::product::coding_models::ReviewReportAcceptance {
+    match value {
+        ReportAcceptance::PendingAcceptance => {
+            crate::product::coding_models::ReviewReportAcceptance::PendingAcceptance
+        }
+        ReportAcceptance::Accepted => {
+            crate::product::coding_models::ReviewReportAcceptance::Accepted
+        }
+        ReportAcceptance::Invalidated => {
+            crate::product::coding_models::ReviewReportAcceptance::Invalidated
+        }
+    }
 }
 
 /// 目录 fsync(rename 后补目录项持久化;RevB2T16 ⚠1 处置面)。
@@ -542,6 +624,93 @@ impl ReviewerWindowStore {
             });
         }
         read_json(&path)
+    }
+
+    /// 违规 journal 追加(T18:单调追加;整体原子写 + 目录 fsync)。
+    /// - `entry` 的 `seq` 由本方法在锁内分配(= 末条 seq+1);
+    /// - `entry_id` 已存在 → 幂等返回已有条目(同一违规重复收口只落一条);
+    /// - journal 文件损坏/window_id 不符 → Err(fail-closed,不覆盖)。
+    pub(crate) fn append_violation(
+        &self,
+        window_id: &str,
+        entry: ViolationJournalEntry,
+    ) -> Result<ViolationJournalEntry, ProductStoreError> {
+        validate_relative_id(window_id)?;
+        let path = self.violation_journal_path(window_id);
+        with_exclusive_lock(&path, || {
+            let mut journal = if path.is_file() {
+                let journal: ViolationJournalFile = read_json(&path)?;
+                if journal.schema != REVIEWER_VIOLATION_JOURNAL_SCHEMA {
+                    return Err(ProductStoreError::InvalidRecord {
+                        kind: "reviewer_violation_journal",
+                        reason: format!("schema 非 {REVIEWER_VIOLATION_JOURNAL_SCHEMA}"),
+                    });
+                }
+                if journal.window_id != window_id {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "reviewer_violation_journal",
+                        id: window_id.to_string(),
+                    });
+                }
+                journal
+            } else {
+                ViolationJournalFile {
+                    schema: REVIEWER_VIOLATION_JOURNAL_SCHEMA.to_string(),
+                    window_id: window_id.to_string(),
+                    entries: Vec::new(),
+                }
+            };
+            if let Some(existing) = journal
+                .entries
+                .iter()
+                .find(|existing| existing.entry_id == entry.entry_id)
+            {
+                return Ok(existing.clone());
+            }
+            let seq = journal.entries.last().map(|last| last.seq + 1).unwrap_or(1);
+            let mut appended = entry;
+            appended.seq = seq;
+            journal.entries.push(appended.clone());
+            write_json(&path, &journal)?;
+            sync_dir(self.violation_journal_dir().as_path())?;
+            Ok(appended)
+        })
+    }
+
+    /// 违规 journal 读取(文件缺失 = 空vec——是否构成篡改由 T18 判定面
+    /// 结合 `from_violation` 决定;文件损坏 → Err,fail-closed)。
+    pub(crate) fn load_violations(
+        &self,
+        window_id: &str,
+    ) -> Result<Vec<ViolationJournalEntry>, ProductStoreError> {
+        validate_relative_id(window_id)?;
+        let path = self.violation_journal_path(window_id);
+        if !path.is_file() {
+            return Ok(Vec::new());
+        }
+        let journal: ViolationJournalFile = read_json(&path)?;
+        if journal.schema != REVIEWER_VIOLATION_JOURNAL_SCHEMA {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "reviewer_violation_journal",
+                reason: format!("schema 非 {REVIEWER_VIOLATION_JOURNAL_SCHEMA}"),
+            });
+        }
+        if journal.window_id != window_id {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "reviewer_violation_journal",
+                id: window_id.to_string(),
+            });
+        }
+        Ok(journal.entries)
+    }
+
+    fn violation_journal_dir(&self) -> PathBuf {
+        self.root.join("violations")
+    }
+
+    fn violation_journal_path(&self, window_id: &str) -> PathBuf {
+        self.violation_journal_dir()
+            .join(format!("{window_id}.json"))
     }
     /// CAS 状态写:expected generation 必须与磁盘一致(否则 Conflict),
     /// 不可变身份字段(window/identity/attempt/run/provider/created_at)

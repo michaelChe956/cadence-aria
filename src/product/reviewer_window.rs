@@ -18,6 +18,12 @@
 //! 非通过并从 `restore.cursor_phase/entry_index` 带出游标;T16
 //! `RestoreOutcome::RecoveryRequired`(域内无法安全恢复)才把窗口迁入
 //! `RecoveryRequired` 停等(锁保留)。
+//! T18 采信判定(本模块 + `reviewer_reconciliation`):恢复成功 ≠ 可
+//! 采信。违规 journal(路径/前后摘要/时间/window/attempt/run/report/
+//! restore_cursor)在恢复开始前先落盘,恢复不可删除/覆盖;三域独立
+//! 对账 + 记录一致 + 无违规才可 `Accepted`;自提交/改 Git/平台元数据/
+//! 通道绕过/可观察篡改 → 整轮 `Invalidated`(人工门只许作废关闭/
+//! 作废后新轮,不能把旧报告改 Accepted)。
 //!
 //! T16 掉电窗口披露(RevB2T16 ⚠1):blobs/manifest 目录项 fsync 缺口
 //! 按审查约定接受该掉电窗口;本模块自身的租约/窗口/闸门记录 rename 后
@@ -33,13 +39,13 @@ use crate::cross_cutting::provider_resources::{
 };
 use crate::product::json_store::ProductStoreError;
 use crate::product::reviewer_snapshot::{
-    CaptureRequest, PlatformWritePath, QuiescenceEvidence, RestoreOutcome,
+    CaptureRequest, PlatformWritePath, QuiescenceEvidence, RestoreOutcome, RestoreReport,
     ReviewWorktreeLockIdentity, ReviewerSnapshotError, ReviewerSnapshotStore, SnapshotBudget,
 };
 use crate::product::reviewer_window_store::{
     ALL_WRITE_CHANNELS, BaselineBinding, ChannelGateError, ChannelWriter, RecoveryPhase,
     ReportAcceptance, RestoreBinding, ReviewerWindowRecord, ReviewerWindowState,
-    ReviewerWindowStore, WindowLeaseRecord, tree_key_of,
+    ReviewerWindowStore, ViolationJournalEntry, ViolationPending, WindowLeaseRecord, tree_key_of,
 };
 
 /// 排空轮询间隔(测试缩短保持秒级;同 T5 cfg 分档)。
@@ -97,6 +103,10 @@ pub(crate) enum ReviewerWindowError {
         detail: String,
         cursor: String,
     },
+    /// 违规已观测但 journal 未落盘(停等标记持有)——恢复与采信关闭
+    /// 均拒绝,直到 journal 落盘成功(重入 `record_violation` 幂等续接)。
+    #[error("reviewer_window_violation_journal_pending: window={window_id}: {detail}")]
+    ViolationJournalPending { window_id: String, detail: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +184,21 @@ pub(crate) enum ManualGateDecision {
     Invalidate,
     /// 作废后要求新一轮评审(新窗口重加锁/新 baseline/新材料)。
     RequireNewReview,
+}
+
+/// 观测违规事实(T18 journal 输入;由观察方——T5 监视/通道闸门/平台
+/// 写监视——提供)。`kind` 用稳定码(见 `ViolationJournalEntry::kind`)。
+pub(crate) struct ViolationRecord<'a> {
+    pub(crate) kind: &'a str,
+    /// 违规涉及的路径(相对 worktree/gitdir 或绝对平台路径)。
+    pub(crate) path: &'a str,
+    /// 前摘要(基线/期望内容指纹;未知为 None)。
+    pub(crate) before_digest: Option<&'a str>,
+    /// 后摘要(观察到的内容指纹;未知为 None)。
+    pub(crate) after_digest: Option<&'a str>,
+    pub(crate) detail: &'a str,
+    /// 触发违规判定时绑定的报告(可空)。
+    pub(crate) report_id: Option<&'a str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -597,10 +622,18 @@ impl BaselineFacts {
 }
 
 /// manifest 指纹:规范化 JSON 序列化 sha256(内容寻材证明)。
-fn manifest_fingerprint(
+///
+/// 规范化规则:`restore_cursor` 归一到 capture 初值(Started+0)再序列化
+/// ——恢复推进的是执行进度,不是基线内容;不归一的话任何成功恢复都会
+/// 使指纹漂移,同源核验永远失败。capture 时游标本就是初值,故 BaselineFacts
+/// 取值不变。经 `load_manifest` 同源加载后计算,**不可按文件字节复算**
+/// (审查硬约束 3:证据链同源)。
+pub(crate) fn manifest_fingerprint(
     manifest: &crate::product::reviewer_snapshot::ReviewerBaselineManifest,
 ) -> String {
-    serde_json::to_string(manifest)
+    let mut canonical = manifest.clone();
+    canonical.restore_cursor = crate::product::reviewer_snapshot::RestoreCursor::start();
+    serde_json::to_string(&canonical)
         .map(|serialized| sha256_hex(serialized.as_bytes()))
         .unwrap_or_default()
 }
@@ -930,23 +963,99 @@ pub(crate) fn begin_quiesce(
     Ok(store.save_window_transition(record, expected_generation)?)
 }
 
-/// Quiescing → ViolationRecorded(违规事实已落;T18 journal 驱动)。
+/// Quiescing → ViolationRecorded(违规事实已落 journal;T18 驱动)。
+///
+/// 落盘顺序(fail-closed):
+/// 1. durable 停等标记 `violation_pending`(先声明「违规已观测」);
+/// 2. journal 追加(单调 seq,原子写 + 目录 fsync;`entry_id` 内容
+///    哈希幂等去重——同一违规重复收口只落一条);
+/// 3. 清除停等标记并迁移状态(Quiescing → ViolationRecorded;
+///    ViolationRecorded 下追加更多违规不迁移)。
+///
+/// 步骤 2 失败 → 返回 Err 且标记保留:`restore_window` /
+/// `record_report_acceptance(Accepted)` / `close_accepted` 全部拒绝
+/// (「违规已观测但 journal 写失败」不得开始恢复),重入本函数按
+/// `entry_id` 幂等续接。条目同时快照 T16 持久化恢复游标
+/// (`restore_cursor`):恢复开始前 journal 即含续接位置;恢复路径
+/// 只追加、不删除/覆盖 journal。
 pub(crate) fn record_violation(
     store: &ReviewerWindowStore,
+    snapshot: &ReviewerSnapshotStore,
     window_id: &str,
     expected_generation: u64,
-    note: &str,
+    violation: ViolationRecord<'_>,
 ) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
     let mut record = load_for_transition(store, window_id, expected_generation)?;
-    if record.state != ReviewerWindowState::Quiescing {
-        return Err(invalid_transition(
-            record.state,
-            ReviewerWindowState::ViolationRecorded,
-            "仅 Quiescing 可记录违规",
-        ));
+    match record.state {
+        ReviewerWindowState::Quiescing | ReviewerWindowState::ViolationRecorded => {}
+        other => {
+            return Err(invalid_transition(
+                other,
+                ReviewerWindowState::ViolationRecorded,
+                "仅 Quiescing/ViolationRecorded 可记录违规",
+            ));
+        }
     }
-    record.bump_transition(ReviewerWindowState::ViolationRecorded, note);
-    Ok(store.save_window_transition(record, expected_generation)?)
+    let cursor = snapshot_cursor_string(snapshot, window_id);
+    let entry_id = violation_entry_id(
+        window_id,
+        violation.kind,
+        violation.path,
+        violation.before_digest,
+        violation.after_digest,
+        violation.detail,
+        violation.report_id,
+    );
+    let journal_has_entry = store
+        .load_violations(window_id)?
+        .iter()
+        .any(|entry| entry.entry_id == entry_id);
+    let pending_retry = record
+        .violation_pending
+        .as_ref()
+        .is_some_and(|pending| pending.entry_id == entry_id);
+    if !journal_has_entry && !pending_retry {
+        record.violation_pending = Some(ViolationPending {
+            entry_id: entry_id.clone(),
+            kind: violation.kind.to_string(),
+            detail: violation.detail.to_string(),
+        });
+        record = store.save_window_transition(record, expected_generation)?;
+    }
+    if !journal_has_entry {
+        let entry = ViolationJournalEntry {
+            seq: 0,
+            entry_id,
+            at: now_rfc3339(),
+            window_id: window_id.to_string(),
+            attempt_id: record.attempt_id.clone(),
+            run_id: record.run_id.clone(),
+            report_id: violation.report_id.map(str::to_string),
+            kind: violation.kind.to_string(),
+            path: violation.path.to_string(),
+            before_digest: violation.before_digest.map(str::to_string),
+            after_digest: violation.after_digest.map(str::to_string),
+            detail: violation.detail.to_string(),
+            restore_cursor: cursor,
+        };
+        store.append_violation(window_id, entry)?;
+    }
+    // journal 已 durable:清停等标记 + 迁移。
+    record.violation_pending = None;
+    let next_state = if record.state == ReviewerWindowState::Quiescing {
+        ReviewerWindowState::ViolationRecorded
+    } else {
+        record.state
+    };
+    record.bump_transition(
+        next_state,
+        &format!(
+            "违规落盘 journal: kind={} path={}",
+            violation.kind, violation.path
+        ),
+    );
+    let expected = record.generation;
+    Ok(store.save_window_transition(record, expected)?)
 }
 
 /// 恢复(Quiescing[无违规]/ViolationRecorded/恢复停等重入 → Restoring;
@@ -958,6 +1067,15 @@ pub(crate) fn record_violation(
 /// - T16 `Err`(Io/Store/Integrity):**状态不动**(仍在 Restoring),
 ///   `last_error` 记录并原样返回——T18 对账计入非通过并带出游标
 ///   (审查硬约束 4 的接口约定)。
+///
+/// T18 违规收口(恢复成功也不能洗白):
+/// - 入口见 `violation_pending` → 拒绝开始恢复(journal 未落盘);
+/// - 恢复完成后从 `RestoreReport` 派生 Git 域违规事实(自提交对象/
+///   HEAD/index/受管 ref 漂移)+ 可观察 journal 篡改/洗白形态,
+///   **先落 journal 再迁移 ManualGate**(journal-first;派生条目
+///   `entry_id` 不含恢复游标,重试幂等不重复落条);
+/// - 派生落盘失败 → Err 且 `violation_pending` 保留(不得采信关闭),
+///   重入本函数按 `entry_id` 幂等续接。
 pub(crate) async fn restore_window(
     store: &ReviewerWindowStore,
     snapshot: &ReviewerSnapshotStore,
@@ -965,6 +1083,17 @@ pub(crate) async fn restore_window(
     expected_generation: u64,
 ) -> Result<RestoreSummary, ReviewerWindowError> {
     let mut record = load_for_transition(store, window_id, expected_generation)?;
+    // T18:「违规已观测但 journal 未落盘」必须不开始恢复(fail-closed)。
+    // 例外:Restoring 态的 pending 是恢复后派生收口的崩溃残留——重入
+    // 本函数幂等续接(entry_id 去重追加后清除),否则永久死锁。
+    if let Some(pending) = record.violation_pending.as_ref()
+        && record.state != ReviewerWindowState::Restoring
+    {
+        return Err(ReviewerWindowError::ViolationJournalPending {
+            window_id: window_id.to_string(),
+            detail: format!("kind={} entry={}", pending.kind, pending.entry_id),
+        });
+    }
     // F1(修复轮 1):违规标记不得因恢复重入丢失——入口同时看当前状态
     // 与已持久化 RestoreBinding(停等重入时 state=RecoveryRequired,
     // 违规事实只在 binding 里),防止违规窗被洗白为可采信关闭。
@@ -999,6 +1128,9 @@ pub(crate) async fn restore_window(
         cursor_phase: None,
         entry_index: None,
         detail: String::new(),
+        git_restored_mutation_paths: Vec::new(),
+        git_extra_refs_observed: Vec::new(),
+        platform_verified: Vec::new(),
     });
     record.last_error = None;
     record.bump_transition(ReviewerWindowState::Restoring, "T16 差异恢复开始(游标续接)");
@@ -1007,32 +1139,100 @@ pub(crate) async fn restore_window(
 
     match snapshot.restore_baseline(window_id, &record.identity) {
         Ok(RestoreOutcome::Restored(report)) => {
-            record.restore = Some(RestoreBinding {
-                completed: true,
-                from_violation,
-                outcome: "restored".to_string(),
-                cursor_phase: Some(restore_phase_str(report.resumed_from.phase).to_string()),
-                entry_index: Some(report.resumed_from.entry_index),
-                detail: format!(
-                    "worktree_fixed={} removed_extras={} git_head={} git_index={} refs_restored={} extra_refs_observed={} platform_verified={}",
-                    report.worktree_fixed_entries.len(),
-                    report.worktree_removed_extras.len(),
-                    report.git_head_restored as u8,
-                    report.git_index_restored as u8,
-                    report.git_refs_restored.len(),
-                    report.git_extra_refs_observed.len(),
-                    report.platform_verified.len()
-                ),
-            });
-            if from_violation {
+            // T18:恢复成功 ≠ 可采信。先收集违规事实(journal-first),
+            // 再决定 Restoring(待采信)还是 ManualGate(整轮作废)。
+            let journal = store.load_violations(window_id)?;
+            let mut facts = derived_violation_facts(&record, &report, &journal);
+            let gate = from_violation || !facts.is_empty();
+            let binding = restored_binding(gate, &report);
+            if gate {
+                // journal-first:停等标记(首条 entry_id)→ 逐条追加 →
+                // 清标记并迁移 ManualGate。任一步失败 → Err + 标记保留,
+                // 重入本函数幂等续接(entry_id 去重)。
+                let cursor = format!(
+                    "{}+{}",
+                    restore_phase_str(report.resumed_from.phase),
+                    report.resumed_from.entry_index
+                );
+                let first_id = facts
+                    .first()
+                    .map(|fact| {
+                        violation_entry_id(
+                            window_id,
+                            fact.kind,
+                            &fact.path,
+                            fact.before_digest.as_deref(),
+                            fact.after_digest.as_deref(),
+                            &fact.detail,
+                            None,
+                        )
+                    })
+                    .unwrap_or_else(|| "journal-empty".to_string());
+                if record.violation_pending.is_none() && !facts.is_empty() {
+                    record.violation_pending = Some(ViolationPending {
+                        entry_id: first_id,
+                        kind: facts
+                            .first()
+                            .map(|fact| fact.kind.to_string())
+                            .unwrap_or_else(|| "journal_tamper".to_string()),
+                        detail: "恢复后违规收口:journal 落盘前停等".to_string(),
+                    });
+                    record = store.save_window_transition(record, expected_next)?;
+                }
+                // 既有停等标记与本次首条不一致(先前 journal 写失败续接):
+                // 保留原标记占位,追加完成后统一清除。
+                let existing_ids: std::collections::HashSet<String> = store
+                    .load_violations(window_id)?
+                    .into_iter()
+                    .map(|entry| entry.entry_id)
+                    .collect();
+                for fact in &facts {
+                    let entry_id = violation_entry_id(
+                        window_id,
+                        fact.kind,
+                        &fact.path,
+                        fact.before_digest.as_deref(),
+                        fact.after_digest.as_deref(),
+                        &fact.detail,
+                        None,
+                    );
+                    if existing_ids.contains(&entry_id) {
+                        continue;
+                    }
+                    let entry = ViolationJournalEntry {
+                        seq: 0,
+                        entry_id,
+                        at: now_rfc3339(),
+                        window_id: window_id.to_string(),
+                        attempt_id: record.attempt_id.clone(),
+                        run_id: record.run_id.clone(),
+                        report_id: None,
+                        kind: fact.kind.to_string(),
+                        path: fact.path.clone(),
+                        before_digest: fact.before_digest.clone(),
+                        after_digest: fact.after_digest.clone(),
+                        detail: fact.detail.clone(),
+                        restore_cursor: cursor.clone(),
+                    };
+                    store.append_violation(window_id, entry)?;
+                }
+                record.violation_pending = None;
+                record.restore = Some(binding);
                 record.bump_transition(
                     ReviewerWindowState::ManualGate,
-                    "违规流:恢复完整,进入人工门(仅作废关闭/作废后新轮)",
+                    "违规流:恢复完整+违规事实落 journal,进入人工门(仅作废关闭/作废后新轮)",
                 );
-            } else {
-                record.bump_transition(ReviewerWindowState::Restoring, "恢复完整,待采信裁决后关闭");
+                let manual_gate = true;
+                let expected_final = record.generation;
+                record = store.save_window_transition(record, expected_final)?;
+                return Ok(RestoreSummary {
+                    record,
+                    manual_gate,
+                });
             }
-            let manual_gate = from_violation;
+            record.restore = Some(binding);
+            record.bump_transition(ReviewerWindowState::Restoring, "恢复完整,待采信裁决后关闭");
+            let manual_gate = false;
             record = store.save_window_transition(record, expected_next)?;
             Ok(RestoreSummary {
                 record,
@@ -1054,6 +1254,9 @@ pub(crate) async fn restore_window(
                 cursor_phase: Some(cursor_phase.clone()),
                 entry_index: Some(cursor.entry_index),
                 detail: detail.clone(),
+                git_restored_mutation_paths: Vec::new(),
+                git_extra_refs_observed: Vec::new(),
+                platform_verified: Vec::new(),
             });
             record.note_recovery(
                 RecoveryPhase::Restore,
@@ -1094,6 +1297,9 @@ pub(crate) async fn restore_window(
                     .map(|cursor| restore_phase_str(cursor.phase).to_string()),
                 entry_index: persisted_cursor.map(|cursor| cursor.entry_index),
                 detail: error.to_string(),
+                git_restored_mutation_paths: Vec::new(),
+                git_extra_refs_observed: Vec::new(),
+                platform_verified: Vec::new(),
             });
             let _ = store.save_window_transition(record, expected_next);
             Err(ReviewerWindowError::Snapshot(error))
@@ -1101,9 +1307,207 @@ pub(crate) async fn restore_window(
     }
 }
 
+/// 恢复完成后的结构化绑定(三域事实入记录;T18 对账消费)。
+fn restored_binding(from_violation: bool, report: &RestoreReport) -> RestoreBinding {
+    RestoreBinding {
+        completed: true,
+        from_violation,
+        outcome: "restored".to_string(),
+        cursor_phase: Some(restore_phase_str(report.resumed_from.phase).to_string()),
+        entry_index: Some(report.resumed_from.entry_index),
+        detail: format!(
+            "worktree_fixed={} removed_extras={} git_head={} git_index={} refs_restored={} extra_refs_observed={} platform_verified={}",
+            report.worktree_fixed_entries.len(),
+            report.worktree_removed_extras.len(),
+            report.git_head_restored as u8,
+            report.git_index_restored as u8,
+            report.git_refs_restored.len(),
+            report.git_extra_refs_observed.len(),
+            report.platform_verified.len()
+        ),
+        git_restored_mutation_paths: git_mutation_paths(report),
+        git_extra_refs_observed: report.git_extra_refs_observed.clone(),
+        platform_verified: report.platform_verified.clone(),
+    }
+}
+
+/// 恢复报告派生的违规事实(冻结窗口内 Git 域漂移/自提交对象/可观察
+/// journal 篡改或洗白形态)。外部推送类外部副作用已在 kind/detail
+/// 中明示不可回滚——不伪造「交付零外部影响」。
+struct DerivedViolationFact {
+    kind: &'static str,
+    path: String,
+    before_digest: Option<String>,
+    after_digest: Option<String>,
+    detail: String,
+}
+
+fn derived_violation_facts(
+    record: &ReviewerWindowRecord,
+    report: &RestoreReport,
+    journal: &[ViolationJournalEntry],
+) -> Vec<DerivedViolationFact> {
+    let mut facts = Vec::new();
+    for path in git_mutation_paths(report) {
+        facts.push(DerivedViolationFact {
+            kind: "git_domain_mutation",
+            path: path.clone(),
+            before_digest: None,
+            after_digest: None,
+            detail: format!(
+                "冻结窗口内 Git 域漂移({path}),恢复已回写基线;改 Git 整轮作废。外部 push 类副作用不可回滚,不伪称交付零外部影响"
+            ),
+        });
+    }
+    for extra in &report.git_extra_refs_observed {
+        facts.push(DerivedViolationFact {
+            kind: "git_extra_ref",
+            path: extra.clone(),
+            before_digest: None,
+            after_digest: None,
+            detail: format!(
+                "窗口内新增 ref {extra}(Reviewer 自提交对象证据保留,不抹共享数据);整轮作废"
+            ),
+        });
+    }
+    // 可观察 journal 完整性(fail-closed;不承诺同 UID 恶意重写整文件
+    // 必被检测——R8 边界):序号断裂/窗号不符 → 篡改;from_violation
+    // 但 journal 空 → 篡改;journal 非空但绑定未标违规 → 洗白形态。
+    let integrity_ok = journal_integrity_ok(journal, &record.window_id);
+    if !integrity_ok {
+        facts.push(DerivedViolationFact {
+            kind: "journal_tamper",
+            path: format!("violations/{}.json", record.window_id),
+            before_digest: None,
+            after_digest: None,
+            detail: format!(
+                "违规 journal 序号断裂或窗号不符(观察到 {} 条,连续={})",
+                journal.len(),
+                journal_windows_contiguous(journal)
+            ),
+        });
+    }
+    if record
+        .restore
+        .as_ref()
+        .is_some_and(|binding| binding.from_violation)
+        && journal.is_empty()
+    {
+        facts.push(DerivedViolationFact {
+            kind: "journal_tamper",
+            path: format!("violations/{}.json", record.window_id),
+            before_digest: None,
+            after_digest: None,
+            detail: "from_violation 绑定为真但 journal 为空(可观察缺失,fail-closed 作废)"
+                .to_string(),
+        });
+    }
+    if !record
+        .restore
+        .as_ref()
+        .is_some_and(|binding| binding.from_violation)
+        && record.state != ReviewerWindowState::ViolationRecorded
+        && !journal.is_empty()
+    {
+        facts.push(DerivedViolationFact {
+            kind: "journal_tamper",
+            path: format!("violations/{}.json", record.window_id),
+            before_digest: None,
+            after_digest: None,
+            detail: format!(
+                "journal 非空({} 条)但绑定未标记违规(洗白形态,fail-closed 作废)",
+                journal.len()
+            ),
+        });
+    }
+    facts
+}
+
+/// journal 序号从 1 连续且窗号全部相符。
+fn journal_integrity_ok(entries: &[ViolationJournalEntry], window_id: &str) -> bool {
+    entries
+        .iter()
+        .enumerate()
+        .all(|(index, entry)| entry.seq == (index + 1) as u64 && entry.window_id == window_id)
+}
+
+fn journal_windows_contiguous(entries: &[ViolationJournalEntry]) -> bool {
+    entries
+        .iter()
+        .enumerate()
+        .all(|(index, entry)| entry.seq == (index + 1) as u64)
+}
+
+/// 冻结窗口内被恢复动作覆盖的 Git 域路径(HEAD/index/受管 ref)。
+fn git_mutation_paths(report: &RestoreReport) -> Vec<String> {
+    let mut paths = Vec::new();
+    if report.git_head_restored {
+        paths.push(".git/HEAD".to_string());
+    }
+    if report.git_index_restored {
+        paths.push(".git/index".to_string());
+    }
+    paths.extend(report.git_refs_restored.iter().cloned());
+    paths
+}
+
+/// T16 持久化恢复游标的稳定串(journal 记录用;manifest 不可读时回退
+/// `started+0`——恢复未开始/无法取证时不伪造续接位置)。
+fn snapshot_cursor_string(snapshot: &ReviewerSnapshotStore, window_id: &str) -> String {
+    snapshot
+        .load_manifest(window_id)
+        .ok()
+        .map(|manifest| {
+            format!(
+                "{}+{}",
+                restore_phase_str(manifest.restore_cursor.phase),
+                manifest.restore_cursor.entry_index
+            )
+        })
+        .unwrap_or_else(|| "started+0".to_string())
+}
+
+/// 违规条目幂等键:事实字段的 sha256(**不含**恢复游标/时间——同一
+/// 违规在不同游标位置重复收口仍只落一条)。
+#[allow(clippy::too_many_arguments)]
+fn violation_entry_id(
+    window_id: &str,
+    kind: &str,
+    path: &str,
+    before_digest: Option<&str>,
+    after_digest: Option<&str>,
+    detail: &str,
+    report_id: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for part in [
+        window_id.as_bytes(),
+        kind.as_bytes(),
+        path.as_bytes(),
+        before_digest.unwrap_or("-").as_bytes(),
+        after_digest.unwrap_or("-").as_bytes(),
+        detail.as_bytes(),
+        report_id.unwrap_or("-").as_bytes(),
+    ] {
+        hasher.update(part);
+        hasher.update([0u8]);
+    }
+    hex::encode(hasher.finalize())
+}
+
 /// 报告采信投影记录(T18 主导;数据级 CAS 写,不改状态)。
+///
+/// 守卫(RevB2T17 ⚠4 处置 + brief):
+/// - Preparing/Running 拒绝(新窗口报告必须先 Pending 再受信裁决);
+/// - **终态拒绝**(旧报告永久定格,人工不能把旧报告改 Accepted);
+/// - `Accepted` 仅在 Restoring+恢复完整+无违规+journal 干净+同源
+///   baseline 指纹一致时可记(指纹=规范化 JSON 内容指纹,经
+///   `load_manifest`+`manifest_fingerprint` 同源计算,不按文件字节复算);
+/// - `Invalidated` 从 Quiescing 起任意非终态可记(违规/人工作废流)。
 pub(crate) fn record_report_acceptance(
     store: &ReviewerWindowStore,
+    snapshot: &ReviewerSnapshotStore,
     window_id: &str,
     expected_generation: u64,
     acceptance: ReportAcceptance,
@@ -1118,6 +1522,63 @@ pub(crate) fn record_report_acceptance(
             record.state,
             "采信投影仅 Quiescing 起(T18 采信流)记录",
         ));
+    }
+    if record.state.is_terminal() {
+        return Err(invalid_transition(
+            record.state,
+            record.state,
+            "终态不可改采信投影(旧报告永久定格,人工不能改旧报告)",
+        ));
+    }
+    if acceptance == ReportAcceptance::Accepted {
+        let binding = record.restore.as_ref();
+        let eligible = record.state == ReviewerWindowState::Restoring
+            && binding.is_some_and(|binding| {
+                binding.completed && !binding.from_violation && binding.outcome == "restored"
+            })
+            && record.violation_pending.is_none();
+        if !eligible {
+            return Err(invalid_transition(
+                record.state,
+                record.state,
+                "Accepted 仅限 Restoring+恢复完整+无违规+journal 已清停等",
+            ));
+        }
+        let journal = store.load_violations(window_id)?;
+        if !journal.is_empty() {
+            return Err(invalid_transition(
+                record.state,
+                record.state,
+                "违规 journal 非空(违规流只能 Invalidated/人工门)",
+            ));
+        }
+        if let Some(binding) = binding
+            && (!binding.git_restored_mutation_paths.is_empty()
+                || !binding.git_extra_refs_observed.is_empty())
+        {
+            return Err(invalid_transition(
+                record.state,
+                record.state,
+                "恢复事实含 Git 域漂移(自提交/改 Git 整轮作废)",
+            ));
+        }
+        // 同源指纹核验(审查硬约束 3):manifest 经 load_manifest 加载,
+        // 指纹=规范化 JSON 序列化 sha256,不得按文件字节复算。
+        let manifest = snapshot.load_manifest(window_id)?;
+        let baseline = record.baseline.as_ref().ok_or_else(|| {
+            invalid_transition(
+                record.state,
+                record.state,
+                "Restoring 记录缺 baseline 绑定(记录不一致)",
+            )
+        })?;
+        if manifest_fingerprint(&manifest) != baseline.manifest_sha256 {
+            return Err(invalid_transition(
+                record.state,
+                record.state,
+                "baseline 指纹不一致(证据链同源核验失败,fail-closed)",
+            ));
+        }
     }
     record.report_acceptance = acceptance;
     record.bump_transition(record.state, "报告采信投影记录(T18)");
@@ -1180,6 +1641,23 @@ pub(crate) fn close_accepted(
             "需先经 T18 采信流记录 Accepted",
         ));
     }
+    // T18 防御:采信关闭前 journal 必须干净、停等标记必须清除
+    // (晚到的违规 journal/未落盘标记均 fail-closed 拒绝)。
+    if record.violation_pending.is_some() {
+        return Err(invalid_transition(
+            record.state,
+            ReviewerWindowState::ClosedAccepted,
+            "违规 journal 未落盘(violation_pending 停等)",
+        ));
+    }
+    let journal = store.load_violations(window_id)?;
+    if !journal.is_empty() {
+        return Err(invalid_transition(
+            record.state,
+            ReviewerWindowState::ClosedAccepted,
+            "违规 journal 非空(整轮作废,走人工门)",
+        ));
+    }
     finalize_terminal(
         store,
         &record,
@@ -1197,7 +1675,7 @@ pub(crate) fn resolve_manual_gate(
     expected_generation: u64,
     decision: ManualGateDecision,
 ) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
-    let record = load_for_transition(store, window_id, expected_generation)?;
+    let mut record = load_for_transition(store, window_id, expected_generation)?;
     if record.state != ReviewerWindowState::ManualGate {
         return Err(invalid_transition(
             record.state,
@@ -1215,19 +1693,23 @@ pub(crate) fn resolve_manual_gate(
             "人工门:作废并要求新一轮评审(新窗口重加锁/新 baseline)",
         ),
     };
+    // RevB2T17 ⚠4:人工门关闭即写 Invalidated(与「旧报告永久
+    // Invalidated」一致;人工不能把旧报告改 Accepted——终态拒绝)。
+    record.report_acceptance = ReportAcceptance::Invalidated;
     finalize_terminal(store, &record, terminal, note, expected_generation)
 }
 
 /// 停等/卡死窗口的人工弃置(Preparing/RecoveryRequired/ManualGate/
 /// Restoring → ClosedInvalidated,锁释放)。Running 窗口必须先走
-/// Quiescing 恢复流(取消也保持锁到恢复完整)。
+/// Quiescing 恢复流(取消也保持锁到恢复完整)。作废即旧报告永久
+/// Invalidated。
 pub(crate) fn abandon_window(
     store: &ReviewerWindowStore,
     window_id: &str,
     expected_generation: u64,
     reason: &str,
 ) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
-    let record = load_for_transition(store, window_id, expected_generation)?;
+    let mut record = load_for_transition(store, window_id, expected_generation)?;
     match record.state {
         ReviewerWindowState::Preparing
         | ReviewerWindowState::RecoveryRequired
@@ -1241,6 +1723,7 @@ pub(crate) fn abandon_window(
             ));
         }
     }
+    record.report_acceptance = ReportAcceptance::Invalidated;
     finalize_terminal(
         store,
         &record,
@@ -1493,6 +1976,7 @@ mod tests {
         assert!(!summary.manual_gate);
         let accepted = record_report_acceptance(
             &store,
+            &snapshot,
             window_id,
             summary.record.generation,
             ReportAcceptance::Accepted,
@@ -1999,6 +2483,7 @@ mod tests {
         // 裁决完成(采信关闭)才释放
         let accepted = record_report_acceptance(
             &store2,
+            &snapshot2,
             &window_id,
             summary.record.generation,
             ReportAcceptance::Accepted,
@@ -2264,8 +2749,21 @@ mod tests {
 
         // 固定违规流:Running→Quiescing→ViolationRecorded→Restoring→ManualGate
         let quiescing = begin_quiesce(&store, "w-viol", handle.generation, "review end").unwrap();
-        let violated =
-            record_violation(&store, "w-viol", quiescing.generation, ".aria 直写").unwrap();
+        let violated = record_violation(
+            &store,
+            &snapshot,
+            "w-viol",
+            quiescing.generation,
+            ViolationRecord {
+                kind: "platform_domain_write",
+                path: ".aria/direct-write.json",
+                before_digest: None,
+                after_digest: Some("sha256:deadbeef"),
+                detail: ".aria 直写(平台合法写入域外)",
+                report_id: None,
+            },
+        )
+        .unwrap();
         let summary = restore_window(&store, &snapshot, "w-viol", violated.generation)
             .await
             .expect("violation restore");
@@ -2489,8 +2987,21 @@ mod tests {
 
         // 违规流:收口 + 落违规
         let quiescing = begin_quiesce(&store, "w-f1", handle.generation, "end").unwrap();
-        let violated =
-            record_violation(&store, "w-f1", quiescing.generation, ".aria 直写").unwrap();
+        let violated = record_violation(
+            &store,
+            &snapshot,
+            "w-f1",
+            quiescing.generation,
+            ViolationRecord {
+                kind: "platform_domain_write",
+                path: ".aria/direct-write.json",
+                before_digest: None,
+                after_digest: Some("sha256:deadbeef"),
+                detail: ".aria 直写(平台合法写入域外)",
+                report_id: None,
+            },
+        )
+        .unwrap();
 
         // Reviewer 残留 + 平台域漂移 → T16 恢复停等(PlatformDomain 游标)
         fs::write(fx.worktree.join("residue.txt"), "junk\n").unwrap();
@@ -2778,5 +3289,180 @@ mod tests {
             store.load_window("w-n2").unwrap().state,
             ReviewerWindowState::Running
         );
+    }
+
+    // ---------- T18 采信/违规收口新增 ----------
+
+    #[tokio::test]
+    async fn acceptance_projection_guards_terminal_running_and_manual_gate() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-guard2", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("begin");
+
+        // Running 拒绝(新窗口报告必须先 Pending 再受信裁决)。
+        let err = record_report_acceptance(
+            &store,
+            &snapshot,
+            "w-guard2",
+            handle.generation,
+            ReportAcceptance::Invalidated,
+        )
+        .expect_err("running cannot record acceptance");
+        assert!(matches!(err, ReviewerWindowError::InvalidTransition { .. }));
+
+        // Quiescing 未恢复:Accepted 拒绝(仅完整恢复才可采信)。
+        let quiescing = begin_quiesce(&store, "w-guard2", handle.generation, "end").unwrap();
+        let err = record_report_acceptance(
+            &store,
+            &snapshot,
+            "w-guard2",
+            quiescing.generation,
+            ReportAcceptance::Accepted,
+        )
+        .expect_err("quiescing without restore cannot accept");
+        assert!(matches!(err, ReviewerWindowError::InvalidTransition { .. }));
+
+        // 违规流:人工门上 Accepted 拒绝(人工不能把旧报告改 Accepted)。
+        let violated = record_violation(
+            &store,
+            &snapshot,
+            "w-guard2",
+            quiescing.generation,
+            ViolationRecord {
+                kind: "channel_bypass",
+                path: "channels/commit",
+                before_digest: None,
+                after_digest: None,
+                detail: "commit 通道绕过",
+                report_id: None,
+            },
+        )
+        .unwrap();
+        let summary = restore_window(&store, &snapshot, "w-guard2", violated.generation)
+            .await
+            .expect("restore");
+        assert_eq!(summary.record.state, ReviewerWindowState::ManualGate);
+        let err = record_report_acceptance(
+            &store,
+            &snapshot,
+            "w-guard2",
+            summary.record.generation,
+            ReportAcceptance::Accepted,
+        )
+        .expect_err("manual gate cannot accept old report");
+        assert!(matches!(err, ReviewerWindowError::InvalidTransition { .. }));
+
+        // 终态拒绝(旧报告永久定格)。
+        let terminal = resolve_manual_gate(
+            &store,
+            "w-guard2",
+            summary.record.generation,
+            ManualGateDecision::Invalidate,
+        )
+        .unwrap();
+        assert_eq!(terminal.report_acceptance, ReportAcceptance::Invalidated);
+        for acceptance in [
+            ReportAcceptance::Accepted,
+            ReportAcceptance::Invalidated,
+            ReportAcceptance::PendingAcceptance,
+        ] {
+            assert!(
+                record_report_acceptance(
+                    &store,
+                    &snapshot,
+                    "w-guard2",
+                    terminal.generation,
+                    acceptance,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn close_accepted_rejects_late_journal_write() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-late", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("begin");
+        let quiescing = begin_quiesce(&store, "w-late", handle.generation, "end").unwrap();
+        let summary = restore_window(&store, &snapshot, "w-late", quiescing.generation)
+            .await
+            .expect("restore");
+        assert!(!summary.manual_gate);
+        let accepted = record_report_acceptance(
+            &store,
+            &snapshot,
+            "w-late",
+            summary.record.generation,
+            ReportAcceptance::Accepted,
+        )
+        .unwrap();
+
+        // 晚到的违规 journal(模拟恢复后观测方补落)→ 采信关闭 fail-closed。
+        store
+            .append_violation(
+                "w-late",
+                ViolationJournalEntry {
+                    seq: 0,
+                    entry_id: "late-1".to_string(),
+                    at: now_rfc3339(),
+                    window_id: "w-late".to_string(),
+                    attempt_id: "attempt-1".to_string(),
+                    run_id: "run-1".to_string(),
+                    report_id: None,
+                    kind: "platform_domain_write".to_string(),
+                    path: ".aria/late.json".to_string(),
+                    before_digest: None,
+                    after_digest: None,
+                    detail: "恢复后补落".to_string(),
+                    restore_cursor: "completed+0".to_string(),
+                },
+            )
+            .unwrap();
+        let err = close_accepted(&store, "w-late", accepted.generation)
+            .expect_err("late journal must block acceptance");
+        assert!(matches!(err, ReviewerWindowError::InvalidTransition { .. }));
+    }
+
+    #[tokio::test]
+    async fn abandon_window_invalidates_report_permanently() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-ab2", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("begin");
+        // Running 须先 Quiescing→恢复(Restoring 可弃置):作废即旧报告永久 Invalidated。
+        let quiescing = begin_quiesce(&store, "w-ab2", handle.generation, "end").unwrap();
+        let summary = restore_window(&store, &snapshot, "w-ab2", quiescing.generation)
+            .await
+            .unwrap();
+        let terminal = abandon_window(&store, "w-ab2", summary.record.generation, "stuck").unwrap();
+        assert_eq!(terminal.state, ReviewerWindowState::ClosedInvalidated);
+        assert_eq!(terminal.report_acceptance, ReportAcceptance::Invalidated);
     }
 }
