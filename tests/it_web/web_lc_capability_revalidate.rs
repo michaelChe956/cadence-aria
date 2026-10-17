@@ -446,18 +446,14 @@ async fn capability_revalidate_old_v2_confirmed_requires_real_reprobe() {
     // runner = 真实 run_cli_boundary_probe(生产链),仅 CLI 程序指向替身、
     // resume 面关闭(替身无应答通道)。
     let service = Arc::new(
-        ProviderCapabilityRevalidateService::new(ProductAppPaths::new(
-            root.path().join(".aria"),
-        ))
-        .with_version_source(Arc::new(move |_program: &str| {
-            Ok(fake_version.to_string())
-        }))
-        .with_probe_runner(Arc::new(move |invocation: ProbeInvocation| {
-            let cli_text = cli_text.clone();
-            let calls = calls_for_runner.clone();
-            Box::pin(async move {
-                calls.fetch_add(1, Ordering::SeqCst);
-                cadence_aria::product::logical_codebase::provider_boundary_probe::
+        ProviderCapabilityRevalidateService::new(ProductAppPaths::new(root.path().join(".aria")))
+            .with_version_source(Arc::new(move |_program: &str| Ok(fake_version.to_string())))
+            .with_probe_runner(Arc::new(move |invocation: ProbeInvocation| {
+                let cli_text = cli_text.clone();
+                let calls = calls_for_runner.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    cadence_aria::product::logical_codebase::provider_boundary_probe::
                     run_cli_boundary_probe(
                         invocation.provider,
                         &cli_text,
@@ -469,8 +465,8 @@ async fn capability_revalidate_old_v2_confirmed_requires_real_reprobe() {
                         invocation.scope,
                     )
                     .await
-            })
-        })),
+                })
+            })),
     );
     let state = WebAppState::with_events(
         root.path().to_path_buf(),
@@ -520,11 +516,18 @@ async fn capability_revalidate_old_v2_confirmed_requires_real_reprobe() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["outcome"], json!("revalidated"), "body: {body}");
     assert_eq!(body["version"], json!(fake_version));
-    assert_eq!(probe_calls.load(Ordering::SeqCst), 3, "三 action 各一次真实探针");
+    assert_eq!(
+        probe_calls.load(Ordering::SeqCst),
+        3,
+        "三 action 各一次真实探针"
+    );
 
     // durable 升级为 schema 3 + host-open-v1;证据文件确实存在。
     let durable = std::fs::read_to_string(&capabilities_path).expect("read durable");
-    assert!(durable.contains("\"schema_version\": 3"), "durable: {durable}");
+    assert!(
+        durable.contains("\"schema_version\": 3"),
+        "durable: {durable}"
+    );
     assert!(durable.contains("host-open-v1"), "durable: {durable}");
 
     // 3) GET:重探针后的行可见(launch/write Confirmed;resume 替身
@@ -539,7 +542,11 @@ async fn capability_revalidate_old_v2_confirmed_requires_real_reprobe() {
     let mut evidence_refs = Vec::new();
     for row in codex["rows"].as_array().expect("rows") {
         assert_eq!(row["launch"], json!("confirmed"), "重探针后可见: {row}");
-        assert_eq!(row["write_boundary"], json!("confirmed"), "重探针后可见: {row}");
+        assert_eq!(
+            row["write_boundary"],
+            json!("confirmed"),
+            "重探针后可见: {row}"
+        );
         assert_eq!(row["resume"], json!("unknown"), "resume 分格如实: {row}");
         evidence_refs.push(
             row["evidence_ref"]
@@ -565,7 +572,11 @@ async fn capability_revalidate_old_v2_confirmed_requires_real_reprobe() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["outcome"], json!("revalidated"), "resume 未确认不秒回: {body}");
+    assert_eq!(
+        body["outcome"],
+        json!("revalidated"),
+        "resume 未确认不秒回: {body}"
+    );
     assert_eq!(
         probe_calls.load(Ordering::SeqCst),
         6,

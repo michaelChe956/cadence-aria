@@ -379,7 +379,12 @@ async fn cancelled_platform_push_is_killed_reaped_and_never_lands_late() {
     git(&repo, &["branch", branch]);
     git(
         &repo,
-        &["remote", "add", "origin", remote.to_str().expect("remote path")],
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ],
     );
 
     let entered = tmp.path().join("push-hook-entered");
@@ -436,7 +441,12 @@ async fn aborted_platform_push_kills_hook_process_group_without_late_side_effect
     git(&repo, &["branch", branch]);
     git(
         &repo,
-        &["remote", "add", "origin", remote.to_str().expect("remote path")],
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ],
     );
 
     let entered = tmp.path().join("abort-push-hook-entered");
@@ -864,8 +874,7 @@ fn bridge_fixture_dir() -> tempfile::TempDir {
 
 fn write_executable_script(path: &Path, body: &str) {
     fs::write(path, body).expect("write executable fixture");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-        .expect("chmod executable fixture");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod executable fixture");
 }
 
 /// coder 域 git config 读取(exit 1 = 未设置)。
@@ -890,13 +899,7 @@ fn git_config_value(repo: &Path, key: &str) -> Option<String> {
 /// Bug45 夹具:模拟 coder 植入的「仓库执行桥」——pre-commit /
 /// post-checkout hook 与 `core.fsmonitor` 探针脚本,只落标记文件、恒
 /// exit 0/1,不影响 git 自身成败;平台受信 git 不得触发任何一个。
-fn repo_with_execution_bridges() -> (
-    tempfile::TempDir,
-    PathBuf,
-    PathBuf,
-    PathBuf,
-    PathBuf,
-) {
+fn repo_with_execution_bridges() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
     let temp = bridge_fixture_dir();
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -931,7 +934,13 @@ fn repo_with_execution_bridges() -> (
             fsmonitor_hook.to_str().expect("utf8 fsmonitor hook path"),
         ],
     );
-    (temp, repo, pre_commit_probe, post_checkout_probe, fsmonitor_probe)
+    (
+        temp,
+        repo,
+        pre_commit_probe,
+        post_checkout_probe,
+        fsmonitor_probe,
+    )
 }
 
 #[tokio::test]

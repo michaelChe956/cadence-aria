@@ -180,8 +180,11 @@ mod tests {
         let _ = fs::remove_file(&fsmonitor_probe);
         let _ = fs::remove_file(&pre_commit_probe);
 
-        run_git(&repo, &args(&["commit", "--quiet", "-m", "platform bridge"]))
-            .expect("platform run_git commit must succeed");
+        run_git(
+            &repo,
+            &args(&["commit", "--quiet", "-m", "platform bridge"]),
+        )
+        .expect("platform run_git commit must succeed");
         assert!(
             !pre_commit_probe.exists(),
             "Bug45: 平台 run_git commit 不得执行仓库 pre-commit hook"

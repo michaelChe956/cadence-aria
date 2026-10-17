@@ -502,10 +502,7 @@ async fn plan_final_confirm_post_confirms_chinese_evidence_commit_end_to_end() {
         (
             fixture.busi,
             "n3-busi",
-            Some((
-                "cadence/verify/2026-10-16_验收报告_v1.0.md",
-                "# 验收报告\n",
-            )),
+            Some(("cadence/verify/2026-10-16_验收报告_v1.0.md", "# 验收报告\n")),
         ),
         (fixture.web, "n3-web", None),
         (fixture.gateway, "n3-gateway", None),

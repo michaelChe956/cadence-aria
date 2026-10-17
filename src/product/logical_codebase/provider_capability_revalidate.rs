@@ -260,8 +260,10 @@ impl ProviderCapabilityRevalidateService {
         let base = probe_base_dir()?;
         // 本次重验证的资源身份(批2 Task 9:审计/资源归属可追溯;按调用
         // 隔离)。
-        let resource_scope_id =
-            format!("aria-capability-revalidate-{}", uuid::Uuid::new_v4().simple());
+        let resource_scope_id = format!(
+            "aria-capability-revalidate-{}",
+            uuid::Uuid::new_v4().simple()
+        );
         let result = self
             .probe_and_import(
                 ProbeScope {

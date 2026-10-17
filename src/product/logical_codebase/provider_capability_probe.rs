@@ -23,7 +23,7 @@
 //! 消费 shape)不得把校验失败解释为能力支持。
 
 use crate::cross_cutting::provider_boundary::{
-    ProviderBoundaryEvidence, ProviderBoundaryMode, PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN,
+    PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN, ProviderBoundaryEvidence, ProviderBoundaryMode,
 };
 use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::policy::SessionPolicyAction;
@@ -193,7 +193,6 @@ impl ProviderCapabilityProbeService {
                 "reviewer 证据缺 review 窗口引用(岗位/窗口缺失拒签)".to_string(),
             ));
         }
-
 
         // 2) provider 身份三方可比对:evidence 的 provider 名必须经 1a 冻结
         //    映射解析为真实 provider ref(Fake/未来 provider fail-closed,
@@ -1056,8 +1055,10 @@ mod tests {
     /// 不符、Reviewer 缺窗口——均 fail-closed 拒绝导入,稳定判别码。
     #[test]
     fn t9_probe_shape_rejects_missing_semantics_duty_or_window() {
-        let (record, _evidence, projection) =
-            consistent_triple(SessionPolicyAction::CodingTargetWrite, ProviderBoundaryMode::TargetWriteOnly);
+        let (record, _evidence, projection) = consistent_triple(
+            SessionPolicyAction::CodingTargetWrite,
+            ProviderBoundaryMode::TargetWriteOnly,
+        );
 
         // 1) record 缺语义(空串 = v1/v2 历史形状)。
         let mut no_semantics = record.clone();
@@ -1102,8 +1103,10 @@ mod tests {
         );
 
         // 4) Reviewer 证据缺窗口引用(只读 action)。
-        let (ro_record, ro_evidence, ro_projection) =
-            consistent_triple(SessionPolicyAction::PlanningReadOnly, ProviderBoundaryMode::ReadOnly);
+        let (ro_record, ro_evidence, ro_projection) = consistent_triple(
+            SessionPolicyAction::PlanningReadOnly,
+            ProviderBoundaryMode::ReadOnly,
+        );
         let no_window = ProviderBoundaryEvidence::new(
             ro_evidence.provider().clone(),
             ro_evidence.exact_version().to_string(),
@@ -1144,9 +1147,7 @@ mod tests {
             .record_verified_probe(project_id, &record, &evidence, &projection)
             .expect_err("缺语义记录不得导入 Confirmed");
         assert!(
-            error
-                .to_string()
-                .contains("provider_probe_import_rejected"),
+            error.to_string().contains("provider_probe_import_rejected"),
             "稳定错误面: {error}"
         );
         assert_eq!(

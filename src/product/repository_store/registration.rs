@@ -957,11 +957,10 @@ impl RepositoryRegistrationCoordinator {
         // TRUSTED_GIT_BRIDGE_ARGS 同源):status 不得询问仓库
         // core.fsmonitor 探针,平台 commit 不执行仓库 hooks。命令诊断
         // (command_summary)按完整 argv 呈现,审计反映实际禁桥参数。
-        let mut full_argv: Vec<String> =
-            crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
-                .iter()
-                .map(|argument| (*argument).to_string())
-                .collect();
+        let mut full_argv: Vec<String> = crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
+            .iter()
+            .map(|argument| (*argument).to_string())
+            .collect();
         full_argv.extend(argv);
         // 批2 Task 3 修复轮(F1):ProcessManager 已统一 env_clear 且不回退
         // 宿主 PATH——平台受信 git 启动在 env map 显式合并宿主 PATH,裸名

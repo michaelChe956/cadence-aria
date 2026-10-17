@@ -585,100 +585,95 @@ impl ProviderCapabilityRecordJson {
             probe_artifact_ref,
             root_recipe_evidence,
             execution_semantics,
-        ) = match self.schema_version {
-            // v1(v0 无 schema 字段)历史:全 Unknown。
-            None => (
-                PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
-                wire_dialect_for_legacy(self.adapter_dialect),
-                ProviderActionMatrix::unknown_all(),
-                ProviderCapabilityEvidence::Unknown,
-                None,
-                None,
-                RootRecipeEvidence::None,
-                String::new(),
-            ),
-            // v2 历史:形状仍须可解码(matrix/wire 在场且合法,损坏即拒),
-            // 但三格矩阵只作历史保留,读取为全 Unknown——旧物理拒写语义的
-            // Confirmed 不铸新证据,必须真实重探针。
-            Some(2) => {
-                let wire_dialect =
-                    self.wire_dialect
-                        .ok_or_else(|| ProductStoreError::InvalidRecord {
-                            kind: "provider_capability_record",
-                            reason: "v2 record missing wire_dialect".to_string(),
-                        })?;
-                let rows =
-                    self.action_matrix
-                        .clone()
-                        .ok_or_else(|| ProductStoreError::InvalidRecord {
+        ) =
+            match self.schema_version {
+                // v1(v0 无 schema 字段)历史:全 Unknown。
+                None => (
+                    PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+                    wire_dialect_for_legacy(self.adapter_dialect),
+                    ProviderActionMatrix::unknown_all(),
+                    ProviderCapabilityEvidence::Unknown,
+                    None,
+                    None,
+                    RootRecipeEvidence::None,
+                    String::new(),
+                ),
+                // v2 历史:形状仍须可解码(matrix/wire 在场且合法,损坏即拒),
+                // 但三格矩阵只作历史保留,读取为全 Unknown——旧物理拒写语义的
+                // Confirmed 不铸新证据,必须真实重探针。
+                Some(2) => {
+                    let wire_dialect =
+                        self.wire_dialect
+                            .ok_or_else(|| ProductStoreError::InvalidRecord {
+                                kind: "provider_capability_record",
+                                reason: "v2 record missing wire_dialect".to_string(),
+                            })?;
+                    let rows = self.action_matrix.clone().ok_or_else(|| {
+                        ProductStoreError::InvalidRecord {
                             kind: "provider_capability_record",
                             reason: "v2 record missing action_matrix".to_string(),
-                        })?;
-                ProviderActionMatrix::from_rows(rows)?;
-                (
-                    2,
-                    wire_dialect,
-                    ProviderActionMatrix::unknown_all(),
-                    self.trust
-                        .clone()
-                        .unwrap_or(ProviderCapabilityEvidence::Unknown),
-                    self.probed_at.clone(),
-                    self.probe_artifact_ref.clone(),
-                    self.root_recipe_evidence
-                        .clone()
-                        .unwrap_or(RootRecipeEvidence::None),
-                    String::new(),
-                )
-            }
-            // v3 当前:host-open 执行语义下的矩阵;缺语义/未知语义 →
-            // 矩阵全 Unknown(不冒充、不放行)。
-            Some(PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION) => {
-                let wire_dialect =
-                    self.wire_dialect
-                        .ok_or_else(|| ProductStoreError::InvalidRecord {
-                            kind: "provider_capability_record",
-                            reason: "v3 record missing wire_dialect".to_string(),
-                        })?;
-                let rows =
-                    self.action_matrix
-                        .clone()
-                        .ok_or_else(|| ProductStoreError::InvalidRecord {
+                        }
+                    })?;
+                    ProviderActionMatrix::from_rows(rows)?;
+                    (
+                        2,
+                        wire_dialect,
+                        ProviderActionMatrix::unknown_all(),
+                        self.trust
+                            .clone()
+                            .unwrap_or(ProviderCapabilityEvidence::Unknown),
+                        self.probed_at.clone(),
+                        self.probe_artifact_ref.clone(),
+                        self.root_recipe_evidence
+                            .clone()
+                            .unwrap_or(RootRecipeEvidence::None),
+                        String::new(),
+                    )
+                }
+                // v3 当前:host-open 执行语义下的矩阵;缺语义/未知语义 →
+                // 矩阵全 Unknown(不冒充、不放行)。
+                Some(PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION) => {
+                    let wire_dialect =
+                        self.wire_dialect
+                            .ok_or_else(|| ProductStoreError::InvalidRecord {
+                                kind: "provider_capability_record",
+                                reason: "v3 record missing wire_dialect".to_string(),
+                            })?;
+                    let rows = self.action_matrix.clone().ok_or_else(|| {
+                        ProductStoreError::InvalidRecord {
                             kind: "provider_capability_record",
                             reason: "v3 record missing action_matrix".to_string(),
-                        })?;
-                let execution_semantics = self
-                    .execution_semantics
-                    .clone()
-                    .unwrap_or_default();
-                let matrix =
-                    if execution_semantics == PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN {
+                        }
+                    })?;
+                    let execution_semantics = self.execution_semantics.clone().unwrap_or_default();
+                    let matrix = if execution_semantics == PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN {
                         ProviderActionMatrix::from_rows(rows)?
                     } else {
                         ProviderActionMatrix::from_rows(rows)?;
                         ProviderActionMatrix::unknown_all()
                     };
-                (
-                    PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
-                    wire_dialect,
-                    matrix,
-                    self.trust
-                        .clone()
-                        .unwrap_or(ProviderCapabilityEvidence::Unknown),
-                    self.probed_at.clone(),
-                    self.probe_artifact_ref.clone(),
-                    self.root_recipe_evidence
-                        .clone()
-                        .unwrap_or(RootRecipeEvidence::None),
-                    execution_semantics,
-                )
-            }
-            Some(other) => {
-                return Err(ProductStoreError::InvalidRecord {
-                    kind: "provider_capability_record",
-                    reason: format!("unsupported schema_version: {other}"),
-                });
-            }
-        };
+                    (
+                        PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+                        wire_dialect,
+                        matrix,
+                        self.trust
+                            .clone()
+                            .unwrap_or(ProviderCapabilityEvidence::Unknown),
+                        self.probed_at.clone(),
+                        self.probe_artifact_ref.clone(),
+                        self.root_recipe_evidence
+                            .clone()
+                            .unwrap_or(RootRecipeEvidence::None),
+                        execution_semantics,
+                    )
+                }
+                Some(other) => {
+                    return Err(ProductStoreError::InvalidRecord {
+                        kind: "provider_capability_record",
+                        reason: format!("unsupported schema_version: {other}"),
+                    });
+                }
+            };
         Ok(ProviderCapabilityRecord {
             provider_type,
             schema_version,
@@ -1653,8 +1648,16 @@ mod tests {
                 "1.2.3",
                 action,
             );
-            assert_eq!(row.launch, ProviderCapabilityEvidence::Unknown, "{action:?}");
-            assert_eq!(row.resume, ProviderCapabilityEvidence::Unknown, "{action:?}");
+            assert_eq!(
+                row.launch,
+                ProviderCapabilityEvidence::Unknown,
+                "{action:?}"
+            );
+            assert_eq!(
+                row.resume,
+                ProviderCapabilityEvidence::Unknown,
+                "{action:?}"
+            );
             assert_eq!(
                 row.write_boundary,
                 ProviderCapabilityEvidence::Unknown,
@@ -1671,8 +1674,7 @@ mod tests {
         // 历史文件字节不变(读取不重写历史含义)。
         let bytes_after = std::fs::read(&path).unwrap();
         assert_eq!(
-            bytes_before,
-            bytes_after,
+            bytes_before, bytes_after,
             "读取 v2 历史记录不得改写历史文件字节"
         );
     }

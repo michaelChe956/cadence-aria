@@ -939,7 +939,10 @@ fn normalize_existing_prefix(path: &Path) -> Result<PathBuf, GitWorkspaceError> 
 fn parse_porcelain_z_status(bytes: &[u8]) -> Result<Vec<FileStatus>, GitWorkspaceError> {
     let mut statuses = Vec::new();
     let mut rename_code: Option<String> = None;
-    for record in bytes.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
+    for record in bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
         let record = str::from_utf8(record).map_err(|error| {
             GitWorkspaceError::Parse(format!(
                 "git status --porcelain -z: file path is not valid UTF-8: {error}"

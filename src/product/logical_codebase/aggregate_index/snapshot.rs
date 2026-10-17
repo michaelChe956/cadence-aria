@@ -159,11 +159,10 @@ impl AggregateIndexSnapshotCollector {
         // 仓)执行 rev-parse/status,属平台受信启动面;argv 前置平台受信
         // 禁桥参数(与 cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
         // 同源),status 不得询问仓库 core.fsmonitor 探针。
-        let mut full_argv: Vec<String> =
-            crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
-                .iter()
-                .map(|argument| (*argument).to_string())
-                .collect();
+        let mut full_argv: Vec<String> = crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
+            .iter()
+            .map(|argument| (*argument).to_string())
+            .collect();
         full_argv.extend(argv.iter().map(|argument| (*argument).to_string()));
         let request = BoundedCommandRequest {
             executable: "git".to_string(),
@@ -273,9 +272,9 @@ fn command_failure_message(argv: &[&str], output: &BoundedCommandResult) -> Stri
 
 #[cfg(test)]
 mod tests {
+    use parking_lot::Mutex;
     use std::collections::VecDeque;
     use std::path::PathBuf;
-    use parking_lot::Mutex;
     use std::sync::Arc;
 
     use uuid::Uuid;

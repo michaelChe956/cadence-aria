@@ -32,9 +32,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::cross_cutting::provider_boundary::{
-    BoundaryWriteAttempt, BoundaryWriteChannel, PlannedBoundaryWrite, ProviderBoundaryError,
-    ProviderBoundaryEvidence, ProviderBoundaryMode, ProviderBoundaryPlan,
-    PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN, probe_write_command, shell_quote,
+    BoundaryWriteAttempt, BoundaryWriteChannel, PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN,
+    PlannedBoundaryWrite, ProviderBoundaryError, ProviderBoundaryEvidence, ProviderBoundaryMode,
+    ProviderBoundaryPlan, probe_write_command, shell_quote,
 };
 use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use crate::product::logical_codebase::aggregate_index::freshness::COMPACT_INVENTORY_HARD_BUDGET_BYTES;
@@ -1075,18 +1075,14 @@ fn validate_scope_for_action(
             scope.duty()
         )));
     }
-    if expected_duty == "reviewer"
-        && scope.review_window_id().map(str::is_empty).unwrap_or(true)
-    {
+    if expected_duty == "reviewer" && scope.review_window_id().map(str::is_empty).unwrap_or(true) {
         return Err(ProviderBoundaryError::InvalidPlan(
-            "boundary_scope_missing: reviewer 探针缺 review 窗口引用(窗口缺失不签)"
-                .to_string(),
+            "boundary_scope_missing: reviewer 探针缺 review 窗口引用(窗口缺失不签)".to_string(),
         ));
     }
     if scope.resource_scope_id().trim().is_empty() {
         return Err(ProviderBoundaryError::InvalidPlan(
-            "boundary_scope_missing: resource scope id 缺失(审计/资源身份不可追溯)"
-                .to_string(),
+            "boundary_scope_missing: resource scope id 缺失(审计/资源身份不可追溯)".to_string(),
         ));
     }
     Ok(())
@@ -1729,7 +1725,6 @@ fn boundary_mode_text(mode: ProviderBoundaryMode) -> &'static str {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1746,8 +1741,8 @@ mod tests {
     use crate::cross_cutting::kimi_code_provider::KimiPolicyProjector;
     use crate::cross_cutting::pi_provider::PiPolicyProjector;
     use crate::cross_cutting::provider_boundary::{
-        ProviderBoundaryError, ProviderBoundaryMode, ProviderBoundaryPlan,
-        PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN,
+        PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN, ProviderBoundaryError, ProviderBoundaryMode,
+        ProviderBoundaryPlan,
     };
     use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
     use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
@@ -1951,11 +1946,18 @@ mod tests {
             "terminal 宿主普通写成功必须是全开事实: {positives:?}"
         );
         assert!(mcp_ok, "MCP 宿主普通写成功必须是全开事实: {positives:?}");
-        assert!(fixture
-            .root()
-            .join("aria-host-open-terminal-probe.txt")
-            .is_file());
-        assert!(fixture.member().join("aria-host-open-mcp-probe.txt").is_file());
+        assert!(
+            fixture
+                .root()
+                .join("aria-host-open-terminal-probe.txt")
+                .is_file()
+        );
+        assert!(
+            fixture
+                .member()
+                .join("aria-host-open-mcp-probe.txt")
+                .is_file()
+        );
 
         // read-only action 同样签发(reviewer 岗位 + 窗口引用)。
         let ro_base = tempdir().expect("ro base dir");

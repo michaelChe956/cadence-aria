@@ -134,8 +134,7 @@ mod bridge_tests {
             format!("#!/bin/sh\n: > {}\nexit 1\n", fsmonitor_probe.display()),
         )
         .unwrap();
-        std::fs::set_permissions(&fsmonitor_hook, std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(&fsmonitor_hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         raw(&[
             "config",
             "core.fsmonitor",

@@ -353,11 +353,10 @@ impl CadenceSkillsManager {
         // 仓库 hooks、不询 core.fsmonitor。
         let mut environment = self.environment.clone();
         environment.insert("LC_ALL".to_string(), "C".to_string());
-        let mut full_argv: Vec<String> =
-            crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
-                .iter()
-                .map(|argument| (*argument).to_string())
-                .collect();
+        let mut full_argv: Vec<String> = crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
+            .iter()
+            .map(|argument| (*argument).to_string())
+            .collect();
         full_argv.extend(argv);
         BoundedCommandRequest {
             executable: "git".to_string(),
@@ -616,11 +615,10 @@ mod tests {
     fn assert_git_request(request: &BoundedCommandRequest, argv: &[&str], cwd: &Path) {
         // Bug45/T4 修复轮:git_request 统一前置平台受信禁桥参数;断言
         // 完整 argv(审计反映),预期值 = 禁桥前缀 + 逻辑子命令。
-        let mut expected: Vec<String> =
-            crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
-                .iter()
-                .map(|argument| (*argument).to_string())
-                .collect();
+        let mut expected: Vec<String> = crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
+            .iter()
+            .map(|argument| (*argument).to_string())
+            .collect();
         expected.extend(argv.iter().map(|value| (*value).to_string()));
         assert_eq!(request.executable, "git");
         assert_eq!(request.argv, expected);

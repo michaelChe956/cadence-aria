@@ -151,7 +151,6 @@ impl ProviderBoundaryEvidence {
         }
     }
 
-
     pub fn provider(&self) -> &ProviderName {
         &self.provider
     }
@@ -442,7 +441,11 @@ impl BoundaryWriteAttempt {
         }
     }
 
-    pub(crate) fn refused_with(channel: BoundaryWriteChannel, path: PathBuf, evidence: String) -> Self {
+    pub(crate) fn refused_with(
+        channel: BoundaryWriteChannel,
+        path: PathBuf,
+        evidence: String,
+    ) -> Self {
         Self {
             channel,
             path,

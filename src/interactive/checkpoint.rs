@@ -552,8 +552,7 @@ mod bridge_tests {
             format!("#!/bin/sh\n: > {}\nexit 1\n", fsmonitor_probe.display()),
         )
         .unwrap();
-        std::fs::set_permissions(&fsmonitor_hook, std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(&fsmonitor_hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         raw(&[
             "config",
             "core.fsmonitor",
@@ -561,7 +560,9 @@ mod bridge_tests {
         ]);
 
         let service = CheckpointService::new(&repo, "task_0001");
-        service.git(&["status", "--porcelain"]).expect("checkpoint git");
+        service
+            .git(&["status", "--porcelain"])
+            .expect("checkpoint git");
         assert!(
             !fsmonitor_probe.exists(),
             "Bug45: checkpoint git 不得执行仓库 core.fsmonitor 探针"

@@ -34,7 +34,6 @@ use crate::product::repository_store::{
     RepositoryInitializationStepKind, RepositoryRegistrationError, RepositoryRegistrationInput,
 };
 
-
 /// Bug45/T4 修复轮:coordinator run_git 在 argv 前置平台受信禁桥参数
 /// (core.hooksPath=/dev/null + core.fsmonitor=false);mock runner 断言
 /// 前缀在位(审计 argv 反映)后按逻辑子命令匹配。

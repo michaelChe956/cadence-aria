@@ -3868,15 +3868,17 @@ impl MatrixEnvironment {
             );
             // 批2 Task 9:受信岗位/窗口(Coding=Author,只读=Reviewer 窗口)
             // + 资源身份注入;缺岗位/窗口 probe 拒签。
-            let resource_scope_id =
-                format!("aria-matrix-probe-{}", uuid::Uuid::new_v4().simple());
+            let resource_scope_id = format!("aria-matrix-probe-{}", uuid::Uuid::new_v4().simple());
             let scope = match action {
                 SessionPolicyAction::CodingTargetWrite => {
                     HostOpenProbeScope::author(resource_scope_id)
                 }
                 SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
                     HostOpenProbeScope::reviewer(
-                        format!("aria-matrix-review-window-{}", uuid::Uuid::new_v4().simple()),
+                        format!(
+                            "aria-matrix-review-window-{}",
+                            uuid::Uuid::new_v4().simple()
+                        ),
                         resource_scope_id,
                     )
                 }
