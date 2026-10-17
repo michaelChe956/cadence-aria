@@ -378,10 +378,6 @@ async fn reviewer_gateway_rejection_without_trust_face_stays_bare() {
     );
 }
 
-// ---- 批2 Task 20b 修复轮 1(F1,Main 裁定):聚合根视图窗口目标钉测 ----
-// 形态枚举(报告同步):
-// A. Story focus=Some(成员):业务解析→focus 成员 checkout(git)→窗口锚成员;
-// B. Story focus=None(聚合视图回落):无唯一成员→plan_review_window_target_unresolved;
 // ---- 批2 Task 20b 修复轮 1(F1,Main 裁定 b):聚合形态窗口目标钉测 ----
 // 形态枚举(报告同步):
 // A. Story focus=Some:业务解析→focus 成员 checkout→窗口锚成员(直选);
@@ -489,11 +485,9 @@ mod t20b_f1_plan_window_target {
 
     fn logical_fixture(entity: FixtureEntity) -> PlanWindowFixture {
         use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
-        use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
         use crate::product::logical_codebase::{
             AggregatePolicyArtifactStore, LogicalCodebaseFeature,
         };
-        use crate::product::models::{ProviderName, WorkspaceType};
         use crate::product::project_store::{CreateProjectInput, ProjectStore};
         use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 
@@ -700,7 +694,7 @@ mod t20b_f1_plan_window_target {
     /// 形态 A:Story focus=Some → 窗口锚 focus 成员(直选),无附注。
     #[tokio::test]
     async fn story_focus_aggregate_view_windows_on_focus_member_and_completes() {
-        let mut fixture = logical_fixture(FixtureEntity::StoryFocusFirstMember);
+        let fixture = logical_fixture(FixtureEntity::StoryFocusFirstMember);
         let (_view, mut rx, mut engine) =
             engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Story);
         let session_id = engine.session().session_id.to_string();
@@ -719,10 +713,10 @@ mod t20b_f1_plan_window_target {
         while let Ok(event) = rx.try_recv() {
             match event {
                 EngineEvent::Error { message } => saw_error = Some(message),
-                EngineEvent::ExecutionEvent { event, .. } => {
-                    if event.title.contains("primary-member anchored") {
-                        saw_anchor_note = true;
-                    }
+                EngineEvent::ExecutionEvent { event, .. }
+                    if event.title.contains("primary-member anchored") =>
+                {
+                    saw_anchor_note = true;
                 }
                 _ => {}
             }
@@ -750,7 +744,7 @@ mod t20b_f1_plan_window_target {
     /// 形态 B(Story focus=None):主成员锚——评审照常走+窗口附注披露。
     #[tokio::test]
     async fn story_without_focus_anchors_primary_member_and_completes_with_note() {
-        let mut fixture = logical_fixture(FixtureEntity::StoryNoFocus);
+        let fixture = logical_fixture(FixtureEntity::StoryNoFocus);
         let (_view, mut rx, mut engine) =
             engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Story);
         let session_id = engine.session().session_id.to_string();
@@ -769,12 +763,11 @@ mod t20b_f1_plan_window_target {
         while let Ok(event) = rx.try_recv() {
             match event {
                 EngineEvent::Error { message } => saw_error = Some(message),
-                EngineEvent::ExecutionEvent { event, .. } => {
+                EngineEvent::ExecutionEvent { event, .. }
                     if event.title.contains("primary-member anchored")
-                        && event.title.contains("非主成员面未对账")
-                    {
-                        saw_anchor_note = true;
-                    }
+                        && event.title.contains("非主成员面未对账") =>
+                {
+                    saw_anchor_note = true;
                 }
                 _ => {}
             }
@@ -802,7 +795,7 @@ mod t20b_f1_plan_window_target {
     /// 形态 B(Design involved 空):主成员锚——评审照常走+附注披露。
     #[tokio::test]
     async fn design_empty_involved_anchors_primary_member_and_completes() {
-        let mut fixture = logical_fixture(FixtureEntity::DesignEmptyInvolved);
+        let fixture = logical_fixture(FixtureEntity::DesignEmptyInvolved);
         let (_view, mut rx, mut engine) =
             engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Design);
         let member_a = fixture.member_a.clone().expect("member a");
@@ -820,10 +813,10 @@ mod t20b_f1_plan_window_target {
         while let Ok(event) = rx.try_recv() {
             match event {
                 EngineEvent::Error { message } => saw_error = Some(message),
-                EngineEvent::ExecutionEvent { event, .. } => {
-                    if event.title.contains("primary-member anchored") {
-                        saw_anchor_note = true;
-                    }
+                EngineEvent::ExecutionEvent { event, .. }
+                    if event.title.contains("primary-member anchored") =>
+                {
+                    saw_anchor_note = true;
                 }
                 _ => {}
             }
@@ -847,10 +840,10 @@ mod t20b_f1_plan_window_target {
                 let path = entry.path();
                 if path.is_dir() {
                     scan(&path, expected, out);
-                } else if let Ok(content) = std::fs::read_to_string(&path) {
-                    if content.contains(&expected.display().to_string()) {
-                        *out = true;
-                    }
+                } else if let Ok(content) = std::fs::read_to_string(&path)
+                    && content.contains(&expected.display().to_string())
+                {
+                    *out = true;
                 }
             }
         }
