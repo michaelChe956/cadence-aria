@@ -563,6 +563,25 @@ async fn handle_coding_socket(
                         .await;
                         continue;
                     }
+                    // T21(人工恢复续接生产面):树上有未终态 reviewer 窗口
+                    // 时先驱动补偿(停旧登记资源→按原 manifest 续恢复→
+                    // 释放);ManualGate 需显式裁决,补偿未收口即拒——
+                    // 不得带窗重启 runner。
+                    if let Err(window_error) = recovery_engine
+                        .redrive_reviewer_window_recovery_for_attempt(&current_attempt)
+                        .await
+                    {
+                        drop(mutation_lease);
+                        let _ = send_coding_json(
+                            &mut socket_tx,
+                            &CodingWsOutMessage::CodingProtocolError {
+                                code: "coding_recover_reviewer_window_open".to_string(),
+                                message: window_error.to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
                     let recovered = coding_store.recover_attempt_from_manual_recovery(
                         &current_attempt.project_id,
                         &current_attempt.issue_id,

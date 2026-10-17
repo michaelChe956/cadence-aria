@@ -220,6 +220,13 @@ pub(crate) struct WindowLeaseRecord {
     pub(crate) run_id: String,
     pub(crate) provider: String,
     pub(crate) acquired_at: String,
+    /// ⚠3(T21):同窗单写者进程标识——owner 进程存活期间,其它进程不得
+    /// 以同 window_id 重入 begin(跨进程并发互斥);owner 已死(崩溃)方可
+    /// 接管续接。旧记录缺省 0 = 未知 → fail-closed 视为存活。
+    #[serde(default)]
+    pub(crate) owner_pid: u32,
+    #[serde(default)]
+    pub(crate) owner_start_ticks: u64,
 }
 
 impl WindowLeaseRecord {
@@ -541,6 +548,23 @@ pub(crate) fn channel_writer_alive(writer: &ChannelWriter) -> bool {
     }
 }
 
+/// ⚠3(T21):租约 owner 进程存活判定(与 channel writer 收割同语义):
+/// proc 无此 pid = 已死(可接管);ticks 不符 = PID 复用后的无关进程 =
+/// 原 owner 已死;未知(owner_pid=0/取证失败)fail-closed 视为存活——
+/// 不得在无法取证时放行并发重入。
+fn lease_owner_alive(lease: &WindowLeaseRecord) -> bool {
+    if lease.owner_pid == 0 {
+        return true;
+    }
+    match proc_stat(lease.owner_pid) {
+        None => false,
+        Some((state, starttime)) => {
+            lease.owner_start_ticks == 0
+                || (starttime == lease.owner_start_ticks && state != 'Z' && state != 'X')
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -769,7 +793,9 @@ impl ReviewerWindowStore {
     // -- leases ------------------------------------------------------------
 
     /// 获取树级 durable 租约(租约域锁内完成读-判-写):
-    /// - 同 window_id 且身份一致 → 幂等(resume);
+    /// - 同 window_id 且身份一致 → 幂等(resume);⚠3(T21):仅限同一
+    ///   owner 进程(自持)或 owner 已死(崩溃接管)——另一存活进程持有
+    ///   同窗 → Conflict(同 window_id 并发 begin 的跨进程互斥);
     /// - 同 tree_key 其它窗口 → Conflict(两 attempt 同树只能一窗口);
     /// - 共享 common-dir 的其它租约 → Conflict(linked 冲突身份纳入锁集)。
     pub(crate) fn acquire_lease(&self, lease: &WindowLeaseRecord) -> Result<(), ProductStoreError> {
@@ -779,6 +805,21 @@ impl ReviewerWindowStore {
                 let existing: WindowLeaseRecord = read_json(&lease_path)?;
                 if existing.window_id == lease.window_id {
                     if existing.matches_identity(lease) {
+                        if existing.owner_pid == lease.owner_pid
+                            && existing.owner_start_ticks == lease.owner_start_ticks
+                        {
+                            return Ok(());
+                        }
+                        if lease_owner_alive(&existing) {
+                            return Err(ProductStoreError::Conflict {
+                                kind: "reviewer_window_lease_owner",
+                                id: lease.tree_key.clone(),
+                            });
+                        }
+                        // owner 进程已死(崩溃):接管续写租约(owner 字段
+                        // 更新为接管进程;身份字段不变)。
+                        write_json(&lease_path, lease)?;
+                        sync_dir(&self.leases_dir())?;
                         return Ok(());
                     }
                     return Err(ProductStoreError::IdentityMismatch {
@@ -877,6 +918,43 @@ impl ReviewerWindowStore {
             }
         }
         Ok(leases)
+    }
+
+    /// 全部窗口记录(T21 启动补偿扫描;只读)。单条损坏记录跳过并告警
+    /// ——该树租约仍持有即由租约面 fail-closed 拦截,不影响其它无冲突
+    /// 树的补偿(局部坏窗不停扫)。
+    pub(crate) fn list_windows(&self) -> Result<Vec<ReviewerWindowRecord>, ProductStoreError> {
+        let dir = self.windows_dir();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "read {}: {error}",
+                    dir.display()
+                )));
+            }
+        };
+        let mut records = Vec::new();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            match read_json::<ReviewerWindowRecord>(&path) {
+                Ok(record) => records.push(record),
+                Err(error) => {
+                    eprintln!(
+                        "warning: skip unreadable reviewer window record {}: {error}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        Ok(records)
     }
 
     // -- channels ----------------------------------------------------------
@@ -1186,7 +1264,30 @@ mod tests {
             run_id: "run-1".to_string(),
             provider: "claude_code".to_string(),
             acquired_at: now(),
+            owner_pid: std::process::id(),
+            owner_start_ticks: crate::cross_cutting::process_manager::process_start_time_ticks(
+                std::process::id(),
+            )
+            .unwrap_or(0),
         }
+    }
+
+    /// 外部存活进程持有的同窗租约(⚠3 并发互斥夹具):spawn 长命子进程
+    /// 以其真实 (pid,starttime) 作 owner。
+    fn foreign_live_lease(
+        window_id: &str,
+        attempt: &str,
+    ) -> (WindowLeaseRecord, std::process::Child) {
+        let mut lease = lease(window_id, attempt);
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        lease.owner_pid = child.id();
+        lease.owner_start_ticks =
+            crate::cross_cutting::process_manager::process_start_time_ticks(child.id())
+                .expect("child starttime");
+        (lease, child)
     }
 
     fn own_writer(writer_id: &str) -> ChannelWriter {
@@ -1309,6 +1410,75 @@ mod tests {
             .acquire_lease(&lease("w-6", "attempt-6"))
             .expect_err("lease survives store rebuild");
         assert!(matches!(err, ProductStoreError::Conflict { .. }), "{err:?}");
+    }
+
+    /// ⚠3(T21):同 window_id 并发 begin 的跨进程互斥——owner 进程存活
+    /// 时他人重入 Conflict;owner 已死(崩溃)方可接管续写。
+    #[test]
+    fn lease_owner_liveness_guards_same_window_reacquire() {
+        let root = t17_dir();
+        let store = ReviewerWindowStore::new(root.path());
+        // 存活外部进程持有同窗(模拟另一进程已 begin)。
+        let (held, mut child) = foreign_live_lease("w-own", "attempt-1");
+        store
+            .acquire_lease(&held)
+            .expect("acquire by live foreign owner");
+        // 同 owner(自持)幂等。
+        store
+            .acquire_lease(&held)
+            .expect("self re-acquire idempotent");
+        // 另一存活进程(本测试进程)以同 window_id 重入 → Conflict(⚠3
+        // 并发互斥收口)。
+        let mine = lease("w-own", "attempt-1");
+        let err = store
+            .acquire_lease(&mine)
+            .expect_err("live foreign owner must conflict");
+        assert!(
+            matches!(
+                &err,
+                ProductStoreError::Conflict {
+                    kind: "reviewer_window_lease_owner",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        // owner 进程死亡(崩溃)→ 接管续写放行(owner 字段更新为接管
+        // 进程),接管者自持幂等。
+        child.kill().expect("kill owner");
+        let _ = child.wait();
+        store
+            .acquire_lease(&mine)
+            .expect("takeover after owner death");
+        store
+            .acquire_lease(&mine)
+            .expect("takeover owner idempotent");
+    }
+
+    /// T21:list_windows 供启动补偿扫描;损坏记录跳过不阻断其它树。
+    #[test]
+    fn list_windows_returns_records_and_skips_corrupt() {
+        let root = t17_dir();
+        let store = ReviewerWindowStore::new(root.path());
+        assert!(store.list_windows().expect("empty ok").is_empty());
+        store
+            .create_or_resume_window(&record("w-ls-a"))
+            .expect("create a");
+        store
+            .create_or_resume_window(&record("w-ls-b"))
+            .expect("create b");
+        std::fs::write(store.windows_dir().join("w-corrupt.json"), "{ not json")
+            .expect("corrupt record");
+        let listed = store.list_windows().expect("list");
+        let ids: Vec<&str> = listed
+            .iter()
+            .map(|record| record.window_id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&"w-ls-a") && ids.contains(&"w-ls-b"),
+            "{ids:?}"
+        );
+        assert_eq!(listed.len(), 2, "corrupt record skipped, others continue");
     }
 
     #[test]

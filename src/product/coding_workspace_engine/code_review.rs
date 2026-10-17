@@ -348,13 +348,14 @@ use crate::product::reviewer_reconciliation::reconcile_from_stores;
 use crate::product::reviewer_snapshot::ReviewerSnapshotStore;
 use crate::product::reviewer_snapshot::SnapshotBudget;
 use crate::product::reviewer_window::{
-    ReviewerWindowError, WindowExpectation, abandon_window, assert_review_window_current,
-    begin_quiesce, begin_review_window, close_accepted, enter_platform_write, exit_platform_write,
-    record_report_acceptance, resolve_worktree_git_identity, restore_window,
+    ManualGateDecision, ReviewerWindowError, WindowExpectation, abandon_window,
+    assert_review_window_current, begin_quiesce, begin_review_window, close_accepted,
+    enter_platform_write, exit_platform_write, park_window_recovery, record_report_acceptance,
+    resolve_manual_gate, resolve_worktree_git_identity, restore_window,
 };
 use crate::product::reviewer_window_store::{
-    ChannelWriter, ReportAcceptance, ReviewerWindowState, ReviewerWindowStore, WriteChannelKind,
-    wire_acceptance,
+    ChannelWriter, ReportAcceptance, ReviewerWindowRecord, ReviewerWindowState,
+    ReviewerWindowStore, WriteChannelKind, tree_key_of, wire_acceptance,
 };
 
 /// 窗口 store 生产根(`<aria>/reviewer-windows`;engine 与 coding_attempt_store
@@ -857,5 +858,619 @@ impl CodingWorkspaceEngine {
         CodingWorkspaceEngineError::Store(crate::product::json_store::ProductStoreError::Io(
             format!("reviewer_window_lifecycle_failed: {error}"),
         ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T21:取消/崩溃启动补偿与人工恢复续接
+// ---------------------------------------------------------------------------
+
+/// 单窗启动补偿结局(消费面:启动扫描前置、人工恢复续接)。
+#[derive(Debug)]
+pub(crate) struct StartupWindowCompensation {
+    pub(crate) window_id: String,
+    pub(crate) attempt_id: String,
+    /// 补偿后的窗口状态(终态=已释放;ManualGate/RecoveryRequired=保持锁)。
+    pub(crate) state: ReviewerWindowState,
+    /// 树已释放(终态关闭;租约释放、四通道解冻)。
+    pub(crate) released: bool,
+    /// 保持锁时的人工处置原因(人工门/停等投影)。
+    pub(crate) manual_attention: Option<String>,
+}
+
+/// attempt 删除/终止时的窗口收口模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttemptWindowCloseMode {
+    /// 终止:恢复失败 → 保持锁 fail-closed(终止结果可见,人工/重试续接)。
+    Terminate,
+    /// 删除:工作树随之删除,恢复 best-effort 后无条件弃置关闭(通道/
+    /// 租约必须收口,不留冻结残锁卡共享 common-dir 的主仓 git mutation)。
+    Delete,
+}
+
+impl CodingWorkspaceEngine {
+    /// T21 启动补偿扫描:枚举全部未终态 reviewer 窗口逐一补偿——
+    /// 停旧登记资源且确认静止 → 按原 manifest 续恢复(不重冻/不重采
+    /// 污染基线)→ 无违规则弃置释放,有违规/停等保持锁并投影人工门。
+    /// 局部坏窗不停扫:单窗失败记入结局,其余无冲突树继续(fail-closed
+    /// 仅作用于该树)。
+    pub(crate) async fn compensate_open_reviewer_windows_at_startup(
+        &self,
+    ) -> Vec<StartupWindowCompensation> {
+        let window_store = self.reviewer_window_store();
+        let snapshot_store = self.reviewer_snapshot_store();
+        let records = match window_store.list_windows() {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!(%error, "startup window scan: window records unreadable");
+                return Vec::new();
+            }
+        };
+        let mut outcomes = Vec::new();
+        for record in records {
+            if record.state.is_terminal() {
+                continue;
+            }
+            let outcome = self
+                .compensate_window_after_crash(&window_store, &snapshot_store, record)
+                .await;
+            if !outcome.released {
+                tracing::warn!(
+                    window = %outcome.window_id,
+                    attempt = %outcome.attempt_id,
+                    state = outcome.state.as_str(),
+                    reason = outcome.manual_attention.as_deref().unwrap_or("unresolved"),
+                    "startup reviewer window compensation kept lock (fail-closed)"
+                );
+            }
+            outcomes.push(outcome);
+        }
+        outcomes
+    }
+
+    /// 单窗补偿单元(启动驱动与人工恢复续接共用)。锁序沿 T19:窗口
+    /// 租约/冻结在前,attempt git 补偿仅在窗口终态释放后续接。
+    async fn compensate_window_after_crash(
+        &self,
+        window_store: &ReviewerWindowStore,
+        snapshot_store: &ReviewerSnapshotStore,
+        record: ReviewerWindowRecord,
+    ) -> StartupWindowCompensation {
+        let window_id = record.window_id.clone();
+        let attempt_id = record.attempt_id.clone();
+        // ManualGate:人工裁决待定——不动状态、保持锁,投影人工面。
+        if record.state == ReviewerWindowState::ManualGate {
+            self.project_window_manual_attention(&record, "reviewer_window_manual_gate");
+            return StartupWindowCompensation {
+                state: record.state,
+                released: false,
+                manual_attention: Some(
+                    "违规人工门:仅人工裁决(Invalidate/RequireNewReview)可收口".to_string(),
+                ),
+                window_id,
+                attempt_id,
+            };
+        }
+        // 1) 停旧登记资源且确认静止(killpg/Drop 只是步骤,静止以真实
+        //    身份观察为准;未知 writer/容器不可证静止 → 停等保持锁)。
+        if let Err(reason) = self.quiesce_window_scopes_for_recovery(&record).await {
+            let state = park_window_recovery(
+                window_store,
+                &record,
+                "startup_compensation_quiesce_not_proven",
+                &reason,
+            );
+            self.project_window_manual_attention(&record, "reviewer_window_recovery_required");
+            return StartupWindowCompensation {
+                state,
+                released: false,
+                manual_attention: Some(reason),
+                window_id,
+                attempt_id,
+            };
+        }
+        // 2) 重读记录(防御并发推进)后按崩溃前缀分派。
+        let mut current = match window_store.load_window(&window_id) {
+            Ok(record) => record,
+            Err(error) => {
+                let reason = format!("window record unreadable: {error}");
+                self.project_window_manual_attention(&record, "reviewer_window_recovery_required");
+                return StartupWindowCompensation {
+                    state: record.state,
+                    released: false,
+                    manual_attention: Some(reason),
+                    window_id,
+                    attempt_id,
+                };
+            }
+        };
+        if current.state == ReviewerWindowState::Running {
+            // run 已死亡(进程崩溃),材料面停:Running → Quiescing 后走恢复。
+            match begin_quiesce(
+                window_store,
+                &window_id,
+                current.generation,
+                "启动补偿:run 已死亡,收口窗口(落违规→恢复)",
+            ) {
+                Ok(quiescing) => current = quiescing,
+                Err(error) => {
+                    let reason = format!("begin_quiesce failed: {error}");
+                    self.project_window_manual_attention(
+                        &current,
+                        "reviewer_window_recovery_required",
+                    );
+                    return StartupWindowCompensation {
+                        state: current.state,
+                        released: false,
+                        manual_attention: Some(reason),
+                        window_id,
+                        attempt_id,
+                    };
+                }
+            }
+        }
+        if matches!(current.state, ReviewerWindowState::Preparing) || current.baseline.is_none() {
+            // 崩溃于开窗中途(租约已持久/manifest 未全):无 baseline ⇒
+            // reviewer 无材料无写入,树无污染可恢复——弃置释放(通道解冻
+            // +租约释放;manifest 采用点属同窗重入路径,启动面无重入者)。
+            return match abandon_window(
+                window_store,
+                &window_id,
+                current.generation,
+                "启动补偿:开窗未完成(无 baseline),弃置释放",
+            ) {
+                Ok(closed) => {
+                    self.after_window_released(window_id, attempt_id, closed.state)
+                        .await
+                }
+                Err(error) => StartupWindowCompensation {
+                    state: current.state,
+                    released: false,
+                    manual_attention: Some(format!("abandon failed: {error}")),
+                    window_id,
+                    attempt_id,
+                },
+            };
+        }
+        // 3) 按原 manifest 续恢复(Quiescing/ViolationRecorded/Restoring/
+        //    RecoveryRequired 停等重入;T16 游标幂等续接,不重冻基线)。
+        let generation = current.generation;
+        match restore_window(window_store, snapshot_store, &window_id, generation).await {
+            Ok(summary) if summary.manual_gate => {
+                // 违规事实已 journal-first 落盘:人工门保持锁(仅人工裁决)。
+                self.project_window_manual_attention(
+                    &summary.record,
+                    "reviewer_window_manual_gate",
+                );
+                StartupWindowCompensation {
+                    state: summary.record.state,
+                    released: false,
+                    manual_attention: Some("恢复完整但违规事实落 journal:人工门待裁决".to_string()),
+                    window_id,
+                    attempt_id,
+                }
+            }
+            Ok(summary) => {
+                // 恢复完整且无违规:run 已死亡、无报告可采——按失败收口
+                // 语义弃置释放(旧报告无/Invalidated;新轮重开新窗/新基线)。
+                match abandon_window(
+                    window_store,
+                    &window_id,
+                    summary.record.generation,
+                    "启动补偿:恢复完整且无违规,run 已死亡,弃置释放",
+                ) {
+                    Ok(closed) => {
+                        self.after_window_released(window_id, attempt_id, closed.state)
+                            .await
+                    }
+                    Err(error) => StartupWindowCompensation {
+                        state: summary.record.state,
+                        released: false,
+                        manual_attention: Some(format!("abandon failed: {error}")),
+                        window_id,
+                        attempt_id,
+                    },
+                }
+            }
+            Err(ReviewerWindowError::RecoveryStopped { reason, .. }) => {
+                // 恢复失败:restore_window 已持久 RecoveryRequired(游标入
+                // 记录,锁保留)——投影人工门面,重入续接。
+                let state = window_store
+                    .load_window(&window_id)
+                    .map(|reloaded| reloaded.state)
+                    .unwrap_or(ReviewerWindowState::RecoveryRequired);
+                self.project_window_manual_attention(&current, "reviewer_window_recovery_required");
+                StartupWindowCompensation {
+                    state,
+                    released: false,
+                    manual_attention: Some(format!("恢复停等: {reason}")),
+                    window_id,
+                    attempt_id,
+                }
+            }
+            Err(error) => {
+                // 瞬时 Err(状态不动)或违规 journal pending 停等:保持锁,
+                // 可见原因,重试/人工续接。
+                let state = window_store
+                    .load_window(&window_id)
+                    .map(|reloaded| reloaded.state)
+                    .unwrap_or(current.state);
+                self.project_window_manual_attention(&current, "reviewer_window_recovery_required");
+                StartupWindowCompensation {
+                    state,
+                    released: false,
+                    manual_attention: Some(error.to_string()),
+                    window_id,
+                    attempt_id,
+                }
+            }
+        }
+    }
+
+    /// 窗口释放后动作:续接被冻结拒绝的 Git 补偿(取消语义;仅非在途
+    /// attempt——Running/Created 的 journal 归 runner 恢复/终止收敛面)。
+    async fn after_window_released(
+        &self,
+        window_id: String,
+        attempt_id: String,
+        state: ReviewerWindowState,
+    ) -> StartupWindowCompensation {
+        self.resume_pending_review_compensation(&attempt_id).await;
+        StartupWindowCompensation {
+            window_id,
+            attempt_id,
+            state,
+            released: true,
+            manual_attention: None,
+        }
+    }
+
+    /// 停止并清理窗口锁集内的全部登记资源(先静止证明再清理;killpg/
+    /// Drop 只是步骤,静止以真实身份观察为准):
+    /// - 窗口自身的 quiesce scope(记录在窗口记录 `quiesced_scopes`);
+    /// - 资源 store 中登记了 `aria.worktree == 本树 tree_key` 的兄弟
+    ///   scope(T14/T20 归属标签合同;未标注归属的不静止,不误杀无关
+    ///   scope)。
+    ///
+    /// 任何 scope 静止未证明/清理失败 → Err(停等,不伪称静止)。
+    async fn quiesce_window_scopes_for_recovery(
+        &self,
+        record: &ReviewerWindowRecord,
+    ) -> Result<(), String> {
+        use crate::cross_cutting::provider_resources::QuiesceOutcome;
+        let store_root = self.store.paths().root().join(PROVIDER_RESOURCE_STORE_DIR);
+        let resource_store =
+            crate::product::provider_resource_store::ProviderResourceStore::new(&store_root);
+        let tree_key = tree_key_of(&record.identity.canonical_worktree);
+        let all_keys = resource_store
+            .scope_keys()
+            .map_err(|error| format!("resource store unreadable: {error}"))?;
+        let mut targets: Vec<(
+            crate::cross_cutting::provider_resources::ResourceScopeKey,
+            Vec<crate::cross_cutting::provider_resources::ProviderResourceRecord>,
+        )> = Vec::new();
+        for key in all_keys {
+            if record.quiesced_scopes.contains(&key) || targets.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            let records = resource_store
+                .list_scope(&key)
+                .map_err(|error| format!("scope {} unreadable: {error}", key.scope_id))?;
+            let owned = records.iter().any(|resource| {
+                resource
+                    .reserved_labels
+                    .get("aria.worktree")
+                    .is_some_and(|labelled| labelled == &tree_key)
+            });
+            if owned {
+                targets.push((key, records));
+            }
+        }
+        for key in &record.quiesced_scopes {
+            if targets.iter().any(|(known, _)| known == key) {
+                continue;
+            }
+            let records = resource_store
+                .list_scope(key)
+                .map_err(|error| format!("scope {} unreadable: {error}", key.scope_id))?;
+            targets.push((key.clone(), records));
+        }
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let scratch = self
+            .store
+            .paths()
+            .root()
+            .join("startup-window-compensation");
+        std::fs::create_dir_all(&scratch)
+            .map_err(|error| format!("scratch private root create failed: {error}"))?;
+        for (key, records) in targets {
+            let private = records
+                .iter()
+                .find_map(|resource| {
+                    resource
+                        .canonical_private_path
+                        .as_ref()
+                        .map(std::path::PathBuf::from)
+                })
+                .unwrap_or_else(|| scratch.clone());
+            let scope =
+                crate::cross_cutting::provider_resources::ProviderRunResourceScope::open_for_recovery(
+                    &key,
+                    Some(&record.window_id),
+                    &private,
+                    &store_root,
+                    None,
+                )
+                .map_err(|error| format!("scope {} open failed: {error}", key.scope_id))?;
+            match scope.quiesce_scope().await {
+                Ok(QuiesceOutcome::Quiescent(proof)) => scope
+                    .cleanup_owned_scope(&proof)
+                    .map_err(|error| format!("scope {} cleanup failed: {error}", key.scope_id))?,
+                Ok(QuiesceOutcome::RecoveryRequired(unknown)) => {
+                    return Err(format!("{}: {}", unknown.reason, unknown.detail));
+                }
+                Err(error) => return Err(format!("quiesce failed: {error}")),
+            }
+        }
+        Ok(())
+    }
+
+    /// 窗口保持锁时的人工面投影:attempt 活跃则转 AwaitingManualRecovery
+    /// (幂等;启动分诊/attach 恢复据此 fail-closed,人工恢复续接为唯一出口)。
+    fn project_window_manual_attention(&self, record: &ReviewerWindowRecord, reason: &str) {
+        match self.store.get_attempt_by_id(&record.attempt_id) {
+            Ok(attempt) if attempt.status.is_active() => {
+                if let Err(error) = self
+                    .store
+                    .transition_to_awaiting_manual_recovery(&record.attempt_id, reason)
+                {
+                    tracing::warn!(
+                        attempt_id = %record.attempt_id,
+                        ?error,
+                        "startup window compensation: manual-recovery projection failed"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                attempt_id = %record.attempt_id,
+                %error,
+                "startup window compensation: attempt lookup failed"
+            ),
+        }
+    }
+
+    /// 释放后续接被窗口冻结拒绝的 ReviewRequest Git 补偿(取消已决定的
+    /// 形态:终态/人工恢复/阻塞 attempt;在途 Running/Created 归 runner
+    /// 恢复与终止收敛面,不在此抢跑)。失败仅告警(journal durable 保守)。
+    async fn resume_pending_review_compensation(&self, attempt_id: &str) {
+        use crate::product::coding_attempt_store::{
+            CodingGitOperationKind, CodingGitOperationPhase,
+        };
+        let Ok(attempt) = self.store.get_attempt_by_id(attempt_id) else {
+            return;
+        };
+        if matches!(
+            attempt.status,
+            crate::product::coding_models::CodingAttemptStatus::Running
+                | crate::product::coding_models::CodingAttemptStatus::Created
+        ) {
+            return;
+        }
+        let Ok(Some(journal)) = self.store.get_coding_git_operation(&attempt) else {
+            return;
+        };
+        if journal.kind != CodingGitOperationKind::ReviewRequest
+            || !matches!(
+                journal.phase,
+                CodingGitOperationPhase::Before
+                    | CodingGitOperationPhase::CommitStarted
+                    | CodingGitOperationPhase::CommitCreated
+            )
+        {
+            return;
+        }
+        if let Err(error) = self
+            .compensate_cancelled_review_commit(&attempt, &journal)
+            .await
+        {
+            tracing::warn!(
+                attempt_id,
+                %error,
+                "window released: git compensation resume failed (durable journal kept)"
+            );
+        }
+    }
+
+    /// 人工恢复续接(socket RecoverCoding 前置):attempt 树上的未终态
+    /// 窗口先驱动补偿(停资源→续恢复→释放);ManualGate 需显式裁决
+    /// (REST reviewer-window:resolve),redrive 不代作废。全部收口
+    /// (终态)才放行 runner 恢复——带窗重启 runner 恒拒。
+    pub(crate) async fn redrive_reviewer_window_recovery_for_attempt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        let window_store = self.reviewer_window_store();
+        let snapshot_store = self.reviewer_snapshot_store();
+        let records = window_store
+            .list_windows()
+            .map_err(CodingWorkspaceEngineError::Store)?;
+        let attempt_tree_key = attempt
+            .worktree_path
+            .as_deref()
+            .and_then(|worktree| worktree.canonicalize().ok())
+            .map(|canonical| tree_key_of(&canonical));
+        for record in records {
+            if record.state.is_terminal() {
+                continue;
+            }
+            let on_tree = attempt_tree_key
+                .as_ref()
+                .is_some_and(|key| key == &tree_key_of(&record.identity.canonical_worktree));
+            if record.attempt_id != attempt.id && !on_tree {
+                continue;
+            }
+            if record.state == ReviewerWindowState::ManualGate {
+                return Err(CodingWorkspaceEngineError::Store(
+                    crate::product::json_store::ProductStoreError::Io(format!(
+                        "reviewer_window_manual_gate_requires_decision: window={}",
+                        record.window_id
+                    )),
+                ));
+            }
+            let outcome = self
+                .compensate_window_after_crash(&window_store, &snapshot_store, record)
+                .await;
+            if !outcome.released {
+                return Err(CodingWorkspaceEngineError::Store(
+                    crate::product::json_store::ProductStoreError::Io(format!(
+                        "reviewer_window_recovery_unresolved: window={} state={} reason={}",
+                        outcome.window_id,
+                        outcome.state.as_str(),
+                        outcome.manual_attention.as_deref().unwrap_or("unresolved")
+                    )),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// 人工门裁决生产入口(REST reviewer-window:resolve 消费):
+    /// ManualGate → ClosedInvalidated|NewReviewRequired(锁释放,旧报告
+    /// 永久 Invalidated)。人工许可新轮=另取租约/新基线(新 run 重开新
+    /// 窗);人工拒绝补偿(Invalidate)不解锁 attempt——不自动复活
+    /// runner,续接只经人工恢复面/新轮,旧违规报告不可 resume。
+    pub(crate) fn resolve_reviewer_manual_gate_for_attempt(
+        &self,
+        attempt_id: &str,
+        decision: ManualGateDecision,
+    ) -> Result<ReviewerWindowRecord, CodingWorkspaceEngineError> {
+        let window_store = self.reviewer_window_store();
+        let record = window_store
+            .list_windows()
+            .map_err(CodingWorkspaceEngineError::Store)?
+            .into_iter()
+            .find(|record| !record.state.is_terminal() && record.attempt_id == attempt_id)
+            .ok_or_else(|| {
+                CodingWorkspaceEngineError::Store(
+                    crate::product::json_store::ProductStoreError::NotFound {
+                        kind: "reviewer_window_open",
+                        id: attempt_id.to_string(),
+                    },
+                )
+            })?;
+        if record.state != ReviewerWindowState::ManualGate {
+            return Err(CodingWorkspaceEngineError::Store(
+                crate::product::json_store::ProductStoreError::Io(format!(
+                    "reviewer_window_not_manual_gate: window={} state={}(停等窗先经恢复续接)",
+                    record.window_id,
+                    record.state.as_str()
+                )),
+            ));
+        }
+        let generation = record.generation;
+        let resolved = resolve_manual_gate(&window_store, &record.window_id, generation, decision)
+            .map_err(Self::window_lifecycle_error)?;
+        // 投影(幂等):attempt 保持人工恢复面,不自动 resume(人工拒绝
+        // 补偿不解锁;新轮/人工恢复续接是唯一出口)。
+        self.project_window_manual_attention(&resolved, "reviewer_window_manual_resolved");
+        Ok(resolved)
+    }
+
+    /// attempt 删除/终止时的 reviewer 窗口与租约收口:逐窗先恢复
+    /// baseline(保 Coder dirty)再弃置关闭;Terminate 恢复失败 → 保持
+    /// 锁 fail-closed(Err 上抛,终止结果可见);Delete 无条件收口
+    /// (工作树随之删除,不留冻结残锁)。违规 journal 随记录保留审计。
+    pub(crate) async fn close_reviewer_windows_for_attempt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        mode: AttemptWindowCloseMode,
+    ) -> Result<usize, CodingWorkspaceEngineError> {
+        let window_store = self.reviewer_window_store();
+        let snapshot_store = self.reviewer_snapshot_store();
+        let records: Vec<ReviewerWindowRecord> = window_store
+            .list_windows()
+            .map_err(CodingWorkspaceEngineError::Store)?
+            .into_iter()
+            .filter(|record| !record.state.is_terminal() && record.attempt_id == attempt.id)
+            .collect();
+        let mut closed = 0usize;
+        for record in records {
+            let window_id = record.window_id.clone();
+            let mut current = record;
+            if current.state == ReviewerWindowState::Running {
+                current = begin_quiesce(
+                    &window_store,
+                    &window_id,
+                    current.generation,
+                    "attempt 终止/删除:收口窗口(落违规→恢复)",
+                )
+                .map_err(Self::window_lifecycle_error)?;
+            }
+            // 恢复前先停旧登记资源且确认静止(与启动补偿同款锁序;writer
+            // 未静止时不得动树)。Terminate 停等 fail-closed;Delete 跳过
+            // 恢复直接弃置(工作树随之删除)。
+            let quiesced = self.quiesce_window_scopes_for_recovery(&current).await;
+            if let Err(reason) = &quiesced
+                && matches!(mode, AttemptWindowCloseMode::Terminate)
+            {
+                park_window_recovery(
+                    &window_store,
+                    &current,
+                    "attempt_close_quiesce_not_proven",
+                    reason,
+                );
+                return Err(CodingWorkspaceEngineError::Store(
+                    crate::product::json_store::ProductStoreError::Io(format!(
+                        "reviewer_window_close_quiesce_not_proven: window={} {reason}",
+                        window_id
+                    )),
+                ));
+            }
+            if quiesced.is_ok()
+                && current.baseline.is_some()
+                && matches!(
+                    current.state,
+                    ReviewerWindowState::Quiescing
+                        | ReviewerWindowState::ViolationRecorded
+                        | ReviewerWindowState::Restoring
+                        | ReviewerWindowState::RecoveryRequired
+                )
+            {
+                match restore_window(
+                    &window_store,
+                    &snapshot_store,
+                    &window_id,
+                    current.generation,
+                )
+                .await
+                {
+                    Ok(summary) => current = summary.record,
+                    Err(error) => {
+                        if matches!(mode, AttemptWindowCloseMode::Terminate) {
+                            // fail-closed:树保持锁,终止结果可见,
+                            // 人工恢复续接/重试终止收敛。
+                            return Err(Self::window_lifecycle_error(error));
+                        }
+                        tracing::warn!(
+                            window = %window_id,
+                            %error,
+                            "attempt delete window close: restore best-effort failed, abandoning anyway (worktree being deleted)"
+                        );
+                    }
+                }
+            }
+            let note = match mode {
+                AttemptWindowCloseMode::Terminate => "attempt 终止:恢复后弃置关闭",
+                AttemptWindowCloseMode::Delete => "attempt 删除:弃置关闭(工作树随之删除)",
+            };
+            abandon_window(&window_store, &window_id, current.generation, note)
+                .map_err(Self::window_lifecycle_error)?;
+            closed += 1;
+            self.resume_pending_review_compensation(&attempt.id).await;
+        }
+        Ok(closed)
     }
 }

@@ -460,6 +460,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::abort_coding_attempt),
         )
         .route(
+            "/api/coding-attempts/{attempt_id}/reviewer-window:resolve",
+            post(handlers::resolve_reviewer_window_manual_gate),
+        )
+        .route(
             "/api/coding-attempts/{attempt_id}/execution-plan/confirm",
             post(handlers::confirm_work_item_execution_plan),
         )
@@ -740,14 +744,16 @@ pub async fn serve_web(
         events,
         work_item_plan_single_candidate,
     );
-    refresh_provider_health_for_startup(&state).await;
-    // P2 Task 6（§3.2）：无 attach 启动扫描——恢复已认领/在途 coding run，
-    // 先于 autopilot 有界 tick 执行一次；失败 fail-visible，不阻塞服务。
+    // T21:启动先扫描未关闭 reviewer 窗口并补偿(停旧登记资源→按原
+    // manifest 续恢复→人工门/释放),再放行 claimed-run/autopilot 分诊
+    // 与 Provider 探活——不得沿旧序仅日志后继续启动同树 runner。失败
+    // fail-visible,不阻塞服务(该树由租约闸门 fail-closed)。
     if let Err(error) =
         crate::web::autopilot_orchestrator::reconcile_claimed_coding_runs_once(&state).await
     {
         eprintln!("[aria-startup] coding run startup reconcile failed: {error}");
     }
+    refresh_provider_health_for_startup(&state).await;
     let static_service = crate::web::static_assets::static_dist_service();
     let evidence_enabled = is_loopback_host(&host);
 

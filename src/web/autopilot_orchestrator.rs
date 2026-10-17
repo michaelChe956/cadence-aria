@@ -222,6 +222,31 @@ impl AutopilotOrchestrator {
 pub async fn reconcile_claimed_coding_runs_once(state: &WebAppState) -> Result<usize, String> {
     let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
     let store = crate::product::coding_attempt_store::CodingAttemptStore::new(paths.clone());
+    // T21 前置:先补偿未关闭 reviewer 窗口(停旧登记资源且确认静止→
+    // 先持久新发现违规→按原 manifest 续恢复→三域复核/人工门→释放),
+    // 再放行 claimed-run/autopilot 分诊——不得沿旧序在同树先启 runner。
+    // 单窗失败不停扫(局部坏窗其它无冲突树继续);未收口树由
+    // recover_claimed_attempt_at_startup 的租约闸门 fail-closed。
+    let (startup_event_tx, _startup_event_rx) = tokio::sync::mpsc::channel(64);
+    let startup_engine = crate::product::coding_workspace_engine::CodingWorkspaceEngine::new(
+        store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        startup_event_tx,
+    );
+    for outcome in startup_engine
+        .compensate_open_reviewer_windows_at_startup()
+        .await
+    {
+        if !outcome.released {
+            eprintln!(
+                "[aria-startup] reviewer window {} (attempt {}) kept locked: state={} reason={}",
+                outcome.window_id,
+                outcome.attempt_id,
+                outcome.state.as_str(),
+                outcome.manual_attention.as_deref().unwrap_or("unresolved")
+            );
+        }
+    }
     let projects = ProjectStore::new(paths.clone())
         .list()
         .map_err(|error| format!("startup coding scan: project list unreadable: {error}"))?;
@@ -454,6 +479,35 @@ async fn recover_claimed_attempt_at_startup(
     .is_some()
     {
         return Ok(false);
+    }
+    // T21:树上仍有未终态 reviewer 窗口(人工门/停等/恢复中)→ 该树
+    // fail-closed:不启动 runner、不采材料;attempt 投影人工恢复面
+    // (幂等),其余无冲突树继续。
+    if let Some(worktree) = attempt
+        .worktree_path
+        .as_deref()
+        .filter(|worktree| !worktree.as_os_str().is_empty())
+    {
+        let (gate_event_tx, _gate_event_rx) = tokio::sync::mpsc::channel(1);
+        let engine = crate::product::coding_workspace_engine::CodingWorkspaceEngine::new(
+            store.clone(),
+            crate::product::git_workspace_service::GitWorkspaceService::new(),
+            gate_event_tx,
+        );
+        if engine
+            .ensure_no_open_reviewer_window(std::path::Path::new(worktree))
+            .is_err()
+        {
+            if let Err(error) = store
+                .transition_to_awaiting_manual_recovery(&attempt.id, "reviewer_window_open_on_tree")
+            {
+                eprintln!(
+                    "[aria-startup] attempt {} manual-recovery projection failed: {error:?}",
+                    attempt.id
+                );
+            }
+            return Ok(false);
+        }
     }
     match attempt.status {
         CodingAttemptStatus::Running => {

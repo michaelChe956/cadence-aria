@@ -410,6 +410,13 @@ pub(crate) async fn begin_review_window(
         run_id: request.run_id.to_string(),
         provider: request.provider.to_string(),
         acquired_at: now_rfc3339(),
+        // ⚠3(T21):同窗单写者进程标识——跨进程并发 begin 互斥(owner
+        // 存活时他人同窗重入 Conflict;崩溃后接管续写)。
+        owner_pid: std::process::id(),
+        owner_start_ticks: crate::cross_cutting::process_manager::process_start_time_ticks(
+            std::process::id(),
+        )
+        .unwrap_or(0),
     };
     if let Err(error) = store.acquire_lease(&lease) {
         let detail = lease_conflict_detail(store, &lease, &error);
@@ -729,6 +736,29 @@ fn mark_begin_recovery(
     );
     let expected = record.generation;
     let _ = store.save_window_transition(next, expected);
+}
+
+/// T21:补偿驱动停等落账(镜像 `mark_begin_recovery`;任意非终态 →
+/// `RecoveryRequired`,租约与已冻结通道保留,fail-closed)。best-effort:
+/// 写失败时返回窗口当前态(非终态即继续持锁)。phase 记 `Restore`——
+/// 停等发生在收口/恢复路径,重入恢复由此续接。
+pub(crate) fn park_window_recovery(
+    store: &ReviewerWindowStore,
+    record: &ReviewerWindowRecord,
+    reason: &str,
+    detail: &str,
+) -> ReviewerWindowState {
+    let mut next = record.clone();
+    next.note_recovery(RecoveryPhase::Restore, reason, detail, None);
+    next.bump_transition(
+        ReviewerWindowState::RecoveryRequired,
+        "补偿停等(静止未证明/未知 writer;租约与冻结通道保留)",
+    );
+    let expected = record.generation;
+    match store.save_window_transition(next, expected) {
+        Ok(saved) => saved.state,
+        Err(_) => record.state,
+    }
 }
 
 /// 租约冲突归因(同树 vs 共享 common-dir 兄弟树;审查硬约束 2 的

@@ -1177,3 +1177,122 @@ async fn terminated_attempt_reconcile_rejected_while_window_frozen() {
         crate::product::coding_models::CodingAttemptStatus::Running
     );
 }
+
+// ---------------------------------------------------------------------------
+// T21:启动补偿驱动——窗口冻结期被拒的取消补偿,在窗口恢复释放后续接
+// ---------------------------------------------------------------------------
+
+/// T21 锁序证明:冻结窗口期间补偿拒绝(T19 已钉);启动补偿先恢复窗口
+/// (restore 将树按原 manifest 回写)→ 释放 → 被拒的 ReviewRequest 取消
+/// 补偿(reset/advance Compensated)在同一驱动内续接完成。复用 T19
+/// lock order(窗口租约/冻结在前,attempt git 补偿只在释放后)。
+#[tokio::test]
+async fn startup_compensation_resumes_cancelled_review_commit_after_window_release() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+
+    // journal 推进到 CommitCreated(真实 commit 已存在;复用 T19 夹具手法)。
+    let before_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    fs::write(worktree.join("committed.rs"), "pub fn committed() {}\n").expect("staged change");
+    git_stdout(&worktree, &["add", "."]);
+    git_stdout(
+        &worktree,
+        &[
+            "-c",
+            "user.email=t21@aria.invalid",
+            "-c",
+            "user.name=t21",
+            "commit",
+            "-qm",
+            "t21 commit",
+        ],
+    );
+    let commit_sha = git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let journal = store
+        .prepare_coding_git_operation(
+            &attempt,
+            crate::product::coding_attempt_store::PrepareCodingGitOperationInput {
+                kind: crate::product::coding_attempt_store::CodingGitOperationKind::ReviewRequest,
+                repo_path: worktree.clone(),
+                worktree_path: worktree.clone(),
+                branch_name: attempt.branch_name.clone(),
+                base_branch: attempt.base_branch.clone(),
+                before_head: before_head.clone(),
+                remote: Some("origin".to_string()),
+                commit_message: Some("t21 commit".to_string()),
+            },
+        )
+        .expect("prepare journal");
+    let journal = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitStarted,
+            None,
+        )
+        .expect("commit started");
+    let journal = store
+        .advance_coding_git_operation(
+            &attempt,
+            &journal,
+            CodingGitOperationPhase::CommitCreated,
+            Some(commit_sha),
+        )
+        .expect("commit created");
+    // 取消已决定的形态:attempt 离开 Running(终止态补偿续接面)。
+    store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            crate::product::coding_models::CodingAttemptStatus::Aborted,
+        )
+        .expect("abort attempt");
+
+    // 冻结窗口开在同树(T19 API 直连;无在途 writer,直接 Frozen)。
+    let handle = t19_open_window(root.path(), &attempt, &worktree, "t21-comp-window").await;
+    let error = engine
+        .compensate_cancelled_review_commit(&attempt, &journal)
+        .await
+        .expect_err("frozen window must reject compensation");
+    assert!(
+        error.to_string().contains("reviewer_window_channel"),
+        "unexpected error: {error}"
+    );
+
+    // 「崩溃重启」后的启动补偿驱动:窗口恢复(按原 manifest 回写→
+    // HEAD 回 baseline)→ 释放 → 取消补偿在同一驱动内续接完成。
+    let (driver_tx, _driver_rx) = mpsc::channel(8);
+    let driver = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), driver_tx);
+    let outcomes = driver.compensate_open_reviewer_windows_at_startup().await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].released, "窗口恢复完整且无违规→释放");
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(),
+        before_head,
+        "补偿续接完成后 HEAD 回 before_head"
+    );
+    let journal_after = store
+        .get_coding_git_operation(&attempt)
+        .expect("journal")
+        .expect("journal persisted");
+    assert_eq!(
+        journal_after.phase,
+        CodingGitOperationPhase::Compensated,
+        "释放后取消补偿被启动驱动续接"
+    );
+    // 租约/通道已收口:同树可再开窗(死锁反证)。
+    let reopened = t19_open_window(root.path(), &attempt, &worktree, "t21-after-window").await;
+    driver
+        .recycle_reviewer_window(&reopened, "t21_teardown")
+        .await
+        .expect("clean reopen proves release");
+    drop(handle);
+}

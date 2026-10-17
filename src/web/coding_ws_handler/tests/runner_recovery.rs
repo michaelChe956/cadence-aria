@@ -24,6 +24,7 @@ use crate::web::state::{CodingAttemptRunKey, WebAppState};
 use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
 mod startup_gate_reconcile;
+mod startup_window_compensation;
 
 /// F-14 红测：blocked gate 放行（retry_coding）/ attach 重启拉起的 runner，在
 /// stage gate 过期或确认之后、provider 启动之前死亡（现场形态：coder provider

@@ -55,6 +55,7 @@ use crate::web::workspace_ws_types::{
 
 mod amendment;
 mod code_review;
+pub(crate) use code_review::{AttemptWindowCloseMode, StartupWindowCompensation};
 mod coding;
 mod cross_attempt_handoff;
 mod cross_target_check;

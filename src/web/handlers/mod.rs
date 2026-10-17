@@ -115,6 +115,7 @@ pub(crate) use coding::{
     EnrolledPlanDriveIdentity, EnrolledPlanStartStep, enrolled_plan_coding_start,
     upsert_automation_drive_failure_fact,
     confirm_work_item_execution_plan, delete_coding_attempt, get_coding_attempt,
+    resolve_reviewer_window_manual_gate,
     post_coding_gate_response,
     get_coding_policy_text, get_verification_command_evidence,
     get_verification_triage_records, post_coding_policy_reauthorization,

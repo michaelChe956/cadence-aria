@@ -48,7 +48,7 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.code.as_str() {
-            "invalid_task_request" => StatusCode::BAD_REQUEST,
+            "invalid_task_request" | "reviewer_window_decision_invalid" => StatusCode::BAD_REQUEST,
             "checkpoint_unsafe_dirty_worktree"
             | "workspace_session_ambiguous"
             | "workspace_session_confirm_not_allowed"

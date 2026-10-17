@@ -972,6 +972,16 @@ pub(crate) async fn delete_coding_attempt(
     let attempt = coding_store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .map_err(product_store_api_error)?;
+    // T21:attempt 删除→reviewer 窗口/租约收口(先恢复 baseline 再弃置
+    // 释放;删除语义=无条件收口,工作树随之删除,不留冻结残锁卡共享
+    // common-dir 的 git mutation),再走 git 终止对账(补偿随释放续接)。
+    coding_workspace_engine_with_dummy_events(coding_store.clone())
+        .close_reviewer_windows_for_attempt(
+            &attempt,
+            crate::product::coding_workspace_engine::AttemptWindowCloseMode::Delete,
+        )
+        .await
+        .map_err(coding_workspace_api_error)?;
     let attempt = coding_workspace_engine_with_dummy_events(coding_store.clone())
         .reconcile_coding_git_operation_for_termination(&attempt)
         .await
@@ -1025,6 +1035,59 @@ pub(crate) async fn delete_coding_attempt(
         .map_err(product_store_api_error)?;
     finalize_coding_attempt_deletion(&coding_store, &app_paths, &attempt)?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// T21:人工门裁决请求体(`decision` ∈ `invalidate` | `require_new_review`)。
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ResolveReviewerWindowRequest {
+    pub decision: String,
+}
+
+/// T21:人工门裁决生产入口(`POST reviewer-window:resolve`)——
+/// ManualGate → 作废关闭/作废后新轮(锁释放,旧报告永久 Invalidated)。
+/// 人工许可新轮=另取租约/新基线(新 run 重开新窗);人工拒绝补偿
+/// (invalidate)不解锁 attempt:不自动复活 runner,续接只经人工恢复
+/// 面/新轮,旧违规报告不可 resume。
+pub(crate) async fn resolve_reviewer_window_manual_gate(
+    State(state): State<WebAppState>,
+    Path(path): Path<CodingAttemptRoutePath>,
+    Json(request): Json<ResolveReviewerWindowRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let app_paths = product_app_paths(&state);
+    let coding_store = CodingAttemptStore::new(app_paths.clone());
+    let attempt = resolve_coding_attempt(
+        &coding_store,
+        path.project_id.as_deref(),
+        path.issue_id.as_deref(),
+        &path.attempt_id,
+    )?;
+    let decision = match request.decision.as_str() {
+        "invalidate" => crate::product::reviewer_window::ManualGateDecision::Invalidate,
+        "require_new_review" => {
+            crate::product::reviewer_window::ManualGateDecision::RequireNewReview
+        }
+        other => {
+            return Err(ApiError::validation(
+                "reviewer_window_decision_invalid",
+                format!("decision must be invalidate|require_new_review, got {other:?}"),
+            ));
+        }
+    };
+    let resolved = coding_workspace_engine_with_dummy_events(coding_store.clone())
+        .resolve_reviewer_manual_gate_for_attempt(&attempt.id, decision)
+        .map_err(coding_workspace_api_error)?;
+    let acceptance = match resolved.report_acceptance {
+        crate::product::reviewer_window_store::ReportAcceptance::Accepted => "accepted",
+        crate::product::reviewer_window_store::ReportAcceptance::PendingAcceptance => {
+            "pending_acceptance"
+        }
+        crate::product::reviewer_window_store::ReportAcceptance::Invalidated => "invalidated",
+    };
+    Ok(Json(json!({
+        "window_id": resolved.window_id,
+        "state": resolved.state.as_str(),
+        "report_acceptance": acceptance,
+    })))
 }
 
 /// 删除 attempt 时清理该 attempt 各 unit 已认领的 handoff revision。

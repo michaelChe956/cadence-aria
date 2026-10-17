@@ -266,6 +266,19 @@ impl CodingWorkspaceEngine {
                 CodingAttemptStatus::Aborted,
             )?,
         };
+        // T14(终止入口 1 行接线,共享集成人角色):回收 attempt 的全部
+        // code_delivery 登记资源——先静止证明再清理 run-owned 目录;
+        // 未知 writer → Err 停等(终止结果可见 cleanup_failed,可重入)。
+        self.recover_coder_delivery_scopes_for_attempt(&updated)
+            .await?;
+        // T21:attempt 终止→reviewer 窗口与租约收口(先恢复 baseline 保
+        // Coder dirty 再弃置关闭;恢复失败 fail-closed 保持锁,人工恢复
+        // 续接/重试终止收敛;取消补偿随释放续接)。
+        self.close_reviewer_windows_for_attempt(
+            &updated,
+            super::code_review::AttemptWindowCloseMode::Terminate,
+        )
+        .await?;
         match updated.scope {
             CodingAttemptScope::WorkItemGroup => {
                 if let Err(error) = self.release_issue_shared_worktree_lock_for_attempt(
