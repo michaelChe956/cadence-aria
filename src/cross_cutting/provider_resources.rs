@@ -429,20 +429,6 @@ fn kill_process_group_if_ours(_pid: u32, _start_time_ticks: u64) -> bool {
     false
 }
 
-/// 组长身份是否仍以登记身份存活(quiesce 记录 kill 前的组长状态)。
-#[cfg(unix)]
-fn process_leader_matches_identity(pid: u32, start_time_ticks: u64) -> bool {
-    matches!(
-        observe_process(pid, start_time_ticks),
-        ProcessObservation::Ours
-    )
-}
-
-#[cfg(not(unix))]
-fn process_leader_matches_identity(_pid: u32, _start_time_ticks: u64) -> bool {
-    false
-}
-
 /// 进程组(pgid=spawn 时组长 pid)内是否仍有存活进程(非僵尸;僵尸不再
 /// 可能写任何文件)。F2:组长已退出时组内残留=无法安全组杀的未知
 /// writer,必须停等。
@@ -766,6 +752,13 @@ impl ProviderRunResourceScope {
             }));
         }
         for record in &records {
+            // P3(修复轮 2):物理清理已完成(Removed+)的恢复重入记录跳过
+            // 进程/引擎检查——旧 pgid/精确 ID 可能已被复用为无关新资源,
+            // 残留扫描/停等会假阳性卡死收口;不误删方向不变(cleanup 面
+            // 的全部守卫保留,F1 游标保持不变)。
+            if record.cleanup_cursor >= CleanupStep::Removed {
+                continue;
+            }
             match record.kind {
                 OwnedResourceKind::Process => match record.started_identity.as_ref() {
                     Some(StartedIdentity::Process {
@@ -773,14 +766,15 @@ impl ProviderRunResourceScope {
                         start_time_ticks,
                     }) => {
                         // killpg 仅其中一步:先发组信号,再以真实身份观察。
-                        // F2(审查修复轮):组长已退出(daemonize/调用方先
-                        // wait)时无法安全 killpg(PID 可能已被复用为新组
+                        // F2/F2b(审查修复轮):组长已退出(daemonize/调用方
+                        // 先 wait)时无法安全 killpg(PID 可能已被复用为新组
                         // 长),组内残留进程须检出停等——与
                         // ManagedProcessChild「组长回收后组清理仍须可达」
                         // 同一风险面,但 quiesce 只凭 durable 身份,不能无
-                        // 身份核对地组杀。
-                        let leader_alive = process_leader_matches_identity(*pid, *start_time_ticks);
-                        kill_process_group_if_ours(*pid, *start_time_ticks);
+                        // 身份核对地组杀。残留判定以 **killpg 实际送达** 为
+                        // 准(kill 返回值),不用 kill 前快照——快照与 kill
+                        // 内部二次核对之间的 µs 级退出窗口会漏判活跃 writer。
+                        let group_killed = kill_process_group_if_ours(*pid, *start_time_ticks);
                         if !self.wait_process_gone(*pid, *start_time_ticks).await {
                             return Ok(quiesce_recovery(
                                 "provider_resources_quiesce_registered_resource_running",
@@ -791,11 +785,11 @@ impl ProviderRunResourceScope {
                                 records,
                             ));
                         }
-                        if !leader_alive && process_group_has_members(*pid) {
+                        if !group_killed && process_group_has_members(*pid) {
                             return Ok(quiesce_recovery(
                                 "provider_resources_quiesce_process_group_residual",
                                 format!(
-                                    "resource={} pgid={pid}: 组长已退出但组内仍有存活进程——无法安全组杀,停等",
+                                    "resource={} pgid={pid}: 组信号未送达(组长身份已失效)但组内仍有存活进程——无法安全组杀,停等",
                                     record.resource_id
                                 ),
                                 records,
@@ -2476,6 +2470,85 @@ mod tests {
             QuiesceOutcome::RecoveryRequired(unknown) => panic!("残留清后应静止: {unknown:?}"),
         }
         let _ = &mut managed; // 持有至断言后,Drop 的组清理在此无害(组已空)
+    }
+
+    // ---------- 修复轮 2 P3:Removed+ 记录跳过检查(pgid 复用不假阳性) ----------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn removed_cursor_skips_checks_when_pgid_reused() {
+        let env = scope_env();
+        let execution = frozen_contract(
+            TrustedProviderRole::Coder,
+            "run_0001",
+            "scope_run_0001",
+            None,
+        );
+        let scope = open_scope(&env, &execution, "boot_a", None);
+
+        // 真实存活进程,自成一组的组长(模拟旧 pgid 被无关新组复用)。
+        let fixture_dir = env.private_root.canonicalize().unwrap();
+        let sleeper = fixture_dir.join("p3-group-owner");
+        write_executable(&sleeper, "#!/bin/sh\nsleep 300\n");
+        let mut managed = crate::cross_cutting::process_manager::ProcessManager::spawn(
+            &sleeper.display().to_string(),
+            &[],
+            &fixture_dir,
+            &unix_path_env(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn group owner");
+        let leader_pid = managed.child.spawn_leader_pid().expect("leader pid");
+
+        // 登记身份 ticks 故意陈旧(组长身份不匹配→kill 不会送达)+ 游标已
+        // 到 Removed(物理清理已完成的恢复重入形态)。
+        let reservation = scope
+            .reserve_owned_resource(&OwnedResourceSpec::new(
+                "res_proc_p3",
+                OwnedResourceKind::Process,
+                "p3-group-owner",
+            ))
+            .expect("reserve");
+        scope
+            .confirm_started_resource(
+                &reservation,
+                StartedResourceIdentity::process(leader_pid, 1),
+            )
+            .expect("confirm with stale ticks");
+        scope
+            .resource_store()
+            .advance_cleanup_cursor(scope.key(), "res_proc_p3", CleanupStep::Removed)
+            .expect("advance to Removed");
+
+        // 无跳过时:group_killed=false + has_members(leader_pid)=true →
+        // 假阳性 process_group_residual 停等。修复后:跳过检查 → Quiescent。
+        let quiescent = match scope.quiesce_scope().await.expect("quiesce") {
+            QuiesceOutcome::Quiescent(quiescent) => quiescent,
+            QuiesceOutcome::RecoveryRequired(unknown) => {
+                panic!("Removed+ 记录不得因 pgid 复用假阳性停等: {unknown:?}")
+            }
+        };
+        assert_eq!(
+            quiescent.manifest()[0].cleanup_cursor,
+            CleanupStep::Removed,
+            "游标原样保留(F1)"
+        );
+        assert!(
+            process_alive(leader_pid as i32),
+            "无关新组不受影响(kill 从未送达)"
+        );
+
+        // 收口仍完整:cleanup 解除登记。
+        scope.cleanup_owned_scope(&quiescent).expect("cleanup");
+        assert!(
+            scope
+                .resource_store()
+                .list_scope(scope.key())
+                .unwrap()
+                .is_empty()
+        );
+        let _ = &mut managed; // Drop 组清理在断言后无害(身份不符,killpg 未发)
     }
 
     // ---------- 修复轮 F3:confirm 重放不回退游标 ----------
