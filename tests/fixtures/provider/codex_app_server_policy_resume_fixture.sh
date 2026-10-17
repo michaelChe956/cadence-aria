@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# I1 wire fixture（GC5 三联动在 resume 路径）：策略 input 的 thread/resume 请求
-# 必须原样携带 sandbox="read-only" + approvalPolicy="on-request"（与 start 同源），
-# 且带原 threadId；不得回退 danger-full-access。
+# I1 wire fixture（T13，Direct 冻结片段改版）：Author 岗位纪律 input 的
+# thread/resume 请求必须原样携带 sandbox="danger-full-access" +
+# approvalPolicy="on-request"（与 start 同源；旧 read-only 三联动不复现），
+# 且带原 threadId。
 
 while IFS= read -r line; do
   if [[ "$line" == *'"method":"initialize"'* ]]; then
@@ -12,12 +13,12 @@ while IFS= read -r line; do
   elif [[ "$line" == *'"method":"initialized"'* ]]; then
     :
   elif [[ "$line" == *'"method":"thread/resume"'* ]]; then
-    if [[ "$line" != *'"sandbox":"read-only"'* ]]; then
-      echo "policy thread/resume must carry sandbox=read-only: $line" >&2
+    if [[ "$line" != *'"sandbox":"danger-full-access"'* ]]; then
+      echo "author discipline thread/resume must carry sandbox=danger-full-access: $line" >&2
       exit 1
     fi
     if [[ "$line" != *'"approvalPolicy":"on-request"'* ]]; then
-      echo "policy thread/resume must carry approvalPolicy=on-request: $line" >&2
+      echo "author discipline thread/resume must carry approvalPolicy=on-request: $line" >&2
       exit 1
     fi
     if [[ "$line" != *'"threadId":"codex-thread-resume-policy"'* ]]; then

@@ -40,29 +40,31 @@ fn codex_streaming_input_without_policy() -> StreamingProviderInput {
 }
 
 #[test]
-fn codex_policy_start_and_resume_use_read_only_on_request() {
+fn codex_policy_direct_author_launch_uses_danger_full_access_on_request() {
     let policy_input = codex_streaming_input_with_policy(None);
     let params = codex_launch_params(&policy_input);
-    assert_eq!(params["sandbox"], "read-only");
+    // T13 Direct Author 冻结片段：danger-full-access + on-request（检测型
+    // 岗位纪律替换旧 read-only 档；不与 LC 冻结序列复用）。
+    assert_eq!(params["sandbox"], "danger-full-access");
     assert_eq!(params["approvalPolicy"], "on-request");
     let coder_input = codex_streaming_input_without_policy();
     let coder = codex_launch_params(&coder_input);
     assert_eq!(coder["sandbox"], "danger-full-access");
 }
 
-/// F3 Task 4.1 零变化回归：策略/Coder 两档 launch 参数全键等值锁定。
-/// 策略档三联动（sandbox=read-only + approvalPolicy=on-request）；Coder 档维持
-/// `danger-full-access` 与既有 permission mode 映射（Auto→never /
-/// Supervised→on-request）——档位不因本 change 改写。
+/// T13 冻结片段回归：策略（Author 岗位纪律）档 danger-full-access +
+/// approvalPolicy=on-request（检测型纪律，替换旧 read-only canonical）；
+/// Coder/Reviewer 档维持 `danger-full-access` 与既有 permission mode 映射
+/// （Auto→never / Supervised→on-request，原生 approval）——档位语义按 T13 改写。
 #[test]
-fn codex_policy_and_coder_launch_params_stay_frozen_zero_change() {
+fn codex_policy_and_coder_launch_params_t13_frozen_fragments() {
     let policy = codex_launch_params(&codex_streaming_input_with_policy(None));
     assert_eq!(
         policy,
         serde_json::json!({
             "cwd": policy["cwd"].clone(),
             "approvalPolicy": "on-request",
-            "sandbox": "read-only",
+            "sandbox": "danger-full-access",
         })
     );
 
@@ -87,16 +89,19 @@ fn codex_policy_and_coder_launch_params_stay_frozen_zero_change() {
     );
 }
 
-/// F3 Task 4.1 回归锁定：策略会话审批分类决策表（GC6 冻结）——
-/// commandExecution/fileChange 拒绝、MCP accept；未知 elicitation 返回
-/// `-32601`+data（不静默），未知 item（任意方法名）返回 decline，连续
-/// `>=3` 次未知形态终止；自然语言 reason 不作为分类依据。
+/// T13 回归锁定：Author 岗位纪律决策表（定稿）——commandExecution=Accept
+/// （danger 基线下危险命令与 Claude/Pi 对齐，不用 never 自禁）、MCP=Accept、
+/// fileChange=Decline（仅 fail-closed 兜底；真实处置是会话循环的检测型
+/// 纪律：事件→durable→中断→本轮 Failed，不以 Decline 作强制防写）；未知
+/// elicitation 返回 `-32601`+data（不静默），未知 item（任意方法名）返回
+/// decline，连续 `>=3` 次未知形态终止；自然语言 reason 不作为分类依据。
 #[test]
 fn codex_policy_decisions_and_unknown_replies_regression_lock() {
-    // 策略决策表：commandExecution/fileChange=decline，MCP=accept。
+    // Author 决策表（T13 定稿）：commandExecution/MCP=accept，
+    // fileChange=decline（兜底；会话循环先行检测中断）。
     assert_eq!(
         decide_for_policy(CodexApprovalCategory::CommandExecution),
-        CodexApprovalResponse::Decline
+        CodexApprovalResponse::Accept
     );
     assert_eq!(
         decide_for_policy(CodexApprovalCategory::FileChange),
@@ -243,10 +248,14 @@ fn codex_parser_distinguishes_mcp_from_generic_elicitation() {
 }
 
 #[test]
-fn codex_policy_session_declines_exec_and_file_change_but_accepts_mcp() {
+fn codex_policy_session_accepts_command_and_mcp_while_file_change_stays_declined() {
+    // T13 定稿 Author 策略：危险命令 Accept（与 Claude/Pi 对齐，不因
+    // approvalPolicy=never 自禁产生跨 provider 不对称）；MCP 自发现 Accept；
+    // fileChange 仅 Decline 兜底——真实纪律是检测型中断（见 wire 检测测试），
+    // Decline 不是强制防写依据。
     assert_eq!(
         decide_for_policy(CodexApprovalCategory::CommandExecution),
-        CodexApprovalResponse::Decline
+        CodexApprovalResponse::Accept
     );
     assert_eq!(
         decide_for_policy(CodexApprovalCategory::FileChange),
@@ -361,8 +370,9 @@ async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
         .await
         .unwrap();
 
-    // C1：策略会话的审批决策必须以 ToolPolicyDecision 事件可观测（wire 顺序：
-    // fileChange decline → commandExecution decline → MCP accept）。
+    // C1：Author 岗位纪律会话的审批决策必须以 ToolPolicyDecision 事件可观测
+    // （wire 顺序：commandExecution accept → MCP accept；fileChange 检测纪律
+    // 由独立 fixture 覆盖，本 happy path 不含 fileChange）。
     let mut decisions = Vec::new();
     loop {
         match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
@@ -381,13 +391,12 @@ async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
                 assert_eq!(
                     decisions,
                     vec![
-                        ("file_change", "decline"),
-                        ("command_execution", "decline"),
+                        ("command_execution", "accept"),
                         ("mcp_tool_call", "accept"),
                     ],
-                    "policy approval decisions must surface as ToolPolicyDecision events"
+                    "author policy approval decisions must surface as ToolPolicyDecision events"
                 );
-                // Task 3.2 双路径：durable sink 先写 provider_start，再落盘三条
+                // 双路径：durable sink 先写 provider_start，再落盘两条
                 // approval_decision（append 失败会使 start/会话 fail-closed）。
                 let durable = sink.events();
                 assert_eq!(
@@ -412,8 +421,7 @@ async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
                 assert_eq!(
                     durable_decisions,
                     vec![
-                        (&"file_change".to_string(), &"decline".to_string()),
-                        (&"command_execution".to_string(), &"decline".to_string()),
+                        (&"command_execution".to_string(), &"accept".to_string()),
                         (&"mcp_tool_call".to_string(), &"accept".to_string()),
                     ],
                     "durable approval decisions must mirror the wire order"
@@ -439,18 +447,18 @@ async fn codex_policy_session_answers_approvals_on_wire_without_bridge() {
                     "mcp approval must carry server_name"
                 );
                 assert_eq!(mcp.reason_code, "policy_allows_mcp");
-                let write_side = durable_decision_records
+                let command = durable_decision_records
                     .iter()
-                    .find(|decision| decision.category == "file_change")
-                    .expect("file_change decision must be durable");
-                assert_eq!(write_side.server_name, None);
+                    .find(|decision| decision.category == "command_execution")
+                    .expect("command decision must be durable");
+                assert_eq!(command.server_name, None);
                 assert_eq!(
-                    write_side.tool_name.as_deref(),
-                    Some("file_change"),
-                    "file_change 形态携带冻结 tool_name"
+                    command.tool_name.as_deref(),
+                    Some("command"),
+                    "commandExecution 形态携带冻结 tool_name"
                 );
-                assert_eq!(write_side.reason_code, "policy_denies_write_side");
-                assert!(!write_side.policy_digest.is_empty());
+                assert_eq!(command.reason_code, "policy_allows_command");
+                assert!(!command.policy_digest.is_empty());
                 return;
             }
             ProviderEvent::StatusChanged(_)
@@ -550,11 +558,13 @@ async fn codex_unknown_item_gets_decline_and_mixed_unknowns_count_toward_storm()
 }
 
 #[tokio::test]
-async fn codex_policy_resume_carries_read_only_and_on_request_on_wire() {
-    // I1：策略 input 的 thread/resume（与 start 同源）必须在真实 wire 上携带
-    // sandbox=read-only + approvalPolicy=on-request（fixture 对缺失任一字面退出）。
-    // Task 3.3：resume 前置冻结三元组比对——预置与当前 digest/version/dialect 完全
-    // 一致的 provider_start 记录，决策为 Resume（保留 resume id）。
+async fn codex_policy_resume_carries_danger_full_access_and_on_request_on_wire() {
+    // I1（T13）：Author 岗位纪律 input 的 thread/resume（与 start 同源）必须在
+    // 真实 wire 上携带 sandbox=danger-full-access + approvalPolicy=on-request
+    //（fixture 对缺失任一字面退出；旧 read-only 三联动不复现）。
+    // Task 3.3：resume 前置冻结三元组比对——预置与当前 digest/version/dialect
+    // 完全一致的 provider_start 记录，决策为 Resume（保留 resume id）。
+
     let fixture =
         executable_fixture("tests/fixtures/provider/codex_app_server_policy_resume_fixture.sh");
     let provider = policy_codex_provider(fixture);
@@ -596,7 +606,7 @@ fn matching_resume_record(
         role: "author".to_string(),
         tool_policy_canonical_digest: canonical.digest,
         argv: Vec::new(),
-        sandbox: Some("read-only".to_string()),
+        sandbox: Some("danger-full-access".to_string()),
         approval_policy: Some("on-request".to_string()),
         provider_version: "codex 0.124.0-policy-fixture".to_string(),
         adapter_dialect: "codex-app-server-rpc".to_string(),
@@ -786,7 +796,8 @@ async fn codex_coder_session_accepts_mcp_elicitation_with_execution_audit() {
 #[tokio::test]
 async fn codex_policy_start_handshake_yields_native_thread_id_and_frozen_start_record() {
     // 策略握手（initialize→initialized→thread/start）前置到 start 内完成：
-    // native_session_id 即 thread id；provider_start 记录冻结三联动原文与 dialect。
+    // native_session_id 即 thread id；provider_start 记录冻结 T13 冻结片段
+    //（danger-full-access + on-request）与 dialect。
     let fixture =
         executable_fixture("tests/fixtures/provider/codex_app_server_policy_approval_fixture.sh");
     let provider = policy_codex_provider(fixture);
@@ -816,7 +827,7 @@ async fn codex_policy_start_handshake_yields_native_thread_id_and_frozen_start_r
     assert_eq!(record.adapter_dialect, "codex-app-server-rpc");
     assert_eq!(record.provider_version, "codex 0.124.0-policy-fixture");
     assert_eq!(record.provider_session_id, "codex-thread-policy");
-    assert_eq!(record.sandbox.as_deref(), Some("read-only"));
+    assert_eq!(record.sandbox.as_deref(), Some("danger-full-access"));
     assert_eq!(record.approval_policy.as_deref(), Some("on-request"));
     assert!(record.argv.contains(&"app-server".to_string()));
     assert!(!record.tool_policy_canonical_digest.is_empty());
@@ -824,6 +835,336 @@ async fn codex_policy_start_handshake_yields_native_thread_id_and_frozen_start_r
     // 会话照常跑完（握手前置不破坏后台循环）。
     let completed = recv_completed(&mut session.events).await;
     assert_eq!(completed, "policy approvals done");
+}
+
+// ---- T13：Author 检测型岗位纪律（fileChange 事实 → 事件 → durable → 中断 → Failed）----
+
+/// T13：无审批请求但出现 fileChange item 通知也必须触发检测纪律——
+/// 双路径出口（事件通道 ToolPolicyWarning + durable `file_change_detected`
+/// 含处置事实，次序：事件→durable→中断）后中断当前 turn，本轮 Failed、
+/// 输出不可采信；🔴 不宣称回滚已发生写入或 terminal/MCP 预防。
+#[tokio::test]
+async fn codex_policy_file_change_item_without_approval_interrupts_turn_and_fails_run() {
+    let fixture = executable_fixture(
+        "tests/fixtures/provider/codex_app_server_policy_file_change_detection_fixture.sh",
+    );
+    let provider = policy_codex_provider(fixture);
+    let sink = RecordingToolPolicyAuditSink::new();
+    let input = codex_streaming_input_with_policy(Some(sink.clone().bound()));
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("author discipline session starts");
+
+    let mut warnings = Vec::new();
+    let mut saw_completed = false;
+    let mut saw_whitewash_delta = false;
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should fail after fileChange detection")
+            .expect("provider event channel should stay open until failure")
+        {
+            ProviderEvent::ToolPolicyWarning(warning) => warnings.push(warning),
+            ProviderEvent::Completed(_) => saw_completed = true,
+            ProviderEvent::TextDelta { content } => {
+                if content.contains("whitewash") {
+                    saw_whitewash_delta = true;
+                }
+            }
+            ProviderEvent::Failed { message } => {
+                assert!(
+                    message.contains("author_file_change_detected"),
+                    "unexpected failure message: {message}"
+                );
+                assert_eq!(
+                    warnings,
+                    vec![CodexProtocolWarningEvent {
+                        reason_code: "author_file_change_detected".to_string(),
+                        method: "item/started".to_string(),
+                        occurrence: 1,
+                    }],
+                    "fileChange detection must surface exactly one in-band warning"
+                );
+                // 迟到 Completed 不能洗白：中断后本轮 Failed，永不 Completed，
+                // 迟到 agentMessage 不被消费为输出。
+                assert!(
+                    !saw_completed,
+                    "turn interrupted by fileChange detection must never complete"
+                );
+                assert!(
+                    !saw_whitewash_delta,
+                    "late agent message after detection must not be consumed as output"
+                );
+                // durable 次序：provider_start 首行 → file_change_detected（含
+                // 处置事实与策略指纹；append 失败沿 kill 链的另一路径由
+                // 专项测试覆盖）。
+                let durable = sink.events();
+                assert_eq!(
+                    durable
+                        .iter()
+                        .position(|event| event.event_type() == "provider_start"),
+                    Some(0),
+                    "provider_start must be the first durable event"
+                );
+                let detection_index = durable
+                    .iter()
+                    .position(|event| event.event_type() == "file_change_detected")
+                    .expect("file_change_detected must be durable");
+                assert_eq!(detection_index, 1);
+                let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::FileChangeDetected(record) =
+                    &durable[detection_index]
+                else {
+                    unreachable!("indexed by event_type");
+                };
+                assert_eq!(record.item_id, "fc_detect");
+                assert_eq!(record.summary, "src/main.rs (modify)");
+                assert_eq!(record.source_method, "item/started");
+                assert_eq!(
+                    record.disposition,
+                    crate::cross_cutting::tool_policy_audit::AUTHOR_FILE_CHANGE_DISPOSITION
+                );
+                assert!(!record.policy_digest.is_empty());
+                assert!(
+                    !durable
+                        .iter()
+                        .any(|event| event.event_type() == "approval_decision"),
+                    "detection without an approval request must not fabricate decisions"
+                );
+                return;
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::UsageReport(_)
+            | ProviderEvent::TerminalActivity(_)
+            | ProviderEvent::ToolPolicyDecision(_) => {}
+            other => panic!("unexpected terminal event before detection failure: {other:?}"),
+        }
+    }
+}
+
+/// T13：检测事件的 durable append 失败必须立即走既有 kill 链——会话终止、
+/// 本轮 Failed（fail-closed，不得只记日志继续）。
+#[tokio::test]
+async fn codex_policy_file_change_detection_durable_failure_terminates() {
+    let fixture = executable_fixture(
+        "tests/fixtures/provider/codex_app_server_policy_file_change_detection_fixture.sh",
+    );
+    let provider = policy_codex_provider(fixture);
+    // provider_start（第 1 次 append）成功；file_change_detected（第 2 次）注入失败。
+    let sink = RecordingToolPolicyAuditSink::failing_after(1);
+    let input = codex_streaming_input_with_policy(Some(sink.clone().bound()));
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("session starts before the detection append");
+
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should fail on detection append failure")
+            .expect("provider event channel should stay open until failure")
+        {
+            ProviderEvent::Failed { message } => {
+                assert!(
+                    message.contains("codex policy audit append failed"),
+                    "unexpected failure message: {message}"
+                );
+                return;
+            }
+            ProviderEvent::Completed(_) => {
+                panic!("detection durable failure must fail the run, not complete")
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::UsageReport(_)
+            | ProviderEvent::TerminalActivity(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            other => panic!("unexpected terminal event: {other:?}"),
+        }
+    }
+}
+
+/// T13：fileChange 审批请求（无前置 item 通知，danger 下通常不出现）若出现，
+/// 即是 fileChange 事实——先合法应答 decline（不静默无应答；Decline 不是
+/// 防写依据），随后走同一检测纪律中断 turn、本轮 Failed。
+#[tokio::test]
+async fn codex_policy_file_change_approval_request_without_item_notification_fails_turn() {
+    let fixture = executable_fixture(
+        "tests/fixtures/provider/codex_app_server_policy_file_change_request_fixture.sh",
+    );
+    let provider = policy_codex_provider(fixture);
+    let sink = RecordingToolPolicyAuditSink::new();
+    let input = codex_streaming_input_with_policy(Some(sink.clone().bound()));
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("author discipline session starts");
+
+    let mut decisions = Vec::new();
+    let mut warnings = Vec::new();
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("provider should fail after fileChange approval detection")
+            .expect("provider event channel should stay open until failure")
+        {
+            ProviderEvent::ToolPolicyDecision(decision) => {
+                decisions.push((decision.category, decision.decision))
+            }
+            ProviderEvent::ToolPolicyWarning(warning) => warnings.push(warning),
+            ProviderEvent::Failed { message } => {
+                assert!(
+                    message.contains("author_file_change_detected"),
+                    "unexpected failure message: {message}"
+                );
+                // 请求不静默无应答：fileChange 请求先得到合法 decline 决策。
+                assert_eq!(
+                    decisions,
+                    vec![("file_change", "decline")],
+                    "fileChange approval request must be answered before the turn fails"
+                );
+                assert_eq!(
+                    warnings,
+                    vec![CodexProtocolWarningEvent {
+                        reason_code: "author_file_change_detected".to_string(),
+                        method: "item/fileChange/requestApproval".to_string(),
+                        occurrence: 1,
+                    }],
+                    "fileChange approval detection must surface one in-band warning"
+                );
+                let durable = sink.events();
+                let detection = durable
+                    .iter()
+                    .find(|event| event.event_type() == "file_change_detected")
+                    .expect("file_change_detected must be durable");
+                let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::FileChangeDetected(record) =
+                    detection
+                else {
+                    unreachable!("filtered by event_type");
+                };
+                assert_eq!(record.item_id, "fc_req");
+                assert_eq!(record.source_method, "item/fileChange/requestApproval");
+                return;
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::UsageReport(_)
+            | ProviderEvent::TerminalActivity(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            other => panic!("unexpected terminal event: {other:?}"),
+        }
+    }
+}
+
+/// T13：旧 tp-v1（read-only canonical 时代）的存档 provider_start 与新冻结
+/// 片段 digest 失配 → 显式 superseded + fresh（不清 id 静默复用旧会话）。
+#[tokio::test]
+async fn codex_policy_resume_from_tp_v1_read_only_digest_starts_fresh() {
+    let legacy_digest = crate::cross_cutting::streaming_provider::tool_policy_digest(
+        crate::cross_cutting::codex_provider::session::TOOL_POLICY_PROVIDER_NAME,
+        &[
+            "sandbox=read-only".to_string(),
+            "approvalPolicy=on-request".to_string(),
+        ],
+        crate::cross_cutting::streaming_provider::TOOL_POLICY_APPROVAL_POLICY_VERSION,
+    );
+    // 旧 digest ≠ 新冻结片段 digest（danger-full-access 档）。
+    let canonical = crate::cross_cutting::streaming_provider::canonical_tool_policy(
+        crate::cross_cutting::codex_provider::session::TOOL_POLICY_PROVIDER_NAME,
+        &ProviderToolPolicy::deny_file_write_builtins(),
+    )
+    .expect("canonical policy");
+    assert_ne!(legacy_digest, canonical.digest);
+
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_policy_approval_fixture.sh");
+    let provider = policy_codex_provider(fixture);
+    let sink = RecordingToolPolicyAuditSink::new();
+    sink.with_stored_provider_start(
+        matching_resume_record("codex-thread-resume-policy").with_digest(legacy_digest),
+    );
+    let mut input = codex_streaming_input_with_policy(Some(sink.clone().bound()));
+    input.resume_provider_session_id = Some("codex-thread-resume-policy".to_string());
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("tp-v1 mismatch must start a fresh session");
+
+    // 显式 fresh：native id 来自新 thread/start，非 resume id。
+    assert_eq!(
+        session.native_session_id.as_deref(),
+        Some("codex-thread-policy")
+    );
+    let events = sink.events();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type() == "session_terminated"
+                && serde_json::to_string(event)
+                    .unwrap()
+                    .contains("superseded_policy_drift")),
+        "tp-v1 read-only record must be marked superseded before the fresh start"
+    );
+    let completed = recv_completed(&mut session.events).await;
+    assert_eq!(completed, "policy approvals done");
+}
+
+/// T13 合同驱动 durable 分区（B2T11 裁定缺口）：无策略 run 只要携带 run-bound
+/// audit sink（engine 已分配，如 Reviewer direct），即统一落 provider_start
+/// 首行——digest 为空串（无策略指纹）、sandbox/approval 与实际启动参数同源；
+/// 审批行为保持原生（ApprovalBridge），不注入岗位策略。
+#[tokio::test]
+async fn codex_contract_bound_non_policy_run_writes_provider_start_without_discipline() {
+    let fixture =
+        executable_fixture("tests/fixtures/provider/codex_app_server_completed_only_fixture.sh");
+    let provider = policy_codex_provider(fixture);
+    let sink = RecordingToolPolicyAuditSink::new();
+    let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
+    input.role = AdapterRole::Reviewer;
+    input.audit_sink = Some(sink.clone().bound());
+    let mut session = provider
+        .start(input, CancellationToken::new())
+        .await
+        .expect("contract-bound reviewer session starts");
+
+    assert_eq!(
+        recv_completed(&mut session.events).await,
+        "Codex completed-only chunk"
+    );
+    let events = sink.events();
+    let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record) =
+        &events[0]
+    else {
+        panic!("contract-bound run must write provider_start as the first durable event");
+    };
+    assert_eq!(record.role, "reviewer");
+    assert_eq!(record.sandbox.as_deref(), Some("danger-full-access"));
+    assert_eq!(record.approval_policy.as_deref(), Some("never"));
+    assert!(
+        record.tool_policy_canonical_digest.is_empty(),
+        "non-policy contract runs carry no tool-policy canonical digest"
+    );
+    assert_eq!(
+        record.provider_session_id, "codex_completed_only_thread",
+        "native thread id must be audited from the pre-spawn handshake"
+    );
 }
 
 #[tokio::test]
@@ -1197,8 +1538,14 @@ async fn lcg_t12_valid_danger_launches_start_for_fresh_resume_and_permission_mod
             "a valid danger launch really spawns ({permission_mode:?})"
         );
         let params = lc_wire_params(&wire_marker);
-        assert_eq!(params["sandbox"], "danger-full-access", "{permission_mode:?}");
-        assert_eq!(params["approvalPolicy"], expected_approval, "{permission_mode:?}");
+        assert_eq!(
+            params["sandbox"], "danger-full-access",
+            "{permission_mode:?}"
+        );
+        assert_eq!(
+            params["approvalPolicy"], expected_approval,
+            "{permission_mode:?}"
+        );
 
         // provider_start 审计与 wire 同源。
         let events = sink.events();

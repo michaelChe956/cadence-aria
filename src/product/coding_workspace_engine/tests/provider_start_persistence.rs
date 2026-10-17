@@ -962,9 +962,9 @@ fn collect_files_recursive(dir: &std::path::Path, out: &mut Vec<std::path::PathB
 }
 
 /// Coder（非策略）run 的执行审计只落既有 role-run-events（execution_event_audit
-/// 通道）；批2 Task 11（T20/T13 前中间态）reviewer wire 面去 deny 后，engine 侧
-/// 只保 role-run seq 分配（`role-run-seq.jsonl`），durable run 事件文件暂缺
-/// （adapter durable 写仍为 deny 门控，补齐归 T13/T20 窗口）。两通道无交叉记录。
+/// 通道）；批2 Task 13 起 reviewer wire 面去 deny 后的 durable run 事件文件由
+/// codex 合同驱动 provider_start 补齐（T20 剩余=ReviewerVerify 真窗/审批
+/// durable 面）。两通道无交叉记录。
 #[tokio::test]
 async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
     use crate::cross_cutting::codex_provider::CodexProvider;
@@ -1116,8 +1116,9 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
         "reviewer run must complete via the wire fixture: {policy_outcome:?}"
     );
 
-    // 策略通道（T20/T13 前中间态）：分区无 run 事件文件（adapter durable 写
-    // 仍为 deny 门控），但 engine 侧 seq 分配 marker 在位——见下方断言。
+    // 策略通道（T13 合同驱动）：reviewer run 携带 engine 分配的 run-bound
+    // sink → adapter 落 provider_start 首行（无策略 digest=空串，
+    // sandbox/approval 与实际启动参数同源）。
     // （`role-run-seq.jsonl` 是 seq 分配高水位 marker，不是事件文件，排除。）
     let partition_dir = tool_policy_partition.join("ws-coding-audit-isolation");
     let mut partition_files = Vec::new();
@@ -1132,16 +1133,27 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
         })
         .cloned()
         .collect();
-    // 批2 Task 11（T20/T13 前中间态）：reviewer wire 面去 deny 后，adapter 的
-    // durable provider_start/approval 写仍是 deny 门控（codex Direct 的策略
-    // 会话机制只服务 deny 意图；claude/pi 同构）——无策略 reviewer run 当前
-    // 只落 engine 侧 role_run_seq 分配（role-run-seq.jsonl），run 文件待
-    // T13（codex Direct 检测型岗位/审计重构）与 T20（真窗接线的
-    // ReviewerVerify durable 面）窗口补齐；deny 策略会话（Author 投影）的
-    // 分区写链由 codex_provider 自测钉住，不在此重复。
-    assert!(
-        run_files.is_empty(),
-        "non-deny reviewer run must not fabricate durable partition run files: {run_files:?}"
+    // 批2 Task 13（合同驱动 durable 分区，B2T11 裁定缺口补齐）：无策略
+    // reviewer run 的 durable provider_start 首行在位；ReviewerVerify 真窗
+    // 接线与审批 durable 面归 T20。
+    assert_eq!(
+        run_files.len(),
+        1,
+        "contract-bound reviewer run must write exactly one durable run file: {run_files:?}"
+    );
+    let run_lines = std::fs::read_to_string(&run_files[0]).unwrap();
+    let first_line = run_lines.lines().next().unwrap();
+    let first: serde_json::Value = serde_json::from_str(first_line).unwrap();
+    assert_eq!(
+        first["event_type"], "provider_start",
+        "reviewer run file must start with provider_start: {first_line}"
+    );
+    assert_eq!(first["role"], "reviewer");
+    assert_eq!(first["sandbox"], "danger-full-access");
+    assert_eq!(first["approval_policy"], "never");
+    assert_eq!(
+        first["tool_policy_canonical_digest"], "",
+        "non-policy contract run carries no tool-policy canonical digest"
     );
     assert!(
         partition_dir.join("role-run-seq.jsonl").exists(),

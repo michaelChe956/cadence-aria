@@ -184,11 +184,11 @@ fn workspace_policy_audit_fixture() -> std::path::PathBuf {
 /// 的既有 lifecycle 产物不含任何 tool-policy 事件标记。（手动 append 属
 /// LifecycleStore 单元测试用途，由 lifecycle_store/tests/tool_policy_audit.rs
 /// 覆盖，本 wiring 测试不再伪造事件。）
-/// 批2 Task 11（T20/T13 前中间态）：reviewer wire 面去 deny 后，adapter 侧
-/// durable provider_start/approval 写仍为 deny 门控（codex 策略会话机制只
-/// 服务 deny 意图），本测试锁定 engine 侧审计分配在位（`role-run-seq.jsonl`
-/// 高水位 marker，与 review/repair 面 sink 绑定口径一致）与通道分离；durable
-/// run 事件文件补齐归 T13/T20 窗口。
+/// 批2 Task 13（合同驱动 durable 分区，B2T11 裁定缺口补齐）：reviewer wire
+/// 面去 deny 后，adapter 侧 durable provider_start 写由 run-bound audit 合同
+/// 驱动（sink 在位即写首行，不再以 deny intent 为门）；本测试经真实 start
+/// 路径锁定 run 事件文件首行 provider_start 与通道分离。ReviewerVerify 真窗
+/// 接线与审批 durable 面归 T20。
 #[tokio::test]
 async fn workspace_policy_review_run_keeps_engine_audit_allocation_via_real_provider_chain() {
     use crate::cross_cutting::codex_provider::CodexProvider;
@@ -236,13 +236,28 @@ async fn workspace_policy_review_run_keeps_engine_audit_allocation_via_real_prov
         })
         .cloned()
         .collect();
-    // 批2 Task 11（T20/T13 前中间态）：去 deny reviewer run 不产生 run 事件
-    // 文件（adapter durable 写 deny 门控）；engine 侧审计分配在位（高水位
-    // marker）。与 review/repair 面 sink 绑定断言同口径。
+    // 批2 Task 13：合同驱动——去 deny reviewer run 的 durable run 事件文件
+    // 首行为 provider_start（role=reviewer、digest 空串、danger 基线）；
+    // engine 侧审计分配在位（高水位 marker）。
     assert!(
-        run_files.is_empty(),
-        "non-deny reviewer run must not fabricate durable partition run files: {run_files:?}"
+        !run_files.is_empty(),
+        "contract-bound reviewer run must write durable partition run files: {run_files:?}"
     );
+    for run_file in &run_files {
+        let content = std::fs::read_to_string(run_file).unwrap();
+        let first_line = content.lines().next().unwrap();
+        let first: serde_json::Value = serde_json::from_str(first_line).unwrap();
+        assert_eq!(
+            first["event_type"], "provider_start",
+            "reviewer run file must start with provider_start: {first_line}"
+        );
+        assert_eq!(first["role"], "reviewer");
+        assert_eq!(first["sandbox"], "danger-full-access");
+        assert_eq!(
+            first["tool_policy_canonical_digest"], "",
+            "non-policy contract run carries no tool-policy canonical digest"
+        );
+    }
     assert!(
         partition_dir.join("role-run-seq.jsonl").exists(),
         "engine must still allocate the reviewer tool-policy role run seq (audit kept post-deny)"

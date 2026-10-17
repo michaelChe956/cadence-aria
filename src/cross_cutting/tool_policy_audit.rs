@@ -5,9 +5,9 @@
 //! `LifecycleStore`（分区 `tool-policy-run-audit/`）实现该 trait 完成，避免
 //! cross-cutting → product 反向依赖。
 //!
-//! 契约冻结（GC11）：
-//! - 仅四类 canonical 事件：`provider_start`、`approval_decision`、
-//!   `protocol_warning`、`session_terminated`；
+//! 契约冻结（GC11；T13 增补第五类）：
+//! - canonical 事件：`provider_start`、`approval_decision`、`file_change_detected`
+//!   （T13：Author 检测型岗位）、`protocol_warning`、`session_terminated`；
 //! - append-only JSONL，文件 key=`(workspace_session_id, role_run_seq)`；
 //! - 文件内行 `seq` 单调递增；`provider_start` 恰为首行且每文件仅一条；
 //! - 读取坏行跳过并产生读取结果告警，该告警不写回 durable 分区；
@@ -120,7 +120,7 @@ pub struct ProviderStartAudit {
     pub tool_policy_canonical_digest: String,
     /// 最终 argv（策略片段按出现顺序原样、大小写保留）。
     pub argv: Vec<String>,
-    /// sandbox 原文（codex `read-only`/`danger-full-access`；pi/claude 为 `None`）。
+    /// sandbox 原文（codex 恒 `danger-full-access`（T13：Author 检测型纪律同档）；pi/claude 为 `None`）。
     pub sandbox: Option<String>,
     /// approval policy 原文（codex `on-request`/`never`；pi/claude 为 `None`）。
     pub approval_policy: Option<String>,
@@ -210,12 +210,44 @@ pub struct SessionTerminatedAudit {
     pub reason_code: String,
 }
 
-/// durable canonical 事件四类枚举（GC11 冻结，serde tag=`event_type` snake_case）。
+/// T13 Author 检测型岗位的 fileChange 检测原因码（冻结）：事件流检得
+/// fileChange 事实（item 通知，无审批请求亦然）。
+pub const AUTHOR_FILE_CHANGE_DETECTED: &str = "author_file_change_detected";
+
+/// 检测事件的处置事实冻结文本（T13）：turn 中断、run Failed、本轮输出不可
+///采信。🔴 明确不宣称：已回滚发生中的写入、terminal/MCP 预防（danger 基线
+/// 下这是检测/对账合同，不是物理防写）。
+pub const AUTHOR_FILE_CHANGE_DISPOSITION: &str =
+    "turn_interrupted;run_failed;turn_output_untrusted;writes_not_rolled_back";
+
+/// `file_change_detected`（T13，Author 检测型岗位）：Author 会话事件流检得
+/// fileChange 事实的 durable 检测事件 + 处置事实。resume 分区键与既有事件
+/// 不变；本类事件只能出现在 provider_start 首行之后（首行不变量由 sink 强制）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct FileChangeDetectedAudit {
+    /// fileChange item id（审批请求缺位时仍可关联）。
+    pub item_id: String,
+    /// item 摘要（"path (changeType)"，来自 `parse_file_change_summary` 缓存；
+    /// 不读自然语言 reason）。
+    pub summary: String,
+    /// 检测来源 wire method（`item/started`/`item/completed`/
+    /// `item/fileChange/requestApproval`）。
+    pub source_method: String,
+    /// 处置事实（T13 冻结文本，见 [`AUTHOR_FILE_CHANGE_DISPOSITION`]）。
+    pub disposition: String,
+    /// 会话 tool-policy canonical digest（检测归属的策略指纹）。
+    pub policy_digest: String,
+}
+
+/// durable canonical 事件枚举（GC11 四类冻结 + T13 增补
+/// `file_change_detected`：Author 检测型岗位的第五类 canonical 事件；
+/// serde tag=`event_type` snake_case）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum DurableToolPolicyEvent {
     ProviderStart(ProviderStartAudit),
     ApprovalDecision(ApprovalDecisionAudit),
+    FileChangeDetected(FileChangeDetectedAudit),
     ProtocolWarning(ProtocolWarningAudit),
     SessionTerminated(SessionTerminatedAudit),
 }
@@ -226,6 +258,7 @@ impl DurableToolPolicyEvent {
         match self {
             DurableToolPolicyEvent::ProviderStart(_) => "provider_start",
             DurableToolPolicyEvent::ApprovalDecision(_) => "approval_decision",
+            DurableToolPolicyEvent::FileChangeDetected(_) => "file_change_detected",
             DurableToolPolicyEvent::ProtocolWarning(_) => "protocol_warning",
             DurableToolPolicyEvent::SessionTerminated(_) => "session_terminated",
         }

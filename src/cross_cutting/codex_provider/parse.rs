@@ -199,10 +199,12 @@ pub(crate) fn command_output(item: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
-/// 缓存 fileChange item 摘要（item id → "path (changeType)"），供
-/// `item/fileChange/requestApproval` 经 item id 关联 diff 信息；不使用自然语言
-/// `reason`。仅接受 `item/started` / `item/completed` 通知中的 fileChange item。
-pub(crate) fn parse_file_change_summary(value: &Value) -> Option<(String, String)> {
+/// 缓存 fileChange item 摘要（item id → "path (changeType)" + 来源 method），
+/// 供 `item/fileChange/requestApproval` 经 item id 关联 diff 信息；T13 起
+/// 岗位纪律（Author）会话以本解析为检测型触发信号（来源 method 进检测审计）。
+/// 不使用自然语言 `reason`；仅接受 `item/started` / `item/completed` 通知中
+/// 的 fileChange item。
+pub(crate) fn parse_file_change_summary(value: &Value) -> Option<(String, String, String)> {
     let method = value.get("method")?.as_str()?;
     if method != "item/started" && method != "item/completed" {
         return None;
@@ -222,7 +224,7 @@ pub(crate) fn parse_file_change_summary(value: &Value) -> Option<(String, String
         .or_else(|| item.get("change_type"))
         .and_then(Value::as_str)
         .unwrap_or("change");
-    Some((id, format!("{path} ({change_type})")))
+    Some((id, format!("{path} ({change_type})"), method.to_string()))
 }
 
 /// 按 GC6 冻结规则分类审批请求：method 名 + `_meta.codex_approval_kind` 精确判别，

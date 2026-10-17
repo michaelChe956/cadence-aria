@@ -725,10 +725,15 @@ fn canonical_tool_policy_freezes_provider_physical_fragments() {
         claude.digest,
         "4d6a4ddf803656ce6e298888beec1980671fc40fdb5bd92aaabbf0dba4bff9bf"
     );
-    // codex 实算命令：
-    // printf 'tp-v1\x1fcodex\x1fsandbox=read-only\x1fapprovalPolicy=on-request\x1fap-v1' | sha256sum
+    // codex 实算命令（T13 Direct 冻结片段：danger-full-access + on-request，
+    // Author 检测型岗位纪律；旧 read-only canonical 已替换）：
+    // printf 'tp-v1\x1fcodex\x1fsandbox=danger-full-access\x1fapprovalPolicy=on-request\x1fap-v1' | sha256sum
     let codex = canonical_tool_policy("codex", &policy).unwrap();
-    assert!(codex.tokens.contains(&"sandbox=read-only".to_string()));
+    assert!(
+        codex
+            .tokens
+            .contains(&"sandbox=danger-full-access".to_string())
+    );
     assert!(
         codex
             .tokens
@@ -736,7 +741,7 @@ fn canonical_tool_policy_freezes_provider_physical_fragments() {
     );
     assert_eq!(
         codex.digest,
-        "55589d94224ef120ba52681e12ac9a9f0a940c600f094a6a49d9fcd8eac48315"
+        "a7b73551df0be89a3bef16ba427959ab0ae222d9592c4b0c406a4fb9c894362f"
     );
 
     // translator 与 canonical tokens 同源：argv flag/value 按出现顺序原样、大小写保留。
@@ -818,7 +823,7 @@ fn translate_tool_policy_freezes_full_canonical_token_sequence() {
 
     let policy = ProviderToolPolicy::deny_file_write_builtins();
     let frozen = vec![
-        "sandbox=read-only".to_string(),
+        "sandbox=danger-full-access".to_string(),
         "approvalPolicy=on-request".to_string(),
     ];
 

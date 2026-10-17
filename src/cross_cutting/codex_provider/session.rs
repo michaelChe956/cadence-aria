@@ -37,26 +37,31 @@ const CODEX_EMPTY_OUTPUT_RETRY_PROMPT: &str =
 /// codex 在 tool-policy canonical 序列中的 provider 名（CLI 名常量）。
 pub const TOOL_POLICY_PROVIDER_NAME: &str = "codex";
 
-/// DenyFileWriteBuiltins 的 codex canonical 参数（三联动冻结：`sandbox=read-only` +
-/// `approvalPolicy=on-request`；argv/参数原文按出现顺序、大小写保留）。
+/// DenyFileWriteBuiltins（Author 岗位纪律）的 codex direct 冻结片段（T13
+/// 替换旧 read-only canonical）：`sandbox=danger-full-access` +
+/// `approvalPolicy=on-request`，argv/参数原文按出现顺序、大小写保留。
+/// 纪律是**检测型**（fileChange 事实 → 事件 → durable → 中断 → 本轮
+/// Failed），不以 FileChange 审批 Decline 作强制防写；LC 侧维护独立冻结
+/// 序列（`projection::CODEX_LC_WIRE_CONTROL_TOKENS`），不与本片段复用。
 pub fn deny_file_write_builtins_tokens() -> Vec<String> {
     vec![
-        "sandbox=read-only".to_string(),
+        "sandbox=danger-full-access".to_string(),
         "approvalPolicy=on-request".to_string(),
     ]
 }
 
-/// thread/start 与 thread/resume 共用的启动参数单一来源（三联动冻结，GC5）：
-/// - 策略 input（`tool_policy.is_some()`）同时给出 `sandbox:"read-only"` 与
-///   `approvalPolicy:"on-request"`（策略会话禁写禁执行，审批走分类规则）；
-/// - Coder（`None`）保持 `danger-full-access` 与既有 permission mode 映射
-///   （Auto→never / Supervised→on-request）。
+/// thread/start 与 thread/resume 共用的启动参数单一来源（T13 冻结）：
+/// - 岗位纪律 input（`tool_policy.is_some()`）给出 `sandbox:"danger-full-access"`
+///   与 `approvalPolicy:"on-request"`（danger 基线 + 检测型岗位纪律；审批走
+///   分类规则，危险命令 Accept 与 Claude/Pi 对齐，不用 never 自禁）；
+/// - Coder/Reviewer（`None`）保持 `danger-full-access` 与既有 permission mode
+///   映射（Auto→never / Supervised→on-request，原生 approval）。
 pub(crate) fn codex_launch_params(input: &StreamingProviderInput) -> serde_json::Value {
     if input.tool_policy.is_some() {
         json!({
             "cwd": input.working_dir.clone(),
             "approvalPolicy": "on-request",
-            "sandbox": "read-only",
+            "sandbox": CODEX_DEFAULT_SANDBOX_MODE,
         })
     } else {
         json!({
@@ -99,26 +104,33 @@ where
     codex_handshake_with_launch_params(peer, input, codex_lc_launch_params(lc)).await
 }
 
-/// 策略会话即时审批决策（GC6 冻结）：commandExecution/fileChange 一律拒绝并
-/// 审计；所有会话 MCP 一律 accept 并审计。决策以结构化事件形式暴露
-/// （`CodexApprovalDecisionEvent`，内存出口；durable 接线在 Task 3.2）。
+/// 岗位纪律会话即时审批决策（T13 定稿）：commandExecution=Accept（danger
+/// 基线下危险命令与 Claude/Pi 对齐，不用 never 产生跨 provider 不对称）、
+/// MCP=Accept；fileChange 在会话循环由检测型纪律先行处置（事件→durable→
+/// 中断→本轮 Failed），此处 Decline 仅作 fail-closed 兜底，不作强制防写
+/// 依据。决策以结构化事件形式暴露（`CodexApprovalDecisionEvent`）。
 pub(crate) fn decide_for_policy(category: CodexApprovalCategory) -> CodexApprovalResponse {
     match category {
-        CodexApprovalCategory::McpToolCall => CodexApprovalResponse::Accept,
+        CodexApprovalCategory::McpToolCall | CodexApprovalCategory::CommandExecution => {
+            CodexApprovalResponse::Accept
+        }
         // 未知形态在 session 层由 decide_unknown 先行处理；此处 fail-closed 拒绝。
-        CodexApprovalCategory::CommandExecution
-        | CodexApprovalCategory::FileChange
-        | CodexApprovalCategory::Unknown { .. } => CodexApprovalResponse::Decline,
+        CodexApprovalCategory::FileChange | CodexApprovalCategory::Unknown { .. } => {
+            CodexApprovalResponse::Decline
+        }
     }
 }
 
-/// 策略决策的原因码（D7 `approval_decision.reason_code` 冻结枚举）：决策归属的
+/// 纪律决策的原因码（D7 `approval_decision.reason_code` 冻结枚举）：决策归属的
 /// 策略语义，不读自然语言 reason。
 pub(crate) fn policy_decision_reason_code(category: CodexApprovalCategory) -> &'static str {
     match category {
         CodexApprovalCategory::McpToolCall => "policy_allows_mcp",
-        CodexApprovalCategory::CommandExecution | CodexApprovalCategory::FileChange => {
-            "policy_denies_write_side"
+        CodexApprovalCategory::CommandExecution => "policy_allows_command",
+        // fileChange 的真实处置是检测型中断（author_file_change_detected）；
+        // 该原因码仅在兜底决策路径出现。
+        CodexApprovalCategory::FileChange => {
+            crate::cross_cutting::tool_policy_audit::AUTHOR_FILE_CHANGE_DETECTED
         }
         CodexApprovalCategory::Unknown { .. } => "unsupported_approval_kind",
     }
@@ -156,6 +168,61 @@ fn policy_digest_for_input(
             .ok()
         })
         .unwrap_or_default()
+}
+
+/// Author 检测型岗位纪律（T13）：事件流检得 fileChange 事实（item 通知，
+/// 无审批请求亦然；或 fileChange 审批请求）→ 双路径出口后中断当前 turn。
+/// 次序冻结：①事件通道 `ToolPolicyWarning(author_file_change_detected)` →
+/// ②durable `file_change_detected`（含处置事实；append 失败返回该错误，
+/// 沿既有 kill 链 fail-closed）→ ③调用方以其返回值中断 turn → ④supervisor
+/// kill child 并终态 Failed——本轮输出不可采信。🔴 不宣称回滚已发生写入或
+/// terminal/MCP 预防（danger 基线下这是检测/对账合同，不是物理防写）。
+async fn fail_turn_on_author_file_change(
+    event_tx: &mpsc::Sender<ProviderEvent>,
+    cancel: &CancellationToken,
+    sink: Option<&std::sync::Arc<dyn ToolPolicyAuditSink>>,
+    input: &StreamingProviderInput,
+    item_id: &str,
+    summary: &str,
+    source_method: &str,
+) -> ProviderAdapterError {
+    let warning = CodexProtocolWarningEvent {
+        reason_code: crate::cross_cutting::tool_policy_audit::AUTHOR_FILE_CHANGE_DETECTED
+            .to_string(),
+        method: source_method.to_string(),
+        occurrence: 1,
+    };
+    if let Err(error) =
+        send_provider_event(event_tx, ProviderEvent::ToolPolicyWarning(warning), cancel).await
+    {
+        return error;
+    }
+    if let Err(error) = audit_policy_event(
+        sink,
+        DurableToolPolicyEvent::FileChangeDetected(
+            crate::cross_cutting::tool_policy_audit::FileChangeDetectedAudit {
+                item_id: item_id.to_string(),
+                summary: summary.to_string(),
+                source_method: source_method.to_string(),
+                disposition:
+                    crate::cross_cutting::tool_policy_audit::AUTHOR_FILE_CHANGE_DISPOSITION
+                        .to_string(),
+                policy_digest: policy_digest_for_input(input),
+            },
+        ),
+    ) {
+        return error;
+    }
+    tracing::warn!(
+        target: "codex_provider",
+        item_id,
+        source_method,
+        "author fileChange detected; interrupting turn and failing the run"
+    );
+    provider_error(format!(
+        "codex session terminated: {}",
+        crate::cross_cutting::tool_policy_audit::AUTHOR_FILE_CHANGE_DETECTED
+    ))
 }
 
 /// 未知审批形态的确定性应答（GC6）：未知 elicitation 返回 JSON-RPC error
@@ -469,9 +536,23 @@ where
             continue;
         }
 
-        // fileChange item 通知进入缓存，供后续 requestApproval 经 item id 关联 diff。
-        if let Some((item_id, summary)) = parse_file_change_summary(&incoming) {
+        // fileChange item 通知：岗位纪律（Author）会话=T13 检测型触发（无审批
+        // 请求亦然：先事件→durable→中断 turn，本轮 Failed/不可采信）；其余
+        // 会话仅缓存摘要，供后续 requestApproval 经 item id 关联 diff。
+        if let Some((item_id, summary, source_method)) = parse_file_change_summary(&incoming) {
             waiting_for_resume_progress = false;
+            if tool_policy_session {
+                return Err(fail_turn_on_author_file_change(
+                    &event_tx,
+                    &cancel,
+                    input.audit_sink.as_ref(),
+                    &input,
+                    &item_id,
+                    &summary,
+                    &source_method,
+                )
+                .await);
+            }
             file_change_summaries.insert(item_id, summary);
             continue;
         }
@@ -553,8 +634,53 @@ where
             unknown_approval_occurrence = 0;
 
             if tool_policy_session {
-                // 策略会话即时决策：exec/fileChange 拒绝、MCP accept，决策经事件通道
-                // 送出会话循环（C1 真实出口；durable 落盘在 Task 3.2 的 sink 注入）。
+                // T13：fileChange 审批请求（danger 下通常不出现；若出现即是
+                // fileChange 事实）先走既有决策双路径合法应答 decline（不静默
+                // 无应答；Decline 不是防写依据），随后检测纪律中断 turn。
+                if matches!(request.category, CodexApprovalCategory::FileChange) {
+                    let decision_event = CodexApprovalDecisionEvent {
+                        request_id: request.request_id.clone(),
+                        category: request.category.audit_text(),
+                        decision: CodexApprovalResponse::Decline.audit_text(),
+                    };
+                    send_provider_event(
+                        &event_tx,
+                        ProviderEvent::ToolPolicyDecision(decision_event.clone()),
+                        &cancel,
+                    )
+                    .await?;
+                    audit_policy_event(
+                        input.audit_sink.as_ref(),
+                        DurableToolPolicyEvent::ApprovalDecision(ApprovalDecisionAudit {
+                            request_id: decision_event.request_id.clone(),
+                            category: decision_event.category.to_string(),
+                            server_name: request.server_name.clone(),
+                            tool_name: request.tool_name.clone(),
+                            decision: decision_event.decision.to_string(),
+                            reason_code: policy_decision_reason_code(request.category.clone())
+                                .to_string(),
+                            policy_digest: policy_digest_for_input(&input),
+                        }),
+                    )?;
+                    write_approval_decision(
+                        &peer,
+                        request.rpc_id.clone(),
+                        &CodexApprovalResponse::Decline,
+                    )
+                    .await?;
+                    return Err(fail_turn_on_author_file_change(
+                        &event_tx,
+                        &cancel,
+                        input.audit_sink.as_ref(),
+                        &input,
+                        &request.request_id,
+                        &request.description,
+                        "item/fileChange/requestApproval",
+                    )
+                    .await);
+                }
+                // 岗位纪律即时决策：commandExecution/MCP accept，决策经事件通道
+                // 送出会话循环（C1 真实出口）。
                 let response = decide_for_policy(request.category.clone());
                 let decision_event = CodexApprovalDecisionEvent {
                     request_id: request.request_id.clone(),

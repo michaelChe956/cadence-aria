@@ -488,13 +488,14 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure
 
 use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
 
-/// T12(REQ-LCG-04 改版):Author 承载角色(Orchestrator+deny)的 LC danger
-/// 会话沿用策略审批冻结(GC6)——fileChange/commandExecution 在真实 wire 上
-/// 得到即时 decline(不经 ApprovalBridge 上抛),MCP accept;thread/start
+/// T12→T13(REQ-LCG-04 改版):Author 承载角色(Orchestrator+deny)的 LC danger
+/// 会话沿用定稿 Author 决策表——commandExecution/MCP 在真实 wire 上得到即时
+/// accept(不经 ApprovalBridge 上抛;危险命令与 Claude/Pi 对齐);fileChange
+/// 检测纪律(事件→durable→中断→Failed)由专项测试覆盖;thread/start
 /// danger-full-access + on-request(LC danger fixture 逐字校验)。
 #[cfg(unix)]
 #[tokio::test]
-async fn lcg_t12_author_danger_lc_session_declines_write_approvals_on_wire() {
+async fn lcg_t13_author_danger_lc_session_accepts_command_and_mcp_on_wire() {
     let fixture = LcCodexFixture::new();
     let sink = RecordingToolPolicyAuditSink::new();
     let raw = fixture.lc_input(
@@ -520,8 +521,8 @@ async fn lcg_t12_author_danger_lc_session_declines_write_approvals_on_wire() {
         .await
         .expect("author danger lc policy session launches");
 
-    // fixture 对任何未 decline/accept 的审批直接退出失败——完成即证明
-    // fileChange/commandExecution=decline、MCP=accept 在 wire 上成立。
+    // fixture 对任何未 accept 的审批直接退出失败——完成即证明
+    // commandExecution=accept、MCP=accept 在 wire 上成立。
     assert_eq!(
         recv_completed(&mut session.events).await,
         "policy approvals done"
@@ -539,6 +540,86 @@ async fn lcg_t12_author_danger_lc_session_declines_write_approvals_on_wire() {
     assert_eq!(record.approval_policy.as_deref(), Some("on-request"));
     let lc_projection = record.lc_projection.as_ref().expect("lc projection audit");
     assert_eq!(lc_projection.action, "planning_read_only");
+}
+
+/// T13:LC 路径的 Author 检测型岗位纪律与 direct 同一合同——事件流检得
+/// fileChange item 事实(无审批请求)即双路径出口(事件→durable 含处置事实)
+/// 并中断 turn,本轮 Failed/不可采信;迟到 Completed 不洗白。
+#[cfg(unix)]
+#[tokio::test]
+async fn lcg_t13_author_danger_lc_file_change_item_fails_turn() {
+    let fixture = LcCodexFixture::new();
+    let sink = RecordingToolPolicyAuditSink::new();
+    let raw = fixture.lc_input(
+        AdapterRole::Orchestrator,
+        Some(ProviderToolPolicy::deny_file_write_builtins()),
+        ProviderPermissionMode::Auto,
+        None,
+        Some(sink.clone().bound()),
+        fixture.target_worktree(),
+    );
+    let provider = CodexProvider::new(executable_fixture(
+        "tests/fixtures/provider/codex_app_server_policy_file_change_detection_fixture.sh",
+    ))
+    .with_version_supplier(lc_version_supplier());
+
+    let mut session = provider
+        .start_lc_validated(
+            raw,
+            &fixture.envelope(SessionPolicyAction::PlanningReadOnly, Vec::new()),
+            "cap_codex_lc_fixture",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("author danger lc session launches");
+
+    let mut saw_completed = false;
+    loop {
+        match tokio::time::timeout(TEST_TIMEOUT, session.events.recv())
+            .await
+            .expect("lc session should fail after fileChange detection")
+            .expect("provider event channel should stay open until failure")
+        {
+            ProviderEvent::Completed(_) => saw_completed = true,
+            ProviderEvent::Failed { message } => {
+                assert!(
+                    message.contains("author_file_change_detected"),
+                    "unexpected failure message: {message}"
+                );
+                assert!(
+                    !saw_completed,
+                    "turn interrupted by fileChange detection must never complete"
+                );
+                let durable = sink.events();
+                assert_eq!(
+                    durable
+                        .iter()
+                        .position(|event| event.event_type() == "provider_start"),
+                    Some(0)
+                );
+                assert!(
+                    durable
+                        .iter()
+                        .any(|event| event.event_type() == "file_change_detected"),
+                    "lc detection must be durable"
+                );
+                return;
+            }
+            ProviderEvent::StatusChanged(_)
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TextDelta { .. }
+            | ProviderEvent::PermissionRequest(_)
+            | ProviderEvent::ChoiceRequest(_)
+            | ProviderEvent::ToolCall(_)
+            | ProviderEvent::ToolResult(_)
+            | ProviderEvent::UsageReport(_)
+            | ProviderEvent::TerminalActivity(_)
+            | ProviderEvent::ToolPolicyDecision(_)
+            | ProviderEvent::ToolPolicyWarning(_)
+            | ProviderEvent::ToolPolicyTerminated(_) => {}
+            other => panic!("unexpected terminal event: {other:?}"),
+        }
+    }
 }
 
 /// T12 approval 映射:LC Coding 的 Supervised 档在真实 wire 与统一审计上

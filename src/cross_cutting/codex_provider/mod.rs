@@ -309,7 +309,6 @@ impl CodexProvider {
         //  拒绝)已废止——danger 是当前合法执行基线,准入由 capability 行/
         //  trust/版本观测与角色合同裁决。
 
-
         // 3) 统一 launch audit sink:LC 会话必须绑定 run-bound sink,缺失
         //    fail-closed(1b 的 prepare 契约之前由本路径强制)。
         let sink = input.audit_sink.clone().ok_or_else(|| {
@@ -678,40 +677,50 @@ impl StreamingProviderAdapter for CodexProvider {
                 ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
             },
         )?;
-        // 策略上下文（Task 3.2/3.3，spawn 前）：版本解析（supplier seam 优先，默认
-        // 真实 `--version` 探测+进程内缓存，不可得 fail-closed）与 resume 冻结三元组
-        // 比对（记录缺失或 digest/version/dialect 任一不一致 → 追加 superseded 终止
-        // 审计并新建会话，丢弃 resume id）。
-        // GC9：resume 记录缺失与 drift 同路径处置（清除 resume id、全新会话）；
-        // 「标记 superseded」仅带内 ToolPolicyWarning（🔴 无旧文件可写，不伪造
-        // durable 文件），在事件通道建立后送出。
+        // T13 合同驱动 durable 分区（B2T11 裁定缺口补齐）：run-bound audit
+        // sink 在位即统一 launch 审计（spawn 前握手 + provider_start 首行），
+        // 不再以 deny intent 为门——去 deny 后的 Reviewer direct run 同样
+        // 落 provider_start（ReviewerVerify 真窗/审批 durable 面归 T20）。
+        // 岗位纪律会话（Author，`DenyFileWriteBuiltins` intent）必须携带
+        // sink（缺失 fail-closed 保持），并叠加 canonical digest 与 resume
+        // 冻结三元组；无策略合同 run 的 digest 为空串（无策略指纹）。
+        // BOOT-04：`BootstrapExecutorMarker` 不进本合同（已在上方守卫完成
+        // 结构复核；自举执行器的 durable 审计由 root recipe receipt 承担）。
         let mut superseded_record_missing = false;
-        let mut policy_context: Option<(
-            std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>,
-            String,
-            String,
-        )> = None;
-        // Task 1.2（BOOT-04）：策略会话机制只服务 deny 意图；BootstrapExecutor
-        // marker 已在上方守卫完成结构复核，不进入策略握手/审计（自举执行器
-        // 的 durable 审计由 root recipe receipt 承担）。
-        if let Some(
-            policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
-                intent:
-                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
-            },
-        ) = input.tool_policy.as_ref()
-        {
-            let sink = input.audit_sink.clone().ok_or_else(|| {
+        let discipline_policy = input.tool_policy.as_ref().is_some_and(|policy| {
+            matches!(
+                policy.intent,
+                crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins
+            )
+        });
+        let audit_contract_sink = if discipline_policy {
+            Some(input.audit_sink.clone().ok_or_else(|| {
                 ProviderAdapterError::parse_error(
                     "codex policy session: audit sink is required for policy sessions",
                     String::new(),
                     String::new(),
                 )
-            })?;
+            })?)
+        } else {
+            input.audit_sink.clone()
+        };
+        let mut policy_context: Option<(
+            std::sync::Arc<dyn crate::cross_cutting::tool_policy_audit::ToolPolicyAuditSink>,
+            String,
+            String,
+        )> = None;
+        if let Some(sink) = audit_contract_sink {
+            let context_label = if discipline_policy {
+                "codex policy session"
+            } else {
+                "codex contract session"
+            };
+            // 版本解析（supplier seam 优先，默认真实 `--version` 探测+进程内
+            // 缓存，不可得 fail-closed）：provider_start 的冻结字段。
             let provider_version = match self.version_supplier.clone() {
                 Some(supplier) => supplier().map_err(|error| {
                     ProviderAdapterError::parse_error(
-                        format!("codex policy session: {error}"),
+                        format!("{context_label}: {error}"),
                         String::new(),
                         String::new(),
                     )
@@ -723,20 +732,35 @@ impl StreamingProviderAdapter for CodexProvider {
                 .await
                 .map_err(|error| {
                     ProviderAdapterError::parse_error(
-                        format!("codex policy session: {error}"),
+                        format!("{context_label}: {error}"),
                         String::new(),
                         String::new(),
                     )
                 })?,
             };
-            let canonical = canonical_tool_policy(session::TOOL_POLICY_PROVIDER_NAME, policy)
-                .map_err(|error| {
-                    ProviderAdapterError::parse_error(
-                        format!("codex policy session: {error}"),
-                        String::new(),
-                        String::new(),
-                    )
-                })?;
+            let tool_policy_digest = if discipline_policy {
+                let policy = input
+                    .tool_policy
+                    .as_ref()
+                    .expect("discipline implies policy");
+                canonical_tool_policy(session::TOOL_POLICY_PROVIDER_NAME, policy)
+                    .map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!("{context_label}: {error}"),
+                            String::new(),
+                            String::new(),
+                        )
+                    })?
+                    .digest
+            } else {
+                // 无策略合同 run：无 canonical 策略指纹（空串）；launch audit
+                // 只冻结实际启动参数/version/dialect（与 LC 统一审计口径同构）。
+                String::new()
+            };
+            // resume 冻结三元组比对（digest/version/dialect）：记录缺失或任一
+            // 不一致 → 追加 superseded 终止审计并新建会话，丢弃 resume id
+            //（GC9：缺失与 drift 同路径处置；「标记 superseded」仅带内
+            // ToolPolicyWarning——无旧文件可写，不伪造 durable 文件）。
             let resume_id = input
                 .resume_provider_session_id
                 .as_deref()
@@ -746,7 +770,7 @@ impl StreamingProviderAdapter for CodexProvider {
             if let Some(resume_id) = resume_id.as_ref() {
                 let stored = sink.find_provider_start(resume_id).map_err(|error| {
                     ProviderAdapterError::parse_error(
-                        format!("codex policy session: resume lookup failed: {error}"),
+                        format!("{context_label}: resume lookup failed: {error}"),
                         String::new(),
                         String::new(),
                     )
@@ -754,7 +778,7 @@ impl StreamingProviderAdapter for CodexProvider {
                 let current = ProviderStartAudit {
                     workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
                     provider_session_id: resume_id.clone(),
-                    tool_policy_canonical_digest: canonical.digest.clone(),
+                    tool_policy_canonical_digest: tool_policy_digest.clone(),
                     provider_version: provider_version.clone(),
                     adapter_dialect: session::CODEX_POLICY_DIALECT.to_string(),
                     ..ProviderStartAudit::default()
@@ -777,9 +801,7 @@ impl StreamingProviderAdapter for CodexProvider {
                     )
                     .map_err(|error| {
                         ProviderAdapterError::parse_error(
-                            format!(
-                                "codex policy session: superseded audit append failed: {error}"
-                            ),
+                            format!("{context_label}: superseded audit append failed: {error}"),
                             String::new(),
                             String::new(),
                         )
@@ -787,14 +809,13 @@ impl StreamingProviderAdapter for CodexProvider {
                     input.resume_provider_session_id = None;
                 } else if stored.is_none() {
                     // GC9：记录缺失与 drift 同路径处置——清除 resume id、以全新会话
-                    // （thread/start + 新 run 的 provider_start）启动；「标记 superseded」
-                    // 仅带内 ToolPolicyWarning：无旧文件可写，🔴 不得伪造无
-                    // provider_start 首行的 durable 文件（首行不变量优先）。
+                    // 启动；「标记 superseded」仅带内 ToolPolicyWarning（事件通道
+                    // 建立后送出），🔴 不伪造无 provider_start 首行的 durable 文件。
                     input.resume_provider_session_id = None;
                     superseded_record_missing = true;
                 }
             }
-            policy_context = Some((sink, provider_version, canonical.digest));
+            policy_context = Some((sink, provider_version, tool_policy_digest));
         }
         let args = self.build_args();
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
@@ -814,9 +835,10 @@ impl StreamingProviderAdapter for CodexProvider {
             .with_outbound_id_namespace(OutboundIdNamespace::Aria);
         let stderr = process.stderr;
         let mut child = process.child;
-        // 策略会话（Task 3.2）：握手（initialize/initialized + thread/start|resume）
-        // 从后台任务前置到 start 内有界完成；成功后、返回前写 `provider_start`，
-        // 握手/写失败终止子进程并 fail-closed。非策略/Coder 路径零变化。
+        // 审计合同会话（T13 合同驱动：岗位纪律/Author 或合同 bound 的无策略
+        // run）：握手（initialize/initialized + thread/start|resume）从后台任务
+        // 前置到 start 内有界完成；成功后、返回前写 `provider_start` 首行，
+        // 握手/写失败终止子进程并 fail-closed。无合同的 Coder 路径零变化。
         let mut native_session_id = None;
         let policy_handshake = if let Some((sink, provider_version, tool_policy_digest)) =
             policy_context
@@ -833,7 +855,7 @@ impl StreamingProviderAdapter for CodexProvider {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 return Err(ProviderAdapterError::parse_error(
-                    "codex policy session: thread/start response missing or blank thread id",
+                    "codex audit contract session: thread/start response missing or blank thread id",
                     String::new(),
                     String::new(),
                 ));
@@ -857,14 +879,16 @@ impl StreamingProviderAdapter for CodexProvider {
                     .map(ToString::to_string),
                 provider_version,
                 adapter_dialect: session::CODEX_POLICY_DIALECT.to_string(),
-                // direct 策略会话:无 LC 投影(仅 LC validated 启动落盘)。
+                // direct 合同会话:无 LC 投影(仅 LC validated 启动落盘)。
                 lc_projection: None,
             });
             if let Err(error) = sink.append_bound(audit_event) {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 return Err(ProviderAdapterError::parse_error(
-                    format!("codex policy session: provider_start audit append failed: {error}"),
+                    format!(
+                        "codex audit contract session: provider_start audit append failed: {error}"
+                    ),
                     String::new(),
                     String::new(),
                 ));

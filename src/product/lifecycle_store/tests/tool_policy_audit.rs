@@ -63,6 +63,91 @@ fn session_terminated_event(reason_code: &str) -> DurableToolPolicyEvent {
         },
     )
 }
+fn file_change_detected_event(item_id: &str, source_method: &str) -> DurableToolPolicyEvent {
+    DurableToolPolicyEvent::FileChangeDetected(
+        crate::cross_cutting::tool_policy_audit::FileChangeDetectedAudit {
+            item_id: item_id.to_string(),
+            summary: "src/main.rs (modify)".to_string(),
+            source_method: source_method.to_string(),
+            disposition: crate::cross_cutting::tool_policy_audit::AUTHOR_FILE_CHANGE_DISPOSITION
+                .to_string(),
+            policy_digest: "sha256:codex-digest".to_string(),
+        },
+    )
+}
+
+/// T13：第五类 canonical 事件 `file_change_detected`（Author 检测型岗位）——
+/// 只能追加在 provider_start 首行之后；durable 序列化键名冻结；必需字段
+/// 缺失 = 解析失败（不以 `#[serde(default)]` 宽容）。既有四类事件与分区键
+/// `(workspace_session_id, role_run_seq)` 不变。
+#[tokio::test]
+async fn tool_policy_audit_file_change_detected_follows_provider_start_and_freezes_fields() {
+    let sink = test_tool_policy_audit_sink();
+    sink.append("ws-t13", 3, provider_start_event("codex"))
+        .unwrap();
+    sink.append(
+        "ws-t13",
+        3,
+        file_change_detected_event("fc_1", "item/started"),
+    )
+    .unwrap();
+    let lines = sink.read_tool_policy_lines("ws-t13", 3).unwrap();
+    assert_eq!(lines[0].event_type(), "provider_start");
+    assert_eq!(lines[1].event_type(), "file_change_detected");
+    let serialized = serde_json::to_value(&lines[1]).unwrap();
+    for field in [
+        "item_id",
+        "summary",
+        "source_method",
+        "disposition",
+        "policy_digest",
+    ] {
+        assert!(
+            serialized.get(field).is_some(),
+            "file_change_detected missing {field}: {serialized}"
+        );
+    }
+    assert!(
+        serialized["disposition"]
+            .as_str()
+            .is_some_and(|disposition| disposition.contains("turn_interrupted")),
+        "disposition must record the handling fact: {serialized}"
+    );
+
+    // 必需字段缺失 = 解析失败（fail-closed）。
+    let base = serde_json::to_string(&lines[1]).unwrap();
+    for field in [
+        "item_id",
+        "summary",
+        "source_method",
+        "disposition",
+        "policy_digest",
+    ] {
+        let mut value = serde_json::from_str::<serde_json::Value>(&base).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove(field)
+            .unwrap_or_else(|| panic!("fixture must carry {field}: {base}"));
+        let line = serde_json::to_string(&value).unwrap();
+        assert!(
+            serde_json::from_str::<ToolPolicyAuditLine>(&line).is_err(),
+            "missing required field {field} must fail parsing"
+        );
+    }
+
+    // 空文件首行不得是 file_change_detected（首行不变量保持）。
+    let fresh = test_tool_policy_audit_sink();
+    let result = fresh.append(
+        "ws-t13b",
+        0,
+        file_change_detected_event("fc_2", "item/completed"),
+    );
+    assert!(
+        result.is_err(),
+        "file_change_detected must not precede provider_start"
+    );
+}
 
 #[tokio::test]
 async fn tool_policy_audit_writes_provider_start_once_then_canonical_events() {
@@ -1006,11 +1091,7 @@ mod anchor_t10_durable_convergence {
 
     /// 四家纯矩阵 fixture:action/wire/capability/projection/boundary 逐家
     /// 形态(与 anchor_t10_support 的家族文本一致)。
-    fn family_projection(
-        wire: &str,
-        capability: &str,
-        projection: &str,
-    ) -> LcProjectionAudit {
+    fn family_projection(wire: &str, capability: &str, projection: &str) -> LcProjectionAudit {
         LcProjectionAudit {
             action: "planning_read_only".to_string(),
             wire_dialect: wire.to_string(),
@@ -1163,7 +1244,10 @@ mod anchor_t10_durable_convergence {
             .expect("codex prepare on the durable sink");
         let session = harness
             .gateway
-            .start_lc_prepared_streaming(candidate.clone(), tokio_util::sync::CancellationToken::new())
+            .start_lc_prepared_streaming(
+                candidate.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            )
             .await
             .expect("unique full path start");
         let native_id = session
@@ -1190,14 +1274,9 @@ mod anchor_t10_durable_convergence {
         );
         assert_eq!(
             first_projection.capability_projection_digest,
-            candidate
-                .full_projection()
-                .capability_projection_digest()
+            candidate.full_projection().capability_projection_digest()
         );
-        assert_eq!(
-            first_projection.action,
-            "planning_read_only"
-        );
+        assert_eq!(first_projection.action, "planning_read_only");
 
         // full-matching resume(seq 2):durable 检索最新代 → 完整字面量
         // 判定 Resume → 同一冻结 full projection 再启动,两代投影逐字相等。
@@ -1252,7 +1331,10 @@ mod anchor_t10_durable_convergence {
         }
         harness
             .gateway
-            .start_lc_prepared_streaming(resume_candidate, tokio_util::sync::CancellationToken::new())
+            .start_lc_prepared_streaming(
+                resume_candidate,
+                tokio_util::sync::CancellationToken::new(),
+            )
             .await
             .expect("resume start via the unique full path");
 
@@ -1297,13 +1379,8 @@ fn cascade_d1_3b_audit_seq_and_append_late_writes_rejected_partition_not_revived
         .next_tool_policy_role_run_seq(&other.id)
         .expect("live seq allocation for other session");
     assert_eq!(other_seq, 0);
-    ToolPolicyAuditSink::append(
-        &store,
-        &other.id,
-        other_seq,
-        provider_start_event("codex"),
-    )
-    .expect("live audit append for other session");
+    ToolPolicyAuditSink::append(&store, &other.id, other_seq, provider_start_event("codex"))
+        .expect("live audit append for other session");
     let other_lines = store
         .read_tool_policy_lines(&other.id, other_seq)
         .expect("read back other session lines");
@@ -1315,13 +1392,8 @@ fn cascade_d1_3b_audit_seq_and_append_late_writes_rejected_partition_not_revived
     let live_seq = store
         .next_tool_policy_role_run_seq(&session.id)
         .expect("live seq allocation");
-    ToolPolicyAuditSink::append(
-        &store,
-        &session.id,
-        live_seq,
-        provider_start_event("codex"),
-    )
-    .expect("live audit append");
+    ToolPolicyAuditSink::append(&store, &session.id, live_seq, provider_start_event("codex"))
+        .expect("live audit append");
 
     // purging + 模拟 D1.1 清掉全局分区：迟到 seq/append 拒且目录不复活。
     let scope = d1_3a_scope(DeletionEntityKind::Story, &story.id);
@@ -1345,10 +1417,7 @@ fn cascade_d1_3b_audit_seq_and_append_late_writes_rejected_partition_not_revived
         ToolPolicyAuditSink::append(&store, &session.id, 1, provider_start_event("codex")),
         Err(ToolPolicyAuditError::Io(message)) if message.contains("entity_deleting")
     ));
-    assert!(
-        !partition.exists(),
-        "迟到 audit append 不得复活分区目录"
-    );
+    assert!(!partition.exists(), "迟到 audit append 不得复活分区目录");
 
     // deleted（完成）后仍稳定拒。
     d1_3a_complete_purge(&store, lease);
