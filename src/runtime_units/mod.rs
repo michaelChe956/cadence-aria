@@ -69,10 +69,12 @@ pub(crate) fn freeze_runtime_unit_execution(
         freeze_provider_execution,
     };
     if session_id.trim().is_empty() || provider_run_id.trim().is_empty() {
-        return Err(crate::cross_cutting::provider_adapter::ProviderAdapterError::provider_unavailable(
-            "runtime unit execution contract requires durable session/run identity facts"
-                .to_string(),
-        ));
+        return Err(
+            crate::cross_cutting::provider_adapter::ProviderAdapterError::provider_unavailable(
+                "runtime unit execution contract requires durable session/run identity facts"
+                    .to_string(),
+            ),
+        );
     }
     let run_record = crate::protocol::contracts::ProviderRunRecord {
         provider_run_id: provider_run_id.to_string(),
@@ -115,7 +117,6 @@ pub(crate) fn freeze_runtime_unit_execution(
         None,
     )
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonContext {
@@ -170,9 +171,7 @@ pub fn completed_step(node_id: &str) -> RuntimeProtocolStep {
 #[cfg(test)]
 mod t11_trusted_carrier_tests {
     use super::freeze_runtime_unit_execution;
-    use crate::cross_cutting::provider_execution::{
-        ProviderExecutionProfile, TrustedProviderRole,
-    };
+    use crate::cross_cutting::provider_execution::{ProviderExecutionProfile, TrustedProviderRole};
 
     /// 批2 Task 11（硬约束1）：runtime unit 受信载体冻结 Coder/HostCoding
     /// 合同（T10 裁定 legacy Direct 形态 identity）；durable 身份事实缺失

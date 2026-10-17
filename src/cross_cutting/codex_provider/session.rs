@@ -168,7 +168,10 @@ fn policy_digest_for_input(
     input: &crate::cross_cutting::streaming_provider::StreamingProviderInput,
     lc_override: Option<&str>,
 ) -> String {
-    if let Some(digest) = lc_override.map(str::trim).filter(|digest| !digest.is_empty()) {
+    if let Some(digest) = lc_override
+        .map(str::trim)
+        .filter(|digest| !digest.is_empty())
+    {
         return digest.to_string();
     }
     input
@@ -688,7 +691,10 @@ where
                             decision: decision_event.decision.to_string(),
                             reason_code: policy_decision_reason_code(request.category.clone())
                                 .to_string(),
-                            policy_digest: policy_digest_for_input(&input, lc_policy_digest.as_deref()),
+                            policy_digest: policy_digest_for_input(
+                                &input,
+                                lc_policy_digest.as_deref(),
+                            ),
                         }),
                     )?;
                     write_approval_decision(
@@ -704,8 +710,8 @@ where
                         &input,
                         &request.request_id,
                         &request.description,
-                    "item/fileChange/requestApproval",
-                    lc_policy_digest.as_deref(),
+                        "item/fileChange/requestApproval",
+                        lc_policy_digest.as_deref(),
                     )
                     .await);
                 }

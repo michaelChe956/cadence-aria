@@ -182,10 +182,29 @@ fn boundary_mode_text(mode: ProviderBoundaryMode) -> &'static str {
 /// 恒 `None`——`None` 使用空 token 序列的 canonical 形态,digest 仍非空且
 /// 稳定,统一 launch audit 不以 `tool_policy=None` 跳过;`Some(_)` 直接
 /// 拒绝(稳定码,与 `start_validated` 同源的第二道门)。
+/// 批2 Task 20a-fix(F1):`ReviewerVerify{window_id}` 唯一例外——它是
+/// ReviewerVerify 窗口合同的 kimi 侧 wire 形态(物理面=无通用策略片段,
+/// 窗口引用经 TrustedDutyGrant 消费);LC digest 以窗口引用为域(换窗必
+/// 失配),不折叠进 None canonical(保与其它家 join 语义)。
 pub(crate) fn lc_tool_policy_canonical_digest(
     policy: Option<&ProviderToolPolicy>,
 ) -> Result<String, ProviderProjectionError> {
     match policy {
+        Some(
+            policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                intent:
+                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify { .. },
+            },
+        ) => crate::cross_cutting::streaming_provider::canonical_tool_policy(
+            TOOL_POLICY_PROVIDER_NAME,
+            policy,
+        )
+        .map(|canonical| canonical.digest)
+        .map_err(|error| {
+            ProviderProjectionError::Unsupported(format!(
+                "{KIMI_GENERIC_TOOL_POLICY_FORBIDDEN}: kimi reviewer window contract digest: {error}"
+            ))
+        }),
         Some(_) => Err(ProviderProjectionError::Unsupported(format!(
             "{KIMI_GENERIC_TOOL_POLICY_FORBIDDEN}: kimi carries no generic tool policy"
         ))),
@@ -339,8 +358,21 @@ impl ProviderPolicyProjector for KimiPolicyProjector {
         }
 
         // Kimi 通用 tool policy 恒 None:非空即拒(稳定码;与
-        // `start_validated` 在 version/child 前的拒绝同源)。
-        if let Some(policy) = input.tool_policy() {
+        // `start_validated` 在 version/child 前的拒绝同源)。批2
+        // Task 20a-fix(F1):ReviewerVerify 窗口合同例外——它是
+        // ReviewerVerify 岗位的 wire 形态(物理面=无通用策略片段,窗口
+        // 经 TrustedDutyGrant 消费),不得在投影层误杀。
+        if let Some(
+            policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                intent:
+                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify {
+                        ..
+                    },
+            },
+        ) = input.tool_policy()
+        {
+            let _ = policy;
+        } else if let Some(policy) = input.tool_policy() {
             return Err(ProviderProjectionError::Unsupported(format!(
                 "{KIMI_GENERIC_TOOL_POLICY_FORBIDDEN}: kimi carries no generic tool policy (got {policy:?})"
             )));

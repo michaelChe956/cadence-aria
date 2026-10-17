@@ -95,7 +95,9 @@ pub enum ToolPolicyIntent {
     /// engine 材料采集前的同源 assert 承担，adapter/gateway 只复验非空
     /// 引用（fail-closed，不 fallback 补 deny）。物理面=全工具（完整
     /// 工具/terminal/MCP/skills），无 deny 片段。
-    ReviewerVerify { window_id: String },
+    ReviewerVerify {
+        window_id: String,
+    },
 }
 
 /// Provider 无关的语义工具策略。只表达语义意图，不携带 provider 物理片段；
@@ -895,7 +897,6 @@ pub fn translate_tool_policy(
         }
     }
 }
-
 
 /// Author 会话基线树锚点（per-issue-base-branch，REQ-PIB-02）。两级语义
 ///（防误读，design D3）：

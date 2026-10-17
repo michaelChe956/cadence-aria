@@ -1757,7 +1757,8 @@ impl LogicalCodebaseProviderGateway {
             });
             if !windowed {
                 return Err(ProviderGatewayError::UnsupportedCapability(
-                    "reviewer streaming launch requires a ReviewerVerify window contract".to_string(),
+                    "reviewer streaming launch requires a ReviewerVerify window contract"
+                        .to_string(),
                 ));
             }
         }
@@ -1963,7 +1964,7 @@ impl LogicalCodebaseProviderGateway {
             profile,
             author_policy,
             resource_scope_id,
-                review_window_id.clone(),
+            review_window_id.clone(),
         )
         .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.details))?;
         // 批2 Task 11→T20:受信装配独占 wire 投影——按 duty+窗口强制覆盖

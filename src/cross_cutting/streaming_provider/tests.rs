@@ -1167,8 +1167,36 @@ async fn tool_policy_guard_rejects_invalid_role_policy_before_spawn() {
     .await;
     expect_guard_rejection(
         "codex",
-        &CodexProvider::new(missing_cli),
+        &CodexProvider::new(missing_cli.clone()),
         base_input(ProviderType::Codex, AdapterRole::Reviewer, None),
+    )
+    .await;
+    // 批2 Task 20a-fix(F2):kimi 同源启动检查——Reviewer 无窗/空窗/
+    // deny 回退同拒(四家名实对齐;kimi 窗口合同由受信岗位授予等价消费)。
+    expect_guard_rejection(
+        "kimi",
+        &crate::cross_cutting::kimi_code_provider::KimiCodeProvider::new(missing_cli.clone()),
+        base_input(ProviderType::KimiCode, AdapterRole::Reviewer, None),
+    )
+    .await;
+    expect_guard_rejection(
+        "kimi",
+        &crate::cross_cutting::kimi_code_provider::KimiCodeProvider::new(missing_cli.clone()),
+        base_input(
+            ProviderType::KimiCode,
+            AdapterRole::Reviewer,
+            Some(ProviderToolPolicy::reviewer_verify("  ")),
+        ),
+    )
+    .await;
+    expect_guard_rejection(
+        "kimi",
+        &crate::cross_cutting::kimi_code_provider::KimiCodeProvider::new(missing_cli),
+        base_input(
+            ProviderType::KimiCode,
+            AdapterRole::Reviewer,
+            Some(ProviderToolPolicy::deny_file_write_builtins()),
+        ),
     )
     .await;
 }

@@ -1209,3 +1209,56 @@ fn kimi_author_duty_hides_fs_write_advertisement_and_reviewer_window_grants_writ
         serde_json::json!(true)
     );
 }
+
+/// 批2 Task 20a-fix(F1):ReviewerVerify 窗口合同不被 kimi 通用策略门误杀
+/// ——投影/digest 两面放行,LC digest 以窗口引用为域(换窗必失配);
+/// deny 仍拒(旧语义保持)。Direct↔LC 合同对齐(带有效窗 LC Reviewer
+/// 不再 spawn 前必败)。
+#[test]
+fn kimi_lc_reviewer_verify_window_contract_passes_policy_gates_with_window_domain_digest() {
+    let windowed = ProviderToolPolicy::reviewer_verify("w-t20-kimi-lc-1");
+
+    // 投影面:ReviewerVerify 放行(不再 provider_generic_tool_policy_forbidden)。
+    let projector = KimiPolicyProjector::new("kimi 0.34.0-lc-fixture");
+    let projected = projector
+        .project(&lc_kimi_projection_input(
+            lc_projection_envelope(
+                SessionPolicyAction::ReviewReadOnly,
+                PathBuf::from("/lc/member-a"),
+                "sha256:cfg-a",
+                "sha256:cfg-digest-a",
+            ),
+            AdapterRole::Reviewer,
+            Some(windowed.clone()),
+            KIMI_NATIVE_MCP_SOURCE,
+            "sha256:trust-1",
+        ))
+        .expect("kimi projector must accept the ReviewerVerify window contract");
+
+    // digest 面:窗口域 canonical——两窗 digest 必不同(换窗必失配)。
+    let digest_w1 =
+        crate::cross_cutting::kimi_code_provider::projection::lc_tool_policy_canonical_digest(
+            Some(&windowed),
+        )
+        .expect("window-domain LC digest must be minted");
+    let digest_w2 =
+        crate::cross_cutting::kimi_code_provider::projection::lc_tool_policy_canonical_digest(
+            Some(&ProviderToolPolicy::reviewer_verify("w-t20-kimi-lc-2")),
+        )
+        .expect("window-domain LC digest must be minted");
+    assert_ne!(
+        digest_w1, digest_w2,
+        "LC digest must be window-scoped (drift on window rotation)"
+    );
+    // 投影摘要与窗口 digest 独立分层:投影成功即证明门放行(不比对值)。
+    let _ = &projected;
+
+    // 旧语义保持:deny 仍被 digest 门拒绝(不 fallback 补 deny)。
+    assert!(
+        crate::cross_cutting::kimi_code_provider::projection::lc_tool_policy_canonical_digest(
+            Some(&ProviderToolPolicy::deny_file_write_builtins()),
+        )
+        .is_err(),
+        "deny stays forbidden on the kimi LC digest gate"
+    );
+}

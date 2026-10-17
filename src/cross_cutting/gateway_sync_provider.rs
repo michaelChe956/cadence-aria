@@ -76,11 +76,8 @@ impl ProviderAdapter for GatewaySyncProvider {
                 "gateway sync bridge: no streaming adapter registered for {provider_name:?}"
             ))
         })?;
-        let streaming_input = bridge_streaming_input(
-            &input,
-            policy.launch_audit(),
-            policy.frozen_execution(),
-        );
+        let streaming_input =
+            bridge_streaming_input(&input, policy.launch_audit(), policy.frozen_execution());
         let validated_streaming =
             crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(
                 streaming_input,
@@ -838,20 +835,18 @@ mod tests {
             constraint_check_ref: None,
             traceability_binding_refs: Vec::new(),
         };
-        let identity =
-            TrustedRunIdentity::from_durable_run(&record, "ws_bridge_t11_0001", duty);
+        let identity = TrustedRunIdentity::from_durable_run(&record, "ws_bridge_t11_0001", duty);
         let profile = match duty {
             crate::cross_cutting::provider_execution::TrustedProviderRole::Reviewer => {
                 ProviderExecutionProfile::ReviewerVerify
             }
             _ => ProviderExecutionProfile::HostCoding,
         };
-        let author_policy =
-            matches!(
-                duty,
-                crate::cross_cutting::provider_execution::TrustedProviderRole::Author
-            )
-            .then(AuthorToolPolicy::author_v1);
+        let author_policy = matches!(
+            duty,
+            crate::cross_cutting::provider_execution::TrustedProviderRole::Author
+        )
+        .then(AuthorToolPolicy::author_v1);
         crate::cross_cutting::provider_execution::freeze_provider_execution(
             &identity,
             profile,

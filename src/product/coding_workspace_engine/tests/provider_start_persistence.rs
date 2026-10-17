@@ -936,11 +936,7 @@ async fn coding_policy_review_input_carries_run_bound_durable_audit_sink() {
     assert!(
         matches!(
             input.tool_policy.as_ref().map(|policy| &policy.intent),
-            Some(
-                crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify {
-                    ..
-                }
-            )
+            Some(crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify { .. })
         ),
         "review input must carry the ReviewerVerify window contract (T20): {:?}",
         input.tool_policy

@@ -571,13 +571,12 @@ impl CodingWorkspaceEngine {
                     .await?
                 }
             };
-            // r54 越界根修残留→批2 Task 20:Reviewer prompt 不再注入
-            // 「必须worktree内复跑」与平台提交责任段(旧注入删除);改为
-            // ReviewerVerify 纪律段——保留禁止 Git mutation/平台交付与
-            // 资源登记/清理纪律,复跑验证命令的落点由窗口对账承担。
-            if attempt.target_snapshot.is_some() {
-                prompt.push_str(&reviewer_verify_discipline_section(worktree_path));
-            }
+            // r54 越界根修残留→批2 Task 20a-fix(F5):Reviewer prompt 不再
+            // 注入「必须worktree内复跑」与平台提交责任段(旧注入删除);
+            // ReviewerVerify 纪律段(禁 Git mutation/平台交付/资源登记
+            // 清理三禁条)对 LC 与单仓(非 LC)reviewer 一致注入——T19
+            // 开窗不按 target_snapshot 分叉,纪律段同不分叉。
+            prompt.push_str(&reviewer_verify_discipline_section(worktree_path));
             if !prompt.ends_with(&terminal_contract) {
                 prompt.push_str(&terminal_contract);
             }

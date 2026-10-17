@@ -193,9 +193,7 @@ async fn lcg_t12_planning_review_wire_is_danger_full_access() {
                 CancellationToken::new(),
             )
             .await
-            .unwrap_or_else(|error| {
-                panic!("{action:?} lc danger launch must start: {error}")
-            });
+            .unwrap_or_else(|error| panic!("{action:?} lc danger launch must start: {error}"));
 
         assert_eq!(
             session.native_session_id.as_deref(),
@@ -480,7 +478,9 @@ async fn lcg_t12_unknown_version_fails_closed_zero_child_without_danger_code() {
         "version-unavailable rejection keeps the LC validated start failure surface: {error:?}"
     );
     assert!(
-        !error.details.contains("codex_danger_full_access_unsupported"),
+        !error
+            .details
+            .contains("codex_danger_full_access_unsupported"),
         "legal danger baseline must not be judged unsupported: {error:?}"
     );
     assert!(
@@ -533,7 +533,6 @@ fn lcg_t05_mismatched_boundary_plan_reports_target_boundary_unverified() {
         "boundary mismatch must carry the stable reason, got: {error}"
     );
 }
-
 
 /// T12 wire 深化:LC danger 会话的 thread/resume 与 thread/start 共享同一
 /// 投影——resume 请求在真实 wire 上携带同 sandbox/approvalPolicy/cwd 与

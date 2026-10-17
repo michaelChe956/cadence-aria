@@ -368,8 +368,16 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        let version = probe_kimi_version(&self.command).await;
-        ensure_kimi_version_compatible(&version)?;
+        // 批2 Task 20a-fix(F2):四家同源启动检查首步——非法角色×策略
+        // 组合(Reviewer 无窗/空窗/deny 回退、合同专属失配)在版本探测与
+        // 子进程之前拒绝(0 会话,不 fallback)。
+        crate::cross_cutting::streaming_provider::validate_tool_policy_for_role(
+            &input.role,
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| {
+            ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
+        })?;
         let args = self.build_args();
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let process = ProcessManager::spawn(
@@ -501,14 +509,13 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         //    Kimi 拒绝非空通用策略,继续既有 ClientServicePolicy)。批2
         //    Task 20 唯一例外:`ReviewerVerify` 窗口合同——kimi 侧由
         //    冻结执行合同的受信岗位授予等价消费(窗口引用进 grant,不
-        //    造通用策略物理面),不在此拒绝。
+        //    造通用策略物理面),不在此拒绝。T7 稳定码合同保持:marker
+        //    等非豁免 intent 先按 provider_generic_tool_policy_forbidden 拒。
         if input.tool_policy.is_some()
             && !matches!(
                 input.tool_policy.as_ref().map(|policy| &policy.intent),
                 Some(
-                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify {
-                        ..
-                    }
+                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify { .. }
                 )
             )
         {
@@ -521,6 +528,17 @@ impl StreamingProviderAdapter for KimiCodeProvider {
                 String::new(),
             ));
         }
+
+        // 批2 Task 20a-fix(F2):四家同源启动检查——置于 kimi 通用策略
+        // 例外门之后、一切观测/child 之前(Reviewer 无窗/空窗/deny 回退
+        // =0 会话,不 fallback)。
+        crate::cross_cutting::streaming_provider::validate_tool_policy_for_role(
+            &input.role,
+            input.tool_policy.as_ref(),
+        )
+        .map_err(|error| {
+            ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
+        })?;
 
         // 2) adapter 匹配:validated input 必须是 Kimi ACP(不匹配即拒,
         //    不回退其它 provider/dialect)。
@@ -856,8 +874,16 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         cancel: CancellationToken,
     ) -> Result<ProviderLcPrepareFacts, ProviderAdapterError> {
         // 1) Kimi 通用策略例外(与 `start_validated` 同源的第二道门;
-        //    guard 早于 probe/child)。
-        if input.tool_policy.is_some() {
+        //    guard 早于 probe/child)。批2 Task 20a-fix(F1):ReviewerVerify
+        //    窗口合同例外放行——kimi 侧窗口经 TrustedDutyGrant 消费。
+        if input.tool_policy.is_some()
+            && !matches!(
+                input.tool_policy.as_ref().map(|policy| &policy.intent),
+                Some(
+                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify { .. }
+                )
+            )
+        {
             return Err(ProviderAdapterError::parse_error(
                 format!(
                     "kimi lc prepare facts rejected: {}: kimi carries no generic tool policy",

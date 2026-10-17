@@ -402,11 +402,10 @@ pub(crate) fn lc_approval_policy(
         // Author 岗位纪律投影(deny):恒 on-request。批2 Task 20:
         // ReviewerVerify 窗口合同非纪律会话——审批按权限档独立映射
         //（与 None 同款,Reviewer danger 原生 approval）。
-        Some(
-            crate::cross_cutting::streaming_provider::ProviderToolPolicy {
-                intent: crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
-            },
-        ) => CODEX_LC_APPROVAL_ON_REQUEST.to_string(),
+        Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+            intent:
+                crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
+        }) => CODEX_LC_APPROVAL_ON_REQUEST.to_string(),
         Some(_) | None => match permission_mode {
             ProviderPermissionMode::Auto => CODEX_LC_APPROVAL_NEVER.to_string(),
             ProviderPermissionMode::Supervised => CODEX_LC_APPROVAL_ON_REQUEST.to_string(),
@@ -565,10 +564,10 @@ mod tests {
     use super::*;
     use crate::cross_cutting::codex_provider::session::deny_file_write_builtins_tokens;
     use crate::cross_cutting::streaming_provider::canonical_tool_policy;
-    use crate::protocol::contracts::AdapterRole;
     use crate::product::logical_codebase::policy::PolicyTarget;
     use crate::product::logical_codebase::provider_gateway::ProviderRef;
     use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector;
+    use crate::protocol::contracts::AdapterRole;
 
     fn t12_root() -> PathBuf {
         std::env::temp_dir().join("codex-t12-projection-root")
@@ -673,7 +672,11 @@ mod tests {
                 "danger-full-access",
                 "{action:?}"
             );
-            assert_eq!(projection.approval_policy(), "never", "{action:?} Auto→never");
+            assert_eq!(
+                projection.approval_policy(),
+                "never",
+                "{action:?} Auto→never"
+            );
         }
     }
 
@@ -682,7 +685,13 @@ mod tests {
     #[test]
     fn lc_approval_maps_independently_by_permission_mode_with_author_on_request() {
         let deny = ProviderToolPolicy::deny_file_write_builtins();
-        let cases: [(SessionPolicyAction, AdapterRole, ProviderPermissionMode, bool, &str); 6] = [
+        let cases: [(
+            SessionPolicyAction,
+            AdapterRole,
+            ProviderPermissionMode,
+            bool,
+            &str,
+        ); 6] = [
             (
                 SessionPolicyAction::PlanningReadOnly,
                 AdapterRole::Orchestrator,
