@@ -227,6 +227,7 @@ pub(crate) fn build_coding_prompt(
     prompt.push_str(&coding_execution_protocol(routing_context));
     prompt.push_str(no_default_stack_assumption_contract());
     prompt.push_str(coding_completion_report_contract());
+    prompt.push_str(host_coding_check_contract());
     prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
     prompt
 }
@@ -317,6 +318,7 @@ pub(crate) fn build_coding_delta_prompt(
     prompt.push_str(&coding_delta_execution_protocol(routing_context));
     prompt.push_str(no_default_stack_assumption_contract());
     prompt.push_str(coding_completion_report_contract());
+    prompt.push_str(host_coding_check_contract());
     prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
     prompt
 }
@@ -392,6 +394,20 @@ pub(crate) fn coding_completion_report_contract() -> &'static str {
      - 必须单列“待人工处理”小节：逐项写明需要人工核对、人工测试或人工操作的事项及其执行方式；无此类事项时明确写“无”。该清单是交接内容，不是未完成项。\n"
 }
 
+/// 批2 Task 15（C5.1／D §7，REQ-ENV-CHECK-01）：HostCoding CHECK 自跑
+/// 合同。主路径＝Coder 自己执行计划原命令（构建／测试／依赖／容器）；
+/// 环境能力标注只是声明，不是授权也不路由——executor=container/JVM 不
+/// 改变受信 profile／岗位／工具策略；A′（verification-triage）只补外部
+/// 硬件／人工／临时缺项；失败四分类如实呈现，不归「沙箱失败」不假绿。
+/// 只注入 Coder 两个 prompt 入口；平台交付门与人工批准保持不动。
+pub(crate) fn host_coding_check_contract() -> &'static str {
+    "\n[host_coding_check]\n\
+     HostCoding CHECK 自跑合同:\n\
+     - 计划合同列出的验证命令（构建、测试、依赖、容器等 CHECK）由你自己在指定 worktree 内亲自执行并如实记录：计划命令原文、实际执行命令、工作目录（cwd）、退出码、测试数量与原始输出都会进入验证证据，供平台与人工对账。\n\
+     - 任务材料中的环境能力标注（例如 executor=container、executor=JVM，或 JVM、Node、网络、容器可用性说明）只是环境能力声明：不是授权，不是路由指令，不改变你的执行 profile、岗位或工具策略，也不改变交付必须经过的平台门与人工批准。\n\
+     - 平台不会代你执行计划命令；验证补充（verification-triage）只覆盖外部硬件、人工检查与临时缺项，不能替代你自己可执行的 CHECK。\n\
+     - CHECK 失败时按事实分类报告并保留原始输出：缺依赖、认证失败、权限失败、断言失败分别说明；不得笼统归为“沙箱失败”或“环境不可用”，不得省略失败输出，不得把失败伪装成通过。\n"
+}
 pub(crate) fn code_review_material_protocol(context: &RoutingReferenceContext) -> String {
     with_cadence_routing_reference(
         concat!(

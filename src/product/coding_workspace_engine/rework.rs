@@ -776,6 +776,12 @@ impl CodingWorkspaceEngine {
         if let Some(cwd) = worktree_cwd {
             fix_hints.push(format!("工作目录：{cwd}"));
         }
+        // T15：重跑只建 Coder 调用——指令明示由 Coder 本人在下一次
+        // coder run 亲自执行并记录证据；平台不代跑、不改计划、不清
+        // finding（executor 等环境能力标注只是声明，不构成代跑路由）。
+        fix_hints.push(
+            "本命令由你本人执行并如实记录实际命令、cwd、退出码、测试数量与原始输出；平台不代跑、不改计划、不清 finding。".to_string(),
+        );
         let instruction = CodingReworkInstruction {
             id: next_sequential_id_from_existing(
                 "coding_rework_instruction",

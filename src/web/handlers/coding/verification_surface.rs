@@ -255,7 +255,10 @@ pub(crate) async fn post_verification_triage_decision(
 }
 
 /// GET /coding-attempts/{attempt_id}/verification-command-evidence——并列
-/// 证据派生（当前 plan revision 全部验证 check；REQ-CVT-01）。
+/// 证据派生（当前 plan revision 全部验证 check；REQ-CVT-01）。T15
+/// （REQ-ENV-CHECK-01）：证据保留计划命令／实际命令／cwd／退出码／测试
+/// 数量／原始输出引用与失败四分类，供 Coder 自跑 CHECK 的对账；只读
+/// 派生，平台不在本面执行任何命令。
 pub(crate) async fn get_verification_command_evidence(
     State(state): State<WebAppState>,
     Path(path): Path<CodingAttemptRoutePath>,
@@ -294,7 +297,10 @@ pub(crate) async fn get_verification_command_evidence(
 
 /// POST /coding-attempts/{attempt_id}/rerun-planned-command——重跑原计划
 /// 命令（REQ-CVT-02；复用引擎返修落地面与 Task 2 命令账本幂等；原门
-/// send_to_coder 收口后按 WS 同款续跑判定唤回 runner）。
+/// send_to_coder 收口后按 WS 同款续跑判定唤回 runner）。T15
+/// （REQ-ENV-CHECK-01）：重跑只建 Coder 调用——请求只携带身份键，
+/// 平台不代跑命令、不自动改计划、不清 finding；A′（verification-triage）
+/// 只补外部硬件／人工／临时缺项。
 pub(crate) async fn post_rerun_planned_command(
     State(state): State<WebAppState>,
     Path(path): Path<CodingAttemptRoutePath>,
@@ -692,6 +698,131 @@ mod tests {
             .expect("ledger read")
             .expect("rejected result recorded");
         assert_eq!(ledger.state, OperationState::Rejected);
-        validate_relative_id("cmd-c2-policy-reauth-0001").expect("command id stays relative");
+    }
+
+    /// T15（REQ-ENV-CHECK-01）：重跑请求只携带身份键（command_id＋gate/check
+    /// ＋expected 版本），command_id 必须是相对 id——客户端无法借重跑面向
+    /// 平台投递任意命令文本，不产生平台通用命令执行向量。
+    #[tokio::test]
+    async fn host_coding_check_rerun_request_has_no_command_execution_vector() {
+        let (_tmp, state, store, attempt) = fixture().await;
+        let request = Json(RerunPlannedCommandRestRequest {
+            command_id: "/bin/sh -c echo pwned".to_string(),
+            gate_id: "coding_blocked_gate_0001".to_string(),
+            check_id: "check_run_tests".to_string(),
+            expected_version: attempt.rework_count as u64,
+        });
+        let error = post_rerun_planned_command(State(state), route(&attempt), request)
+            .await
+            .expect_err("non-relative command id must be rejected");
+        assert!(
+            error.code.contains("coding_rerun_invalid_command_id"),
+            "unexpected code: {}",
+            error.code
+        );
+        // 拒绝面不落任何命令账本记录、不触发返修。
+        assert!(
+            store
+                .find_attempt_command_result(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    "/bin/sh -c echo pwned"
+                )
+                .expect("ledger read")
+                .is_none()
+        );
+        assert!(
+            store
+                .list_rework_instructions(&attempt.project_id, &attempt.issue_id, &attempt.id)
+                .expect("instructions")
+                .is_empty()
+        );
+    }
+
+    /// T15：并列证据 wire 契约——计划命令／实际命令／实际 cwd／退出码／
+    /// 测试数量／原始输出引用／失败分类全部出现在 REST JSON，失败分类
+    /// snake_case 透传。
+    #[test]
+    fn host_coding_check_evidence_wire_contract_exposes_reconciliation_fields() {
+        let evidence = crate::product::coding_attempt_store::VerificationCommandEvidence {
+            check_id: "check_run_tests".to_string(),
+            planned_command: Some("cargo test --lib".to_string()),
+            planned_manual_instruction: None,
+            actual_command: Some("cargo test --lib".to_string()),
+            actual_cwd: Some("/repo/worktree".to_string()),
+            exit_code: Some(1),
+            test_execution_count: Some(3),
+            environment_summary: None,
+            raw_output_excerpt: Some("test result: FAILED. 0 passed; 3 failed".to_string()),
+            failure_class: Some(
+                crate::product::coding_attempt_store::VerificationFailureClass::AssertionFailure,
+            ),
+            mismatch: false,
+        };
+        let value = serde_json::to_value(&evidence).expect("serialize evidence");
+        for key in [
+            "check_id",
+            "planned_command",
+            "actual_command",
+            "actual_cwd",
+            "exit_code",
+            "test_execution_count",
+            "raw_output_excerpt",
+            "failure_class",
+            "mismatch",
+        ] {
+            assert!(
+                value.get(key).is_some(),
+                "并列证据 wire 缺少对账字段 {key}: {value}"
+            );
+        }
+        assert_eq!(
+            value
+                .get("failure_class")
+                .and_then(serde_json::Value::as_str),
+            Some("assertion_failure"),
+            "失败分类必须 snake_case 透传: {value}"
+        );
+        assert_eq!(
+            value
+                .get("test_execution_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
+    }
+
+    /// T15：A′ 补充定位——失败分类文案把可自跑修复指向 Coder 重跑原计划
+    /// 命令，验证处理只作为外部硬件／人工／临时缺项补充，不得建议忽略
+    /// finding、自动改计划或代跑。
+    #[test]
+    fn host_coding_check_failure_class_copy_positions_a_prime_as_supplement_only() {
+        use crate::product::coding_attempt_store::{
+            VerificationFailureClass, verification_failure_class_copy,
+        };
+        for class in [
+            VerificationFailureClass::MissingDependency,
+            VerificationFailureClass::AuthFailure,
+            VerificationFailureClass::PermissionFailure,
+            VerificationFailureClass::AssertionFailure,
+            VerificationFailureClass::Unclassified,
+        ] {
+            let copy = verification_failure_class_copy(class);
+            assert!(!copy.is_empty(), "每类失败都必须有呈现文案");
+            assert!(
+                !copy.contains("server 代跑") && !copy.contains("平台代跑你"),
+                "文案不得宣称平台代跑: {copy}"
+            );
+            assert!(
+                !copy.contains("自动改计划") && !copy.contains("清 finding"),
+                "文案不得建议自动改计划或清 finding: {copy}"
+            );
+        }
+        // A′ 定位句：只补外部硬件／人工／临时缺项。
+        let auth_copy = verification_failure_class_copy(VerificationFailureClass::AuthFailure);
+        assert!(
+            auth_copy.contains("外部") || auth_copy.contains("人工") || auth_copy.contains("临时"),
+            "认证失败文案必须把验证处理定位为外部缺项补充: {auth_copy}"
+        );
     }
 }

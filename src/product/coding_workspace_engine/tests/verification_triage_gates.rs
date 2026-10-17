@@ -1020,3 +1020,400 @@ async fn coding_output_human_triage_gate_emits_gate_required_frame() {
     drop(root);
 }
 
+
+// ─── 批2 Task 15（C5.1／D §7，REQ-ENV-CHECK-01）：HostCoding 自跑 CHECK 与 A′ 补充定位 ───
+use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
+use crate::product::coding_attempt_store::{
+    VerificationFailureClass, verification_failure_class_copy,
+};
+
+/// T15 主路径对账：计划命令／实际命令／实际 cwd／退出码／测试数量／原始
+/// 输出引用并列保留，供平台与人工对账（REQ-CVT-01 扩展）。
+#[tokio::test]
+async fn host_coding_check_command_evidence_reconciles_count_and_raw_output() {
+    let (_root, store, _engine, attempt) = verification_triage_group_fixture();
+    let check = VerificationCheck {
+        check_id: "check_cargo_nonzero".to_string(),
+        command: Some("cargo test --lib".to_string()),
+        manual_instruction: None,
+        required: true,
+        non_zero_test_execution_required: true,
+    };
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("role run");
+    store
+        .append_role_run_event(
+            &attempt,
+            &role_run,
+            crate::product::coding_models::CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "event_id": "exec_t15_reconcile",
+                "kind": "Command",
+                "status": "Succeeded",
+                "title": "cargo test",
+                "command": "cargo test --lib",
+                "cwd": "/repo/worktree",
+                "output": "running 12 tests\ntest result: ok. 12 passed; 0 failed; 2 ignored; finished in 0.5s",
+                "exit_code": 0
+            }),
+        )
+        .expect("execution event");
+    let evidence = store
+        .verification_command_evidence(&attempt.project_id, &attempt.issue_id, &attempt.id, &check)
+        .expect("evidence");
+    assert_eq!(evidence.planned_command.as_deref(), Some("cargo test --lib"));
+    assert_eq!(evidence.actual_command.as_deref(), Some("cargo test --lib"));
+    assert_eq!(evidence.actual_cwd.as_deref(), Some("/repo/worktree"));
+    assert_eq!(evidence.exit_code, Some(0));
+    assert!(!evidence.mismatch, "字面一致不得误标 mismatch");
+    assert_eq!(
+        evidence.test_execution_count,
+        Some(12),
+        "测试数量必须从原始输出派生供对账"
+    );
+    let excerpt = evidence
+        .raw_output_excerpt
+        .as_deref()
+        .expect("原始输出引用必须保留");
+    assert!(
+        excerpt.contains("12 passed"),
+        "原始输出引用须携带可对账片段：{excerpt}"
+    );
+    assert_eq!(
+        evidence.failure_class, None,
+        "通过(退出码 0)不产生失败分类"
+    );
+}
+
+/// T15 四分类：缺依赖／认证失败／权限失败／断言失败分别呈现，未命中
+/// 归「未分类失败」——任何呈现都不把失败归为「沙箱失败」，也不假绿。
+#[tokio::test]
+async fn host_coding_check_failure_classes_presented_separately() {
+    let (_root, store, _engine, attempt) = verification_triage_group_fixture();
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("role run");
+    let cases = [
+        (
+            "check_install",
+            "npm install --frozen-lockfile",
+            "npm install --frozen-lockfile",
+            "npm ERR! code ENOENT\nnpm ERR! 404 Not Found - GET https://registry.example/missing-pkg\nnpm ERR! module not found",
+            VerificationFailureClass::MissingDependency,
+            "缺依赖",
+        ),
+        (
+            "check_image",
+            "docker pull registry.local/app:latest",
+            "docker pull registry.local/app:latest",
+            "Error response from daemon: unauthorized: authentication required",
+            VerificationFailureClass::AuthFailure,
+            "认证失败",
+        ),
+        (
+            "check_make",
+            "make build",
+            "make build",
+            "make: *** [Makefile:12: build] Error 1\ncat: build/output.log: Permission denied",
+            VerificationFailureClass::PermissionFailure,
+            "权限失败",
+        ),
+        (
+            "check_tests",
+            "cargo test --lib",
+            "cargo test --lib",
+            "test result: FAILED. 0 passed; 3 failed; 0 ignored; finished in 1.0s",
+            VerificationFailureClass::AssertionFailure,
+            "断言失败",
+        ),
+        (
+            "check_vet",
+            "go vet ./...",
+            "go vet ./...",
+            "signal: killed",
+            VerificationFailureClass::Unclassified,
+            "未分类失败",
+        ),
+    ];
+    let mut copies = Vec::new();
+    for (index, (check_id, planned, actual, output, expected_class, label)) in
+        cases.iter().enumerate()
+    {
+        let check = VerificationCheck {
+            check_id: check_id.to_string(),
+            command: Some(planned.to_string()),
+            manual_instruction: None,
+            required: true,
+            non_zero_test_execution_required: false,
+        };
+        store
+            .append_role_run_event(
+                &attempt,
+                &role_run,
+                crate::product::coding_models::CodingRoleRunEventType::ExecutionEvent,
+                serde_json::json!({
+                    "event_id": format!("exec_t15_class_{index}"),
+                    "kind": "Command",
+                    "status": "Failed",
+                    "title": planned,
+                    "command": actual,
+                    "cwd": "/repo/worktree",
+                    "output": output,
+                    "exit_code": 1
+                }),
+            )
+            .expect("execution event");
+        let evidence = store
+            .verification_command_evidence(&attempt.project_id, &attempt.issue_id, &attempt.id, &check)
+            .expect("evidence");
+        assert_eq!(
+            evidence.failure_class,
+            Some(*expected_class),
+            "{planned} 分类必须分别呈现（got {:?}）",
+            evidence.failure_class
+        );
+        let copy = verification_failure_class_copy(*expected_class);
+        assert!(!copy.is_empty(), "每类失败都必须有呈现文案");
+        assert!(
+            copy.contains(label),
+            "文案必须以类名呈现：{copy}"
+        );
+        assert!(
+            copy.contains("重跑原计划命令"),
+            "主路径必须指向 Coder 重跑原计划命令：{copy}"
+        );
+        assert!(
+            !copy.contains("沙箱失败:") && !copy.contains("沙箱失败："),
+            "任何分类都不得以「沙箱失败」作为呈现标签：{copy}"
+        );
+        assert!(
+            !copy.contains("忽略 finding") && !copy.contains("自动改计划"),
+            "文案不得建议忽略 finding 或自动改计划：{copy}"
+        );
+        copies.push((*expected_class, copy));
+    }
+    // 五类文案两两可区分。
+    for (index, (_, copy)) in copies.iter().enumerate() {
+        for (other_index, (_, other)) in copies.iter().enumerate() {
+            if index != other_index {
+                assert_ne!(copy, other, "分类文案必须可区分");
+            }
+        }
+    }
+    // 认证失败文案里的 A′ 定位：外部凭据／登录态属人工／临时缺项，才走
+    // 验证处理补充；不能替代 Coder 自跑主路径。
+    let auth_copy = verification_failure_class_copy(VerificationFailureClass::AuthFailure);
+    assert!(
+        auth_copy.contains("验证处理") && auth_copy.contains("外部"),
+        "认证失败文案必须把 A′ 定位为外部缺项补充：{auth_copy}"
+    );
+}
+
+/// T15 假绿防线：退出码 0 但 0 条测试被执行时，数量并列呈现 Some(0)
+///（非 None 非 ubiquitously 绿），对账面可发现矛盾。
+#[tokio::test]
+async fn host_coding_check_zero_test_execution_surfaces_not_fake_green() {
+    let (_root, store, _engine, attempt) = verification_triage_group_fixture();
+    let check = VerificationCheck {
+        check_id: "check_zero_tests".to_string(),
+        command: Some("cargo test --lib".to_string()),
+        manual_instruction: None,
+        required: true,
+        non_zero_test_execution_required: true,
+    };
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("role run");
+    store
+        .append_role_run_event(
+            &attempt,
+            &role_run,
+            crate::product::coding_models::CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "event_id": "exec_t15_zero",
+                "kind": "Command",
+                "status": "Succeeded",
+                "title": "cargo test",
+                "command": "cargo test --lib",
+                "cwd": "/repo/worktree",
+                "output": "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; finished in 0.0s",
+                "exit_code": 0
+            }),
+        )
+        .expect("execution event");
+    let evidence = store
+        .verification_command_evidence(&attempt.project_id, &attempt.issue_id, &attempt.id, &check)
+        .expect("evidence");
+    assert_eq!(
+        evidence.test_execution_count,
+        Some(0),
+        "0 条测试执行必须呈现为 Some(0) 而非「未记录」，否则假绿不可对账"
+    );
+    assert_eq!(evidence.exit_code, Some(0));
+    assert_eq!(evidence.failure_class, None);
+}
+
+/// T15 prompt 合同：Coder 自己执行计划原命令；环境能力标注只是声明，
+/// 不是授权也不路由；executor=container/JVM 不改变 profile／岗位／工具
+/// 策略；A′ 只补外部硬件／人工／临时缺项；失败四分类如实呈现。Author／
+/// Reviewer 面不注入自跑合同，平台交付门保留。
+#[test]
+fn host_coding_check_prompt_pins_self_run_and_declaration_non_authorization() {
+    let contract = prompts::host_coding_check_contract();
+    assert!(
+        contract.starts_with("\n[host_coding_check]\n"),
+        "自跑合同必须以固定锚点开头:\n{contract}"
+    );
+    assert!(contract.contains("由你自己在指定 worktree 内亲自执行"));
+    assert!(contract.contains("executor=container"));
+    assert!(contract.contains("executor=JVM"));
+    assert!(contract.contains("只是环境能力声明"));
+    assert!(contract.contains("不是授权"));
+    assert!(contract.contains("不是路由指令"));
+    assert!(contract.contains("不改变你的执行 profile、岗位或工具策略"));
+    assert!(contract.contains("平台不会代你执行计划命令"));
+    assert!(contract.contains("只覆盖外部硬件、人工检查与临时缺项"));
+    assert!(contract.contains("缺依赖、认证失败、权限失败、断言失败分别说明"));
+    assert!(contract.contains("沙箱失败"));
+    assert!(contract.contains("不得把失败伪装成通过"));
+
+    // 两个 coder prompt 入口都必须携带自跑合同。
+    let attempt = test_attempt("coding_attempt_t15_prompt");
+    let context = CodingExecutionContext {
+        work_item_markdown: None,
+        verification_commands: vec!["cargo test --lib".to_string()],
+    };
+    let full = build_coding_prompt(&attempt, &context, None, None, &RoutingReferenceContext::Legacy);
+    let delta = build_coding_delta_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
+    for prompt in [&full, &delta] {
+        assert!(
+            prompt.contains("[host_coding_check]"),
+            "coder prompt 必须携带 HostCoding CHECK 自跑合同"
+        );
+    }
+
+    // Author／Reviewer 面不获得自跑合同授权；Reviewer 平台门语言保留。
+    let reviewer_protocol = code_review_material_protocol(&RoutingReferenceContext::Legacy);
+    assert!(
+        !reviewer_protocol.contains("[host_coding_check]"),
+        "Reviewer 面不得携带 Coder 自跑合同"
+    );
+    assert!(
+        reviewer_protocol.contains("不得绕过现有 gate"),
+        "Reviewer 平台交付门语言必须保留"
+    );
+    assert!(
+        !provider_runtime_contract("Author").contains("[host_coding_check]"),
+        "Author 面不得因环境声明获得交付授权"
+    );
+}
+
+/// T15 重跑只建 Coder 调用：引擎面只落返修指令（明示 Coder 本人执行、
+/// 平台不代跑）＋命令账本 Accepted 登记事实，不产生任何平台通用命令
+/// 执行（零新 role run），不改计划、不清 finding。
+#[tokio::test]
+async fn host_coding_check_rerun_recalls_coder_without_platform_execution() {
+    let (_root, store, engine, attempt) = verification_triage_group_fixture();
+    seed_code_review_report_with_finding(&store, &attempt);
+    seed_verification_incomplete_gate(&store, &attempt);
+    let gate_id = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("gates")[0]
+        .gate_id
+        .clone();
+    let role_runs_before = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs before");
+
+    let outcome = engine
+        .rerun_planned_command(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &crate::product::coding_workspace_engine::RerunPlannedCommandRequest {
+                command_id: "rerun-cmd-t15-0001".to_string(),
+                gate_id: gate_id.clone(),
+                check_id: TRIAGE_CHECK_PLAIN.to_string(),
+                expected_version: attempt.rework_count as u64,
+            },
+        )
+        .await
+        .expect("rerun planned command");
+    assert!(!outcome.replayed);
+
+    // 返修指令明示：由 Coder 本人在下一次 coder run 亲自执行，平台不代跑。
+    let instructions = store
+        .list_rework_instructions(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("instructions");
+    assert_eq!(instructions.len(), 1);
+    assert!(
+        instructions[0]
+            .fix_hints
+            .iter()
+            .any(|hint| hint.contains("平台不代跑")),
+        "重跑指令必须明示平台不代跑、由 Coder 本人执行：{:?}",
+        instructions[0].fix_hints
+    );
+
+    // 不产生平台通用命令执行：重跑后零新 role run（执行归下一次 coder run）。
+    let role_runs_after = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs after");
+    assert_eq!(
+        role_runs_after.len(),
+        role_runs_before.len(),
+        "重跑只建 Coder 调用，不得在平台侧执行命令"
+    );
+
+    // 命令账本只登记 Accepted 调用事实，不是平台执行结果。
+    let ledger = store
+        .find_attempt_command_result(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            "rerun-cmd-t15-0001",
+        )
+        .expect("ledger read")
+        .expect("rerun ledger record");
+    assert_eq!(
+        ledger.state,
+        crate::product::models::automation::OperationState::Accepted
+    );
+
+    // 原门收口（send_to_coder 语义）；finding 不清。
+    assert!(
+        store
+            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("gates after")
+            .is_empty()
+    );
+    let reports = store
+        .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("reports");
+    assert_eq!(reports[0].findings.len(), 1, "重跑不得清 finding");
+}

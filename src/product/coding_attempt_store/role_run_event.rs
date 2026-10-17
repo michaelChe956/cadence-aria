@@ -269,8 +269,66 @@ pub struct VerificationCommandEvidence {
     pub exit_code: Option<i32>,
     pub test_execution_count: Option<u64>,
     pub environment_summary: Option<String>,
+    /// 批2 Task 15（REQ-ENV-CHECK-01）：匹配事件原始输出的有界尾摘
+    /// （原始输出引用）。始终保留失败/通过的可观测片段，供人工对账；
+    /// 无输出字段 → None（"未记录"），不推断补写。
+    pub raw_output_excerpt: Option<String>,
+    /// 批2 Task 15：CHECK 失败四分类（仅非零退出码时呈现）。分类只是
+    /// 呈现辅助：不存在"沙箱失败"类——去沙箱后失败是真实失败，按事实
+    /// 归类供 Coder 返修与人工判断，原始输出引用始终保留可纠偏。
+    pub failure_class: Option<VerificationFailureClass>,
     /// "实际执行命令与计划不一致"（同一可执行族下参数差异也算）。
     pub mismatch: bool,
+}
+
+/// 批2 Task 15（D §7）：CHECK 失败呈现分类。缺依赖／认证失败／权限失败／
+/// 断言失败分别呈现，未命中已知模式归 Unclassified（明确"未分类"，
+/// 不冒充任何已知类）。枚举刻意不含"沙箱"类：HostCoding 全开语义下
+/// 失败不得笼统归「沙箱失败」，也不得借分类假绿。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationFailureClass {
+    MissingDependency,
+    AuthFailure,
+    PermissionFailure,
+    AssertionFailure,
+    Unclassified,
+}
+
+impl VerificationFailureClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MissingDependency => "missing_dependency",
+            Self::AuthFailure => "auth_failure",
+            Self::PermissionFailure => "permission_failure",
+            Self::AssertionFailure => "assertion_failure",
+            Self::Unclassified => "unclassified",
+        }
+    }
+}
+
+/// 批2 Task 15：四分类＋未分类的呈现文案。主路径一律指向 Coder 重跑
+/// 原计划命令（唤回原 Coder，平台不代跑）；A′（验证处理）只在文案中
+/// 作为外部硬件／人工／临时缺项的补充出现。文案不得建议忽略 finding、
+/// 自动改计划或泛化重试。
+pub fn verification_failure_class_copy(class: VerificationFailureClass) -> &'static str {
+    match class {
+        VerificationFailureClass::MissingDependency => {
+            "缺依赖：命令因依赖缺失而失败。由 Coder 在返修中安装或补齐依赖后重跑原计划命令；平台不代跑，也不归为沙箱失败。"
+        }
+        VerificationFailureClass::AuthFailure => {
+            "认证失败：命令因凭据、令牌或登录态缺失被拒。若缺外部账号或登录态，属外部／临时缺项，可经人工转入验证处理补充；Coder 自可执行的认证前置修复后重跑原计划命令。"
+        }
+        VerificationFailureClass::PermissionFailure => {
+            "权限失败：命令因文件系统或系统权限被拒。由 Coder 核对路径与权限事实后重跑原计划命令；权限事实保留在原始输出中，不归为沙箱失败。"
+        }
+        VerificationFailureClass::AssertionFailure => {
+            "断言失败：命令真实执行且测试或断言未通过，这是可观测的失败结果，不是环境问题。由 Coder 修复实现或测试后重跑原计划命令。"
+        }
+        VerificationFailureClass::Unclassified => {
+            "未分类失败：退出码非零且原始输出未命中已知分类。保留原始输出引用供人工判断；不得归为沙箱失败，也不得视为通过，可由 Coder 重跑原计划命令复核。"
+        }
+    }
 }
 
 /// C2 Task 9：三类文案 reason code（验证类等待面与前端共用）。
@@ -317,6 +375,8 @@ impl super::CodingAttemptStore {
             exit_code: None,
             test_execution_count: None,
             environment_summary: None,
+            raw_output_excerpt: None,
+            failure_class: None,
             mismatch: false,
         };
         let Some(planned_command) = check.command.as_deref() else {
@@ -356,10 +416,167 @@ impl super::CodingAttemptStore {
                 .get("exit_code")
                 .and_then(|value| value.as_i64())
                 .map(|code| code as i32);
+            // T15：原始输出引用（有界尾摘）＋测试数量（显式字段优先，
+            // 否则从输出解析；0 条测试执行呈现 Some(0) 而非 None——
+            // non_zero 要求下的假绿必须可对账发现）。
+            let output = payload
+                .get("output")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            if let Some(output) = output.as_deref() {
+                evidence.raw_output_excerpt = Some(bounded_output_excerpt(output));
+            }
+            evidence.test_execution_count = payload
+                .get("test_execution_count")
+                .and_then(|value| value.as_u64())
+                .or_else(|| output.as_deref().and_then(parse_test_execution_count));
+            // T15：非零退出码才产生失败分类（通过无分类）；分类只做呈现
+            // 区分，不存在「沙箱失败」类。
+            if evidence.exit_code.is_some_and(|code| code != 0) {
+                evidence.failure_class = Some(classify_verification_failure(
+                    output.as_deref().unwrap_or(""),
+                ));
+            }
             evidence.mismatch = command != planned_command;
         }
         Ok(evidence)
     }
+}
+
+/// 原始输出引用的尾摘上界（保留失败摘要行——测试结果/错误通常在尾部）。
+const RAW_OUTPUT_EXCERPT_LIMIT: usize = 1200;
+
+/// 有界尾摘：超限时保留尾部并显式标注前文截断；UTF-8 字符边界安全。
+fn bounded_output_excerpt(output: &str) -> String {
+    if output.len() <= RAW_OUTPUT_EXCERPT_LIMIT {
+        return output.to_string();
+    }
+    let mut start = output.len() - RAW_OUTPUT_EXCERPT_LIMIT;
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…（前文截断）{}", &output[start..])
+}
+
+/// 从原始输出解析测试执行数量：`<n> passed`＋`<n> failed` 求和（cargo/
+/// vitest/jest/pytest 口径）；无命中再回退 `<n> tests`（如 `running 0
+/// tests`）。仍无命中 → None（"未记录"，不推断补写）。
+fn parse_test_execution_count(output: &str) -> Option<u64> {
+    let tokens: Vec<&str> = output.split_whitespace().collect();
+    let mut total: Option<u64> = None;
+    for pair in tokens.windows(2) {
+        let count = pair[0].trim_matches(|c: char| !c.is_ascii_digit());
+        let Some(count) = count.parse::<u64>().ok() else {
+            continue;
+        };
+        let normalized = pair[1].trim_matches(|c: char| !c.is_alphanumeric());
+        if normalized == "passed" || normalized == "failed" {
+            total = Some(total.unwrap_or(0) + count);
+        }
+    }
+    if total.is_some() {
+        return total;
+    }
+    for pair in tokens.windows(2) {
+        let count = pair[0].trim_matches(|c: char| !c.is_ascii_digit());
+        let Some(count) = count.parse::<u64>().ok() else {
+            continue;
+        };
+        let normalized = pair[1].trim_matches(|c: char| !c.is_alphanumeric());
+        if normalized == "tests" || normalized == "test" {
+            return Some(count);
+        }
+    }
+    None
+}
+
+/// CHECK 失败四分类（呈现辅助）：按固定优先级做大小写不敏感子串匹配——
+/// 认证失败 → 权限失败 → 缺依赖 → 断言失败 → 未分类。分类不改变返修
+/// 主路径，原始输出引用始终保留供人工纠偏。
+fn classify_verification_failure(output: &str) -> VerificationFailureClass {
+    let lowered = output.to_lowercase();
+    let auth_markers = [
+        "unauthorized",
+        "unauthenticated",
+        "authentication",
+        "authenticated",
+        "eneedauth",
+        "could not read username",
+        "login required",
+        "invalid token",
+        "invalid api key",
+        "credentials",
+        "认证失败",
+        "鉴权失败",
+    ];
+    let permission_markers = [
+        "permission denied",
+        "access denied",
+        "operation not permitted",
+        "eacces",
+        "eperm",
+        "权限不足",
+        "权限拒绝",
+    ];
+    let dependency_markers = [
+        "command not found",
+        "no such file",
+        "not found",
+        "enoent",
+        "module not found",
+        "no module named",
+        "unresolved",
+        "package not found",
+        "dependency missing",
+        "依赖缺失",
+        "缺依赖",
+        "未安装",
+    ];
+    let assertion_markers = [
+        "panicked",
+        "assertion",
+        "assert",
+        "断言失败",
+        "测试失败",
+        "test failed",
+        "tests failed",
+    ];
+    if auth_markers.iter().any(|marker| lowered.contains(marker)) {
+        return VerificationFailureClass::AuthFailure;
+    }
+    if permission_markers
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        return VerificationFailureClass::PermissionFailure;
+    }
+    if dependency_markers
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        return VerificationFailureClass::MissingDependency;
+    }
+    if assertion_markers
+        .iter()
+        .any(|marker| lowered.contains(marker))
+        || contains_digit_prefixed_word(&lowered, "failed")
+    {
+        return VerificationFailureClass::AssertionFailure;
+    }
+    VerificationFailureClass::Unclassified
+}
+
+/// `<n> failed`（数字后紧跟 failed 词）扫描——cargo/jest/vitest 的失败
+/// 计数口径。
+fn contains_digit_prefixed_word(output: &str, word: &str) -> bool {
+    let tokens: Vec<&str> = output.split_whitespace().collect();
+    tokens.windows(2).any(|pair| {
+        pair[0]
+            .trim_matches(|c: char| !c.is_ascii_digit())
+            .parse::<u64>()
+            .is_ok()
+            && pair[1].trim_matches(|c: char| !c.is_alphanumeric()) == word
+    })
 }
 
 fn first_command_token(command: &str) -> &str {

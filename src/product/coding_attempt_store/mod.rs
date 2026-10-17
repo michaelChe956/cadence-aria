@@ -66,7 +66,8 @@ pub use recovery::{FailedCodeReviewRecoveryJournal, FailedCodeReviewRecoveryPhas
 pub use rework_claim::{ReworkClaimOutcome, ReworkInstructionClaim};
 pub use role_run_event::{
     VERIFICATION_EVIDENCE_ACTUAL_COMMAND_MISMATCH, VERIFICATION_EVIDENCE_PLAN_PATH_UNEXECUTABLE,
-    VERIFICATION_EVIDENCE_PLAN_UNDECLARED, VerificationCommandEvidence, verification_evidence_copy,
+    VERIFICATION_EVIDENCE_PLAN_UNDECLARED, VerificationCommandEvidence, VerificationFailureClass,
+    verification_evidence_copy, verification_failure_class_copy,
 };
 pub use run_exclusion::{CodingAttemptCommandRecord, CodingRunExclusionDecision};
 #[allow(unused_imports)]
