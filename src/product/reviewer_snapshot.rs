@@ -197,6 +197,12 @@ pub(crate) struct GitObservationBaseline {
     pub(crate) managed_refs: Vec<BaselineRef>,
     /// for-each-ref 原始输出的 sha256 摘要(观察域原始摘要)。
     pub(crate) refs_digest: String,
+    /// N4(修复轮 3):index **语义内容摘要**(`git ls-files --stage -z`
+    /// 输出的 sha256——OID/路径/模式,不受 stat-refresh 影响);漂移
+    /// 判定用此摘要,raw `index_sha256` 仅用于恢复回写。旧 manifest 无
+    /// 此字段 → None(该面跳过比对)。
+    #[serde(default)]
+    pub(crate) index_semantic_sha256: Option<String>,
 }
 
 /// 平台合法写入域基线条目(调用方精确预枚举;归属标签供 T18 判定)。
@@ -305,7 +311,8 @@ pub(crate) struct GitAnnexObservation {
     /// common-dir/config 内容 sha256。
     pub(crate) common_config_sha256: String,
     /// gitdir/config.worktree 内容 sha256(P3-1:per-worktree 配置面;
-    /// 合法缺失记 "absent")。
+    /// 合法缺失记 "absent";N3:旧 manifest 缺字段反序列化为空=跳过)。
+    #[serde(default)]
     pub(crate) worktree_config_sha256: String,
     /// objects 域摘要(loose 对象相对名 + pack 文件名与大小的有序拼接
     /// sha256;对象名即内容寻址,摘要对新增/删除敏感)。
@@ -630,6 +637,7 @@ impl ReviewerSnapshotStore {
             index_sha256: index_sha256.clone(),
             managed_refs,
             refs_digest: sha256_hex(refs_raw.as_bytes()),
+            index_semantic_sha256: Some(index_semantic_digest(&worktree)?),
         };
 
         let platform_write_baseline = capture_platform_baseline(&request.platform_write_paths)?;
@@ -985,13 +993,14 @@ fn validate_manifest(manifest: &ReviewerBaselineManifest) -> Result<(), Reviewer
             }
         }
         // capture 不变量:父目录必须也在 manifest(保证多余目录可整删)
-        if let Some((parent, _)) = entry.rel_path.rsplit_once('/') {
-            if !parent.is_empty() && !rels.contains(parent) {
+        if let Some((parent, _)) = entry.rel_path.rsplit_once('/')
+            && !parent.is_empty()
+            && !rels.contains(parent)
+        {
                 return Err(ReviewerSnapshotError::Integrity(format!(
                     "{}: 父目录 {parent} 不在 manifest",
                     entry.rel_path
                 )));
-            }
         }
     }
     if !is_object_id(&manifest.git_observation.head_sha)
@@ -1579,8 +1588,8 @@ fn walk_dir(
 /// - root `.git` 为 gitfile 文件(linked)→ 按 `gitdir: <path>` 解析
 ///   (相对路径锚定 worktree 根),commondir 文件相对 gitdir;
 /// - root `.git` 为 symlink/特殊文件 → 拒绝。
-/// linked worktree 的 gitdir/gitdir 回指文件存在时一并核对(校验 linked
-/// `.git` 指针与真实 gitdir/common-dir)。
+///   linked worktree 的 gitdir/gitdir 回指文件存在时一并核对(校验 linked
+///   `.git` 指针与真实 gitdir/common-dir)。
 fn resolve_git_identity(
     canonical_worktree: &Path,
 ) -> Result<(PathBuf, PathBuf), ReviewerSnapshotError> {
@@ -1691,16 +1700,17 @@ fn capture_platform_baseline(
 
 /// T18(F4):Git 观察域补充面采集/复观(config/objects/reflog/子模块
 /// gitdir)。capture 与 T18 恢复后重观察同源调用——摘要不同即逃逸。
+///
+/// P2-c 边界(修复轮 3 明示):objects 面为「相对路径+大小」元数据
+/// 摘要——**同尺寸替换不可检**(loose/pack 文件名即内容寻址,重命名
+/// 保留大小+名字的恶意替换逃逸此面;由 reflog/refs/HEAD 语义面与
+/// CAS blob 域互补覆盖)。
 pub(crate) fn observe_git_annex(
     gitdir: &Path,
     common_dir: &Path,
 ) -> Result<GitAnnexObservation, ReviewerSnapshotError> {
-    let file_sha = |path: &Path| -> Result<String, ReviewerSnapshotError> {
-        let bytes = std::fs::read(path).map_err(|error| {
-            ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", path.display()))
-        })?;
-        Ok(sha256_hex(&bytes))
-    };
+    // N1(修复轮 3):file_sha 闭包已无调用点(collect_named_files_sha
+    // 覆盖),删除以免 clippy -D warnings 阻断。
     // config:gitdir/config 与 common-dir/config(linked worktree 时不同;
     // linked 私有 config 可合法缺失 → 记 "absent" 摘要,与采集同源)。
     let config_sha256 = match std::fs::read(gitdir.join("config")) {
@@ -1769,6 +1779,25 @@ pub(crate) fn observe_git_annex(
         reflogs_digest,
         submodule_gitdirs_digest,
     })
+}
+
+/// N4(修复轮 3):index **语义内容摘要**——`git ls-files --stage -z`
+/// 原始输出的 sha256(模式/OID/路径;排序稳定)。stat-refresh 只改
+/// stat 区不改 OID/路径/模式 → 摘要不变,不误伤;`git add`(OID 变)
+/// 仍被检出。capture 与 T18 漂移判定同源调用。
+pub(crate) fn index_semantic_digest(worktree: &Path) -> Result<String, ReviewerSnapshotError> {
+    let output = std::process::Command::new("git")
+        .args(["ls-files", "--stage", "-z"])
+        .current_dir(worktree)
+        .output()
+        .map_err(|error| ReviewerSnapshotError::Git(format!("spawn git ls-files: {error}")))?;
+    if !output.status.success() {
+        return Err(ReviewerSnapshotError::Git(format!(
+            "git ls-files 失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(sha256_hex(&output.stdout))
 }
 
 /// 递归收集全部「相对路径:大小」行(仅元数据,不读内容;目录缺失空)。
@@ -2036,11 +2065,11 @@ impl RestoreCtx<'_> {
             }
             BaselineEntryKind::File | BaselineEntryKind::Gitfile => {
                 // 当前态为目录(含 root `.git` 被换成目录)→ 先整删再写
-                if let Ok(stat) = &current {
-                    if classify(stat.st_mode) == Some(BaselineEntryKind::Directory) {
-                        std::fs::remove_dir_all(self.worktree.join(&entry.rel_path))
-                            .map_err(|error| io_error_string("移除占位目录", error))?;
-                    }
+                if let Ok(stat) = &current
+                    && classify(stat.st_mode) == Some(BaselineEntryKind::Directory)
+                {
+                    std::fs::remove_dir_all(self.worktree.join(&entry.rel_path))
+                        .map_err(|error| io_error_string("移除占位目录", error))?;
                 }
                 let needs_write = match &current {
                     Ok(stat) => {

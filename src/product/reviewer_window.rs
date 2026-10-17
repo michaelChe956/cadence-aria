@@ -870,7 +870,7 @@ pub(crate) fn assert_review_window_current(
 // ---------------------------------------------------------------------------
 
 /// 平台 git mutation(stage/commit/push/补偿)准入:窗口冻结期间拒绝
-/// (Draining/Frozen 均拒,携带持有窗口);进入成功后必须 `exit_platform_write`。
+#[allow(dead_code)] // T19 生产接线入口(--all-targets 下测试目标未引用)
 pub(crate) fn enter_platform_write(
     store: &ReviewerWindowStore,
     worktree: &Path,
@@ -883,7 +883,7 @@ pub(crate) fn enter_platform_write(
         .map_err(ReviewerWindowError::Channel)
 }
 
-/// 平台 git mutation 退出(幂等)。
+#[allow(dead_code)] // 同上
 pub(crate) fn exit_platform_write(
     store: &ReviewerWindowStore,
     worktree: &Path,
@@ -1221,8 +1221,20 @@ pub(crate) async fn restore_window(
             // **恢复前持久化观察**——T16 回写后不可再观的漂移(index-only
             // 直写/RecoveryRequired 停等重入/崩溃续接)全部由此续接,
             // entry_id 去重不重复落 journal。
-            if let Ok(manifest) = snapshot.load_manifest(window_id) {
-                facts.extend(observed_git_violation_facts(&record, &manifest));
+            match snapshot.load_manifest(window_id) {
+                Ok(manifest) => {
+                    facts.extend(observed_git_violation_facts(&record, &manifest));
+                }
+                Err(error) => {
+                    // 顺带(修复轮 3):不再静默吞——统一转 fail-closed 事实。
+                    facts.push(DerivedViolationFact {
+                        kind: "git_observation_unreadable".to_string(),
+                        path: ".git[manifest]".to_string(),
+                        before_digest: None,
+                        after_digest: None,
+                        detail: format!("恢复后观察无法加载 manifest(fail-closed): {error}"),
+                    });
+                }
             }
             facts.extend(
                 record
@@ -1310,6 +1322,41 @@ pub(crate) async fn restore_window(
                         before_digest: fact.before_digest.clone(),
                         after_digest: fact.after_digest.clone(),
                         detail: fact.detail.clone(),
+                        restore_cursor: cursor.clone(),
+                    };
+                    store.append_violation(window_id, entry)?;
+                }
+                // 顺带(修复轮 3):仅因 pending/journal 非空而 gate、且
+                // 无任何可落事实时,把 pending 违规以占位条目写入 journal
+                // ——否则清标记后 from_violation 绑定真而 journal 空,
+                // reconcile 会误报 journal_tamper。
+                if let Some(pending) = record.violation_pending.as_ref()
+                    && facts.is_empty()
+                {
+                    let entry = ViolationJournalEntry {
+                        seq: 0,
+                        entry_id: violation_entry_id(
+                            window_id,
+                            &pending.kind,
+                            &format!("pending:{}", pending.entry_id),
+                            None,
+                            None,
+                            &pending.detail,
+                            None,
+                        ),
+                        at: now_rfc3339(),
+                        window_id: window_id.to_string(),
+                        attempt_id: record.attempt_id.clone(),
+                        run_id: record.run_id.clone(),
+                        report_id: None,
+                        kind: pending.kind.clone(),
+                        path: format!("pending:{}", pending.entry_id),
+                        before_digest: None,
+                        after_digest: None,
+                        detail: format!(
+                            "违规已观测但无可复观事实(停等标记占位落盘): {}",
+                            pending.detail
+                        ),
                         restore_cursor: cursor.clone(),
                     };
                     store.append_violation(window_id, entry)?;
@@ -1433,12 +1480,13 @@ fn restored_binding(from_violation: bool, report: &RestoreReport) -> RestoreBind
 /// 恢复报告派生的违规事实(冻结窗口内 Git 域漂移/自提交对象/可观察
 /// journal 篡改或洗白形态)。外部推送类外部副作用已在 kind/detail
 /// 中明示不可回滚——不伪造「交付零外部影响」。
-struct DerivedViolationFact {
-    kind: String,
-    path: String,
-    before_digest: Option<String>,
-    after_digest: Option<String>,
-    detail: String,
+#[derive(Debug)]
+pub(crate) struct DerivedViolationFact {
+    pub(crate) kind: String,
+    pub(crate) path: String,
+    pub(crate) before_digest: Option<String>,
+    pub(crate) after_digest: Option<String>,
+    pub(crate) detail: String,
 }
 
 fn derived_violation_facts(
@@ -1531,7 +1579,7 @@ fn derived_violation_facts(
 /// 重观察:extra refs(自提交对象留仓仍可见)/HEAD/受管 ref/index/
 /// config/objects/reflog/子模块 gitdir vs manifest 基线。观察失败
 /// fail-closed 作为 drift 事实(停等处理,不伪称通过)。
-fn observed_git_violation_facts(
+pub(crate) fn observed_git_violation_facts(
     record: &ReviewerWindowRecord,
     manifest: &crate::product::reviewer_snapshot::ReviewerBaselineManifest,
 ) -> Vec<DerivedViolationFact> {
@@ -1607,30 +1655,34 @@ fn observed_git_violation_facts(
             detail: format!("HEAD 观察不可读(fail-closed): {error}"),
         });
     }
-    // index:gitdir/index 字节 sha vs 基线。
-    let index_observation = std::fs::read(record.identity.gitdir.join("index"));
-    if let Ok(index_bytes) = index_observation.as_ref() {
-        let current = sha256_hex(&index_bytes);
-        if current != manifest.git_observation.index_sha256 {
-            facts.push(DerivedViolationFact {
-                kind: "git_domain_mutation".to_string(),
-                path: ".git/index".to_string(),
-                before_digest: Some(manifest.git_observation.index_sha256.clone()),
-                after_digest: Some(current),
-                detail: "index 字节漂移(改 Git 整轮作废;含 stat-refresh 类误伤时同样 \
-                         fail-closed,人工门处置)"
-                    .to_string(),
-            });
+    // index 漂移判定(N4 修复轮 3):语义内容摘要(`git ls-files --stage`)
+    // 比对——stat-refresh 不改 OID/路径/模式故不误伤;`git add`(OID 变)
+    // 仍检出。raw 字节仅由 T16 用于恢复回写,不作违规判定。旧 manifest
+    // 无语义摘要(None)→ 该面跳过(不把旧窗口当漂移)。
+    if let Some(expected) = manifest.git_observation.index_semantic_sha256.as_ref() {
+        match crate::product::reviewer_snapshot::index_semantic_digest(&worktree) {
+            Ok(current) => {
+                if current != *expected {
+                    facts.push(DerivedViolationFact {
+                        kind: "git_domain_mutation".to_string(),
+                        path: ".git/index".to_string(),
+                        before_digest: Some(expected.clone()),
+                        after_digest: Some(current),
+                        detail: "index 语义内容漂移(模式/OID/路径;改 Git 整轮作废)".to_string(),
+                    });
+                }
+            }
+            Err(error) => {
+                // P3-3:观察失败 fail-closed 计事实。
+                facts.push(DerivedViolationFact {
+                    kind: "git_observation_unreadable".to_string(),
+                    path: ".git[index]".to_string(),
+                    before_digest: None,
+                    after_digest: None,
+                    detail: format!("index 语义摘要不可观察(fail-closed): {error}"),
+                });
+            }
         }
-    } else if let Err(error) = index_observation.as_ref() {
-        // P3-3:观察失败 fail-closed 计事实。
-        facts.push(DerivedViolationFact {
-            kind: "git_observation_unreadable".to_string(),
-            path: ".git[index]".to_string(),
-            before_digest: None,
-            after_digest: None,
-            detail: format!("index 观察不可读(fail-closed): {error}"),
-        });
     }
     // F4:annex 补充面(config/objects/reflog/子模块 gitdir)。
     if let Some(baseline) = manifest.git_annex_observation.as_ref() {
@@ -1652,6 +1704,14 @@ fn observed_git_violation_facts(
                     ),
                     ("objects", &baseline.objects_digest, &current.objects_digest),
                     ("reflogs", &baseline.reflogs_digest, &current.reflogs_digest),
+                    // N2(修复轮 3):config.worktree 面此前采集从不比对,
+                    // 现入对比表;旧 manifest 字段缺失反序列化为空串 →
+                    // 跳过(N3),不把旧窗口当漂移。
+                    (
+                        "worktree_config",
+                        &baseline.worktree_config_sha256,
+                        &current.worktree_config_sha256,
+                    ),
                     (
                         "submodule_gitdirs",
                         &baseline.submodule_gitdirs_digest,
@@ -1659,7 +1719,7 @@ fn observed_git_violation_facts(
                     ),
                 ];
                 for (face, before, after) in comparisons {
-                    if before != after {
+                    if !before.is_empty() && before != after {
                         facts.push(DerivedViolationFact {
                             kind: "git_annex_drift".to_string(),
                             path: format!(".git[{face}]"),

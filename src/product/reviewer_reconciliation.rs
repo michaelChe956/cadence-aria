@@ -37,7 +37,7 @@ use crate::product::reviewer_snapshot::{
 };
 use crate::product::reviewer_window::manifest_fingerprint;
 use crate::product::reviewer_window_store::{
-    ReportAcceptance, RestoreBinding, ReviewerWindowRecord, ReviewerWindowState,
+    ReportAcceptance, ReviewerWindowRecord, ReviewerWindowState,
     ReviewerWindowStore, ViolationJournalEntry,
 };
 
@@ -47,6 +47,7 @@ use crate::product::reviewer_window_store::{
 
 /// baseline manifest 的装载结局(区分「不存在」与「读不了」:
 /// 前者配合已有 baseline 绑定构成篡改信号,后者 fail-closed 停等)。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ManifestFacts {
     Loaded(ReviewerBaselineManifest),
@@ -290,7 +291,7 @@ pub(crate) fn reconcile(facts: &ReconciliationFacts) -> ReconciliationOutcome {
                 consistency_reasons.push("manifest 与窗口记录身份不对齐".to_string());
             }
             // 平台 allowlist 对齐:预枚举路径+归属必须与基线一致。
-            let record_paths = platform_allowlist(&record);
+            let record_paths = platform_allowlist(record);
             let manifest_paths = platform_allowlist_of_manifest(manifest);
             if record_paths != manifest_paths {
                 consistent = false;
@@ -496,11 +497,6 @@ pub(crate) enum ReconciliationError {
     WindowStore(crate::product::json_store::ProductStoreError),
 }
 
-/// 恢复绑定便捷取值(测试/消费者用)。
-pub(crate) fn binding_of(record: &ReviewerWindowRecord) -> Option<&RestoreBinding> {
-    record.restore.as_ref()
-}
-
 // ---------------------------------------------------------------------------
 // 内测
 // ---------------------------------------------------------------------------
@@ -513,13 +509,14 @@ mod tests {
     };
     use crate::product::coding_models::ReviewReportAcceptance;
     use crate::product::reviewer_snapshot::{
-        CaptureRequest, PlatformWritePath, REVIEWER_BASELINE_SCHEMA, RestoreCursor, RestorePhase,
+        PlatformWritePath, REVIEWER_BASELINE_SCHEMA, RestoreCursor, RestorePhase,
         ReviewWorktreeLockIdentity, ReviewerSnapshotStore, SnapshotBudget,
     };
     use crate::product::reviewer_window::{
         ViolationRecord, begin_quiesce, begin_review_window, close_accepted,
         record_report_acceptance, record_violation, resolve_manual_gate, restore_window,
     };
+    use crate::product::reviewer_window_store::RestoreBinding;
     use crate::product::reviewer_window_store::{
         BaselineBinding, ReportAcceptance, ReviewerWindowStore, ViolationJournalEntry,
         wire_acceptance,
@@ -668,10 +665,11 @@ mod tests {
             git_observation: crate::product::reviewer_snapshot::GitObservationBaseline {
                 head_symref: Some("refs/heads/main".to_string()),
                 head_sha: "0".repeat(40),
-                index_blob: "blobs/0".repeat(1),
+                index_blob: "blobs/0".to_string(),
                 index_sha256: "0".repeat(64),
                 managed_refs: Vec::new(),
                 refs_digest: "0".repeat(64),
+                index_semantic_sha256: None,
             },
             platform_write_baseline: Vec::new(),
             scope_key: ResourceScopeKey {
@@ -1832,10 +1830,19 @@ mod tests {
 
         // Reviewer 直写 .git/index(追加字节:无新对象/无 ref 痕迹——
         // 恢复回写后不可再观)+ 平台域漂移(逼 RecoveryRequired 分支)。
-        let index_path = fx.worktree.join(".git").join("index");
-        let mut index_bytes = fs::read(&index_path).unwrap();
-        index_bytes.extend_from_slice(b"evil");
-        fs::write(&index_path, index_bytes).unwrap();
+        // index-only 直写(N4 语义可检出形态):写对象 + 直接改 staging
+        // (无 ref/HEAD 变化;OID 变 → 语义摘要漂移)。
+        fs::write(fx.worktree.join("evil.txt"), "evil\n").unwrap();
+        let blob = git_sha(&fx.worktree, &["hash-object", "-w", "evil.txt"]);
+        git_ok(
+            &fx.worktree,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{blob},evil.txt"),
+            ],
+        );
         fs::write(&platform_file, "v1-drift\n").unwrap();
 
         let quiescing = begin_quiesce(&store, "w-p1", handle.generation, "end").unwrap();
@@ -1905,10 +1912,18 @@ mod tests {
         ))
         .expect("begin");
 
-        let index_path = fx.worktree.join(".git").join("index");
-        let mut index_bytes = fs::read(&index_path).unwrap();
-        index_bytes.extend_from_slice(b"evil");
-        fs::write(&index_path, index_bytes).unwrap();
+        // index-only 直写(N4 语义可检出形态,同 p1 平台绕行)。
+        fs::write(fx.worktree.join("evil.txt"), "evil\n").unwrap();
+        let blob = git_sha(&fx.worktree, &["hash-object", "-w", "evil.txt"]);
+        git_ok(
+            &fx.worktree,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{blob},evil.txt"),
+            ],
+        );
         let quiescing = begin_quiesce(&store, "w-p1c", handle.generation, "end").unwrap();
 
         // 第一次入口:观察+in_progress 已持久化;journal 阻断使收口
@@ -2145,5 +2160,232 @@ mod tests {
         .expect("陈旧 pending 已清,B 必须可推进");
         assert_eq!(violated.state, ReviewerWindowState::ViolationRecorded);
         assert_eq!(store.load_violations("w-p34").unwrap().len(), 2);
+    }
+
+    // ---------- 审查修复轮 3(N1-N4+顺带)钉测 ----------
+
+    /// N2:直写 .git/config.worktree → git_annex_drift → ManualGate。
+    #[test]
+    fn n2_config_worktree_direct_write_detected() {
+        let fx = fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = block_on(begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-n2", "attempt-1", &fx.worktree, &targets),
+        ))
+        .expect("begin");
+
+        // 窗口内直写 per-worktree 配置面。
+        fs::write(
+            fx.worktree.join(".git").join("config.worktree"),
+            "[core]\n\tfoo\n",
+        )
+        .unwrap();
+        let quiescing = begin_quiesce(&store, "w-n2", handle.generation, "end").unwrap();
+        let summary = block_on(restore_window(
+            &store,
+            &snapshot,
+            "w-n2",
+            quiescing.generation,
+        ))
+        .expect("restore");
+        assert!(summary.manual_gate, "直写 config.worktree 必须进人工门");
+        let journal = store.load_violations("w-n2").unwrap();
+        assert!(
+            journal
+                .iter()
+                .any(|entry| entry.kind == "git_annex_drift"
+                    && entry.path.contains("worktree_config")),
+            "{journal:?}"
+        );
+    }
+
+    /// N3:修复轮 1 形态 manifest(annex 无 worktree_config_sha256 字段)
+    /// 可反序列化,观察跳过该面不误报。
+    #[test]
+    fn n3_round1_manifest_deserializes_and_skips_missing_face() {
+        let mut manifest = minimal_manifest("w-n3");
+        manifest.git_annex_observation =
+            Some(crate::product::reviewer_snapshot::GitAnnexObservation {
+                config_sha256: "a".to_string(),
+                common_config_sha256: "b".to_string(),
+                // 修复轮 1 形态:无此字段 → JSON 缺失 → 反序列化为空串。
+                worktree_config_sha256: String::new(),
+                objects_digest: "c".to_string(),
+                reflogs_digest: "d".to_string(),
+                submodule_gitdirs_digest: "e".to_string(),
+            });
+        // 手工剔除 worktree_config_sha256 键模拟 round-1 JSON。
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        let annex = value
+            .get_mut("git_annex_observation")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        annex.remove("worktree_config_sha256");
+        let manifest: crate::product::reviewer_snapshot::ReviewerBaselineManifest =
+            serde_json::from_value(value).expect("round-1 manifest 必须可反序列化");
+        assert_eq!(
+            manifest
+                .git_annex_observation
+                .as_ref()
+                .unwrap()
+                .worktree_config_sha256,
+            ""
+        );
+
+        // 空 before → 观察跳过该面(不把旧窗口当漂移):直接断言比对守卫。
+        let mut record = facts_record("w-n3");
+        record.state = ReviewerWindowState::Restoring;
+        record.restore = Some(restored_binding());
+        let facts =
+            crate::product::reviewer_window::observed_git_violation_facts(&record, &manifest);
+        assert!(
+            !facts
+                .iter()
+                .any(|fact| fact.path.contains("worktree_config")),
+            "空 before 必须跳过该面: {facts:?}"
+        );
+    }
+
+    /// N4:常规 git status(stat-refresh)不改语义摘要——不整轮作废;
+    /// git add(OID 变)仍被检出。
+    #[test]
+    fn n4_index_semantic_digest_ignores_stat_refresh_detects_add() {
+        let fx = fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = block_on(begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-n4a", "attempt-1", &fx.worktree, &targets),
+        ))
+        .expect("begin");
+
+        // 场景 1:评审 agent 常规 git status(触发 index stat-refresh 写)。
+        git_ok(&fx.worktree, &["status", "--porcelain"]);
+        let quiescing = begin_quiesce(&store, "w-n4a", handle.generation, "end").unwrap();
+        let summary = block_on(restore_window(
+            &store,
+            &snapshot,
+            "w-n4a",
+            quiescing.generation,
+        ))
+        .expect("restore");
+        assert!(
+            !summary.manual_gate,
+            "stat-refresh 不得整轮作废: {:?}",
+            store.load_violations("w-n4a").unwrap()
+        );
+
+        // 场景 2:git add(新对象入 index,OID 变)仍被检出。
+        let fx2 = fixture();
+        let store2 = fx2.store();
+        let snapshot2 = fx2.snapshot();
+        let scope2 = open_scope(&fx2.base, "coder");
+        let targets2: [&ProviderRunResourceScope; 1] = [&scope2];
+        let handle2 = block_on(begin_review_window(
+            &store2,
+            &snapshot2,
+            &begin_request("w-n4b", "attempt-1", &fx2.worktree, &targets2),
+        ))
+        .expect("begin");
+        fs::write(fx2.worktree.join("smuggled.txt"), "x\n").unwrap();
+        git_ok(&fx2.worktree, &["add", "smuggled.txt"]);
+        let quiescing2 = begin_quiesce(&store2, "w-n4b", handle2.generation, "end").unwrap();
+        let summary2 = block_on(restore_window(
+            &store2,
+            &snapshot2,
+            "w-n4b",
+            quiescing2.generation,
+        ))
+        .expect("restore");
+        assert!(summary2.manual_gate, "git add 漂移必须被检出");
+        let journal = store2.load_violations("w-n4b").unwrap();
+        assert!(
+            journal.iter().any(|entry| entry.path == ".git/index"),
+            "{journal:?}"
+        );
+    }
+
+    /// 顺带 2:零事实 pending 清除时落占位条目——reconcile 不误报
+    /// journal_tamper(from_violation 真而 journal 空的矛盾)。
+    #[test]
+    fn incidental2_pending_placeholder_entry_prevents_tamper_false_positive() {
+        let fx = fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = block_on(begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-i2", "attempt-1", &fx.worktree, &targets),
+        ))
+        .expect("begin");
+        let quiescing = begin_quiesce(&store, "w-i2", handle.generation, "end").unwrap();
+
+        // 造 pending + 白盒构造 Restoring 现场(同 p2a)。
+        let journal_path = fx.window_root.join("violations").join("w-i2.json");
+        fs::create_dir_all(&journal_path).unwrap();
+        assert!(
+            record_violation(
+                &store,
+                &snapshot,
+                "w-i2",
+                quiescing.generation,
+                ViolationRecord {
+                    kind: "channel_bypass",
+                    path: "channels/commit",
+                    before_digest: None,
+                    after_digest: None,
+                    detail: "绕过",
+                    report_id: None,
+                },
+            )
+            .is_err()
+        );
+        fs::remove_dir(&journal_path).unwrap();
+        let mut record = store.load_window("w-i2").unwrap();
+        record.state = ReviewerWindowState::Restoring;
+        record.restore = Some(crate::product::reviewer_window_store::RestoreBinding {
+            completed: false,
+            from_violation: false,
+            outcome: "in_progress".to_string(),
+            cursor_phase: None,
+            entry_index: None,
+            detail: String::new(),
+            git_restored_mutation_paths: Vec::new(),
+            git_extra_refs_observed: Vec::new(),
+            platform_verified: Vec::new(),
+        });
+        record.bump_transition(ReviewerWindowState::Restoring, "白盒 kill 现场");
+        let expected = record.generation;
+        let record = store.save_window_transition(record, expected).unwrap();
+
+        let summary = block_on(restore_window(&store, &snapshot, "w-i2", record.generation))
+            .expect("reentry");
+        assert!(summary.manual_gate);
+        // 占位条目已落:reconcile 无 journal_tamper 误报。
+        let journal = store.load_violations("w-i2").unwrap();
+        assert_eq!(journal.len(), 1, "pending 占位条目: {journal:?}");
+        let outcome = reconcile_from_stores(&store, &snapshot, "w-i2").unwrap();
+        match &outcome.recommendation {
+            AcceptanceRecommendation::Invalidated { reasons, .. } => {
+                assert!(
+                    !reasons.iter().any(
+                        |reason| reason.contains("journal 为空") || reason.contains("序号断裂")
+                    ),
+                    "不得误报篡改: {reasons:?}"
+                );
+            }
+            other => panic!("期望 Invalidated,得到 {other:?}"),
+        }
     }
 }
