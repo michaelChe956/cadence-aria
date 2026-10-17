@@ -831,15 +831,21 @@ mod tests {
         panic!("no PermissionRequest arrived");
     }
 
-    /// Task 6 红测①(无 bwrap):六职责经 5 个 wire 角色承载(Author 由
-    /// Orchestrator 承载,岗位纪律归 T8);冻结 policy 面允许 terminal 的
-    /// 角色(Auto 档)必须直接启动 Host 进程并完成——现状:bwrap 缺失时
-    /// Auto 档死于 "bubblewrap is unavailable"。拒绝型角色维持 policy
-    /// 拒绝(拒绝原因必须是角色 policy,不是 bwrap 缺失)。
+    /// Task 6 红测①(无 bwrap)+ 批2 Task 8 反转:六职责经 5 个 wire
+    /// 角色承载(Author 由 Orchestrator 承载,岗位纪律归 T8);policy
+    /// 面允许 terminal 的角色(Auto 档)直接启动 Host 进程并完成。
+    /// 批2 Task 8:Reviewer/Splitter/Handoff terminal 不再整段拒绝——
+    /// 合法操作正向启动(fs 写面的职责拒绝由 policy/fs 测试另行钉住)。
     #[cfg(unix)]
     #[tokio::test]
     async fn host_terminal_starts_for_permitted_roles_without_bwrap_auto() {
-        for role in [AdapterRole::Orchestrator, AdapterRole::Executor] {
+        for role in [
+            AdapterRole::Orchestrator,
+            AdapterRole::Executor,
+            AdapterRole::Reviewer,
+            AdapterRole::WorkItemSplitter,
+            AdapterRole::Handoff,
+        ] {
             let dir = tempfile::tempdir().expect("dir");
             let state = host_state(role.clone(), dir.path().canonicalize().expect("root"));
             let params = json!({
@@ -864,28 +870,6 @@ mod tests {
                 "{role:?}"
             );
             state.terminal.release(&id).await.expect("release");
-        }
-        for role in [
-            AdapterRole::Reviewer,
-            AdapterRole::WorkItemSplitter,
-            AdapterRole::Handoff,
-        ] {
-            let dir = tempfile::tempdir().expect("dir");
-            let state = host_state(role.clone(), dir.path().canonicalize().expect("root"));
-            let params = json!({
-                "sessionId": "client-service-test",
-                "command": "/bin/sh",
-                "args": ["-c", "echo denied"],
-                "cwd": ""
-            });
-            let error = handle_terminal_create(&state, &params)
-                .await
-                .expect_err("role policy denial is unchanged");
-            let message = error.to_string();
-            assert!(
-                message.contains("not permitted") || message.contains("read-only"),
-                "{role:?}: {message}"
-            );
         }
     }
 

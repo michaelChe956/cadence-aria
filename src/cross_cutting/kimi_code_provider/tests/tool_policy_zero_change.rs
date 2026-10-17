@@ -1116,3 +1116,96 @@ async fn lcg_t07_kimi_generic_policy_rejected_before_version_child() {
     assert_eq!(kimi_handshake_count, 0);
     assert_eq!(kimi_reason, "provider_generic_tool_policy_forbidden");
 }
+
+// ==== 批2 Task 8:Kimi 岗位策略(通用 tool policy 的 kimi 等价承担面)====
+
+/// r61 豁免的等价承担在 Task 8 岗位化后依然成立:策略角色
+/// (Orchestrator/Splitter/Handoff wire 承载 + 无窗 Reviewer)的 fs 写仍
+/// 被 `ClientServicePolicy` 拒绝——gateway 对 KimiCode 的
+/// `DenyFileWriteBuiltins`→None 映射不因岗位化失去等价面(terminal
+/// 正向放行不影响该结论:豁免只覆盖「文件写内建」语义,fs 写拒绝
+/// 由 fs API 授权根/no-follow 合同与职责矩阵独立钉住)。
+#[test]
+fn kimi_duty_contract_keeps_policy_role_fs_write_denied_after_r61_exemption() {
+    use crate::cross_cutting::kimi_code_provider::client_services::{
+        ClientAction, ClientServicePolicy,
+    };
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+
+    for (role, label) in [
+        (AdapterRole::Orchestrator, "orchestrator duty"),
+        (AdapterRole::WorkItemSplitter, "splitter duty"),
+        (AdapterRole::Handoff, "handoff duty"),
+        (AdapterRole::Reviewer, "review window"),
+    ] {
+        for mode in [
+            ProviderPermissionMode::Auto,
+            ProviderPermissionMode::Supervised,
+        ] {
+            let policy = ClientServicePolicy::new(role.clone(), mode.clone());
+            assert!(
+                matches!(
+                    policy.evaluate(ClientAction::FsWrite),
+                    crate::cross_cutting::kimi_code_provider::client_services::PolicyDecision::Deny(
+                        message
+                    ) if message.contains(label)
+                ),
+                "{role:?} x {mode:?}"
+            );
+        }
+    }
+}
+
+/// Author 岗位合同(kimi provider 表面):工具广告与实际拒绝同一岗位
+/// 合同——author 职责(Orchestrator 承载,经 T2 冻结合同注入)不广告
+/// 代码编辑 fs 写(`writeTextFile:false`,不按扩展名另建过滤),fs 写
+/// 请求拒绝;窗口化 Reviewer 正向获得 fs 写判定;作者文档走平台通道。
+#[test]
+fn kimi_author_duty_hides_fs_write_advertisement_and_reviewer_window_grants_write() {
+    use crate::cross_cutting::kimi_code_provider::client_services::test_fixtures::frozen_duty_grant;
+    use crate::cross_cutting::kimi_code_provider::client_services::{
+        ClientAction, ClientServicePolicy, PolicyDecision,
+    };
+    use crate::cross_cutting::provider_execution::TrustedProviderRole;
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+
+    let author = ClientServicePolicy::new(AdapterRole::Orchestrator, ProviderPermissionMode::Auto)
+        .with_trusted_duty(frozen_duty_grant(
+            TrustedProviderRole::Author,
+            AdapterRole::Orchestrator,
+            None,
+        ));
+    // 广告面:author 不广告 fs 写,read/terminal 保持方言全集。
+    let capabilities = author.advertised_capabilities();
+    assert_eq!(
+        capabilities["fs"]["writeTextFile"],
+        serde_json::json!(false)
+    );
+    assert_eq!(capabilities["fs"]["readTextFile"], serde_json::json!(true));
+    assert_eq!(capabilities["terminal"], serde_json::json!(true));
+    // 实际拒绝:同一合同,fs 写请求 Deny。
+    assert_eq!(
+        author.evaluate(ClientAction::FsWrite),
+        PolicyDecision::Deny(
+            "author duty denies code-editing fs writes (builtin_write_code_file); author documents go through the platform channel"
+        )
+    );
+
+    // 窗口化 Reviewer:fs 写正向随权限档(有效窗口引用=受信 fixture,
+    // T20 接真窗)。
+    let reviewer = ClientServicePolicy::new(AdapterRole::Reviewer, ProviderPermissionMode::Auto)
+        .with_trusted_duty(frozen_duty_grant(
+            TrustedProviderRole::Reviewer,
+            AdapterRole::Reviewer,
+            Some("window_t8"),
+        ));
+    assert_eq!(
+        reviewer.evaluate(ClientAction::FsWrite),
+        PolicyDecision::Allow
+    );
+    let reviewer_capabilities = reviewer.advertised_capabilities();
+    assert_eq!(
+        reviewer_capabilities["fs"]["writeTextFile"],
+        serde_json::json!(true)
+    );
+}

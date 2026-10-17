@@ -29,7 +29,14 @@ use crate::protocol::contracts::AdapterRole;
 
 use self::fs_handlers::{handle_fs_read, handle_fs_write};
 use self::fs_service::FsError;
-use self::policy::{ClientAction, ClientServicePolicy, PolicyDecision};
+// 批2 Task 8:受信岗位授予(T2 冻结执行合同消费面)经 dispatcher 注入;
+// policy 面 pub(crate) re-export 供三处测试(policy/mod/tool_policy)与
+// T10/T20 接线共用同一入口。
+#[cfg(test)]
+pub(crate) use self::policy::test_fixtures;
+pub(crate) use self::policy::{
+    ClientAction, ClientServicePolicy, PolicyDecision, TrustedDutyGrant,
+};
 use self::sandbox::canonicalize_root;
 use self::terminal::{TerminalError, TerminalManager};
 // 批2 Task 7（Bug45）：会话（kimi_code_provider::session）注入同一
@@ -42,6 +49,11 @@ use self::terminal_handlers::{
 
 /// Adapter-local constant: kimi's boolean client-capability dialect. It never
 /// leaks into the generic ACP layer.
+///
+/// 批2 Task 8:岗位感知广告(`ClientServicePolicy::advertised_capabilities`,
+/// Author 不广告代码编辑 fs 写)与本函数共用同一布尔方言形状;会话
+/// initialize 接线归 T10/T20,当前直连会话保持全集(广告≠授权,请求仍
+/// 逐条过 policy gate)。
 pub fn kimi_client_capabilities() -> Value {
     json!({
         "fs": {"readTextFile": true, "writeTextFile": true},
@@ -124,12 +136,7 @@ impl<W> KimiClientServiceDispatcher<W>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    /// 12 个参数均为构造期一次性注入的运行时依赖（peer/session/working_dir/
-    /// role/permission_mode/session_env/bridge/event_tx/cancel/terminal/
-    /// baseline_tree/target_boundary），无自然聚合语义且仅在 `new` 使用
-    /// 一次，重构为 struct 会引入额外间接层，故允许 clippy::too_many_arguments。
-    /// 批2 Task 7（Bug45）：`terminal` 由会话注入（会话 stall 判定与产品
-    /// 双层看门狗读同一真实活动 registry，同源不另造状态）。
+    /// 批2 Task 8:直连形态构造(无受信授予,行为=承载角色映射职责矩阵)。
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer: JsonRpcPeer<W>,
@@ -144,6 +151,49 @@ where
         terminal: TerminalManager,
         baseline_tree: Option<BaselineTreeRef>,
         target_boundary: Option<ProviderBoundaryPlan>,
+    ) -> Self {
+        Self::new_with_trusted_duty(
+            peer,
+            session_id,
+            working_dir,
+            role,
+            permission_mode,
+            session_env,
+            bridge,
+            event_tx,
+            cancel,
+            terminal,
+            baseline_tree,
+            target_boundary,
+            None,
+        )
+    }
+
+    /// 12+1 个参数均为构造期一次性注入的运行时依赖(peer/session/
+    /// working_dir/role/permission_mode/session_env/bridge/event_tx/cancel/
+    /// terminal/baseline_tree/target_boundary/trusted_duty),无自然聚合
+    /// 语义且仅在构造使用一次,重构为 struct 会引入额外间接层,故允许
+    /// clippy::too_many_arguments。
+    /// 批2 Task 7(Bug45):`terminal` 由会话注入(会话 stall 判定与产品
+    /// 双层看门狗读同一真实活动 registry,同源不另造状态)。
+    /// 批2 Task 8:`trusted_duty` 为受信岗位授予(T2 冻结执行合同消费
+    /// 面;`None` 等价 [`Self::new`] 直连形态;生产注入归 T10/T20,测试
+    /// 注入可信 fixture)。
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_trusted_duty(
+        peer: JsonRpcPeer<W>,
+        session_id: String,
+        working_dir: PathBuf,
+        role: AdapterRole,
+        permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode,
+        session_env: std::collections::BTreeMap<String, String>,
+        bridge: Arc<ApprovalBridge>,
+        event_tx: mpsc::Sender<ProviderEvent>,
+        cancel: CancellationToken,
+        terminal: TerminalManager,
+        baseline_tree: Option<BaselineTreeRef>,
+        target_boundary: Option<ProviderBoundaryPlan>,
+        trusted_duty: Option<TrustedDutyGrant>,
     ) -> Self {
         let root = canonicalize_root(&working_dir).unwrap_or(working_dir);
         // Task 4c 一致性早门:LC plan 的进程 cwd 必须即会话根(plan 与 root
@@ -165,10 +215,15 @@ where
         // request/response (see `handle_terminal_output`); kimi 0.38.0
         // ignores unsolicited `terminal/output` notifications.
 
+        let policy = ClientServicePolicy::new(role, permission_mode);
+        let policy = match trusted_duty {
+            Some(grant) => policy.with_trusted_duty(grant),
+            None => policy,
+        };
         let state = Arc::new(ClientServiceState {
             session_id,
             root,
-            policy: ClientServicePolicy::new(role, permission_mode),
+            policy,
             session_env,
             bridge,
             event_tx,
@@ -355,8 +410,13 @@ mod tests {
         env
     }
 
+    /// 批2 Task 8 反转:Reviewer 直连会话 terminal 正向执行(Host 单路径
+    /// 物理可达是正确观察);FsWrite 无有效窗口引用拒绝(可区分文案);
+    /// FsRead 仍锚定授权根(越界拒绝——fs API 拒绝越界同样是正确观察,
+    /// 两种观察互不否定)。
+    #[cfg(unix)]
     #[tokio::test]
-    async fn reviewer_role_is_read_only_and_confined_to_authorized_root() {
+    async fn reviewer_wire_session_terminal_positive_and_fs_write_denied_without_window() {
         let dir = tempfile::tempdir().expect("dir");
         let (client, server) = tokio::io::duplex(16 * 1024);
         let (reader, writer) = tokio::io::split(client);
@@ -382,75 +442,61 @@ mod tests {
         let (server_reader, mut server_writer) = tokio::io::split(server);
         let mut server_reader = tokio::io::BufReader::new(server_reader);
 
-        // Reviewer cannot execute terminals or write files even though the
-        // root is the authorized worktree: the role boundary precedes any
-        // root-based authorization.
-        let cases = [
-            (
-                "terminal/create",
-                json!({
-                    "sessionId": "reviewer-session",
-                    "command": "git status",
-                    "cwd": ""
-                }),
-                ERROR_REJECTED,
-            ),
-            (
-                "fs/write_text_file",
-                json!({
-                    "sessionId": "reviewer-session",
-                    "path": "notes.txt",
-                    "content": "x"
-                }),
-                ERROR_REJECTED,
-            ),
-            // The single permitted action (fs read) is still confined to the
-            // authorized root; escaping paths are rejected.
-            (
-                "fs/read_text_file",
-                json!({
-                    "sessionId": "reviewer-session",
-                    "path": "../escape.txt"
-                }),
-                ERROR_FS,
-            ),
-        ];
-        for (index, (method, params, expected_code)) in cases.iter().enumerate() {
-            assert!(dispatcher.dispatch(method, json!(index), params.clone()));
-            let reply = {
-                let mut line = String::new();
-                tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                    loop {
-                        line.clear();
-                        server_reader
-                            .read_line(&mut line)
-                            .await
-                            .expect("read reply");
-                        if !line.trim().is_empty() {
-                            break;
-                        }
-                    }
-                })
-                .await
-                .expect("reply within timeout");
-                serde_json::from_str::<Value>(&line).expect("reply json")
-            };
-            assert_eq!(reply["id"], json!(index), "{method}");
-            assert_eq!(
-                reply["error"]["code"],
-                json!(expected_code),
-                "{method}: {reply}"
-            );
-            if *expected_code == ERROR_REJECTED {
-                assert!(
-                    reply["error"]["message"]
-                        .as_str()
-                        .expect("message")
-                        .contains("reviewer"),
-                    "{method}: {reply}"
-                );
-            }
-        }
+        // 1) terminal 正向:真实 Host 子进程执行成功(非拒绝)。
+        assert!(dispatcher.dispatch(
+            "terminal/create",
+            json!(0),
+            json!({
+                "sessionId": "reviewer-session",
+                "command": "/bin/sh",
+                "args": ["-c", "printf reviewer-terminal-ok"],
+                "cwd": "",
+                "outputByteLimit": 4194304
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 0).await;
+        let terminal_id = reply["result"]["terminalId"]
+            .as_str()
+            .expect("reviewer terminal must be positively allowed")
+            .to_string();
+        assert!(dispatcher.dispatch(
+            "terminal/wait_for_exit",
+            json!(1),
+            json!({"sessionId": "reviewer-session", "terminalId": terminal_id})
+        ));
+        let reply = read_reply(&mut server_reader, 1).await;
+        assert_eq!(reply["result"]["exitCode"], json!(0), "{reply}");
+
+        // 2) FsWrite 无窗拒绝:稳定可区分文案(非旧「角色只读」整段拒绝)。
+        assert!(dispatcher.dispatch(
+            "fs/write_text_file",
+            json!(2),
+            json!({
+                "sessionId": "reviewer-session",
+                "path": "notes.txt",
+                "content": "x"
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 2).await;
+        assert_eq!(reply["error"]["code"], json!(ERROR_REJECTED), "{reply}");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("review window"),
+            "{reply}"
+        );
+        assert!(!dir.path().join("notes.txt").exists());
+
+        // 3) FsRead 越界仍拒绝:授权根/no-follow 合同独立有效。
+        assert!(dispatcher.dispatch(
+            "fs/read_text_file",
+            json!(3),
+            json!({"sessionId": "reviewer-session", "path": "../escape.txt"})
+        ));
+        let reply = read_reply(&mut server_reader, 3).await;
+        assert_eq!(reply["error"]["code"], json!(ERROR_FS), "{reply}");
+
         let _ = server_writer.shutdown().await;
         drop(dispatcher);
     }
@@ -1204,5 +1250,305 @@ mod tests {
 
         let _ = server_writer.shutdown().await;
         drop(dispatcher);
+    }
+
+    // ==== 批2 Task 8:受信岗位授予(dispatcher 面)====
+
+    use super::test_fixtures::frozen_duty_grant;
+    use crate::cross_cutting::provider_execution::TrustedProviderRole;
+
+    /// 批2 Task 8:Reviewer 携带有效窗口引用(受信 fixture,T20 接真窗)
+    /// 时授权根内 FsWrite 通过且落盘;越界写拒绝且目标未改;terminal
+    /// 正向——「fs API 拒绝越界」与「Host terminal 物理可达」两种观察在
+    /// 同一会话内同时成立,互不放松。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reviewer_grant_with_window_writes_inside_authorized_root() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        let (reader, writer) = tokio::io::split(client);
+        let peer = JsonRpcPeer::new(reader, writer);
+        let (event_tx, _events) = mpsc::channel(32);
+        let dispatcher = KimiClientServiceDispatcher::new_with_trusted_duty(
+            peer,
+            "reviewer-window".to_string(),
+            dir.path().to_path_buf(),
+            AdapterRole::Reviewer,
+            ProviderPermissionMode::Auto,
+            host_env(),
+            Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            CancellationToken::new(),
+            TerminalManager::new(),
+            None,
+            None,
+            Some(frozen_duty_grant(
+                TrustedProviderRole::Reviewer,
+                AdapterRole::Reviewer,
+                Some("window_t8"),
+            )),
+        );
+        let (server_reader, mut server_writer) = tokio::io::split(server);
+        let mut server_reader = tokio::io::BufReader::new(server_reader);
+
+        // 1) 授权根内 FsWrite 通过(窗口化 Reviewer 的正向写)。
+        assert!(dispatcher.dispatch(
+            "fs/write_text_file",
+            json!(0),
+            json!({
+                "sessionId": "reviewer-window",
+                "path": "review-note.txt",
+                "content": "windowed write"
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 0).await;
+        assert!(reply.get("result").is_some(), "{reply}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("review-note.txt"))
+                .expect("windowed reviewer write lands"),
+            "windowed write"
+        );
+
+        // 2) 越界写拒绝且目标未改(授权根/no-follow 合同不因窗口放宽)。
+        let escape = dir
+            .path()
+            .parent()
+            .expect("root parent")
+            .join("t8-escape.txt");
+        assert!(dispatcher.dispatch(
+            "fs/write_text_file",
+            json!(1),
+            json!({
+                "sessionId": "reviewer-window",
+                "path": "../t8-escape.txt",
+                "content": "must not land"
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 1).await;
+        assert_eq!(reply["error"]["code"], json!(ERROR_FS), "{reply}");
+        assert!(!escape.exists(), "escape target must stay unchanged");
+
+        // 3) terminal 正向(Host 单路径物理可达)。
+        assert!(dispatcher.dispatch(
+            "terminal/create",
+            json!(2),
+            json!({
+                "sessionId": "reviewer-window",
+                "command": "/bin/sh",
+                "args": ["-c", "printf reviewer-window-terminal-ok"],
+                "cwd": "",
+                "outputByteLimit": 4194304
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 2).await;
+        let terminal_id = reply["result"]["terminalId"]
+            .as_str()
+            .expect("reviewer terminal must stay positive")
+            .to_string();
+        assert!(dispatcher.dispatch(
+            "terminal/wait_for_exit",
+            json!(3),
+            json!({"sessionId": "reviewer-window", "terminalId": terminal_id})
+        ));
+        let reply = read_reply(&mut server_reader, 3).await;
+        assert_eq!(reply["result"]["exitCode"], json!(0), "{reply}");
+
+        let _ = server_writer.shutdown().await;
+        drop(dispatcher);
+    }
+
+    /// 批2 Task 8:Author(Orchestrator 承载)——代码编辑 fs 写请求拒绝
+    /// (AuthorToolPolicy v1 `builtin_write_code_file` 语义,不落盘,不按
+    /// 扩展名另建过滤);fs 读与 terminal 可用;作者文档走平台通道。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn author_grant_denies_fs_write_read_and_terminal_usable() {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(dir.path().join("brief.md"), "author reads").expect("seed");
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        let (reader, writer) = tokio::io::split(client);
+        let peer = JsonRpcPeer::new(reader, writer);
+        let (event_tx, _events) = mpsc::channel(32);
+        let dispatcher = KimiClientServiceDispatcher::new_with_trusted_duty(
+            peer,
+            "author-session".to_string(),
+            dir.path().to_path_buf(),
+            AdapterRole::Orchestrator,
+            ProviderPermissionMode::Auto,
+            host_env(),
+            Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            CancellationToken::new(),
+            TerminalManager::new(),
+            None,
+            None,
+            Some(frozen_duty_grant(
+                TrustedProviderRole::Author,
+                AdapterRole::Orchestrator,
+                None,
+            )),
+        );
+        let (server_reader, mut server_writer) = tokio::io::split(server);
+        let mut server_reader = tokio::io::BufReader::new(server_reader);
+
+        // 1) 代码编辑 fs 写拒绝:author 岗位合同,不落盘。
+        assert!(dispatcher.dispatch(
+            "fs/write_text_file",
+            json!(0),
+            json!({
+                "sessionId": "author-session",
+                "path": "story.md",
+                "content": "must not land"
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 0).await;
+        assert_eq!(reply["error"]["code"], json!(ERROR_REJECTED), "{reply}");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("author duty"),
+            "{reply}"
+        );
+        assert!(!dir.path().join("story.md").exists());
+
+        // 2) fs 读可用。
+        assert!(dispatcher.dispatch(
+            "fs/read_text_file",
+            json!(1),
+            json!({"sessionId": "author-session", "path": "brief.md"})
+        ));
+        let reply = read_reply(&mut server_reader, 1).await;
+        assert_eq!(reply["result"]["content"], json!("author reads"), "{reply}");
+
+        // 3) terminal 可用(read/terminal/report/document 通道的一部分)。
+        assert!(dispatcher.dispatch(
+            "terminal/create",
+            json!(2),
+            json!({
+                "sessionId": "author-session",
+                "command": "/bin/sh",
+                "args": ["-c", "printf author-terminal-ok"],
+                "cwd": "",
+                "outputByteLimit": 4194304
+            })
+        ));
+        let reply = read_reply(&mut server_reader, 2).await;
+        let terminal_id = reply["result"]["terminalId"]
+            .as_str()
+            .expect("author terminal must stay usable")
+            .to_string();
+        assert!(dispatcher.dispatch(
+            "terminal/wait_for_exit",
+            json!(3),
+            json!({"sessionId": "author-session", "terminalId": terminal_id})
+        ));
+        let reply = read_reply(&mut server_reader, 3).await;
+        assert_eq!(reply["result"]["exitCode"], json!(0), "{reply}");
+
+        let _ = server_writer.shutdown().await;
+        drop(dispatcher);
+    }
+
+    /// 批2 Task 8 反转:Splitter/Handoff 直连会话的合法操作不整段拒绝
+    /// ——fs 读/terminal 正向;fs 写拒绝(职责级,不落盘)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn splitter_and_handoff_wire_sessions_run_legal_operations() {
+        for (role, session) in [
+            (AdapterRole::WorkItemSplitter, "splitter-session"),
+            (AdapterRole::Handoff, "handoff-session"),
+        ] {
+            let dir = tempfile::tempdir().expect("dir");
+            std::fs::write(dir.path().join("item.md"), "split input").expect("seed");
+            let (client, server) = tokio::io::duplex(16 * 1024);
+            let (reader, writer) = tokio::io::split(client);
+            let peer = JsonRpcPeer::new(reader, writer);
+            let (event_tx, _events) = mpsc::channel(32);
+            let dispatcher = KimiClientServiceDispatcher::new(
+                peer,
+                session.to_string(),
+                dir.path().to_path_buf(),
+                role.clone(),
+                ProviderPermissionMode::Auto,
+                host_env(),
+                Arc::new(ApprovalBridge::new(
+                    ProviderPermissionMode::Auto,
+                    event_tx.clone(),
+                )),
+                event_tx,
+                CancellationToken::new(),
+                TerminalManager::new(),
+                None,
+                None,
+            );
+            let (server_reader, mut server_writer) = tokio::io::split(server);
+            let mut server_reader = tokio::io::BufReader::new(server_reader);
+
+            // 1) fs 读正向。
+            assert!(dispatcher.dispatch(
+                "fs/read_text_file",
+                json!(0),
+                json!({"sessionId": session, "path": "item.md"})
+            ));
+            let reply = read_reply(&mut server_reader, 0).await;
+            assert_eq!(
+                reply["result"]["content"],
+                json!("split input"),
+                "{role:?}: {reply}"
+            );
+
+            // 2) terminal 正向。
+            assert!(dispatcher.dispatch(
+                "terminal/create",
+                json!(1),
+                json!({
+                    "sessionId": session,
+                    "command": "/bin/sh",
+                    "args": ["-c", "printf planning-terminal-ok"],
+                    "cwd": "",
+                    "outputByteLimit": 4194304
+                })
+            ));
+            let reply = read_reply(&mut server_reader, 1).await;
+            let terminal_id = reply["result"]["terminalId"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{role:?}: terminal must stay legal: {reply}"))
+                .to_string();
+            assert!(dispatcher.dispatch(
+                "terminal/wait_for_exit",
+                json!(2),
+                json!({"sessionId": session, "terminalId": terminal_id})
+            ));
+            let reply = read_reply(&mut server_reader, 2).await;
+            assert_eq!(reply["result"]["exitCode"], json!(0), "{role:?}: {reply}");
+
+            // 3) fs 写拒绝且不落盘。
+            assert!(dispatcher.dispatch(
+                "fs/write_text_file",
+                json!(3),
+                json!({
+                    "sessionId": session,
+                    "path": "mutation.txt",
+                    "content": "must not land"
+                })
+            ));
+            let reply = read_reply(&mut server_reader, 3).await;
+            assert_eq!(
+                reply["error"]["code"],
+                json!(ERROR_REJECTED),
+                "{role:?}: {reply}"
+            );
+            assert!(!dir.path().join("mutation.txt").exists(), "{role:?}");
+
+            let _ = server_writer.shutdown().await;
+            drop(dispatcher);
+        }
     }
 }

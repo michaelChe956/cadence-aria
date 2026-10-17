@@ -1,6 +1,11 @@
 //! `fs/read_text_file` / `fs/write_text_file` request handlers: JSON-RPC
 //! param extraction, session check, and policy gate, delegating the
 //! root-anchored file IO to `fs_service`.
+//!
+//! 批2 Task 8:policy gate 消费受信岗位合同(Author 代码编辑 fs 写/
+//! 无窗 Reviewer 在此拒绝,先于任何落盘);目标锚定与 openat/O_NOFOLLOW
+//! 原子路径合同保持独立(授权根/no-follow 不因岗位放宽,也不投影成
+//! terminal target-only)。
 
 use serde_json::Value;
 

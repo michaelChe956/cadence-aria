@@ -188,6 +188,10 @@ fn validate_tree_relative_path(path: &str) -> Result<PathBuf, FsError> {
 
 fn map_open_error(error: std::io::Error) -> FsError {
     match error.raw_os_error() {
+        // 中间组件以 O_DIRECTORY|O_NOFOLLOW 打开:symlink 父目录(含
+        // 新建文件父目录替换竞态)在该 flag 组合下先败目录检查报
+        // ENOTDIR(symlink inode 非目录,早于 ELOOP),属路径安全拒绝。
+        Some(libc::ENOTDIR) => FsError::SymlinkOrTraversal(error.to_string()),
         Some(libc::ELOOP) => FsError::SymlinkOrTraversal(error.to_string()),
         Some(libc::ENOENT) => FsError::NotFound(error.to_string()),
         Some(libc::EACCES) | Some(libc::EPERM) => FsError::PermissionDenied(error.to_string()),
@@ -380,6 +384,82 @@ mod tests {
         assert_eq!(
             read_text_file(root.path(), "f.txt").expect("read"),
             "second"
+        );
+    }
+
+    /// 批2 Task 8:新建文件父目录替换竞态——父目录被换成指向根外目录的
+    /// symlink 后,新建文件写必须拒绝(openat 逐级 O_NOFOLLOW,不跟随
+    /// 替换后的 symlink),根外目标未被创建/修改。
+    #[cfg(unix)]
+    #[test]
+    fn write_rejects_new_file_parent_swapped_to_symlink_target_unchanged() {
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("victim.txt"), "untouched").expect("victim");
+        std::fs::create_dir(root.path().join("sub")).expect("mkdir sub");
+
+        // 竞态形态:校验面看到的是真实目录,写之前攻击者把 `sub` 替换成
+        // 指向根外目录的 symlink。
+        std::fs::remove_dir(root.path().join("sub")).expect("rm sub");
+        std::os::unix::fs::symlink(outside.path(), root.path().join("sub")).expect("swap");
+
+        let error = write_text_file(root.path(), "sub/new.txt", "must not land")
+            .expect_err("swapped parent must be rejected");
+        assert!(matches!(error, FsError::SymlinkOrTraversal(_)), "{error}");
+        assert!(
+            !outside.path().join("new.txt").exists(),
+            "no file may land through the swapped parent"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("victim.txt")).expect("victim"),
+            "untouched",
+            "the outside target must stay unchanged"
+        );
+    }
+
+    /// 批2 Task 8:全部越界写形态(绝对越界/`..`/symlink 逃逸)拒绝且
+    /// 目标未改,错误变体可区分(OutOfRoot vs SymlinkOrTraversal)。
+    #[cfg(unix)]
+    #[test]
+    fn write_escape_rejections_leave_targets_unchanged_and_errors_distinguishable() {
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "secret").expect("secret");
+
+        // 绝对越界 → OutOfRoot,目标未改。
+        let error = write_text_file(root.path(), &secret.to_string_lossy(), "overwrite")
+            .expect_err("absolute escape must be rejected");
+        assert!(matches!(error, FsError::OutOfRoot(_)), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&secret).expect("secret"),
+            "secret",
+            "absolute escape target must stay unchanged"
+        );
+
+        // `..` 穿越 → SymlinkOrTraversal,根外目标未创建。
+        let error = write_text_file(root.path(), "../escaped.txt", "must not land")
+            .expect_err("parent traversal must be rejected");
+        assert!(matches!(error, FsError::SymlinkOrTraversal(_)), "{error}");
+        assert!(
+            !root
+                .path()
+                .parent()
+                .expect("root parent")
+                .join("escaped.txt")
+                .exists(),
+            "traversal escape must not land outside the root"
+        );
+
+        // symlink 逃逸(最终分量)→ SymlinkOrTraversal,根外目标未改。
+        std::os::unix::fs::symlink(&secret, root.path().join("leak.txt")).expect("symlink");
+        let error = write_text_file(root.path(), "leak.txt", "overwrite")
+            .expect_err("symlink escape must be rejected");
+        assert!(matches!(error, FsError::SymlinkOrTraversal(_)), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&secret).expect("secret"),
+            "secret",
+            "symlink escape target must stay unchanged"
         );
     }
     #[test]
