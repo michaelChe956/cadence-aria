@@ -10953,25 +10953,58 @@ impl LiveLcGatewayHarness {
 
         // 6) 取消格:同 plan 新 attempt,Supervised/拒绝/批准/AbortAttempt。
         fp("b45_stage_begin", "cancel-cell");
-        let cancel_cell;
+        let mut cancel_cell = json!({"error": "取消格未执行(内部态)"});
         if env.plan_id.is_empty() {
             cancel_cell = json!({"error": "缺 durable plan id,取消格无法启动"});
         } else {
-            let (status, body) = request_json(
-                &env.app,
-                Method::POST,
-                &format!(
-                    "/api/projects/{PROJECT_ID}/issues/{}/work-item-plans/{}/coding-attempts",
-                    env.issue_id, env.plan_id
-                ),
-                json!({}),
-            )
-            .await;
-            if !status.is_success() {
-                cancel_cell = json!({"error": format!("取消格 attempt 创建失败({status}):{body}")});
-            } else {
-                let attempt_id = body["attempt_id"].as_str().unwrap_or_default().to_string();
-                cancel_cell = env.drive_b45_cancel_cell(&attempt_id).await;
+            // r64(T22 b45 现场):journal Completed 后同 plan POST 会重放
+            // coding_main 正在用的同一 attempt(journal 权威重放),非 created
+            // 态重发 start_coding 被产品拒收——取消格拿不到可驱动的独立格。
+            // 产品语义=「删除后重试」:先 DELETE 主 attempt(N7 清理+worktree
+            // 释放+journal 删除;coder 证据已在 coding_main 段全部落袋:
+            // verification/role_run_rows/approvals/attempt_state),再 POST 才
+            // 得到 created 态新 attempt 供取消格驱动。
+            let main_attempt_id = coding_main
+                .get("attempt_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let mut cancel_cell_ready = true;
+            if !main_attempt_id.is_empty() {
+                let (delete_status, delete_body) = request_json(
+                    &env.app,
+                    Method::DELETE,
+                    &format!(
+                        "/api/projects/{PROJECT_ID}/issues/{}/coding-attempts/{main_attempt_id}",
+                        env.issue_id
+                    ),
+                    json!({}),
+                )
+                .await;
+                if !delete_status.is_success() {
+                    cancel_cell_ready = false;
+                    cancel_cell = json!({"error": format!(
+                        "取消格前置清理失败:主 attempt 删除失败({delete_status}):{delete_body}"
+                    )});
+                }
+            }
+            if cancel_cell_ready {
+                let (status, body) = request_json(
+                    &env.app,
+                    Method::POST,
+                    &format!(
+                        "/api/projects/{PROJECT_ID}/issues/{}/work-item-plans/{}/coding-attempts",
+                        env.issue_id, env.plan_id
+                    ),
+                    json!({}),
+                )
+                .await;
+                if !status.is_success() {
+                    cancel_cell = json!({"error": format!("取消格 attempt 创建失败({status}):{body}")});
+                } else {
+                    let attempt_id = body["attempt_id"].as_str().unwrap_or_default().to_string();
+                    cancel_cell = env.drive_b45_cancel_cell(&attempt_id).await;
+                }
             }
         }
         fp("b45_stage_end", "cancel-cell");
