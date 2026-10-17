@@ -698,6 +698,7 @@ mod tests {
             .expect("ledger read")
             .expect("rejected result recorded");
         assert_eq!(ledger.state, OperationState::Rejected);
+        validate_relative_id("cmd-c2-policy-reauth-0001").expect("command id stays relative");
     }
 
     /// T15（REQ-ENV-CHECK-01）：重跑请求只携带身份键（command_id＋gate/check

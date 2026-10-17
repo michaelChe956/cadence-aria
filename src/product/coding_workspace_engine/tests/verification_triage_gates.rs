@@ -1012,14 +1012,16 @@ async fn coding_output_human_triage_gate_emits_gate_required_frame() {
         .expect("channel open");
     match frame {
         crate::web::coding_ws_handler::CodingWsOutMessage::CodingGateRequired { gate } => {
-            assert_eq!(gate.reason_code.as_deref(), Some("coding_output_human_triage"));
+            assert_eq!(
+                gate.reason_code.as_deref(),
+                Some("coding_output_human_triage")
+            );
             assert_eq!(gate.title, "Coder 输出需要人工分诊");
         }
         other => panic!("expected CodingGateRequired, got {other:?}"),
     }
     drop(root);
 }
-
 
 // ─── 批2 Task 15（C5.1／D §7，REQ-ENV-CHECK-01）：HostCoding 自跑 CHECK 与 A′ 补充定位 ───
 use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
@@ -1068,7 +1070,10 @@ async fn host_coding_check_command_evidence_reconciles_count_and_raw_output() {
     let evidence = store
         .verification_command_evidence(&attempt.project_id, &attempt.issue_id, &attempt.id, &check)
         .expect("evidence");
-    assert_eq!(evidence.planned_command.as_deref(), Some("cargo test --lib"));
+    assert_eq!(
+        evidence.planned_command.as_deref(),
+        Some("cargo test --lib")
+    );
     assert_eq!(evidence.actual_command.as_deref(), Some("cargo test --lib"));
     assert_eq!(evidence.actual_cwd.as_deref(), Some("/repo/worktree"));
     assert_eq!(evidence.exit_code, Some(0));
@@ -1086,10 +1091,7 @@ async fn host_coding_check_command_evidence_reconciles_count_and_raw_output() {
         excerpt.contains("12 passed"),
         "原始输出引用须携带可对账片段：{excerpt}"
     );
-    assert_eq!(
-        evidence.failure_class, None,
-        "通过(退出码 0)不产生失败分类"
-    );
+    assert_eq!(evidence.failure_class, None, "通过(退出码 0)不产生失败分类");
 }
 
 /// T15 四分类：缺依赖／认证失败／权限失败／断言失败分别呈现，未命中
@@ -1177,7 +1179,12 @@ async fn host_coding_check_failure_classes_presented_separately() {
             )
             .expect("execution event");
         let evidence = store
-            .verification_command_evidence(&attempt.project_id, &attempt.issue_id, &attempt.id, &check)
+            .verification_command_evidence(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &check,
+            )
             .expect("evidence");
         assert_eq!(
             evidence.failure_class,
@@ -1187,10 +1194,7 @@ async fn host_coding_check_failure_classes_presented_separately() {
         );
         let copy = verification_failure_class_copy(*expected_class);
         assert!(!copy.is_empty(), "每类失败都必须有呈现文案");
-        assert!(
-            copy.contains(label),
-            "文案必须以类名呈现：{copy}"
-        );
+        assert!(copy.contains(label), "文案必须以类名呈现：{copy}");
         assert!(
             copy.contains("重跑原计划命令"),
             "主路径必须指向 Coder 重跑原计划命令：{copy}"
@@ -1296,13 +1300,21 @@ fn host_coding_check_prompt_pins_self_run_and_declaration_non_authorization() {
     assert!(contract.contains("沙箱失败"));
     assert!(contract.contains("不得把失败伪装成通过"));
 
-    // 两个 coder prompt 入口都必须携带自跑合同。
+    // F3(审查修复轮1):合同单源在 render/fallback 合并后的无条件追加
+    //(coding.rs/rework.rs 四个落点,见下一个测试的源码钉测);两个
+    // builder 不再内嵌,防止合并路径重复注入。
     let attempt = test_attempt("coding_attempt_t15_prompt");
     let context = CodingExecutionContext {
         work_item_markdown: None,
         verification_commands: vec!["cargo test --lib".to_string()],
     };
-    let full = build_coding_prompt(&attempt, &context, None, None, &RoutingReferenceContext::Legacy);
+    let full = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
     let delta = build_coding_delta_prompt(
         &attempt,
         &context,
@@ -1312,8 +1324,8 @@ fn host_coding_check_prompt_pins_self_run_and_declaration_non_authorization() {
     );
     for prompt in [&full, &delta] {
         assert!(
-            prompt.contains("[host_coding_check]"),
-            "coder prompt 必须携带 HostCoding CHECK 自跑合同"
+            !prompt.contains("[host_coding_check]"),
+            "builder 不内嵌自跑合同(单源在合并后追加,防重复):{prompt}"
         );
     }
 
@@ -1416,4 +1428,171 @@ async fn host_coding_check_rerun_recalls_coder_without_platform_execution() {
         .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("reports");
     assert_eq!(reports[0].findings.len(), 1, "重跑不得清 finding");
+}
+
+/// 审查修复轮1 F3:group 首轮 rendered_context 分支不经两个 builder——
+/// 自跑合同必须按 platform_directives_section 先例,在 render/fallback
+/// 合并后的最终 prompt 无条件追加(coding.rs/rework.rs 各 full_prompt 主臂
+/// ＋delta-only 臂共四个落点);builder 不内嵌(单源防重复)。
+#[test]
+fn host_coding_check_contract_appended_after_render_fallback_merge() {
+    let coding_source = include_str!("../coding.rs");
+    let rework_source = include_str!("../rework.rs");
+    assert!(
+        coding_source.contains("full_prompt.push_str(host_coding_check_contract());"),
+        "coding.rs render/fallback 合并后必须无条件追加自跑合同(先例=platform_directives_section)"
+    );
+    assert!(
+        coding_source.contains("delta.push_str(host_coding_check_contract());"),
+        "coding.rs delta-only resume 臂必须同样携带自跑合同"
+    );
+    assert!(
+        rework_source.contains("full_prompt.push_str(host_coding_check_contract());"),
+        "rework.rs render/fallback 合并后必须无条件追加自跑合同"
+    );
+    assert!(
+        rework_source.contains("delta_prompt.push_str(host_coding_check_contract());"),
+        "rework.rs delta-only resume 臂必须同样携带自跑合同"
+    );
+}
+
+/// 审查修复轮1 F1:超限(>16KiB)输出在 append 时被规范化为
+/// {preview, artifact_ref, truncated} 对象——证据派生必须经取值辅助读
+/// artifact_ref 指向的完整落盘文本(回退 preview),同一文本供
+/// excerpt/数量/分类;不得整段丢证据或空串误归未分类。
+#[tokio::test]
+async fn host_coding_check_long_output_artifact_evidence_preserved() {
+    let (_root, store, _engine, attempt) = verification_triage_group_fixture();
+    let check = VerificationCheck {
+        check_id: "check_long_output".to_string(),
+        command: Some("cargo test --lib".to_string()),
+        manual_instruction: None,
+        required: true,
+        non_zero_test_execution_required: true,
+    };
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("role run");
+    // 填充超过 ROLE_RUN_EVENT_INLINE_STRING_LIMIT(16384)——append 时
+    // normalize 必然替换为对象;失败摘要(数量/分类锚)在尾部。
+    let filler = "filler-line-of-padding\n".repeat(1200);
+    let output = format!(
+        "{filler}running 3 tests\ntest result: FAILED. 0 passed; 3 failed; 0 ignored; finished in 2.0s"
+    );
+    assert!(output.len() > 16_384, "fixture 必须触发规范化对象路径");
+    store
+        .append_role_run_event(
+            &attempt,
+            &role_run,
+            crate::product::coding_models::CodingRoleRunEventType::ExecutionEvent,
+            serde_json::json!({
+                "event_id": "exec_t15_long",
+                "kind": "Command",
+                "status": "Failed",
+                "title": "cargo test",
+                "command": "cargo test --lib",
+                "cwd": "/repo/worktree",
+                "output": output,
+                "exit_code": 1
+            }),
+        )
+        .expect("execution event");
+    let evidence = store
+        .verification_command_evidence(&attempt.project_id, &attempt.issue_id, &attempt.id, &check)
+        .expect("evidence");
+    assert_eq!(
+        evidence.test_execution_count,
+        Some(3),
+        "超限输出的测试数量必须经 artifact 全文派生"
+    );
+    assert_eq!(
+        evidence.failure_class,
+        Some(VerificationFailureClass::AssertionFailure),
+        "超限输出的失败分类必须经 artifact 全文派生,不得空串误归未分类(got {:?})",
+        evidence.failure_class
+    );
+    let excerpt = evidence
+        .raw_output_excerpt
+        .as_deref()
+        .expect("超限输出必须保留原始输出引用");
+    assert!(
+        excerpt.contains("3 failed"),
+        "原始输出引用须携带尾部失败摘要:{excerpt}"
+    );
+}
+
+/// 审查修复轮1 F4:jest/vitest 的 suite/file 汇总行(Test Suites:/
+/// Test Files/Snapshots:)不计入测试数量——按行解析,跳过汇总标题行;
+/// cargo/pytest 口径不受影响。
+#[tokio::test]
+async fn host_coding_check_parse_counts_ignore_suite_file_lines() {
+    let (_root, store, _engine, attempt) = verification_triage_group_fixture();
+    let role_run = store
+        .create_role_run(
+            &attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("role run");
+    let cases = [
+        (
+            "check_jest",
+            "npx jest --ci",
+            "PASS src/a.test.js\nPASS src/b.test.js\nTest Suites: 1 failed, 1 passed, 2 total\nTests:       2 failed, 3 passed, 5 total\nSnapshots: 1 failed, 4 passed, 5 total\nTime:        3.2 s",
+            5u64,
+        ),
+        (
+            "check_vitest",
+            "npx vitest run",
+            " ✓ src/a.test.ts (1 test) 1s\n ✓ src/b.test.ts (1 test) 1s\n Test Files  2 passed (2)\n      Tests  2 passed (2)",
+            2u64,
+        ),
+    ];
+    for (index, (check_id, command, output, expected_count)) in cases.iter().enumerate() {
+        let check = VerificationCheck {
+            check_id: check_id.to_string(),
+            command: Some(command.to_string()),
+            manual_instruction: None,
+            required: true,
+            non_zero_test_execution_required: true,
+        };
+        store
+            .append_role_run_event(
+                &attempt,
+                &role_run,
+                crate::product::coding_models::CodingRoleRunEventType::ExecutionEvent,
+                serde_json::json!({
+                    "event_id": format!("exec_t15_runner_{index}"),
+                    "kind": "Command",
+                    "status": "Succeeded",
+                    "title": command,
+                    "command": command,
+                    "cwd": "/repo/worktree",
+                    "output": output,
+                    "exit_code": 0
+                }),
+            )
+            .expect("execution event");
+        let evidence = store
+            .verification_command_evidence(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &check,
+            )
+            .expect("evidence");
+        assert_eq!(
+            evidence.test_execution_count,
+            Some(*expected_count),
+            "{command} 数量不得被 suite/file 汇总行污染"
+        );
+    }
 }

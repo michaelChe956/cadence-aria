@@ -24,6 +24,15 @@ const CONTEXT_CHAR_LIMIT = 2000;
 /** 分诊卡文件列表默认展示前 3 个，其余收进折叠明细。 */
 const VISIBLE_CHANGED_FILES = 3;
 
+/** 批2 Task 15：CHECK 失败四分类的中文呈现（镜像 Rust serde snake_case 值）。 */
+const FAILURE_CLASS_LABELS: Record<string, string> = {
+  missing_dependency: "缺依赖",
+  auth_failure: "认证失败",
+  permission_failure: "权限失败",
+  assertion_failure: "断言失败",
+  unclassified: "未分类失败",
+};
+
 /** 原始 description/reason/raw/evidence 技术元数据（自 CodingWorkspaceControls 迁出，零行为变化）。 */
 export function GateMetadata({ gate }: { gate: CodingPendingGate }) {
   const rows = [
@@ -115,6 +124,23 @@ export function VerificationTriageSection({
           <div className="font-mono">
             退出码：{commandEvidence.exit_code ?? "未记录"}
           </div>
+          <div className="font-mono">
+            测试数量：
+            {commandEvidence.test_execution_count ?? "未记录"}
+          </div>
+          {commandEvidence.failure_class ? (
+            <div data-testid="coding-command-evidence-failure-class" className="font-mono">
+              失败分类：{FAILURE_CLASS_LABELS[commandEvidence.failure_class] ?? commandEvidence.failure_class}
+            </div>
+          ) : null}
+          {commandEvidence.raw_output_excerpt ? (
+            <details className="font-mono">
+              <summary className="cursor-pointer text-amber-800">原始输出引用</summary>
+              <pre className="mt-0.5 max-h-40 overflow-auto whitespace-pre-wrap break-all text-[11px]">
+                {commandEvidence.raw_output_excerpt}
+              </pre>
+            </details>
+          ) : null}
           {commandEvidence.mismatch ? (
             <div data-testid="coding-command-evidence-mismatch" className="font-semibold">
               实际执行命令与计划不一致

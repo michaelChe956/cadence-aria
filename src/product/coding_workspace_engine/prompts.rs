@@ -227,7 +227,6 @@ pub(crate) fn build_coding_prompt(
     prompt.push_str(&coding_execution_protocol(routing_context));
     prompt.push_str(no_default_stack_assumption_contract());
     prompt.push_str(coding_completion_report_contract());
-    prompt.push_str(host_coding_check_contract());
     prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
     prompt
 }
@@ -318,7 +317,6 @@ pub(crate) fn build_coding_delta_prompt(
     prompt.push_str(&coding_delta_execution_protocol(routing_context));
     prompt.push_str(no_default_stack_assumption_contract());
     prompt.push_str(coding_completion_report_contract());
-    prompt.push_str(host_coding_check_contract());
     prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
     prompt
 }
@@ -399,7 +397,10 @@ pub(crate) fn coding_completion_report_contract() -> &'static str {
 /// 环境能力标注只是声明，不是授权也不路由——executor=container/JVM 不
 /// 改变受信 profile／岗位／工具策略；A′（verification-triage）只补外部
 /// 硬件／人工／临时缺项；失败四分类如实呈现，不归「沙箱失败」不假绿。
-/// 只注入 Coder 两个 prompt 入口；平台交付门与人工批准保持不动。
+/// 接线（审查修复轮1 F3）：单源在 coding.rs／rework.rs 的 render/fallback
+/// 合并后无条件追加（先例＝platform_directives_section，追加发生在
+/// render→bind 哈希计算之后）；builder 不内嵌，防合并路径重复注入；
+/// 平台交付门与人工批准保持不动。
 pub(crate) fn host_coding_check_contract() -> &'static str {
     "\n[host_coding_check]\n\
      HostCoding CHECK 自跑合同:\n\

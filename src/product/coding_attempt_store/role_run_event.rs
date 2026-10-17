@@ -383,7 +383,7 @@ impl super::CodingAttemptStore {
             return Ok(evidence);
         };
         let planned_head = first_command_token(planned_command);
-        let mut matched: Option<(String, serde_json::Value)> = None;
+        let mut matched: Option<(String, serde_json::Value, String)> = None;
         for role_run in self.list_role_runs(project_id, issue_id, attempt_id)? {
             for event in
                 self.list_role_run_events(project_id, issue_id, attempt_id, &role_run.id)?
@@ -402,11 +402,16 @@ impl super::CodingAttemptStore {
                     continue;
                 }
                 // list_role_run_events 按 sequence 升序，role_runs 按 id 升序：
-                // 后写者覆盖，最终保留同族最新一条。
-                matched = Some((command.to_string(), event.payload.clone()));
+                // 后写者覆盖，最终保留同族最新一条；携带 role_run_id 供
+                // 超限规范化输出的 artifact 取值（审查修复轮1 F1）。
+                matched = Some((
+                    command.to_string(),
+                    event.payload.clone(),
+                    role_run.id.clone(),
+                ));
             }
         }
-        if let Some((command, payload)) = matched {
+        if let Some((command, payload, role_run_id)) = matched {
             evidence.actual_command = Some(command.clone());
             evidence.actual_cwd = payload
                 .get("cwd")
@@ -418,11 +423,17 @@ impl super::CodingAttemptStore {
                 .map(|code| code as i32);
             // T15：原始输出引用（有界尾摘）＋测试数量（显式字段优先，
             // 否则从输出解析；0 条测试执行呈现 Some(0) 而非 None——
-            // non_zero 要求下的假绿必须可对账发现）。
-            let output = payload
-                .get("output")
-                .and_then(|value| value.as_str())
-                .map(str::to_string);
+            // non_zero 要求下的假绿必须可对账发现）。取值接受字符串与
+            // 超限规范化对象两种形态（审查修复轮1 F1）：对象时读
+            // artifact_ref 指向的完整落盘文本（失败回退 preview），同一
+            // 文本供 excerpt／数量／分类。
+            let output = self.role_run_event_output_text(
+                project_id,
+                issue_id,
+                attempt_id,
+                &role_run_id,
+                payload.get("output"),
+            );
             if let Some(output) = output.as_deref() {
                 evidence.raw_output_excerpt = Some(bounded_output_excerpt(output));
             }
@@ -441,6 +452,69 @@ impl super::CodingAttemptStore {
         }
         Ok(evidence)
     }
+
+    /// 审查修复轮1 F1：ExecutionEvent `output` 取值辅助——字符串原样；
+    /// append 期超限（>ROLE_RUN_EVENT_INLINE_STRING_LIMIT）规范化对象
+    /// {preview, artifact_ref, truncated} 时读 artifact_ref 指向的完整
+    /// 落盘文本，读取失败回退 preview（有界）；两种形态都取不到 → None。
+    fn role_run_event_output_text(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+        value: Option<&serde_json::Value>,
+    ) -> Option<String> {
+        let value = value?;
+        if let Some(text) = value.as_str() {
+            return Some(text.to_string());
+        }
+        let object = value.as_object()?;
+        let preview = object
+            .get("preview")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let artifact_ref = object
+            .get("artifact_ref")
+            .and_then(|value| value.as_str())?;
+        self.read_role_run_event_artifact_text(
+            project_id,
+            issue_id,
+            attempt_id,
+            role_run_id,
+            artifact_ref,
+        )
+        .ok()
+        .or(preview)
+    }
+
+    /// 审查修复轮1 F1：读取 role-run 事件 artifact 全文。artifact_ref 形如
+    /// `artifacts/role-run-events/<role_run_id>/<seq>_<field>.txt`（相对
+    /// attempt 目录）；先验证 ref 归属该 role run 再拼路径读文件。
+    fn read_role_run_event_artifact_text(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        role_run_id: &str,
+        artifact_ref: &str,
+    ) -> Result<String, ProductStoreError> {
+        validate_relative_artifact_ref(artifact_ref)?;
+        let expected_prefix = format!("artifacts/role-run-events/{role_run_id}/");
+        if !artifact_ref.starts_with(&expected_prefix) {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "coding_role_run_event_artifact",
+                reason: format!(
+                    "artifact ref mismatch: expected prefix {expected_prefix}, got {artifact_ref}"
+                ),
+            });
+        }
+        let path = self
+            .attempt_dir(project_id, issue_id, attempt_id)
+            .join(artifact_ref);
+        fs::read_to_string(&path)
+            .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))
+    }
 }
 
 /// 原始输出引用的尾摘上界（保留失败摘要行——测试结果/错误通常在尾部）。
@@ -458,36 +532,59 @@ fn bounded_output_excerpt(output: &str) -> String {
     format!("…（前文截断）{}", &output[start..])
 }
 
-/// 从原始输出解析测试执行数量：`<n> passed`＋`<n> failed` 求和（cargo/
-/// vitest/jest/pytest 口径）；无命中再回退 `<n> tests`（如 `running 0
-/// tests`）。仍无命中 → None（"未记录"，不推断补写）。
+/// 从原始输出解析测试执行数量（审查修复轮1 F4：按行处理）：跳过 jest/
+/// vitest 的汇总标题行（trim 后小写前缀 `test files`／`test suites`／
+/// `snapshots`——suite/file/snapshot 计数不是测试数量，求和会重复计
+/// 数）；其余行 `<n> passed`＋`<n> failed` 求和（cargo/vitest/jest/
+/// pytest 口径）；无命中再回退 `<n> tests`（如 `running 0 tests`）。
+/// 仍无命中 → None（"未记录"，不推断补写）。
 fn parse_test_execution_count(output: &str) -> Option<u64> {
-    let tokens: Vec<&str> = output.split_whitespace().collect();
     let mut total: Option<u64> = None;
-    for pair in tokens.windows(2) {
-        let count = pair[0].trim_matches(|c: char| !c.is_ascii_digit());
-        let Some(count) = count.parse::<u64>().ok() else {
+    for line in output.lines() {
+        if is_runner_summary_header_line(line) {
             continue;
-        };
-        let normalized = pair[1].trim_matches(|c: char| !c.is_alphanumeric());
-        if normalized == "passed" || normalized == "failed" {
-            total = Some(total.unwrap_or(0) + count);
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        for pair in tokens.windows(2) {
+            let count = pair[0].trim_matches(|c: char| !c.is_ascii_digit());
+            let Some(count) = count.parse::<u64>().ok() else {
+                continue;
+            };
+            let normalized = pair[1].trim_matches(|c: char| !c.is_alphanumeric());
+            if normalized == "passed" || normalized == "failed" {
+                total = Some(total.unwrap_or(0) + count);
+            }
         }
     }
     if total.is_some() {
         return total;
     }
-    for pair in tokens.windows(2) {
-        let count = pair[0].trim_matches(|c: char| !c.is_ascii_digit());
-        let Some(count) = count.parse::<u64>().ok() else {
+    for line in output.lines() {
+        if is_runner_summary_header_line(line) {
             continue;
-        };
-        let normalized = pair[1].trim_matches(|c: char| !c.is_alphanumeric());
-        if normalized == "tests" || normalized == "test" {
-            return Some(count);
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        for pair in tokens.windows(2) {
+            let count = pair[0].trim_matches(|c: char| !c.is_ascii_digit());
+            let Some(count) = count.parse::<u64>().ok() else {
+                continue;
+            };
+            let normalized = pair[1].trim_matches(|c: char| !c.is_alphanumeric());
+            if normalized == "tests" || normalized == "test" {
+                return Some(count);
+            }
         }
     }
     None
+}
+
+/// 汇总标题行判定：jest/vitest 的 `Test Suites:`／`Test Files`／
+/// `Snapshots:` 行携带的是 suite/file/snapshot 计数,不是测试数量。
+fn is_runner_summary_header_line(line: &str) -> bool {
+    let lowered = line.trim().to_lowercase();
+    lowered.starts_with("test files")
+        || lowered.starts_with("test suites")
+        || lowered.starts_with("snapshots")
 }
 
 /// CHECK 失败四分类（呈现辅助）：按固定优先级做大小写不敏感子串匹配——

@@ -154,11 +154,18 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
         )
         .unwrap();
     // S6（DesignPushLocal2 Q6/Q4②，审查加强）：最终 prompt 是绑定渲染
-    // envelope 与 platform_directives 段的精确拼接（前缀零改写、中段零
-    // 插入）；执行上下文哈希仍等于渲染 content_hash（追加不动冻结哈希面）。
+    // envelope 与 HostCoding CHECK 自跑合同（批2 T15 审查修复轮1 F3 同步
+    // 本精确断言）及 platform_directives 段的精确拼接（前缀零改写、
+    // 中段零插入）；执行上下文哈希仍等于渲染 content_hash（追加不动冻结
+    // 哈希面）。
     assert_eq!(
         coder.input().prompt,
-        format!("{}{}", expected_coder.text, platform_directives_section())
+        format!(
+            "{}{}{}",
+            expected_coder.text,
+            host_coding_check_contract(),
+            platform_directives_section()
+        )
     );
     assert_eq!(
         run.coder_provider_renderer_version,

@@ -222,6 +222,9 @@ impl CodingWorkspaceEngine {
         // S6（DesignPushLocal2 Q6/Q4②）：同 coding.rs——渲染与回落两路径
         // 合并后的最终 prompt 统一追加平台指令段（提交责任声明+汇报契约），
         // 哈希计算之后追加，所有 attempt 无条件注入。
+        // T15（REQ-ENV-CHECK-01,审查修复轮1 F3）：HostCoding CHECK 自跑
+        // 合同同先例无条件追加（rendered_context 分支不经 builder）。
+        full_prompt.push_str(host_coding_check_contract());
         full_prompt.push_str(&platform_directives_section());
         // P3-a（REQ-COD-07）：跨仓上游交付注入——同 coding.rs：权威 resolver
         // 结果以运行期 DTO 组段，追加在 render→bind 哈希计算之后、下方
@@ -244,6 +247,9 @@ impl CodingWorkspaceEngine {
                 }
                 // S6:delta/rework 变体同样携带平台指令段（当前轮直接可见）。
                 delta_prompt.push_str(&platform_directives_section());
+                // T15:delta/rework 变体同样携带 HostCoding CHECK 自跑合同
+                //（builder 不内嵌,单源在此追加）。
+                delta_prompt.push_str(host_coding_check_contract());
                 // P3-a：delta/rework 变体同样携带上游交付段（当前轮直接可见）。
                 delta_prompt.push_str(&upstream_section);
                 delta_prompt

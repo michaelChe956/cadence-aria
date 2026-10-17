@@ -524,6 +524,10 @@ export type VerificationCommandEvidence = {
   exit_code?: number | null;
   test_execution_count?: number | null;
   environment_summary?: string | null;
+  /** 批2 Task 15：原始输出引用（有界尾摘；超限输出经 artifact 全文派生）。 */
+  raw_output_excerpt?: string | null;
+  /** 批2 Task 15：CHECK 失败四分类（missing_dependency/auth_failure/permission_failure/assertion_failure/unclassified）；通过为 null。 */
+  failure_class?: string | null;
   mismatch: boolean;
 };
 

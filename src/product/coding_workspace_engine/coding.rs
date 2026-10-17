@@ -216,6 +216,11 @@ impl CodingWorkspaceEngine {
         // prompt 统一追加平台指令段——提交责任声明优先于仓库「不自动
         // 提交」类规则，汇报契约钉住交付摘要事实面。追加发生在 render→bind
         // 哈希计算之后，执行上下文哈希不受影响；所有 attempt 无条件注入。
+        // T15（REQ-ENV-CHECK-01,审查修复轮1 F3）：HostCoding CHECK 自跑
+        // 合同——按 platform_directives_section 先例在 render/fallback
+        // 合并后无条件追加（group 首轮 rendered_context 分支不经 builder）；
+        // 追加发生在 render→bind 哈希计算之后，执行上下文哈希不受影响。
+        full_prompt.push_str(host_coding_check_contract());
         full_prompt.push_str(&platform_directives_section());
         // P3-a（REQ-COD-07）：跨仓上游交付注入——权威 resolver 结果以运行期
         // DTO 组段，追加在 render→bind 哈希计算之后（renderer/执行上下文哈希
@@ -249,6 +254,9 @@ impl CodingWorkspaceEngine {
                 // S6:delta-only resume 轮同样携带平台指令段（同 r54 禁线
                 // 先例——当前轮必须直接可见）。
                 delta.push_str(&platform_directives_section());
+                // T15:delta-only resume 轮同样携带 HostCoding CHECK 自跑
+                // 合同（当前轮直接可见;builder 不内嵌,单源在此追加）。
+                delta.push_str(host_coding_check_contract());
                 // P3-a：delta-only resume 轮同样携带上游交付段（注入族
                 // 先例——当前轮必须直接可见）。
                 delta.push_str(&upstream_section);
