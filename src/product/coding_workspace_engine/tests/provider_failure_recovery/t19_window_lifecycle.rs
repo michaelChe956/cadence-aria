@@ -262,7 +262,6 @@ async fn reviewer_violation_blocks_retry_and_keeps_manual_gate_lock() {
         config_after.contains("[t19violation]"),
         "git-domain violation evidence must survive: {config_after}"
     );
-    let _ = baseline_config;
     // worktree 恢复面:reviewer 无文件改动,Coder 产出不丢。
     assert!(
         worktree.join("reviewed.rs").exists(),
@@ -372,7 +371,6 @@ async fn invalidated_report_content_approve_never_drives_progression() {
         config_after.contains("[t19violation]"),
         "violation evidence must survive: {config_after}"
     );
-    let _ = baseline_config;
     let window_store = t19_window_store(root.path());
     let record = window_store
         .load_window(report.review_window_id.as_deref().expect("window bound"))
@@ -422,3 +420,70 @@ impl StreamingProviderAdapter for ViolatingApproveProvider {
 }
 
 use crate::product::reviewer_window_store::ReportAcceptance as ReportAcceptanceProjection;
+
+/// brief 参数化补齐:resume 形态(已有 CodeReviewer 会话的 attempt 经
+/// `execute_code_review_with_commands` 续跑)与 initial 同一窗口生命周期。
+#[tokio::test]
+async fn reviewer_resume_entry_shares_window_lifecycle() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
+    // 注入历史 reviewer 会话 → 首轮 invocation 走 resume 通道。
+    let mut resumed = attempt.clone();
+    resumed.provider_conversations = vec![crate::product::models::ProviderConversationRef {
+        role: crate::product::models::ProviderConversationRole::CodeReviewer,
+        provider: ProviderName::ClaudeCode,
+        provider_session_id: "session-resume-1".to_string(),
+        updated_at: "2026-07-01T00:00:00Z".to_string(),
+        last_node_id: None,
+    }];
+    store
+        .write_coding_attempt_for_test(&resumed)
+        .expect("persist resumed attempt");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = ResumeCapturingProvider {
+        inner: TransportFailuresThenSuccessProvider::new(0, APPROVE_OUTPUT),
+    };
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let report = engine
+        .execute_code_review_with_commands(&resumed, &provider, &mut command_rx)
+        .await
+        .expect("resume review completes");
+
+    // resume 通道确实消费了历史会话。
+    let inputs = provider.inner.recorded_inputs();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0].resume_provider_session_id.as_deref(),
+        Some("session-resume-1")
+    );
+    // 窗口生命周期与 initial 同构:报告绑定窗口且被采信。
+    assert_eq!(report.verdict, ReviewVerdict::Approve);
+    assert_eq!(report.acceptance, Some(ReviewReportAcceptance::Accepted));
+    let window_store = t19_window_store(root.path());
+    let record = window_store
+        .load_window(report.review_window_id.as_deref().expect("window bound"))
+        .expect("window record");
+    assert_eq!(
+        record.state,
+        crate::product::reviewer_window_store::ReviewerWindowState::ClosedAccepted
+    );
+}
+
+struct ResumeCapturingProvider {
+    inner: TransportFailuresThenSuccessProvider,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ResumeCapturingProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.inner.start(input, cancel).await
+    }
+}

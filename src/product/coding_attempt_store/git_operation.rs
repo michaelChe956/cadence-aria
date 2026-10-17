@@ -194,7 +194,9 @@ impl super::CodingAttemptStore {
         // 上一相位;同 attempt 流程经 journal 锁串行,无误清并发),
         // durable 写意图落盘后、mutation 发生前登记 writer;窗口冻结
         // 期间拒绝(journal 停在原相位,重入幂等续接)。
-        {
+        // ⚠4(修复轮 1):仅 ReviewRequest 走通道守卫——WorktreePrepare/
+        // PointerPublish 不在 reviewer 窗口锁域,跳过闸门 IO。
+        if candidate.kind == CodingGitOperationKind::ReviewRequest {
             let paths = self.paths();
             exit_review_write_channels_best_effort(
                 &paths,
@@ -263,7 +265,7 @@ impl super::CodingAttemptStore {
         );
         // T19 通道守卫(自愈式,与 prepare 同款):清残留→durable 推进→
         // 登记新相位通道(冻结即拒;早退相位重入同样登记)。
-        {
+        if expected.kind == CodingGitOperationKind::ReviewRequest {
             let paths = self.paths();
             exit_review_write_channels_best_effort(
                 &paths,

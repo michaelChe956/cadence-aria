@@ -144,7 +144,7 @@ impl CodingWorkspaceEngine {
         outcome
     }
 
-    async fn compensate_cancelled_review_commit_inner(
+    pub(super) async fn compensate_cancelled_review_commit_inner(
         &self,
         attempt: &CodingExecutionAttempt,
         journal: &CodingGitOperationJournal,
@@ -160,6 +160,15 @@ impl CodingWorkspaceEngine {
                 &journal,
                 CodingGitOperationPhase::CommitCreated,
                 Some(current_head),
+            )?;
+            // F1(修复轮 1):上方 advance 的自愈式 exit-all 已清除外层
+            // enter 的 Compensation 登记,而 CommitCreated 相位不再登记
+            // 任何通道——reset 前必须重新登记:冻结窗口恰好在外层 enter
+            // 之后出现时,此处拒绝,reset 不在冻结窗口内裸跑。
+            self.guard_platform_write_channel(
+                &journal.worktree_path,
+                crate::product::reviewer_window_store::WriteChannelKind::Compensation,
+                &attempt.id,
             )?;
         }
         git.git_reset_mixed(&journal.worktree_path, &journal.before_head)

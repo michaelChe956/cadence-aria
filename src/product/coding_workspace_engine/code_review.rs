@@ -131,33 +131,52 @@ impl CodingWorkspaceEngine {
         let role_run = retry_success.role_run;
         let node = retry_success.node;
         let full_output = outcome.full_output.clone();
-        let raw_provider_output_ref = self.store.save_provider_raw_output(
-            &attempt,
-            CodingExecutionStage::CodeReview,
-            "code_review",
-            &full_output,
-        )?;
-        self.store.update_role_run_refs(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &role_run.id,
-            vec![raw_provider_output_ref.clone()],
-            Vec::new(),
-        )?;
-        // T19:收口先于 save——Quiescing/落违规/恢复/采信完成后,保存的
-        // 才是可消费完成事实;Pending/Invalidated 永不驱动 approve/交付。
-        let window_outcome = self
-            .finalize_reviewer_window_with_report(&review_window)
-            .await?;
-        let mut report = self.build_code_review_report(
-            &attempt,
-            outcome,
-            Some(raw_provider_output_ref.clone()),
-            &role_run,
-        )?;
-        report.review_window_id = Some(window_outcome.window_id.clone());
-        report.acceptance = Some(wire_acceptance(window_outcome.acceptance));
+        // F2(修复轮 1):成功后的落盘链(raw output/refs/收口/报告构建)
+        // 任一失败都必须先收口窗口再返回——否则 Running/Quiescing 窗口
+        // 携租约与四通道冻结永久残留(后续开窗/Coder/人工重试全被拒)。
+        let persisted: Result<(CodeReviewReport, String), CodingWorkspaceEngineError> = async {
+            let raw_provider_output_ref = self.store.save_provider_raw_output(
+                &attempt,
+                CodingExecutionStage::CodeReview,
+                "code_review",
+                &full_output,
+            )?;
+            self.store.update_role_run_refs(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &role_run.id,
+                vec![raw_provider_output_ref.clone()],
+                Vec::new(),
+            )?;
+            // T19:收口先于 save——Quiescing/落违规/恢复/采信完成后,
+            // 保存的才是可消费完成事实;Pending/Invalidated 永不驱动
+            // approve/交付。
+            let window_outcome = self
+                .finalize_reviewer_window_with_report(&review_window)
+                .await?;
+            let mut report = self.build_code_review_report(
+                &attempt,
+                outcome,
+                Some(raw_provider_output_ref.clone()),
+                &role_run,
+            )?;
+            report.review_window_id = Some(window_outcome.window_id.clone());
+            report.acceptance = Some(wire_acceptance(window_outcome.acceptance));
+            Ok((report, raw_provider_output_ref))
+        }
+        .await;
+        let (report, raw_provider_output_ref) = match persisted {
+            Ok(pair) => pair,
+            Err(error) => {
+                self.close_reviewer_window_after_failure(
+                    &review_window,
+                    "code_review_post_run_persist_failed",
+                )
+                .await;
+                return Err(error);
+            }
+        };
         let plan_defect_source = PlanDefectSource::CodeReviewer;
         let reviewer_projection = self.reviewer_projection_for_attempt(&attempt)?;
         let plan_defect_route = code_review_flow_decision(&report, &reviewer_projection);
@@ -351,8 +370,6 @@ pub(crate) struct ReviewerWindowOutcome {
     pub(crate) window_id: String,
     /// 权威采信投影(同源窗口记录;报告 DTO 只是 wire 形状)。
     pub(crate) acceptance: ReportAcceptance,
-    /// 恢复后进入人工门(违规整轮作废,待人工裁决)。
-    pub(crate) manual_gate: bool,
 }
 
 fn reviewer_provider_wire_name(provider: &ProviderName) -> String {
@@ -501,14 +518,14 @@ impl CodingWorkspaceEngine {
         );
         for sibling in resource_store
             .scope_keys()
-            .map_err(|error| CodingWorkspaceEngineError::Store(error))?
+            .map_err(CodingWorkspaceEngineError::Store)?
         {
             if sibling == key {
                 continue;
             }
             let records = resource_store
                 .list_scope(&sibling)
-                .map_err(|error| CodingWorkspaceEngineError::Store(error))?;
+                .map_err(CodingWorkspaceEngineError::Store)?;
             let owned = records.iter().any(|record| {
                 record
                     .reserved_labels
@@ -743,11 +760,20 @@ impl CodingWorkspaceEngine {
                 ..
             } => ReportAcceptance::PendingAcceptance,
         };
-        let _ = &record;
+        // ⚠5(修复轮 1):终态观察——人工门/停等窗留 durable 记录供
+        // T21 恢复驱动与人工面分诊(记录状态由 store 持久,此处仅告警)。
+        if summary.manual_gate || record.state != ReviewerWindowState::ClosedAccepted {
+            tracing::warn!(
+                window = %window.window_id,
+                state = record.state.as_str(),
+                manual_gate = summary.manual_gate,
+                acceptance = ?acceptance,
+                "reviewer_window_finalized_not_accepted_lock_or_gate_held"
+            );
+        }
         Ok(ReviewerWindowOutcome {
             window_id: window.window_id.clone(),
             acceptance,
-            manual_gate: summary.manual_gate,
         })
     }
 

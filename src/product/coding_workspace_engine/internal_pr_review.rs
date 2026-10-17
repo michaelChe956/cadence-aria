@@ -312,302 +312,309 @@ impl CodingWorkspaceEngine {
             &reviewer,
             worktree_path,
         )?;
-
-        let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
-        let is_group_final_review = attempt.scope == CodingAttemptScope::WorkItemGroup;
-        let prepared_group_context = if is_group_final_review {
-            Some(self.prepare_group_reviewer_context(&attempt, &reviewer)?)
-        } else {
-            None
-        };
-        // 裁决 A 两阶段:validate 前移,在 prompt 构建前 resolve policy 并计算
-        // routing reference context。
-        let policy = self
-            .resolve_launch_policy_for_role(
-                &attempt,
-                CodingProviderRole::InternalReviewer,
-                worktree_path.as_path(),
-            )
-            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
-        let routing_context = policy
-            .as_ref()
-            .map(routing_reference_context_from_policy)
-            .unwrap_or_default();
-        let legacy_prompt = if is_group_final_review {
-            self.build_group_internal_pr_review_prompt(
-                &attempt,
-                &review_request,
-                Some(worktree_path.as_path()),
-                retry_diagnostic.as_deref(),
-                &routing_context,
-            )
-            .await?
-        } else {
-            self.build_internal_pr_review_prompt(
-                &attempt,
-                &review_request,
-                worktree_path,
-                retry_diagnostic.as_deref(),
-                &routing_context,
-            )
-            .await?
-        };
-        let prompt = prepared_group_context
-            .as_ref()
-            .map(|context| format!("{}\n\n{legacy_prompt}", context.prompt_section))
-            .unwrap_or(legacy_prompt);
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::CodingExecutionEvent {
-                event: provider_prompt_event(
-                    &node.id,
-                    &reviewer,
-                    prompt.clone(),
-                    CodingPromptMode::FullConversation.event_detail(),
-                ),
-            })
-            .await;
-        // D2 锚点：经文件内具名生产构造函数构造（内部走共享工厂派生
-        // tool_policy：Reviewer → DenyFileWriteBuiltins）。
-        let (input, provider_input) = internal_pr_review_streaming_input(
-            &reviewer,
-            prompt,
-            worktree_path,
-            self.attempt_provider_stream_log_dir(&attempt),
-            &attempt.id,
-            self.provider_resume_session_id_for_attempt(
-                &attempt,
-                &CodingProviderRole::InternalReviewer,
+        // F3(修复轮 1):开窗后全部材料采集/启动/落盘链包进内层块——任一
+        // 失败(流前或流后)统一先收口窗口再返回原错,不留下持锁窗口。
+        let flow = async {
+            let retry_diagnostic = self.retry_diagnostic_for_previous_run(&attempt, &role_run)?;
+            let is_group_final_review = attempt.scope == CodingAttemptScope::WorkItemGroup;
+            let prepared_group_context = if is_group_final_review {
+                Some(self.prepare_group_reviewer_context(&attempt, &reviewer)?)
+            } else {
+                None
+            };
+            // 裁决 A 两阶段:validate 前移,在 prompt 构建前 resolve policy 并计算
+            // routing reference context。
+            let policy = self
+                .resolve_launch_policy_for_role(
+                    &attempt,
+                    CodingProviderRole::InternalReviewer,
+                    worktree_path.as_path(),
+                )
+                .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            let routing_context = policy
+                .as_ref()
+                .map(routing_reference_context_from_policy)
+                .unwrap_or_default();
+            let legacy_prompt = if is_group_final_review {
+                self.build_group_internal_pr_review_prompt(
+                    &attempt,
+                    &review_request,
+                    Some(worktree_path.as_path()),
+                    retry_diagnostic.as_deref(),
+                    &routing_context,
+                )
+                .await?
+            } else {
+                self.build_internal_pr_review_prompt(
+                    &attempt,
+                    &review_request,
+                    worktree_path,
+                    retry_diagnostic.as_deref(),
+                    &routing_context,
+                )
+                .await?
+            };
+            let prompt = prepared_group_context
+                .as_ref()
+                .map(|context| format!("{}\n\n{legacy_prompt}", context.prompt_section))
+                .unwrap_or(legacy_prompt);
+            let _ = self
+                .event_tx
+                .send(CodingWsOutMessage::CodingExecutionEvent {
+                    event: provider_prompt_event(
+                        &node.id,
+                        &reviewer,
+                        prompt.clone(),
+                        CodingPromptMode::FullConversation.event_detail(),
+                    ),
+                })
+                .await;
+            // D2 锚点：经文件内具名生产构造函数构造（内部走共享工厂派生
+            // tool_policy：Reviewer → DenyFileWriteBuiltins）。
+            let (input, provider_input) = internal_pr_review_streaming_input(
                 &reviewer,
-            ),
-            role_permission_mode_for_attempt(
-                &self.store,
+                prompt,
+                worktree_path,
+                self.attempt_provider_stream_log_dir(&attempt),
+                &attempt.id,
+                self.provider_resume_session_id_for_attempt(
+                    &attempt,
+                    &CodingProviderRole::InternalReviewer,
+                    &reviewer,
+                ),
+                role_permission_mode_for_attempt(
+                    &self.store,
+                    &attempt,
+                    CodingProviderRole::InternalReviewer,
+                )?,
+            );
+            // 裁决 A 两阶段:policy 已 resolve,routing reference 已注入 prompt;
+            // 此处仅把 policy 与 provider_input 捆绑(同源 clone-then-move)。
+            // Task 2.7（REQ-ENV-10）：launch 层 envelope 重绑（设计决策 1，与 2.6 的
+            // coder/reviewer cycle 同款）——policy 在场时 input 显式携带 envelope 冻结
+            // 的 canonical cwd（LC=root），spawn 前复验消费；无政策路径保持 None
+            // （回填 working_dir，单仓零变化）。
+            let mut provider_input = provider_input;
+            if let Some(policy) = policy.as_ref() {
+                provider_input.working_directory =
+                    Some(policy.envelope().working_directory.clone());
+            }
+            // Task 1b 段③:validated input 一律经 gateway `prepare_streaming_launch`
+            // 组装(prepare 前绑定 run-bound sink;外来非法 Some(policy) 拒绝)。
+            let validated_input = self
+                .prepare_streaming_launch_for_role(
+                    &attempt,
+                    CodingProviderRole::InternalReviewer,
+                    worktree_path.as_path(),
+                    provider_input.clone(),
+                )
+                .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            let full_output = self
+                .run_provider_stream_to_completion(CodingProviderStreamRun {
+                    attempt: &attempt,
+                    node_id: &node.id,
+                    role_run: Some(&role_run),
+                    provider,
+                    legacy_input: &input,
+                    input: provider_input,
+                    provider_name: &reviewer,
+                    provider_role: CodingProviderRole::InternalReviewer,
+                    command_rx,
+                    // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge。
+                    allow_legacy_stream_fallback: attempt.target_snapshot.is_none(),
+                    timeout: None,
+                    timeout_reason_code: None,
+                    suppress_failure_side_effects: false,
+                    validated_input,
+                })
+                .await?;
+            let raw_provider_output_ref = self.store.save_provider_raw_output(
                 &attempt,
-                CodingProviderRole::InternalReviewer,
-            )?,
-        );
-        // 裁决 A 两阶段:policy 已 resolve,routing reference 已注入 prompt;
-        // 此处仅把 policy 与 provider_input 捆绑(同源 clone-then-move)。
-        // Task 2.7（REQ-ENV-10）：launch 层 envelope 重绑（设计决策 1，与 2.6 的
-        // coder/reviewer cycle 同款）——policy 在场时 input 显式携带 envelope 冻结
-        // 的 canonical cwd（LC=root），spawn 前复验消费；无政策路径保持 None
-        // （回填 working_dir，单仓零变化）。
-        let mut provider_input = provider_input;
-        if let Some(policy) = policy.as_ref() {
-            provider_input.working_directory = Some(policy.envelope().working_directory.clone());
-        }
-        // Task 1b 段③:validated input 一律经 gateway `prepare_streaming_launch`
-        // 组装(prepare 前绑定 run-bound sink;外来非法 Some(policy) 拒绝)。
-        let validated_input = self
-            .prepare_streaming_launch_for_role(
+                CodingExecutionStage::InternalPrReview,
+                if is_group_final_review {
+                    "group_final_review"
+                } else {
+                    "internal_pr_review"
+                },
+                &full_output,
+            )?;
+            self.store.update_role_run_refs(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &role_run.id,
+                vec![raw_provider_output_ref.clone()],
+                Vec::new(),
+            )?;
+            // T19:收口先于 save(可消费完成事实);采信投影入报告 DTO。
+            let window_outcome = self
+                .finalize_reviewer_window_with_report(&review_window)
+                .await?;
+            let mut review = self.build_internal_pr_review(
                 &attempt,
-                CodingProviderRole::InternalReviewer,
-                worktree_path.as_path(),
-                provider_input.clone(),
+                &review_request,
+                &full_output,
+                Some(raw_provider_output_ref.clone()),
+                &role_run,
+            )?;
+            review.review_window_id = Some(window_outcome.window_id.clone());
+            review.acceptance = Some(crate::product::reviewer_window_store::wire_acceptance(
+                window_outcome.acceptance,
+            ));
+            // T19 采信门:未采信报告即使内容 approve 也不驱动推进——runner
+            // 侧 flow 门与本侧 blocked gate 双面收口(复用既有门链)。
+            let review_blocks_on_acceptance = review.verdict == ReviewVerdict::Approve
+                && matches!(
+                    review.acceptance,
+                    Some(
+                        crate::product::coding_models::ReviewReportAcceptance::PendingAcceptance
+                            | crate::product::coding_models::ReviewReportAcceptance::Invalidated
+                    )
+                );
+            let review_flow_decision = match prepared_group_context.as_ref() {
+                Some(context) => {
+                    internal_review_flow_decision_with_bindings(&review, &context.bindings)
+                }
+                None => self.internal_review_flow_decision_for_attempt(&attempt, &review)?,
+            };
+            self.store.save_internal_pr_review(&attempt, &review)?;
+            self.emit_internal_pr_review_chat_entry(
+                &attempt,
+                &node.id,
+                &review,
+                review_flow_decision.label(),
             )
-            .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
-        let full_output = match self
-            .run_provider_stream_to_completion(CodingProviderStreamRun {
-                attempt: &attempt,
-                node_id: &node.id,
-                role_run: Some(&role_run),
-                provider,
-                legacy_input: &input,
-                input: provider_input,
-                provider_name: &reviewer,
-                provider_role: CodingProviderRole::InternalReviewer,
-                command_rx,
-                // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge。
-                allow_legacy_stream_fallback: attempt.target_snapshot.is_none(),
-                timeout: None,
-                timeout_reason_code: None,
-                suppress_failure_side_effects: false,
-                validated_input,
-            })
-            .await
-        {
-            Ok(output) => output,
+            .await;
+            let _ = self
+                .event_tx
+                .send(CodingWsOutMessage::InternalPrReviewComplete {
+                    review: Box::new(review.clone()),
+                })
+                .await;
+            let (node_status, summary, role_run_status, reason_code) = match review.verdict {
+                ReviewVerdict::Approve => (
+                    CodingTimelineNodeStatus::Completed,
+                    Some(
+                        if is_group_final_review {
+                            "GroupFinalReview 通过"
+                        } else {
+                            "internal PR review 通过"
+                        }
+                        .to_string(),
+                    ),
+                    CodingRoleRunStatus::Completed,
+                    None,
+                ),
+                ReviewVerdict::RequestChanges => (
+                    CodingTimelineNodeStatus::Failed,
+                    Some(
+                        if is_group_final_review {
+                            "GroupFinalReview 要求修改"
+                        } else {
+                            "internal PR review 要求修改"
+                        }
+                        .to_string(),
+                    ),
+                    CodingRoleRunStatus::Completed,
+                    None,
+                ),
+                ReviewVerdict::Blocked => (
+                    CodingTimelineNodeStatus::Blocked,
+                    Some(
+                        if is_group_final_review {
+                            "GroupFinalReview 被阻塞"
+                        } else {
+                            "internal PR review 被阻塞"
+                        }
+                        .to_string(),
+                    ),
+                    CodingRoleRunStatus::Blocked,
+                    Some(
+                        if is_group_final_review {
+                            "group_final_review_blocked"
+                        } else {
+                            "internal_review_blocked"
+                        }
+                        .to_string(),
+                    ),
+                ),
+            };
+            self.complete_timeline_node(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &node.id,
+                node_status,
+                summary,
+            )
+            .await?;
+            self.store.update_role_run_status(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                &role_run.id,
+                role_run_status,
+                reason_code,
+            )?;
+            let blocked_gate_reason = if review_blocks_on_acceptance {
+                Some("internal_review_report_not_accepted")
+            } else {
+                internal_review_blocked_gate_reason(review_flow_decision, is_group_final_review)
+            };
+            if let Some(blocked_gate_reason) = blocked_gate_reason {
+                let title = match (blocked_gate_reason, is_group_final_review) {
+                    ("group_final_review_blocked", _) => "GroupFinalReview change requested",
+                    ("internal_review_change_requested", false) => {
+                        "Internal PR review change requested"
+                    }
+                    ("internal_review_verification_incomplete", true) => {
+                        "GroupFinalReview verification incomplete"
+                    }
+                    ("internal_review_verification_incomplete", false) => {
+                        "Internal PR review verification incomplete"
+                    }
+                    ("internal_review_human_triage", true) => {
+                        "GroupFinalReview requires human triage"
+                    }
+                    ("internal_review_human_triage", false) => {
+                        "Internal PR review requires human triage"
+                    }
+                    ("internal_review_operational_blocker", true) => {
+                        "GroupFinalReview operational blocker"
+                    }
+                    ("internal_review_operational_blocker", false) => {
+                        "Internal PR review operational blocker"
+                    }
+                    _ => "Internal PR review blocked",
+                };
+                self.create_review_blocked_gate(ReviewBlockedGateInput {
+                    attempt: &attempt,
+                    node_id: &node.id,
+                    stage: CodingExecutionStage::InternalPrReview,
+                    role: CodingProviderRole::InternalReviewer,
+                    title: title.to_string(),
+                    description: review.summary.clone(),
+                    reason_code: blocked_gate_reason,
+                    evidence_refs: vec![review.id.clone()],
+                    raw_provider_output_ref: Some(raw_provider_output_ref),
+                })
+                .await?;
+            }
+            Ok(review)
+        };
+        match flow.await {
+            Ok(review) => Ok(review),
             Err(error) => {
-                // T19:失败/取消——窗口收口恢复,锁保持到恢复完成。
+                // T19/F3:流前材料、流中执行、流后落盘任一失败——窗口
+                // 收口恢复(锁保持到恢复完成),不掩盖原始错误。
                 self.close_reviewer_window_after_failure(
                     &review_window,
                     "internal_pr_review_failed_or_cancelled",
                 )
                 .await;
-                return Err(error);
+                Err(error)
             }
-        };
-        let raw_provider_output_ref = self.store.save_provider_raw_output(
-            &attempt,
-            CodingExecutionStage::InternalPrReview,
-            if is_group_final_review {
-                "group_final_review"
-            } else {
-                "internal_pr_review"
-            },
-            &full_output,
-        )?;
-        self.store.update_role_run_refs(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &role_run.id,
-            vec![raw_provider_output_ref.clone()],
-            Vec::new(),
-        )?;
-        // T19:收口先于 save(可消费完成事实);采信投影入报告 DTO。
-        let window_outcome = self
-            .finalize_reviewer_window_with_report(&review_window)
-            .await?;
-        let mut review = self.build_internal_pr_review(
-            &attempt,
-            &review_request,
-            &full_output,
-            Some(raw_provider_output_ref.clone()),
-            &role_run,
-        )?;
-        review.review_window_id = Some(window_outcome.window_id.clone());
-        review.acceptance = Some(crate::product::reviewer_window_store::wire_acceptance(
-            window_outcome.acceptance,
-        ));
-        // T19 采信门:未采信报告即使内容 approve 也不驱动推进——runner
-        // 侧 flow 门与本侧 blocked gate 双面收口(复用既有门链)。
-        let review_blocks_on_acceptance = review.verdict == ReviewVerdict::Approve
-            && matches!(
-                review.acceptance,
-                Some(
-                    crate::product::coding_models::ReviewReportAcceptance::PendingAcceptance
-                        | crate::product::coding_models::ReviewReportAcceptance::Invalidated
-                )
-            );
-        let review_flow_decision = match prepared_group_context.as_ref() {
-            Some(context) => {
-                internal_review_flow_decision_with_bindings(&review, &context.bindings)
-            }
-            None => self.internal_review_flow_decision_for_attempt(&attempt, &review)?,
-        };
-        self.store.save_internal_pr_review(&attempt, &review)?;
-        self.emit_internal_pr_review_chat_entry(
-            &attempt,
-            &node.id,
-            &review,
-            review_flow_decision.label(),
-        )
-        .await;
-        let _ = self
-            .event_tx
-            .send(CodingWsOutMessage::InternalPrReviewComplete {
-                review: Box::new(review.clone()),
-            })
-            .await;
-        let (node_status, summary, role_run_status, reason_code) = match review.verdict {
-            ReviewVerdict::Approve => (
-                CodingTimelineNodeStatus::Completed,
-                Some(
-                    if is_group_final_review {
-                        "GroupFinalReview 通过"
-                    } else {
-                        "internal PR review 通过"
-                    }
-                    .to_string(),
-                ),
-                CodingRoleRunStatus::Completed,
-                None,
-            ),
-            ReviewVerdict::RequestChanges => (
-                CodingTimelineNodeStatus::Failed,
-                Some(
-                    if is_group_final_review {
-                        "GroupFinalReview 要求修改"
-                    } else {
-                        "internal PR review 要求修改"
-                    }
-                    .to_string(),
-                ),
-                CodingRoleRunStatus::Completed,
-                None,
-            ),
-            ReviewVerdict::Blocked => (
-                CodingTimelineNodeStatus::Blocked,
-                Some(
-                    if is_group_final_review {
-                        "GroupFinalReview 被阻塞"
-                    } else {
-                        "internal PR review 被阻塞"
-                    }
-                    .to_string(),
-                ),
-                CodingRoleRunStatus::Blocked,
-                Some(
-                    if is_group_final_review {
-                        "group_final_review_blocked"
-                    } else {
-                        "internal_review_blocked"
-                    }
-                    .to_string(),
-                ),
-            ),
-        };
-        self.complete_timeline_node(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &node.id,
-            node_status,
-            summary,
-        )
-        .await?;
-        self.store.update_role_run_status(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &role_run.id,
-            role_run_status,
-            reason_code,
-        )?;
-        let blocked_gate_reason = if review_blocks_on_acceptance {
-            Some("internal_review_report_not_accepted")
-        } else {
-            internal_review_blocked_gate_reason(review_flow_decision, is_group_final_review)
-        };
-        if let Some(blocked_gate_reason) = blocked_gate_reason {
-            let title = match (blocked_gate_reason, is_group_final_review) {
-                ("group_final_review_blocked", _) => "GroupFinalReview change requested",
-                ("internal_review_change_requested", false) => {
-                    "Internal PR review change requested"
-                }
-                ("internal_review_verification_incomplete", true) => {
-                    "GroupFinalReview verification incomplete"
-                }
-                ("internal_review_verification_incomplete", false) => {
-                    "Internal PR review verification incomplete"
-                }
-                ("internal_review_human_triage", true) => "GroupFinalReview requires human triage",
-                ("internal_review_human_triage", false) => {
-                    "Internal PR review requires human triage"
-                }
-                ("internal_review_operational_blocker", true) => {
-                    "GroupFinalReview operational blocker"
-                }
-                ("internal_review_operational_blocker", false) => {
-                    "Internal PR review operational blocker"
-                }
-                _ => "Internal PR review blocked",
-            };
-            self.create_review_blocked_gate(ReviewBlockedGateInput {
-                attempt: &attempt,
-                node_id: &node.id,
-                stage: CodingExecutionStage::InternalPrReview,
-                role: CodingProviderRole::InternalReviewer,
-                title: title.to_string(),
-                description: review.summary.clone(),
-                reason_code: blocked_gate_reason,
-                evidence_refs: vec![review.id.clone()],
-                raw_provider_output_ref: Some(raw_provider_output_ref),
-            })
-            .await?;
         }
-        Ok(review)
     }
 }
 
