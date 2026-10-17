@@ -75,3 +75,16 @@
 4. 平台合法写入域漂移(platform_domain_drift→RecoveryRequired)路径继承 T16/T17 已测语义,本 Task 未在新驱动下重复单测(驱动经 `restore_window` 同链路)。
 5. 全量 lib(5177)未跑完(预算),受影响面按 brief+接线邻接 14 套件跑(549/1,唯一红为登记存量);`git archive` detached 快照复验未执行(预算截止),测试在待提交工作树原位运行(内容=提交内容,git status 核对无未预期文件)。
 6. serve_web 次序修正使启动扫描先于 Provider 探活;若探活失败语义依赖先行,属可再议的次序取舍(补偿先行是本 Task 合同)。
+
+# 审查修复轮 1(F1/F2/F3+⚠9/⚠5 顺带,单独 commit)
+
+| 缺陷 | 处置 |
+|---|---|
+| F1(P2)Directory scope 私有根误取资源目录本身→cleanup 必败→窗口永久停等 | ✅ `restore_scope_private_root`:按 scope_id 前缀还原**开窗时私有根**(`code-delivery-{attempt}`→coder_delivery 根;`reviewer-window-{attempt}`→provider-stream 根;其余取资源私有路径 parent,兜底 scratch)。钉测 `directory_scope_residue_cleaned_without_parking`(真实 code_delivery Directory 残留+崩溃重启→清理成功释放零停等) |
+| F2(P2)新序分诊先于探活→恢复 runner 撞初始 degraded 闸门误转 AMR | ✅ `reconcile_claimed_coding_runs_once` 在补偿循环之后、分诊循环之前插 `state.refresh_provider_health()`(与 startup helper 同 `test_provider_enabled` 守卫;不重复发 probe notice,serve_web 侧 notice 语义保留)。钉测 `startup_reconcile_refreshes_provider_health_before_triage`(显式关 test 旗标驱动真实刷新路径:分诊后诊断代次≥1+attempt 保持 Running 未误转 AMR;测试环境缺真实 CLI 探测可合法 degraded,断言刷新先于分诊而非结果本身) |
+| F3(P3)trace 断言恒真(terminal_at<now) | ✅ 改判别性比较:好树首个 provider 会话(role run `started_at`,≤5s 轮询收敛)必须晚于窗口终态迁移时间戳;与补偿期零 role run/分诊后 resumed==1 结构性断言并存 |
+| ⚠9-a list_windows eprintln | ✅ 改 tracing::warn |
+| ⚠9-b scratch 兜底目录收口 | ✅ 补偿路径各出口 best-effort `remove_dir`(空目录才删) |
+| ⚠5 resolve 后不续接补偿 | ✅ 注释固化单一归属:补偿续接统一归启动驱动/终止收敛面,人工裁决面零 git mutation |
+
+修复轮 1 终验:`cargo test --locked --lib -- startup_window_compensation` → **16 passed / 0 failed**;受影响面 14 套件 → **551 passed / 1 failed**(唯一红仍为登记存量 `plan_repair_cancel_replay_requires_authoritative_terminal_state`);`cargo fmt --check` 零差异;clippy all-targets 本面文件 0 命中。

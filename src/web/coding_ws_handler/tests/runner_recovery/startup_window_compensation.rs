@@ -1023,20 +1023,115 @@ async fn bad_tree_fail_closed_while_conflict_free_tree_resumes() {
         bad.reload_attempt().status,
         CodingAttemptStatus::AwaitingManualRecovery
     );
-    // trace:好树窗口终态迁移时间戳早于分诊后观察时刻(baseline 恢复/
-    // 窗口收口先于下一材料采集)。
-    let terminal_at = good
-        .window_record(&good.window_id)
-        .transitions
-        .last()
-        .expect("terminal transition")
-        .at
-        .clone();
-    let terminal_at =
-        chrono::DateTime::parse_from_rfc3339(&terminal_at).expect("rfc3339 transition timestamp");
+    // trace(F3 修复轮 1,判别性):好树下一材料采集的首个 provider 会话
+    // (role run created_at)必须晚于窗口终态迁移时间戳——baseline 恢复/
+    // 窗口收口先于下一材料采集;配合补偿期零 role run 的结构性断言。
+    let terminal_at = chrono::DateTime::parse_from_rfc3339(
+        &good
+            .window_record(&good.window_id)
+            .transitions
+            .last()
+            .expect("terminal transition")
+            .at,
+    )
+    .expect("rfc3339 transition timestamp")
+    .with_timezone(&chrono::Utc);
+    let mut first_run_at = None;
+    for _ in 0..200 {
+        let runs = good
+            .store
+            .list_role_runs(
+                &good.attempt.project_id,
+                &good.attempt.issue_id,
+                &good.attempt.id,
+            )
+            .expect("role runs");
+        if let Some(first) = runs.first() {
+            first_run_at = chrono::DateTime::parse_from_rfc3339(&first.started_at).ok();
+            if first_run_at.is_some() {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let first_run_at = first_run_at
+        .expect("分诊后 runner 建立 provider 会话(role run)")
+        .with_timezone(&chrono::Utc);
     assert!(
-        terminal_at.with_timezone(&chrono::Utc) < chrono::Utc::now(),
-        "窗口收口先于下一材料采集(trace)"
+        terminal_at < first_run_at,
+        "窗口收口({terminal_at})必须先于下一材料采集({first_run_at})"
+    );
+}
+
+/// F1(修复轮 1):共享 worktree 的 code_delivery Directory 残留(带
+/// aria.worktree 标签)与本窗共存——崩溃重启后启动补偿必须还原**开窗时
+/// 的私有根**(而非资源目录本身),清理成功零停等(旧实现必败于
+/// outside_private_root → 窗口永久 RecoveryRequired)。
+#[tokio::test]
+async fn directory_scope_residue_cleaned_without_parking() {
+    let fx = WindowStartupFixture::new("dirs");
+    let role_run = fx
+        .store
+        .create_role_run(
+            &fx.attempt,
+            CodingExecutionStage::Coding,
+            CodingProviderRole::Coder,
+            CodingRoleRunTrigger::Initial,
+            None,
+        )
+        .expect("role run");
+    let scope = fx
+        .engine()
+        .begin_coder_delivery_scope(&fx.attempt, &role_run, &fx.worktree)
+        .await
+        .expect("coder delivery scope");
+    drop(scope);
+    fx.open_window(&fx.window_id, "run-t21-dirs").await;
+
+    let outcomes = run_startup_compensation(&fx).await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(
+        outcomes[0].released,
+        "Directory 残留清理成功,不因私有根误取停等:{:?}",
+        outcomes[0].manual_attention
+    );
+    assert!(!lease_held(&fx));
+    assert!(
+        fx.store
+            .coder_delivery_scope_keys_for_attempt(&fx.attempt.id)
+            .expect("coder delivery keys")
+            .is_empty(),
+        "残留 Directory scope 已清理"
+    );
+    assert_eq!(
+        fx.window_record(&fx.window_id).state,
+        ReviewerWindowState::ClosedInvalidated
+    );
+}
+
+/// F2(修复轮 1):补偿之后、分诊之前刷新 provider 健康——分诊恢复的
+/// runner 不再撞初始 degraded 闸门被误转 AwaitingManualRecovery。
+#[tokio::test]
+async fn startup_reconcile_refreshes_provider_health_before_triage() {
+    let fx = WindowStartupFixture::new("health");
+    let mut state = fx.restart_state();
+    // F2 竞态仅存在于真实 provider 可用性强制面(fake runtime 默认
+    // test_provider_enabled=true 会跳过刷新)——显式关闭以驱动「补偿
+    // 后、分诊前」的刷新路径。
+    state.test_provider_enabled = false;
+    let resumed = crate::web::autopilot_orchestrator::reconcile_claimed_coding_runs_once(&state)
+        .await
+        .expect("reconcile");
+    assert_eq!(resumed, 1, "无窗树分诊恢复 runner");
+    assert!(
+        state.provider_health.latest_diagnostic().generation >= 1,
+        "F2:分诊前 provider 健康已刷新(诊断代次≥1;测试环境缺真实 \
+         CLI 探测可合法 degraded,断言刷新先于分诊而非结果本身)"
+    );
+    assert_eq!(
+        fx.reload_attempt().status,
+        CodingAttemptStatus::Running,
+        "未因 degraded 闸门误转 AwaitingManualRecovery"
     );
 }
 

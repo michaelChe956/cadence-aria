@@ -247,6 +247,15 @@ pub async fn reconcile_claimed_coding_runs_once(state: &WebAppState) -> Result<u
             );
         }
     }
+    // F2(审查修复轮 1):分诊恢复的 runner 只有 5s 阶段门,若探活仍在
+    // 途中,provider_for 会撞初始 degraded 闸门被误转 AwaitingManualRecovery
+    // (F-14 面)。补偿之后、分诊之前先行刷新(与 serve_web 的 notice 语义
+    // 分离:此处只刷新不重复发 probe notice;test_provider_enabled 时跳过
+    // 真实探测,与 refresh_provider_health_for_startup 同守卫)。
+    if !state.test_provider_enabled {
+        state.refresh_provider_health().await;
+    }
+
     let projects = ProjectStore::new(paths.clone())
         .list()
         .map_err(|error| format!("startup coding scan: project list unreadable: {error}"))?;

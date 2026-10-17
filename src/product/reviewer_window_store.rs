@@ -947,9 +947,10 @@ impl ReviewerWindowStore {
             match read_json::<ReviewerWindowRecord>(&path) {
                 Ok(record) => records.push(record),
                 Err(error) => {
-                    eprintln!(
-                        "warning: skip unreadable reviewer window record {}: {error}",
-                        path.display()
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "skip unreadable reviewer window record"
                     );
                 }
             }

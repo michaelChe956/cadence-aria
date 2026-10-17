@@ -1185,16 +1185,9 @@ impl CodingWorkspaceEngine {
             .join("startup-window-compensation");
         std::fs::create_dir_all(&scratch)
             .map_err(|error| format!("scratch private root create failed: {error}"))?;
+        let cleanup_scratch = scratch.clone();
         for (key, records) in targets {
-            let private = records
-                .iter()
-                .find_map(|resource| {
-                    resource
-                        .canonical_private_path
-                        .as_ref()
-                        .map(std::path::PathBuf::from)
-                })
-                .unwrap_or_else(|| scratch.clone());
+            let private = self.restore_scope_private_root(&key, &records, &scratch);
             let scope =
                 crate::cross_cutting::provider_resources::ProviderRunResourceScope::open_for_recovery(
                     &key,
@@ -1209,12 +1202,65 @@ impl CodingWorkspaceEngine {
                     .cleanup_owned_scope(&proof)
                     .map_err(|error| format!("scope {} cleanup failed: {error}", key.scope_id))?,
                 Ok(QuiesceOutcome::RecoveryRequired(unknown)) => {
+                    // ⚠9:scratch 兜底目录收口(best-effort,空目录才可删)。
+                    let _ = std::fs::remove_dir(&cleanup_scratch);
                     return Err(format!("{}: {}", unknown.reason, unknown.detail));
                 }
-                Err(error) => return Err(format!("quiesce failed: {error}")),
+                Err(error) => {
+                    let _ = std::fs::remove_dir(&cleanup_scratch);
+                    return Err(format!("quiesce failed: {error}"));
+                }
             }
         }
+        let _ = std::fs::remove_dir(&cleanup_scratch);
         Ok(())
+    }
+
+    /// F1(审查修复轮 1):还原 scope **开窗时的私有根**——Directory 资源的
+    /// `canonical_private_path` 是私有根下的资源目录本身,直接当私有根会让
+    /// cleanup 的「严格子路径」守卫命中 outside_private_root → 清理必败 →
+    /// 窗口永久停等。按 scope_id 前缀还原:
+    /// - `code-delivery-{attempt}` → `coder_delivery_private_root(attempt)`;
+    /// - `reviewer-window-{attempt}` → attempt 的 provider-stream 根;
+    /// - 其余:资源私有路径的父目录(兜底 scratch)。
+    fn restore_scope_private_root(
+        &self,
+        key: &crate::cross_cutting::provider_resources::ResourceScopeKey,
+        records: &[crate::cross_cutting::provider_resources::ProviderResourceRecord],
+        scratch: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let attempt_scoped_root = |prefix: &str| -> Option<std::path::PathBuf> {
+            let attempt_id = key.scope_id.strip_prefix(prefix)?;
+            let attempt = self.store.get_attempt_by_id(attempt_id).ok()?;
+            let stream_root = self.store.provider_stream_log_root(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+            );
+            let root = if prefix == "code-delivery-" {
+                stream_root.join("code-delivery")
+            } else {
+                stream_root
+            };
+            std::fs::create_dir_all(&root).ok()?;
+            Some(root)
+        };
+        if let Some(root) = attempt_scoped_root("code-delivery-") {
+            return root;
+        }
+        if let Some(root) = attempt_scoped_root("reviewer-window-") {
+            return root;
+        }
+        records
+            .iter()
+            .find_map(|resource| {
+                resource.canonical_private_path.as_ref().and_then(|path| {
+                    std::path::Path::new(path)
+                        .parent()
+                        .map(std::path::Path::to_path_buf)
+                })
+            })
+            .unwrap_or_else(|| scratch.to_path_buf())
     }
 
     /// 窗口保持锁时的人工面投影:attempt 活跃则转 AwaitingManualRecovery
@@ -1342,6 +1388,10 @@ impl CodingWorkspaceEngine {
     /// 永久 Invalidated)。人工许可新轮=另取租约/新基线(新 run 重开新
     /// 窗);人工拒绝补偿(Invalidate)不解锁 attempt——不自动复活
     /// runner,续接只经人工恢复面/新轮,旧违规报告不可 resume。
+    ///
+    /// ⚠5(审查顺带):本入口不抢跑 attempt 的取消 git 补偿——窗口已终态
+    /// 释放,补偿续接统一归启动驱动/终止收敛面(`resume_pending_review_
+    /// compensation` 的单一归属),人工裁决面保持零 git mutation。
     pub(crate) fn resolve_reviewer_manual_gate_for_attempt(
         &self,
         attempt_id: &str,
