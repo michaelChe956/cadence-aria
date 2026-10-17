@@ -28,6 +28,23 @@ fn unix_process_group_signal_target(spawn_time_leader_pid: Option<u32>, pgid: i3
     (spawn_time_leader_pid == u32::try_from(pgid).ok()).then_some(pgid)
 }
 
+/// 批2 Task 5:读取 `/proc/<pid>/stat` 的 starttime(第 22 字段,时钟 ticks)——
+/// 与 PID 组成 PID-start 真实身份,防 PID 复用误杀。进程消失/不可读返回 None。
+#[cfg(unix)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn process_start_time_ticks(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, tail) = stat.rsplit_once(") ")?;
+    // tail 从第 3 字段(state)开始:starttime=第 22 字段 → nth(19)。
+    tail.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(not(unix))]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn process_start_time_ticks(_pid: u32) -> Option<u64> {
+    None
+}
+
 #[derive(Debug)]
 pub struct ManagedProcess {
     pub stdin: ChildStdin,
@@ -108,6 +125,21 @@ impl ManagedProcessChild {
         #[cfg(windows)]
         {
             self.child.id()
+        }
+    }
+
+    /// 批2 Task 5:spawn 时冻结的进程组组长 PID——资源归属真实身份的
+    /// PID 维(与 `/proc/<pid>/stat` starttime 组成 PID-start identity,
+    /// 防 PID 复用误杀;`process_group(0)` 使 child 即组长)。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn spawn_leader_pid(&self) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            self.group_leader_pid
+        }
+        #[cfg(windows)]
+        {
+            self.id()
         }
     }
 
@@ -480,9 +512,7 @@ fn command_is_resolvable(
 fn path_env(env_vars: &BTreeMap<String, String>) -> Option<OsString> {
     // 批2 Task 3:不回退未冻结宿主 PATH——env_vars 无 PATH 即显式缺工具
     // (command_missing),绝不解析 Aria 进程自身 PATH。
-    env_vars
-        .get("PATH")
-        .map(OsString::from)
+    env_vars.get("PATH").map(OsString::from)
 }
 
 fn command_missing(command: &str) -> ProviderAdapterError {
@@ -593,8 +623,7 @@ mod tests {
         let dir = tempfile::tempdir_in(root).expect("t3 fixture dir");
         let script = dir.path().join("print-env-keys");
         fs::write(&script, "#!/bin/sh\nenv | cut -d= -f1 | sort\n").expect("write fixture");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
-            .expect("chmod fixture");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod fixture");
 
         let env = BTreeMap::from([
             ("PATH".to_string(), "/usr/bin:/bin".to_string()),
@@ -643,6 +672,36 @@ mod tests {
 
         let error = result.expect_err("无 PATH 的裸命令必须显式缺工具");
         assert_eq!(error.code, ProviderErrorCode::ProviderCommandMissing);
+    }
+
+    /// 批2 Task 5:spawn 即冻结 PID-start 真实身份(PID 与 /proc starttime)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_freezes_process_start_identity() {
+        let working_dir = tempfile::tempdir().expect("working dir");
+        let sleeper = working_dir.path().join("identity-sleeper");
+        std::fs::write(&sleeper, "#!/bin/sh\nsleep 30\n").expect("write fixture");
+        std::fs::set_permissions(&sleeper, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fixture");
+
+        let mut process = ProcessManager::spawn(
+            &sleeper.to_string_lossy(),
+            &[],
+            working_dir.path(),
+            &BTreeMap::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn identity fixture");
+
+        let pid = process.child.spawn_leader_pid().expect("spawn leader pid");
+        assert_eq!(Some(pid), process.child.id());
+        let start_ticks =
+            process_start_time_ticks(pid).expect("/proc starttime readable for live child");
+        assert!(start_ticks > 0);
+
+        process.child.terminate().await;
+        assert_eq!(process_start_time_ticks(pid), None);
     }
 }
 

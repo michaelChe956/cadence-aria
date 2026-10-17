@@ -41,8 +41,10 @@ pub mod provider_context_builder;
 // 批2 Task 3:统一白名单环境构造器与 trust 发现一致性(§环境精确合同)。
 pub mod provider_environment;
 pub mod provider_execution;
+// 批2 Task 5:先登记后启动、真实静止与资源回收合同。
 pub mod provider_health;
 pub mod provider_registry;
+pub mod provider_resources;
 pub mod provider_router;
 pub mod provider_run;
 pub mod runtime_event_log;

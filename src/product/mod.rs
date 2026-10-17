@@ -30,6 +30,7 @@ pub mod plan_repair;
 pub mod planning_failure;
 pub mod product_data_schema;
 pub mod project_store;
+pub mod provider_resource_store;
 pub mod provider_workspace_runner;
 pub mod repository_store;
 pub mod runtime_binding_store;
