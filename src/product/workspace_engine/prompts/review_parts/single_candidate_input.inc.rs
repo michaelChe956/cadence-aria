@@ -289,7 +289,9 @@ impl WorkspaceEngine {
         Ok(StreamingProviderInput {
             working_directory,
             baseline_tree,
-            tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+            // 批2 Task 11(T20 前中间态):Reviewer wire 面全开(无 deny);
+            // 纪律=ReviewerVerify+窗口合同,真窗归 T20;执行审计按角色保留。
+            tool_policy: None,
             audit_sink: None,
             provider_type: provider_type_for_name(&provider),
             role: AdapterRole::Reviewer,

@@ -544,15 +544,17 @@ fn builder_factory_applies_role_policy_matrix_per_entry() {
         ProviderToolPolicy, ToolPolicyIntent as PolicyIntent,
     };
 
+    // 批2 Task 11：deny=Author 岗位投影（Author 承载角色保留）；Reviewer
+    // 全开（T20 前中间态，纪律=窗口合同）；Coder 不带 deny。
     for (entry, role, denied) in [
         ("sc_author", AdapterRole::Orchestrator, true),
         ("sc_revision", AdapterRole::Orchestrator, true),
         ("wip_author", AdapterRole::WorkItemSplitter, true),
-        ("workspace_reviewer", AdapterRole::Reviewer, true),
+        ("workspace_reviewer", AdapterRole::Reviewer, false),
         ("coding_coder", AdapterRole::Executor, false),
-        ("coding_reviewer", AdapterRole::Reviewer, true),
-        ("coding_code_reviewer", AdapterRole::Reviewer, true),
-        ("coding_group_reviewer", AdapterRole::Reviewer, true),
+        ("coding_reviewer", AdapterRole::Reviewer, false),
+        ("coding_code_reviewer", AdapterRole::Reviewer, false),
+        ("coding_group_reviewer", AdapterRole::Reviewer, false),
     ] {
         let input = entry_input(entry);
         assert_eq!(input.role, role, "{entry}");
@@ -629,8 +631,9 @@ fn coder_and_aggregate_executor_keep_existing_full_tool_launch() {
     assert_eq!(aggregate.permission_mode, ProviderPermissionMode::Auto);
 }
 
-/// 断言 role 与 tool_policy 成对一致（D2：作者/评审必带 DenyFileWriteBuiltins，
-/// Executor/Coder 禁带；聚合初始化的 marker 例外由各测试单独断言）。
+/// 断言 role 与 tool_policy 成对一致（批2 Task 11：deny=Author 岗位投影，
+/// 仅 Author 承载角色保留；Reviewer/Coder 全开（T20 前中间态）；聚合初始化
+/// 的 marker 例外由各测试单独断言）。
 fn assert_role_policy_pair(
     input: &StreamingProviderInput,
     entry: &str,

@@ -252,14 +252,16 @@ impl ExecutionChainState {
         );
         // 批2 Task 11（硬约束1）：裸 provider.run 前先经受信载体冻结执行
         // 合同（legacy Direct 形态 identity=HostCoding/Coder，T10 裁定）
-        // ——矩阵失配在 run 之前零副作用拒绝。
-        let _execution_contract = crate::runtime_units::freeze_runtime_unit_execution(
+        // ——矩阵失配在 run 之前零副作用拒绝；合同摘要随 node_exit 事件
+        // 落 runtime event log（实际载体，不丢弃）。
+        let execution_contract = crate::runtime_units::freeze_runtime_unit_execution(
             &self.input.session_id,
             node_id,
             adapter_input.provider_type.clone(),
             request.runtime_role.clone(),
             &request.provider_run_id,
         )?;
+        let execution_contract_digest = execution_contract.contract_digest().to_string();
         let output = match provider.run(&adapter_input) {
             Ok(output) => output,
             Err(error) => {
@@ -276,6 +278,7 @@ impl ExecutionChainState {
                         "provider_run_id": request.provider_run_id.clone(),
                         "error_code": error.code.as_str(),
                         "error_details": error.details.clone(),
+                        "execution_contract_digest": execution_contract_digest,
                     }),
                 );
                 self.route_provider_error_to_manual_hold(
@@ -329,6 +332,7 @@ impl ExecutionChainState {
                 "provider_run_id": record_ref.provider_run_id,
                 "duration_ms": record_ref.duration_ms,
                 "retry_count": record_ref.retry_count,
+                "execution_contract_digest": execution_contract_digest,
             }),
         );
         self.artifacts.push(artifact.clone());

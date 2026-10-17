@@ -46,8 +46,10 @@ pub struct CanonicalNodeInput {
 /// `TrustedRunIdentity` 并按权威装配矩阵冻结执行合同，任何矩阵失配都在
 /// `provider.run` 之前零副作用拒绝（裸 run 不再存在）。
 ///
-/// 职责口径（T10 已裁定并合同测试锁定）：legacy Direct 形态 identity 恒
-/// `HostCoding/Coder`——本链的 review-report 节点是 Direct 链的报告工人
+/// 职责口径（T10 已裁定并合同测试锁定；**Direct 恒 Coder=受信裁定**）：
+/// `runtime_role` 参数仅作为 durable run 身份事实记录，不参与 duty 派生——
+/// legacy Direct 形态 identity 恒 `HostCoding/Coder`，本链的 review-report
+/// 节点是 Direct 链的报告工人
 /// （D §3.2：Direct Coder/Reviewer 不注入策略、danger 原生 approval），
 /// B 档 `ReviewerVerify+窗口` 职责未经真窗（T20）不可 claim；Author 岗位
 /// 经 LC author root launch 独立入口（`bind_author_execution_contract`）

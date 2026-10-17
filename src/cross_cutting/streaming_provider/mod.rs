@@ -557,6 +557,22 @@ pub fn validate_tool_policy_for_role(
                 })
             })
         }
+        // BOOT-04/T10 契约（修复轮 F3）：marker 不是策略——原策略角色
+        // （Orchestrator/WorkItemSplitter/Reviewer）携带 marker 在 spawn 前
+        // 以 `PolicyRequired` 拒绝（Handoff 保持 `PolicyForbidden`），与
+        // T10 bootstrap 负测/预检口径一致。
+        Some(ToolPolicyIntent::BootstrapExecutorMarker(_))
+            if matches!(
+                role,
+                AdapterRole::Orchestrator
+                    | AdapterRole::WorkItemSplitter
+                    | AdapterRole::Reviewer
+            ) =>
+        {
+            Err(ToolPolicyGuardError::PolicyRequired {
+                role: adapter_role_text(role).to_string(),
+            })
+        }
         // 其余组合（非 Author 承载角色带 deny、Handoff/Reviewer 带任何
         // 策略、未来未知 intent）一律 fail-closed。
         Some(_) => Err(ToolPolicyGuardError::PolicyForbidden {

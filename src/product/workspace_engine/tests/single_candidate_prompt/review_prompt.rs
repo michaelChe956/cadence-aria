@@ -110,12 +110,13 @@ fn single_candidate_review_prompt_reads_compiled_ir_and_mechanical_report() {
     let input = engine
         .build_work_item_plan_review_input()
         .expect("single-candidate review input");
-    // F3 restrict-role-write-tools：single-candidate 分派分支也必须带 D2 角色×策略对。
+    // 批2 Task 11（T20 前中间态）：Reviewer wire 面全开（无 deny）——
+    // 纪律=ReviewerVerify+窗口合同，真窗归 T20。
     assert_eq!(
         input.role,
         crate::protocol::contracts::AdapterRole::Reviewer
     );
-    assert!(input.tool_policy.is_some());
+    assert!(input.tool_policy.is_none());
     assert!(input.prompt.contains("wi-a"));
     assert!(
         input
@@ -717,7 +718,8 @@ mod sg3a1_structure_input {
             input.role,
             crate::protocol::contracts::AdapterRole::Reviewer
         );
-        assert!(input.tool_policy.is_some());
+        // 批2 Task 11（T20 前中间态）：Reviewer wire 面全开（无 deny）。
+        assert!(input.tool_policy.is_none());
         assert!(
             !input
                 .prompt

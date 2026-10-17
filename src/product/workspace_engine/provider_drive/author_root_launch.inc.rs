@@ -17,7 +17,12 @@ impl WorkspaceEngine {
         &self,
         mut input: StreamingProviderInput,
     ) -> StreamingProviderInput {
-        if input.tool_policy.is_none() || input.audit_sink.is_some() {
+        // 批2 Task 11(T20 前中间态):Reviewer wire 面去 deny 后,执行审计按
+        // 角色保留——Reviewer 的 provider run 同样分配 run-bound durable
+        // sink(纪律=ReviewerVerify+窗口合同,真窗归 T20,不随去 deny 丢审计)。
+        let is_reviewer_run =
+            input.role == crate::protocol::contracts::AdapterRole::Reviewer;
+        if (input.tool_policy.is_none() && !is_reviewer_run) || input.audit_sink.is_some() {
             return input;
         }
         let Some(store) = self.lifecycle_store.as_ref() else {

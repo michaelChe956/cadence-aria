@@ -410,10 +410,11 @@ fn assert_logical_plan_review_input(
     use crate::cross_cutting::streaming_provider::ProviderToolPolicy;
 
     assert_eq!(input.role, AdapterRole::Reviewer, "{case}: reviewer role");
+    // 批2 Task 11（T20 前中间态）：Reviewer wire 面全开（无 deny）——
+    // 纪律=ReviewerVerify+窗口合同，真窗归 T20。
     assert_eq!(
-        input.tool_policy,
-        Some(ProviderToolPolicy::deny_file_write_builtins()),
-        "{case}: ReviewOnly 写工具策略不得放宽（DenyFileWriteBuiltins 保持）"
+        input.tool_policy, None,
+        "{case}: reviewer wire 面全开（deny 矩阵退役）"
     );
     assert_eq!(
         input.working_directory.as_deref(),
