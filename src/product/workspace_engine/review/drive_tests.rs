@@ -291,6 +291,7 @@ async fn reviewer_gateway_spawn_trust_missing_classifies_with_manual_guidance() 
         &crate::product::models::ProviderName::KimiCode,
         reviewer_trust_streaming_input(target_dir.path().to_path_buf()),
         "project_0001".to_string(),
+        None,
         tokio_util::sync::CancellationToken::new(),
     )
     .await;
@@ -358,6 +359,7 @@ async fn reviewer_gateway_rejection_without_trust_face_stays_bare() {
         &crate::product::models::ProviderName::ClaudeCode,
         reviewer_trust_streaming_input(target_dir.path().to_path_buf()),
         "project_0001".to_string(),
+        None,
         tokio_util::sync::CancellationToken::new(),
     )
     .await;
@@ -885,4 +887,41 @@ mod t20b_f1_plan_window_target {
             "must not misreport as git identity drift, got: {message}"
         );
     }
+}
+
+/// T22 b45 现场 r1(plan SC 复评臂 ProviderCommandMissing kimi):
+/// reviewer gateway 启动环境的受信构造钉测——有活动审查窗时必须产出
+/// 白名单 env(PATH 精确继承、HOME 冻结受信 owner home),裸名 CLI 靠
+/// 最终 PATH 可解析;fail-closed 形态=空窗 id 被 freeze 拒绝。
+#[test]
+fn reviewer_launch_environment_carries_frozen_path_with_window() {
+    let input = reviewer_trust_streaming_input(std::path::PathBuf::from("/tmp/review-target"));
+    let environment = reviewer_launch_environment(&input, "review_window_0001")
+        .expect("windowed reviewer launch must build the trusted environment");
+    let owner_home =
+        crate::cross_cutting::provider_environment::resolve_trusted_owner_home_from_env()
+            .expect("test host must provide an absolute HOME for the frozen environment");
+    assert_eq!(
+        environment.get("PATH"),
+        std::env::var_os("PATH")
+            .map(|value| value.to_string_lossy().into_owned())
+            .as_ref(),
+        "reviewer 启动必须携带精确继承的宿主 PATH(裸名 CLI 可解析的充要条件)"
+    );
+    assert_eq!(
+        environment.get("HOME").map(String::as_str),
+        Some(owner_home.display().to_string().as_str()),
+        "HOME 必须冻结受信 owner home"
+    );
+}
+
+#[test]
+fn reviewer_launch_environment_blank_window_fails_closed() {
+    let input = reviewer_trust_streaming_input(std::path::PathBuf::from("/tmp/review-target"));
+    let error = reviewer_launch_environment(&input, "  ")
+        .expect_err("blank window id must fail closed, not fall back to an empty env");
+    assert!(
+        error.contains("plan reviewer"),
+        "fail-closed 原因码必须可诊断,got: {error}"
+    );
 }
