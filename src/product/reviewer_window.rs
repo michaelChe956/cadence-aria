@@ -1014,6 +1014,20 @@ pub(crate) fn record_violation(
         .violation_pending
         .as_ref()
         .is_some_and(|pending| pending.entry_id == entry_id);
+    // F2(审查修复轮 1):pending 非空且不属本 entry → fail-closed 拒绝,
+    // 不得覆盖他人停等标记;仅本 entry(重试或已落 journal)可推进/清除。
+    if let Some(pending) = record.violation_pending.as_ref()
+        && !pending_retry
+        && !journal_has_entry
+    {
+        return Err(ReviewerWindowError::ViolationJournalPending {
+            window_id: window_id.to_string(),
+            detail: format!(
+                "pending={}(kind={}) 与新违规 {}({}) 不符,不得覆盖",
+                pending.entry_id, pending.kind, violation.kind, violation.path
+            ),
+        });
+    }
     if !journal_has_entry && !pending_retry {
         record.violation_pending = Some(ViolationPending {
             entry_id: entry_id.clone(),
@@ -1022,6 +1036,7 @@ pub(crate) fn record_violation(
         });
         record = store.save_window_transition(record, expected_generation)?;
     }
+    let mut durable = journal_has_entry;
     if !journal_has_entry {
         let entry = ViolationJournalEntry {
             seq: 0,
@@ -1039,9 +1054,13 @@ pub(crate) fn record_violation(
             restore_cursor: cursor,
         };
         store.append_violation(window_id, entry)?;
+        durable = true;
     }
-    // journal 已 durable:清停等标记 + 迁移。
-    record.violation_pending = None;
+    // journal 已 durable:清**本 entry 的**停等标记(F2:他人 pending 保留,
+    // 由其自身重试路径清除)+ 迁移。
+    if pending_retry || durable {
+        record.violation_pending = None;
+    }
     let next_state = if record.state == ReviewerWindowState::Quiescing {
         ReviewerWindowState::ViolationRecorded
     } else {
@@ -1143,6 +1162,12 @@ pub(crate) async fn restore_window(
             // 再决定 Restoring(待采信)还是 ManualGate(整轮作废)。
             let journal = store.load_violations(window_id)?;
             let mut facts = derived_violation_facts(&record, &report, &journal);
+            // F1(审查修复轮 1):并入独立只读观察——T16 Completed 重入
+            // 时内存报告全空,派生事实只能来自对当前仓的重观察(自提交
+            // refs/对象留仓仍可见);entry_id 去重保证不重复落 journal。
+            if let Ok(manifest) = snapshot.load_manifest(window_id) {
+                facts.extend(observed_git_violation_facts(&record, &manifest));
+            }
             let gate = from_violation || !facts.is_empty();
             let binding = restored_binding(gate, &report);
             if gate {
@@ -1402,10 +1427,13 @@ fn derived_violation_facts(
                 .to_string(),
         });
     }
-    if !record
-        .restore
-        .as_ref()
-        .is_some_and(|binding| binding.from_violation)
+    // F3(审查修复轮 1):本窗重入态(pending 残留=append 部分成功后
+    // 崩溃)不算洗白——已落条目来自本窗派生收口,非外部篡改。
+    if record.violation_pending.is_none()
+        && !record
+            .restore
+            .as_ref()
+            .is_some_and(|binding| binding.from_violation)
         && record.state != ReviewerWindowState::ViolationRecorded
         && !journal.is_empty()
     {
@@ -1421,6 +1449,173 @@ fn derived_violation_facts(
         });
     }
     facts
+}
+
+/// F1/F4(审查修复轮 1):恢复后**独立只读 Git 观察**——不依赖 T16
+/// RestoreReport 的内存事实(Completed 游标重入会跳过恢复块导致报告
+/// 全空,派生事实丢失),而是每次 `Restored`(含重入)直接对当前仓
+/// 重观察:extra refs(自提交对象留仓仍可见)/HEAD/受管 ref/index/
+/// config/objects/reflog/子模块 gitdir vs manifest 基线。观察失败
+/// fail-closed 作为 drift 事实(停等处理,不伪称通过)。
+fn observed_git_violation_facts(
+    record: &ReviewerWindowRecord,
+    manifest: &crate::product::reviewer_snapshot::ReviewerBaselineManifest,
+) -> Vec<DerivedViolationFact> {
+    let worktree = record.identity.canonical_worktree.clone();
+    let mut facts = Vec::new();
+    // extra refs:当前 refs - 受管 refs(自提交证据保留,重入仍可见)。
+    if let Ok(current) = list_current_refs(&worktree) {
+        for (path, _) in &current {
+            if !manifest
+                .git_observation
+                .managed_refs
+                .iter()
+                .any(|managed| managed.ref_path == *path)
+            {
+                facts.push(DerivedViolationFact {
+                    kind: "git_extra_ref",
+                    path: path.clone(),
+                    before_digest: None,
+                    after_digest: None,
+                    detail: format!(
+                        "窗口内新增 ref {path}(Reviewer 自提交对象证据保留,不抹共享数据);整轮作废"
+                    ),
+                });
+            }
+        }
+        // 受管 ref 当前 sha vs 基线(恢复后仍漂移=窗口内 mutation)。
+        for managed in &manifest.git_observation.managed_refs {
+            if let Some((_, sha)) = current.iter().find(|(path, _)| path == &managed.ref_path)
+                && sha != &managed.sha
+            {
+                facts.push(DerivedViolationFact {
+                    kind: "git_domain_mutation",
+                    path: managed.ref_path.clone(),
+                    before_digest: Some(managed.sha.clone()),
+                    after_digest: Some(sha.clone()),
+                    detail: format!(
+                        "受管 ref {} 漂移(基线 {} -> 当前 {sha}),改 Git 整轮作废",
+                        managed.ref_path, managed.sha
+                    ),
+                });
+            }
+        }
+    }
+    // HEAD:当前 symref/sha vs 基线。
+    if let Ok(head_sha) = git_stdout_trimmed(&worktree, &["rev-parse", "HEAD"]) {
+        if head_sha != manifest.git_observation.head_sha {
+            facts.push(DerivedViolationFact {
+                kind: "git_domain_mutation",
+                path: ".git/HEAD".to_string(),
+                before_digest: Some(manifest.git_observation.head_sha.clone()),
+                after_digest: Some(head_sha),
+                detail: "HEAD 指向漂移(改 Git 整轮作废)".to_string(),
+            });
+        }
+    }
+    // index:gitdir/index 字节 sha vs 基线。
+    if let Ok(index_bytes) = std::fs::read(record.identity.gitdir.join("index")) {
+        let current = sha256_hex(&index_bytes);
+        if current != manifest.git_observation.index_sha256 {
+            facts.push(DerivedViolationFact {
+                kind: "git_domain_mutation",
+                path: ".git/index".to_string(),
+                before_digest: Some(manifest.git_observation.index_sha256.clone()),
+                after_digest: Some(current),
+                detail: "index 字节漂移(改 Git 整轮作废;含 stat-refresh 类误伤时同样 \
+                         fail-closed,人工门处置)"
+                    .to_string(),
+            });
+        }
+    }
+    // F4:annex 补充面(config/objects/reflog/子模块 gitdir)。
+    if let Some(baseline) = manifest.git_annex_observation.as_ref() {
+        match crate::product::reviewer_snapshot::observe_git_annex(
+            &record.identity.gitdir,
+            &record.identity.common_dir,
+        ) {
+            Ok(current) => {
+                let comparisons = [
+                    (
+                        "gitdir_config",
+                        &baseline.config_sha256,
+                        &current.config_sha256,
+                    ),
+                    (
+                        "common_dir_config",
+                        &baseline.common_config_sha256,
+                        &current.common_config_sha256,
+                    ),
+                    ("objects", &baseline.objects_digest, &current.objects_digest),
+                    ("reflogs", &baseline.reflogs_digest, &current.reflogs_digest),
+                    (
+                        "submodule_gitdirs",
+                        &baseline.submodule_gitdirs_digest,
+                        &current.submodule_gitdirs_digest,
+                    ),
+                ];
+                for (face, before, after) in comparisons {
+                    if before != after {
+                        facts.push(DerivedViolationFact {
+                            kind: "git_annex_drift",
+                            path: format!(".git[{face}]"),
+                            before_digest: Some(before.clone()),
+                            after_digest: Some(after.clone()),
+                            detail: format!(
+                                "Git 观察域补充面 {face} 摘要漂移(直写 .git 逃逸检测);整轮作废"
+                            ),
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                facts.push(DerivedViolationFact {
+                    kind: "git_annex_drift",
+                    path: ".git[annex]".to_string(),
+                    before_digest: None,
+                    after_digest: None,
+                    detail: format!("Git 观察域补充面不可观察(fail-closed): {error}"),
+                });
+            }
+        }
+    }
+    facts
+}
+
+fn list_current_refs(worktree: &Path) -> Result<Vec<(String, String)>, String> {
+    let output = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads",
+            "refs/tags",
+        ])
+        .current_dir(worktree)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (path, sha) = line.split_once(' ')?;
+            Some((path.to_string(), sha.to_string()))
+        })
+        .collect())
+}
+
+fn git_stdout_trimmed(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// journal 序号从 1 连续且窗号全部相符。

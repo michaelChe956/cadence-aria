@@ -283,12 +283,36 @@ pub(crate) struct ReviewerBaselineManifest {
     pub(crate) entries: Vec<BaselineEntry>,
     pub(crate) git_observation: GitObservationBaseline,
     pub(crate) platform_write_baseline: Vec<PlatformWriteBaselineEntry>,
-    /// T5 静止证明交接(scope manifest 含恢复游标)。
+    /// T18(F4):Git 观察域补充面(config/objects/reflog/子模块 gitdir)
+    /// 的基线摘要;旧 manifest 无此字段 → None(该面不对比,报告披露)。
+    #[serde(default)]
+    pub(crate) git_annex_observation: Option<GitAnnexObservation>,
+
     pub(crate) scope_key: ResourceScopeKey,
     pub(crate) scope_manifest: Vec<ProviderResourceRecord>,
     pub(crate) quiesced_at: String,
     pub(crate) captured_at: String,
     pub(crate) restore_cursor: RestoreCursor,
+}
+
+/// Git 观察域补充摘要(T18 F4:直写 `.git/config`/objects/reflog/
+/// 子模块 gitdir 的逃逸检测基线)。全部为**内容寻址摘要**,恢复/对账
+/// 侧同源重算对比。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GitAnnexObservation {
+    /// gitdir/config 内容 sha256(linked worktree 私有 config)。
+    pub(crate) config_sha256: String,
+    /// common-dir/config 内容 sha256。
+    pub(crate) common_config_sha256: String,
+    /// objects 域摘要(loose 对象相对名 + pack 文件名与大小的有序拼接
+    /// sha256;对象名即内容寻址,摘要对新增/删除敏感)。
+    pub(crate) objects_digest: String,
+    /// reflog 摘要(gitdir/logs 与 common-dir/logs 下全部文件的
+    /// 路径+内容 sha256 有序拼接摘要)。
+    pub(crate) reflogs_digest: String,
+    /// 子模块 gitdir 摘要(common-dir/modules 下目录名 + 各 config
+    /// 内容 sha256 有序拼接摘要)。
+    pub(crate) submodule_gitdirs_digest: String,
 }
 
 /// capture 请求。
@@ -615,6 +639,7 @@ impl ReviewerSnapshotStore {
             lock_identity: identity.clone(),
             entries,
             git_observation,
+            git_annex_observation: Some(observe_git_annex(&identity.gitdir, &identity.common_dir)?),
             platform_write_baseline,
             scope_key: evidence.scope_key.clone(),
             scope_manifest: evidence.scope_manifest.clone(),
@@ -1659,6 +1684,125 @@ fn capture_platform_baseline(
         });
     }
     Ok(out)
+}
+
+/// T18(F4):Git 观察域补充面采集/复观(config/objects/reflog/子模块
+/// gitdir)。capture 与 T18 恢复后重观察同源调用——摘要不同即逃逸。
+pub(crate) fn observe_git_annex(
+    gitdir: &Path,
+    common_dir: &Path,
+) -> Result<GitAnnexObservation, ReviewerSnapshotError> {
+    let file_sha = |path: &Path| -> Result<String, ReviewerSnapshotError> {
+        let bytes = std::fs::read(path).map_err(|error| {
+            ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", path.display()))
+        })?;
+        Ok(sha256_hex(&bytes))
+    };
+    // config:gitdir/config 与 common-dir/config(linked worktree 时不同;
+    // linked 私有 config 可合法缺失 → 记 "absent" 摘要,与采集同源)。
+    let config_sha256 = match std::fs::read(gitdir.join("config")) {
+        Ok(bytes) => sha256_hex(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "absent".to_string(),
+        Err(error) => {
+            return Err(ReviewerSnapshotError::ReadFailure(format!(
+                "read {}: {error}",
+                gitdir.join("config").display()
+            )));
+        }
+    };
+    let common_config_sha256 = match std::fs::read(common_dir.join("config")) {
+        Ok(bytes) => sha256_hex(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "absent".to_string(),
+        Err(error) => {
+            return Err(ReviewerSnapshotError::ReadFailure(format!(
+                "read {}: {error}",
+                common_dir.join("config").display()
+            )));
+        }
+    };
+
+    // objects:loose 对象相对名(XX/sha…)与 pack 文件名+大小,有序拼接。
+    let mut object_lines = Vec::new();
+    collect_relative_files(&common_dir.join("objects"), &mut object_lines)?;
+    object_lines.sort();
+    let objects_digest = sha256_hex(object_lines.join("\n").as_bytes());
+
+    // reflogs:gitdir/logs 与 common-dir/logs 下全部文件 路径+内容sha。
+    let mut reflog_lines = Vec::new();
+    collect_relative_files(&gitdir.join("logs"), &mut reflog_lines)?;
+    if common_dir != gitdir {
+        collect_relative_files(&common_dir.join("logs"), &mut reflog_lines)?;
+    }
+    reflog_lines.sort();
+    let reflogs_digest = sha256_hex(reflog_lines.join("\n").as_bytes());
+
+    // 子模块 gitdir:modules 下目录名 + 各 config 内容 sha。
+    let mut submodule_lines = Vec::new();
+    let modules = common_dir.join("modules");
+    if modules.is_dir() {
+        let entries = std::fs::read_dir(&modules).map_err(|error| {
+            ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", modules.display()))
+        })?;
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", modules.display()))
+            })?;
+            if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        names.sort();
+        for name in names {
+            let config_sha = file_sha(&modules.join(&name).join("config"))?;
+            submodule_lines.push(format!("{name}:{config_sha}"));
+        }
+    }
+    let submodule_gitdirs_digest = sha256_hex(submodule_lines.join("\n").as_bytes());
+
+    Ok(GitAnnexObservation {
+        config_sha256,
+        common_config_sha256,
+        objects_digest,
+        reflogs_digest,
+        submodule_gitdirs_digest,
+    })
+}
+
+/// 递归收集目录下全部文件的「相对路径:内容sha256:大小」行(不追随
+/// symlink;目录缺失视为空)。
+fn collect_relative_files(root: &Path, out: &mut Vec<String>) -> Result<(), ReviewerSnapshotError> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(root).map_err(|error| {
+        ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", root.display()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", root.display()))
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            ReviewerSnapshotError::ReadFailure(format!("stat {}: {error}", path.display()))
+        })?;
+        if file_type.is_dir() {
+            collect_relative_files(&path, out)?;
+        } else if file_type.is_file() {
+            let bytes = std::fs::read(&path).map_err(|error| {
+                ReviewerSnapshotError::ReadFailure(format!("read {}: {error}", path.display()))
+            })?;
+            let size = bytes.len();
+            let sha = sha256_hex(&bytes);
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push(format!("{rel}:{sha}:{size}"));
+        }
+    }
+    Ok(())
 }
 
 fn observe_platform_state(path: &Path) -> Result<PlatformWriteState, ReviewerSnapshotError> {

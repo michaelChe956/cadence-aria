@@ -118,25 +118,69 @@ pub(crate) fn reconcile(facts: &ReconciliationFacts) -> ReconciliationOutcome {
     let mut blockers: Vec<String> = Vec::new();
     let mut consistency_reasons: Vec<String> = Vec::new();
 
-    // -- 终态:已定格,直接投影(幂等) ------------------------------
+    // -- 终态:已定格,按**实际绑定事实**投影(幂等;F5 修复轮 1:不再
+    // 恒 false);ClosedAccepted 遇非空 journal/pending → 倒填防线,
+    // fail-closed 投影 Invalidated。 ------------------------------
     if record.state.is_terminal() {
+        let binding_ok = binding.is_some_and(|binding| binding.completed);
+        let git_clean = binding.is_some_and(|binding| {
+            binding.git_restored_mutation_paths.is_empty()
+                && binding.git_extra_refs_observed.is_empty()
+        });
+        let git_reasons: Vec<String> = binding
+            .map(|binding| {
+                binding
+                    .git_restored_mutation_paths
+                    .iter()
+                    .map(|path| format!("Git 域 mutation: {path}"))
+                    .chain(
+                        binding
+                            .git_extra_refs_observed
+                            .iter()
+                            .map(|r| format!("新增 ref: {r}")),
+                    )
+                    .collect()
+            })
+            .unwrap_or_default();
+        let platform_reasons: Vec<String> = facts
+            .journal
+            .iter()
+            .filter(|entry| entry.kind.starts_with("platform_"))
+            .map(|entry| format!("平台合法写入域违规: {}", entry.detail))
+            .collect();
+        let journal_dirty = !facts.journal.is_empty() || record.violation_pending.is_some();
         let recommendation = if record.state == ReviewerWindowState::ClosedAccepted
             && record.report_acceptance == ReportAcceptance::Accepted
+            && !journal_dirty
         {
             AcceptanceRecommendation::Accepted {
                 window_id: record.window_id.clone(),
             }
         } else {
+            let mut reasons = vec![format!("终态 {} 已定格(旧报告永久)", record.state.as_str())];
+            if journal_dirty {
+                reasons.push(
+                    "终态下违规 journal/pending 非空(倒填防线,fail-closed 投影作废)".to_string(),
+                );
+            }
             AcceptanceRecommendation::Invalidated {
                 window_id: record.window_id.clone(),
                 manual_gate: false,
-                reasons: vec![format!("终态 {} 已定格(旧报告永久)", record.state.as_str())],
+                reasons,
             }
         };
         return ReconciliationOutcome {
-            worktree: domain("worktree", binding.is_some_and(|b| b.completed), Vec::new()),
-            git: domain("git", false, Vec::new()),
-            platform: domain("platform", false, Vec::new()),
+            worktree: domain("worktree", binding_ok, Vec::new()),
+            git: domain(
+                "git",
+                binding_ok && git_clean && git_reasons.is_empty(),
+                git_reasons,
+            ),
+            platform: domain(
+                "platform",
+                binding_ok && platform_reasons.is_empty(),
+                platform_reasons,
+            ),
             records_consistent: true,
             consistency_reasons: Vec::new(),
             recommendation,
@@ -165,7 +209,7 @@ pub(crate) fn reconcile(facts: &ReconciliationFacts) -> ReconciliationOutcome {
         invalidated_reasons
             .push("from_violation 为真但 journal 为空(可观察缺失,篡改面 fail-closed)".to_string());
     }
-    if !from_violation && !facts.journal.is_empty() {
+    if !from_violation && !facts.journal.is_empty() && record.violation_pending.is_none() {
         invalidated_reasons.push(format!(
             "journal 非空({} 条)但绑定未标违规(洗白形态,整轮作废)",
             facts.journal.len()
@@ -638,6 +682,7 @@ mod tests {
             scope_manifest: Vec::new(),
             quiesced_at: "2026-10-17T00:00:00Z".to_string(),
             captured_at: "2026-10-17T00:00:00Z".to_string(),
+            git_annex_observation: None,
             restore_cursor: RestoreCursor {
                 phase: RestorePhase::Completed,
                 entry_index: 0,
@@ -1501,5 +1546,265 @@ mod tests {
         ))
         .expect("restore");
         assert!(summary.manual_gate);
+    }
+
+    // ---------- 审查修复轮 1(F1-F5)钉测 ----------
+
+    /// F1:派生违规后 journal 写失败/崩溃 → 重入恢复仍观察得到自提交
+    /// 事实(extra ref 留仓),不丢失、不误放行 Accepted。
+    #[test]
+    fn f1_derived_git_facts_survive_journal_failure_and_restore_reentry() {
+        let fx = fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = block_on(begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-f1r", "attempt-1", &fx.worktree, &targets),
+        ))
+        .expect("begin");
+
+        // Reviewer 自提交(新分支+commit,extra ref 留仓)。
+        fs::write(fx.worktree.join("r.txt"), "x\n").unwrap();
+        git_ok(&fx.worktree, &["checkout", "-q", "-b", "evil"]);
+        git_ok(&fx.worktree, &["add", "-A"]);
+        git_ok(&fx.worktree, &["commit", "-qm", "self"]);
+        let quiescing = begin_quiesce(&store, "w-f1r", handle.generation, "end").unwrap();
+
+        // 注入 journal 写失败:恢复后派生收口落盘失败,停等标记残留。
+        let journal_path = fx.window_root.join("violations").join("w-f1r.json");
+        fs::create_dir_all(&journal_path).unwrap();
+        let err = block_on(restore_window(
+            &store,
+            &snapshot,
+            "w-f1r",
+            quiescing.generation,
+        ))
+        .expect_err("journal 阻断时恢复收口必须失败");
+        assert!(
+            matches!(
+                &err,
+                crate::product::reviewer_window::ReviewerWindowError::Store(_)
+            ),
+            "{err:?}"
+        );
+        let record = store.load_window("w-f1r").unwrap();
+        assert!(record.violation_pending.is_some());
+        assert!(
+            !record
+                .restore
+                .as_ref()
+                .is_some_and(|binding| binding.completed),
+            "journal 未落盘不得宣称恢复完整待采信"
+        );
+
+        // 崩溃重入(修复 journal 可写):独立观察重算自提交事实 → 落
+        // journal → ManualGate;即使 T16 游标已推进,事实不丢。
+        fs::remove_dir(&journal_path).unwrap();
+        let summary = block_on(restore_window(
+            &store,
+            &snapshot,
+            "w-f1r",
+            record.generation,
+        ))
+        .expect("reentry restore");
+        assert!(summary.manual_gate, "重入后自提交事实不得丢失");
+        let journal = store.load_violations("w-f1r").unwrap();
+        assert!(
+            journal.iter().any(|entry| entry.kind == "git_extra_ref"),
+            "{journal:?}"
+        );
+    }
+
+    /// F4:直写 .git/config → annex 补充面观察 → 整轮作废进人工门。
+    #[test]
+    fn f4_direct_git_config_write_detected_via_annex_observation() {
+        let fx = fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = block_on(begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-f4", "attempt-1", &fx.worktree, &targets),
+        ))
+        .expect("begin");
+
+        // 通道冻结窗口内直写 .git/config(hooks/fsmonitor 类逃逸面)。
+        let config_path = fx.worktree.join(".git").join("config");
+        let original = fs::read_to_string(&config_path).unwrap();
+        fs::write(
+            &config_path,
+            format!("{original}[core]\n\tfsmonitor = evil\n"),
+        )
+        .unwrap();
+
+        let quiescing = begin_quiesce(&store, "w-f4", handle.generation, "end").unwrap();
+        let summary = block_on(restore_window(
+            &store,
+            &snapshot,
+            "w-f4",
+            quiescing.generation,
+        ))
+        .expect("restore");
+        assert!(summary.manual_gate, "直写 .git/config 必须进人工门");
+        let journal = store.load_violations("w-f4").unwrap();
+        assert!(
+            journal
+                .iter()
+                .any(|entry| entry.kind == "git_annex_drift" && entry.path.contains("config")),
+            "{journal:?}"
+        );
+        // 对账:整轮 Invalidated,Git 域不通过。
+        let outcome = reconcile_from_stores(&store, &snapshot, "w-f4").unwrap();
+        assert!(!outcome.git.passed);
+        assert!(matches!(
+            outcome.recommendation,
+            AcceptanceRecommendation::Invalidated { .. }
+        ));
+    }
+
+    /// F2:pending 属他人 entry 时 record_violation fail-closed 拒绝,
+    /// 不得覆盖;同 entry 重试可推进并清除。
+    #[test]
+    fn f2_record_violation_never_overwrites_foreign_pending() {
+        let fx = fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = block_on(begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-f2", "attempt-1", &fx.worktree, &targets),
+        ))
+        .expect("begin");
+        let quiescing = begin_quiesce(&store, "w-f2", handle.generation, "end").unwrap();
+
+        // 造 pending(A):journal 阻断写入失败但标记已持久化。
+        let journal_path = fx.window_root.join("violations").join("w-f2.json");
+        fs::create_dir_all(&journal_path).unwrap();
+        let violation_a = ViolationRecord {
+            kind: "platform_domain_write",
+            path: ".aria/a.json",
+            before_digest: None,
+            after_digest: None,
+            detail: "A",
+            report_id: None,
+        };
+        assert!(
+            record_violation(&store, &snapshot, "w-f2", quiescing.generation, violation_a).is_err()
+        );
+        let record = store.load_window("w-f2").unwrap();
+        assert!(record.violation_pending.is_some());
+
+        // pending(A) 存在时记 B → ViolationJournalPending 拒绝(A 不被覆盖)。
+        let violation_b = ViolationRecord {
+            kind: "git_domain_write",
+            path: ".git/x",
+            before_digest: None,
+            after_digest: None,
+            detail: "B",
+            report_id: None,
+        };
+        let err = record_violation(&store, &snapshot, "w-f2", record.generation, violation_b)
+            .expect_err("不得覆盖他人 pending");
+        assert!(
+            matches!(
+                err,
+                crate::product::reviewer_window::ReviewerWindowError::ViolationJournalPending { .. }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            store
+                .load_window("w-f2")
+                .unwrap()
+                .violation_pending
+                .as_ref()
+                .unwrap()
+                .kind,
+            "platform_domain_write"
+        );
+
+        // 同 entry(A)重试 → journal 落盘、标记清除、迁移 ViolationRecorded。
+        fs::remove_dir(&journal_path).unwrap();
+        let violation_a = ViolationRecord {
+            kind: "platform_domain_write",
+            path: ".aria/a.json",
+            before_digest: None,
+            after_digest: None,
+            detail: "A",
+            report_id: None,
+        };
+        let violated = record_violation(&store, &snapshot, "w-f2", record.generation, violation_a)
+            .expect("retry A");
+        assert_eq!(violated.state, ReviewerWindowState::ViolationRecorded);
+        assert!(violated.violation_pending.is_none());
+    }
+
+    /// F3:本窗重入态(pending 残留)下 journal 非空不构成洗白指控。
+    #[test]
+    fn f3_reentry_pending_journal_not_accused_as_whitewash() {
+        let mut record = facts_record("w-f3");
+        record.state = ReviewerWindowState::Restoring;
+        record.restore = Some(restored_binding());
+        record.violation_pending = Some(crate::product::reviewer_window_store::ViolationPending {
+            entry_id: "half-appended".to_string(),
+            kind: "git_extra_ref".to_string(),
+            detail: "append 崩溃残留".to_string(),
+        });
+        // journal 非空(部分落盘的本窗派生条目)+ pending 残留 →
+        // reconcile 不产生「洗白」指控(那是 journal_tamper 虚假污染)。
+        let outcome = reconcile(&ReconciliationFacts {
+            journal: vec![journal_entry(1, "w-f3", "git_extra_ref")],
+            record,
+            manifest: ManifestFacts::Missing,
+        });
+        match outcome.recommendation {
+            AcceptanceRecommendation::Invalidated { reasons, .. } => {
+                assert!(
+                    !reasons.iter().any(|reason| reason.contains("洗白")),
+                    "重入态不得误判洗白: {reasons:?}"
+                );
+            }
+            other => panic!("期望 Invalidated(pending fail-closed),得到 {other:?}"),
+        }
+    }
+
+    /// F5:终态投影按实际绑定;ClosedAccepted 遇非空 journal 倒填作废。
+    #[test]
+    fn f5_terminal_projection_uses_binding_and_backfill_guard() {
+        let manifest = minimal_manifest("w-f5");
+        let mut record = facts_record("w-f5");
+        record.state = ReviewerWindowState::ClosedAccepted;
+        record.report_acceptance = ReportAcceptance::Accepted;
+        record.restore = Some(restored_binding());
+        record.baseline = Some(baseline_binding(&manifest_fingerprint(&manifest)));
+        let outcome = reconcile(&ReconciliationFacts {
+            record: record.clone(),
+            journal: Vec::new(),
+            manifest: ManifestFacts::Loaded(manifest),
+        });
+        assert!(outcome.git.passed, "终态投影按绑定事实,不再恒 false");
+        assert!(outcome.platform.passed);
+        assert!(matches!(
+            outcome.recommendation,
+            AcceptanceRecommendation::Accepted { .. }
+        ));
+
+        // 倒填防线:终态 Accepted + 非空 journal → Invalidated fail-closed。
+        let outcome = reconcile(&ReconciliationFacts {
+            record,
+            journal: vec![journal_entry(1, "w-f5", "channel_bypass")],
+            manifest: ManifestFacts::Missing,
+        });
+        assert!(matches!(
+            outcome.recommendation,
+            AcceptanceRecommendation::Invalidated { .. }
+        ));
     }
 }
