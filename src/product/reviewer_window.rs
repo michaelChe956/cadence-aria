@@ -456,8 +456,11 @@ pub(crate) async fn begin_review_window(
     };
 
     // 5. 持久完整 baseline(T16:全部 blob+manifest 落盘成功才返回;
-    // 失败整单拒绝,无已发布 manifest)。
-    let captured = match snapshot.capture_baseline(CaptureRequest {
+    // 失败整单拒绝,无已发布 manifest)。F4(修复轮 1):崩溃于
+    // 「manifest 已发布、Running CAS 未落」窗口时,同窗重入对已发布
+    // manifest 校验归属(window/attempt/run/identity)后**采用**,不
+    // 作废最贵一步;仅身份不符才失败停等。
+    let baseline = match snapshot.capture_baseline(CaptureRequest {
         window_id: request.window_id,
         attempt_id: request.attempt_id,
         run_id: request.run_id,
@@ -467,7 +470,61 @@ pub(crate) async fn begin_review_window(
         platform_write_paths: request.platform_write_paths.clone(),
         budget: request.budget,
     }) {
-        Ok(captured) => captured,
+        Ok(captured) => match snapshot.load_manifest(request.window_id) {
+            Ok(manifest) => BaselineFacts::from_manifest(
+                &manifest,
+                captured.manifest_path.display().to_string(),
+                now_rfc3339(),
+            ),
+            Err(error) => {
+                mark_begin_recovery(
+                    store,
+                    &current,
+                    "reviewer_window_manifest_unreadable",
+                    error.to_string(),
+                );
+                return Err(ReviewerWindowError::Snapshot(error));
+            }
+        },
+        Err(ReviewerSnapshotError::Store(ProductStoreError::Conflict { ref id, .. }))
+            if id == request.window_id =>
+        {
+            // 同窗 manifest 已存在(崩溃重入):校验归属后采用。
+            match snapshot.load_manifest(request.window_id) {
+                Ok(manifest)
+                    if manifest.window_id == request.window_id
+                        && manifest.attempt_id == request.attempt_id
+                        && manifest.run_id == request.run_id
+                        && manifest.lock_identity == identity =>
+                {
+                    BaselineFacts::from_manifest(
+                        &manifest,
+                        format!("snapshot-store:windows/{}/manifest.json", request.window_id),
+                        now_rfc3339(),
+                    )
+                }
+                Ok(_) => {
+                    let detail =
+                        "已发布 manifest 归属不符(window/attempt/run/identity)".to_string();
+                    mark_begin_recovery(
+                        store,
+                        &current,
+                        "reviewer_window_manifest_owner_mismatch",
+                        detail.clone(),
+                    );
+                    return Err(ReviewerWindowError::IdentityDrift(detail));
+                }
+                Err(error) => {
+                    mark_begin_recovery(
+                        store,
+                        &current,
+                        "reviewer_window_manifest_unreadable",
+                        error.to_string(),
+                    );
+                    return Err(ReviewerWindowError::Snapshot(error));
+                }
+            }
+        }
         Err(error) => {
             mark_begin_recovery(
                 store,
@@ -478,29 +535,16 @@ pub(crate) async fn begin_review_window(
             return Err(ReviewerWindowError::Snapshot(error));
         }
     };
-    let manifest_sha256 = match std::fs::read(&captured.manifest_path) {
-        Ok(bytes) => sha256_hex(&bytes),
-        Err(error) => {
-            let detail = format!("manifest 读取失败: {error}");
-            mark_begin_recovery(
-                store,
-                &current,
-                "reviewer_window_manifest_unreadable",
-                detail.clone(),
-            );
-            return Err(ReviewerWindowError::Store(ProductStoreError::Io(detail)));
-        }
-    };
 
     // 6. Preparing → Running:完整持久 manifest 之后才允许采材料与
     // 构造 ReviewerVerify(T20 经 assert_review_window_current 准入)。
     let expected = current.generation;
     current.baseline = Some(BaselineBinding {
-        manifest_path: captured.manifest_path.display().to_string(),
-        manifest_sha256: manifest_sha256.clone(),
-        entry_count: captured.entry_count,
-        total_bytes: captured.total_bytes,
-        captured_at: now_rfc3339(),
+        manifest_path: baseline.manifest_path.clone(),
+        manifest_sha256: baseline.manifest_sha256.clone(),
+        entry_count: baseline.entry_count,
+        total_bytes: baseline.total_bytes,
+        captured_at: baseline.captured_at.clone(),
     });
     current.quiesced_scopes = quiesced_scope_keys;
     current.bump_transition(
@@ -512,11 +556,46 @@ pub(crate) async fn begin_review_window(
         window_id: request.window_id.to_string(),
         generation: saved.generation,
         identity,
-        manifest_path: captured.manifest_path,
-        manifest_sha256,
-        entry_count: captured.entry_count,
-        total_bytes: captured.total_bytes,
+        manifest_path: PathBuf::from(&baseline.manifest_path),
+        manifest_sha256: baseline.manifest_sha256,
+        entry_count: baseline.entry_count,
+        total_bytes: baseline.total_bytes,
     })
+}
+
+/// baseline 事实(捕获/采用两路径同构;指纹=manifest 规范化 JSON 序列
+/// 化的 sha256——内容寻址,与文件字节排版无关,assert 侧同源可复核)。
+struct BaselineFacts {
+    manifest_path: String,
+    manifest_sha256: String,
+    entry_count: usize,
+    total_bytes: u64,
+    captured_at: String,
+}
+
+impl BaselineFacts {
+    fn from_manifest(
+        manifest: &crate::product::reviewer_snapshot::ReviewerBaselineManifest,
+        manifest_path: String,
+        captured_at: String,
+    ) -> Self {
+        Self {
+            manifest_path,
+            manifest_sha256: manifest_fingerprint(manifest),
+            entry_count: manifest.entries.len(),
+            total_bytes: manifest.entries.iter().map(|entry| entry.size).sum(),
+            captured_at,
+        }
+    }
+}
+
+/// manifest 指纹:规范化 JSON 序列化 sha256(内容寻材证明)。
+fn manifest_fingerprint(
+    manifest: &crate::product::reviewer_snapshot::ReviewerBaselineManifest,
+) -> String {
+    serde_json::to_string(manifest)
+        .map(|serialized| sha256_hex(serialized.as_bytes()))
+        .unwrap_or_default()
 }
 
 /// 通道排空冻结(四个通道全部 Draining→在途清零→Frozen;「不能只禁
@@ -645,13 +724,14 @@ fn lease_conflict_detail(
 
 /// 同源复验当前窗口:重载 durable 记录,核对期望身份(attempt/run/
 /// provider + worktree 现场重解析 canonical/gitdir/common-dir 均不得
-/// 漂移)与状态;`Running` 时额外核验 baseline manifest 仍在且字节
-/// sha256 与绑定指纹一致(材料同源证明)。gateway/spawn 用
+/// 漂移)与状态;`Running` 时额外经 snapshot store 重载 baseline manifest
+/// 并核验内容指纹(规范化 JSON 序列化 sha256)与绑定一致(材料同源
+/// 证明)。gateway/spawn 用
 /// `allowed=[Running]`;平台写通道守卫走 `enter_platform_write`(同一
 /// durable 闸门文件,同源)。
 pub(crate) fn assert_review_window_current(
     store: &ReviewerWindowStore,
-    _snapshot: &ReviewerSnapshotStore,
+    snapshot: &ReviewerSnapshotStore,
     expectation: &WindowExpectation<'_>,
     allowed_states: &[ReviewerWindowState],
 ) -> Result<CurrentWindowProof, ReviewerWindowError> {
@@ -697,22 +777,32 @@ pub(crate) fn assert_review_window_current(
     }
     let (manifest_path, manifest_sha256, entry_count, total_bytes) =
         if record.state == ReviewerWindowState::Running {
-            // 材料同源证明:Running 窗口的材料必须来自同一 manifest
-            // (字节指纹与绑定期初值一致;被改/被删即拒)。
+            // 材料同源证明:Running 窗口的材料必须来自同一 manifest——
+            // 经 snapshot store 重载并计算内容指纹(manifest 规范化 JSON
+            // 序列化 sha256),与绑定指纹一致;被改/被删即拒。内容寻址
+            // 与 F4 采用路径(绝对路径未必可得)同源可复核。
             let baseline = record
                 .baseline
                 .as_ref()
                 .ok_or_else(|| not_current("Running 无 baseline 绑定".to_string()))?;
-            let path = PathBuf::from(&baseline.manifest_path);
-            let bytes = std::fs::read(&path)
-                .map_err(|error| not_current(format!("baseline manifest 读取失败: {error}")))?;
-            let digest = sha256_hex(&bytes);
+            let manifest = snapshot
+                .load_manifest(expectation.window_id)
+                .map_err(|error| not_current(format!("baseline manifest 重载失败: {error}")))?;
+            let digest = manifest_fingerprint(&manifest);
             if digest != baseline.manifest_sha256 {
                 return Err(not_current(
                     "manifest 指纹不符——材料不再与 baseline 同源".to_string(),
                 ));
             }
-            (path, digest, baseline.entry_count, baseline.total_bytes)
+            if manifest.entries.len() != baseline.entry_count {
+                return Err(not_current("manifest 条目数与绑定不符".to_string()));
+            }
+            (
+                PathBuf::from(&baseline.manifest_path),
+                digest,
+                baseline.entry_count,
+                baseline.total_bytes,
+            )
         } else {
             (PathBuf::new(), String::new(), 0, 0)
         };
@@ -861,10 +951,20 @@ pub(crate) async fn restore_window(
     expected_generation: u64,
 ) -> Result<RestoreSummary, ReviewerWindowError> {
     let mut record = load_for_transition(store, window_id, expected_generation)?;
-    let from_violation = record.state == ReviewerWindowState::ViolationRecorded;
+    // F1(修复轮 1):违规标记不得因恢复重入丢失——入口同时看当前状态
+    // 与已持久化 RestoreBinding(停等重入时 state=RecoveryRequired,
+    // 违规事实只在 binding 里),防止违规窗被洗白为可采信关闭。
+    let from_violation = record.state == ReviewerWindowState::ViolationRecorded
+        || record
+            .restore
+            .as_ref()
+            .is_some_and(|binding| binding.from_violation);
+    // Restoring 重入 = 瞬时 Err 后的恢复重试(T16 游标幂等续接)。
     let resumable = matches!(
         record.state,
-        ReviewerWindowState::Quiescing | ReviewerWindowState::ViolationRecorded
+        ReviewerWindowState::Quiescing
+            | ReviewerWindowState::ViolationRecorded
+            | ReviewerWindowState::Restoring
     ) || (record.state == ReviewerWindowState::RecoveryRequired
         && record.baseline.is_some()
         && record
@@ -875,7 +975,7 @@ pub(crate) async fn restore_window(
         return Err(invalid_transition(
             record.state,
             ReviewerWindowState::Restoring,
-            "仅 Quiescing/ViolationRecorded/恢复停等(带 baseline)可进入恢复",
+            "仅 Quiescing/ViolationRecorded/Restoring 重试/恢复停等(带 baseline)可进入恢复",
         ));
     }
     record.restore = Some(RestoreBinding {
@@ -964,7 +1064,23 @@ pub(crate) async fn restore_window(
         Err(error) => {
             // 审查硬约束 4:瞬时 store 错误(Io/Store/Integrity)不迁移
             // 窗口状态——T18 对账计入非通过并从 restore.cursor 带出游标。
+            // F3(修复轮 1):best-effort 读回 T16 持久化恢复游标回填
+            // 绑定,使「计入非通过并带出游标」三处接口约定真实可达。
             record.last_error = Some(error.to_string());
+            let persisted_cursor = snapshot
+                .load_manifest(window_id)
+                .ok()
+                .map(|manifest| manifest.restore_cursor);
+            record.restore = Some(RestoreBinding {
+                completed: false,
+                from_violation,
+                outcome: "error".to_string(),
+                cursor_phase: persisted_cursor
+                    .as_ref()
+                    .map(|cursor| restore_phase_str(cursor.phase).to_string()),
+                entry_index: persisted_cursor.map(|cursor| cursor.entry_index),
+                detail: error.to_string(),
+            });
             let _ = store.save_window_transition(record, expected_next);
             Err(ReviewerWindowError::Snapshot(error))
         }
@@ -1005,15 +1121,21 @@ fn finalize_terminal(
 ) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
     // 释放顺序:解冻四通道 → 释放租约 → 落终态。任何一步失败即返回
     // (记录停在非终态,重入幂等收口);只有全部释放成功才 Closed*。
+    // F5(修复轮 1):只释放本窗**实际持有**的闸门/租约——租约冲突等
+    // 未持锁失败窗的 abandon 不得被持有人闸门/租约 OwnerMismatch 卡死。
     for channel in ALL_WRITE_CHANNELS {
-        store
-            .unfreeze_channel(&record.identity.common_dir, channel, &record.window_id)
-            .map_err(|error| map_channel_gate_error(&record.window_id, error))?;
+        if store.channel_owned_by(&record.identity.common_dir, channel, &record.window_id)? {
+            store
+                .unfreeze_channel(&record.identity.common_dir, channel, &record.window_id)
+                .map_err(|error| map_channel_gate_error(&record.window_id, error))?;
+        }
     }
-    store.release_lease(
-        &record.window_id,
-        &tree_key_of(&record.identity.canonical_worktree),
-    )?;
+    let tree_key = tree_key_of(&record.identity.canonical_worktree);
+    if let Some(lease) = store.load_lease(&tree_key)?
+        && lease.window_id == record.window_id
+    {
+        store.release_lease(&record.window_id, &tree_key)?;
+    }
     let mut final_record = record.clone();
     final_record.bump_transition(terminal, note);
     Ok(store.save_window_transition(final_record, expected_generation)?)
@@ -1537,8 +1659,9 @@ mod tests {
         );
         assert_eq!(counts.material, 1);
         assert_eq!(counts.spawn, 1);
-        let manifest_bytes = fs::read(&handle.manifest_path).unwrap();
-        assert_eq!(sha256_hex(&manifest_bytes), handle.manifest_sha256);
+        let manifest = snapshot.load_manifest("w-bar").unwrap();
+        assert_eq!(manifest_fingerprint(&manifest), handle.manifest_sha256);
+        assert_eq!(manifest.entries.len(), handle.entry_count);
 
         // 窗口期间新 git mutation 仍拒绝
         let err = store
@@ -1959,8 +2082,14 @@ mod tests {
         .await
         .expect("begin 2");
         let manifest2 = fx2.snapshot_root.join("windows/w-tamper/manifest.json");
-        let raw = fs::read(&manifest2).unwrap();
-        fs::write(&manifest2, format!("{}\n", String::from_utf8_lossy(&raw))).unwrap();
+        let raw = fs::read_to_string(&manifest2).unwrap();
+        // 内容篡改(改条目 rel_path 值):解析仍合法但内容指纹漂移
+        assert!(raw.contains("\"tracked.txt\""), "fixture entry present");
+        fs::write(
+            &manifest2,
+            raw.replace("\"tracked.txt\"", "\"tampered.txt\""),
+        )
+        .unwrap();
         assert!(
             assert_review_window_current(
                 &fx2.store(),
@@ -2316,5 +2445,238 @@ mod tests {
             .unwrap();
         let rec = store.load_window("w-stuck").unwrap();
         abandon_window(&store, "w-stuck", rec.generation, "drain stuck").unwrap();
+    }
+
+    // ---------- 修复轮 1 钉测(F1/F3/F4/F5) ----------
+
+    /// F1(P1):违规流恢复中断(T16 RecoveryRequired)后重入续接,
+    /// 违规标记不得丢失——恢复完整仍必须进 ManualGate,不能洗白为
+    /// 可采信关闭。
+    #[tokio::test]
+    async fn violation_recovery_resume_still_reaches_manual_gate() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        // 平台合法写入路径:worktree 之外的独立平台文件
+        let platform_dir = fx.base.join("platform");
+        fs::create_dir_all(&platform_dir).unwrap();
+        let platform_file = platform_dir.join("report.json");
+        fs::write(&platform_file, "v0\n").unwrap();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let mut request = begin_request("w-f1", "attempt-1", &fx.worktree, &targets);
+        request.platform_write_paths = vec![PlatformWritePath {
+            path: platform_file.clone(),
+            ownership: "report-store".to_string(),
+        }];
+        let handle = begin_review_window(&store, &snapshot, &request)
+            .await
+            .expect("begin");
+
+        // 违规流:收口 + 落违规
+        let quiescing = begin_quiesce(&store, "w-f1", handle.generation, "end").unwrap();
+        let violated =
+            record_violation(&store, "w-f1", quiescing.generation, ".aria 直写").unwrap();
+
+        // Reviewer 残留 + 平台域漂移 → T16 恢复停等(PlatformDomain 游标)
+        fs::write(fx.worktree.join("residue.txt"), "junk\n").unwrap();
+        fs::write(&platform_file, "v1-tampered\n").unwrap();
+        let outcome = restore_window(&store, &snapshot, "w-f1", violated.generation).await;
+        match outcome.expect_err("platform drift must stop-and-wait") {
+            ReviewerWindowError::RecoveryStopped { reason, cursor, .. } => {
+                assert!(reason.contains("platform_domain_drift"), "{reason}");
+                assert!(cursor.contains("platform_domain"), "{cursor}");
+            }
+            other => panic!("expected RecoveryStopped, got {other:?}"),
+        }
+        let stopped = store.load_window("w-f1").unwrap();
+        assert_eq!(stopped.state, ReviewerWindowState::RecoveryRequired);
+
+        // 处置平台漂移(回基线)后重入续接:from_violation 必须从持久化
+        // 绑定恢复 → ManualGate(而非可采信关闭)
+        fs::write(&platform_file, "v0\n").unwrap();
+        let summary = restore_window(&store, &snapshot, "w-f1", stopped.generation)
+            .await
+            .expect("resume restore completes");
+        assert!(
+            summary.manual_gate,
+            "violation must survive recovery resume"
+        );
+        assert_eq!(summary.record.state, ReviewerWindowState::ManualGate);
+        let err = close_accepted(&store, "w-f1", summary.record.generation)
+            .expect_err("manual gate cannot accept");
+        assert!(matches!(err, ReviewerWindowError::InvalidTransition { .. }));
+    }
+
+    /// F3(P2):T16 瞬时 Err(Integrity)不迁移状态,但恢复游标必须
+    /// best-effort 回填绑定(T18「计入非通过并带出游标」可达)。
+    #[tokio::test]
+    async fn restore_error_keeps_state_and_backfills_cursor() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-err", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("begin");
+        let quiescing = begin_quiesce(&store, "w-err", handle.generation, "cancel").unwrap();
+
+        // 抽掉一个 CAS blob → T16 恢复 CAS 预检 Integrity 拒绝(树不动)
+        let manifest = snapshot.load_manifest("w-err").unwrap();
+        let blob = manifest
+            .entries
+            .iter()
+            .find_map(|entry| entry.blob.clone())
+            .expect("fixture has file entries");
+        let blob_path = fx.snapshot_root.join("windows/w-err").join(&blob);
+        let blob_bytes = fs::read(&blob_path).unwrap();
+        fs::remove_file(&blob_path).unwrap();
+
+        let err = restore_window(&store, &snapshot, "w-err", quiescing.generation)
+            .await
+            .expect_err("CAS precheck must fail");
+        assert!(matches!(err, ReviewerWindowError::Snapshot(_)), "{err:?}");
+        let record = store.load_window("w-err").unwrap();
+        assert_eq!(
+            record.state,
+            ReviewerWindowState::Restoring,
+            "transient Err must not move state"
+        );
+        assert!(record.last_error.is_some(), "last_error recorded");
+        let binding = record.restore.as_ref().expect("binding present");
+        assert!(!binding.completed);
+        assert_eq!(binding.outcome, "error");
+        assert_eq!(
+            binding.cursor_phase.as_deref(),
+            Some("started"),
+            "cursor backfilled from persisted manifest"
+        );
+        assert_eq!(binding.entry_index, Some(0));
+
+        // Restoring 重入(瞬时 Err 后重试):补回原字节 → 恢复完成
+        fs::write(&blob_path, blob_bytes).unwrap();
+        let summary = restore_window(&store, &snapshot, "w-err", record.generation)
+            .await
+            .expect("retry after transient error");
+        assert!(!summary.manual_gate);
+    }
+
+    /// F4(P2):崩溃于「manifest 已发布、Running CAS 未落」——同窗重入
+    /// 采用已发布 manifest(校验归属),不作废最贵一步。
+    #[tokio::test]
+    async fn crash_after_capture_resumes_by_adopting_manifest() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let first = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-adopt", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("first begin");
+
+        // 模拟崩溃点:窗口记录回 Preparing(manifest 已发布、租约/闸门
+        // 仍为本窗持有——create_or_resume 同身份重建即该状态)
+        fs::remove_file(fx.window_root.join("windows/w-adopt.json")).unwrap();
+        store
+            .create_or_resume_window(&ReviewerWindowRecord::new(
+                "w-adopt",
+                first.identity.clone(),
+                "attempt-1",
+                "run-1",
+                "claude_code",
+                Vec::new(),
+            ))
+            .expect("recreate preparing record");
+
+        // 同窗重入:capture 见 manifest 冲突 → 归属校验 → 采用 → Running
+        let second = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-adopt", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("resume adopts published manifest");
+        assert_eq!(second.manifest_sha256, first.manifest_sha256);
+        assert_eq!(second.entry_count, first.entry_count);
+        assert_eq!(
+            store.load_window("w-adopt").unwrap().state,
+            ReviewerWindowState::Running
+        );
+        assert!(
+            assert_review_window_current(
+                &store,
+                &snapshot,
+                &expectation("w-adopt", "attempt-1", &fx.worktree),
+                &[ReviewerWindowState::Running]
+            )
+            .is_ok(),
+            "adopted baseline admits material via same-source gate"
+        );
+        // 归属防线说明:异窗口重入在租约面即被拒(见
+        // two_attempts/abandon_gateless 钉测);manifest 归属校验为
+        // 租约已过(同窗)但 manifest 异主时的纵深防御分支。
+    }
+
+    /// F5(P3):未持闸门/租约的失败窗(租约冲突停等)abandon 时不得被
+    /// 持有人(合法在窗窗口)的闸门/租约 OwnerMismatch 卡死。
+    #[tokio::test]
+    async fn abandon_gateless_conflict_window_not_blocked_by_holder() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-owner", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("owner window running");
+
+        // 租约冲突失败窗:从未持有租约/闸门
+        let err = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-loser", "attempt-2", &fx.worktree, &targets),
+        )
+        .await
+        .expect_err("lease conflict");
+        assert!(matches!(err, ReviewerWindowError::Conflict { .. }));
+        let loser = store.load_window("w-loser").unwrap();
+        assert_eq!(loser.state, ReviewerWindowState::RecoveryRequired);
+
+        // F5:abandon 跳过非本窗持有的闸门/租约,顺利终态
+        let terminal =
+            abandon_window(&store, "w-loser", loser.generation, "lease conflict").unwrap();
+        assert_eq!(terminal.state, ReviewerWindowState::ClosedInvalidated);
+
+        // 持有人不受影响:仍 Running、闸门仍冻、租约仍在
+        assert_eq!(
+            store.load_window("w-owner").unwrap().state,
+            ReviewerWindowState::Running
+        );
+        let common = fx.common_dir();
+        let err = store
+            .enter_write_channel(&common, WriteChannelKind::Commit, own_writer("probe-late"))
+            .expect_err("owner freeze intact");
+        assert!(matches!(err, ChannelGateError::Blocked { .. }));
+        let err = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-third", "attempt-3", &fx.worktree, &targets),
+        )
+        .await
+        .expect_err("owner lease intact");
+        assert!(matches!(err, ReviewerWindowError::Conflict { .. }));
     }
 }

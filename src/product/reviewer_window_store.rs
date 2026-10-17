@@ -578,6 +578,9 @@ impl ReviewerWindowStore {
             let mut saved = next;
             saved.generation = expected_generation + 1;
             write_json(&path, &saved)?;
+            // F2(修复轮 1):rename 后补目录 fsync——与租约/闸门/创建
+            // 一致,消除「锁已释放、记录仍旧态」的掉电撕裂窗口。
+            sync_dir(&self.windows_dir())?;
             Ok(saved)
         })
     }
@@ -874,6 +877,27 @@ impl ReviewerWindowStore {
             Self::save_gate(&path, &gate)?;
             Ok(())
         })
+    }
+
+    /// F5(修复轮 1):查询闸门是否由本窗口持有(终态释放只释放本窗
+    /// 实际持有的闸门;未持有/他窗持有/Open 均跳过,不误伤持有人)。
+    pub(crate) fn channel_owned_by(
+        &self,
+        common_dir: &Path,
+        channel: WriteChannelKind,
+        window_id: &str,
+    ) -> Result<bool, ProductStoreError> {
+        let path = self.channel_path(common_dir, channel);
+        if !path.is_file() {
+            return Ok(false);
+        }
+        let gate: ChannelGateRecord = read_json(&path)?;
+        Ok(matches!(
+            &gate.state,
+            GateState::Draining { window_id: holder }
+                | GateState::Frozen { window_id: holder }
+                if holder == window_id
+        ))
     }
 
     /// 收割已死 writer(进程消失/僵尸/PID 复用均为已退出);在途清零
