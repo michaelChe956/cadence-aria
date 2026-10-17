@@ -929,16 +929,17 @@ async fn coding_policy_review_input_carries_run_bound_durable_audit_sink() {
         .execute_code_review(&fixture.attempt, &provider)
         .await;
 
-    // CodeReviewer 是策略角色（D2 矩阵）：engine 必须在 provider 启动前绑定
-    // run-bound durable sink（LifecycleStore `tool-policy-run-audit/` 分区）。
+    // 批2 Task 11（T20 前中间态）：CodeReviewer wire 面全开（共享工厂恒
+    // None，纪律=ReviewerVerify+窗口合同，真窗归 T20）；engine 仍必须在
+    // provider 启动前绑定 run-bound durable sink（执行审计不随去 deny 丢失）。
     let input = provider.input();
     assert!(
-        input.tool_policy.is_some(),
-        "review input must carry the deny policy"
+        input.tool_policy.is_none(),
+        "review input must not carry deny policy (T20 intermediate)"
     );
     assert!(
         input.audit_sink.is_some(),
-        "review policy input must carry the run-bound durable audit sink"
+        "review run must carry the run-bound durable audit sink"
     );
     assert!(result.is_ok(), "review flow must not regress: {result:?}");
 }
@@ -1033,9 +1034,12 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
             Some("audit_isolation_policy_reviewer".to_string()),
         )
         .expect("reviewer role run");
+    // 批2 Task 11（T20 前中间态）：reviewer run 不再是 deny 策略会话——
+    // 改用无三联动前置的 completed-only wire fixture（thread/start 无策略
+    // 前置）；审计通道分离断言不变（sink 由 engine 按 Reviewer 角色分配）。
     let fixture = {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/provider/codex_app_server_policy_approval_fixture.sh");
+            .join("tests/fixtures/provider/codex_app_server_completed_only_fixture.sh");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1052,10 +1056,12 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
         std::sync::Arc::new(|| Ok("codex 0.124.0-isolation-fixture".to_string()));
     let policy_provider = CodexProvider::new(fixture).with_version_supplier(supplier);
     let worktree = attempt.worktree_path.clone().expect("worktree path");
+    // 批2 Task 11（T20 前中间态）：reviewer wire 面全开（无 deny）；审计
+    // 通道分离语义不变——sink 由 engine 按 Reviewer 角色分配。
     let policy_input = StreamingProviderInput {
         working_directory: None,
         baseline_tree: None,
-        tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
+        tool_policy: None,
         audit_sink: None,
         provider_type: ProviderType::Codex,
         role: AdapterRole::Reviewer,
@@ -1105,8 +1111,8 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
         .await;
     assert!(
         matches!(policy_outcome, ProviderInvocationOutcome::Completed(ref outcome)
-            if outcome.full_output == "policy approvals done"),
-        "policy reviewer run must complete via the wire fixture: {policy_outcome:?}"
+            if outcome.full_output == "Codex completed-only chunk"),
+        "reviewer run must complete via the wire fixture: {policy_outcome:?}"
     );
 
     // 策略通道：分区文件存在，首行 provider_start，含 approval_decision。
@@ -1124,39 +1130,21 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
         })
         .cloned()
         .collect();
-    assert_eq!(
-        run_files.len(),
-        1,
-        "policy run must land in exactly one durable partition run file: {run_files:?}"
-    );
-    let lines: Vec<serde_json::Value> = std::fs::read_to_string(&run_files[0])
-        .expect("partition file")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("partition jsonl line"))
-        .collect();
-    assert_eq!(
-        lines[0]["event_type"], "provider_start",
-        "provider_start must be the first durable event"
-    );
-    assert_eq!(lines[0]["provider"], "codex");
-    assert!(lines[0]["provider_session_id"] == "codex-thread-policy");
-    let event_types: Vec<&str> = lines
-        .iter()
-        .map(|line| line["event_type"].as_str().expect("event_type"))
-        .collect();
+    // 批2 Task 11（T20/T13 前中间态）：reviewer wire 面去 deny 后，adapter 的
+    // durable provider_start/approval 写仍是 deny 门控（codex Direct 的策略
+    // 会话机制只服务 deny 意图；claude/pi 同构）——无策略 reviewer run 当前
+    // 只落 engine 侧 role_run_seq 分配（role-run-seq.jsonl），run 文件待
+    // T13（codex Direct 检测型岗位/审计重构）与 T20（真窗接线的
+    // ReviewerVerify durable 面）窗口补齐；deny 策略会话（Author 投影）的
+    // 分区写链由 codex_provider 自测钉住，不在此重复。
     assert!(
-        event_types.contains(&"approval_decision"),
-        "wire fixture approvals must persist as approval_decision: {event_types:?}"
+        run_files.is_empty(),
+        "non-deny reviewer run must not fabricate durable partition run files: {run_files:?}"
     );
-    for kind in &event_types {
-        assert!(
-            matches!(
-                *kind,
-                "provider_start" | "approval_decision" | "protocol_warning" | "session_terminated"
-            ),
-            "tool-policy partition must contain only canonical events, saw `{kind}`"
-        );
-    }
+    assert!(
+        partition_dir.join("role-run-seq.jsonl").exists(),
+        "engine must still allocate the reviewer tool-policy role run seq (audit kept post-deny)"
+    );
 
     // 执行通道：role-run-events（execution_event_audit）不含任何 tool-policy
     // durable canonical 事件（策略事件不串入执行审计）。注意执行通道有既有的
