@@ -548,7 +548,7 @@ impl StreamingProviderAdapter for LegacySinkHookProvider {
 }
 
 #[tokio::test]
-async fn run_streaming_bridge_injects_engine_provided_sink_for_policy_roles() {
+async fn run_streaming_bridge_keeps_sink_and_derives_no_deny() {
     use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
     use std::sync::atomic::Ordering;
 
@@ -557,9 +557,10 @@ async fn run_streaming_bridge_injects_engine_provided_sink_for_policy_roles() {
         saw_policy: std::sync::atomic::AtomicBool::new(false),
         saw_sink: std::sync::atomic::AtomicBool::new(false),
     };
-    // make_input 的 role=Orchestrator（策略角色）：默认 bridge 必须派生策略并
-    // 同时注入 hook 提供的 sink，不得让真实 adapter 在 legacy 直连上缺 sink
-    // 运行时 fail-closed。
+    // 批2 Task 11：legacy bridge 不再按 AdapterRole 一概派生 deny（Author
+    // 岗位投影的唯一铸造点=受信装配；Coder/Reviewer/规划族 wire 面全开），
+    // 但 engine hook 提供的 run-bound sink 仍必须注入——Reviewer 执行审计
+    // 不随去 deny 丢失。
     let mut rx = provider
         .run_streaming(&make_input("legacy sink"), CancellationToken::new())
         .await
@@ -570,13 +571,50 @@ async fn run_streaming_bridge_injects_engine_provided_sink_for_policy_roles() {
         }
     }
     assert!(
-        provider.saw_policy.load(Ordering::SeqCst),
-        "legacy bridge must derive the deny policy for policy roles"
+        !provider.saw_policy.load(Ordering::SeqCst),
+        "legacy bridge must not derive the deny policy from AdapterRole (T11 matrix)"
     );
     assert!(
         provider.saw_sink.load(Ordering::SeqCst),
-        "legacy bridge must inject the engine-provided audit sink alongside the derived policy"
+        "legacy bridge must still inject the engine-provided audit sink"
     );
+}
+
+/// 批2 Task 11：legacy bridge 对全部 AdapterRole 一律不派生 deny——
+/// 表驱动覆盖五角色（Orchestrator/WorkItemSplitter/Reviewer/Executor/
+/// Handoff），deny 只能由受信装配（Author 岗位投影）铸造。
+#[tokio::test]
+async fn run_streaming_bridge_derives_no_policy_for_any_role() {
+    use crate::protocol::contracts::AdapterRole;
+
+    for role in [
+        AdapterRole::Orchestrator,
+        AdapterRole::WorkItemSplitter,
+        AdapterRole::Reviewer,
+        AdapterRole::Executor,
+        AdapterRole::Handoff,
+    ] {
+        let provider = LegacySinkHookProvider {
+            sink: crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink::new(),
+            saw_policy: std::sync::atomic::AtomicBool::new(false),
+            saw_sink: std::sync::atomic::AtomicBool::new(false),
+        };
+        let mut input = make_input("legacy role matrix");
+        input.role = role.clone();
+        let mut rx = provider
+            .run_streaming(&input, CancellationToken::new())
+            .await
+            .expect("legacy bridge run");
+        while let Some(chunk) = rx.recv().await {
+            if matches!(chunk, super::StreamChunk::Done { .. }) {
+                break;
+            }
+        }
+        assert!(
+            !provider.saw_policy.load(std::sync::atomic::Ordering::SeqCst),
+            "legacy bridge must not derive deny for {role:?} (T11 matrix)"
+        );
+    }
 }
 
 #[test]
@@ -829,7 +867,7 @@ fn usage_report_without_any_tokens_is_not_reportable() {
     assert!(!empty.has_any_tokens());
 }
 
-// ---- Task 3.1（REQ-ENV-09）：三 adapter 双向 spawn 前守卫 ----
+// ---- 批2 Task 11（REQ-ENV-09/B6 公共角色矩阵）：deny 退役为 Author 岗位投影 ----
 
 #[test]
 fn adapter_tool_policy_guard_is_bidirectional_for_every_role() {
@@ -837,28 +875,69 @@ fn adapter_tool_policy_guard_is_bidirectional_for_every_role() {
     use crate::protocol::contracts::AdapterRole;
 
     let deny = ProviderToolPolicy::deny_file_write_builtins();
+    // 全角色 wire 面默认全开（None 合法）：Coder/Reviewer/规划族不再按
+    // AdapterRole 一概套 deny——纪律移入受信冻结合同（Author 岗位策略/
+    // Reviewer 窗口合同）。
     for role in [
         AdapterRole::Orchestrator,
         AdapterRole::WorkItemSplitter,
         AdapterRole::Reviewer,
+        AdapterRole::Executor,
+        AdapterRole::Handoff,
     ] {
         assert!(
-            validate_tool_policy_for_role(&role, None).is_err(),
-            "policy role {role:?} without policy must be rejected"
-        );
-        assert!(
-            validate_tool_policy_for_role(&role, Some(&deny)).is_ok(),
-            "policy role {role:?} with deny policy must be accepted"
+            validate_tool_policy_for_role(&role, None).is_ok(),
+            "role {role:?} without policy must be accepted (deny matrix retired by T11)"
         );
     }
-    for role in [AdapterRole::Executor, AdapterRole::Handoff] {
+    // DenyFileWriteBuiltins = Author 岗位纪律的唯一 wire 物理投影，只在
+    // Author 可承载的角色（Orchestrator=story/design/revision、
+    // WorkItemSplitter=plan authoring）合法；Coder（Executor）、Reviewer、
+    // Handoff 携带 deny 一律拒绝（Coder 不带 deny；Reviewer 只携
+    // ReviewerVerify+窗口合同，不回退旧 deny fallback）。
+    for role in [AdapterRole::Orchestrator, AdapterRole::WorkItemSplitter] {
         assert!(
-            validate_tool_policy_for_role(&role, None).is_ok(),
-            "non-policy role {role:?} without policy must be accepted"
+            validate_tool_policy_for_role(&role, Some(&deny)).is_ok(),
+            "author carrier {role:?} with deny projection must be accepted"
         );
+    }
+    for role in [
+        AdapterRole::Reviewer,
+        AdapterRole::Executor,
+        AdapterRole::Handoff,
+    ] {
         assert!(
             validate_tool_policy_for_role(&role, Some(&deny)).is_err(),
-            "non-policy role {role:?} carrying policy must be rejected"
+            "non-author role {role:?} carrying deny must be rejected (T11 matrix)"
+        );
+    }
+}
+
+/// 批2 Task 11 表驱动：六职责→wire 投影权威矩阵（`tool_policy_for_duty`）
+/// ——Author 岗位纪律唯一带 deny；Coder/Orchestrator/Splitter/Handoff/
+/// Reviewer 全开（Reviewer 只携 ReviewerVerify+窗口合同）。
+#[test]
+fn duty_tool_policy_matrix_is_author_only() {
+    use crate::cross_cutting::provider_execution::TrustedProviderRole;
+    use crate::cross_cutting::streaming_provider::tool_policy_for_duty;
+
+    let deny = ProviderToolPolicy::deny_file_write_builtins();
+    assert_eq!(
+        tool_policy_for_duty(&TrustedProviderRole::Author),
+        Some(deny),
+        "Author duty carries the deny projection (Claude Edit/Write/NotebookEdit, Pi edit/write)"
+    );
+    for duty in [
+        TrustedProviderRole::Orchestrator,
+        TrustedProviderRole::Splitter,
+        TrustedProviderRole::Handoff,
+        TrustedProviderRole::Coder,
+        TrustedProviderRole::Reviewer,
+    ] {
+        assert_eq!(
+            tool_policy_for_duty(&duty),
+            None,
+            "duty {duty:?} must keep the wire fully open (T11 matrix)"
         );
     }
 }
@@ -912,27 +991,40 @@ async fn tool_policy_guard_rejects_invalid_role_policy_before_spawn() {
         }
     };
 
-    // 策略角色缺失策略：spawn 前拒绝。
+    // 批2 Task 11：非 Author 承载角色误带 deny 投影——spawn 前拒绝
+    // （Coder 不带 deny；Reviewer 只携窗口合同，不回退旧 deny fallback）。
     expect_guard_rejection(
         "pi",
         &PiProvider::new(missing_cli.clone()),
-        base_input(ProviderType::Pi, AdapterRole::Orchestrator, None),
+        base_input(
+            ProviderType::Pi,
+            AdapterRole::Reviewer,
+            Some(ProviderToolPolicy::deny_file_write_builtins()),
+        ),
     )
     .await;
     expect_guard_rejection(
         "claude",
         &ClaudeCodeProvider::new(missing_cli.clone()),
-        base_input(ProviderType::ClaudeCode, AdapterRole::Reviewer, None),
+        base_input(
+            ProviderType::ClaudeCode,
+            AdapterRole::Handoff,
+            Some(ProviderToolPolicy::deny_file_write_builtins()),
+        ),
     )
     .await;
     expect_guard_rejection(
         "codex",
         &CodexProvider::new(missing_cli.clone()),
-        base_input(ProviderType::Codex, AdapterRole::WorkItemSplitter, None),
+        base_input(
+            ProviderType::Codex,
+            AdapterRole::Reviewer,
+            Some(ProviderToolPolicy::deny_file_write_builtins()),
+        ),
     )
     .await;
 
-    // 非策略角色误带策略：spawn 前拒绝。
+    // 非策略角色误带策略（Executor+deny）：spawn 前拒绝。
     expect_guard_rejection(
         "pi",
         &PiProvider::new(missing_cli.clone()),
@@ -1444,24 +1536,22 @@ async fn lcg_t07_invalid_role_policy_zero_child_and_zero_extension() {
         ))
         .expect("pi lc launch validates");
 
+    // 批2 Task 11：旧「策略角色缺 deny」臂退役（全角色 None 合法）；非法
+    // 组合=非 Author 承载角色携带 deny 投影（Reviewer 只携窗口合同、
+    // Coder 不带 deny、Handoff 不一概套 deny）。
     let cases: Vec<(&str, AdapterRole, Option<ProviderToolPolicy>)> = [
-        AdapterRole::Orchestrator,
-        AdapterRole::WorkItemSplitter,
         AdapterRole::Reviewer,
+        AdapterRole::Executor,
+        AdapterRole::Handoff,
     ]
     .into_iter()
-    .map(|role| ("policy role missing deny", role, None))
-    .chain(
-        [AdapterRole::Executor, AdapterRole::Handoff]
-            .into_iter()
-            .map(|role| {
-                (
-                    "non-policy role carrying deny",
-                    role,
-                    Some(ProviderToolPolicy::deny_file_write_builtins()),
-                )
-            }),
-    )
+    .map(|role| {
+        (
+            "non-author role carrying deny",
+            role,
+            Some(ProviderToolPolicy::deny_file_write_builtins()),
+        )
+    })
     .collect();
 
     let launch_input = |provider_type: ProviderType,

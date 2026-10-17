@@ -26,7 +26,9 @@ fn policy_claude_input(
         crate::protocol::contracts::ProviderType::ClaudeCode,
         crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
     );
-    input.role = AdapterRole::Reviewer;
+    // 批2 Task 11：deny 是 Author 岗位纪律的 wire 物理投影——策略会话
+    // fixture 采用 Author 承载角色（Orchestrator）；Reviewer 不再带 deny。
+    input.role = AdapterRole::Orchestrator;
     input.tool_policy = Some(ProviderToolPolicy::deny_file_write_builtins());
     input.audit_sink = audit_sink;
     if let Some(resume_id) = resume_id {

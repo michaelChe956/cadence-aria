@@ -182,11 +182,11 @@ impl ProviderInvocationOutcome {
     }
 }
 
-/// Coder（Executor）retry-cycle streaming 启动的生产构造函数（D2 锚点）。
-/// 内部构造 legacy `AdapterInput{role: Executor}` 并经共享工厂
-/// `streaming_input_from_adapter` 派生 `tool_policy`（Executor → `None`，D2
-/// 矩阵禁带），再绑定 attempt 的 workspace/resume 会话上下文。Coder streaming
-/// 入口禁止绕过本函数裸构造 `StreamingProviderInput`——绕过工厂即绕过 D2
+/// Coder（Executor）retry-cycle streaming 启动的生产构造函数（批2 Task 11
+/// 矩阵锚点）。内部构造 legacy `AdapterInput{role: Executor}` 并经共享工厂
+/// `streaming_input_from_adapter` 派生 `tool_policy`（Coder 全工具 `None`，
+/// 不带 deny），再绑定 attempt 的 workspace/resume 会话上下文。Coder streaming
+/// 入口禁止绕过本函数裸构造 `StreamingProviderInput`——绕过工厂即绕过
 /// 角色矩阵，矩阵测试将失败。
 pub(crate) fn coder_retry_cycle_streaming_input(
     provider_name: &ProviderName,
@@ -216,12 +216,12 @@ pub(crate) fn coder_retry_cycle_streaming_input(
     (legacy_input, provider_input)
 }
 
-/// CodeReviewer（Reviewer）retry-cycle streaming 启动的生产构造函数（D2 锚点）。
-/// 内部构造 legacy `AdapterInput{role: Reviewer}` 并经共享工厂
-/// `streaming_input_from_adapter` 派生 `tool_policy`（Reviewer →
-/// `DenyFileWriteBuiltins`，D2 必带），再绑定 attempt 会话上下文与结构化输出
-/// 契约。CodeReviewer streaming 入口禁止绕过本函数裸构造
-/// `StreamingProviderInput`。
+/// CodeReviewer（Reviewer）retry-cycle streaming 启动的生产构造函数（批2
+/// Task 11 矩阵锚点）。内部构造 legacy `AdapterInput{role: Reviewer}` 并经
+/// 共享工厂 `streaming_input_from_adapter` 派生 `tool_policy`（T11：Reviewer
+/// wire 面全开 `None`，只携 ReviewerVerify+窗口合同，真窗归 T20，执行审计
+/// 按角色保留），再绑定 attempt 会话上下文与结构化输出契约。CodeReviewer
+/// streaming 入口禁止绕过本函数裸构造 `StreamingProviderInput`。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn code_reviewer_retry_cycle_streaming_input(
     reviewer: &ProviderName,

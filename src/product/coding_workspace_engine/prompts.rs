@@ -640,17 +640,45 @@ pub(crate) fn provider_prompt_event(
     }
 }
 
-/// D2 角色×策略矩阵在 coding 的注入点：Reviewer（CodeReviewer/InternalReviewer/group
-/// review）必带 `DenyFileWriteBuiltins`；Coder/Executor 与 Handoff 禁带（`None`）。
+/// 批2 Task 11（B6 公共角色矩阵）在 coding 的注入点：deny 按 AdapterRole
+/// 一概套用的旧矩阵退役——Coder（Executor）全工具；Reviewer 只携
+/// ReviewerVerify+窗口合同（真窗归 T20 接线，wire 面不回退旧 deny
+/// fallback）；Orchestrator/Splitter/Handoff 不一概套 deny。Author 岗位
+/// 纪律的唯一 wire 物理投影（DenyFileWriteBuiltins）由受信装配铸造
+/// （workspace_engine author 面/`prepare_trusted_*`），不经本工厂。
 /// 所有 coding streaming 入口（provider_retry.rs / internal_pr_review.rs /
-/// group_review_orchestrator.rs）都经 `streaming_input_from_adapter` 构造，role 的
-/// 唯一设置点即此处，新角色入口自动继承矩阵，禁止绕过本工厂裸构造直启。
-fn coding_tool_policy_for_role(role: &AdapterRole) -> Option<ProviderToolPolicy> {
-    match role {
-        AdapterRole::Orchestrator | AdapterRole::WorkItemSplitter | AdapterRole::Reviewer => {
-            Some(ProviderToolPolicy::deny_file_write_builtins())
+/// group_review_orchestrator.rs）都经 `streaming_input_from_adapter` 构造，
+/// role 的唯一设置点即此处，新角色入口自动继承矩阵，禁止绕过本工厂裸构造
+/// 直启。
+fn coding_tool_policy_for_role(_role: &AdapterRole) -> Option<ProviderToolPolicy> {
+    None
+}
+
+#[cfg(test)]
+mod coding_tool_policy_matrix_tests {
+    use super::{AdapterRole, ProviderToolPolicy, coding_tool_policy_for_role};
+
+    /// 批2 Task 11 表驱动：五角色 wire 面一律 None（Coder 不带 deny；
+    /// Reviewer 不回退旧 deny；Author 岗位投影不经本工厂）。
+    #[test]
+    fn coding_streaming_roles_derive_no_deny() {
+        for role in [
+            AdapterRole::Orchestrator,
+            AdapterRole::WorkItemSplitter,
+            AdapterRole::Reviewer,
+            AdapterRole::Executor,
+            AdapterRole::Handoff,
+        ] {
+            assert_eq!(
+                coding_tool_policy_for_role(&role),
+                None,
+                "coding streaming role {role:?} must not derive deny (T11 matrix)"
+            );
+            assert_ne!(
+                coding_tool_policy_for_role(&role),
+                Some(ProviderToolPolicy::deny_file_write_builtins())
+            );
         }
-        AdapterRole::Executor | AdapterRole::Handoff => None,
     }
 }
 

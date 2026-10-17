@@ -58,13 +58,14 @@ pub(crate) fn internal_review_blocked_gate_reason(
 }
 use crate::product::coding_models::CodingAttemptScope;
 
-/// InternalReviewer（Reviewer）内部 PR 评审 streaming 启动的生产构造函数（D2
-/// 锚点）。内部构造 legacy `AdapterInput{role: Reviewer}` 并经共享工厂
-/// `streaming_input_from_adapter` 派生 `tool_policy`（Reviewer →
-/// `DenyFileWriteBuiltins`，D2 必带），再绑定 attempt 的 workspace/resume 会话
-/// 上下文。InternalReviewer streaming 入口禁止绕过本函数裸构造
-/// `StreamingProviderInput`——绕过工厂即绕过 D2 角色矩阵，矩阵测试将失败。
-/// LC root cwd 由 execute 侧 envelope 重绑注入（Task 2.7），工厂本身保持 D2 锚点。
+/// InternalReviewer（Reviewer）内部 PR 评审 streaming 启动的生产构造函数
+/// （批2 Task 11 矩阵锚点）。内部构造 legacy `AdapterInput{role: Reviewer}`
+/// 并经共享工厂 `streaming_input_from_adapter` 派生 `tool_policy`（T11：
+/// Reviewer wire 面全开 `None`，只携 ReviewerVerify+窗口合同，真窗归 T20），
+/// 再绑定 attempt 的 workspace/resume 会话上下文。InternalReviewer streaming
+/// 入口禁止绕过本函数裸构造 `StreamingProviderInput`——绕过工厂即绕过角色
+/// 矩阵，矩阵测试将失败。LC root cwd 由 execute 侧 envelope 重绑注入
+/// （Task 2.7），工厂本身保持矩阵锚点。
 pub(crate) fn internal_pr_review_streaming_input(
     reviewer: &ProviderName,
     prompt: String,

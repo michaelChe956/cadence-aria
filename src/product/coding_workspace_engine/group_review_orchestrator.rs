@@ -63,13 +63,14 @@ const GROUP_REVIEW_MAX_ATTEMPTS: usize = 3;
 /// 同 provider fresh 重试恰一次，两次挂起即耗尽（不占 transport 3 次预算）。
 const GROUP_REVIEW_MAX_IDLE_STALLS: u32 = 2;
 
-/// group review shard/reduction（Reviewer）streaming 启动的生产构造函数（D2
-/// 锚点）。内部构造 legacy `AdapterInput{role: Reviewer}` 并经共享工厂
-/// `streaming_input_from_adapter` 派生 `tool_policy`（Reviewer →
-/// `DenyFileWriteBuiltins`，D2 必带），再绑定 attempt 的 workspace 会话上下文
+/// group review shard/reduction（Reviewer）streaming 启动的生产构造函数
+/// （批2 Task 11 矩阵锚点）。内部构造 legacy `AdapterInput{role: Reviewer}`
+/// 并经共享工厂 `streaming_input_from_adapter` 派生 `tool_policy`（T11：
+/// Reviewer wire 面全开 `None`，只携 ReviewerVerify+窗口合同，真窗归 T20，
+/// 不回退旧 deny fallback），再绑定 attempt 的 workspace 会话上下文
 /// （group review 每次 execute 均新起会话，resume 恒 `None`）。group review
 /// streaming 入口禁止绕过本函数裸构造 `StreamingProviderInput`——绕过工厂即
-/// 绕过 D2 角色矩阵，矩阵测试将失败。LC root cwd 由 execute 侧 envelope
+/// 绕过角色矩阵，矩阵测试将失败。LC root cwd 由 execute 侧 envelope
 /// 重绑注入（Task 2.7），工厂本身保持 D2 锚点。
 pub(crate) fn group_review_streaming_input(
     reviewer: &ProviderName,

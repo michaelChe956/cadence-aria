@@ -68,6 +68,16 @@ pub fn run_provider_node(
             "output_schema": adapter_input.output_schema.clone(),
         }),
     );
+    // 批2 Task 11（硬约束1）：裸 provider.run 前先经受信载体冻结执行合同
+    // （legacy Direct 形态 identity=HostCoding/Coder，T10 裁定）——矩阵
+    // 失配在 run 之前零副作用拒绝。
+    let _execution_contract = crate::runtime_units::freeze_runtime_unit_execution(
+        &state.input.session_id.to_string(),
+        node_id,
+        adapter_input.provider_type.clone(),
+        request.runtime_role.clone(),
+        &request.provider_run_id,
+    )?;
     let protected_openspec_snapshot = snapshot_directory(&state.openspec_change_dir())?;
     let mut retry_count = 0;
     loop {

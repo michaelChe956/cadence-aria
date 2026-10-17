@@ -770,7 +770,28 @@ impl WorkspaceEngine {
                 ProviderConversationRole::Author,
                 author.clone(),
             );
-            let validated_input = ValidatedStreamingProviderInput::new(input, decision.launch);
+            // 批2 Task 11（硬约束2·resume 同口径）：revision 续接与 fresh
+            // 首轮绑定同一 duty=Author 执行合同（bind_author_execution_
+            // contract），resume 判定以未装饰投影比对（T10），绑定不引起
+            // supersede；绑定失败与 launch 决策 Err 同形收口。
+            let validated_input = match self.bind_author_execution_contract(input, decision.launch)
+            {
+                Ok(validated) => validated,
+                Err(message) => {
+                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                    self.finish_failed_run().await;
+                    if fresh_recovery.is_some() {
+                        let reconcile_node = node_id.clone().or_else(|| {
+                            fresh_recovery
+                                .as_ref()
+                                .and_then(|recovery| recovery.fresh_node_id.clone())
+                        });
+                        self.reconcile_lc_fresh_author_family_run(reconcile_node.as_deref())
+                            .await;
+                    }
+                    return;
+                }
+            };
             // 指引卡简化补缺：分类桥结构化变体携带同源等待投影，
             // `trust_waiting` 随驱动收尾紧随 error 事件发出结构化指导
             // （`EngineEvent::TrustMissingGuidance`）；非 trust 分型为 None。

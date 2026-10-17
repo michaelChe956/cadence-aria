@@ -53,8 +53,10 @@ impl ProviderAdapter for GatewaySyncProvider {
     /// - **run-bound sink**:prepared launch 冻结的 `ProviderLaunchAuditContext`
     ///   在此物化为 `RoleRunBoundAuditSink` 注入 streaming input(无通用
     ///   tool_policy 的角色同样绑定);
-    /// - **工具策略按角色矩阵派生**(与 legacy bridge 同源):策略角色带
-    ///   `DenyFileWriteBuiltins`,Executor/Handoff 为 `None`;
+    /// - **工具策略按冻结合同投影**(批2 Task 11):不再按 AdapterRole 派生
+    ///   deny——duty=Author 的合同把 `DenyFileWriteBuiltins` 岗位投影注入
+    ///   streaming input(kimi 例外交接 ClientServicePolicy),其余合同与
+    ///   无合同 launch 一律 `None`;
     /// - **不借 streaming fresh 推导 resume**:同步 input 无 resume id,
     ///   桥接恒 fresh;
     /// - 终态映射:Completed → structured output 经现有 sentinel parser
@@ -74,7 +76,11 @@ impl ProviderAdapter for GatewaySyncProvider {
                 "gateway sync bridge: no streaming adapter registered for {provider_name:?}"
             ))
         })?;
-        let streaming_input = bridge_streaming_input(&input, policy.launch_audit());
+        let streaming_input = bridge_streaming_input(
+            &input,
+            policy.launch_audit(),
+            policy.frozen_execution(),
+        );
         let validated_streaming =
             crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(
                 streaming_input,
@@ -125,14 +131,18 @@ impl ProviderAdapter for GatewaySyncProvider {
 
 /// 同步 `AdapterInput` → streaming input 桥接(与 legacy bridge 的字段映射
 /// 同源):cwd 独立透传,`working_dir` 仍是 target;prepared launch 的 audit
-/// 上下文物化为 run-bound sink;工具策略按角色矩阵派生(kimi 例外:
-/// DenyFileWriteBuiltins 映射为 None,ClientServicePolicy 等价承担);恒 fresh。
+/// 上下文物化为 run-bound sink;工具策略按冻结合同投影(批2 Task 11:
+/// duty=Author → DenyFileWriteBuiltins 岗位投影,其余/无合同 → None;
+/// kimi 例外:deny 映射为 None,ClientServicePolicy/T8 岗位策略等价承担);
+/// 恒 fresh。
 fn bridge_streaming_input(
     input: &AdapterInput,
     launch_audit: Option<
         &crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext,
     >,
+    frozen_execution: Option<&crate::cross_cutting::provider_execution::FrozenProviderExecution>,
 ) -> crate::cross_cutting::streaming_provider::StreamingProviderInput {
+    use crate::cross_cutting::provider_execution::TrustedProviderRole;
     use crate::cross_cutting::streaming_provider::{
         ProviderPermissionMode, ProviderToolPolicy, StreamingProviderInput,
     };
@@ -145,19 +155,15 @@ fn bridge_streaming_input(
         .unwrap_or_else(||
             // 与 legacy bridge 同语义:无 target 时回填进程 cwd。
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
-    let tool_policy = match input.role {
-        crate::protocol::contracts::AdapterRole::Orchestrator
-        | crate::protocol::contracts::AdapterRole::WorkItemSplitter
-        | crate::protocol::contracts::AdapterRole::Reviewer => {
-            Some(ProviderToolPolicy::deny_file_write_builtins())
-        }
-        crate::protocol::contracts::AdapterRole::Executor
-        | crate::protocol::contracts::AdapterRole::Handoff => None,
-    };
-    // kimi 例外映射(r61 kimi 现场):sync/split_sync 栈的角色矩阵派生与
+    // 批2 Task 11:deny 只由冻结合同的 duty=Author 岗位投影铸造
+    // (tool_policy_for_duty 同源);无合同/非 Author duty 一律全开。
+    let tool_policy = frozen_execution
+        .filter(|contract| contract.duty() == TrustedProviderRole::Author)
+        .map(|_| ProviderToolPolicy::deny_file_write_builtins());
+    // kimi 例外映射(r61 kimi 现场):sync/split_sync 栈的岗位投影与
     // 流式漏斗(start_streaming)同款例外——kimi 的 DenyFileWriteBuiltins
-    // 由既有 ClientServicePolicy 等价承担(spec「kimi 既有对齐维持」),
-    // 分发前映射为 None,否则 kimi validated start 以
+    // 由既有 ClientServicePolicy/T8 岗位策略等价承担(spec「kimi 既有
+    // 对齐维持」),分发前映射为 None,否则 kimi validated start 以
     // provider_generic_tool_policy_forbidden 拒绝;其余 provider 零变化。
     let tool_policy = if input.provider_type == crate::protocol::contracts::ProviderType::KimiCode {
         crate::cross_cutting::streaming_provider::kimi_exempted_tool_policy(tool_policy)
@@ -787,6 +793,181 @@ mod tests {
         (root, canonical_root, member)
     }
 
+    /// 批2 Task 11 fixture:从 durable run 事实构造受信 identity 并冻结
+    /// 执行合同（crate 内受信 builder 面；与 b2t2 合同测试同型）。
+    fn bridge_frozen_contract(
+        duty: crate::cross_cutting::provider_execution::TrustedProviderRole,
+        carrier: AdapterRole,
+    ) -> crate::cross_cutting::provider_execution::FrozenProviderExecution {
+        use crate::cross_cutting::provider_execution::{
+            AuthorToolPolicy, ProviderExecutionProfile, TrustedRunIdentity,
+        };
+        let record = crate::protocol::contracts::ProviderRunRecord {
+            provider_run_id: "run_bridge_t11_0001".to_string(),
+            node_id: "N11".to_string(),
+            provider_type: ProviderType::ClaudeCode,
+            runtime_role: crate::protocol::contracts::RuntimeRole::Orchestrator,
+            adapter_role: carrier,
+            provider_capability_ref: "cap_bridge_fixture".to_string(),
+            adapter_compatibility_ref: "compat_1".to_string(),
+            context_package_ref: "ctx_1".to_string(),
+            adapter_input_ref: "ain_1".to_string(),
+            adapter_output_ref: "aout_1".to_string(),
+            raw_artifact_refs: Vec::new(),
+            exit_code: Some(0),
+            error_code: None,
+            error_details: None,
+            stdout_ref: None,
+            stderr_ref: None,
+            structured_output_ref: None,
+            files_modified: Vec::new(),
+            status: crate::protocol::contracts::ProviderRunStatus::Running,
+            started_at: "2026-10-17T00:00:00Z".to_string(),
+            completed_at: None,
+            duration_ms: None,
+            timeout_status: TimeoutStatus::NotTimedOut,
+            retry_count: 0,
+            approval_policy: crate::protocol::contracts::ApprovalPolicy::OnRequest,
+            sandbox_mode: crate::protocol::contracts::SandboxMode::FullAccess,
+            constraint_check_ref: None,
+            traceability_binding_refs: Vec::new(),
+        };
+        let identity =
+            TrustedRunIdentity::from_durable_run(&record, "ws_bridge_t11_0001", duty);
+        let profile = match duty {
+            crate::cross_cutting::provider_execution::TrustedProviderRole::Reviewer => {
+                ProviderExecutionProfile::ReviewerVerify
+            }
+            _ => ProviderExecutionProfile::HostCoding,
+        };
+        let author_policy =
+            matches!(
+                duty,
+                crate::cross_cutting::provider_execution::TrustedProviderRole::Author
+            )
+            .then(AuthorToolPolicy::author_v1);
+        crate::cross_cutting::provider_execution::freeze_provider_execution(
+            &identity,
+            profile,
+            author_policy,
+            "scope_bridge_t11_0001".to_string(),
+            None,
+        )
+        .expect("bridge fixture contract")
+    }
+
+    /// 批2 Task 11：sync bridge 不再按 AdapterRole 派生 deny——无冻结合同的
+    /// 规划角色（WorkItemSplitter）wire 面全开（None）；deny 只能来自受信
+    /// 装配的 Author 岗位投影。
+    #[tokio::test]
+    async fn sync_bridge_without_contract_derives_no_deny_for_role() {
+        let (root, canonical_root, member) = bridge_root_and_member();
+        let paths = ProductAppPaths::new(canonical_root.join(".aria"));
+
+        let adapter = BridgeCountingStreamingAdapter::new(
+            Duration::from_millis(30),
+            "ok\n<ARIA_STRUCTURED_OUTPUT nonce=\"t11a0001\">{\"nonce\":\"t11a0001\",\"work_items\":[]}</ARIA_STRUCTURED_OUTPUT>"
+                .to_string(),
+        );
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, adapter.clone());
+        let bridge = GatewaySyncProvider::new(std::sync::Arc::new(registry));
+
+        let validated = bridge_validated_policy(&paths, &canonical_root, &member);
+        let launch =
+            ValidatedAdapterInput::new(bridge_adapter_input(&canonical_root, &member), validated);
+        let _ = bridge.run_validated(launch).expect("bridge run");
+
+        assert_eq!(
+            adapter
+                .observed_tool_policy
+                .lock()
+                .expect("policy probe")
+                .clone(),
+            None,
+            "T11: sync bridge must not derive deny from AdapterRole without a frozen contract"
+        );
+        drop(root);
+    }
+
+    /// 批2 Task 11：冻结合同驱动 deny——duty=Author 的合同把 deny 岗位投影
+    /// 注入 streaming input（Claude Edit/Write/NotebookEdit、Pi edit/write 的
+    /// argv 过滤由此携带），承载角色不是 Orchestrator 也一样生效。
+    #[tokio::test]
+    async fn sync_bridge_projects_author_contract_deny() {
+        let (root, canonical_root, member) = bridge_root_and_member();
+        let paths = ProductAppPaths::new(canonical_root.join(".aria"));
+
+        let adapter = BridgeCountingStreamingAdapter::new(
+            Duration::from_millis(30),
+            "ok\n<ARIA_STRUCTURED_OUTPUT nonce=\"t11b0001\">{\"nonce\":\"t11b0001\",\"work_items\":[]}</ARIA_STRUCTURED_OUTPUT>"
+                .to_string(),
+        );
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, adapter.clone());
+        let bridge = GatewaySyncProvider::new(std::sync::Arc::new(registry));
+
+        let validated = bridge_validated_policy(&paths, &canonical_root, &member);
+        let mut input = bridge_adapter_input(&canonical_root, &member);
+        input.role = AdapterRole::Executor;
+        let contract = bridge_frozen_contract(
+            crate::cross_cutting::provider_execution::TrustedProviderRole::Author,
+            AdapterRole::Executor,
+        );
+        let launch = ValidatedAdapterInput::new(input, validated).with_frozen_execution(contract);
+        let _ = bridge.run_validated(launch).expect("bridge run");
+
+        assert_eq!(
+            adapter
+                .observed_tool_policy
+                .lock()
+                .expect("policy probe")
+                .clone(),
+            Some(
+                crate::cross_cutting::streaming_provider::ProviderToolPolicy::deny_file_write_builtins()
+            ),
+            "T11: author duty contract must project the deny tool policy through the sync bridge"
+        );
+        drop(root);
+    }
+
+    /// 批2 Task 11：Coder 合同全开（None）——deny 是 Author-only 投影；
+    /// kimi 的 deny 例外交接 ClientServicePolicy（T8），桥接后仍 None。
+    #[tokio::test]
+    async fn sync_bridge_coder_contract_stays_open_and_kimi_author_exempted() {
+        let (root, canonical_root, member) = bridge_root_and_member();
+        let paths = ProductAppPaths::new(canonical_root.join(".aria"));
+
+        // Coder duty（carrier=Executor）→ None。
+        let adapter = BridgeCountingStreamingAdapter::new(
+            Duration::from_millis(30),
+            "ok\n<ARIA_STRUCTURED_OUTPUT nonce=\"t11c0001\">{\"nonce\":\"t11c0001\",\"work_items\":[]}</ARIA_STRUCTURED_OUTPUT>"
+                .to_string(),
+        );
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, adapter.clone());
+        let bridge = GatewaySyncProvider::new(std::sync::Arc::new(registry));
+        let validated = bridge_validated_policy(&paths, &canonical_root, &member);
+        let mut input = bridge_adapter_input(&canonical_root, &member);
+        input.role = AdapterRole::Executor;
+        let contract = bridge_frozen_contract(
+            crate::cross_cutting::provider_execution::TrustedProviderRole::Coder,
+            AdapterRole::Executor,
+        );
+        let launch = ValidatedAdapterInput::new(input, validated).with_frozen_execution(contract);
+        let _ = bridge.run_validated(launch).expect("bridge run");
+        assert_eq!(
+            adapter
+                .observed_tool_policy
+                .lock()
+                .expect("policy probe")
+                .clone(),
+            None,
+            "T11: coder duty contract keeps the wire fully open"
+        );
+        drop(root);
+    }
+
     /// 段①(lcg_t01):bridge 只经 `start_validated` 启动真实 streaming adapter,
     /// 不落裸 `start`/legacy bridge;输出结构保真(structured output 经现有
     /// sentinel parser 提取,timeout_status 非超时)。
@@ -885,12 +1066,10 @@ mod tests {
         assert!(timer_completed_before_provider_finished);
     }
 
-    /// r61(kimi 适配):sync/split_sync 栈的角色矩阵派生(策略角色
-    /// WorkItemSplitter→DenyFileWriteBuiltins)在 kimi 侧映射为 None——
-    /// kimi 隔离控制面不携带通用 tool policy(spec「kimi 既有对齐维持」
-    /// 例外,该 intent 的等价面由 kimi 既有 ClientServicePolicy 承担),
-    /// 否则 kimi validated start 以 `provider_generic_tool_policy_forbidden`
-    /// 拒绝;claude 对照保持角色矩阵派生的 Some(deny) 不变。
+    /// r61(kimi 适配)+批2 Task 11 矩阵:sync bridge 不再按 AdapterRole 派生
+    /// deny(无冻结合同一律 None);kimi 例外交接(该 intent 的等价面由 kimi
+    /// 既有 ClientServicePolicy/T8 岗位策略承担)——Author 合同投影经
+    /// `sync_bridge_projects_author_contract_deny` 单独钉测。
     #[tokio::test]
     async fn lcg_t01_sync_bridge_maps_kimi_policy_role_tool_policy_to_none() {
         let (_root, canonical_root, member) = bridge_root_and_member();
@@ -948,9 +1127,8 @@ mod tests {
             "kimi 策略角色 sync 会话必须以 tool_policy=None 分发"
         );
         assert_eq!(
-            observed_claude_policy,
-            Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy::deny_file_write_builtins()),
-            "claude 对照保持角色矩阵派生的 Some(deny)"
+            observed_claude_policy, None,
+            "批2 Task 11：无冻结合同的 sync 会话不再按角色派生 deny（claude 对照同样全开）"
         );
     }
 

@@ -145,6 +145,16 @@ pub(crate) fn run_final_provider_node(
 ) -> Result<Value, FinalClosureError> {
     let context = build_provider_context(builder_input(input, node_id))?;
     let adapter_input = final_adapter_input_for_node(&context)?;
+    // 批2 Task 11（硬约束1）：裸 provider.run 前先经受信载体冻结执行合同
+    // （legacy Direct 形态 identity=HostCoding/Coder，T10 裁定）——矩阵
+    // 失配在 run 之前零副作用拒绝。
+    let _execution_contract = crate::runtime_units::freeze_runtime_unit_execution(
+        &input.session_id,
+        node_id,
+        adapter_input.provider_type.clone(),
+        context.context_package.runtime_role.clone(),
+        &format!("run_{}_{}", input.task_id, node_id.to_lowercase()),
+    )?;
     let output = provider.run(&adapter_input)?;
     let request = provider_run_request(node_id, &context.context_package.context_package_id);
     let record = provider_run_record_from_output(&request, &adapter_input, &output);

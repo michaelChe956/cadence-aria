@@ -1878,27 +1878,18 @@ impl LogicalCodebaseProviderGateway {
     /// 在 prepare 前绑定 run-bound sink(无通用 tool_policy 的 Coder/Kimi 同样
     /// 统一写 launch audit);非法外来 `Some(policy)` 直接拒绝(双向守卫语义,
     /// 不偷清、不回退裸 start——Task 7 统一 guard 顺序)。
+    ///
+    /// 批2 Task 11:gateway 不再按 AdapterRole 派生 deny——deny 是 Author
+    /// 岗位纪律的唯一 wire 物理投影,只由受信装配铸造(下方
+    /// [`Self::prepare_trusted_streaming_launch`] 按 duty 强制投影;普通
+    /// prepare 保持 caller 语义并经双向守卫)。Reviewer/Coder/规划族普通
+    /// launch wire 面全开。
     pub fn prepare_streaming_launch(
         &self,
         mut input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
         request: SessionLaunchRequest,
         context: ProviderLaunchAuditContext,
     ) -> Result<ValidatedStreamingProviderInput, ProviderGatewayError> {
-        // 策略角色缺策略时按角色矩阵派生 DenyFileWriteBuiltins(与 legacy
-        // bridge 同源,gateway-owned);外来非法 Some(policy) 由下方守卫直接
-        // 拒绝——不偷清、不回退裸 start。
-        if input.tool_policy.is_none()
-            && matches!(
-                input.role,
-                crate::protocol::contracts::AdapterRole::Orchestrator
-                    | crate::protocol::contracts::AdapterRole::WorkItemSplitter
-                    | crate::protocol::contracts::AdapterRole::Reviewer
-            )
-        {
-            input.tool_policy = Some(
-                crate::cross_cutting::streaming_provider::ProviderToolPolicy::deny_file_write_builtins(),
-            );
-        }
         crate::cross_cutting::streaming_provider::validate_tool_policy_for_role(
             &input.role,
             input.tool_policy.as_ref(),
@@ -1922,21 +1913,24 @@ impl LogicalCodebaseProviderGateway {
 
     /// 批2 Task 2:受信执行的 private launch 面(`pub(crate)`,engine 受信
     /// builder 专用;普通 caller 凭 role 字符串无从铸造)。在既有
-    /// `prepare_streaming_launch` 语义(角色矩阵派生/双向守卫/run-bound
-    /// audit 绑定)之上,先按权威装配矩阵冻结执行合同(职责×profile/窗口/
-    /// 岗位纪律 fail-closed,任何失配都在 validate 与 spawn 之前、零副作用
-    /// 拒绝),再把合同冻结进 validated launch(指纹按合同摘要重算)。
+    /// `prepare_streaming_launch` 语义(双向守卫/run-bound audit 绑定)之上,
+    /// 先按权威装配矩阵冻结执行合同(职责×profile/窗口/岗位纪律
+    /// fail-closed,任何失配都在 validate 与 spawn 之前、零副作用拒绝),
+    /// 再把合同冻结进 validated launch(指纹按合同摘要重算)。
     ///
     /// 职责来自 `TrustedRunIdentity`(engine durable run/store 构造);prompt/
     /// env/canonical_inputs 里的自报角色不参与装配。legacy Direct 由 engine
     /// 沿同一 builder(`freeze_provider_execution` + 载体绑定)绑等价合同。
-    /// 生产 caller 为 T10+ 受信 engine builder;接线前仅合同测试消费
-    /// (前瞻载体,同 `into_validated_streaming_input` 范式)。
+    ///
+    /// 批2 Task 11:wire `tool_policy` 由受信装配按 duty 强制投影
+    /// (`tool_policy_for_duty`:Author → DenyFileWriteBuiltins 岗位纪律
+    /// 物理投影,其余职责全开)——caller 传入值被覆盖,不得凭 input 铸造/
+    /// 剥离岗位投影;kimi 例外在 start 漏斗统一映射。
     #[cfg_attr(not(test), allow(dead_code))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_trusted_streaming_launch(
         &self,
-        input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+        mut input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
         request: SessionLaunchRequest,
         context: ProviderLaunchAuditContext,
         identity: &crate::cross_cutting::provider_execution::TrustedRunIdentity,
@@ -1959,6 +1953,11 @@ impl LogicalCodebaseProviderGateway {
             review_window_id,
         )
         .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.details))?;
+        // 批2 Task 11:受信装配独占 deny 投影——按 duty 强制覆盖 caller
+        // 传入的 tool_policy(Author=deny;其余=None),随后经
+        // prepare_streaming_launch 的双向守卫复核。
+        input.tool_policy =
+            crate::cross_cutting::streaming_provider::tool_policy_for_duty(&identity.duty());
         self.prepare_streaming_launch(input, request, context)
             .map(|launch| launch.with_frozen_execution(contract))
     }
@@ -2042,21 +2041,8 @@ impl LogicalCodebaseProviderGateway {
         audit: ProviderLaunchAuditContext,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<PreparedLcStreamingCandidate, ProviderGatewayError> {
-        // 1. 策略角色缺策略时按角色矩阵派生(与 prepare_streaming_launch
-        //    同源,gateway-owned);外来非法 Some(policy) 由双向守卫拒绝。
-        if input.tool_policy.is_none()
-            && matches!(
-                input.role,
-                crate::protocol::contracts::AdapterRole::Orchestrator
-                    | crate::protocol::contracts::AdapterRole::WorkItemSplitter
-                    | crate::protocol::contracts::AdapterRole::Reviewer
-            )
-        {
-            input.tool_policy = Some(
-                crate::cross_cutting::streaming_provider::ProviderToolPolicy::deny_file_write_builtins(
-                ),
-            );
-        }
+        // 1. 批2 Task 11:gateway 不再按 AdapterRole 派生 deny(Author 岗位
+        //    投影只由受信装配铸造);外来非法 Some(policy) 由双向守卫拒绝。
         crate::cross_cutting::streaming_provider::validate_tool_policy_for_role(
             &input.role,
             input.tool_policy.as_ref(),

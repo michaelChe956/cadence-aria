@@ -130,9 +130,13 @@ impl CodingWorkspaceEngine {
     > {
         if input.tool_policy.is_none() {
             let is_lc_run = attempt.target_snapshot.is_some();
-            if !is_lc_run || input.audit_sink.is_some() {
-                // 非 LC legacy 直连零变化;LC prepared launch 的 sink 已在
-                // gateway prepare 阶段绑定,不重复分配。
+            // 批2 Task 11:Reviewer 执行审计不随去 deny 丢失——旧矩阵下
+            // Reviewer 以 deny 策略会话身份获得 sink,矩阵退役后改为按角色
+            // 显式保留(非 LC legacy 直连同分配;LC prepared launch 的 sink
+            // 已在 gateway prepare 阶段绑定,不重复分配)。
+            let is_reviewer_run =
+                input.role == crate::protocol::contracts::AdapterRole::Reviewer;
+            if (!is_lc_run && !is_reviewer_run) || input.audit_sink.is_some() {
                 return Ok((input, validated));
             }
         }

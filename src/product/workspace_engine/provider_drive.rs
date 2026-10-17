@@ -179,10 +179,19 @@ impl WorkspaceEngine {
             );
             let mut input = input;
             input.working_directory = Some(launch.envelope().working_directory.clone());
-            let validated_input =
-                crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(
-                    input, launch,
-                );
+            // 批2 Task 11（Author 独立入口）：LC author launch 经受信装配
+            // 冻结 duty=Author 执行合同（HostCoding+AuthorToolPolicy）并按
+            // duty 强制 wire 岗位投影——伪造 role 缺合同不得产生可启动
+            // 会话；绑定失败与 launch 解析失败同形收口（fail-closed，不
+            // 静默回落直连）。
+            let validated_input = match self.bind_author_execution_contract(input, launch) {
+                Ok(validated) => validated,
+                Err(message) => {
+                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                    self.finish_failed_run().await;
+                    return;
+                }
+            };
             self.drive_author_provider_session_via_gateway(
                 validated_input,
                 command_rx,

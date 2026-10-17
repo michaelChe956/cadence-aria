@@ -1,16 +1,17 @@
 //! F3 修复轮 P2-1：legacy 直连 `run_streaming` 路径的策略会话 durable 审计注入。
 //!
-//! 默认 bridge（`StreamingProviderAdapter::run_streaming`）按角色矩阵为策略角色
-//! 派生 `DenyFileWriteBuiltins`，但 bridge 本体是中立层、无法构造 product 层的
-//! `LifecycleStore` sink——注入点在本 engine：`run_legacy_stream_to_completion`
-//! 为策略角色的 legacy run 分配 run-bound sink，经
+//! 默认 bridge（`StreamingProviderAdapter::run_streaming`）不再按角色矩阵派生
+//! deny（批2 Task 11：deny 是 Author 岗位投影，只由受信装配铸造），但 bridge
+//! 本体是中立层、无法构造 product 层的 `LifecycleStore` sink——注入点在本
+//! engine：`run_legacy_stream_to_completion` 为 Reviewer 的 legacy run 分配
+//! run-bound sink（执行审计不随去 deny 丢失），经
 //! [`LegacyToolPolicyAuditProvider`] 装饰器以 trait hook（`legacy_tool_policy_audit_sink`）
 //! 交给默认 bridge，使 legacy 直连路径「策略+sink」同源同在，不得运行时
 //! fail-closed。
 //!
 //! 语义保真：
-//! - 策略角色优先走默认 bridge（派生策略+注入 sink，经 `start` 接受守卫与
-//!   denylist argv）；
+//! - Reviewer 优先走默认 bridge（注入 sink，策略面恒 None，经 `start` 接受
+//!   守卫）；
 //! - adapter 未实现 `start`（run_streaming-only 测试替身）时回落 inner 既有
 //!   `run_streaming`，与修复前的 legacy 语义逐字一致；
 //! - 非策略角色直接透传 inner。
@@ -32,12 +33,13 @@ use crate::protocol::contracts::AdapterRole;
 use super::CodingWorkspaceEngine;
 use super::ws_event_mapper::provider_start_is_not_implemented;
 
-/// AdapterInput 角色是否按矩阵派生策略（与默认 bridge 的派生矩阵逐字一致）。
+/// 批2 Task 11：legacy 直连是否需要 run-bound durable 审计。deny 按
+/// AdapterRole 一概派生的旧矩阵退役（Author 岗位投影只由受信装配铸造），
+/// 但 Reviewer 的执行审计不随去 deny 丢失——Reviewer 角色（code review/
+/// group review 的 legacy 直连）仍分配 run-bound sink 并经默认 bridge
+/// 注入（策略面恒 None）；Orchestrator/Splitter 无策略会话，原样透传。
 pub(crate) fn legacy_input_role_requires_policy(input: &AdapterInput) -> bool {
-    matches!(
-        input.role,
-        AdapterRole::Orchestrator | AdapterRole::WorkItemSplitter | AdapterRole::Reviewer
-    )
+    matches!(input.role, AdapterRole::Reviewer)
 }
 
 /// engine 侧注入装饰器：携带 run-bound sink，供默认 bridge 的
@@ -107,9 +109,10 @@ impl StreamingProviderAdapter for LegacyToolPolicyAuditProvider<'_> {
 }
 
 impl CodingWorkspaceEngine {
-    /// legacy 直连的 provider run（P2-1 注入点）：策略角色分配 run-bound sink
-    /// （与 `attach_tool_policy_audit` 同法；分配即持久化，P1-6）并经装饰器把
-    /// sink 交给默认 bridge；非策略角色原样透传。
+    /// legacy 直连的 provider run（P2-1 注入点；批2 Task 11 审计保留）：
+    /// Reviewer 分配 run-bound sink（与 `attach_tool_policy_audit` 同法；
+    /// 分配即持久化，P1-6）并经装饰器把 sink 交给默认 bridge；其余角色
+    /// （策略面全开、无策略会话）原样透传。
     pub(crate) async fn run_legacy_provider_stream(
         &self,
         provider: &dyn StreamingProviderAdapter,
@@ -235,10 +238,16 @@ mod tests {
             }
         }
         assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
-        assert!(provider.saw_policy.load(Ordering::SeqCst));
+        // 批2 Task 11：deny 不再按角色派生（Reviewer wire 面全开，纪律=窗口
+        // 合同），但 Reviewer 执行审计的 run-bound sink 仍必须注入——审计
+        // 不随去 deny 丢失。
+        assert!(
+            !provider.saw_policy.load(Ordering::SeqCst),
+            "T11：legacy 直连不再按角色派生 deny"
+        );
         assert!(
             provider.saw_sink.load(Ordering::SeqCst),
-            "P2-1：派生策略必须同时注入 engine 分配的 sink"
+            "批2 Task 11：Reviewer 执行审计 sink 不随去 deny 丢失"
         );
     }
 

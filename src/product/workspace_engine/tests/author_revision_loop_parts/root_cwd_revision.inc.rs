@@ -44,10 +44,15 @@ use crate::product::repository_store::CreateRepositoryInput;
 
 /// 记录启动 input 并以完整 Story 产物立即完成的 capture provider——注册进
 /// gateway registry，是 LC revision 经 gateway 启动时唯一的真实 adapter。
+/// 批2 Task 11：capture validated launch 冻结的执行合同事实
+/// （None=合同显式缺失）。(duty, author_digest, profile, carrier)。
+type CapturedExecutionContracts = std::sync::Mutex<Vec<Option<(String, bool, String, String)>>>;
+
 struct RevisionCaptureProvider {
     starts: Arc<AtomicUsize>,
     inputs: mpsc::UnboundedSender<StreamingProviderInput>,
     output: &'static str,
+    contracts: std::sync::Arc<CapturedExecutionContracts>,
 }
 
 #[async_trait::async_trait]
@@ -82,6 +87,18 @@ impl StreamingProviderAdapter for RevisionCaptureProvider {
         validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+        let snapshot = validated.frozen_execution().map(|contract| {
+            (
+                contract.duty().as_str().to_string(),
+                contract.author_policy_digest().is_some(),
+                contract.profile().as_str().to_string(),
+                format!("{:?}", contract.carrier()),
+            )
+        });
+        self.contracts
+            .lock()
+            .expect("contract capture lock")
+            .push(snapshot);
         let (input, _launch) = validated.into_parts();
         self.start(input, cancel).await
     }
@@ -198,6 +215,8 @@ struct LogicalRevisionFixture {
     /// 漂移备选 root（cwd 漂移测试用，位于 authority 允许范围内）。
     drift_root: std::path::PathBuf,
     provider_starts: Arc<AtomicUsize>,
+    /// 批2 Task 11：gateway capture provider 观测到的执行合同快照。
+    captured_contracts: std::sync::Arc<CapturedExecutionContracts>,
 }
 
 /// gateway 冻结 authority root 的口径：`ManifestRoot`=canonical manifest root
@@ -416,6 +435,8 @@ fn logical_revision_fixture_with(
 
     // gateway：capture provider 注册为 ClaudeCode 真实 adapter（LC revision 经
     // gateway 启动）；capability/target resolver 复用 part_32 测试 doubles。
+    let contracts: std::sync::Arc<CapturedExecutionContracts> =
+        Default::default();
     let (starts, inputs, capture) = {
         let starts = Arc::new(AtomicUsize::new(0));
         let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -426,6 +447,7 @@ fn logical_revision_fixture_with(
                 starts,
                 inputs: input_tx,
                 output: revision_story_output(),
+                contracts: contracts.clone(),
             }),
         )
     };
@@ -484,6 +506,7 @@ fn logical_revision_fixture_with(
             manifest_root,
             drift_root,
             provider_starts: starts,
+            captured_contracts: contracts,
         },
         inputs,
     )
@@ -607,6 +630,27 @@ async fn logical_revision_rebinds_root_cwd_and_preserves_revision_target() {
         input.audit_sink.is_some(),
         "策略 provider run 必须绑定 durable tool-policy audit sink"
     );
+    // 批2 Task 11（Author 独立入口·revision 面）：LC revision launch 同样
+    // 冻结 duty=Author 的执行合同（HostCoding + AuthorToolPolicy，经
+    // Orchestrator 承载 audit 面仍 Author）——fresh 与 resume 同一口径，
+    // 否则每次 resume 都因合同指纹漂移 supersede。
+    let contract_snapshots = fixture
+        .captured_contracts
+        .lock()
+        .expect("contract capture lock")
+        .clone();
+    assert_eq!(
+        contract_snapshots.len(),
+        1,
+        "LC revision run must freeze the Author execution contract"
+    );
+    let Some((duty, author_digest, profile, carrier)) = &contract_snapshots[0] else {
+        panic!("LC revision launch must freeze the Author execution contract");
+    };
+    assert_eq!(duty, "author");
+    assert!(author_digest, "Author 合同必须冻结岗位策略摘要");
+    assert_eq!(profile, "host_coding");
+    assert_eq!(carrier, "Orchestrator", "Author 经 Orchestrator 承载");
     // 修订 run 完成回 AuthorConfirm（artifact gate 通过的完整产物）。
     assert_eq!(
         engine.session().stage,
@@ -684,6 +728,27 @@ async fn revision_resume_cwd_drift_supersedes_session() {
         "续接轮的 cwd 仍是 manifest root"
     );
     assert_eq!(fixture.audit.supersede_count(), 0, "未漂移不得 supersede");
+    // 批2 Task 11（硬约束2·resume 同口径）：续接轮与 fresh 轮绑定同一
+    // duty=Author 执行合同——resume 判定以未装饰投影比对（T10），合同
+    // 绑定不得引起 supersede；本轮合同事实与首轮完全一致。
+    let contract_snapshots = fixture
+        .captured_contracts
+        .lock()
+        .expect("contract capture lock")
+        .clone();
+    assert!(
+        !contract_snapshots.is_empty(),
+        "resume round must also freeze the Author execution contract"
+    );
+    for snapshot in &contract_snapshots {
+        let Some((duty, author_digest, profile, carrier)) = snapshot else {
+            panic!("resume round must freeze the Author execution contract");
+        };
+        assert_eq!(duty, "author");
+        assert!(author_digest);
+        assert_eq!(profile, "host_coding");
+        assert_eq!(carrier, "Orchestrator");
+    }
 
     // root cwd 漂移：manifest 指向另一 root（成员/政策/能力均不变）。
     let drifted = LogicalCodebaseManifest {
@@ -1084,6 +1149,7 @@ async fn logical_revision_spawn_trust_missing_classifies_with_manual_guidance() 
                 starts,
                 inputs: input_tx,
                 output: revision_story_output(),
+                contracts: Default::default(),
             }),
         )
     };
@@ -1387,6 +1453,7 @@ fn logical_design_revision_fixture() -> LogicalDesignRevisionFixture {
             starts,
             inputs: input_tx,
             output: revision_story_output(),
+            contracts: Default::default(),
         }),
     );
     let audit = Arc::new(GatewayRunAudit::new());

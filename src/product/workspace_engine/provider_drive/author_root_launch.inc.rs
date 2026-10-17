@@ -146,6 +146,100 @@ impl WorkspaceEngine {
         self.emit_launch_trust_guidance(launch_trust_waiting).await;
     }
 
+    /// 批2 Task 11（Author 独立入口·硬约束1/3）：LC author launch 的受信
+    /// 装配——以 engine durable 事实构造 duty=Author、carrier=Orchestrator
+    /// 的 `TrustedRunIdentity`，按权威装配矩阵冻结 `HostCoding +
+    /// AuthorToolPolicy` 执行合同，并按 duty 强制 wire 岗位投影
+    /// （`tool_policy_for_duty`：Author → DenyFileWriteBuiltins，Claude
+    /// `Edit/Write/NotebookEdit`、Pi `edit/write` 的 argv 过滤由此携带；
+    /// caller 传入值被覆盖，不得凭 input 铸造/剥离岗位投影），最后把合同
+    /// 绑定进 validated launch。
+    ///
+    /// 口径合同（硬约束2）：fresh（首轮/ChoiceFollowup）与 resume/revision
+    /// 续接同用本装配——resume 判定以未装饰投影比对（T10），合同摘要走
+    /// resume 稳定域（不含 provider_run_id），绑定不引起 supersede。
+    /// 伪造 role 缺合同：Author launch 唯一经本受信装配，role 字符串/
+    /// serde 输入无从铸合同。audit 面经 Orchestrator 承载仍记录
+    /// duty=Author（合同事实面）。
+    pub(crate) fn bind_author_execution_contract(
+        &self,
+        mut input: StreamingProviderInput,
+        launch: ValidatedSessionLaunchPolicy,
+    ) -> Result<
+        crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        String,
+    > {
+        use crate::cross_cutting::provider_execution::{
+            AuthorToolPolicy, ProviderExecutionProfile, TrustedProviderRole, TrustedRunIdentity,
+            freeze_provider_execution,
+        };
+        if input.role != crate::protocol::contracts::AdapterRole::Orchestrator {
+            return Err(format!(
+                "author execution contract requires the Orchestrator carrier; got {:?}",
+                input.role
+            ));
+        }
+        // engine durable run 事实（crate 内受信 builder 面）：fresh 每轮新
+        // run id（合同 resume 摘要不含 run id，续接指纹稳定）。
+        let run_record = crate::protocol::contracts::ProviderRunRecord {
+            provider_run_id: format!(
+                "author_{}_{}",
+                self.session.session_id,
+                uuid::Uuid::new_v4().simple()
+            ),
+            node_id: "author_root_launch".to_string(),
+            provider_type: input.provider_type.clone(),
+            runtime_role: crate::protocol::contracts::RuntimeRole::Orchestrator,
+            adapter_role: crate::protocol::contracts::AdapterRole::Orchestrator,
+            provider_capability_ref: "cap_managed_snapshot".to_string(),
+            adapter_compatibility_ref: "compat_1".to_string(),
+            context_package_ref: "ctx_author_root".to_string(),
+            adapter_input_ref: "ain_author_root".to_string(),
+            adapter_output_ref: "aout_author_root".to_string(),
+            raw_artifact_refs: Vec::new(),
+            exit_code: None,
+            error_code: None,
+            error_details: None,
+            stdout_ref: None,
+            stderr_ref: None,
+            structured_output_ref: None,
+            files_modified: Vec::new(),
+            status: crate::protocol::contracts::ProviderRunStatus::Running,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            duration_ms: None,
+            timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
+            retry_count: 0,
+            approval_policy: crate::protocol::contracts::ApprovalPolicy::OnRequest,
+            sandbox_mode: crate::protocol::contracts::SandboxMode::FullAccess,
+            constraint_check_ref: None,
+            traceability_binding_refs: Vec::new(),
+        };
+        let identity = TrustedRunIdentity::from_durable_run(
+            &run_record,
+            &self.session.session_id,
+            TrustedProviderRole::Author,
+        );
+        let contract = freeze_provider_execution(
+            &identity,
+            ProviderExecutionProfile::HostCoding,
+            Some(AuthorToolPolicy::author_v1()),
+            format!("role_run_author_{}", self.session.session_id),
+            None,
+        )
+        .map_err(|error| format!("author execution contract freeze failed: {}", error.details))?;
+        // 受信装配独占 deny 投影：按 duty 强制覆盖（与
+        // prepare_trusted_streaming_launch 同一口径）。
+        input.tool_policy =
+            crate::cross_cutting::streaming_provider::tool_policy_for_duty(&identity.duty());
+        Ok(
+            crate::cross_cutting::session_launch::ValidatedStreamingProviderInput::new(
+                input, launch,
+            )
+            .with_frozen_execution(contract),
+        )
+    }
+
     /// Task 2.1（REQ-ENV-01/ENV-10）：LC 会话 Author/ChoiceFollowup 的 root launch
     /// 解析。cwd = 唯一 authority resolver 冻结的 manifest `provider_context_root`
     ///（canonical root）；target = E `native_launch_anchor` 聚合根锚（REQ-PLN-08：

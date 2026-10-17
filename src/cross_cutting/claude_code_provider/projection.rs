@@ -53,10 +53,11 @@ const BOUNDARY_PLAN_REF_SCHEMA: &str = "lc-claude-boundary-plan-v1";
 /// (Task 10 fix:marker 是稳定结构——完整凭据 operation/receipt 上下文,
 /// canonical 形态=固定字段序+长度分隔+域前缀,与 digest 分层模式同构)。
 const BOOTSTRAP_MARKER_DIGEST_SCHEMA: &str = "lc-claude-bootstrap-marker-v1";
-/// 固定 role×policy 映射的冻结快照(与 `validate_tool_policy_for_role` 同源:
-/// 策略角色必带 DenyFileWriteBuiltins,普通 Executor/Handoff 无通用策略;
-/// BootstrapExecutorMarker 是 root-recipe 例外,不进 LC profile)。
-const CLAUDE_LC_ROLE_POLICY_MAP: &str = "orchestrator=deny_file_write_builtins;work_item_splitter=deny_file_write_builtins;reviewer=deny_file_write_builtins;executor=none;handoff=none";
+/// 固定 role×policy 映射的冻结快照(批2 Task 11 与 `validate_tool_policy_for_role`
+/// 同源:DenyFileWriteBuiltins 仅为 Author 岗位纪律的物理投影,由受信装配
+/// 铸造;Coder/Reviewer/规划族 wire 面全开;BootstrapExecutorMarker 是
+/// root-recipe 例外,不进 LC profile)。
+const CLAUDE_LC_ROLE_POLICY_MAP: &str = "author=deny_file_write_builtins;orchestrator=none;work_item_splitter=none;reviewer=none;executor=none;handoff=none";
 
 /// Claude LC projector:构造时冻结已实测 exact version 与相位。真实 version
 /// 未知(空串)时 `project` fail-closed 拒绝;`root_recipe_phase` 来自

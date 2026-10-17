@@ -6,6 +6,10 @@
 pub(super) struct RootCwdCaptureAuthorProvider {
     pub(super) starts: Arc<AtomicUsize>,
     pub(super) inputs: mpsc::UnboundedSender<StreamingProviderInput>,
+    /// 批2 Task 11：capture validated launch 冻结的执行合同事实
+    /// （None=合同显式缺失）。(duty, author_digest, profile, carrier)。
+    pub(super) contracts:
+        std::sync::Mutex<Vec<Option<(String, bool, String, String)>>>,
 }
 
 #[async_trait::async_trait]
@@ -40,6 +44,18 @@ impl StreamingProviderAdapter for RootCwdCaptureAuthorProvider {
         validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        let snapshot = validated.frozen_execution().map(|contract| {
+            (
+                contract.duty().as_str().to_string(),
+                contract.author_policy_digest().is_some(),
+                contract.profile().as_str().to_string(),
+                format!("{:?}", contract.carrier()),
+            )
+        });
+        self.contracts
+            .lock()
+            .expect("contract capture lock")
+            .push(snapshot);
         let (input, _launch) = validated.into_parts();
         self.start(input, cancel).await
     }
@@ -68,6 +84,7 @@ pub(super) fn root_cwd_capture_provider() -> (
         Arc::new(RootCwdCaptureAuthorProvider {
             starts,
             inputs: inputs_tx,
+            contracts: std::sync::Mutex::new(Vec::new()),
         }),
     )
 }
@@ -89,7 +106,7 @@ pub(super) async fn next_captured_input(
 #[tokio::test]
 async fn logical_author_and_choice_followup_keep_root_cwd_and_target_separate() {
     let (gateway_starts, mut gateway_inputs, gateway_author) = root_cwd_capture_provider();
-    let fixture = ProviderRunFixture::new_logical(true, gateway_author);
+    let fixture = ProviderRunFixture::new_logical(true, gateway_author.clone());
     let (direct_starts, _direct_inputs, direct_sentinel) = root_cwd_capture_provider();
     let mut registry = ProviderRegistry::new();
     registry.register(ProviderName::ClaudeCode, direct_sentinel);
@@ -128,6 +145,29 @@ async fn logical_author_and_choice_followup_keep_root_cwd_and_target_separate() 
         0,
         "LC author/follow-up 不得绕过 gateway 直连 provider"
     );
+    // 批2 Task 11（Author 独立入口）：Author 首轮与 ChoiceFollowup 的
+    // gateway launch 都必须冻结 duty=Author 的执行合同（HostCoding +
+    // AuthorToolPolicy 岗位纪律，经 Orchestrator 承载 audit 面仍 Author）；
+    // 伪造 role 缺合同不得产生可启动会话。
+    let contract_snapshots = gateway_author
+        .contracts
+        .lock()
+        .expect("contract capture lock")
+        .clone();
+    assert_eq!(
+        contract_snapshots.len(),
+        2,
+        "author first round + followup must each freeze an execution contract"
+    );
+    for snapshot in &contract_snapshots {
+        let Some((duty, author_digest, profile, carrier)) = snapshot else {
+            panic!("author gateway launch must freeze the Author execution contract");
+        };
+        assert_eq!(duty, "author");
+        assert!(author_digest, "Author 合同必须冻结岗位策略摘要");
+        assert_eq!(profile, "host_coding");
+        assert_eq!(carrier, "Orchestrator", "Author 经 Orchestrator 承载");
+    }
     assert_eq!(
         gateway_starts.load(Ordering::SeqCst),
         2,

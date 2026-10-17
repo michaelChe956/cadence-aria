@@ -497,51 +497,71 @@ impl LcVersionCacheInner {
     }
 }
 
-/// 双向角色×策略守卫：Orchestrator/WorkItemSplitter/Reviewer 必须携带
-/// `DenyFileWriteBuiltins`；Executor/Handoff 必须不携带策略；唯一例外是
-/// Executor 携带结构完整的 `BootstrapExecutorMarker`（REQ-BOOT-04/D1，
-/// Task 1.2）——「有写权限的 Executor」的显式自举通道。非法组合在
-/// provider 创建子进程之前拒绝（三 adapter `start` 首步调用）；普通
-/// Executor/Coder 仍不得携带任何 tool policy。
+/// 批2 Task 11（B6 公共角色矩阵）六职责→wire 工具策略权威矩阵：
+/// - **Author** → `Some(DenyFileWriteBuiltins)`：岗位纪律（AuthorToolPolicy
+///   「不装配编辑代码文件的内建工具」语义）的唯一 wire 物理投影，由受信
+///   装配铸造（engine builder / gateway `prepare_trusted_*` / workspace
+///   author 面），adapter 映射到 Claude `Edit/Write/NotebookEdit`、Pi
+///   `edit/write`；
+/// - **Coder / Orchestrator / Splitter / Handoff** → `None`：全工具；
+/// - **Reviewer** → `None`：只携 ReviewerVerify+窗口合同（真窗归 T20），
+///   wire 面不回退旧 deny fallback。
+pub fn tool_policy_for_duty(
+    duty: &crate::cross_cutting::provider_execution::TrustedProviderRole,
+) -> Option<ProviderToolPolicy> {
+    match duty {
+        crate::cross_cutting::provider_execution::TrustedProviderRole::Author => {
+            Some(ProviderToolPolicy::deny_file_write_builtins())
+        }
+        crate::cross_cutting::provider_execution::TrustedProviderRole::Orchestrator
+        | crate::cross_cutting::provider_execution::TrustedProviderRole::Splitter
+        | crate::cross_cutting::provider_execution::TrustedProviderRole::Handoff
+        | crate::cross_cutting::provider_execution::TrustedProviderRole::Coder
+        | crate::cross_cutting::provider_execution::TrustedProviderRole::Reviewer => None,
+    }
+}
+
+/// 双向角色×策略守卫（批2 Task 11 改造）：按 AdapterRole 一概套 deny 的
+/// 旧矩阵退役——全角色 `None` 合法（Coder/Reviewer/规划族 wire 面全开，
+/// 纪律移入受信冻结合同）；`DenyFileWriteBuiltins` 是 Author 岗位纪律的
+/// 物理投影，只在 Author 可承载的角色（Orchestrator=story/design/
+/// revision、WorkItemSplitter=plan authoring）合法，Coder（Executor）、
+/// Reviewer、Handoff 携带一律拒绝（Coder 不带 deny；Reviewer 只携窗口
+/// 合同）；Executor 的 `BootstrapExecutorMarker` 自举通道（REQ-BOOT-04/
+/// D1，Task 1.2）保持不变。非法组合在 provider 创建子进程之前拒绝（四
+/// adapter `start` 首步调用）。
 pub fn validate_tool_policy_for_role(
     role: &AdapterRole,
     policy: Option<&ProviderToolPolicy>,
 ) -> Result<(), ToolPolicyGuardError> {
-    match role {
-        AdapterRole::Orchestrator | AdapterRole::WorkItemSplitter | AdapterRole::Reviewer => {
-            // 缺失或未来非法意图均拒绝：`matches!` 对新增 intent 变体默认不
-            // 命中，fail-closed（策略角色唯一合法意图为 DenyFileWriteBuiltins；
-            // marker 不是策略，不得替代）。
-            if policy.is_some_and(|policy| {
-                matches!(policy.intent, ToolPolicyIntent::DenyFileWriteBuiltins)
-            }) {
-                Ok(())
-            } else {
-                Err(ToolPolicyGuardError::PolicyRequired {
-                    role: adapter_role_text(role).to_string(),
-                })
-            }
+    match policy.map(|policy| &policy.intent) {
+        None => Ok(()),
+        // Author 岗位投影：仅 Author 可承载的角色合法。
+        Some(ToolPolicyIntent::DenyFileWriteBuiltins)
+            if matches!(
+                role,
+                AdapterRole::Orchestrator | AdapterRole::WorkItemSplitter
+            ) =>
+        {
+            Ok(())
         }
-        AdapterRole::Executor | AdapterRole::Handoff => match policy.map(|policy| &policy.intent) {
-            None => Ok(()),
-            // BOOT-04/D1：Executor 的唯一自举通道——marker 四要素（credential、
-            // 写权限 action、canonical root、receipt context）联合完整才放行。
-            Some(ToolPolicyIntent::BootstrapExecutorMarker(marker))
-                if role == &AdapterRole::Executor =>
-            {
-                marker.incomplete_reason().map_or(Ok(()), |detail| {
-                    Err(ToolPolicyGuardError::BootstrapMarkerInvalid {
-                        role: adapter_role_text(role).to_string(),
-                        detail: detail.to_string(),
-                    })
+        // BOOT-04/D1：Executor 的唯一自举通道——marker 四要素（credential、
+        // 写权限 action、canonical root、receipt context）联合完整才放行。
+        Some(ToolPolicyIntent::BootstrapExecutorMarker(marker))
+            if role == &AdapterRole::Executor =>
+        {
+            marker.incomplete_reason().map_or(Ok(()), |detail| {
+                Err(ToolPolicyGuardError::BootstrapMarkerInvalid {
+                    role: adapter_role_text(role).to_string(),
+                    detail: detail.to_string(),
                 })
-            }
-            // 普通 Executor/Coder 带 deny 策略、Handoff 带任何策略（含 marker）
-            // 均拒绝：marker 不是给普通编码/交接角色的豁免口。
-            Some(_) => Err(ToolPolicyGuardError::PolicyForbidden {
-                role: adapter_role_text(role).to_string(),
-            }),
-        },
+            })
+        }
+        // 其余组合（非 Author 承载角色带 deny、Handoff/Reviewer 带任何
+        // 策略、未来未知 intent）一律 fail-closed。
+        Some(_) => Err(ToolPolicyGuardError::PolicyForbidden {
+            role: adapter_role_text(role).to_string(),
+        }),
     }
 }
 
@@ -1382,16 +1402,13 @@ pub(crate) async fn run_legacy_bridge_stream<'a>(
             ProviderAdapterError::execution_failed(None, String::new(), error.to_string(), 0)
         })?,
     );
-    // REQ-ENV-09（GC13 例外边界 + Task 3.1）：legacy 同步直连不携带策略字段，
-    // 但必须接受 adapter 双向守卫——被角色矩阵派生语义策略（策略角色带上
-    // DenyFileWriteBuiltins，Executor/Handoff 保持 None），随后统一经
-    // `start` 接受守卫与 argv 注入。kimi 不读 `tool_policy`，零物理变化。
-    let tool_policy = match input.role {
-        AdapterRole::Orchestrator | AdapterRole::WorkItemSplitter | AdapterRole::Reviewer => {
-            Some(ProviderToolPolicy::deny_file_write_builtins())
-        }
-        AdapterRole::Executor | AdapterRole::Handoff => None,
-    };
+    // 批2 Task 11（B6 公共角色矩阵）：legacy 同步直连不携带策略字段，bridge
+    // 也不再按 AdapterRole 一概派生 deny——Coder/Reviewer/规划族 wire 面
+    // 全开；deny 是 Author 岗位纪律的唯一物理投影，由受信装配铸造
+    // （AdapterInput 无策略字段，legacy 直连无从铸造）。engine 侧 hook 提供
+    // 的 run-bound sink 照常注入（Reviewer 执行审计不随去 deny 丢失）；
+    // kimi 不读 `tool_policy`，零物理变化。
+    let tool_policy: Option<ProviderToolPolicy> = None;
     let provider_input = StreamingProviderInput {
         tool_policy,
         // P2-1：派生策略必须同时注入 sink（engine 侧 hook）。
