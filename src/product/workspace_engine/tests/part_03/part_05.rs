@@ -26,7 +26,7 @@ async fn work_item_plan_item_required_revision_feedback_includes_findings() {
     engine.active_node_id = Some(review_node_id);
 
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"当前 draft 需要返修。
 
@@ -67,11 +67,21 @@ async fn work_item_plan_item_required_revision_feedback_includes_findings() {
         .build_current_work_item_draft_streaming_input(None, &RoutingReferenceContext::Legacy)
         .expect("draft streaming input");
     assert!(input.prompt.contains("[review_findings]"));
-    assert!(input.prompt.contains("evidence: snapshot 被 tokio::spawn 调用"));
-    assert!(input.prompt.contains("message: sync 方法在 tokio runtime 内 block_on 会 panic"));
-    assert!(input
-        .prompt
-        .contains("required_action: 当前 draft 需明确 spawn_blocking 或改为 async 方案"));
+    assert!(
+        input
+            .prompt
+            .contains("evidence: snapshot 被 tokio::spawn 调用")
+    );
+    assert!(
+        input
+            .prompt
+            .contains("message: sync 方法在 tokio runtime 内 block_on 会 panic")
+    );
+    assert!(
+        input
+            .prompt
+            .contains("required_action: 当前 draft 需明确 spawn_blocking 或改为 async 方案")
+    );
 }
 
 // 退役留档（T5/REQ-RET-02）：`work_item_plan_item_plan_reopen_review_decision_restarts_outline_revision` 直接驱动已删除的 legacy 决策面，
@@ -116,14 +126,18 @@ async fn anchor_t16_draft_fresh_builder_and_node_rebuild_keep_generation() {
         ))
         .expect("put accepted draft record");
     // 旧 native 会话引用在场（fresh 必须不回捞）+ 内存 pending 残留
-//（fresh 消费 durable 冻结值，不读不借内存反馈）。
+    //（fresh 消费 durable 冻结值，不读不借内存反馈）。
     engine.session.provider_conversations = vec![anchor_t16_author_conversation_ref()];
     engine.pending_revision_context = Some("内存残留反馈（不得进入 fresh 输入）".to_string());
     // 一次 RetryOnce 修复已发生过的形态：修复预算已占用，fresh 不得重置。
     engine.remember_one_draft_repair("outline_a", Vec::new(), Some("原始用户反馈".to_string()));
 
     let index_before = store
-        .load_active_index(&engine.session.project_id, &engine.session.issue_id, &plan_id)
+        .load_active_index(
+            &engine.session.project_id,
+            &engine.session.issue_id,
+            &plan_id,
+        )
         .expect("load index before")
         .expect("index before");
 
@@ -172,22 +186,35 @@ async fn anchor_t16_draft_fresh_builder_and_node_rebuild_keep_generation() {
         )
         .expect("fresh draft streaming input without feedback");
     assert_eq!(input_none.resume_provider_session_id, None);
-    assert!(!input_none.prompt.contains("内存残留反馈（不得进入 fresh 输入）"));
+    assert!(
+        !input_none
+            .prompt
+            .contains("内存残留反馈（不得进入 fresh 输入）")
+    );
 
     // 业务代同原：generation/outline/批次零变化；修复预算未重置。
     let index_after = store
-        .load_active_index(&engine.session.project_id, &engine.session.issue_id, &plan_id)
+        .load_active_index(
+            &engine.session.project_id,
+            &engine.session.issue_id,
+            &plan_id,
+        )
         .expect("load index after")
         .expect("index after");
     assert_eq!(
         index_after.current_generation_round_id,
         index_before.current_generation_round_id
     );
-    assert_eq!(index_after.active_outline_id, index_before.active_outline_id);
+    assert_eq!(
+        index_after.active_outline_id,
+        index_before.active_outline_id
+    );
     assert_eq!(index_after.batches.len(), index_before.batches.len());
     assert_eq!(index_after.draft_statuses, index_before.draft_statuses);
     assert!(
-        engine.work_item_draft_repair_states.contains_key("outline_a"),
+        engine
+            .work_item_draft_repair_states
+            .contains_key("outline_a"),
         "fresh 重建不得重置 draft 修复预算"
     );
     drop(lifecycle);
@@ -241,7 +268,8 @@ async fn anchor_t16_batch_fresh_builder_and_node_rebuild_keep_batch() {
         })
         .expect("save batch active index");
     engine.session.provider_conversations = vec![anchor_t16_author_conversation_ref()];
-    engine.pending_revision_context = Some("内存残留 batch 反馈（不得进入 fresh 输入）".to_string());
+    engine.pending_revision_context =
+        Some("内存残留 batch 反馈（不得进入 fresh 输入）".to_string());
 
     // stale 收口后无活动 batch 节点：fresh 仅重建 provider 运行节点。
     assert_ne!(
@@ -264,13 +292,19 @@ async fn anchor_t16_batch_fresh_builder_and_node_rebuild_keep_batch() {
     assert_eq!(input.resume_provider_session_id, None);
     assert!(input.prompt.contains(frozen_feedback));
     assert!(
-        !input.prompt.contains("内存残留 batch 反馈（不得进入 fresh 输入）"),
+        !input
+            .prompt
+            .contains("内存残留 batch 反馈（不得进入 fresh 输入）"),
         "fresh 的 feedback 源是 durable 冻结值"
     );
 
     // 同 batch：不另建 batch、generation 不重建、draft 状态同原。
     let index_after = store
-        .load_active_index(&engine.session.project_id, &engine.session.issue_id, &plan_id)
+        .load_active_index(
+            &engine.session.project_id,
+            &engine.session.issue_id,
+            &plan_id,
+        )
         .expect("load index after")
         .expect("index after");
     assert_eq!(index_after.current_generation_round_id, "round_0001");

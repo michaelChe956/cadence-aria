@@ -360,7 +360,7 @@ async fn choice_delivery_review_path_forwards_full_answers_and_receipt() {
         .expect("send choice response");
 
     engine
-        .drive_review_session(Arc::new(provider), command_rx)
+        .drive_review_session_with_window(Arc::new(provider), command_rx)
         .await;
 
     let (forwarded_answers, forwarded_receipt) = captured

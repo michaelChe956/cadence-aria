@@ -1050,9 +1050,8 @@ impl<'a> RealGroupReviewExecutor<'a> {
     /// 批2 Task 20:绑定 durable 审查窗口(开窗后传入;shard/reduction/
     /// repair 共享同窗,材料与 baseline 同指纹;无窗 fail-closed 由
     /// adapter 启动检查承担,不在测试专用 executor 路径伪铸)。
-    /// T20a-fix(F4):生产 group 构造点接线归 T20b(决策项⑧)——先以
-    /// cfg(test) 豁免 clippy -D warnings,T20b 接生产时移除。
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// T20a-fix(F4)→T20b(决策项⑧):已接生产构造点
+    /// (legacy_group_final_review 开窗后绑定)——豁免移除。
     pub(crate) fn with_review_window_id(mut self, window_id: &str) -> Self {
         self.review_window_id = Some(window_id.to_string());
         self

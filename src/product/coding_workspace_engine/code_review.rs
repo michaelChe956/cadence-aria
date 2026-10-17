@@ -777,6 +777,49 @@ impl CodingWorkspaceEngine {
         })
     }
 
+    /// T20b（硬约束5/RevB2T19 ⚠1）：交付门回查——报告携带窗口 id 时以
+    /// `reconcile_from_stores` 为权威复检（不信任 DTO 采信投影）；无窗口
+    /// id/空引用 = 历史未核验报告，返回 `None`（调用方按历史放行语义）；
+    /// 窗口 id 在场而记录缺失/对账失败 = 悬挂引用，fail-closed
+    /// `Invalidated`（不默认 Accepted）。
+    pub(crate) fn recheck_review_acceptance_for_delivery(
+        &self,
+        review_window_id: Option<&str>,
+    ) -> Option<ReportAcceptance> {
+        let window_id = review_window_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())?;
+        let outcome = reconcile_from_stores(
+            &self.reviewer_window_store(),
+            &self.reviewer_snapshot_store(),
+            window_id,
+        );
+        Some(match outcome {
+            Ok(outcome) => match outcome.recommendation {
+                crate::product::reviewer_reconciliation::AcceptanceRecommendation::Accepted {
+                    ..
+                } => ReportAcceptance::Accepted,
+                crate::product::reviewer_reconciliation::AcceptanceRecommendation::Invalidated {
+                    ..
+                } => ReportAcceptance::Invalidated,
+                // 停等（恢复未完成/瞬时错误）：交付面不得放行——按
+                // Pending 处理（与 finalize 采信投影同口径）。
+                crate::product::reviewer_reconciliation::AcceptanceRecommendation::NotReady {
+                    ..
+                } => ReportAcceptance::PendingAcceptance,
+            },
+            // 窗口记录缺失/读取失败：窗口 id 在场的悬挂引用 fail-closed。
+            Err(error) => {
+                tracing::warn!(
+                    window = %window_id,
+                    %error,
+                    "review_delivery_recheck_failed_fail_closed_invalidated"
+                );
+                ReportAcceptance::Invalidated
+            }
+        })
+    }
+
     /// 树上存在未终态 reviewer 窗口(租约被持有)→ fail-closed。
     /// Coder 交付/人工重试/plan repair 再入的窗重叠守卫(T14 合同预留:
     /// 不依赖其实现,由租约面直接判定)。

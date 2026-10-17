@@ -391,19 +391,46 @@ pub(crate) async fn start_plan_repair_for_execution_outcome_if_needed(
         .map(Some)
 }
 
-/// T19 采信门:报告采信投影是否允许 approve 交付推进。缺字段(None)=
-/// 历史未核验报告(不改历史行为);仅显式 Accepted 放行,
-/// PendingAcceptance/Invalidated 一律停人工面。
+/// T19 采信门 + T20b（硬约束5/RevB2T19 ⚠1）交付门回查：报告携带窗口 id
+/// 时以 engine `recheck_review_acceptance_for_delivery`（内部
+/// `reconcile_from_stores` 权威复检）为准——DTO 采信投影不作数；缺字段
+/// （acceptance/窗口 id 双缺）= 历史未核验报告，按历史放行语义不改历史
+/// 行为；Pending/Invalidated 一律停人工面。
 fn review_acceptance_permits_delivery(
+    engine: &CodingWorkspaceEngine,
     acceptance: Option<crate::product::coding_models::ReviewReportAcceptance>,
+    review_window_id: Option<&str>,
 ) -> bool {
+    let authoritative = engine.recheck_review_acceptance_for_delivery(review_window_id);
+    let effective = match authoritative {
+        Some(rechecked) => Some(rechecked),
+        // 无窗口 id：历史未核验——回落 DTO 投影（None=历史放行语义）。
+        None => acceptance.map(coding_acceptance_from_window),
+    };
     !matches!(
-        acceptance,
+        effective,
         Some(
-            crate::product::coding_models::ReviewReportAcceptance::PendingAcceptance
-                | crate::product::coding_models::ReviewReportAcceptance::Invalidated
+            crate::product::reviewer_window_store::ReportAcceptance::PendingAcceptance
+                | crate::product::reviewer_window_store::ReportAcceptance::Invalidated
         )
     )
+}
+
+/// coding DTO 采信枚举 → 窗口 store 采信枚举（同语义三态映射）。
+fn coding_acceptance_from_window(
+    acceptance: crate::product::coding_models::ReviewReportAcceptance,
+) -> crate::product::reviewer_window_store::ReportAcceptance {
+    match acceptance {
+        crate::product::coding_models::ReviewReportAcceptance::PendingAcceptance => {
+            crate::product::reviewer_window_store::ReportAcceptance::PendingAcceptance
+        }
+        crate::product::coding_models::ReviewReportAcceptance::Accepted => {
+            crate::product::reviewer_window_store::ReportAcceptance::Accepted
+        }
+        crate::product::coding_models::ReviewReportAcceptance::Invalidated => {
+            crate::product::reviewer_window_store::ReportAcceptance::Invalidated
+        }
+    }
 }
 
 async fn handle_internal_review_flow_decision(
@@ -415,11 +442,14 @@ async fn handle_internal_review_flow_decision(
 ) -> Result<(), CodingWorkspaceEngineError> {
     let raw_decision =
         engine.internal_review_flow_decision_for_attempt(current, internal_review)?;
-    // T19 采信门:Pending/Invalidated 报告即使内容 approve 也不驱动
-    // 交付推进(完成/整组完成一律停在人工面)。
+    // T19 采信门 + T20b 回查:Pending/Invalidated 报告即使内容 approve
+    // 也不驱动交付推进;窗口 id 在场时以 reconcile 权威复检为准。
     let decision = if raw_decision == CodeReviewFlowDecision::ContinueAfterApprove
-        && !review_acceptance_permits_delivery(internal_review.acceptance)
-    {
+        && !review_acceptance_permits_delivery(
+            engine,
+            internal_review.acceptance,
+            internal_review.review_window_id.as_deref(),
+        ) {
         CodeReviewFlowDecision::StopForHumanTriage
     } else {
         raw_decision
@@ -763,12 +793,17 @@ pub(crate) async fn execute_start_coding_flow(
                 return Ok(());
             }
             let reviewer_projection = engine.reviewer_projection_for_attempt(&current)?;
-            // T19 采信门:Pending/Invalidated 报告即使内容 approve 也不
-            // 驱动交付推进(ReviewRequest/完成链一律停在人工面)。
+            // T19 采信门 + T20b 回查:Pending/Invalidated 报告即使内容
+            // approve 也不驱动交付推进;窗口 id 在场时以 reconcile
+            // 权威复检为准。
             let review_flow_decision = {
                 let raw = code_review_flow_decision(&review_report, &reviewer_projection);
                 if raw == CodeReviewFlowDecision::ContinueAfterApprove
-                    && !review_acceptance_permits_delivery(review_report.acceptance)
+                    && !review_acceptance_permits_delivery(
+                        engine,
+                        review_report.acceptance,
+                        review_report.review_window_id.as_deref(),
+                    )
                 {
                     CodeReviewFlowDecision::StopForHumanTriage
                 } else {

@@ -848,7 +848,7 @@ async fn review_idle_watchdog_aborts_silent_reviewer_with_diagnosable_failure() 
 
     tokio::time::timeout(
         PROVIDER_IDLE_WATCHDOG_TIMEOUT.saturating_mul(8),
-        engine.drive_review_session(Arc::new(provider), empty_provider_commands()),
+        engine.drive_review_session_with_window(Arc::new(provider), empty_provider_commands()),
     )
     .await
     .expect("静默 reviewer 必须由看门狗收口，不得永久悬置");
@@ -891,7 +891,7 @@ async fn review_choice_wait_timeout_converts_lost_reviewer_choice_into_diagnosab
 
     tokio::time::timeout(
         PROVIDER_CHOICE_WAIT_TIMEOUT.saturating_mul(8),
-        engine.drive_review_session(Arc::new(provider), empty_provider_commands()),
+        engine.drive_review_session_with_window(Arc::new(provider), empty_provider_commands()),
     )
     .await
     .expect("choice 悬置的 reviewer 必须由等待界收口，不得永久悬置");

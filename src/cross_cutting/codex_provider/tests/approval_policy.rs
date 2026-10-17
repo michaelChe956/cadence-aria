@@ -1161,9 +1161,18 @@ async fn codex_contract_bound_non_policy_run_writes_provider_start_without_disci
     assert_eq!(record.role, "reviewer");
     assert_eq!(record.sandbox.as_deref(), Some("danger-full-access"));
     assert_eq!(record.approval_policy.as_deref(), Some("never"));
-    assert!(
-        record.tool_policy_canonical_digest.is_empty(),
-        "non-policy contract runs carry no tool-policy canonical digest"
+    // 决策项②(T20b):ReviewerVerify 合同 run 的 provider_start digest=
+    // 窗口域 canonical(与决策审计/LC 同源可 join);纯无策略 sink 合同
+    // (policy=None)才保持空串口径。
+    let expected_window_digest = crate::cross_cutting::streaming_provider::canonical_tool_policy(
+        crate::cross_cutting::codex_provider::session::TOOL_POLICY_PROVIDER_NAME,
+        &ProviderToolPolicy::reviewer_verify("w-t20-contract-run"),
+    )
+    .expect("window-domain canonical digest")
+    .digest;
+    assert_eq!(
+        record.tool_policy_canonical_digest, expected_window_digest,
+        "ReviewerVerify contract runs carry the window-domain canonical digest"
     );
     assert_eq!(
         record.provider_session_id, "codex_completed_only_thread",

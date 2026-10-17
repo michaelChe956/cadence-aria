@@ -20,7 +20,7 @@ use crate::cross_cutting::streaming_provider::{
     ProviderToolResult, RiskLevel, StreamingProviderInput, UsageReportData,
 };
 
-use super::client_services::{KimiClientServiceDispatcher, kimi_client_capabilities};
+use super::client_services::KimiClientServiceDispatcher;
 use super::mcp_bundle::{KimiMcpInjection, SessionMethodDecision, resolve_session_method};
 use super::parse::{
     KimiPermissionOption, KimiPromptResult, KimiSessionUpdate, Parsed, parse_message,
@@ -198,6 +198,24 @@ where
     let timeout_secs = input.timeout_secs.max(1);
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
+    // 批2 Task 20b:受信岗位授予派生前移(早于 initialize)——广告面按
+    // 岗位合同协商(Author 不广告代码编辑 fs 写;Reviewer/其余全集;
+    // 无授予直连会话全集,行为不变);广告≠授权,请求仍逐条过 gate。
+    let trusted_duty = lc
+        .as_ref()
+        .and_then(|lc| lc.trusted_duty.clone())
+        .or_else(|| {
+            input.tool_policy.as_ref().and_then(|policy| {
+                match &policy.intent {
+                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify {
+                        window_id,
+                    } => Some(
+                        crate::cross_cutting::kimi_code_provider::client_services::TrustedDutyGrant::from_reviewer_wire_contract(window_id),
+                    ),
+                    _ => None,
+                }
+            })
+        });
     let initialize = match request_control(
         &peer,
         json!({
@@ -206,7 +224,7 @@ where
             "method": "initialize",
             "params": {
                 "protocolVersion": 1,
-                "clientCapabilities": kimi_client_capabilities(),
+                "clientCapabilities": super::client_services::advertised_client_capabilities(trusted_duty.as_ref().map(|grant| grant.duty_of_grant())),
                 "clientInfo": {"name": "cadence-aria", "version": env!("CARGO_PKG_VERSION")}
             }
         }),
@@ -394,24 +412,6 @@ where
     // 落盘失败 fail-closed(会话终止,由 mod.rs 会话任务的既有 kill 链
     // 回收子进程)。
     let target_boundary = lc.as_ref().map(|lc| lc.boundary.clone());
-    // 批2 Task 20：受信岗位授予——LC 冻结合同优先；direct 会话消费
-    // ReviewerVerify wire 合同的窗口引用（受信装配铸造）；其余 None
-    //（行为=承载角色映射矩阵）。
-    let trusted_duty = lc
-        .as_ref()
-        .and_then(|lc| lc.trusted_duty.clone())
-        .or_else(|| {
-            input.tool_policy.as_ref().and_then(|policy| {
-                match &policy.intent {
-                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify {
-                        window_id,
-                    } => Some(
-                        crate::cross_cutting::kimi_code_provider::client_services::TrustedDutyGrant::from_reviewer_wire_contract(window_id),
-                    ),
-                    _ => None,
-                }
-            })
-        });
     if let Some(lc) = lc {
         let mut audit_event = lc.audit_template;
         audit_event.provider_session_id = session_id.clone();

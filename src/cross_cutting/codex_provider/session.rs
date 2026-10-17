@@ -195,6 +195,7 @@ fn policy_digest_for_input(
 /// 沿既有 kill 链 fail-closed）→ ③调用方以其返回值中断 turn → ④supervisor
 /// kill child 并终态 Failed——本轮输出不可采信。🔴 不宣称回滚已发生写入或
 /// terminal/MCP 预防（danger 基线下这是检测/对账合同，不是物理防写）。
+#[allow(clippy::too_many_arguments)]
 async fn fail_turn_on_author_file_change(
     event_tx: &mpsc::Sender<ProviderEvent>,
     cancel: &CancellationToken,

@@ -534,10 +534,12 @@ impl StreamingProviderAdapter for KimiCodeProvider {
             ));
         }
 
-        // 批2 Task 20a-fix(F2):四家同源启动检查——置于 kimi 通用策略
-        // 例外门之后、一切观测/child 之前(Reviewer 无窗/空窗/deny 回退
-        // =0 会话,不 fallback)。
-        crate::cross_cutting::streaming_provider::validate_tool_policy_for_role(
+        // 批2 Task 20a-fix(F2)+T20b 决策项③:LC validated 共用 run-context
+        // guard(三家同构)——角色一致性 + RootRecipe 相位 marker 门 +
+        // 双向策略守卫(Reviewer 无窗=0 会话,不 fallback)。
+        crate::cross_cutting::streaming_provider::guard_lc_validated_launch(
+            launch.is_root_recipe_phase(),
+            &input.role,
             &input.role,
             input.tool_policy.as_ref(),
         )

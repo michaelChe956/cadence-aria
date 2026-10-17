@@ -72,6 +72,7 @@ impl CodingWorkspaceEngine {
                         &node.id,
                         &role_run.id,
                         CodingWorkspaceEngineError::Store(error),
+                        None,
                     )
                     .await;
             }
@@ -88,8 +89,32 @@ impl CodingWorkspaceEngine {
                         attempt_id: attempt.id.clone(),
                         role: CodingProviderRole::InternalReviewer,
                     },
+                    None,
                 )
                 .await;
+        };
+        // 批2 Task 20b(决策项⑧):group shard/reduction/repair 材料采集前
+        // 开窗(bindings/git facts/material 均在窗口 Running 之后,材料与
+        // baseline manifest 同指纹);shard 共享同窗,任一窗口违规整组
+        // 不得 approve(采信走 T19/T20b 交付门回查)。开窗失败 fail-closed
+        // 绝不以无窗继续编排。
+        let window_id = format!("{}-w01", role_run.id);
+        let review_window = match self
+            .begin_reviewer_window_for_run(
+                &window_id,
+                &attempt,
+                &role_run.id,
+                &reviewer,
+                &worktree_path,
+            )
+            .await
+        {
+            Ok(window) => window,
+            Err(error) => {
+                return self
+                    .finalize_group_review_failure(&attempt, &node.id, &role_run.id, error, None)
+                    .await;
+            }
         };
         let executor = RealGroupReviewExecutor::new(
             self,
@@ -98,14 +123,21 @@ impl CodingWorkspaceEngine {
             node.id.clone(),
             role_run.clone(),
             reviewer,
-        );
+        )
+        .with_review_window_id(&review_window.window_id);
         let orchestrator =
             GroupReviewOrchestrator::new(&executor, &self.store).with_role_run_id(&role_run.id);
         let bindings = match self.authoritative_group_reviewer_bindings(&attempt) {
             Ok(bindings) => bindings,
             Err(error) => {
                 return self
-                    .finalize_group_review_failure(&attempt, &node.id, &role_run.id, error)
+                    .finalize_group_review_failure(
+                        &attempt,
+                        &node.id,
+                        &role_run.id,
+                        error,
+                        Some(&review_window),
+                    )
                     .await;
             }
         };
@@ -124,6 +156,7 @@ impl CodingWorkspaceEngine {
                             &node.id,
                             &role_run.id,
                             GroupReviewOrchestrationError::IdentityMissing,
+                            Some(&review_window),
                         )
                         .await;
                 }
@@ -134,6 +167,7 @@ impl CodingWorkspaceEngine {
                             &node.id,
                             &role_run.id,
                             CodingWorkspaceEngineError::Store(error),
+                            Some(&review_window),
                         )
                         .await;
                 }
@@ -153,6 +187,7 @@ impl CodingWorkspaceEngine {
                         &node.id,
                         &role_run.id,
                         GroupReviewOrchestrationError::IdentityMissing,
+                        Some(&review_window),
                     )
                     .await
                     .map_err(|mapped| match mapped {
@@ -167,7 +202,13 @@ impl CodingWorkspaceEngine {
             }
             Err(error) => {
                 return self
-                    .finalize_group_review_failure(&attempt, &node.id, &role_run.id, error)
+                    .finalize_group_review_failure(
+                        &attempt,
+                        &node.id,
+                        &role_run.id,
+                        error,
+                        Some(&review_window),
+                    )
                     .await;
             }
         };
@@ -190,6 +231,7 @@ impl CodingWorkspaceEngine {
                                 &node.id,
                                 &role_run.id,
                                 GroupReviewOrchestrationError::IdentityMissing,
+                                Some(&review_window),
                             )
                             .await;
                     }
@@ -206,6 +248,7 @@ impl CodingWorkspaceEngine {
                         &node.id,
                         &role_run.id,
                         orchestration_error,
+                        Some(&review_window),
                     )
                     .await;
             }
@@ -220,6 +263,7 @@ impl CodingWorkspaceEngine {
                     &node.id,
                     &role_run.id,
                     CodingWorkspaceEngineError::Store(error),
+                    Some(&review_window),
                 )
                 .await;
         }
@@ -234,6 +278,7 @@ impl CodingWorkspaceEngine {
                         &node.id,
                         &role_run.id,
                         error,
+                        Some(&review_window),
                     )
                     .await;
             }
@@ -251,6 +296,7 @@ impl CodingWorkspaceEngine {
                         &node.id,
                         &role_run.id,
                         error,
+                        Some(&review_window),
                     )
                     .await;
             }
@@ -313,7 +359,13 @@ impl CodingWorkspaceEngine {
             Ok(review) => review,
             Err(error) => {
                 return self
-                    .finalize_group_review_failure(&attempt, &node.id, &role_run.id, error)
+                    .finalize_group_review_failure(
+                        &attempt,
+                        &node.id,
+                        &role_run.id,
+                        error,
+                        Some(&review_window),
+                    )
                     .await;
             }
         };
@@ -323,6 +375,11 @@ impl CodingWorkspaceEngine {
                 review: Box::new(review.clone()),
             })
             .await;
+        // 批2 Task 20b(决策项⑧):成功路径技术收口——干净恢复+释放;
+        // 采信投影不在此铸造(legacy 面报告 acceptance 保持 None=历史
+        // 未核验语义,消费面走 T20b 交付门回查判定)。
+        self.recycle_reviewer_window(&review_window, "group_final_review_completed")
+            .await?;
         Ok(review)
     }
 }

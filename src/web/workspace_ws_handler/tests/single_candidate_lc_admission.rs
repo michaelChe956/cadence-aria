@@ -2486,10 +2486,24 @@ async fn reviewer_launch_trust_missing_emits_structured_guidance_frame() {
     let forward = spawn_engine_event_forward_task(engine_rx, outbound_tx, None);
     {
         let mut engine = fixture.engine.lock().await;
+        // T20b(决策项⑦):真实 gateway 链的 reviewer 会话必须携窗——内层
+        // 直调前开规划审查窗(生产入口同 helper 面),使 trust 分型错误
+        // 形态保持原判别面。
+        let reviewer = engine
+            .session
+            .reviewer_provider
+            .clone()
+            .expect("reviewer provider");
+        engine
+            .begin_plan_review_window(&reviewer, fixture.member_checkout_root())
+            .await
+            .expect("plan review window");
         engine.start_review_or_skip().await;
         let (_command_tx, command_rx) =
             mpsc::channel::<crate::cross_cutting::streaming_provider::ProviderCommand>(8);
-        engine.drive_review_session_via_gateway(command_rx).await;
+        engine
+            .drive_review_session_via_gateway_with_window(command_rx)
+            .await;
     }
 
     // 平铺 error 帧保留（旧客户端兼容，稳定判别码不变）。

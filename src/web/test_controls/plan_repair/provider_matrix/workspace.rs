@@ -150,7 +150,7 @@ pub(super) async fn run_workspace_provider_roles(
         .await;
     let (_review_command_tx, review_command_rx) = mpsc::channel::<ProviderCommand>(1);
     engine
-        .drive_review_session(adapter, review_command_rx)
+        .drive_review_session_with_window(adapter, review_command_rx)
         .await;
 
     let mut plan_review_passed = false;

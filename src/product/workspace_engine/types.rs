@@ -913,6 +913,12 @@ pub struct WorkspaceEngine {
     /// 有 gateway 却缺此上下文时确认 fail-closed ContextWaiting；非 LC
     /// 会话（无 gateway）免登记，见 `ensure_confirmation_trust_ready`。
     pub(crate) confirmation_trust_context: Option<ConfirmationTrustContext>,
+    /// 批2 Task 20b(决策项⑦):规划面 reviewer 会话的活动审查窗口——
+    /// `drive_review_session(_via_gateway)` 入口在材料采集前开窗并持有;
+    /// repair/静默重试同窗复用;prompt 铸造 ReviewerVerify 合同的唯一
+    /// 窗口来源。`None` = 无活动审查(非 review 会话/内层直调测试形态)。
+    pub(crate) active_review_window:
+        Option<crate::product::workspace_engine::review::ActivePlanReviewWindow>,
 }
 
 #[derive(Debug, Clone)]

@@ -134,7 +134,7 @@ async fn workspace_review_and_repair_policy_runs_receive_durable_audit_sink() {
         valid_structured_output(revise_json),
     ]));
     engine
-        .drive_review_session(probe.clone(), empty_provider_commands())
+        .drive_review_session_with_window(probe.clone(), empty_provider_commands())
         .await;
 
     // 批2 Task 11（T20 前中间态）：review/repair 输入不再携带 deny——纪律=
@@ -202,8 +202,53 @@ async fn workspace_policy_review_run_keeps_engine_audit_allocation_via_real_prov
     let provider = Arc::new(
         CodexProvider::new(workspace_policy_audit_fixture()).with_version_supplier(supplier),
     );
+    // T20b(决策项⑦):真实 provider 链的 reviewer 会话必须携窗——engine 会话
+    // 的仓库根 git init+种子提交后开规划审查窗(生产入口同 helper 面)。
+    {
+        let worktree = root.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("create worktree");
+        use std::process::Command as StdCommand;
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["commit", "-m", "init", "--quiet", "--allow-empty"],
+        ] {
+            let status = StdCommand::new("git")
+                .current_dir(&worktree)
+                .args(&args)
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git fixture {args:?} must succeed");
+        }
+        // lifecycle store 在场会激活 author baseline fail-closed 链——
+        // 种子最小 issue 记录(本 fixture 此前无仓库路径,baseline 链被跳过)。
+        crate::product::issue_store::IssueStore::new(ProductAppPaths::new(
+            root.path().join(".aria"),
+        ))
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: "p1".to_string(),
+            repo_id: None,
+            logical_codebase_id: None,
+            base_branch: None,
+            title: "t20b audit chain fixture".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("seed issue for baseline chain");
+        let reviewer = engine
+            .session
+            .reviewer_provider
+            .clone()
+            .expect("reviewer provider");
+        // 会话保持无仓库路径(原上下文行为零变化);窗口显式锚定 git 树。
+        engine
+            .begin_plan_review_window(&reviewer, worktree)
+            .await
+            .expect("plan review window");
+    }
     engine
-        .drive_review_session(provider, empty_provider_commands())
+        .drive_review_session_with_window(provider, empty_provider_commands())
         .await;
 
     let aria_root = root.path().join(".aria");
@@ -253,9 +298,15 @@ async fn workspace_policy_review_run_keeps_engine_audit_allocation_via_real_prov
         );
         assert_eq!(first["role"], "reviewer");
         assert_eq!(first["sandbox"], "danger-full-access");
-        assert_eq!(
-            first["tool_policy_canonical_digest"], "",
-            "non-policy contract run carries no tool-policy canonical digest"
+        // 决策项②(T20b):ReviewerVerify 合同 run 的 provider_start digest=
+        // 窗口域 canonical(与决策审计/LC 同源可 join;纯无策略 sink 合同
+        // 才是空串口径)。
+        assert!(
+            !first["tool_policy_canonical_digest"]
+                .as_str()
+                .unwrap_or("")
+                .is_empty(),
+            "ReviewerVerify contract run carries the window-domain canonical digest: {first_line}"
         );
     }
     assert!(

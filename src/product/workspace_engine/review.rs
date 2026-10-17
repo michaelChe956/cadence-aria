@@ -7,5 +7,7 @@ mod policy_scope;
 mod routing;
 mod structured_output;
 
+pub(crate) use drive::ActivePlanReviewWindow;
+
 pub(crate) use feedback::{format_review_feedback, trusted_review_comments};
 pub(crate) use structured_output::*;

@@ -61,6 +61,24 @@ pub fn kimi_client_capabilities() -> Value {
     })
 }
 
+/// 批2 Task 20b:kimi 布尔方言广告面的岗位感知单源——Author 职责不
+/// 广告代码编辑 fs 写(AuthorToolPolicy v1 `builtin_write_code_file`
+/// 语义);其余职责(含 Reviewer 窗口合同)保持全集(广告≠授权,请求
+/// 仍逐条过 policy gate)。会话 initialize 接线消费本函数;`None` =
+/// 无受信授予的直连会话(全集,行为不变)。
+pub(crate) fn advertised_client_capabilities(
+    duty: Option<crate::cross_cutting::provider_execution::TrustedProviderRole>,
+) -> Value {
+    let fs_write_advertised = !matches!(
+        duty,
+        Some(crate::cross_cutting::provider_execution::TrustedProviderRole::Author)
+    );
+    json!({
+        "fs": {"readTextFile": true, "writeTextFile": fs_write_advertised},
+        "terminal": true
+    })
+}
+
 const ERROR_REJECTED: i64 = -32000;
 const ERROR_UNKNOWN_TERMINAL: i64 = -32001;
 const ERROR_FS: i64 = -32002;

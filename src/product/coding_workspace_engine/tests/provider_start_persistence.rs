@@ -1160,9 +1160,19 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
     assert_eq!(first["role"], "reviewer");
     assert_eq!(first["sandbox"], "danger-full-access");
     assert_eq!(first["approval_policy"], "never");
+    // 决策项②(T20b):ReviewerVerify 合同 run 的 provider_start digest=
+    // 窗口域 canonical(与决策审计/LC 同源可 join)。
+    let expected_window_digest = crate::cross_cutting::streaming_provider::canonical_tool_policy(
+        crate::cross_cutting::codex_provider::session::TOOL_POLICY_PROVIDER_NAME,
+        &crate::cross_cutting::streaming_provider::ProviderToolPolicy::reviewer_verify(
+            "w-t20-audit-isolation",
+        ),
+    )
+    .expect("window-domain canonical digest")
+    .digest;
     assert_eq!(
-        first["tool_policy_canonical_digest"], "",
-        "non-policy contract run carries no tool-policy canonical digest"
+        first["tool_policy_canonical_digest"], expected_window_digest,
+        "ReviewerVerify contract run carries the window-domain canonical digest"
     );
     assert!(
         partition_dir.join("role-run-seq.jsonl").exists(),

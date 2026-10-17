@@ -51,6 +51,11 @@ impl TrustedDutyGrant {
             review_window_id: Some(window_id.to_string()),
         }
     }
+
+    /// 受信职责（广告面/审计消费；批2 Task 20b 会话 initialize 接线）。
+    pub(crate) fn duty_of_grant(&self) -> TrustedProviderRole {
+        self.duty
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,18 +153,14 @@ impl ClientServicePolicy {
     }
 
     /// 工具广告面(与 [`Self::evaluate`] 同一岗位合同):Author 职责不
-    /// 广告代码编辑 fs 写(`writeTextFile:false`,AuthorToolPolicy v1
-    /// `builtin_write_code_file` 语义;不按扩展名猜「代码文件」另建
-    /// 过滤)——广告与实际拒绝同源;其余职责保持既有布尔方言全集
-    /// (广告≠授权,请求仍逐条过 evaluate)。会话 initialize 接线归
-    /// T10/T20(前瞻载体,测试钉合同)。
+    /// 广告代码编辑 fs 写;其余职责布尔方言全集(广告≠授权)。批2
+    /// Task 20b:与 session initialize 的 `advertised_client_capabilities`
+    /// 单源同矩阵(审计/测试消费面;生产 initialize 走同矩阵自由函数)。
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn advertised_capabilities(&self) -> serde_json::Value {
-        let fs_write_advertised = self.duty() != TrustedProviderRole::Author;
-        serde_json::json!({
-            "fs": {"readTextFile": true, "writeTextFile": fs_write_advertised},
-            "terminal": true
-        })
+        crate::cross_cutting::kimi_code_provider::client_services::advertised_client_capabilities(
+            Some(self.duty()),
+        )
     }
 
     /// 职责矩阵判定(批2 Task 8):受信授予与承载角色映射共用同一矩阵。

@@ -886,20 +886,43 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                     )
                 })?,
             };
-            let canonical = canonical_tool_policy(
-                TOOL_POLICY_PROVIDER_NAME,
-                input
-                    .tool_policy
-                    .as_ref()
-                    .expect("sink-in-place contract implies a wire policy or discipline policy"),
-            )
-            .map_err(|error| {
-                ProviderAdapterError::parse_error(
-                    format!("{context_label}: {error}"),
-                    String::new(),
-                    String::new(),
+            // 决策项①(T20b P0):不 panic——sink 在位而 wire 策略缺席/
+            // marker 形态都是可判定的合同形状:deny/ReviewerVerify →
+            // canonical digest(窗口域);None → 无策略指纹(空串,与
+            // codex T13「无策略合同 run」口径一致);marker 不进本合同
+            // (BOOT-04,root recipe receipt 承担,无三元组)。
+            let tool_policy_digest = match input.tool_policy.as_ref() {
+                Some(
+                    policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                        intent:
+                            crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
+                    },
                 )
-            })?;
+                | Some(
+                    policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                        intent:
+                            crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify { .. },
+                    },
+                ) => canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy)
+                    .map_err(|error| {
+                        ProviderAdapterError::parse_error(
+                            format!("{context_label}: {error}"),
+                            String::new(),
+                            String::new(),
+                        )
+                    })?
+                    .digest,
+                Some(
+                    crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                        intent:
+                            crate::cross_cutting::streaming_provider::ToolPolicyIntent::BootstrapExecutorMarker(_),
+                    },
+                ) => {
+                    // marker 不是合同会话:sink 若在场仅作透传,无策略指纹。
+                    String::new()
+                }
+                None => String::new(),
+            };
             // 批2 Task 20（RevB2T13 ⚠4 同构）：resume 三元组门只服务岗位
             // 纪律会话——非策略合同 run（ReviewerVerify）的连续性由 native
             // 会话承担，不按策略记录门控（不清 id、不误报告警）。
@@ -924,7 +947,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 let current = ProviderStartAudit {
                     workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
                     provider_session_id: resume_id.clone(),
-                    tool_policy_canonical_digest: canonical.digest.clone(),
+                    tool_policy_canonical_digest: tool_policy_digest.clone(),
                     provider_version: provider_version.clone(),
                     adapter_dialect: CLAUDE_POLICY_DIALECT.to_string(),
                     ..ProviderStartAudit::default()
@@ -969,7 +992,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             let role_text =
                 crate::cross_cutting::streaming_provider::adapter_role_text(&input.role)
                     .to_string();
-            policy_context = Some((sink, provider_version, canonical.digest, role_text));
+            policy_context = Some((sink, provider_version, tool_policy_digest, role_text));
         }
         let args = self.build_args(
             input.resume_provider_session_id.as_deref(),

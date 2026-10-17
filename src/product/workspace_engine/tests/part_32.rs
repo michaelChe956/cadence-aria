@@ -195,6 +195,24 @@ fn review_gateway_fixture() -> ReviewGatewayFixture {
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     let worktree = root.path().join("worktree");
     std::fs::create_dir_all(&worktree).expect("create review worktree");
+    // 批2 Task 20b(决策项⑦):审查窗口需要 git 身份——fixture 补
+    // git init+种子提交(T19 契约同款;生产规划 review 对象恒为 git 树)。
+    {
+        use std::process::Command as StdCommand;
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["commit", "-m", "init", "--quiet", "--allow-empty"],
+        ] {
+            let status = StdCommand::new("git")
+                .current_dir(&worktree)
+                .args(&args)
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git fixture {args:?} must succeed");
+        }
+    }
 
     let manifest = LogicalCodebaseManifest::new("project_0001", worktree.clone(), Vec::new());
     let policy_store = AggregatePolicyArtifactStore::new(paths.clone());
@@ -236,6 +254,47 @@ fn review_gateway_fixture() -> ReviewGatewayFixture {
     }
 }
 
+/// 批2 Task 20b(决策项⑦):gateway review 测试的窗口装备——注入
+/// lifecycle store(窗口/快照 store 根)并开真实规划审查窗(生产入口
+/// 同一 helper 面 `begin_plan_review_window`);内层驱动据此铸造
+/// ReviewerVerify 合同并通过网关复验。
+async fn equip_plan_review_window(
+    engine: &mut crate::product::workspace_engine::types::WorkspaceEngine,
+    paths: &crate::product::app_paths::ProductAppPaths,
+) {
+    engine.lifecycle_store = Some(crate::product::lifecycle_store::LifecycleStore::new(
+        paths.clone(),
+    ));
+    // lifecycle store 注入会激活 author baseline fail-closed 链
+    // (baseline_teaching)——种子最小 issue 记录(base_branch 缺省由
+    // resolve_effective_base_branch 解析默认分支)。
+    crate::product::issue_store::IssueStore::new(paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            logical_codebase_id: None,
+            base_branch: None,
+            title: "t20b plan review window fixture".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("seed issue for baseline chain");
+    let reviewer = engine
+        .session
+        .reviewer_provider
+        .clone()
+        .expect("reviewer provider");
+    let worktree = engine
+        .session
+        .repository_path
+        .clone()
+        .expect("repository path");
+    engine
+        .begin_plan_review_window(&reviewer, worktree)
+        .await
+        .expect("plan review window");
+}
+
 #[tokio::test]
 async fn drive_review_session_via_gateway_records_audit_and_completes() {
     let fixture = review_gateway_fixture();
@@ -258,9 +317,10 @@ async fn drive_review_session_via_gateway_records_audit_and_completes() {
     )
     .with_logical_provider_gateway(fixture.gateway.clone());
 
+    equip_plan_review_window(&mut engine, &fixture.paths).await;
     engine.start_review_or_skip().await;
     engine
-        .drive_review_session_via_gateway(empty_provider_commands())
+        .drive_review_session_via_gateway_with_window(empty_provider_commands())
         .await;
 
     assert_eq!(
@@ -326,9 +386,10 @@ async fn drive_review_session_via_gateway_fails_closed_for_unavailable_kimi_revi
     )
     .with_logical_provider_gateway(fixture.gateway.clone());
 
+    equip_plan_review_window(&mut engine, &fixture.paths).await;
     engine.start_review_or_skip().await;
     engine
-        .drive_review_session_via_gateway(empty_provider_commands())
+        .drive_review_session_via_gateway_with_window(empty_provider_commands())
         .await;
 
     let mut start_failure = None;
@@ -357,8 +418,9 @@ async fn drive_review_session_via_gateway_fails_closed_for_unavailable_kimi_revi
     // 若被顶替则启动成功、stream_launches 变 1(上方零启动断言即红)。
     let seen = fixture.capabilities.seen_provider_refs();
     assert!(
-        seen.iter().any(|r| r.provider_type == ProviderRefType::KimiCode
-            && r.capability_snapshot_ref == "cap_managed_snapshot"),
+        seen.iter()
+            .any(|r| r.provider_type == ProviderRefType::KimiCode
+                && r.capability_snapshot_ref == "cap_managed_snapshot"),
         "the review launch must validate the session-configured Kimi reviewer, got {seen:?}"
     );
 }
@@ -387,9 +449,10 @@ async fn drive_review_session_via_gateway_blocks_codex_reviewer_at_route() {
     )
     .with_logical_provider_gateway(fixture.gateway.clone());
 
+    equip_plan_review_window(&mut engine, &fixture.paths).await;
     engine.start_review_or_skip().await;
     engine
-        .drive_review_session_via_gateway(empty_provider_commands())
+        .drive_review_session_via_gateway_with_window(empty_provider_commands())
         .await;
 
     let mut start_failure = None;

@@ -54,7 +54,7 @@ async fn work_item_plan_outline_review_repair_preserves_scope_and_business_paylo
         queued_work_item_plan_outline_review_engine("sess_wip_outline_repair_success").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
@@ -121,7 +121,7 @@ async fn work_item_plan_outline_repair_provider_failure_safely_degrades() {
         queued_work_item_plan_outline_review_engine("sess_wip_outline_repair_terminal").await;
 
     engine
-        .drive_review_session(Arc::new(provider), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider), empty_provider_commands())
         .await;
 
     assert_eq!(engine.session.stage, WorkspaceStage::HumanConfirm);
@@ -167,7 +167,7 @@ async fn work_item_plan_outline_review_repair_rejects_payload_change() {
         queued_work_item_plan_outline_review_engine("sess_wip_outline_repair_changed").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
@@ -213,7 +213,7 @@ async fn work_item_plan_outline_review_repair_keeps_active_scope_schema_strict()
         queued_work_item_plan_outline_review_engine("sess_wip_outline_repair_scope_mismatch").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);

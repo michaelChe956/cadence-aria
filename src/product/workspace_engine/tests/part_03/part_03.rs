@@ -17,7 +17,7 @@ async fn strong_review_findings_route_author_confirm_or_review_decision_for_all_
         engine.start_review().await;
 
         engine
-            .drive_review_session(
+            .drive_review_session_with_window(
                 Arc::new(ReviewVerdictStreamingProvider {
                     output: r#"必须补充验收标准。
 
@@ -89,7 +89,7 @@ async fn revise_without_findings_enters_user_triage_for_all_workspace_types() {
         engine.start_review().await;
 
         engine
-            .drive_review_session(
+            .drive_review_session_with_window(
                 Arc::new(ReviewVerdictStreamingProvider {
                     output: r#"Reviewer 明确要求返修，但未输出结构化 finding。
 
@@ -163,7 +163,7 @@ async fn malformed_findings_enter_user_triage_for_all_workspace_types() {
         engine.start_review().await;
 
         engine
-            .drive_review_session(
+            .drive_review_session_with_window(
                 Arc::new(ReviewVerdictStreamingProvider {
                     output: r#"Reviewer 明确要求返修，但 findings 结构错误。
 
@@ -429,7 +429,7 @@ async fn drive_review_session_strong_revise_returns_to_author_confirm() {
         .await;
 
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"需要补充失败路径。
 
@@ -704,7 +704,7 @@ async fn kimi_review_repairs_missing_json_nonce_once_for_all_workspace_types() {
         engine.session.reviewer_provider = Some(ProviderName::KimiCode);
 
         engine
-            .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+            .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
             .await;
 
         assert_eq!(provider.starts.load(Ordering::SeqCst), 2, "{case_name}");
@@ -748,7 +748,7 @@ async fn review_structured_output_repair_failure_persists_diagnostic() {
         queued_review_engine("sess_review_repair_failure").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
@@ -793,7 +793,7 @@ async fn review_structured_output_repair_rejects_payload_change() {
     engine.session.reviewer_provider = Some(ProviderName::KimiCode);
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
@@ -830,7 +830,7 @@ async fn invalid_review_json_retries_same_input_without_verifiable_payload_repai
         queued_review_engine("sess_review_invalid_json_no_repair").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
@@ -869,7 +869,7 @@ async fn invalid_json_retries_once_within_invocation_and_consumes_recovery() {
         queued_review_engine("sess_review_invalid_json_retry_success").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
@@ -914,7 +914,7 @@ async fn invalid_json_retry_failure_preserves_diagnostic_and_counts_nothing() {
         queued_work_item_plan_outline_review_engine("sess_review_invalid_json_retry_failed").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     // 恰一次重试：两次 provider 启动后不再追加第三次。
@@ -955,7 +955,7 @@ async fn malformed_review_findings_do_not_trigger_business_rewrite() {
         queued_review_engine("sess_review_malformed_findings_no_repair").await;
 
     engine
-        .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
         .await;
 
     assert_eq!(provider.starts.load(Ordering::SeqCst), 1);

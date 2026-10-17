@@ -412,17 +412,17 @@ pub(crate) fn host_coding_check_contract() -> &'static str {
 pub(crate) fn code_review_material_protocol(context: &RoutingReferenceContext) -> String {
     with_cadence_routing_reference(
         concat!(
-            "当前阶段：只读代码审查。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改文件。\n",
+            "当前阶段：代码审查（ReviewerVerify）。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改交付源码。\n",
             "首个用户可见消息必须是工作流路由回执；该回执不属于最终审查结论，不能因 JSON 合同省略。完成必调 Skill 与原始规则读取后，最终审查结论必须只输出一个 JSON 对象，不要输出 Markdown、解释、验证报告或表格。\n\
      CodeReviewer 审查协议:\n\
-     - 只分析当前变更 diff，不修改代码、不执行写操作。\n\
+     - 只分析当前变更 diff，不得修改交付源码；验证所需的临时文件、脚本与构建产物允许创建，轮次结束由平台按审查窗口基线恢复与对账。\n\
      - 在给出 verdict 前，必须从“原始需求上下文”和 EvaluationContextPack 中提取本次任务的审查清单。\n\
      - 审查清单必须覆盖：实现目标、允许修改范围、禁止修改范围、TDD/测试要求、验证命令与证据、完成前自检要求、交接契约与能力、需求/设计追踪关系。\n\
      - EvaluationContextPack.CoderEvidencePack 是 coder 已执行工作的证据包；必须优先审查其中的 role run、raw/artifact refs、completion report 和 evidence_warnings。\n\
      - WorkItemGroup 当前 Unit 的 completion commit 与 HandoffRevision 在 Code Review approve 后才生成；Code Review 前为空是正常状态，不得据此创建 finding、request_changes 或 blocked。\n\
      - Code Review 阶段应以 Coder completion report、raw/artifact refs、实际测试输出和当前 Unit diff 判断验证证据；真正缺失或自相矛盾的 required verification evidence 仍必须记录。\n\
      - 不得重复执行 required verification commands；除非证据缺失、证据自相矛盾或用户/Work Item 明确要求 reviewer 复跑，否则只基于 CoderEvidencePack、diff 和任务材料判断。\n\
-     - 复跑验证命令时必须在隔离 worktree 内执行（以 worktree 纪律段钉定的绝对路径为准）；禁止在任何成员主 checkout 执行验证、构建或测试命令（cargo 等）或任何写操作/git mutation。\n\
+     - 复跑验证命令时在隔离 worktree 内执行（以 reviewer_verify_discipline 纪律段钉定的绝对路径为准）；禁止在任何成员主 checkout 执行验证、构建或测试命令（cargo 等）或任何写操作/git mutation。\n\
      - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围、验证计划、自检要求和交接契约。\n\
      - 如果 coder 报告或 EvaluationContextPack 中缺少 required 验证命令的执行证据，必须作为 finding 记录；若该证据是完成本 Work Item 的必要条件，verdict 应为 request_changes 或 blocked。\n\
      - 待人工处理事项不是缺陷：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，由人工在流程末端确认。coder 如实登记这些事项即为正确交付，不得因其“尚未验证”创建 finding、给出 request_changes 或 blocked；缺少浏览器等人工环境同理。\n\
@@ -443,7 +443,7 @@ pub(crate) fn code_review_material_protocol(context: &RoutingReferenceContext) -
 pub(crate) fn group_final_review_material_protocol(context: &RoutingReferenceContext) -> String {
     with_cadence_routing_reference(
         concat!(
-            "当前阶段：组级 PR 最终只读审查。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改文件。\n",
+            "当前阶段：组级 PR 最终审查（ReviewerVerify）。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改交付源码；验证临时产物允许，轮次结束由平台按审查窗口基线恢复与对账。\n",
             "WorkItemGroup GroupFinalReview 审查协议:\n\
      - 你必须从 Completed Units、HandoffRevision、EvaluationContextPack 和完整 diff 中提取整组审查清单。\n\
      - 跨 unit 交接的审查对象是 HandoffRevision 的契约与能力语义：Completed Units 段落中每个 unit 的 Provided Contracts 与 Provided Capabilities。不存在自然语言交接摘要，不得要求或期待它。\n\
@@ -1014,8 +1014,12 @@ mod tests {
         for context in [RoutingReferenceContext::Legacy, logical_context()] {
             let protocol = code_review_material_protocol(&context);
             assert!(
-                protocol.contains("复跑验证命令时必须在隔离 worktree 内执行"),
+                protocol.contains("复跑验证命令时在隔离 worktree 内执行"),
                 "reviewer 复跑口必须收口到 worktree:\n{protocol}"
+            );
+            assert!(
+                protocol.contains("reviewer_verify_discipline"),
+                "复跑口必须锚定 ReviewerVerify 纪律段:\n{protocol}"
             );
             assert!(
                 protocol.contains("禁止在任何成员主 checkout 执行验证、构建或测试命令"),

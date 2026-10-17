@@ -607,14 +607,34 @@ impl StreamingProviderAdapter for PiProvider {
                     .map_err(tool_policy_session_error)?
                 }
             };
-            let canonical = canonical_tool_policy(
-                TOOL_POLICY_PROVIDER_NAME,
-                input
-                    .tool_policy
-                    .as_ref()
-                    .expect("sink-in-place contract implies a wire policy or discipline policy"),
-            )
-            .map_err(|error| tool_policy_session_error(format!("{context_label}: {error}")))?;
+            // 决策项①(T20b P0):不 panic——deny/ReviewerVerify → canonical
+            // digest(窗口域);None → 无策略指纹(空串,codex T13 口径);
+            // marker 不进本合同(BOOT-04,root recipe receipt 承担)。
+            let tool_policy_digest = match input.tool_policy.as_ref() {
+                Some(
+                    policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                        intent:
+                            crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
+                    },
+                )
+                | Some(
+                    policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                        intent:
+                            crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify { .. },
+                    },
+                ) => canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy)
+                    .map_err(|error| {
+                        tool_policy_session_error(format!("{context_label}: {error}"))
+                    })?
+                    .digest,
+                Some(
+                    crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                        intent:
+                            crate::cross_cutting::streaming_provider::ToolPolicyIntent::BootstrapExecutorMarker(_),
+                    },
+                ) => String::new(),
+                None => String::new(),
+            };
             // 批2 Task 20（RevB2T13 ⚠4 同构）：resume 三元组门只服务岗位
             // 纪律会话；非策略合同 run 连续性由 native 会话承担。
             let resume_id = if discipline_policy {
@@ -634,7 +654,7 @@ impl StreamingProviderAdapter for PiProvider {
                 let current = ProviderStartAudit {
                     workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
                     provider_session_id: resume_id.clone(),
-                    tool_policy_canonical_digest: canonical.digest.clone(),
+                    tool_policy_canonical_digest: tool_policy_digest.clone(),
                     provider_version: provider_version.clone(),
                     adapter_dialect: PI_POLICY_DIALECT.to_string(),
                     ..ProviderStartAudit::default()
@@ -667,7 +687,12 @@ impl StreamingProviderAdapter for PiProvider {
                 .filter(|id| !id.is_empty())
                 .map(ToString::to_string)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            policy_start = Some((sink, provider_version, canonical.digest, native_session_id));
+            policy_start = Some((
+                sink,
+                provider_version,
+                tool_policy_digest,
+                native_session_id,
+            ));
         }
         let resume_session_id = match &policy_start {
             Some((_, _, _, native_session_id)) => Some(native_session_id.clone()),

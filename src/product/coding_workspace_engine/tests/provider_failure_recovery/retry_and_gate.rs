@@ -111,7 +111,11 @@ async fn reviewer_three_transport_failures_open_one_human_gate_after_third_run()
     assert!(
         inputs
             .iter()
-            .all(|input| input.prompt.contains("当前阶段：只读代码审查"))
+            // T20b 决策项⑤:审查协议头不再「只读」——验证临时产物允许,
+            // 禁改交付源码+窗口对账。
+            .all(|input| input
+                .prompt
+                .contains("当前阶段：代码审查（ReviewerVerify）"))
     );
     assert!(
         inputs

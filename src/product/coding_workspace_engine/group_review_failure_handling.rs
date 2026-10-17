@@ -154,7 +154,14 @@ impl CodingWorkspaceEngine {
         node_id: &str,
         role_run_id: &str,
         error: CodingWorkspaceEngineError,
+        review_window: Option<&crate::product::reviewer_window::ReviewerWindowHandle>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
+        // 批2 Task 20b(决策项⑧):group 审查窗在失败收尾前技术收口
+        // (锁保持到恢复完成;收口错误只 warn 不掩盖原始错误)。
+        if let Some(window) = review_window {
+            self.close_reviewer_window_after_failure(window, "group_review_failed")
+                .await;
+        }
         let message = error.to_string();
         match group_review_failure_disposition(&error) {
             GroupReviewFailureDisposition::Blocked => {
@@ -246,6 +253,7 @@ impl CodingWorkspaceEngine {
         node_id: &str,
         role_run_id: &str,
         error: GroupReviewOrchestrationError,
+        review_window: Option<&crate::product::reviewer_window::ReviewerWindowHandle>,
     ) -> Result<InternalPrReview, CodingWorkspaceEngineError> {
         let gate_id = match &error {
             GroupReviewOrchestrationError::CapacityExceeded
@@ -266,6 +274,7 @@ impl CodingWorkspaceEngine {
                             node_id,
                             role_run_id,
                             CodingWorkspaceEngineError::Store(store_error),
+                            review_window,
                         )
                         .await;
                 }
@@ -279,7 +288,7 @@ impl CodingWorkspaceEngine {
             | GroupReviewOrchestrationError::Executor(_) => None,
         };
         let mapped = map_group_review_orchestration_error(error, gate_id);
-        self.finalize_group_review_failure(attempt, node_id, role_run_id, mapped)
+        self.finalize_group_review_failure(attempt, node_id, role_run_id, mapped, review_window)
             .await
     }
 }

@@ -17,7 +17,52 @@ use crate::product::workspace_engine::provider_drive::{
 use crate::product::workspace_engine::types::ReviewProviderRunFailure;
 
 impl WorkspaceEngine {
+    /// 批2 Task 20b(决策项⑦):公共入口——reviewer 解析后、一切材料采集
+    /// (ensure_review_invocation_scope/build_review_input/load_plan_review_
+    /// context)之前**无条件开窗**;失败 fail-closed 不以无窗继续;轮次
+    /// 结束(成功/失败/中止)统一技术收口(干净恢复+释放;违规留人工门)。
     pub async fn drive_review_session(
+        &mut self,
+        provider: Arc<dyn StreamingProviderAdapter>,
+        command_rx: mpsc::Receiver<ProviderCommand>,
+    ) {
+        // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）不驱动 review
+        // run——错误事件＋失败收尾，绝不以 Codex 顶替。
+        let Some(reviewer) = self.session.reviewer_provider.clone() else {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::Error {
+                    message: "reviewer_configuration_missing: review run not started".to_string(),
+                })
+                .await;
+            self.finish_failed_run().await;
+            return;
+        };
+        // T20b:开窗早于材料采集(生产入口无条件;测试内层直调走
+        // `drive_review_session_with_window`,无窗形态=内层测试 seam)。
+        let review_target = self
+            .session
+            .repository_path
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        if let Err(message) = self
+            .begin_plan_review_window(&reviewer, review_target)
+            .await
+        {
+            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+            self.finish_failed_run().await;
+            return;
+        }
+        self.drive_review_session_with_window(provider, command_rx)
+            .await;
+        // 统一收口(覆盖成功/失败/中止一切退出;内层已收口时幂等)。
+        self.close_plan_review_window("plan_review_completed").await;
+    }
+
+    /// 内层承载(批2 Task 20b):公共入口开窗后进入;测试面可直接调用
+    /// (无活动窗=测试 seam,真实 adapter 由四家启动检查/网关复验拒绝)。
+    /// 每次 provider 启动前同源复验窗口 Running。
+    pub(crate) async fn drive_review_session_with_window(
         &mut self,
         provider: Arc<dyn StreamingProviderAdapter>,
         command_rx: mpsc::Receiver<ProviderCommand>,
@@ -65,6 +110,13 @@ impl WorkspaceEngine {
         // P1-2：reviewer 是策略角色——与 author 主流同法绑定 run-bound durable
         // sink（持久 store 缺失时不接线，真实 adapter 对 policy+缺 sink fail-closed）。
         let input = self.attach_tool_policy_audit(input);
+        // T20b(决策项⑦):provider 启动前同源复验——窗口 Running 且材料
+        // 与 baseline 同指纹(fail-closed,不无窗启动)。
+        if let Err(message) = self.assert_plan_review_window() {
+            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+            self.finish_failed_run().await;
+            return;
+        }
         // F-19：reviewer run 拉起前登记 provider start（诊断面，best-effort）。
         self.register_provider_start_in_ledger(
             ProviderConversationRole::Reviewer,
@@ -120,6 +172,13 @@ impl WorkspaceEngine {
                 )
                 .await;
                 let repair_input = self.attach_tool_policy_audit(repair_input);
+                // T20b:repair 入口同窗复验(恢复成功不洗白;窗口失效
+                // 即停,不换窗续跑)。
+                if let Err(message) = self.assert_plan_review_window() {
+                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                    self.finish_failed_run().await;
+                    return;
+                }
                 let repair_session = provider.start(repair_input, self.cancel.clone()).await;
                 let repair_result = self
                     .drive_reviewer_provider_session_once(
@@ -238,6 +297,12 @@ impl WorkspaceEngine {
                         .filter(|session_id| !session_id.trim().is_empty()),
                     ..input.clone()
                 };
+                // T20b:静默重试同窗复验(不换窗、不清窗)。
+                if let Err(message) = self.assert_plan_review_window() {
+                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                    self.finish_failed_run().await;
+                    return;
+                }
                 let retry_session = provider.start(retry_input, self.cancel.clone()).await;
                 self.complete_silent_output_retry(
                     &first_completion,
@@ -262,7 +327,42 @@ impl WorkspaceEngine {
     /// 仅在注入 `logical_provider_gateway` 后由 handler 调用(调用前先判
     /// `logical_provider_gateway().is_some()`);None 属编程错误——生产正常序列
     /// 该分支不可达,故 `expect` 直接暴露而非静默吞掉。
+    /// 批2 Task 20b(决策项⑦):gateway 版公共入口——同 direct 版,
+    /// 材料采集前无条件开窗,轮次结束统一收口。
     pub(crate) async fn drive_review_session_via_gateway(
+        &mut self,
+        command_rx: mpsc::Receiver<ProviderCommand>,
+    ) {
+        let Some(reviewer) = self.session.reviewer_provider.clone() else {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::Error {
+                    message: "reviewer_configuration_missing: review run not started".to_string(),
+                })
+                .await;
+            self.finish_failed_run().await;
+            return;
+        };
+        let review_target = self
+            .session
+            .repository_path
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        if let Err(message) = self
+            .begin_plan_review_window(&reviewer, review_target)
+            .await
+        {
+            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+            self.finish_failed_run().await;
+            return;
+        }
+        self.drive_review_session_via_gateway_with_window(command_rx)
+            .await;
+        self.close_plan_review_window("plan_review_completed").await;
+    }
+
+    /// gateway 版内层承载(测试 seam 同 direct 版)。
+    pub(crate) async fn drive_review_session_via_gateway_with_window(
         &mut self,
         command_rx: mpsc::Receiver<ProviderCommand>,
     ) {
@@ -320,6 +420,12 @@ impl WorkspaceEngine {
         // P1-2：gateway review 路径同样绑定 run-bound durable sink（input 进入
         // validated 包装前附着，sink 随 input 原样透传 gateway.start_streaming）。
         let input = self.attach_tool_policy_audit(input);
+        // T20b(决策项⑦):gateway 启动前同源复验(窗口 Running+指纹一致)。
+        if let Err(message) = self.assert_plan_review_window() {
+            let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+            self.finish_failed_run().await;
+            return;
+        }
         // F-19：gateway review 路径同样登记 reviewer provider start（k3 P2——
         // drive_review_session 的镜像，logical repository 会话实际走此分支）。
         self.register_provider_start_in_ledger(
@@ -386,6 +492,12 @@ impl WorkspaceEngine {
                 let repair_input = self.attach_tool_policy_audit(repair_input);
                 // 修复轮：首发已成功启动（trust 已复验通过），结构化等待
                 // 恒 None——解包丢弃。
+                // T20b:repair 入口同窗复验。
+                if let Err(message) = self.assert_plan_review_window() {
+                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                    self.finish_failed_run().await;
+                    return;
+                }
                 let (repair_session, _repair_trust_waiting) = start_review_session_via_gateway(
                     &gateway,
                     &reviewer,
@@ -509,6 +621,12 @@ impl WorkspaceEngine {
                 };
                 // 静默重试：首发已成功启动（trust 已复验通过），结构化等待
                 // 恒 None——解包丢弃。
+                // T20b:静默重试同窗复验。
+                if let Err(message) = self.assert_plan_review_window() {
+                    let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                    self.finish_failed_run().await;
+                    return;
+                }
                 let (retry_session, _retry_trust_waiting) = start_review_session_via_gateway(
                     &gateway,
                     &reviewer,
@@ -1271,6 +1389,16 @@ fn provider_allows_review_repair(provider: &ProviderName) -> bool {
 /// 指引卡简化补缺：返回值携带分类桥同源等待投影（`trust_waiting`，仅
 /// trust 分型命中且启动失败时 Some）——reviewer 首发臂消费它紧随 error
 /// 事件发出 `EngineEvent::TrustMissingGuidance`；启动成功恒 None。
+/// 批2 Task 20b(决策项⑦):规划面活动审查窗——句柄+同源复验的期望
+/// 事实(worktree/provider/run_id 在开窗时冻结;assert 不再回读会话
+/// 字段,repair/静默重试与测试换装会话字段零漂移)。
+pub(crate) struct ActivePlanReviewWindow {
+    pub(crate) handle: crate::product::reviewer_window::ReviewerWindowHandle,
+    pub(crate) worktree: std::path::PathBuf,
+    pub(crate) provider: String,
+    pub(crate) run_id: String,
+}
+
 async fn start_review_session_via_gateway(
     gateway: &Arc<LogicalCodebaseProviderGateway>,
     reviewer: &ProviderName,
@@ -1361,6 +1489,240 @@ fn map_gateway_error_to_adapter(error: &ProviderGatewayError) -> ProviderAdapter
             mapped
         }
         _ => ProviderAdapterError::provider_unavailable(error.to_string()),
+    }
+}
+
+// ---- 批2 Task 20b(决策项⑦):规划面 reviewer 审查窗口 ----
+// 约定:窗口/快照/资源 store 根与 coding_workspace_engine::code_review 的
+// `REVIEWER_WINDOW_STORE_DIR`/`REVIEWER_SNAPSHOT_STORE_DIR`/
+// `PROVIDER_RESOURCE_STORE_DIR` 同名同根(跨模块字面量锚定,不跨模块引用
+// 私有常量——与 coding_attempt_store/git_operation.rs 同款约定)。
+const PLAN_REVIEWER_WINDOW_STORE_DIR: &str = "reviewer-windows";
+const PLAN_REVIEWER_SNAPSHOT_STORE_DIR: &str = "reviewer-snapshots";
+const PLAN_PROVIDER_RESOURCE_STORE_DIR: &str = "provider-resources";
+
+impl WorkspaceEngine {
+    fn plan_reviewer_window_store(
+        &self,
+    ) -> Result<crate::product::reviewer_window_store::ReviewerWindowStore, String> {
+        let store = self.lifecycle_store.as_ref().ok_or_else(|| {
+            "plan_review_window_unavailable: no persistent lifecycle store".to_string()
+        })?;
+        Ok(
+            crate::product::reviewer_window_store::ReviewerWindowStore::new(
+                store
+                    .app_paths()
+                    .root()
+                    .join(PLAN_REVIEWER_WINDOW_STORE_DIR),
+            ),
+        )
+    }
+
+    fn plan_reviewer_snapshot_store(
+        &self,
+    ) -> Result<crate::product::reviewer_snapshot::ReviewerSnapshotStore, String> {
+        let store = self.lifecycle_store.as_ref().ok_or_else(|| {
+            "plan_review_window_unavailable: no persistent lifecycle store".to_string()
+        })?;
+        Ok(
+            crate::product::reviewer_snapshot::ReviewerSnapshotStore::new(
+                store
+                    .app_paths()
+                    .root()
+                    .join(PLAN_REVIEWER_SNAPSHOT_STORE_DIR),
+            ),
+        )
+    }
+
+    /// 规划面 quiesce 目标:主 scope=本次 review run(空登记 Quiescent 即
+    /// 静止证明;与 coding 面同构,不含 aria.worktree 协调 scope——规划
+    /// 面无 Coder 并行窗登记)。
+    fn plan_review_quiesce_targets(
+        &self,
+        window_id: &str,
+    ) -> Result<Vec<crate::cross_cutting::provider_resources::ProviderRunResourceScope>, String>
+    {
+        use crate::cross_cutting::provider_resources::{
+            ProviderRunResourceScope, ResourceScopeKey,
+        };
+        let store = self.lifecycle_store.as_ref().ok_or_else(|| {
+            "plan_review_window_unavailable: no persistent lifecycle store".to_string()
+        })?;
+        let private_root = store
+            .app_paths()
+            .root()
+            .join("plan-review-scopes")
+            .join(window_id);
+        std::fs::create_dir_all(&private_root)
+            .map_err(|error| format!("plan_review_scope_create_failed: {error}"))?;
+        let key = ResourceScopeKey {
+            scope_id: format!("plan-review-{window_id}"),
+            run_id: self
+                .active_run_id
+                .clone()
+                .unwrap_or_else(|| self.session.session_id.clone()),
+            boot_identity: format!("aria-engine-{}", std::process::id()),
+        };
+        let scope = ProviderRunResourceScope::open_for_recovery(
+            &key,
+            Some(window_id),
+            &private_root,
+            &store
+                .app_paths()
+                .root()
+                .join(PLAN_PROVIDER_RESOURCE_STORE_DIR),
+            None,
+        )
+        .map_err(|error| format!("plan_review_scope_open_failed: {error}"))?;
+        Ok(vec![scope])
+    }
+
+    /// 入口开窗(T17 冻结顺序):必须早于 `ensure_review_invocation_scope`/
+    /// `build_review_input`/`load_plan_review_context` 的一切材料采集。
+    /// 失败 fail-closed——不以无窗继续 review。
+    pub(crate) async fn begin_plan_review_window(
+        &mut self,
+        reviewer: &ProviderName,
+        worktree: std::path::PathBuf,
+    ) -> Result<(), String> {
+        let window_id = format!(
+            "plan-{}-w01",
+            self.active_run_id
+                .clone()
+                .unwrap_or_else(|| self.session.session_id.clone())
+        );
+        let worktree = worktree.canonicalize().unwrap_or(worktree);
+        let provider = serde_json::to_string(reviewer)
+            .map(|raw| raw.trim_matches('"').to_string())
+            .unwrap_or_else(|_| format!("{reviewer:?}"));
+        let targets = self.plan_review_quiesce_targets(&window_id)?;
+        let target_refs: Vec<&crate::cross_cutting::provider_resources::ProviderRunResourceScope> =
+            targets.iter().collect();
+        let request = crate::product::reviewer_window::ReviewerWindowBeginRequest {
+            window_id: &window_id,
+            attempt_id: &self.session.session_id,
+            run_id: self
+                .active_run_id
+                .as_deref()
+                .unwrap_or(&self.session.session_id),
+            provider: &provider,
+            worktree: &worktree,
+            quiesce_targets: &target_refs,
+            platform_write_paths: Vec::new(),
+            budget: crate::product::reviewer_snapshot::SnapshotBudget {
+                max_entries: 200_000,
+                max_total_bytes: 2 * 1024 * 1024 * 1024,
+            },
+            drain_timeout: std::time::Duration::from_secs(60),
+        };
+        let window = crate::product::reviewer_window::begin_review_window(
+            &self.plan_reviewer_window_store()?,
+            &self.plan_reviewer_snapshot_store()?,
+            &request,
+        )
+        .await
+        .map_err(|error| format!("plan_review_window_begin_failed: {error}"))?;
+        let run_id = self
+            .active_run_id
+            .clone()
+            .unwrap_or_else(|| self.session.session_id.clone());
+        self.active_review_window = Some(ActivePlanReviewWindow {
+            handle: window,
+            worktree,
+            provider,
+            run_id,
+        });
+        Ok(())
+    }
+
+    /// 材料采集/provider 启动前同源复验(窗口 Running+指纹一致)。
+    fn assert_plan_review_window(&self) -> Result<(), String> {
+        let Some(active) = self.active_review_window.as_ref() else {
+            return Ok(());
+        };
+        let expectation = crate::product::reviewer_window::WindowExpectation {
+            window_id: &active.handle.window_id,
+            attempt_id: &self.session.session_id,
+            run_id: &active.run_id,
+            provider: &active.provider,
+            worktree: &active.worktree,
+        };
+        let proof = crate::product::reviewer_window::assert_review_window_current(
+            &self.plan_reviewer_window_store()?,
+            &self.plan_reviewer_snapshot_store()?,
+            &expectation,
+            &[crate::product::reviewer_window_store::ReviewerWindowState::Running],
+        )
+        .map_err(|error| format!("plan_review_window_not_current: {error}"))?;
+        if proof.manifest_sha256 != active.handle.manifest_sha256 {
+            return Err("plan_review_window_material_fingerprint_drift".to_string());
+        }
+        Ok(())
+    }
+
+    /// reviewer 输入的 ReviewerVerify 窗口合同铸造(prompt 八点共用的
+    /// 唯一窗口来源;无活动窗=None,由四家启动检查/网关复验拒绝)。
+    pub(crate) fn reviewer_verify_policy(&self) -> Option<ProviderToolPolicy> {
+        self.active_review_window
+            .as_ref()
+            .map(|active| ProviderToolPolicy::reviewer_verify(active.handle.window_id.clone()))
+    }
+
+    /// 收口:干净恢复+释放(技术回收;规划面 verdict 无报告采信投影,
+    /// 消费面采信由后续交付门承担——与 legacy group 面同口径披露)。
+    async fn close_plan_review_window(&mut self, reason: &str) {
+        let Some(active) = self.active_review_window.take() else {
+            return;
+        };
+        let window = active.handle;
+        let (Ok(window_store), Ok(snapshot_store)) = (
+            self.plan_reviewer_window_store(),
+            self.plan_reviewer_snapshot_store(),
+        ) else {
+            tracing::warn!("plan_review_window_close_store_unavailable");
+            return;
+        };
+        let record = match crate::product::reviewer_window::begin_quiesce(
+            &window_store,
+            &window.window_id,
+            window.generation,
+            reason,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(%error, window = %window.window_id, "plan_review_window_close_kept_lock");
+                return;
+            }
+        };
+        match crate::product::reviewer_window::restore_window(
+            &window_store,
+            &snapshot_store,
+            &window.window_id,
+            record.generation,
+        )
+        .await
+        {
+            Ok(summary) => {
+                if summary.manual_gate {
+                    tracing::warn!(
+                        window = %window.window_id,
+                        "plan_review_window_violation_manual_gate"
+                    );
+                    return;
+                }
+                if let Err(error) = crate::product::reviewer_window::abandon_window(
+                    &window_store,
+                    &window.window_id,
+                    summary.record.generation,
+                    reason,
+                ) {
+                    tracing::warn!(%error, window = %window.window_id, "plan_review_window_abandon_failed");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, window = %window.window_id, "plan_review_window_close_kept_lock");
+            }
+        }
     }
 }
 #[cfg(test)]

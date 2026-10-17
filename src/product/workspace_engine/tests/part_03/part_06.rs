@@ -167,15 +167,19 @@ async fn persistent_queued_review_engine_for(
         WorkspaceType::WorkItemPlan => "work_item_plan_0001",
     };
     let session_record = lifecycle_store
-        .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
-        issue_id: "issue_0001".to_string(),
-        entity_id: entity_id.to_string(),
-        workspace_type,
-        author_provider: ProviderName::ClaudeCode,
-        reviewer_provider: Some(ProviderName::Codex),
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: entity_id.to_string(),
+            workspace_type,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
 
-        review_rounds: 2,
-        superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
+            review_rounds: 2,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+            work_item_plan_options: None,
+        })
         .expect("persistent review session");
     let mut session = WorkspaceSession::from_record(session_record);
     session.artifact = Some(artifact);
@@ -241,7 +245,7 @@ async fn review_structured_output_repair_succeeds_for_all_general_workspace_type
             queued_review_engine_for(&session_id, workspace_type, artifact).await;
 
         engine
-            .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+            .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
             .await;
 
         assert_eq!(provider.starts.load(Ordering::SeqCst), 2);
@@ -337,7 +341,7 @@ async fn repair_terminal_paths_close_started_event_as_failed() {
                 .await;
 
             engine
-                .drive_review_session(Arc::new(provider), empty_provider_commands())
+                .drive_review_session_with_window(Arc::new(provider), empty_provider_commands())
                 .await;
 
             // spec-design-dialog-revision T5：Story/Design repair 终态 review 完成统一回 AuthorConfirm
@@ -478,7 +482,7 @@ async fn repair_permission_timeout_resolves_persisted_request_before_fallback_re
         .await;
 
     engine
-        .drive_review_session(Arc::new(provider), empty_provider_commands())
+        .drive_review_session_with_window(Arc::new(provider), empty_provider_commands())
         .await;
 
     // spec-design-dialog-revision T5：Story repair permission timeout 终态 review 完成回 AuthorConfirm（报告进对话流）。
@@ -580,7 +584,7 @@ async fn repair_abort_closes_started_event_as_failed() {
     });
 
     engine
-        .drive_review_session(Arc::new(provider), command_rx)
+        .drive_review_session_with_window(Arc::new(provider), command_rx)
         .await;
     abort.await.unwrap();
 
@@ -609,7 +613,7 @@ async fn missing_or_blank_first_provider_session_id_starts_one_fresh_session_rep
             queued_review_engine("sess_repair_missing_provider_session").await;
 
         engine
-            .drive_review_session(Arc::new(provider.clone()), empty_provider_commands())
+            .drive_review_session_with_window(Arc::new(provider.clone()), empty_provider_commands())
             .await;
 
         assert_eq!(provider.starts.load(Ordering::SeqCst), 2);

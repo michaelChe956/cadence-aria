@@ -246,6 +246,7 @@ async fn group_review_material_failure_keeps_business_error_when_terminal_lock_w
             CodingWorkspaceEngineError::GroupReviewMaterial(
                 "unit_cross_review_record_exceeds_size_limit".into(),
             ),
+            None,
         )
         .await
         .expect_err("group review material failure remains surfaced");

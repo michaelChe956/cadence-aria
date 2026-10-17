@@ -336,6 +336,7 @@ impl WorkspaceEngine {
             logical_launch_fingerprints: HashMap::new(),
             last_gate_close_compile_failure: None,
             confirmation_trust_context: None,
+            active_review_window: None,
         }
     }
 
@@ -621,6 +622,7 @@ impl WorkspaceEngine {
             logical_launch_fingerprints: HashMap::new(),
             last_gate_close_compile_failure: None,
             confirmation_trust_context: None,
+            active_review_window: None,
         }
     }
 

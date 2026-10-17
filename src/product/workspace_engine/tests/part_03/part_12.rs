@@ -15,7 +15,8 @@ async fn plan_repair_reviewer_orchestration_binds_initial_and_shrink_scope_attes
         .next()
         .unwrap()
         .clone();
-    let previous_work_item_revision_id = outcome.plan_revision.work_item_bindings[&logical_id].clone();
+    let previous_work_item_revision_id =
+        outcome.plan_revision.work_item_bindings[&logical_id].clone();
     let minimum_scope_unit = outcome
         .plan_revision
         .work_item_bindings
@@ -25,9 +26,7 @@ async fn plan_repair_reviewer_orchestration_binds_initial_and_shrink_scope_attes
         .clone();
     let amendment_id = "plan_amendment_review_candidate_0001";
     let request_id = "plan_repair_request_review_candidate_0001";
-    let plan = store
-        .acquire_active_amendment(&plan, amendment_id)
-        .unwrap();
+    let plan = store.acquire_active_amendment(&plan, amendment_id).unwrap();
     let request = crate::product::models::PlanRepairRequest {
         id: request_id.to_string(),
         plan_id: plan.id.clone(),
@@ -186,7 +185,7 @@ async fn plan_repair_reviewer_orchestration_binds_initial_and_shrink_scope_attes
 
     engine.begin_work_item_plan_outline_review_run().await;
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"候选修订通过 Plan Review。
 
@@ -241,8 +240,16 @@ async fn plan_repair_reviewer_orchestration_binds_initial_and_shrink_scope_attes
         "plan_repair_impact_scope_review_0001"
     );
     let re_review_input = engine.build_work_item_plan_review_input().unwrap();
-    assert!(re_review_input.prompt.contains("System Minimum Impact Scope"));
-    assert!(re_review_input.prompt.contains("Proposed Accepted Impact Scope"));
+    assert!(
+        re_review_input
+            .prompt
+            .contains("System Minimum Impact Scope")
+    );
+    assert!(
+        re_review_input
+            .prompt
+            .contains("Proposed Accepted Impact Scope")
+    );
     assert!(re_review_input.prompt.contains("Risk Acceptance Reason"));
     assert!(
         re_review_input
@@ -251,7 +258,7 @@ async fn plan_repair_reviewer_orchestration_binds_initial_and_shrink_scope_attes
     );
 
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"缩小影响范围通过 Plan Review。
 
@@ -316,9 +323,7 @@ async fn plan_repair_real_prepare_review_publish_keeps_full_canonical_candidate_
         .get_draft_revision(&plan, &previous_revision.source_draft_revision_id)
         .unwrap();
     let amendment_id = "plan_amendment_real_review_publish_0001";
-    plan = store
-        .acquire_active_amendment(&plan, amendment_id)
-        .unwrap();
+    plan = store.acquire_active_amendment(&plan, amendment_id).unwrap();
     let request = crate::product::models::PlanRepairRequest {
         id: "plan_repair_request_real_review_publish_0001".to_string(),
         plan_id: plan.id.clone(),
@@ -356,12 +361,10 @@ async fn plan_repair_real_prepare_review_publish_keeps_full_canonical_candidate_
         crate::product::models::PlanRevisionReason::RepairUpstreamContract;
     candidate_draft.trigger_repair_request_id = Some(request.id.clone());
     candidate_draft.created_at = "2026-07-18T00:00:03Z".to_string();
-    let repair_engine = crate::product::plan_repair::PlanRepairEngine::new(
-        store.clone(),
-        plan.clone(),
-    )
-    .with_candidate_drafts(vec![candidate_draft])
-    .with_created_at("2026-07-18T00:00:03Z");
+    let repair_engine =
+        crate::product::plan_repair::PlanRepairEngine::new(store.clone(), plan.clone())
+            .with_candidate_drafts(vec![candidate_draft])
+            .with_created_at("2026-07-18T00:00:03Z");
     let prepared = repair_engine.prepare_amendment(&request).unwrap();
     let unchanged_projection_ids = outcome
         .plan_revision
@@ -425,14 +428,17 @@ async fn plan_repair_real_prepare_review_publish_keeps_full_canonical_candidate_
         timeline_nodes: vec![],
         error: None,
     });
-    engine.enter_plan_repair_review(prepared.clone()).await.unwrap();
+    engine
+        .enter_plan_repair_review(prepared.clone())
+        .await
+        .unwrap();
     assert!(matches!(
         store.get_amendment_manifest(&plan, &prepared.manifest.id),
         Err(crate::product::json_store::ProductStoreError::NotFound { .. })
     ));
     let prompt = Arc::new(Mutex::new(None));
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"Canonical candidate package passed review.
 
@@ -585,8 +591,7 @@ async fn finalizer_replays_same_binding_child_and_fails_closed_on_drift() {
     let (_tmp2, lifecycle2, plan_id2, mut engine2) =
         make_work_item_plan_engine_with_accepted_contract_drafts();
     let session_id2 = engine2.session.session_id.clone();
-    let enrollment_store2 =
-        enable_c1_child_enrollment(&lifecycle2, &plan_id2, &session_id2);
+    let enrollment_store2 = enable_c1_child_enrollment(&lifecycle2, &plan_id2, &session_id2);
     let enrollment_id2 = enrollment_store2
         .get("project_0001", "issue_0001")
         .unwrap()

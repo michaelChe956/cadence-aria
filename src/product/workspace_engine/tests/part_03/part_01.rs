@@ -82,15 +82,15 @@ fn work_item_plan_item_review_pass_with_strong_finding_requires_current_item_rev
     assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
     assert_eq!(verdict.review_gate, ReviewGate::RequiresRevision);
     assert_eq!(verdict.findings.len(), 1);
-    assert_eq!(
-        verdict.findings[0].severity,
-        ReviewFindingSeverity::MustFix
-    );
+    assert_eq!(verdict.findings[0].severity, ReviewFindingSeverity::MustFix);
     let review = verdict
         .work_item_plan_review
         .expect("work item plan extension");
     assert_eq!(review.verdict, WorkItemPlanReviewVerdict::Revise);
-    assert_eq!(review.review_action, WorkItemPlanReviewAction::ReviseCurrentItem);
+    assert_eq!(
+        review.review_action,
+        WorkItemPlanReviewAction::ReviseCurrentItem
+    );
     assert_eq!(
         review.gates,
         vec![WorkItemPlanReviewGate::RequiresCurrentItemRevision]
@@ -127,7 +127,10 @@ fn work_item_plan_outline_review_pass_with_strong_finding_requires_outline_revis
         .work_item_plan_review
         .expect("work item plan extension");
     assert_eq!(review.verdict, WorkItemPlanReviewVerdict::Revise);
-    assert_eq!(review.review_action, WorkItemPlanReviewAction::ReviseOutline);
+    assert_eq!(
+        review.review_action,
+        WorkItemPlanReviewAction::ReviseOutline
+    );
     assert_eq!(
         review.gates,
         vec![WorkItemPlanReviewGate::RequiresPlanReopen]
@@ -378,7 +381,7 @@ async fn optional_review_findings_route_author_confirm_or_human_confirm_for_all_
         engine.start_review().await;
 
         engine
-            .drive_review_session(
+            .drive_review_session_with_window(
                 Arc::new(ReviewVerdictStreamingProvider {
                     output: r#"建议补充说明。
 
@@ -461,7 +464,7 @@ async fn work_item_plan_outline_optional_findings_pause_for_user_choice() {
     engine.begin_work_item_plan_outline_review_run().await;
 
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"当前 outline 可以继续，但建议补充 handoff 描述。
 

@@ -49,7 +49,10 @@ impl WorkspaceEngine {
             baseline_tree: None,
             // 批2 Task 11(T20 前中间态):Reviewer wire 面全开(无 deny);
             // 纪律=ReviewerVerify+窗口合同,真窗归 T20;执行审计按角色保留。
-            tool_policy: None,
+            // 批2 Task 20b(决策项⑦):Reviewer 输入铸造 ReviewerVerify 窗口
+            // 合同(活动审查窗的窗口 id;无活动窗=None,由四家启动检查/
+            // 网关复验拒绝,不 fallback)。
+            tool_policy: self.reviewer_verify_policy(),
             audit_sink: None,
             provider_type: base_input.provider_type.clone(),
             role: AdapterRole::Reviewer,

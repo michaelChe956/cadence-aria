@@ -8,8 +8,12 @@ async fn work_item_plan_item_optional_findings_pause_for_user_choice() {
         make_work_item_plan_engine_with_draft_candidate("sess_wip_item_optional_review");
     prepare_work_item_plan_outline_artifact(&mut engine).await;
     save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
-    let draft_payload =
-        work_item_draft_artifact_payload(&plan_id, "outline_a", "draft_a", WorkItemDraftStatus::Draft);
+    let draft_payload = work_item_draft_artifact_payload(
+        &plan_id,
+        "outline_a",
+        "draft_a",
+        WorkItemDraftStatus::Draft,
+    );
     engine.update_artifact(draft_payload).await;
     let review_node_id = engine
         .create_timeline_node(TimelineNodeDraft {
@@ -25,7 +29,7 @@ async fn work_item_plan_item_optional_findings_pause_for_user_choice() {
     engine.active_node_id = Some(review_node_id);
 
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"当前 draft 可以继续，但建议补充验证说明。
 
@@ -114,7 +118,7 @@ async fn work_item_plan_batch_optional_findings_pause_for_user_choice() {
     engine.active_node_id = Some(review_node_id);
 
     engine
-        .drive_review_session(
+        .drive_review_session_with_window(
             Arc::new(ReviewVerdictStreamingProvider {
                 output: r#"当前 batch 可以继续，但建议补充 handoff。
 
@@ -174,7 +178,10 @@ async fn work_item_plan_batch_optional_findings_pause_for_user_choice() {
 async fn finishing_work_item_draft_or_batch_run_clears_short_lived_repair_state() {
     let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
         make_work_item_plan_engine_with_draft_candidate("sess_wip_clear_draft_repair_state");
-    for node_type in [TimelineNodeType::WorkItemDraftRun, TimelineNodeType::WorkItemBatchRun] {
+    for node_type in [
+        TimelineNodeType::WorkItemDraftRun,
+        TimelineNodeType::WorkItemBatchRun,
+    ] {
         engine.session.stage = WorkspaceStage::Running;
         let node_id = engine
             .create_timeline_node(TimelineNodeDraft {
@@ -198,7 +205,9 @@ async fn finishing_work_item_draft_or_batch_run_clears_short_lived_repair_state(
 }
 
 async fn prepare_work_item_plan_outline_artifact(engine: &mut WorkspaceEngine) {
-    engine.update_artifact(work_item_plan_outline_artifact()).await;
+    engine
+        .update_artifact(work_item_plan_outline_artifact())
+        .await;
 }
 
 fn work_item_plan_outline_artifact() -> ArtifactPayload {
@@ -365,10 +374,9 @@ fn test_work_item_draft_record(
                 target_repository_id: None,
                 outline_id: outline_id.to_string(),
                 logical_work_item_id,
-                verification_plan:
-                    crate::product::models::WorkItemDraftVerificationPlan {
-                        checks: contract.verification_checks.clone(),
-                    },
+                verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                    checks: contract.verification_checks.clone(),
+                },
                 canonical_contract_candidate: contract,
             }
         },

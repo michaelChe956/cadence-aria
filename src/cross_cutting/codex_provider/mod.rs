@@ -754,9 +754,27 @@ impl StreamingProviderAdapter for CodexProvider {
                     })?
                     .digest
             } else {
-                // 无策略合同 run：无 canonical 策略指纹（空串）；launch audit
-                // 只冻结实际启动参数/version/dialect（与 LC 统一审计口径同构）。
-                String::new()
+                // 决策项②(T20b):非纪律合同 run 的 digest 按策略形态——
+                // ReviewerVerify 携窗口域 canonical digest(与 provider_start/
+                // claude/pi/kimi LC 同源可 join,换窗必失配);无策略(纯
+                // sink 合同,如 T13 中间态形态)保持空串口径。
+                match input.tool_policy.as_ref() {
+                    Some(
+                        policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                            intent:
+                                crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify { .. },
+                        },
+                    ) => canonical_tool_policy(session::TOOL_POLICY_PROVIDER_NAME, policy)
+                        .map_err(|error| {
+                            ProviderAdapterError::parse_error(
+                                format!("{context_label}: {error}"),
+                                String::new(),
+                                String::new(),
+                            )
+                        })?
+                        .digest,
+                    _ => String::new(),
+                }
             };
             // resume 冻结三元组比对（digest/version/dialect）：记录缺失或任一
             // 不一致 → 追加 superseded 终止审计并新建会话，丢弃 resume id
