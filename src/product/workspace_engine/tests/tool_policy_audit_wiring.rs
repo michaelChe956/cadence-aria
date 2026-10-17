@@ -137,12 +137,13 @@ async fn workspace_review_and_repair_policy_runs_receive_durable_audit_sink() {
         .drive_review_session(probe.clone(), empty_provider_commands())
         .await;
 
-    // reviewer 首轮与 repair 轮（P1-2 的两路）都必须携带 policy + run-bound sink。
+    // 批2 Task 11（T20 前中间态）：review/repair 输入不再携带 deny——纪律=
+    // ReviewerVerify+窗口合同（真窗归 T20）；run-bound durable sink 按角色保留。
     assert_eq!(probe.starts.load(Ordering::SeqCst), 2);
     assert_eq!(
         *probe.policy_seen.lock().unwrap(),
-        vec![true, true],
-        "review/repair inputs must carry the deny policy"
+        vec![false, false],
+        "review/repair inputs must not carry deny policy (T20 intermediate)"
     );
     assert_eq!(
         *probe.sink_seen.lock().unwrap(),
