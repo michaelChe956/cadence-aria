@@ -394,6 +394,18 @@ impl ReviewerSnapshotStore {
         Ok(read_json(&path)?)
     }
 
+    /// T17 采用路径消费(修复轮 2):加载 manifest 并核验其引用的全部
+    /// CAS blob 存在且 hash 一致(O(blob 数);restore_baseline 动树前
+    /// 同源预检)——「manifest 已发布」≠「基线完整」。
+    pub(crate) fn verify_baseline_cas(
+        &self,
+        window_id: &str,
+    ) -> Result<ReviewerBaselineManifest, ReviewerSnapshotError> {
+        let manifest = self.load_manifest(window_id)?;
+        verify_cas_blobs(&self.window_dir(window_id), &manifest)?;
+        Ok(manifest)
+    }
+
     /// 完整持久化基线:全部 blob + manifest 落盘成功才返回;预算超限/
     /// 读失败/不支持项/身份漂移整单拒绝并清理未发布窗口目录。
     pub(crate) fn capture_baseline(
@@ -664,26 +676,7 @@ impl ReviewerSnapshotStore {
         // CAS 预检:任何改动之前核验全部 blob 存在且 hash 一致(缺失/错
         // hash 整单拒绝,不做部分恢复)。
         let window_dir = self.window_dir(window_id);
-        let mut referenced: Vec<&str> = manifest
-            .entries
-            .iter()
-            .filter_map(|entry| entry.blob.as_deref())
-            .collect();
-        referenced.push(manifest.git_observation.index_blob.as_str());
-        for blob_rel in referenced {
-            let path = blob_abs_path(&window_dir, blob_rel)?;
-            let bytes = std::fs::read(&path).map_err(|error| {
-                ReviewerSnapshotError::Integrity(format!("blob 缺失 {blob_rel}: {error}"))
-            })?;
-            let expected = blob_rel
-                .strip_prefix("blobs/")
-                .expect("blob_abs_path 已校验形状");
-            if sha256_hex(&bytes) != expected {
-                return Err(ReviewerSnapshotError::Integrity(format!(
-                    "blob hash 不符 {blob_rel}"
-                )));
-            }
-        }
+        verify_cas_blobs(&window_dir, &manifest)?;
 
         let resumed_from = manifest.restore_cursor.clone();
         let mut ctx = RestoreCtx {
@@ -858,6 +851,36 @@ fn blob_abs_path(window_dir: &Path, blob_rel: &str) -> Result<PathBuf, ReviewerS
         )));
     }
     Ok(window_dir.join("blobs").join(sha))
+}
+
+/// CAS 预检:manifest 引用的全部 blob(条目+index)存在且 hash 一致。
+/// restore_baseline 动树前与 T17 采用路径(修复轮 2:manifest 已发布
+/// ≠基线完整——掉电可丢 blob 目录项)共用;缺失/错 hash 整单拒绝。
+fn verify_cas_blobs(
+    window_dir: &Path,
+    manifest: &ReviewerBaselineManifest,
+) -> Result<(), ReviewerSnapshotError> {
+    let mut referenced: Vec<&str> = manifest
+        .entries
+        .iter()
+        .filter_map(|entry| entry.blob.as_deref())
+        .collect();
+    referenced.push(manifest.git_observation.index_blob.as_str());
+    for blob_rel in referenced {
+        let path = blob_abs_path(window_dir, blob_rel)?;
+        let bytes = std::fs::read(&path).map_err(|error| {
+            ReviewerSnapshotError::Integrity(format!("blob 缺失 {blob_rel}: {error}"))
+        })?;
+        let expected = blob_rel
+            .strip_prefix("blobs/")
+            .expect("blob_abs_path 已校验形状");
+        if sha256_hex(&bytes) != expected {
+            return Err(ReviewerSnapshotError::Integrity(format!(
+                "blob hash 不符 {blob_rel}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_manifest(manifest: &ReviewerBaselineManifest) -> Result<(), ReviewerSnapshotError> {

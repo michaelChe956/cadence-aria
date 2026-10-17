@@ -128,6 +128,7 @@ pub(crate) struct ReviewerWindowHandle {
     pub(crate) window_id: String,
     pub(crate) generation: u64,
     pub(crate) identity: ReviewWorktreeLockIdentity,
+    /// snapshot store 内相对引用(非绝对路径;经 load_manifest 解析)。
     pub(crate) manifest_path: PathBuf,
     pub(crate) manifest_sha256: String,
     pub(crate) entry_count: usize,
@@ -152,6 +153,7 @@ pub(crate) struct CurrentWindowProof {
     pub(crate) generation: u64,
     pub(crate) state: ReviewerWindowState,
     pub(crate) report_acceptance: ReportAcceptance,
+    /// snapshot store 内相对引用(非绝对路径;经 load_manifest 解析)。
     pub(crate) manifest_path: PathBuf,
     pub(crate) manifest_sha256: String,
     pub(crate) entry_count: usize,
@@ -470,10 +472,10 @@ pub(crate) async fn begin_review_window(
         platform_write_paths: request.platform_write_paths.clone(),
         budget: request.budget,
     }) {
-        Ok(captured) => match snapshot.load_manifest(request.window_id) {
+        Ok(_captured) => match snapshot.load_manifest(request.window_id) {
             Ok(manifest) => BaselineFacts::from_manifest(
                 &manifest,
-                captured.manifest_path.display().to_string(),
+                manifest_store_ref(request.window_id),
                 now_rfc3339(),
             ),
             Err(error) => {
@@ -489,8 +491,11 @@ pub(crate) async fn begin_review_window(
         Err(ReviewerSnapshotError::Store(ProductStoreError::Conflict { ref id, .. }))
             if id == request.window_id =>
         {
-            // 同窗 manifest 已存在(崩溃重入):校验归属后采用。
-            match snapshot.load_manifest(request.window_id) {
+            // 同窗 manifest 已存在(崩溃重入):归属校验 + **CAS blob 完整
+            // 性预检**(NEW-1:manifest 已发布≠基线完整——掉电可丢 blob
+            // 目录项;预检与 restore_baseline 动树前同源,O(blob 数)),
+            // 全部通过才采用。
+            match snapshot.verify_baseline_cas(request.window_id) {
                 Ok(manifest)
                     if manifest.window_id == request.window_id
                         && manifest.attempt_id == request.attempt_id
@@ -499,7 +504,7 @@ pub(crate) async fn begin_review_window(
                 {
                     BaselineFacts::from_manifest(
                         &manifest,
-                        format!("snapshot-store:windows/{}/manifest.json", request.window_id),
+                        manifest_store_ref(request.window_id),
                         now_rfc3339(),
                     )
                 }
@@ -515,10 +520,12 @@ pub(crate) async fn begin_review_window(
                     return Err(ReviewerWindowError::IdentityDrift(detail));
                 }
                 Err(error) => {
+                    // blob 缺失/损坏或 manifest 不可读:停等,不绑定
+                    // 不可恢复基线。
                     mark_begin_recovery(
                         store,
                         &current,
-                        "reviewer_window_manifest_unreadable",
+                        "reviewer_window_snapshot_failed",
                         error.to_string(),
                     );
                     return Err(ReviewerWindowError::Snapshot(error));
@@ -596,6 +603,13 @@ fn manifest_fingerprint(
     serde_json::to_string(manifest)
         .map(|serialized| sha256_hex(serialized.as_bytes()))
         .unwrap_or_default()
+}
+
+/// manifest 在 snapshot store 内的**相对引用**(NEW-2:两路径同形;
+/// 不是绝对路径,消费方经 `ReviewerSnapshotStore::load_manifest` 解析,
+/// 不得直接 fs::read)。
+fn manifest_store_ref(window_id: &str) -> String {
+    format!("windows/{window_id}/manifest.json")
 }
 
 /// 通道排空冻结(四个通道全部 Draining→在途清零→Frozen;「不能只禁
@@ -2678,5 +2692,91 @@ mod tests {
         .await
         .expect_err("owner lease intact");
         assert!(matches!(err, ReviewerWindowError::Conflict { .. }));
+    }
+
+    // ---------- 修复轮 2 钉测(NEW-1) ----------
+
+    /// NEW-1(P2):「manifest 已发布」≠「基线完整」——采用路径必须先过
+    /// CAS blob 存在性+hash 预检;blob 缺失 → 停等(非 Running,不绑定
+    /// 不可恢复基线);修复后旧窗弃置、同树新窗全新 capture 收口。
+    #[tokio::test]
+    async fn adoption_with_missing_blob_waits_not_running() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let first = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-n1", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("first begin");
+
+        // 崩溃点 + blob 目录项丢失(已接受的掉电窗口形态)
+        fs::remove_file(fx.window_root.join("windows/w-n1.json")).unwrap();
+        store
+            .create_or_resume_window(&ReviewerWindowRecord::new(
+                "w-n1",
+                first.identity.clone(),
+                "attempt-1",
+                "run-1",
+                "claude_code",
+                Vec::new(),
+            ))
+            .expect("recreate preparing record");
+        let manifest = snapshot.load_manifest("w-n1").unwrap();
+        let blob = manifest
+            .entries
+            .iter()
+            .find_map(|entry| entry.blob.clone())
+            .expect("fixture has file entries");
+        let blob_path = fx.snapshot_root.join("windows/w-n1").join(&blob);
+        let blob_bytes = fs::read(&blob_path).unwrap();
+        fs::remove_file(&blob_path).unwrap();
+
+        // 采用:blob 缺失 → CAS 预检 Integrity 拒 → 停等,非 Running
+        let err = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-n1", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect_err("missing blob must stop-and-wait");
+        match &err {
+            ReviewerWindowError::Snapshot(error) => {
+                assert!(error.to_string().contains("blob"), "{error:?}");
+            }
+            other => panic!("expected Snapshot, got {other:?}"),
+        }
+        let record = store.load_window("w-n1").unwrap();
+        assert_eq!(record.state, ReviewerWindowState::RecoveryRequired);
+        assert!(record.recovery.as_ref().unwrap().reason == "reviewer_window_snapshot_failed");
+        assert!(
+            assert_review_window_current(
+                &store,
+                &snapshot,
+                &expectation("w-n1", "attempt-1", &fx.worktree),
+                &[ReviewerWindowState::Running]
+            )
+            .is_err(),
+            "incomplete baseline must not admit material"
+        );
+
+        // 修复 blob → 旧窗弃置(释放锁)→ 同树新窗全新 capture(非采用)
+        fs::write(&blob_path, blob_bytes).unwrap();
+        abandon_window(&store, "w-n1", record.generation, "blob 缺失停等").unwrap();
+        begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-n2", "attempt-2", &fx.worktree, &targets),
+        )
+        .await
+        .expect("fresh capture on new window after repair");
+        assert_eq!(
+            store.load_window("w-n2").unwrap().state,
+            ReviewerWindowState::Running
+        );
     }
 }

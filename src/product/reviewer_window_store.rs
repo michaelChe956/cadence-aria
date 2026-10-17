@@ -237,7 +237,11 @@ impl WindowLeaseRecord {
     }
 }
 
-/// baseline 绑定(完整持久化 manifest 的引用+字节指纹:材料同源证明)。
+/// baseline 绑定(材料同源证明)。`manifest_path` = snapshot store 内
+/// **相对引用**(`windows/<id>/manifest.json`,非绝对路径——经
+/// `ReviewerSnapshotStore::load_manifest` 解析);`manifest_sha256` =
+/// manifest **规范化 JSON 序列化内容指纹**(不可由 manifest 文件字节
+/// 直接复算——T18/T19 证据链须用同源 `manifest_fingerprint`)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct BaselineBinding {
     pub(crate) manifest_path: String,
@@ -252,7 +256,9 @@ pub(crate) struct BaselineBinding {
 pub(crate) struct RestoreBinding {
     pub(crate) completed: bool,
     pub(crate) from_violation: bool,
-    /// `restored` | `recovery_required`(T16 RecoveryRequired 停等)。
+    /// `in_progress`(已入 Restoring)| `restored`(完整)|
+    /// `recovery_required`(T16 域停等)| `error`(瞬时 Err,状态不动,
+    /// last_error 记录;T18 计入非通过并带出游标)。
     pub(crate) outcome: String,
     pub(crate) cursor_phase: Option<String>,
     pub(crate) entry_index: Option<usize>,
