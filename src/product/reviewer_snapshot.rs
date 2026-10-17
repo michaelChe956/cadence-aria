@@ -1827,7 +1827,13 @@ impl RestoreCtx<'_> {
                             == Some(BaselineEntryKind::Directory) =>
                     {
                         if stat.st_mode & 0o7777 != entry.mode {
-                            fchmod_dir(&parent, entry.mode).map_err(|error| {
+                            // F1 修复:chmod 作用于条目自身,不是父目录 fd
+                            // (父目录可能是不在 manifest 内的 worktree 根)。
+                            let opened = openat_dir(&parent, &name)
+                                .map_err(|error| {
+                                    io_error_string("open dir for chmod", error)
+                                })?;
+                            fchmod_dir(&opened, entry.mode).map_err(|error| {
                                 io_error_string("chmod dir", error)
                             })?;
                             return Ok(true);
@@ -1895,12 +1901,21 @@ impl RestoreCtx<'_> {
                 if !needs_relink {
                     return Ok(false);
                 }
-                if current.is_ok() {
-                    unlinkat_file(&parent, &name)
-                        .or_else(|_| unlinkat_dir(&parent, &name))
-                        .map_err(|error| {
-                            io_error_string("移除旧 symlink 占位", error)
-                        })?;
+                if let Ok(stat) = &current {
+                    if classify(stat.st_mode) == Some(BaselineEntryKind::Directory) {
+                        // F2 修复:被非空目录替换时 unlinkat 双双失败
+                        // (EISDIR/ENOTEMPTY)会中断且不可续接——与 File 分支
+                        // 同形,先整删占位目录再重建 symlink。
+                        std::fs::remove_dir_all(self.worktree.join(&entry.rel_path))
+                            .map_err(|error| {
+                                io_error_string("移除目录替换的 symlink", error)
+                            })?;
+                    } else {
+                        unlinkat_file(&parent, &name)
+                            .map_err(|error| {
+                                io_error_string("移除旧 symlink 占位", error)
+                            })?;
+                    }
                 }
                 symlinkat_link(OsStr::new(&target), &parent, &name)
                     .map_err(|error| io_error_string("symlinkat", error))?;
@@ -2243,6 +2258,7 @@ mod tests {
         fs::write(worktree.join("ignored.log"), "secret\n").unwrap();
         fs::remove_file(worktree.join("gone.txt")).unwrap();
         fs::create_dir(worktree.join("empty_dir")).unwrap();
+        fs::create_dir_all(worktree.join("nested/dir")).unwrap();
         symlink("/etc/hostname", worktree.join("escape")).unwrap();
     }
 
@@ -2260,6 +2276,12 @@ mod tests {
         fs::remove_file(worktree.join("link")).unwrap();
         symlink("evil.txt", worktree.join("link")).unwrap();
         fs::write(worktree.join("empty_dir/.junk"), "junk\n").unwrap();
+        // F1 行:既有嵌套目录 chmod 漂移(恢复须改条目自身,不动父目录)
+        chmod(&worktree.join("nested/dir"), 0o700);
+        // F2 行:基线 symlink 被非空目录替换(恢复须整删占位后重建)
+        fs::remove_file(worktree.join("escape")).unwrap();
+        fs::create_dir(worktree.join("escape")).unwrap();
+        fs::write(worktree.join("escape/junk.txt"), "replaced\n").unwrap();
         if worktree.join("sub").is_dir() {
             fs::write(worktree.join("sub/c.txt"), "reviewer touched child\n").unwrap();
         }
@@ -2515,6 +2537,12 @@ mod tests {
             0,
             "空目录必须恢复为空"
         );
+        // F1 行:嵌套目录 chmod 漂移——条目自身回基线,父目录不被改写
+        assert!(w.join("nested/dir").is_dir());
+        assert_eq!(mode_of(&w.join("nested/dir")), 0o755,
+            "目录条目 mode 漂移必须修复到条目自身");
+        assert_eq!(mode_of(&w.join("nested")), 0o755,
+            "父目录 mode 不得被 chmod 波及");
         assert_eq!(
             fs::read_to_string(w.join("untracked_new.txt")).unwrap(),
             "keep-me\n"
@@ -2523,8 +2551,9 @@ mod tests {
         assert_eq!(
             fs::read_link(w.join("escape")).unwrap().to_string_lossy(),
             "/etc/hostname",
-            "指向 owner 域的 symlink 按指针恢复,不追随"
+            "指向 owner 域的 symlink 按指针恢复,不追随(F2:被非空目录替换后重建)"
         );
+        assert!(!w.join("escape/junk.txt").exists(), "F2:占位目录内容必须整删");
         assert!(!w.join("build").exists(), "Reviewer 构建残留必须删除");
         assert!(!w.join("empty_dir/.junk").exists());
     }
