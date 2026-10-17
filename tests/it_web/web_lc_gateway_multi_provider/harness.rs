@@ -51,8 +51,8 @@ use cadence_aria::product::logical_codebase::production_policy_resolvers::{
     ProductionPolicyTargetResolver, StoreBackedProviderCapabilitySource,
 };
 use cadence_aria::product::logical_codebase::provider_boundary_probe::{
-    BOUNDARY_PROBE_EVIDENCE_SCHEMA, BoundaryFixture, ProviderBoundaryProbe, ResumeChannelKind,
-    ResumeProbeSpec, provider_family_text, run_cli_boundary_probe,
+    BOUNDARY_PROBE_EVIDENCE_SCHEMA, BoundaryFixture, HostOpenProbeScope, ProviderBoundaryProbe,
+    ResumeChannelKind, ResumeProbeSpec, provider_family_text, run_cli_boundary_probe,
 };
 use cadence_aria::product::logical_codebase::provider_capability_store::{
     CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
@@ -2341,6 +2341,9 @@ impl Task11CapabilityRestore {
             probed_at: None,
             probe_artifact_ref: None,
             root_recipe_evidence: RootRecipeEvidence::None,
+            execution_semantics:
+                cadence_aria::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+                    .to_string(),
         }
     }
 }
@@ -3869,6 +3872,21 @@ impl MatrixEnvironment {
                 matrix_action_text(action),
                 chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
             );
+            // 批2 Task 9:受信岗位/窗口(Coding=Author,只读=Reviewer 窗口)
+            // + 资源身份注入;缺岗位/窗口 probe 拒签。
+            let resource_scope_id =
+                format!("aria-matrix-probe-{}", uuid::Uuid::new_v4().simple());
+            let scope = match action {
+                SessionPolicyAction::CodingTargetWrite => {
+                    HostOpenProbeScope::author(resource_scope_id)
+                }
+                SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
+                    HostOpenProbeScope::reviewer(
+                        format!("aria-matrix-review-window-{}", uuid::Uuid::new_v4().simple()),
+                        resource_scope_id,
+                    )
+                }
+            };
             let probe = run_cli_boundary_probe(
                 self.provider.clone(),
                 cli_program,
@@ -3880,6 +3898,7 @@ impl MatrixEnvironment {
                     resume_kind,
                     "Reply with exactly: matrix-resume-probe",
                 )),
+                scope,
             )
             .await;
             let outcome = match probe {

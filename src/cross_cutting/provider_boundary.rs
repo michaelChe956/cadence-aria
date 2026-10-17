@@ -90,7 +90,18 @@ impl ProviderBoundaryPlan {
     }
 }
 
-/// 真实 boundary probe 的证据记录(Task 1a 冻结形状;6c 产出、2d 导入)。
+/// 批2 Task 9 冻结:capability 证据的**执行语义标识**(单一来源;capability
+/// store 行、probe 证据与 2d 导入三方共用,T10/T12 交接 digest)。
+///
+/// `host-open-v1` = 宿主全开执行语义:provider 以宿主身份直接执行
+/// (`ProviderExecutionProfile::HostCoding`/HostLocal 部署),受控宿主写成功
+/// 即「全开」事实,不再要求 root/非 target/`.git`/`.aria` 物理拒写。旧
+/// 物理拒写语义(v1/v2 记录)没有本标识,读取时当前行 Unknown,必须真实
+/// 重探针铸新证。
+pub const PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN: &str = "host-open-v1";
+
+/// 真实 boundary probe 的证据记录(Task 1a 冻结形状;6c 产出、2d 导入;
+/// 批2 Task 9 增补执行语义/岗位/窗口维度)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderBoundaryEvidence {
     provider: ProviderName,
@@ -103,10 +114,19 @@ pub struct ProviderBoundaryEvidence {
     /// probe 工件引用(快照/日志的 durable 引用)。
     artifact_ref: String,
     probed_at: String,
+    /// 执行语义标识(批2 Task 9;必须等于
+    /// `PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN`,缺语义证据不可导入)。
+    execution_semantics: String,
+    /// 受信岗位(author/reviewer;受信注入,probe 不采信模型自报)。
+    duty: String,
+    /// Reviewer 窗口引用(reviewer 岗位必带;author 为 None)。
+    review_window_id: Option<String>,
 }
 
 impl ProviderBoundaryEvidence {
-    /// crate 内构造(6c probe 产出;调用方不能自造)。
+    /// crate 内构造(6c probe 产出;调用方不能自造)。批2 Task 9 增补
+    /// 执行语义/岗位/窗口三参数(缺语义/缺岗位由 probe 侧拒签,构造器
+    /// 只承载字段)。
     pub(crate) fn new(
         provider: ProviderName,
         exact_version: String,
@@ -114,6 +134,9 @@ impl ProviderBoundaryEvidence {
         projection_digest: String,
         artifact_ref: String,
         probed_at: String,
+        execution_semantics: String,
+        duty: String,
+        review_window_id: Option<String>,
     ) -> Self {
         Self {
             provider,
@@ -122,8 +145,12 @@ impl ProviderBoundaryEvidence {
             projection_digest,
             artifact_ref,
             probed_at,
+            execution_semantics,
+            duty,
+            review_window_id,
         }
     }
+
 
     pub fn provider(&self) -> &ProviderName {
         &self.provider
@@ -147,6 +174,21 @@ impl ProviderBoundaryEvidence {
 
     pub fn probed_at(&self) -> &str {
         &self.probed_at
+    }
+
+    /// 执行语义标识(批2 Task 9;导入链与 `host-open-v1` 单一来源比对)。
+    pub fn execution_semantics(&self) -> &str {
+        &self.execution_semantics
+    }
+
+    /// 受信岗位(author/reviewer)。
+    pub fn duty(&self) -> &str {
+        &self.duty
+    }
+
+    /// Reviewer 窗口引用(reviewer 岗位必带)。
+    pub fn review_window_id(&self) -> Option<&str> {
+        self.review_window_id.as_deref()
     }
 }
 
@@ -391,7 +433,7 @@ pub struct BoundaryWriteAttempt {
 }
 
 impl BoundaryWriteAttempt {
-    fn allowed(channel: BoundaryWriteChannel, path: PathBuf) -> Self {
+    pub(crate) fn allowed(channel: BoundaryWriteChannel, path: PathBuf) -> Self {
         Self {
             channel,
             path,
@@ -400,7 +442,7 @@ impl BoundaryWriteAttempt {
         }
     }
 
-    fn refused_with(channel: BoundaryWriteChannel, path: PathBuf, evidence: String) -> Self {
+    pub(crate) fn refused_with(channel: BoundaryWriteChannel, path: PathBuf, evidence: String) -> Self {
         Self {
             channel,
             path,
@@ -438,12 +480,12 @@ impl BoundaryWriteAttempt {
 }
 
 /// shell 单引号转义(探针路径/脚本片段嵌入用)。
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// 生成指定通道的一次写命令(嵌入探针脚本;路径/脚本经单引号转义)。
-fn probe_write_command(channel: BoundaryWriteChannel, quoted_path: &str) -> String {
+pub(crate) fn probe_write_command(channel: BoundaryWriteChannel, quoted_path: &str) -> String {
     let builtin = r#"printf aria-boundary-probe >"$1""#;
     match channel {
         BoundaryWriteChannel::Builtin => {
@@ -831,6 +873,9 @@ mod tests {
             "sha256:abc".to_string(),
             "probe://run/1".to_string(),
             "2026-10-03T00:00:00Z".to_string(),
+            PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+            "author".to_string(),
+            None,
         );
         assert_eq!(evidence.provider(), &ProviderName::ClaudeCode);
         assert_eq!(evidence.exact_version(), "2.1.0");
@@ -841,6 +886,12 @@ mod tests {
         assert_eq!(evidence.projection_digest(), "sha256:abc");
         assert_eq!(evidence.artifact_ref(), "probe://run/1");
         assert_eq!(evidence.probed_at(), "2026-10-03T00:00:00Z");
+        assert_eq!(
+            evidence.execution_semantics(),
+            PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+        );
+        assert_eq!(evidence.duty(), "author");
+        assert_eq!(evidence.review_window_id(), None);
     }
 }
 

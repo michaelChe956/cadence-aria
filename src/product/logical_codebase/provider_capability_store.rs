@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN;
 use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
@@ -35,8 +36,11 @@ pub enum CapabilityEvidence {
     FixtureVerified,
     ProductionVerified,
 }
-/// v2 record 的持久化 schema 版本(冻结接口:Capability矩阵 DTO/持久化)。
-pub const PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION: u32 = 2;
+/// v3 record 的持久化 schema 版本(冻结接口:Capability矩阵 DTO/持久化)。
+/// 批2 Task 9:2→3 = 执行语义换代(host-open-v1);v1/v2 历史记录保留
+/// 读取,矩阵当前行一律 Unknown,只有携带
+/// `execution_semantics="host-open-v1"` 的新证可成为当前 Confirmed。
+pub const PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION: u32 = 3;
 
 /// 逐 action 的三态 capability 行(冻结接口):`launch`/`resume`/
 /// `write_boundary` 各自独立记录 `ProviderCapabilityEvidence`(1a 三态),
@@ -267,7 +271,7 @@ pub struct CapabilityMigrationWaiting {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCapabilityRecord {
     pub provider_type: ProviderRefType,
-    /// 持久化 schema 版本;v2 写入恒为 `PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION`。
+    /// 持久化 schema 版本;v3 写入恒为 `PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION`。
     pub schema_version: u32,
     pub version: String,
     pub adapter_dialect: ProviderDialect,
@@ -280,7 +284,8 @@ pub struct ProviderCapabilityRecord {
     pub resume_evidence: ResumeEvidenceState,
     /// legacy 过渡字段(仅 DTO 解码;旧列表不产生正常会话 Confirmed)。
     pub supported_actions: Vec<SessionPolicyAction>,
-    /// 逐 action 三态矩阵(v2 核心事实)。
+    /// 逐 action 三态矩阵(v2 起核心事实;批2 Task 9 起仅 host-open 语义
+    /// 下的 Confirmed 可成为当前行)。
     pub action_matrix: ProviderActionMatrix,
     /// provider trust 证据(三态)。
     pub trust: ProviderCapabilityEvidence,
@@ -290,6 +295,10 @@ pub struct ProviderCapabilityRecord {
     pub probe_artifact_ref: Option<String>,
     /// 根 recipe 证据隔离格(独立于 normal 矩阵)。
     pub root_recipe_evidence: RootRecipeEvidence,
+    /// 执行语义标识(批2 Task 9;v3 新证写入恒为
+    /// `PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN`,bootstrap/历史形状为空串
+    /// = 无语义主张,当前行读取 Unknown)。
+    pub execution_semantics: String,
 }
 
 impl ProviderCapabilityRecord {
@@ -316,6 +325,7 @@ impl ProviderCapabilityRecord {
             probed_at: None,
             probe_artifact_ref: None,
             root_recipe_evidence: RootRecipeEvidence::None,
+            execution_semantics: String::new(),
         }
     }
 
@@ -336,6 +346,7 @@ impl ProviderCapabilityRecord {
             probed_at: None,
             probe_artifact_ref: None,
             root_recipe_evidence: RootRecipeEvidence::None,
+            execution_semantics: String::new(),
         }
     }
 
@@ -363,19 +374,24 @@ impl ProviderCapabilityRecord {
             probed_at: None,
             probe_artifact_ref: None,
             root_recipe_evidence: RootRecipeEvidence::None,
+            execution_semantics: String::new(),
         }
     }
 
-    /// 以当前 CLI 事实(exact version + wire dialect)解析 action 行:版本或
-    /// wire 任一漂移时旧行整体失效为全 Unknown 行,旧 Confirmed 不跨 CLI
-    /// 版本/wire 沿用(CLI 升级/漂移后须等待真实 probe 重建证据)。
+    /// 以当前 CLI 事实(exact version + wire dialect + 执行语义)解析 action
+    /// 行:版本或 wire 任一漂移、或记录未携带当前 host-open 执行语义
+    /// (v1/v2 历史形状)时旧行整体失效为全 Unknown 行,旧 Confirmed 不跨
+    /// CLI 版本/wire/语义沿用(换代后须等待真实 probe 重建证据)。
     pub fn current_action_row(
         &self,
         wire_dialect: ProviderWireDialect,
         exact_version: &str,
         action: SessionPolicyAction,
     ) -> ProviderActionCapability {
-        if self.wire_dialect == wire_dialect && self.version == exact_version {
+        if self.wire_dialect == wire_dialect
+            && self.version == exact_version
+            && self.execution_semantics == PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+        {
             self.action_matrix.row(&action)
         } else {
             ProviderActionCapability::unknown(action)
@@ -492,6 +508,7 @@ impl ProviderCapabilityRecord {
             probed_at: self.probed_at.clone(),
             probe_artifact_ref: self.probe_artifact_ref.clone(),
             root_recipe_evidence: Some(self.root_recipe_evidence.clone()),
+            execution_semantics: Some(self.execution_semantics.clone()),
         }
     }
 }
@@ -509,8 +526,10 @@ fn wire_dialect_for_legacy(dialect: ProviderDialect) -> ProviderWireDialect {
 
 /// 持久化 DTO:`ProviderRefType` 与 `ResumeEvidenceState` 无 serde 派生,用 String
 /// 承载并在 load 时 match 映射回枚举。v2 字段(`schema_version` 起)在 v1 旧
-/// 记录上缺失(serde Option 缺省 None),decode 时按 schema 分支:v1 → 矩阵
-/// 全 Unknown;v2 → 必须携带 matrix/wire;未知 schema 拒绝(fail-closed)。
+/// 记录上缺失(serde Option 缺省 None),decode 时按 schema 分支(fail-closed):
+/// v1/v2 → 历史保留(矩阵读作全 Unknown,不重写历史含义);v3 → 必须携带
+/// matrix/wire,且 `execution_semantics` 缺失或非 host-open-v1 时矩阵同样
+/// 读作全 Unknown(缺语义不得成为当前 Confirmed);未知 schema 拒绝。
 #[derive(Debug, Serialize, Deserialize)]
 struct ProviderCapabilityRecordJson {
     provider_type: String,
@@ -523,8 +542,11 @@ struct ProviderCapabilityRecordJson {
     evidence: CapabilityEvidence,
     resume_evidence: String,
     supported_actions: Vec<SessionPolicyAction>,
-    /// v2 必填(缺失的 v2 记录属损坏,拒绝);序列化为行数组。
+    /// v2 起必填(缺失的 v2+ 记录属损坏,拒绝);序列化为行数组。
     action_matrix: Option<Vec<ProviderActionCapability>>,
+    /// v3 新增:执行语义标识(v1/v2 历史记录缺失 = None;当前唯一合法值
+    /// `host-open-v1`,其它值矩阵读作全 Unknown)。
+    execution_semantics: Option<String>,
     trust: Option<ProviderCapabilityEvidence>,
     probed_at: Option<String>,
     probe_artifact_ref: Option<String>,
@@ -546,8 +568,14 @@ impl ProviderCapabilityRecordJson {
                     reason: format!("unknown resume_evidence: {}", self.resume_evidence),
                 }
             })?;
-        // schema 分支(fail-closed):缺 schema = v1 legacy(旧字段仅 decode,
-        // 三 action 全 Unknown);schema=2 读 v2 字段;其它 schema 拒绝。
+        // schema 分支(fail-closed,批2 Task 9 语义换代):
+        // - 缺 schema = v1 legacy、schema=2 = v2 历史:旧字段仅 decode 作
+        //   历史,矩阵当前行一律 Unknown(v1 旧 allow/v2 三格 Confirmed 均
+        //   不能成为当前 Confirmed,不重写历史文件字节);
+        // - schema=3(当前):必须携带 matrix/wire;`execution_semantics`
+        //   缺失或非 host-open-v1 时矩阵同样读作全 Unknown(新语义未知必须
+        //   Unknown,不报错冒充损坏、也不放行);
+        // - 其它 schema 拒绝(fail-closed,面向未来版本)。
         let (
             schema_version,
             wire_dialect,
@@ -556,7 +584,9 @@ impl ProviderCapabilityRecordJson {
             probed_at,
             probe_artifact_ref,
             root_recipe_evidence,
+            execution_semantics,
         ) = match self.schema_version {
+            // v1(v0 无 schema 字段)历史:全 Unknown。
             None => (
                 PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
                 wire_dialect_for_legacy(self.adapter_dialect),
@@ -565,8 +595,12 @@ impl ProviderCapabilityRecordJson {
                 None,
                 None,
                 RootRecipeEvidence::None,
+                String::new(),
             ),
-            Some(PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION) => {
+            // v2 历史:形状仍须可解码(matrix/wire 在场且合法,损坏即拒),
+            // 但三格矩阵只作历史保留,读取为全 Unknown——旧物理拒写语义的
+            // Confirmed 不铸新证据,必须真实重探针。
+            Some(2) => {
                 let wire_dialect =
                     self.wire_dialect
                         .ok_or_else(|| ProductStoreError::InvalidRecord {
@@ -580,10 +614,11 @@ impl ProviderCapabilityRecordJson {
                             kind: "provider_capability_record",
                             reason: "v2 record missing action_matrix".to_string(),
                         })?;
+                ProviderActionMatrix::from_rows(rows)?;
                 (
-                    PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+                    2,
                     wire_dialect,
-                    ProviderActionMatrix::from_rows(rows)?,
+                    ProviderActionMatrix::unknown_all(),
                     self.trust
                         .clone()
                         .unwrap_or(ProviderCapabilityEvidence::Unknown),
@@ -592,6 +627,49 @@ impl ProviderCapabilityRecordJson {
                     self.root_recipe_evidence
                         .clone()
                         .unwrap_or(RootRecipeEvidence::None),
+                    String::new(),
+                )
+            }
+            // v3 当前:host-open 执行语义下的矩阵;缺语义/未知语义 →
+            // 矩阵全 Unknown(不冒充、不放行)。
+            Some(PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION) => {
+                let wire_dialect =
+                    self.wire_dialect
+                        .ok_or_else(|| ProductStoreError::InvalidRecord {
+                            kind: "provider_capability_record",
+                            reason: "v3 record missing wire_dialect".to_string(),
+                        })?;
+                let rows =
+                    self.action_matrix
+                        .clone()
+                        .ok_or_else(|| ProductStoreError::InvalidRecord {
+                            kind: "provider_capability_record",
+                            reason: "v3 record missing action_matrix".to_string(),
+                        })?;
+                let execution_semantics = self
+                    .execution_semantics
+                    .clone()
+                    .unwrap_or_default();
+                let matrix =
+                    if execution_semantics == PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN {
+                        ProviderActionMatrix::from_rows(rows)?
+                    } else {
+                        ProviderActionMatrix::from_rows(rows)?;
+                        ProviderActionMatrix::unknown_all()
+                    };
+                (
+                    PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+                    wire_dialect,
+                    matrix,
+                    self.trust
+                        .clone()
+                        .unwrap_or(ProviderCapabilityEvidence::Unknown),
+                    self.probed_at.clone(),
+                    self.probe_artifact_ref.clone(),
+                    self.root_recipe_evidence
+                        .clone()
+                        .unwrap_or(RootRecipeEvidence::None),
+                    execution_semantics,
                 )
             }
             Some(other) => {
@@ -616,6 +694,7 @@ impl ProviderCapabilityRecordJson {
             probed_at,
             probe_artifact_ref,
             root_recipe_evidence,
+            execution_semantics,
         })
     }
 }
@@ -734,10 +813,11 @@ impl ProviderCapabilityStore {
     /// merge 语义(Global Constraints 第 2 条 / Review Focus #1):
     /// - 只导入 `action` 一行;evidence 未覆盖的格子(resume/trust/其它
     ///   action)不自报导入,保持既有状态;
-    /// - durable 既有 version/wire/adapter dialect 与本次 probe 不一致
-    ///   (CLI 漂移)时,旧行整体失效为 Unknown 等待各自真实 probe(旧
-    ///   evidence 工件保留在盘,此处不删除任何探测工件);
-    /// - `root_recipe_evidence` 独立隔离:原样保留,不被 normal 导入升级;
+    /// - durable 既有 version/wire/adapter dialect/执行语义与本次 probe 不
+    ///   一致(CLI 漂移/语义换代)时,旧行整体失效为 Unknown 等待各自真实
+    ///   probe(旧 evidence 工件保留在盘,此处不删除任何探测工件);
+    /// - `root_recipe_evidence` 独立隔离:原样保留,不被 normal 导入升级
+    ///   (RootRecipe 凭据独立,不升级为 normal 行);
     /// - provenance 升级 `ProductionVerified`(真实 probe 导入)。
     pub fn import_verified_probe_row(
         &self,
@@ -761,12 +841,14 @@ impl ProviderCapabilityStore {
             probed_at: None,
             probe_artifact_ref: None,
             root_recipe_evidence: RootRecipeEvidence::None,
+            execution_semantics: verified.execution_semantics.clone(),
         });
-        // CLI version/wire/adapter dialect 任一漂移:旧 Confirmed 不跨版本
-        // 沿用,矩阵整体回 Unknown(导入行随后覆盖其 action 格)。
+        // CLI version/wire/adapter dialect/执行语义任一漂移:旧 Confirmed 不
+        // 跨版本/语义沿用,矩阵整体回 Unknown(导入行随后覆盖其 action 格)。
         if merged.version != verified.version
             || merged.wire_dialect != verified.wire_dialect
             || merged.adapter_dialect != verified.adapter_dialect
+            || merged.execution_semantics != verified.execution_semantics
         {
             merged.action_matrix = ProviderActionMatrix::unknown_all();
         }
@@ -777,6 +859,7 @@ impl ProviderCapabilityStore {
         merged.version = verified.version.clone();
         merged.adapter_dialect = verified.adapter_dialect;
         merged.wire_dialect = verified.wire_dialect;
+        merged.execution_semantics = verified.execution_semantics.clone();
         merged.probed_at = verified.probed_at.clone();
         merged.probe_artifact_ref = verified.probe_artifact_ref.clone();
         merged.evidence = CapabilityEvidence::ProductionVerified;
@@ -929,7 +1012,8 @@ mod tests {
         }
     }
 
-    /// 构造 v2 Claude 记录(非 bootstrap 版本,便于漂移断言)。
+    /// 构造当前 schema(v3 + host-open 语义)的 verified 记录(便于往返/
+    /// 漂移断言;Confirmed 行只有携带 host-open 语义才能存活 decode)。
     fn lcg_t02_v2_record(version: &str, matrix: ProviderActionMatrix) -> ProviderCapabilityRecord {
         ProviderCapabilityRecord {
             provider_type: ProviderRefType::ClaudeCode,
@@ -949,6 +1033,7 @@ mod tests {
                 evidence_ref: "recipe://evidence-0001".to_string(),
                 version: "0.0.0-managed".to_string(),
             },
+            execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
         }
     }
 
@@ -1061,6 +1146,11 @@ mod tests {
                 version: "0.0.0-managed".to_string(),
             }
         );
+        // v3 语义字段一并往返(host-open 标识原样保留)。
+        assert_eq!(
+            loaded.execution_semantics,
+            PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+        );
     }
 
     #[test]
@@ -1100,7 +1190,7 @@ mod tests {
     "evidence": "fixture_verified",
     "resume_evidence": "confirmed",
     "supported_actions": [],
-    "schema_version": 3
+    "schema_version": 4
   }
 ]"#;
         lcg_t02_write_capabilities_json(&temp, unknown_schema);
@@ -1496,5 +1586,156 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+    // ===== Task 9:全开证据语义换代(schema 3/execution_semantics)=====
+
+    /// v2 历史 JSON(三格 Confirmed + 无执行语义):读取时当前行必须全
+    /// Unknown(旧 Confirmed 不铸新证据),历史文件字节不得被读取改写。
+    const T9_V2_CONFIRMED_HISTORY: &str = r#"[
+  {
+    "provider_type": "claude_code",
+    "schema_version": 2,
+    "version": "1.2.3",
+    "adapter_dialect": "claude_code_cli_v1",
+    "wire_dialect": "claude-stream-json",
+    "capability_snapshot_ref": "cap_managed_snapshot",
+    "evidence": "production_verified",
+    "resume_evidence": "confirmed",
+    "supported_actions": ["coding_target_write"],
+    "action_matrix": [
+      {
+        "action": "coding_target_write",
+        "launch": {"state": "confirmed"},
+        "resume": {"state": "confirmed"},
+        "write_boundary": {"state": "confirmed"},
+        "projection_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "evidence_ref": "probe://boundary/history-v2"
+      },
+      {
+        "action": "planning_read_only",
+        "launch": {"state": "confirmed"},
+        "resume": {"state": "confirmed"},
+        "write_boundary": {"state": "confirmed"},
+        "projection_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "evidence_ref": "probe://boundary/history-v2"
+      }
+    ],
+    "trust": {"state": "confirmed"},
+    "probed_at": "2026-10-01T00:00:00Z",
+    "probe_artifact_ref": "probe://boundary/history-v2",
+    "root_recipe_evidence": {"kind": "none"}
+  }
+]"#;
+
+    #[test]
+    fn t9_v2_confirmed_history_reads_unknown_and_keeps_file_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderCapabilityStore::new(ProductAppPaths::new(temp.path()));
+        lcg_t02_write_capabilities_json(&temp, T9_V2_CONFIRMED_HISTORY);
+        let path = temp
+            .path()
+            .join("projects/project_0001/logical-codebase/capabilities.json");
+        let bytes_before = std::fs::read(&path).unwrap();
+
+        let record = store
+            .get("project_0001", ProviderRefType::ClaudeCode)
+            .unwrap()
+            .expect("v2 历史记录可解码(不报错、不删除)");
+
+        // v2 三格 Confirmed 不能成为当前 Confirmed:当前行视图全 Unknown。
+        for action in [
+            SessionPolicyAction::CodingTargetWrite,
+            SessionPolicyAction::PlanningReadOnly,
+            SessionPolicyAction::ReviewReadOnly,
+        ] {
+            let row = record.current_action_row(
+                ProviderWireDialect::ClaudeCodeStreamJson,
+                "1.2.3",
+                action,
+            );
+            assert_eq!(row.launch, ProviderCapabilityEvidence::Unknown, "{action:?}");
+            assert_eq!(row.resume, ProviderCapabilityEvidence::Unknown, "{action:?}");
+            assert_eq!(
+                row.write_boundary,
+                ProviderCapabilityEvidence::Unknown,
+                "{action:?}"
+            );
+        }
+        // 矩阵本体也读取为 Unknown(任何矩阵消费面不得看到旧 Confirmed)。
+        for row in record.action_matrix.rows() {
+            assert_eq!(row.launch, ProviderCapabilityEvidence::Unknown);
+            assert_eq!(row.resume, ProviderCapabilityEvidence::Unknown);
+            assert_eq!(row.write_boundary, ProviderCapabilityEvidence::Unknown);
+        }
+
+        // 历史文件字节不变(读取不重写历史含义)。
+        let bytes_after = std::fs::read(&path).unwrap();
+        assert_eq!(
+            bytes_before,
+            bytes_after,
+            "读取 v2 历史记录不得改写历史文件字节"
+        );
+    }
+
+    /// schema 3 缺 execution_semantics(或语义非 host-open-v1):行 Unknown,
+    /// 不报错、不冒充(新语义未知必须 Unknown)。
+    #[test]
+    fn t9_v3_missing_or_foreign_semantics_reads_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderCapabilityStore::new(ProductAppPaths::new(temp.path()));
+        let row = r#"
+      {
+        "action": "coding_target_write",
+        "launch": {"state": "confirmed"},
+        "resume": {"state": "confirmed"},
+        "write_boundary": {"state": "confirmed"},
+        "projection_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "evidence_ref": "probe://boundary/semantics"
+      }"#;
+        for (label, semantics_json) in [
+            ("missing", String::new()),
+            (
+                "foreign",
+                r#""execution_semantics": "bwrap-phys-deny-v0","#.to_string(),
+            ),
+        ] {
+            let json = format!(
+                r#"[{{
+  "provider_type": "claude_code",
+  "schema_version": 3,
+  {semantics_json}
+  "version": "1.2.3",
+  "adapter_dialect": "claude_code_cli_v1",
+  "wire_dialect": "claude-stream-json",
+  "capability_snapshot_ref": "cap_managed_snapshot",
+  "evidence": "production_verified",
+  "resume_evidence": "confirmed",
+  "supported_actions": [],
+  "action_matrix": [{row}],
+  "trust": {{"state": "confirmed"}},
+  "probed_at": "2026-10-01T00:00:00Z",
+  "probe_artifact_ref": "probe://boundary/semantics",
+  "root_recipe_evidence": {{"kind": "none"}}
+}}]"#
+            );
+            lcg_t02_write_capabilities_json(&temp, &json);
+            let record = store
+                .get("project_0001", ProviderRefType::ClaudeCode)
+                .unwrap_or_else(|error| panic!("{label} 语义缺位/未知应可解码为 Unknown: {error}"))
+                .expect("记录在场");
+            let coding = record
+                .action_matrix
+                .row(&SessionPolicyAction::CodingTargetWrite);
+            assert_eq!(
+                coding.launch,
+                ProviderCapabilityEvidence::Unknown,
+                "{label}: 缺语义/未知语义不得成为当前 Confirmed"
+            );
+            assert_eq!(
+                coding.write_boundary,
+                ProviderCapabilityEvidence::Unknown,
+                "{label}: 缺语义/未知语义不得成为当前 Confirmed"
+            );
+        }
     }
 }

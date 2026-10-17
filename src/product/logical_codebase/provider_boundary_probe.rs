@@ -1,48 +1,51 @@
-//! LC provider 写边界 probe 与证据签发(Task 6c,REQ-LCG-03/07)。
+//! LC provider capability probe 与证据签发(Task 6c,REQ-LCG-03/07;
+//! 批2 Task 9 语义换代:宿主全开执行 host-open-v1)。
 //!
-//! `ProviderBoundaryProbe::run` 是受控隔离 fixture 的**探测通道**(冻结签名,
-//! 计划 Task 6 Interfaces):对某个真实 provider 的 projection,在产品拥有的
-//! 写边界沙箱(6a launcher)内执行**真实正负写探针**,只有「完整防护在场 +
-//! 正向探针真实成功落盘 + 负向探针全部被拒且带证据 + 受保护面 pre==post 零
-//! 漂移 + 观测完整且未超预算」才签发 `ProviderBoundaryEvidence`(2c shape
-//! 校验通过后由 2d 导入 Confirmed)。
+//! `ProviderBoundaryProbe::run` 是受控 fixture 的**探测通道**(冻结签名):
+//! 对某个真实 provider 的 projection,以宿主全开执行语义
+//! (`PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN`,消费 T2 Host profile/HostLocal
+//! 部署,不调用 bwrap launcher)执行**真实正向写探针**(builtin/terminal/
+//! MCP 三通道 + Coding 受控 commit)+ 真实 resume 面(launch→同 id resume→
+//! 错 id 负探针),并且:
+//! - 受控宿主写成功是「全开」事实——不再要求 root/非 target/`.git`/
+//!   `.aria` 物理拒写;不在真实平台目录做破坏探针(一切写探针落在受控
+//!   fixture 内);
+//! - 岗位/窗口(HostOpenProbeScope,受信注入)缺失一律拒签;probe 不靠
+//!   模型自述、`git status` 或「MCP 可用」单条件代证;
+//! - 审计/资源身份(duty/review_window_id/resource_scope_id)随证据工件
+//!   落盘,可追溯。
 //!
-//! 语义红线(计划 Global Constraints/Task 6 Step 3/4):
-//! - probe 不是用户 normal action 的 Unknown 旁路;`write_boundary=Confirmed`
-//!   只能由本 probe 的完整防护+真实正负探针签发。
-//! - 缺 bwrap/user namespace、CLI 版本漂移、观测缺失(哨兵/FIFO 缺失)、
-//!   观测超预算(沿 HEAD 既有预算:snapshot `max_entries=20_000`/
-//!   `max_bytes=64 MiB`、inventory soft4096/hard8192B,不新立预算)、证据
-//!   工件未落盘——一律**不签 Confirmed**,状态保持 Unknown;负向写真实落盘
-//!   或受保护面漂移才是 Denied。FIFO/观测缺失/超限**不截断冒充通过**。
-//! - evidence 工件(快照/日志)写盘不入 git;`artifact_ref` 必须指向真实
-//!   存在的工件文件。
+//! 语义红线(批2 Task 9):
+//! - `write_boundary=Confirmed` 只能由本 probe 的真实正向探针+resume 面
+//!   签发;CLI 版本漂移、观测缺失(哨兵)、观测超预算、证据工件未落盘、
+//!   岗位/窗口缺失——一律**不签 Confirmed**,状态保持 Unknown;正向探针
+//!   真实失败是防护失效 → Denied。超限**不截断冒充通过**。
+//! - evidence 工件写盘不入 git;`artifact_ref` 必须指向真实存在的工件
+//!   文件;工件不含任何 secret 值(env 只记键约定,不记值)。
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tokio_util::sync::CancellationToken;
 
-use crate::cross_cutting::process_manager::ProcessManager;
 use crate::cross_cutting::provider_boundary::{
     BoundaryWriteAttempt, BoundaryWriteChannel, PlannedBoundaryWrite, ProviderBoundaryError,
-    ProviderBoundaryEvidence, ProviderBoundaryLauncher, ProviderBoundaryMode, ProviderBoundaryPlan,
-    run_write_surface_probe,
+    ProviderBoundaryEvidence, ProviderBoundaryMode, ProviderBoundaryPlan,
+    PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN, probe_write_command, shell_quote,
 };
 use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use crate::product::logical_codebase::aggregate_index::freshness::COMPACT_INVENTORY_HARD_BUDGET_BYTES;
 use crate::product::logical_codebase::policy::SessionPolicyAction;
 use crate::product::logical_codebase::provider_projection::ProviderPolicyProjection;
-use crate::product::logical_codebase::root_recipe_receipt::RootRecipeSnapshotBudget;
 use crate::product::models::ProviderName;
 
-/// evidence 工件的 schema 标记(字段序变化必须换 schema 版本)。
-pub const BOUNDARY_PROBE_EVIDENCE_SCHEMA: &str = "lc-boundary-probe-evidence-v1";
+/// evidence 工件的 schema 标记(字段序变化必须换 schema 版本;批2 Task 9
+/// 语义换代 → v2:增 execution_semantics/duty/review_window_id/
+/// resource_scope_id,去物理拒写面 negatives/D4/bwrap/mounts)。
+pub const BOUNDARY_PROBE_EVIDENCE_SCHEMA: &str = "lc-boundary-probe-evidence-v2";
 
 /// 6a 写面探针通道对「哨兵缺失(写未被观测)」产出的证据标记(见
 /// `provider_boundary.rs::run_probe_script` 的
@@ -256,6 +259,55 @@ impl ResumeProbeSpec {
 
     pub(crate) fn timeout_secs(&self) -> u64 {
         self.timeout_secs
+    }
+}
+
+/// 宿主全开执行探针的可信岗位/窗口/资源身份(批2 Task 9 冻结面)。
+///
+/// `duty`(`author`/`reviewer`,与 T2 `TrustedProviderRole::as_str` 同口径)、
+/// `review_window_id`(Reviewer 窗口)与 `resource_scope_id`(审计/资源
+/// 归属)由受信调用方(产品 revalidate 通道、矩阵 harness)注入;probe
+/// **不从模型自报、prompt、env 或 `git status` 推导**,也不以「MCP 可用」
+/// 单条件代证。缺岗位、Reviewer 缺窗口、缺资源身份一律拒签。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostOpenProbeScope {
+    duty: String,
+    review_window_id: Option<String>,
+    resource_scope_id: String,
+}
+
+impl HostOpenProbeScope {
+    /// Author 岗位(Coding/HostCoding;无窗口)。
+    pub fn author(resource_scope_id: impl Into<String>) -> Self {
+        Self {
+            duty: "author".to_string(),
+            review_window_id: None,
+            resource_scope_id: resource_scope_id.into(),
+        }
+    }
+
+    /// Reviewer 窗口(Planning/Review 只读 action;窗口必带非空)。
+    pub fn reviewer(
+        review_window_id: impl Into<String>,
+        resource_scope_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            duty: "reviewer".to_string(),
+            review_window_id: Some(review_window_id.into()),
+            resource_scope_id: resource_scope_id.into(),
+        }
+    }
+
+    pub fn duty(&self) -> &str {
+        &self.duty
+    }
+
+    pub fn review_window_id(&self) -> Option<&str> {
+        self.review_window_id.as_deref()
+    }
+
+    pub fn resource_scope_id(&self) -> &str {
+        &self.resource_scope_id
     }
 }
 
@@ -553,42 +605,39 @@ fn git(dir: &Path, args: &[&str]) -> Result<(), ProviderBoundaryError> {
 pub struct ProviderBoundaryProbe;
 
 impl ProviderBoundaryProbe {
-    /// 冻结签名:受控隔离 fixture 的探测通道。完整防护(6a launcher 实测
-    /// 可用)+ 真实正负探针全部通过才签发 evidence;任一环节缺位返回
-    /// 稳定码错误(见 [`Self::evidence_state`] 的三态映射)。
+    /// 冻结签名(批2 Task 9 语义换代):受控 fixture 的宿主全开探测通道。
+    /// 真实正向写探针(builtin/terminal/MCP 三通道 + Coding 受控 commit)+
+    /// 岗位/窗口受信在场 + 版本一致 + 观测完整,才签发 host-open evidence;
+    /// 任一环节缺位返回稳定码错误(见 [`Self::evidence_state`] 三态映射)。
     pub async fn run(
         projection: &ProviderPolicyProjection,
         fixture: &BoundaryFixture,
+        scope: &HostOpenProbeScope,
     ) -> Result<ProviderBoundaryEvidence, ProviderBoundaryError> {
-        let launcher = ProviderBoundaryLauncher::probe_environment();
         Self::run_with_observation_budget(
-            &launcher,
             COMPACT_INVENTORY_HARD_BUDGET_BYTES,
             projection,
             fixture,
+            scope,
         )
         .await
     }
 
-    /// 注入式 seam(launcher/观测预算可注入;测试与装配用)。生产 `run`
-    /// 以 `ProviderBoundaryLauncher::probe_environment()` 与沿 HEAD 的
-    /// inventory 硬预算(8192B)调用本函数。
+    /// 注入式 seam(观测预算可注入;测试与装配用)。生产 `run` 以沿 HEAD
+    /// 的 inventory 硬预算(8192B)调用本函数。宿主全开语义:无 bwrap
+    /// launcher 前置(消费 Host profile,不在沙箱内执行)。
     pub(crate) async fn run_with_observation_budget(
-        launcher: &ProviderBoundaryLauncher,
         observation_budget: usize,
         projection: &ProviderPolicyProjection,
         fixture: &BoundaryFixture,
+        scope: &HostOpenProbeScope,
     ) -> Result<ProviderBoundaryEvidence, ProviderBoundaryError> {
-        // 1) 完整防护前置:缺 bwrap/user namespace 一律失败关闭(Unknown,
-        //    非 skip→pass,也非 Denied)。
-        if !launcher.is_available() {
-            return Err(ProviderBoundaryError::Unsupported(
-                "boundary_unavailable: bwrap + user namespace not verified on this machine; fail-closed"
-                    .to_string(),
-            ));
-        }
-        // 2) plan 派生与 projection/fixture 一致性(材料不匹配=未探测)。
+        // 1) plan 派生与 projection/fixture 一致性(材料不匹配=未探测,
+        //    InvalidPlan → Unknown)。
         let plan = derive_boundary_plan(projection, fixture)?;
+        // 2) 岗位/窗口受信在场(批2 Task 9):缺岗位、Reviewer 缺窗口、
+        //    缺资源身份一律拒签;岗位必须与 action 执行语义相符。
+        validate_scope_for_action(scope, projection.action())?;
         // 3) 真实 CLI exact version(宿主侧只读探测);漂移即拒签。
         let cli_version = probe_cli_version(fixture.cli_program())?;
         if cli_version != projection.exact_version() {
@@ -599,27 +648,25 @@ impl ProviderBoundaryProbe {
                 cli_version
             )));
         }
-        // 3.5) resume 面(规格在场时):宿主侧真实 launch→同 id resume→错
-        //     id 负探针。置于 pre 快照**之前**:宿主 LLM 会话可能在 cwd
-        //     git 仓库做项目探测而物化 `.git/index` 等状态(pi 实测)——
-        //     那是宿主侧会话准备,不是沙箱写边界违规;D4 只度量沙箱窗口。
-        //     resume 结果与写边界正交,只记录工件 resume 段(2d 导入消费)。
+        // 4) resume 面(规格在场时):宿主侧真实 launch→同 id resume→错
+        //    id 负探针(保留真实 native id 与负探针记录;resume 结果与写
+        //    面正交,只记录工件 resume 段,2d 导入消费)。
         let resume = match fixture.resume_spec() {
             Some(spec) => run_resume_segment(spec, fixture.cli_program(), fixture.root()).await,
             None => ResumeProbeRecord::not_probed(),
         };
         let env = fixture.probe_env();
-        // 4) 受保护面 pre 快照(沿 HEAD 既有预算;超限即拒签,不截断)。
-        let snapshot_budget = RootRecipeSnapshotBudget::DEFAULT;
-        let faces = protected_face_roots(fixture);
-        let pre = bounded_snapshot(&faces, &snapshot_budget)?;
-        // 5) 探针计划:正向(runtime 窄面 + Coding target)在前,负向矩阵
-        //    (builtin/terminal/MCP/extension 四通道)在后。
+        // 5) 宿主全开正向写探针:builtin(provider 运行时窄面 [+ Coding
+        //    target])/terminal(root 普通文件)/MCP(member 普通文件)三
+        //    通道真实执行——受控宿主写成功=「全开」事实,不再要求物理
+        //    拒写;一切写探针只落在受控 fixture 内,不触真实平台目录。
         let coding = matches!(projection.action(), SessionPolicyAction::CodingTargetWrite);
         let runtime_probe = fixture.runtime_probe_path();
         let target_probe = fixture
             .target()
             .map(|target| target.join("aria-boundary-probe.txt"));
+        let terminal_probe = fixture.root().join("aria-host-open-terminal-probe.txt");
+        let mcp_probe = fixture.member().join("aria-host-open-mcp-probe.txt");
         let mut planned = vec![PlannedBoundaryWrite::new(
             BoundaryWriteChannel::Builtin,
             runtime_probe.clone(),
@@ -630,33 +677,25 @@ impl ProviderBoundaryProbe {
                 target_probe,
             ));
         }
-        planned.extend(planned_negative_writes(fixture));
-        // actual argv 记录(挂载与真实探针 spawn 完全一致;payload 以标记
-        // 代替,逐 attempt 记录见 positives/negatives)。
-        let probe_argv = launcher.build_boundary_argv(
+        planned.push(PlannedBoundaryWrite::new(
+            BoundaryWriteChannel::Terminal,
+            terminal_probe.clone(),
+        ));
+        planned.push(PlannedBoundaryWrite::new(
+            BoundaryWriteChannel::Mcp,
+            mcp_probe.clone(),
+        ));
+        // 记录宿主执行 argv 形态(payload 以标记代替;逐 attempt 记录见
+        // positives)。
+        let probe_argv = argv_with_program(
             "sh",
-            &["-c", "(aria boundary write-surface probe payload)"],
-            fixture.root(),
-            &env,
-            &plan,
-        )?;
-        // 6) 真实执行(6a 写面探针通道:provider 自身与其 terminal/MCP/
-        //    extension 后代共享同一 mount namespace)。
-        let attempts = run_write_surface_probe(launcher, &plan, &env, &planned)
-            .await
-            .map_err(|error| {
-                let stderr = error.stderr.trim();
-                ProviderBoundaryError::ProbeFailed(format!(
-                    "boundary_unobserved: write-surface probe channel failed before observation: {}{}",
-                    error.details,
-                    if stderr.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" | {stderr}")
-                    }
-                ))
-            })?;
-        // 7) 观测预算:超限拒签,绝不截断观测面冒充通过。
+            &[
+                "-c".to_string(),
+                "(aria host-open write-surface probe payload)".to_string(),
+            ],
+        );
+        let attempts = run_host_write_surface_probe(&env, fixture.root(), &planned).await?;
+        // 6) 观测预算:超限拒签,绝不截断观测面冒充通过。
         let observation_bytes: usize = attempts
             .iter()
             .map(|attempt| attempt.evidence().len() + attempt.path().as_os_str().len())
@@ -666,10 +705,9 @@ impl ProviderBoundaryProbe {
                 "boundary_observation_over_budget: attempts observation {observation_bytes}B exceeds budget {observation_budget}B; refusing to truncate the observation surface"
             )));
         }
-        // 8) 分类:正向必须成功且宿主复核真实落盘;负向必须被拒且被观测。
-        let positive_count = 1 + usize::from(coding);
-        let (positive_attempts, negative_attempts) = attempts.split_at(positive_count);
-        for attempt in positive_attempts {
+        // 7) 全开判定:每个正向探针必须写成功且宿主复核真实落盘 verbatim
+        //    (写失败/未观测 = 防护失效 → Denied 维度,不签)。
+        for attempt in &attempts {
             if attempt.result() != Ok(()) {
                 return Err(ProviderBoundaryError::ProbeFailed(format!(
                     "positive probe refused: channel={:?} path={} evidence={}",
@@ -680,7 +718,10 @@ impl ProviderBoundaryProbe {
             }
         }
         let probe_content = b"aria-boundary-probe".to_vec();
-        for path in std::iter::once(&runtime_probe).chain(target_probe.as_ref()) {
+        for path in std::iter::once(&runtime_probe)
+            .chain(target_probe.as_ref())
+            .chain([&terminal_probe, &mcp_probe])
+        {
             let observed = fs::read(path).unwrap_or_default();
             if observed != probe_content {
                 return Err(ProviderBoundaryError::ProbeFailed(format!(
@@ -689,39 +730,15 @@ impl ProviderBoundaryProbe {
                 )));
             }
         }
-        for attempt in negative_attempts {
-            if attempt.result() == Ok(()) {
-                return Err(ProviderBoundaryError::ProbeFailed(format!(
-                    "negative probe landed: channel={:?} path={}",
-                    attempt.channel(),
-                    attempt.path().display()
-                )));
-            }
-            if !Self::attempt_observed(true, attempt.evidence()) {
-                return Err(ProviderBoundaryError::ProbeFailed(format!(
-                    "boundary_unobserved: channel={:?} path={} evidence={:?}",
-                    attempt.channel(),
-                    attempt.path().display(),
-                    attempt.evidence()
-                )));
-            }
-        }
-        // 9) 受控 commit(Coding):target 内 git commit 沿冻结授权链成功。
+        // 8) 受控 commit(Coding):target 内 git commit 宿主直接执行成功
+        //    (git identity 沿冻结授权链)。
         let controlled_commit = if coding {
-            Some(run_controlled_commit(launcher, fixture, &env, &plan).await?)
+            Some(run_controlled_commit(fixture, &env).await?)
         } else {
             None
         };
-        // 10) 受保护面 post 快照:pre==post 零漂移(D4 口径,只度量沙箱窗口)。
-        let post = bounded_snapshot(&faces, &snapshot_budget)?;
-        if post != pre {
-            return Err(ProviderBoundaryError::ProbeFailed(format!(
-                "protected-face drift after probes: pre {} entries != post {} entries",
-                pre.len(),
-                post.len()
-            )));
-        }
-        // 11) 证据工件落盘(artifact_ref 必须指向真实存在的文件)。
+        // 9) 证据工件落盘(artifact_ref 必须指向真实存在的文件;schema v2
+        //    含执行语义/岗位/窗口/资源身份,不含任何 secret 值)。
         let probed_at = chrono::Utc::now().to_rfc3339();
         let session_dir = fixture.evidence_session_dir();
         fs::create_dir_all(&session_dir).map_err(|error| {
@@ -739,49 +756,25 @@ impl ProviderBoundaryProbe {
             cli_version_argv: vec![fixture.cli_program().to_string(), "--version".to_string()],
             cli_exact_version: cli_version.clone(),
             os: os_text(),
-            bwrap_path: launcher
-                .bwrap_path()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "unresolved".to_string()),
-            bwrap_version: launcher
-                .bwrap_path()
-                .and_then(|path| capture_trim(path, &["--version"]))
-                .unwrap_or_else(|| "unknown".to_string()),
-            sandbox: "product-owned-bwrap".to_string(),
+            execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+            duty: scope.duty().to_string(),
+            review_window_id: scope.review_window_id().map(str::to_string),
+            resource_scope_id: scope.resource_scope_id().to_string(),
             action: action_text(projection.action()).to_string(),
             boundary_mode: boundary_mode_text(plan.mode()).to_string(),
             role: format!("{:?}", projection.role()),
             fixture_digest: fixture.fixture_digest(),
             profile_digest: projection.capability_projection_digest().to_string(),
             session_projection_digest: projection.projection_digest().to_string(),
-            launcher_argv: argv_text(&probe_argv),
-            mounts: extract_mounts(&probe_argv),
-            positives: attempts[..positive_count]
-                .iter()
-                .map(attempt_record)
-                .collect(),
-            negatives: attempts[positive_count..]
-                .iter()
-                .map(attempt_record)
-                .collect(),
+            host_probe_argv: probe_argv,
+            positives: attempts.iter().map(attempt_record).collect(),
             controlled_commit,
             resume,
-            d4: D4Record {
-                protected_faces: faces
-                    .iter()
-                    .map(|face| face.to_string_lossy().into_owned())
-                    .collect(),
-                protected_pre_digest: snapshot_digest(&pre),
-                protected_post_digest: snapshot_digest(&post),
-                drift: "none".to_string(),
-            },
             observation: ObservationRecord {
                 attempt_count: attempts.len(),
                 evidence_bytes: observation_bytes,
                 budget_bytes: observation_budget,
                 complete: true,
-                snapshot_max_entries: snapshot_budget.max_entries,
-                snapshot_max_bytes: snapshot_budget.max_bytes,
             },
             write_boundary_state: "Confirmed".to_string(),
             probed_at: probed_at.clone(),
@@ -797,7 +790,8 @@ impl ProviderBoundaryProbe {
                 artifact_path.display()
             ))
         })?;
-        // 12) 签发:仅在完整防护+真实正负探针全部通过后构造 evidence。
+        // 10) 签发:真实正向探针 + 岗位/窗口/资源身份齐备后构造 host-open
+        //     evidence(语义/岗位/窗口随证据进入 2c/2d 导入链)。
         Ok(ProviderBoundaryEvidence::new(
             fixture.provider(),
             cli_version,
@@ -805,6 +799,9 @@ impl ProviderBoundaryProbe {
             projection.projection_digest().to_string(),
             artifact_path.to_string_lossy().into_owned(),
             probed_at,
+            PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+            scope.duty().to_string(),
+            scope.review_window_id().map(str::to_string),
         ))
     }
 
@@ -815,9 +812,10 @@ impl ProviderBoundaryProbe {
         !refused || (!evidence.trim().is_empty() && !evidence.contains(UNOBSERVED_MARKER))
     }
 
-    /// capability 三态视角(Confirmed 只能来自 `run` 的完整防护+真实正负
-    /// 探针签发):Ok=Confirmed;缺防护/材料不一致/版本漂移/观测缺失/超
-    /// 预算/工件未落盘=Unknown;防护失效(负向落盘/正向失败/漂移)=Denied。
+    /// capability 三态视角(Confirmed 只能来自 `run` 的真实正向探针+
+    /// 岗位/窗口受信在场签发):Ok=Confirmed;材料不一致/岗位窗口缺失/
+    /// 版本漂移/观测缺失/超预算/工件未落盘=Unknown;防护失效(正向写
+    /// 真实失败)=Denied。
     pub fn evidence_state(
         outcome: &Result<ProviderBoundaryEvidence, ProviderBoundaryError>,
     ) -> ProviderCapabilityEvidence {
@@ -902,16 +900,6 @@ struct CommitRecord {
     argv: Vec<String>,
 }
 
-/// D4 口径的受保护面零漂移记录(pre/post 快照 digest 对比)。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-struct D4Record {
-    protected_faces: Vec<String>,
-    protected_pre_digest: String,
-    protected_post_digest: String,
-    drift: String,
-}
-
 /// 观测面记录(沿 HEAD 既有预算,不截断)。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -920,12 +908,11 @@ struct ObservationRecord {
     evidence_bytes: usize,
     budget_bytes: usize,
     complete: bool,
-    snapshot_max_entries: usize,
-    snapshot_max_bytes: u64,
 }
 
-/// probe 证据工件(`evidence.json`):观测记录本体,durable capability
-/// 导入归 2d(经 2c shape 校验),本工件不入 git。
+/// probe 证据工件(`evidence.json`,schema v2):观测记录本体,durable
+/// capability 导入归 2d(经 2c shape 校验),本工件不入 git。执行语义/
+/// 岗位/窗口/资源身份随工件落盘(批2 Task 9);不含任何 secret 值。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 struct BoundaryProbeEvidenceArtifact {
@@ -936,22 +923,20 @@ struct BoundaryProbeEvidenceArtifact {
     cli_version_argv: Vec<String>,
     cli_exact_version: String,
     os: String,
-    bwrap_path: String,
-    bwrap_version: String,
-    sandbox: String,
+    execution_semantics: String,
+    duty: String,
+    review_window_id: Option<String>,
+    resource_scope_id: String,
     action: String,
     boundary_mode: String,
     role: String,
     fixture_digest: String,
     profile_digest: String,
     session_projection_digest: String,
-    launcher_argv: Vec<String>,
-    mounts: Vec<String>,
+    host_probe_argv: Vec<String>,
     positives: Vec<AttemptRecord>,
-    negatives: Vec<AttemptRecord>,
     controlled_commit: Option<CommitRecord>,
     resume: ResumeProbeRecord,
-    d4: D4Record,
     observation: ObservationRecord,
     write_boundary_state: String,
     probed_at: String,
@@ -1073,196 +1058,117 @@ fn derive_boundary_plan(
     }
 }
 
-/// 负向探针矩阵:builtin/terminal/MCP/extension 四通道对 root/成员/元数据
-/// 的写全部必须被拒且带证据;Coding 追加 target `.git` 指针与 target
-/// `.aria`(后置只读挂载保护面)。
-fn planned_negative_writes(fixture: &BoundaryFixture) -> Vec<PlannedBoundaryWrite> {
-    let root = fixture.root();
-    let mut planned = vec![
-        PlannedBoundaryWrite::new(
-            BoundaryWriteChannel::Builtin,
-            root.join("rogue-builtin-probe"),
-        ),
-        PlannedBoundaryWrite::new(
-            BoundaryWriteChannel::Builtin,
-            root.join(".git").join("rogue-probe"),
-        ),
-        PlannedBoundaryWrite::new(
-            BoundaryWriteChannel::Terminal,
-            root.join(".aria").join("rogue-probe"),
-        ),
-        PlannedBoundaryWrite::new(
-            BoundaryWriteChannel::Terminal,
-            fixture.member().join("rogue-probe"),
-        ),
-        PlannedBoundaryWrite::new(
-            BoundaryWriteChannel::Mcp,
-            fixture.member().join(".git").join("rogue-probe"),
-        ),
-        PlannedBoundaryWrite::new(BoundaryWriteChannel::Mcp, root.join("AGENTS.md")),
-        PlannedBoundaryWrite::new(
-            BoundaryWriteChannel::Extension,
-            fixture.member_b().join("rogue-probe"),
-        ),
-        PlannedBoundaryWrite::new(
-            BoundaryWriteChannel::Extension,
-            root.join(".mcp.json.rogue"),
-        ),
-    ];
-    if let Some(target) = fixture.target() {
-        planned.push(PlannedBoundaryWrite::new(
-            BoundaryWriteChannel::Builtin,
-            target.join(".git"),
-        ));
-        planned.push(PlannedBoundaryWrite::new(
-            BoundaryWriteChannel::Extension,
-            target.join(".aria").join("rogue-probe"),
+/// 岗位/窗口/资源身份受信校验(批2 Task 9):岗位必须与 action 执行语义
+/// 相符(Coding=author,只读=reviewer);Reviewer 缺窗口、缺资源身份、
+/// 岗位不符一律拒签(InvalidPlan → Unknown;probe 不采信模型自报)。
+fn validate_scope_for_action(
+    scope: &HostOpenProbeScope,
+    action: SessionPolicyAction,
+) -> Result<(), ProviderBoundaryError> {
+    let expected_duty = match action {
+        SessionPolicyAction::CodingTargetWrite => "author",
+        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => "reviewer",
+    };
+    if scope.duty() != expected_duty {
+        return Err(ProviderBoundaryError::InvalidPlan(format!(
+            "boundary_scope_missing: action {action:?} 要求岗位 {expected_duty:?},scope 携带 {:?}(岗位缺失/不符不签)",
+            scope.duty()
+        )));
+    }
+    if expected_duty == "reviewer"
+        && scope.review_window_id().map(str::is_empty).unwrap_or(true)
+    {
+        return Err(ProviderBoundaryError::InvalidPlan(
+            "boundary_scope_missing: reviewer 探针缺 review 窗口引用(窗口缺失不签)"
+                .to_string(),
         ));
     }
-    planned
+    if scope.resource_scope_id().trim().is_empty() {
+        return Err(ProviderBoundaryError::InvalidPlan(
+            "boundary_scope_missing: resource scope id 缺失(审计/资源身份不可追溯)"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
-/// 受保护面(root/成员树 + target `.aria` 与 `.git` 指针)。
-fn protected_face_roots(fixture: &BoundaryFixture) -> Vec<PathBuf> {
-    // 成员 checkout 是 root 子目录:root 树快照已覆盖成员与全部元数据
-    // (`.git`/`.aria`/AGENTS.md/.mcp.json);Coding target 的 `.aria` 与
-    // `.git` 指针在 rw bind 之外,单独入面。
-    let mut faces = vec![fixture.root().to_path_buf()];
-    if let Some(target) = fixture.target() {
-        faces.push(target.join(".aria"));
-        faces.push(target.join(".git"));
+/// 宿主全开写面探针(批2 Task 9):受控 fixture 内以宿主身份直接执行
+/// `sh` 探针脚本(无 bwrap),按通道逐路径尝试写入并解析
+/// `A <i> ok|refused <evidence>` 哨兵。宿主普通写成功=全开事实;进程
+/// 失败/超时=未观测(boundary_unobserved),不产生 attempt 冒充。
+async fn run_host_write_surface_probe(
+    env: &BTreeMap<String, String>,
+    cwd: &Path,
+    planned: &[PlannedBoundaryWrite],
+) -> Result<Vec<BoundaryWriteAttempt>, ProviderBoundaryError> {
+    let mut script = String::new();
+    for (index, planned) in planned.iter().enumerate() {
+        let quoted = shell_quote(&planned.path().to_string_lossy());
+        let write = probe_write_command(planned.channel(), &quoted);
+        // 错误采集文件落在受控 fixture 内(cwd 相对),不触宿主其它目录。
+        let error_file = format!(".aria-host-open-probe-{index}.err");
+        script.push_str(&format!(
+            "if ( {write} ) 2>{error_file}; then printf 'A {index} ok\\n'; \
+             else printf 'A {index} refused %s\\n' \"$(tr '\\n' ' ' <{error_file} | cut -c1-160)\"; fi\n"
+        ));
     }
-    faces
-}
-
-/// 沿 HEAD 既有快照预算(`RootRecipeSnapshotBudget::DEFAULT`:20_000 条目/
-/// 64 MiB)的有界递归快照;超限 fail-closed 报错,绝不静默截断观测面。
-fn bounded_snapshot(
-    roots: &[PathBuf],
-    budget: &RootRecipeSnapshotBudget,
-) -> Result<BTreeMap<String, Vec<u8>>, ProviderBoundaryError> {
-    #[derive(Default)]
-    struct Tally {
-        entries: usize,
-        bytes: u64,
-    }
-    fn walk(
-        dir: &Path,
-        prefix: &str,
-        snapshot: &mut BTreeMap<String, Vec<u8>>,
-        tally: &mut Tally,
-        budget: &RootRecipeSnapshotBudget,
-    ) -> Result<(), ProviderBoundaryError> {
-        let entries = fs::read_dir(dir).map_err(|error| {
+    let invocation = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .current_dir(cwd)
+        .envs(env)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), invocation)
+        .await
+        .map_err(|_| {
+            ProviderBoundaryError::ProbeFailed(
+                "boundary_unobserved: host write-surface probe timed out (60s)".to_string(),
+            )
+        })?
+        .map_err(|error| {
             ProviderBoundaryError::ProbeFailed(format!(
-                "boundary_unobserved: cannot snapshot {}: {error}",
-                dir.display()
+                "boundary_unobserved: host write-surface probe spawn failed: {error}"
             ))
         })?;
-        for entry in entries {
-            let entry = entry.map_err(|error| {
-                ProviderBoundaryError::ProbeFailed(format!(
-                    "boundary_unobserved: snapshot entry in {}: {error}",
-                    dir.display()
-                ))
-            })?;
-            let path = entry.path();
-            let key = format!("{prefix}/{}", entry.file_name().to_string_lossy());
-            tally.entries += 1;
-            if tally.entries > budget.max_entries {
-                return Err(ProviderBoundaryError::ProbeFailed(format!(
-                    "boundary_observation_over_budget: snapshot entries {} exceed max_entries {}",
-                    tally.entries, budget.max_entries
-                )));
-            }
-            let metadata = entry.metadata().map_err(|error| {
-                ProviderBoundaryError::ProbeFailed(format!(
-                    "boundary_unobserved: snapshot metadata {}: {error}",
-                    path.display()
-                ))
-            })?;
-            if metadata.is_dir() {
-                walk(&path, &key, snapshot, tally, budget)?;
-            } else {
-                let content = fs::read(&path).map_err(|error| {
-                    ProviderBoundaryError::ProbeFailed(format!(
-                        "boundary_unobserved: cannot read {}: {error}",
-                        path.display()
-                    ))
-                })?;
-                tally.bytes += content.len() as u64;
-                if tally.bytes > budget.max_bytes {
-                    return Err(ProviderBoundaryError::ProbeFailed(format!(
-                        "boundary_observation_over_budget: snapshot bytes {} exceed max_bytes {}",
-                        tally.bytes, budget.max_bytes
-                    )));
-                }
-                snapshot.insert(key, content);
-            }
-        }
-        Ok(())
+    if !output.status.success() {
+        return Err(ProviderBoundaryError::ProbeFailed(format!(
+            "boundary_unobserved: host write-surface probe channel failed: exit {:?}: {}",
+            output.status.code(),
+            text_excerpt(&String::from_utf8_lossy(&output.stderr), 200)
+        )));
     }
-    let mut snapshot = BTreeMap::new();
-    let mut tally = Tally::default();
-    for root in roots {
-        let prefix = root.to_string_lossy().into_owned();
-        let metadata = fs::symlink_metadata(root).map_err(|error| {
-            ProviderBoundaryError::ProbeFailed(format!(
-                "boundary_unobserved: cannot snapshot {}: {error}",
-                root.display()
-            ))
-        })?;
-        tally.entries += 1;
-        if tally.entries > budget.max_entries {
-            return Err(ProviderBoundaryError::ProbeFailed(format!(
-                "boundary_observation_over_budget: snapshot entries {} exceed max_entries {}",
-                tally.entries, budget.max_entries
-            )));
-        }
-        if metadata.is_dir() {
-            walk(root, &prefix, &mut snapshot, &mut tally, budget)?;
-        } else {
-            let content = fs::read(root).map_err(|error| {
-                ProviderBoundaryError::ProbeFailed(format!(
-                    "boundary_unobserved: cannot read {}: {error}",
-                    root.display()
-                ))
-            })?;
-            tally.bytes += content.len() as u64;
-            if tally.bytes > budget.max_bytes {
-                return Err(ProviderBoundaryError::ProbeFailed(format!(
-                    "boundary_observation_over_budget: snapshot bytes {} exceed max_bytes {}",
-                    tally.bytes, budget.max_bytes
-                )));
+    let stdout_text = bounded_text(&output.stdout);
+    let mut attempts = Vec::with_capacity(planned.len());
+    for (index, planned) in planned.iter().enumerate() {
+        let sentinel = stdout_text
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("A {index} ")));
+        let attempt = match sentinel {
+            Some(rest) if rest.starts_with("ok") => {
+                BoundaryWriteAttempt::allowed(planned.channel(), planned.path().to_path_buf())
             }
-            snapshot.insert(prefix, content);
-        }
+            Some(rest) => BoundaryWriteAttempt::refused_with(
+                planned.channel(),
+                planned.path().to_path_buf(),
+                rest.trim_start_matches("refused").trim().to_string(),
+            ),
+            None => BoundaryWriteAttempt::refused_with(
+                planned.channel(),
+                planned.path().to_path_buf(),
+                "probe sentinel missing (write unobserved)".to_string(),
+            ),
+        };
+        attempts.push(attempt);
     }
-    Ok(snapshot)
+    Ok(attempts)
 }
 
-/// 快照 digest(键序 + 长度分隔的规范串;内容对比由 map 相等承担)。
-fn snapshot_digest(snapshot: &BTreeMap<String, Vec<u8>>) -> String {
-    let mut canonical = String::new();
-    canonical_field(&mut canonical, "lc-boundary-protected-snapshot-v1");
-    for (key, content) in snapshot {
-        canonical.push('|');
-        canonical_field(&mut canonical, key);
-        canonical_field(&mut canonical, &content.len().to_string());
-    }
-    format!("sha256:{:x}", Sha256::digest(canonical.as_bytes()))
-}
-
-/// Coding 受控 commit:target 内 `git add + commit` 在产品写边界沙箱内
-/// 执行(git identity 沿冻结授权链),宿主复核提交 subject。
+/// Coding 受控 commit(批2 Task 9):target 内 `git add + commit` 在宿主
+/// 直接执行(git identity 沿冻结授权链),宿主复核提交 subject。
 async fn run_controlled_commit(
-    launcher: &ProviderBoundaryLauncher,
     fixture: &BoundaryFixture,
     env: &BTreeMap<String, String>,
-    plan: &ProviderBoundaryPlan,
 ) -> Result<CommitRecord, ProviderBoundaryError> {
-    use tokio::io::AsyncReadExt;
-
     let Some(target) = fixture.target() else {
         return Err(ProviderBoundaryError::InvalidPlan(
             "controlled commit requires a coding target worktree".to_string(),
@@ -1273,34 +1179,18 @@ async fn run_controlled_commit(
         "git -C '{target_text}' add aria-boundary-probe.txt && \
          git -C '{target_text}' -c commit.gpgsign=false commit -q -m aria-boundary-probe-commit"
     );
-    let argv = launcher.build_boundary_argv("sh", &["-c", &script], fixture.root(), env, plan)?;
-    let mut process = ProcessManager::spawn_with_boundary_resolved(
-        launcher.clone(),
-        "sh",
-        &["-c", &script],
-        fixture.root(),
-        env,
-        plan,
-        CancellationToken::new(),
-    )
-    .await
-    .map_err(|error| {
-        ProviderBoundaryError::ProbeFailed(format!(
-            "controlled commit spawn failed: {}",
-            error.details
-        ))
-    })?;
-    drop(process.stdin);
-    let mut stderr_text = String::new();
-    let _ = process.stderr.read_to_string(&mut stderr_text).await;
-    let status = process.child.wait().await.map_err(|error| {
-        ProviderBoundaryError::ProbeFailed(format!("controlled commit wait failed: {error}"))
-    })?;
-    if !status.success() {
+    let argv = argv_with_program("sh", &["-c".to_string(), script.clone()]);
+    let commit = run_env_capture("sh", &["-c".to_string(), script], fixture.root(), env, 120).await;
+    if commit.timed_out {
+        return Err(ProviderBoundaryError::ProbeFailed(
+            "controlled commit timed out (120s)".to_string(),
+        ));
+    }
+    if !commit.succeeded() {
         return Err(ProviderBoundaryError::ProbeFailed(format!(
-            "controlled commit failed: exit {:?}: {}",
-            status.code(),
-            stderr_text.trim()
+            "controlled commit failed: {}{}",
+            commit.exit_summary(),
+            text_excerpt(&commit.stderr, 200)
         )));
     }
     let log = Command::new("git")
@@ -1322,7 +1212,7 @@ async fn run_controlled_commit(
     Ok(CommitRecord {
         subject: "aria-boundary-probe-commit".to_string(),
         verified_on_host: true,
-        argv: argv_text(&argv),
+        argv,
     })
 }
 
@@ -1466,6 +1356,50 @@ async fn run_cli_capture(
     let invocation = tokio::process::Command::new(program)
         .args(args)
         .current_dir(cwd)
+        .output();
+    let output =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), invocation).await;
+    match output {
+        Err(_) => CliCapture {
+            timed_out: true,
+            spawn_error: None,
+            status_success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+        Ok(Err(error)) => CliCapture {
+            timed_out: false,
+            spawn_error: Some(error.to_string()),
+            status_success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+        Ok(Ok(output)) => CliCapture {
+            timed_out: false,
+            spawn_error: None,
+            status_success: output.status.success(),
+            exit_code: output.status.code(),
+            stdout: bounded_text(&output.stdout),
+            stderr: bounded_text(&output.stderr),
+        },
+    }
+}
+
+/// 环境感知的宿主侧捕获(受控 commit 等需要 env overlay 的宿主执行;
+/// 与 `run_cli_capture` 同构,叠加显式 env)。
+async fn run_env_capture(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    timeout_secs: u64,
+) -> CliCapture {
+    let invocation = tokio::process::Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .envs(env)
         .output();
     let output =
         tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), invocation).await;
@@ -1721,15 +1655,16 @@ pub(crate) fn probe_import_record(
         probe_artifact_ref: Some(evidence.artifact_ref().to_string()),
         root_recipe_evidence:
             crate::product::logical_codebase::provider_capability_store::RootRecipeEvidence::None,
+        execution_semantics: evidence.execution_semantics().to_string(),
     }
 }
 
 /// 6c 现场探针的外部入口(矩阵 harness 等 crate 外调用方):受控 fixture +
 /// 真实 projector 组装 probe 投影并执行完整真实 probe(`resume` 规格在场时
-/// 覆盖 resume 面:真实 launch→同 id resume→错 id 负探针)。返回
-/// evidence/projection/record 材料包,record 经 2d `record_verified_probe`
-/// 导入 durable;任何环节失败返回稳定码错误——调用方 BLOCKED 真实报告,
-/// 不伪造。
+/// 覆盖 resume 面:真实 launch→同 id resume→错 id 负探针;批2 Task 9 起
+/// `scope` 携带受信岗位/窗口/资源身份,缺失即拒签)。返回 evidence/
+/// projection/record 材料包,record 经 2d `record_verified_probe` 导入
+/// durable;任何环节失败返回稳定码错误——调用方 BLOCKED 真实报告,不伪造。
 pub async fn run_cli_boundary_probe(
     provider: ProviderName,
     cli_program: &str,
@@ -1738,6 +1673,7 @@ pub async fn run_cli_boundary_probe(
     evidence_root: &Path,
     session_label: &str,
     resume: Option<ResumeProbeSpec>,
+    scope: HostOpenProbeScope,
 ) -> Result<CliBoundaryProbeOutcome, ProviderBoundaryError> {
     let mut fixture = BoundaryFixture::create(
         provider.clone(),
@@ -1759,7 +1695,7 @@ pub async fn run_cli_boundary_probe(
         }
     };
     let projection = boundary_probe_projection(provider, &fixture, &version, role);
-    let evidence = ProviderBoundaryProbe::run(&projection, &fixture).await?;
+    let evidence = ProviderBoundaryProbe::run(&projection, &fixture, &scope).await?;
     // record.resume 格取工件签发结果(6c worker 提醒:不自报)。
     let resume = ProviderBoundaryProbe::artifact_resume_state(evidence.artifact_ref());
     let record = probe_import_record(&evidence, &projection, resume);
@@ -1793,50 +1729,6 @@ fn boundary_mode_text(mode: ProviderBoundaryMode) -> &'static str {
     }
 }
 
-fn argv_text(argv: &[OsString]) -> Vec<String> {
-    argv.iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect()
-}
-
-/// 从 launcher argv 提取挂载操作序列(挂载顺序是安全语义;payload 命令
-/// 之前的部分)。
-fn extract_mounts(argv: &[OsString]) -> Vec<String> {
-    let texts = argv_text(argv);
-    let mut mounts = Vec::new();
-    let mut index = 0;
-    while index < texts.len() {
-        let token = texts[index].as_str();
-        match token {
-            "--ro-bind" | "--bind" => {
-                if index + 2 >= texts.len() {
-                    break;
-                }
-                mounts.push(format!(
-                    "{} {} {}",
-                    token,
-                    texts[index + 1],
-                    texts[index + 2]
-                ));
-                index += 3;
-            }
-            "--proc" | "--dev" | "--tmpfs" | "--chdir" => {
-                if index + 1 >= texts.len() {
-                    break;
-                }
-                mounts.push(format!("{} {}", token, texts[index + 1]));
-                index += 2;
-            }
-            "--die-with-parent" => {
-                mounts.push(token.to_string());
-                index += 1;
-            }
-            // payload 命令开始(探针脚本/受控 commit)。
-            _ => break,
-        }
-    }
-    mounts
-}
 
 #[cfg(test)]
 mod tests {
@@ -1845,13 +1737,17 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{BoundaryFixture, ProviderBoundaryProbe, ResumeChannelKind, ResumeProbeSpec};
+    use super::{
+        BoundaryFixture, HostOpenProbeScope, ProviderBoundaryProbe, ResumeChannelKind,
+        ResumeProbeSpec,
+    };
     use crate::cross_cutting::claude_code_provider::ClaudePolicyProjector;
     use crate::cross_cutting::codex_provider::CodexPolicyProjector;
     use crate::cross_cutting::kimi_code_provider::KimiPolicyProjector;
     use crate::cross_cutting::pi_provider::PiPolicyProjector;
     use crate::cross_cutting::provider_boundary::{
-        ProviderBoundaryError, ProviderBoundaryLauncher, ProviderBoundaryMode, ProviderBoundaryPlan,
+        ProviderBoundaryError, ProviderBoundaryMode, ProviderBoundaryPlan,
+        PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN,
     };
     use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
     use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
@@ -1883,6 +1779,16 @@ mod tests {
             output.status.code()
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Coding/author 岗位的受信 scope(测试注入可信 fixture)。
+    fn author_scope() -> HostOpenProbeScope {
+        HostOpenProbeScope::author("aria-unit-probe-scope")
+    }
+
+    /// 只读/reviewer 窗口的受信 scope。
+    fn reviewer_scope() -> HostOpenProbeScope {
+        HostOpenProbeScope::reviewer("aria-unit-review-window", "aria-unit-probe-scope")
     }
 
     /// Task 6c Step 1(断言 355 逐字):未观测/超预算的 evidence 永不
@@ -1924,13 +1830,8 @@ mod tests {
             ProviderCapabilityEvidence::Confirmed
         );
 
-        // 3) 真实沙箱运行 + 观测面超出预算(注入 16B 预算):拒签且保持
+        // 3) 真实宿主运行 + 观测面超出预算(注入 16B 预算):拒签且保持
         //    Unknown,错误带稳定码,不截断冒充。
-        let launcher = ProviderBoundaryLauncher::probe_environment();
-        assert!(
-            launcher.is_available(),
-            "environment blocked: over-budget probe case needs bwrap + user namespace"
-        );
         let base = tempdir().expect("base dir");
         let fixture = BoundaryFixture::create(
             ProviderName::ClaudeCode,
@@ -1949,10 +1850,10 @@ mod tests {
             AdapterRole::Reviewer,
         );
         let over_budget_outcome = ProviderBoundaryProbe::run_with_observation_budget(
-            &launcher,
             16,
             &projection,
             &fixture,
+            &reviewer_scope(),
         )
         .await;
         assert!(
@@ -1967,16 +1868,13 @@ mod tests {
         assert_ne!(over_budget_state, ProviderCapabilityEvidence::Confirmed);
     }
 
-    /// Task 6c:完整防护 + 真实正负探针才签 Confirmed——Ok evidence 的每个
-    /// 字段锚定 projection/provider/版本/模式/工件,Coding 与 read-only 两种
-    /// action 各签一份;证据工件含正负探针、D4 零漂移与 actual argv/mount。
+    /// Task 9(承接 6c):真实正向宿主探针才签 Confirmed——Ok evidence 的
+    /// 每个字段锚定 projection/provider/版本/模式/工件/执行语义/岗位/窗口,
+    /// Coding 与 read-only 两种 action 各签一份;宿主普通写(terminal 写
+    /// root、MCP 写 member)成功是「全开」事实,不再判失败;证据工件含
+    /// 正向探针、受控 commit 与审计/资源身份,不含物理拒写面。
     #[tokio::test]
-    async fn lcg_t06_probe_signs_confirmed_only_after_full_protection_and_real_probes() {
-        let launcher = ProviderBoundaryLauncher::probe_environment();
-        assert!(
-            launcher.is_available(),
-            "environment blocked: full signing case needs bwrap + user namespace"
-        );
+    async fn lcg_t06_probe_signs_confirmed_only_after_real_host_open_probes() {
         let base = tempdir().expect("base dir");
         // CLI 以 git 充当(版本通道确定性;真实四家 CLI 由 live probe 覆盖)。
         let version = host_cli_version("git");
@@ -1995,7 +1893,8 @@ mod tests {
             &version,
             AdapterRole::Executor,
         );
-        let outcome = ProviderBoundaryProbe::run(&projection, &fixture).await;
+        let scope = author_scope();
+        let outcome = ProviderBoundaryProbe::run(&projection, &fixture, &scope).await;
         let state = ProviderBoundaryProbe::evidence_state(&outcome);
         assert_eq!(state, ProviderCapabilityEvidence::Confirmed, "{outcome:?}");
         let evidence = outcome.expect("confirmed coding evidence");
@@ -2006,18 +1905,59 @@ mod tests {
             ProviderBoundaryMode::TargetWriteOnly
         );
         assert_eq!(evidence.projection_digest(), projection.projection_digest());
+        assert_eq!(
+            evidence.execution_semantics(),
+            PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+        );
+        assert_eq!(evidence.duty(), "author");
+        assert_eq!(evidence.review_window_id(), None);
         assert!(!evidence.artifact_ref().is_empty());
         assert!(!evidence.probed_at().is_empty());
         let artifact = PathBuf::from(evidence.artifact_ref());
         assert!(artifact.is_file(), "artifact must exist on disk");
         let content = fs::read_to_string(&artifact).expect("read artifact");
         assert!(content.contains("\"positives\""));
-        assert!(content.contains("\"negatives\""));
-        assert!(content.contains("\"d4\""));
-        assert!(content.contains("\"launcher_argv\""));
+        assert!(content.contains("\"execution_semantics\""));
+        assert!(content.contains("host-open-v1"));
+        assert!(content.contains("\"duty\""));
+        assert!(content.contains("\"resource_scope_id\""));
+        assert!(content.contains("\"host_probe_argv\""));
         assert!(content.contains("\"cli_exact_version\""));
+        // 物理拒写语义面已退役:无 negatives/D4/bwrap/mounts 字段。
+        assert!(!content.contains("\"negatives\""));
+        assert!(!content.contains("\"d4\""));
+        assert!(!content.contains("\"bwrap_path\""));
+        assert!(!content.contains("\"mounts\""));
+        // 宿主普通写成功=全开事实:terminal 写 root、MCP 写 member 的
+        // 正向 attempt 均 allowed 且工件可见(旧语义会判 negative landed)。
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse artifact");
+        let positives = parsed["positives"].as_array().expect("positives");
+        let terminal_ok = positives.iter().any(|attempt| {
+            attempt["channel"] == serde_json::json!("Terminal")
+                && attempt["outcome"] == serde_json::json!("allowed")
+                && attempt["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with("aria-host-open-terminal-probe.txt"))
+        });
+        let mcp_ok = positives.iter().any(|attempt| {
+            attempt["channel"] == serde_json::json!("Mcp")
+                && attempt["outcome"] == serde_json::json!("allowed")
+                && attempt["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with("aria-host-open-mcp-probe.txt"))
+        });
+        assert!(
+            terminal_ok,
+            "terminal 宿主普通写成功必须是全开事实: {positives:?}"
+        );
+        assert!(mcp_ok, "MCP 宿主普通写成功必须是全开事实: {positives:?}");
+        assert!(fixture
+            .root()
+            .join("aria-host-open-terminal-probe.txt")
+            .is_file());
+        assert!(fixture.member().join("aria-host-open-mcp-probe.txt").is_file());
 
-        // read-only action 同样签发(全负向 + runtime 窄面正向)。
+        // read-only action 同样签发(reviewer 岗位 + 窗口引用)。
         let ro_base = tempdir().expect("ro base dir");
         let ro_fixture = BoundaryFixture::create(
             ProviderName::ClaudeCode,
@@ -2034,7 +1974,8 @@ mod tests {
             &version,
             AdapterRole::Reviewer,
         );
-        let ro_outcome = ProviderBoundaryProbe::run(&ro_projection, &ro_fixture).await;
+        let ro_outcome =
+            ProviderBoundaryProbe::run(&ro_projection, &ro_fixture, &reviewer_scope()).await;
         assert_eq!(
             ProviderBoundaryProbe::evidence_state(&ro_outcome),
             ProviderCapabilityEvidence::Confirmed,
@@ -2046,13 +1987,21 @@ mod tests {
             ro_evidence.projection_digest(),
             ro_projection.projection_digest()
         );
+        assert_eq!(
+            ro_evidence.execution_semantics(),
+            PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+        );
+        assert_eq!(ro_evidence.duty(), "reviewer");
+        assert_eq!(
+            ro_evidence.review_window_id(),
+            Some("aria-unit-review-window")
+        );
     }
 
-    /// Task 6c:缺 sandbox(Coding 口径 Unknown 非 skip→pass 非 Denied)与
-    /// CLI 版本漂移(projection 与真实 CLI 不一致)都不签 evidence,状态
-    /// 保持 Unknown 且错误带稳定码。
+    /// Task 9:岗位/窗口缺失(拒签,Unknown)与 CLI 版本漂移(projection
+    /// 与真实 CLI 不一致)都不签 evidence,状态保持 Unknown 且错误带稳定码。
     #[tokio::test]
-    async fn lcg_t06_probe_keeps_unknown_without_sandbox_or_version_drift() {
+    async fn lcg_t06_probe_keeps_unknown_on_scope_missing_or_version_drift() {
         let base = tempdir().expect("base dir");
         let fixture = BoundaryFixture::create(
             ProviderName::ClaudeCode,
@@ -2064,9 +2013,8 @@ mod tests {
         )
         .expect("fixture");
 
-        // 缺 bwrap/user namespace:失败关闭,Unknown。
-        let unavailable = ProviderBoundaryProbe::run_with_observation_budget(
-            &ProviderBoundaryLauncher::from_bwrap(None),
+        // 岗位与 action 不符(Coding 证据携带 reviewer 岗位):拒签,Unknown。
+        let wrong_duty = ProviderBoundaryProbe::run_with_observation_budget(
             8192,
             &probe_projection(
                 ProviderName::ClaudeCode,
@@ -2075,26 +2023,81 @@ mod tests {
                 AdapterRole::Executor,
             ),
             &fixture,
+            &reviewer_scope(),
         )
         .await;
-        assert!(matches!(
-            &unavailable,
-            Err(ProviderBoundaryError::Unsupported(reason))
-                if reason.starts_with("boundary_unavailable")
-        ));
+        assert!(
+            matches!(
+                &wrong_duty,
+                Err(ProviderBoundaryError::InvalidPlan(reason))
+                    if reason.starts_with("boundary_scope_missing")
+            ),
+            "duty/action mismatch must refuse to sign: {wrong_duty:?}"
+        );
         assert_eq!(
-            ProviderBoundaryProbe::evidence_state(&unavailable),
+            ProviderBoundaryProbe::evidence_state(&wrong_duty),
             ProviderCapabilityEvidence::Unknown
         );
 
-        // 版本漂移:projection 冻结版本 ≠ 真实 CLI 版本 → 拒签,Unknown。
-        let launcher = ProviderBoundaryLauncher::probe_environment();
+        // Reviewer 窗口缺失:只读 action + 空窗口 → 拒签,Unknown。
+        let ro_fixture = BoundaryFixture::create(
+            ProviderName::ClaudeCode,
+            "git",
+            SessionPolicyAction::PlanningReadOnly,
+            base.path(),
+            &base.path().join("evidence"),
+            "unit-unknown-ro",
+        )
+        .expect("ro fixture");
+        let no_window = ProviderBoundaryProbe::run_with_observation_budget(
+            8192,
+            &probe_projection(
+                ProviderName::ClaudeCode,
+                &ro_fixture,
+                "git version 0.0.0-probe",
+                AdapterRole::Reviewer,
+            ),
+            &ro_fixture,
+            &HostOpenProbeScope::reviewer("", "aria-unit-probe-scope"),
+        )
+        .await;
         assert!(
-            launcher.is_available(),
-            "environment blocked: version drift case needs bwrap + user namespace"
+            matches!(
+                &no_window,
+                Err(ProviderBoundaryError::InvalidPlan(reason))
+                    if reason.starts_with("boundary_scope_missing")
+            ),
+            "missing review window must refuse to sign: {no_window:?}"
         );
+        assert_eq!(
+            ProviderBoundaryProbe::evidence_state(&no_window),
+            ProviderCapabilityEvidence::Unknown
+        );
+
+        // 资源身份缺失:拒签,Unknown(审计/资源身份不可追溯不签)。
+        let no_resource = ProviderBoundaryProbe::run_with_observation_budget(
+            8192,
+            &probe_projection(
+                ProviderName::ClaudeCode,
+                &ro_fixture,
+                "git version 0.0.0-probe",
+                AdapterRole::Reviewer,
+            ),
+            &ro_fixture,
+            &HostOpenProbeScope::reviewer("aria-unit-review-window", " "),
+        )
+        .await;
+        assert!(
+            matches!(
+                &no_resource,
+                Err(ProviderBoundaryError::InvalidPlan(reason))
+                    if reason.starts_with("boundary_scope_missing")
+            ),
+            "missing resource scope must refuse to sign: {no_resource:?}"
+        );
+
+        // 版本漂移:projection 冻结版本 ≠ 真实 CLI 版本 → 拒签,Unknown。
         let drifted = ProviderBoundaryProbe::run_with_observation_budget(
-            &launcher,
             8192,
             &probe_projection(
                 ProviderName::ClaudeCode,
@@ -2103,6 +2106,7 @@ mod tests {
                 AdapterRole::Executor,
             ),
             &fixture,
+            &author_scope(),
         )
         .await;
         assert!(
@@ -2147,27 +2151,26 @@ mod tests {
         assert!(fixture.fixture_digest().starts_with("sha256:"));
     }
 
-    /// 三态映射:防护失效(负向落盘/正向失败/受保护面漂移)→ Denied;
-    /// 稳定码前缀(缺防护/漂移/未观测/超预算/工件未落盘)→ Unknown。
+    /// 三态映射:防护失效(正向写真实失败/受控 commit 失败)→ Denied;
+    /// 稳定码前缀(CLI 缺失/漂移/未观测/超预算/工件未落盘)→ Unknown。
     #[test]
     fn boundary_probe_state_mapping_denies_only_on_protection_failure() {
         let denied =
             ProviderBoundaryProbe::evidence_state(&Err(ProviderBoundaryError::ProbeFailed(
-                "negative probe landed: channel=Builtin path=/lc/root/.aria/rogue".to_string(),
+                "positive probe refused: channel=Mcp path=/lc/root/rogue".to_string(),
             )));
         assert_eq!(
             denied,
             ProviderCapabilityEvidence::Denied {
-                reason: "negative probe landed: channel=Builtin path=/lc/root/.aria/rogue"
-                    .to_string()
+                reason: "positive probe refused: channel=Mcp path=/lc/root/rogue".to_string()
             }
         );
-        let drift_denied =
+        let commit_denied =
             ProviderBoundaryProbe::evidence_state(&Err(ProviderBoundaryError::ProbeFailed(
-                "protected-face drift after probes (pre != post)".to_string(),
+                "controlled commit failed: exit Some(1)".to_string(),
             )));
         assert!(matches!(
-            drift_denied,
+            commit_denied,
             ProviderCapabilityEvidence::Denied { .. }
         ));
         for code in [
@@ -2232,11 +2235,6 @@ mod tests {
     /// 签发 Confirmed,且 2c shape 对 resume=Confirmed 的行兼容。
     #[tokio::test]
     async fn lcg_t06_resume_probe_round_trips_native_session_id() {
-        let launcher = ProviderBoundaryLauncher::probe_environment();
-        assert!(
-            launcher.is_available(),
-            "environment blocked: resume round-trip case needs bwrap + user namespace"
-        );
         let base = tempdir().expect("base dir");
         let cli = write_fake_resume_cli(base.path(), "ok");
         let cli_text = cli.to_string_lossy().into_owned();
@@ -2260,7 +2258,7 @@ mod tests {
             &version,
             AdapterRole::Executor,
         );
-        let outcome = ProviderBoundaryProbe::run(&projection, &fixture).await;
+        let outcome = ProviderBoundaryProbe::run(&projection, &fixture, &author_scope()).await;
         assert_eq!(
             ProviderBoundaryProbe::evidence_state(&outcome),
             ProviderCapabilityEvidence::Confirmed,
@@ -2357,11 +2355,6 @@ mod tests {
     }
     #[tokio::test]
     async fn lcg_t06_external_cli_probe_entry_feeds_2d_import() {
-        let launcher = ProviderBoundaryLauncher::probe_environment();
-        assert!(
-            launcher.is_available(),
-            "environment blocked: external entry case needs bwrap + user namespace"
-        );
         let base = tempdir().expect("base dir");
         let cli = write_fake_resume_cli(base.path(), "ok");
         let cli_text = cli.to_string_lossy().into_owned();
@@ -2376,6 +2369,7 @@ mod tests {
                 ResumeChannelKind::ClaudePrintJson,
                 "Reply with exactly: resume-ok",
             )),
+            reviewer_scope(),
         )
         .await
         .expect("external probe entry must run the full probe");
@@ -2410,11 +2404,6 @@ mod tests {
     /// 失效)→ resume 段 Denied(带真实应答摘录);写面证据不受影响。
     #[tokio::test]
     async fn lcg_t06_resume_probe_denies_when_cli_breaks_id_binding() {
-        let launcher = ProviderBoundaryLauncher::probe_environment();
-        assert!(
-            launcher.is_available(),
-            "environment blocked: resume deny case needs bwrap + user namespace"
-        );
         let base = tempdir().expect("base dir");
         let cli = write_fake_resume_cli(base.path(), "broken");
         let cli_text = cli.to_string_lossy().into_owned();
@@ -2438,7 +2427,7 @@ mod tests {
             &version,
             AdapterRole::Executor,
         );
-        let outcome = ProviderBoundaryProbe::run(&projection, &fixture).await;
+        let outcome = ProviderBoundaryProbe::run(&projection, &fixture, &author_scope()).await;
         assert_eq!(
             ProviderBoundaryProbe::evidence_state(&outcome),
             ProviderCapabilityEvidence::Confirmed,
@@ -2466,11 +2455,6 @@ mod tests {
     /// 三态 Unknown(launch/write 面不受影响,legacy 行为零变化)。
     #[tokio::test]
     async fn lcg_t06_resume_face_not_probed_without_spec() {
-        let launcher = ProviderBoundaryLauncher::probe_environment();
-        assert!(
-            launcher.is_available(),
-            "environment blocked: resume not-probed case needs bwrap + user namespace"
-        );
         let base = tempdir().expect("base dir");
         let version = host_cli_version("git");
         let fixture = BoundaryFixture::create(
@@ -2488,7 +2472,7 @@ mod tests {
             &version,
             AdapterRole::Reviewer,
         );
-        let outcome = ProviderBoundaryProbe::run(&projection, &fixture).await;
+        let outcome = ProviderBoundaryProbe::run(&projection, &fixture, &reviewer_scope()).await;
         assert_eq!(
             ProviderBoundaryProbe::evidence_state(&outcome),
             ProviderCapabilityEvidence::Confirmed,
@@ -2567,6 +2551,7 @@ mod tests {
             probe_artifact_ref: Some(evidence.artifact_ref().to_string()),
             root_recipe_evidence:
                 crate::product::logical_codebase::provider_capability_store::RootRecipeEvidence::None,
+            execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
         }
     }
 
@@ -2607,7 +2592,12 @@ mod tests {
                 AdapterRole::Reviewer
             };
             let projection = probe_projection(provider.clone(), &fixture, &version, role);
-            let outcome = ProviderBoundaryProbe::run(&projection, &fixture).await;
+            let scope = if action == SessionPolicyAction::CodingTargetWrite {
+                author_scope()
+            } else {
+                reviewer_scope()
+            };
+            let outcome = ProviderBoundaryProbe::run(&projection, &fixture, &scope).await;
             let state = ProviderBoundaryProbe::evidence_state(&outcome);
             assert_eq!(
                 state,
@@ -2647,13 +2637,11 @@ mod tests {
             )
             .expect("parse live artifact");
             let positives = artifact["positives"].as_array().expect("positives");
-            let negatives = artifact["negatives"].as_array().expect("negatives");
             println!(
                 "EVIDENCE live-boundary-probe family={family_dir} action={} version={version} \
-                 state=Confirmed positives={} negatives={} artifact={}",
+                 state=Confirmed positives={} artifact={}",
                 action_text(action),
                 positives.len(),
-                negatives.len(),
                 evidence.artifact_ref(),
             );
         }

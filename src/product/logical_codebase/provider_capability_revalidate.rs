@@ -19,8 +19,8 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::policy::SessionPolicyAction;
 use crate::product::logical_codebase::provider_boundary_probe::{
-    CliBoundaryProbeOutcome, ResumeChannelKind, ResumeProbeSpec, probe_cli_version,
-    run_cli_boundary_probe,
+    CliBoundaryProbeOutcome, HostOpenProbeScope, ResumeChannelKind, ResumeProbeSpec,
+    probe_cli_version, run_cli_boundary_probe,
 };
 use crate::product::logical_codebase::provider_capability_probe::ProviderCapabilityProbeService;
 use crate::product::logical_codebase::provider_capability_store::{
@@ -72,19 +72,21 @@ pub fn revalidate_action_text(action: SessionPolicyAction) -> &'static str {
     }
 }
 
-/// 真实探针调用的完整材料包（seam 注入面：生产实现=run_cli_boundary_probe）。
+/// 真实探针调用的完整材料包(seam 注入面:生产实现=run_cli_boundary_probe)。
 #[derive(Debug, Clone)]
 pub struct ProbeInvocation {
     pub provider: ProviderName,
     pub cli_program: String,
     pub action: SessionPolicyAction,
-    /// 受控 fixture 基目录（生产=每次点击一个 /tmp 族 TempDir；
-    /// root/member/home/target 全在其内、按调用隔离）。
+    /// 受控 fixture 基目录(生产=每次点击一个 /tmp 族 TempDir;
+    /// root/member/home/target 全在其内、按调用隔离)。
     pub base: PathBuf,
-    /// 证据落盘根（生产=LC 子树 `capability-evidence/boundary`，durable）。
+    /// 证据落盘根(生产=LC 子树 `capability-evidence/boundary`,durable)。
     pub evidence_root: PathBuf,
     pub session_label: String,
     pub resume: Option<ResumeProbeSpec>,
+    /// 受信岗位/窗口/资源身份(批2 Task 9;产品层注入,probe 不采信自报)。
+    pub scope: HostOpenProbeScope,
 }
 
 pub type ProbeFuture =
@@ -165,6 +167,8 @@ struct ProbeScope<'a> {
     cli_program: &'a str,
     resume_kind: ResumeChannelKind,
     base: &'a std::path::Path,
+    /// 本次重验证的资源身份(审计/资源归属可追溯)。
+    resource_scope_id: String,
 }
 
 impl ProviderCapabilityRevalidateService {
@@ -181,6 +185,7 @@ impl ProviderCapabilityRevalidateService {
                     evidence_root,
                     session_label,
                     resume,
+                    scope,
                 } = invocation;
                 Box::pin(async move {
                     run_cli_boundary_probe(
@@ -191,6 +196,7 @@ impl ProviderCapabilityRevalidateService {
                         &evidence_root,
                         &session_label,
                         resume,
+                        scope,
                     )
                     .await
                 })
@@ -252,6 +258,10 @@ impl ProviderCapabilityRevalidateService {
         // 命名；与 repository_store 登记先例同构，不引运行时新依赖），
         // 探测结束 best-effort 清理；证据 durable 落 LC 子树。
         let base = probe_base_dir()?;
+        // 本次重验证的资源身份(批2 Task 9:审计/资源归属可追溯;按调用
+        // 隔离)。
+        let resource_scope_id =
+            format!("aria-capability-revalidate-{}", uuid::Uuid::new_v4().simple());
         let result = self
             .probe_and_import(
                 ProbeScope {
@@ -261,6 +271,7 @@ impl ProviderCapabilityRevalidateService {
                     cli_program,
                     resume_kind,
                     base: &base,
+                    resource_scope_id,
                 },
                 &missing,
             )
@@ -285,6 +296,7 @@ impl ProviderCapabilityRevalidateService {
             cli_program,
             resume_kind,
             base,
+            resource_scope_id,
         } = scope;
         let evidence_root = capability_evidence_root(&self.paths, project_id, lc_id)?;
         let mut imported_actions = Vec::new();
@@ -294,6 +306,19 @@ impl ProviderCapabilityRevalidateService {
                 revalidate_action_text(*action),
                 chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
             );
+            // 受信岗位/窗口(批2 Task 9):Coding=Author 岗位,只读=
+            // Reviewer 窗口(产品层注入;probe 不采信模型自报)。
+            let host_scope = match action {
+                SessionPolicyAction::CodingTargetWrite => {
+                    HostOpenProbeScope::author(resource_scope_id.clone())
+                }
+                SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
+                    HostOpenProbeScope::reviewer(
+                        format!("{resource_scope_id}-review-window"),
+                        resource_scope_id.clone(),
+                    )
+                }
+            };
             let invocation = ProbeInvocation {
                 provider: provider.clone(),
                 cli_program: cli_program.to_string(),
@@ -302,6 +327,7 @@ impl ProviderCapabilityRevalidateService {
                 evidence_root: evidence_root.clone(),
                 session_label,
                 resume: Some(ResumeProbeSpec::new(resume_kind, REVALIDATE_RESUME_PROMPT)),
+                scope: host_scope,
             };
             let outcome = (self.probe_runner)(invocation).await.map_err(|error| {
                 RevalidateError::ProbeFailed {
@@ -507,6 +533,11 @@ mod tests {
             digest.clone(),
             artifact_ref.clone(),
             probed_at.clone(),
+            crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+                .to_string(),
+            duty_for_action_text(action).to_string(),
+            (action != SessionPolicyAction::CodingTargetWrite)
+                .then(|| "probe://review-window/0001".to_string()),
         );
         let projection = ProviderPolicyProjection::new(
             ProviderRefType::Codex,
@@ -554,6 +585,9 @@ mod tests {
             probed_at: Some(probed_at),
             probe_artifact_ref: Some(artifact_ref),
             root_recipe_evidence: RootRecipeEvidence::None,
+            execution_semantics:
+                crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+                    .to_string(),
         };
         CliBoundaryProbeOutcome {
             evidence,
@@ -593,6 +627,19 @@ mod tests {
             probed_at: Some("2026-10-09T00:00:00Z".to_string()),
             probe_artifact_ref: Some("probe://boundary/codex/seed".to_string()),
             root_recipe_evidence: RootRecipeEvidence::None,
+            execution_semantics:
+                crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+                    .to_string(),
+        }
+    }
+
+    /// action → 受信岗位文本(与 probe 侧 duty 映射同口径)。
+    fn duty_for_action_text(action: SessionPolicyAction) -> &'static str {
+        match action {
+            SessionPolicyAction::CodingTargetWrite => "author",
+            SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
+                "reviewer"
+            }
         }
     }
 

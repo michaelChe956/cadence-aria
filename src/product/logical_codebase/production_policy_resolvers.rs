@@ -1095,6 +1095,9 @@ mod tests {
                 probed_at: Some("2026-10-07T00:00:00Z".to_string()),
                 probe_artifact_ref: Some("probe-evidence".to_string()),
                 root_recipe_evidence: RootRecipeEvidence::None,
+                execution_semantics:
+                    crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+                        .to_string(),
             };
         store
             .import_verified_probe_row(
@@ -1191,6 +1194,7 @@ mod tests {
                     probed_at: None,
                     probe_artifact_ref: None,
                     root_recipe_evidence: RootRecipeEvidence::None,
+                    execution_semantics: String::new(),
                 },
             )
             .unwrap();
@@ -1250,6 +1254,9 @@ mod tests {
             probed_at: Some("2026-10-03T00:00:00Z".to_string()),
             probe_artifact_ref: Some("probe://artifact-0001".to_string()),
             root_recipe_evidence: RootRecipeEvidence::None,
+            execution_semantics:
+                crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+                    .to_string(),
         }
     }
 

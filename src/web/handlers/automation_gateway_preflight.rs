@@ -584,6 +584,12 @@ mod tests {
             probed_at: None,
             probe_artifact_ref: None,
             root_recipe_evidence: RootRecipeEvidence::None,
+            execution_semantics: if confirmed {
+                crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+                    .to_string()
+            } else {
+                String::new()
+            },
         }
     }
 

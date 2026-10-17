@@ -164,6 +164,7 @@ fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
         probed_at: None,
         probe_artifact_ref: None,
         root_recipe_evidence: RootRecipeEvidence::None,
+        execution_semantics: String::new(),
     };
     store
         .upsert(project_id, &stale)
@@ -181,6 +182,9 @@ fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
     record.version = "1.42.0".to_string();
     record.probed_at = Some("2026-10-03T08:00:00Z".to_string());
     record.probe_artifact_ref = Some("probe://boundary/kimi-code/0001".to_string());
+    record.execution_semantics =
+        crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+            .to_string();
     record.action_matrix = ProviderActionMatrix::from_rows(vec![ProviderActionCapability {
         action,
         launch: ProviderCapabilityEvidence::Confirmed,
@@ -197,6 +201,10 @@ fn lcg_t02_probe_evidence_projection_record_mismatch_stays_unknown() {
         digest_drift,
         "probe://boundary/kimi-code/0001".to_string(),
         "2026-10-03T08:00:00Z".to_string(),
+        crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+            .to_string(),
+        "author".to_string(),
+        None,
     );
     let projection = ProviderPolicyProjection::new(
         ProviderRefType::KimiCode,

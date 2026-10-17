@@ -124,7 +124,7 @@ pub use provider_admission_preflight::{
     ProviderAdmissionPreflightResult, ProviderRuleReference,
 };
 pub use provider_boundary_probe::{
-    BoundaryFixture, ProviderBoundaryProbe, ResumeChannelKind, ResumeProbeSpec,
+    BoundaryFixture, HostOpenProbeScope, ProviderBoundaryProbe, ResumeChannelKind, ResumeProbeSpec,
 };
 pub use provider_capability_probe::{ProviderCapabilityProbeError, ProviderCapabilityProbeService};
 pub use provider_capability_store::{

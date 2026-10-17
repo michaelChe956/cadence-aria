@@ -293,6 +293,9 @@ async fn capability_revalidate_confirmed_rows_fast_return_without_probe() {
                 probed_at: Some("2026-10-09T00:00:00Z".to_string()),
                 probe_artifact_ref: Some("probe://boundary/codex/seed".to_string()),
                 root_recipe_evidence: RootRecipeEvidence::None,
+                execution_semantics:
+                    cadence_aria::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+                        .to_string(),
             },
         )
         .expect("seed");
@@ -367,4 +370,205 @@ async fn capability_revalidate_probe_failure_reports_stable_error_and_keeps_dura
         assert_ne!(row["launch"], json!("confirmed"), "失败不伪造: {row}");
     }
     let _ = paths;
+}
+
+/// 批2 Task 9:旧 v2 Confirmed 记录(生产 store 路径、真实文件字节)读取
+/// 时当前行必须 Unknown——只有真实重探针(run_cli_boundary_probe 真实
+/// 执行,CLI 以脚本替身)导入 host-open 证据后才可见;证据文件确实存在,
+/// durable 升为 schema 3 + host-open-v1。不能只测 mock:本测试走生产
+/// store 路径与真实 probe→2c/2d 导入链。
+#[tokio::test]
+async fn capability_revalidate_old_v2_confirmed_requires_real_reprobe() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempdir().expect("root");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lc_id = create_project_and_lc(&paths, &root.path().join("aggregate-root"));
+
+    // 旧 v2 durable 字节(三格 Confirmed @ 当前版本)直接落在生产 store
+    // 路径——历史记录,不得被读取改写。
+    let fake_version = "aria-fake-cli 1.42.0";
+    let confirmed_row = r#"{
+        "action": "{action}",
+        "launch": {"state": "confirmed"},
+        "resume": {"state": "confirmed"},
+        "write_boundary": {"state": "confirmed"},
+        "projection_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "evidence_ref": "probe://boundary/old-v2"
+      }"#;
+    let old_v2_json = format!(
+        r#"[{{
+  "provider_type": "codex",
+  "schema_version": 2,
+  "version": "{fake_version}",
+  "adapter_dialect": "codex_cli_v1",
+  "wire_dialect": "codex-app-server-rpc",
+  "capability_snapshot_ref": "cap_managed_snapshot",
+  "evidence": "production_verified",
+  "resume_evidence": "confirmed",
+  "supported_actions": [],
+  "action_matrix": [
+    {},
+    {},
+    {}
+  ],
+  "trust": {{"state": "confirmed"}},
+  "probed_at": "2026-10-01T00:00:00Z",
+  "probe_artifact_ref": "probe://boundary/old-v2",
+  "root_recipe_evidence": {{"kind": "none"}}
+}}]"#,
+        confirmed_row.replace("{action}", "coding_target_write"),
+        confirmed_row.replace("{action}", "planning_read_only"),
+        confirmed_row.replace("{action}", "review_read_only"),
+    );
+    let capabilities_path = paths
+        .logical_codebases_root(PROJECT_ID)
+        .join(&lc_id)
+        .join("capabilities.json");
+    std::fs::create_dir_all(capabilities_path.parent().expect("dir")).expect("create dir");
+    std::fs::write(&capabilities_path, &old_v2_json).expect("seed old v2 bytes");
+
+    // 真实探针机 CLI 替身:仅 `--version`(resume 面由规格覆盖;替身
+    // 无法应答 resume 通道,resume 面保持 Unknown,如实导入)。
+    use std::os::unix::fs::PermissionsExt;
+    let cli_path = root.path().join("fake-codex-cli");
+    std::fs::write(
+        &cli_path,
+        format!("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '{fake_version}'; exit 0; fi\nexit 1\n"),
+    )
+    .expect("write fake cli");
+    std::fs::set_permissions(&cli_path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake cli");
+    let cli_text = cli_path.to_string_lossy().into_owned();
+
+    let probe_calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_runner = probe_calls.clone();
+    // runner = 真实 run_cli_boundary_probe(生产链),仅 CLI 程序指向替身、
+    // resume 面关闭(替身无应答通道)。
+    let service = Arc::new(
+        ProviderCapabilityRevalidateService::new(ProductAppPaths::new(
+            root.path().join(".aria"),
+        ))
+        .with_version_source(Arc::new(move |_program: &str| {
+            Ok(fake_version.to_string())
+        }))
+        .with_probe_runner(Arc::new(move |invocation: ProbeInvocation| {
+            let cli_text = cli_text.clone();
+            let calls = calls_for_runner.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                cadence_aria::product::logical_codebase::provider_boundary_probe::
+                    run_cli_boundary_probe(
+                        invocation.provider,
+                        &cli_text,
+                        invocation.action,
+                        &invocation.base,
+                        &invocation.evidence_root,
+                        &invocation.session_label,
+                        None,
+                        invocation.scope,
+                    )
+                    .await
+            })
+        })),
+    );
+    let state = WebAppState::with_events(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        EventHub::new(),
+    )
+    .with_capability_revalidate_service(service);
+    let app = build_web_router(state);
+    std::mem::forget(root);
+
+    // 1) GET:旧 v2 Confirmed 不可见(当前行 Unknown),且 GET 不改写历史字节。
+    let (status, snapshot) =
+        request_json(&app, Method::GET, &capabilities_uri(&lc_id), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "body: {snapshot}");
+    let codex = snapshot["providers"]
+        .as_array()
+        .expect("providers")
+        .iter()
+        .find(|provider| provider["provider_type"] == json!("codex"))
+        .expect("codex");
+    for row in codex["rows"].as_array().expect("rows") {
+        assert_eq!(
+            row["launch"],
+            json!("unknown"),
+            "旧 v2 Confirmed 不得成为当前 Confirmed: {row}"
+        );
+        assert_eq!(
+            row["write_boundary"],
+            json!("unknown"),
+            "旧 v2 Confirmed 不得成为当前 Confirmed: {row}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&capabilities_path).expect("reread"),
+        old_v2_json.as_bytes(),
+        "GET 读取不得改写历史文件字节"
+    );
+
+    // 2) POST revalidate:真实重探针 + 2c/2d 导入(生产 store 路径)。
+    let (status, body) = request_json(
+        &app,
+        Method::POST,
+        &revalidate_uri(&lc_id),
+        json!({ "provider_type": "codex" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["outcome"], json!("revalidated"), "body: {body}");
+    assert_eq!(body["version"], json!(fake_version));
+    assert_eq!(probe_calls.load(Ordering::SeqCst), 3, "三 action 各一次真实探针");
+
+    // durable 升级为 schema 3 + host-open-v1;证据文件确实存在。
+    let durable = std::fs::read_to_string(&capabilities_path).expect("read durable");
+    assert!(durable.contains("\"schema_version\": 3"), "durable: {durable}");
+    assert!(durable.contains("host-open-v1"), "durable: {durable}");
+
+    // 3) GET:重探针后的行可见(launch/write Confirmed;resume 替身
+    //    无应答通道,如实 Unknown——fresh/resume 分格)。
+    let (_, snapshot) = request_json(&app, Method::GET, &capabilities_uri(&lc_id), json!({})).await;
+    let codex = snapshot["providers"]
+        .as_array()
+        .expect("providers")
+        .iter()
+        .find(|provider| provider["provider_type"] == json!("codex"))
+        .expect("codex");
+    let mut evidence_refs = Vec::new();
+    for row in codex["rows"].as_array().expect("rows") {
+        assert_eq!(row["launch"], json!("confirmed"), "重探针后可见: {row}");
+        assert_eq!(row["write_boundary"], json!("confirmed"), "重探针后可见: {row}");
+        assert_eq!(row["resume"], json!("unknown"), "resume 分格如实: {row}");
+        evidence_refs.push(
+            row["evidence_ref"]
+                .as_str()
+                .expect("evidence_ref")
+                .to_string(),
+        );
+    }
+    for evidence_ref in evidence_refs {
+        assert!(
+            Path::new(&evidence_ref).is_file(),
+            "证据文件必须真实存在: {evidence_ref}"
+        );
+    }
+
+    // 4) 再次 POST:resume 未 Confirmed → 不秒回,重新真实探针(逐格
+    //    如实,不因 launch/write Confirmed 而冒充全行)。
+    let (status, body) = request_json(
+        &app,
+        Method::POST,
+        &revalidate_uri(&lc_id),
+        json!({ "provider_type": "codex" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["outcome"], json!("revalidated"), "resume 未确认不秒回: {body}");
+    assert_eq!(
+        probe_calls.load(Ordering::SeqCst),
+        6,
+        "第二次点击重新逐 action 真实探针"
+    );
 }

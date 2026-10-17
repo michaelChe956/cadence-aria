@@ -1797,6 +1797,9 @@ mod tests {
                 evidence_ref: "recipe://evidence-0001".to_string(),
                 version: "1.4.0".to_string(),
             },
+            execution_semantics:
+                crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+                    .to_string(),
         }
     }
 

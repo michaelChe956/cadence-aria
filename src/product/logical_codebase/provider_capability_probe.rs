@@ -22,7 +22,9 @@
 //! 任一维度不可比对即 fail-closed 返回稳定错误,调用方(2d 导入、4/5/6a
 //! 消费 shape)不得把校验失败解释为能力支持。
 
-use crate::cross_cutting::provider_boundary::{ProviderBoundaryEvidence, ProviderBoundaryMode};
+use crate::cross_cutting::provider_boundary::{
+    ProviderBoundaryEvidence, ProviderBoundaryMode, PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN,
+};
 use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::policy::SessionPolicyAction;
 use crate::product::logical_codebase::provider_capability_store::{
@@ -37,9 +39,15 @@ use crate::product::logical_codebase::provider_projection::ProviderPolicyProject
 /// 不得把任何失败静默当作「通过」或「支持」。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProviderCapabilityProbeError {
-    /// record 自身形状非法(如 schema 版本不是当前 v2)。
+    /// record 自身形状非法(如 schema 版本不是当前 v3、或未携带当前执行
+    /// 语义标识)。
     #[error("provider_probe_shape_record_invalid: {0}")]
     RecordShapeInvalid(String),
+    /// 执行语义/岗位/窗口维度非法(批2 Task 9):证据或 record 未携带
+    /// `host-open-v1` 语义、evidence 与 record 语义不一致、岗位与 action
+    /// 语义不符、或 Reviewer 证据缺窗口引用。
+    #[error("provider_probe_shape_semantics_invalid: {0}")]
+    SemanticsInvalid(String),
     /// 三方 provider 身份不可比对(provider_type/adapter/wire dialect 不一致,
     /// 或 evidence 的 provider 无法映射为真实 provider ref,如 Fake)。
     #[error("provider_probe_shape_provider_mismatch: {0}")]
@@ -138,14 +146,54 @@ impl ProviderCapabilityProbeService {
         evidence: &ProviderBoundaryEvidence,
         projection: &ProviderPolicyProjection,
     ) -> Result<(), ProviderCapabilityProbeError> {
-        // 1) record 形状:probe 校验只接受当前 v2 schema(v1 旧行仅解码为
-        //    全 Unknown,不得作为 probe 导入目标)。
+        // 1) record 形状:probe 校验只接受当前 v3 schema(v1/v2 旧行仅解码
+        //    为全 Unknown,不得作为 probe 导入目标)。
         if record.schema_version != PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION {
             return Err(ProviderCapabilityProbeError::RecordShapeInvalid(format!(
                 "schema_version={:?},期望 {:?}",
                 record.schema_version, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION
             )));
         }
+
+        // 1.5) 执行语义/岗位/窗口(批2 Task 9):新证三方必须同语义——
+        //      record 与 evidence 都携带 `host-open-v1` 且一致;岗位与
+        //      action 语义相符(Coding=author,只读=reviewer);Reviewer
+        //      证据必须携带非空窗口引用。缺语义/未知语义/缺岗位/缺窗口
+        //      一律拒绝(旧 Confirmed 或 supported_actions 不得铸新证)。
+        if record.execution_semantics != PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN {
+            return Err(ProviderCapabilityProbeError::RecordShapeInvalid(format!(
+                "execution_semantics={:?},期望 {:?}(缺语义记录不得导入 Confirmed)",
+                record.execution_semantics, PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+            )));
+        }
+        if evidence.execution_semantics() != PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN {
+            return Err(ProviderCapabilityProbeError::SemanticsInvalid(format!(
+                "evidence.execution_semantics={:?},期望 {:?}",
+                evidence.execution_semantics(),
+                PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN
+            )));
+        }
+        if evidence.execution_semantics() != record.execution_semantics {
+            return Err(ProviderCapabilityProbeError::SemanticsInvalid(format!(
+                "execution_semantics: evidence={:?} record={:?}",
+                evidence.execution_semantics(),
+                record.execution_semantics
+            )));
+        }
+        let expected_duty = duty_for_action(projection.action());
+        if evidence.duty() != expected_duty {
+            return Err(ProviderCapabilityProbeError::SemanticsInvalid(format!(
+                "duty: evidence={:?} 期望 {expected_duty:?}(action={:?})",
+                evidence.duty(),
+                projection.action()
+            )));
+        }
+        if evidence.duty() == "reviewer" && evidence.review_window_id().unwrap_or("").is_empty() {
+            return Err(ProviderCapabilityProbeError::SemanticsInvalid(
+                "reviewer 证据缺 review 窗口引用(岗位/窗口缺失拒签)".to_string(),
+            ));
+        }
+
 
         // 2) provider 身份三方可比对:evidence 的 provider 名必须经 1a 冻结
         //    映射解析为真实 provider ref(Fake/未来 provider fail-closed,
@@ -314,6 +362,15 @@ fn three_way_fields_match(
             projection.provider_type()
         ));
     }
+    // 执行语义:record 与 evidence 描述同一语义(批2 Task 9;host-open
+    // 单一来源,导入链不接受语义漂移的旧证)。
+    if record.execution_semantics != evidence.execution_semantics() {
+        return Err(format!(
+            "execution_semantics: record={:?} evidence={:?}",
+            record.execution_semantics,
+            evidence.execution_semantics()
+        ));
+    }
     // exact version 三方一致(CLI 漂移后旧证据不可导入)。
     if record.version != evidence.exact_version()
         || evidence.exact_version() != projection.exact_version()
@@ -390,6 +447,16 @@ fn boundary_mode_for_action(action: SessionPolicyAction) -> ProviderBoundaryMode
     }
 }
 
+/// action 的执行语义 → 受信岗位(批2 Task 9 冻结映射):Coding = Author
+/// 岗位(HostCoding),Planning/Review 只读 = Reviewer 窗口。与 T2
+/// `TrustedProviderRole::as_str` 同口径文本。
+fn duty_for_action(action: SessionPolicyAction) -> &'static str {
+    match action {
+        SessionPolicyAction::CodingTargetWrite => "author",
+        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => "reviewer",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,6 +527,11 @@ mod tests {
         boundary_mode: ProviderBoundaryMode,
         digest: &str,
     ) -> ProviderBoundaryEvidence {
+        // host-open 语义 + 与边界模式相称的岗位/窗口(批2 Task 9 合法面)。
+        let (duty, window) = match boundary_mode {
+            ProviderBoundaryMode::ReadOnly => ("reviewer", Some("review-window-0001".to_string())),
+            ProviderBoundaryMode::TargetWriteOnly => ("author", None),
+        };
         ProviderBoundaryEvidence::new(
             provider,
             exact_version.to_string(),
@@ -467,6 +539,9 @@ mod tests {
             digest.to_string(),
             PROBE_ARTIFACT_REF.to_string(),
             PROBE_PROBED_AT.to_string(),
+            PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+            duty.to_string(),
+            window,
         )
     }
 
@@ -502,6 +577,7 @@ mod tests {
             probed_at: Some(PROBE_PROBED_AT.to_string()),
             probe_artifact_ref: Some(PROBE_ARTIFACT_REF.to_string()),
             root_recipe_evidence: RootRecipeEvidence::None,
+            execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
         }
     }
 
@@ -786,8 +862,15 @@ mod tests {
             "provider_probe_shape_provider_mismatch",
         );
 
-        // 矩阵缺 projection action 行(未探测 action 不可导入)。
-        let (record, evidence, _) = consistent_triple(action, mode);
+        // 矩阵缺 projection action 行(未探测 action 不可导入;evidence 岗位
+        // 与 Planning 相符,钉住「缺行」维度本身)。
+        let (record, _, _) = consistent_triple(action, mode);
+        let evidence = evidence_with(
+            ProviderName::KimiCode,
+            PROBE_VERSION,
+            ProviderBoundaryMode::ReadOnly,
+            &digest64(7),
+        );
         let projection = projection_with(
             ProviderRefType::KimiCode,
             ProviderDialect::KimiAcpV1,
@@ -800,7 +883,8 @@ mod tests {
             "provider_probe_shape_action_mismatch",
         );
 
-        // boundary 模式与 action 读写语义不一致(Coding 却持只读证据)。
+        // 边界模式/岗位与 action 执行语义不一致(Coding 却持只读/reviewer
+        // 形证据):批2 Task 9 起由语义门先拒(duty 与 action 不符)。
         let (record, _, projection) = consistent_triple(action, mode);
         let evidence = evidence_with(
             ProviderName::KimiCode,
@@ -810,7 +894,7 @@ mod tests {
         );
         expect_mismatch(
             service().validate_probe_shape(&record, &evidence, &projection),
-            "provider_probe_shape_action_mismatch",
+            "provider_probe_shape_semantics_invalid",
         );
 
         // probed_at 缺失/漂移:record 未描述同一探测。
@@ -963,6 +1047,112 @@ mod tests {
         assert_eq!(
             reloaded.action_matrix.row(&action).write_boundary,
             ProviderCapabilityEvidence::Confirmed
+        );
+    }
+
+    // ===== Task 9:执行语义/岗位/窗口导入门 =====
+
+    /// 缺语义(record 空语义 / evidence 旧语义)、语义漂移、岗位与 action
+    /// 不符、Reviewer 缺窗口——均 fail-closed 拒绝导入,稳定判别码。
+    #[test]
+    fn t9_probe_shape_rejects_missing_semantics_duty_or_window() {
+        let (record, _evidence, projection) =
+            consistent_triple(SessionPolicyAction::CodingTargetWrite, ProviderBoundaryMode::TargetWriteOnly);
+
+        // 1) record 缺语义(空串 = v1/v2 历史形状)。
+        let mut no_semantics = record.clone();
+        no_semantics.execution_semantics = String::new();
+        expect_mismatch(
+            service().validate_probe_shape(&no_semantics, &_evidence, &projection),
+            "provider_probe_shape_record_invalid",
+        );
+
+        // 2) evidence 携带旧/未知语义。
+        let legacy_evidence = ProviderBoundaryEvidence::new(
+            _evidence.provider().clone(),
+            _evidence.exact_version().to_string(),
+            _evidence.boundary_mode(),
+            _evidence.projection_digest().to_string(),
+            _evidence.artifact_ref().to_string(),
+            _evidence.probed_at().to_string(),
+            "bwrap-phys-deny-v0".to_string(),
+            "author".to_string(),
+            None,
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &legacy_evidence, &projection),
+            "provider_probe_shape_semantics_invalid",
+        );
+
+        // 3) 岗位与 action 语义不符(Coding 证据携带 reviewer 岗位)。
+        let wrong_duty = ProviderBoundaryEvidence::new(
+            _evidence.provider().clone(),
+            _evidence.exact_version().to_string(),
+            _evidence.boundary_mode(),
+            _evidence.projection_digest().to_string(),
+            _evidence.artifact_ref().to_string(),
+            _evidence.probed_at().to_string(),
+            PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+            "reviewer".to_string(),
+            Some("review-window-0001".to_string()),
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&record, &wrong_duty, &projection),
+            "provider_probe_shape_semantics_invalid",
+        );
+
+        // 4) Reviewer 证据缺窗口引用(只读 action)。
+        let (ro_record, ro_evidence, ro_projection) =
+            consistent_triple(SessionPolicyAction::PlanningReadOnly, ProviderBoundaryMode::ReadOnly);
+        let no_window = ProviderBoundaryEvidence::new(
+            ro_evidence.provider().clone(),
+            ro_evidence.exact_version().to_string(),
+            ro_evidence.boundary_mode(),
+            ro_evidence.projection_digest().to_string(),
+            ro_evidence.artifact_ref().to_string(),
+            ro_evidence.probed_at().to_string(),
+            PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+            "reviewer".to_string(),
+            None,
+        );
+        expect_mismatch(
+            service().validate_probe_shape(&ro_record, &no_window, &ro_projection),
+            "provider_probe_shape_semantics_invalid",
+        );
+    }
+
+    /// 缺语义的 record 即便三方其它字段一致也不得导入 durable;旧 durable
+    /// 字节保持不变(导入失败不触盘)。
+    #[test]
+    fn t9_import_rejects_missing_semantics_and_keeps_durable_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProviderCapabilityStore::new(ProductAppPaths::new(temp.path()));
+        let project_id = "project_0001";
+        store.ensure_bootstrap(project_id).unwrap();
+        let path = temp
+            .path()
+            .join("projects/project_0001/logical-codebase/capabilities.json");
+        let bytes_before = std::fs::read(&path).unwrap();
+
+        let (mut record, evidence, projection) = consistent_triple(
+            SessionPolicyAction::PlanningReadOnly,
+            ProviderBoundaryMode::ReadOnly,
+        );
+        record.execution_semantics = String::new();
+        let service = ProviderCapabilityProbeService::with_durable_writer(store.clone());
+        let error = service
+            .record_verified_probe(project_id, &record, &evidence, &projection)
+            .expect_err("缺语义记录不得导入 Confirmed");
+        assert!(
+            error
+                .to_string()
+                .contains("provider_probe_import_rejected"),
+            "稳定错误面: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes_before,
+            "导入失败不得触达 durable 字节"
         );
     }
 }
