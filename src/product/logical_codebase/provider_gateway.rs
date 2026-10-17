@@ -1533,16 +1533,11 @@ impl LogicalCodebaseProviderGateway {
         })
     }
 
-    /// 路由级硬门(Task 13;r47 修订):对解析出的 provider capability 施加
-    /// gateway-owned 路由阻断。原规则「Codex 在 danger-full-access sandbox
-    /// 下不支持」按全局默认模式常量全阻——但 LC 会话经 Task 5 投影
-    /// (REQ-LCG-04)恒非 danger(Planning/Review→read-only+on-request,
-    /// Coding→workspace-write;projection.rs 无 Danger 变体),全阻把 2d
-    /// 探针签发的 Confirmed 行也一并拒之门外(r47 codex 首轮现场)。修订:
-    /// 本 gateway 只服务 LC 会话(会话形态由投影决定,不存在 danger 形态),
-    /// direct coder 的 danger 缺陷属 direct 路径(danger 模式不进入本
-    /// gateway);LC 会话的 Codex 放行交由 capability 行(探针 Confirmed)
-    /// 与投影复验(sandbox=read-only/workspace-write)裁决。
+    /// 路由级硬门(Task 13;r47 桩化;T12 收口):原「Codex 在
+    /// danger-full-access 下路由全阻」规则已退役——danger-full-access 是
+    /// LC 全相位(REQ-LCG-04 改版)与 direct Coder 的当前执行基线,LC 会话
+    /// 放行由 capability 行(探针 Confirmed)与投影复验裁决;本桩仅保留
+    /// 调用形状,不再阻断任何 provider 形态。
     fn enforce_route_policy(
         &self,
         _capability: &ProviderCapability,
@@ -1595,8 +1590,8 @@ impl LogicalCodebaseProviderGateway {
     /// resume)的原行为;LC 全上下文判定走 `resume_or_start_with_projection`
     /// ——本入口的基准指纹不构成 LC 会话的可 spawn 权来源。
     ///
-    /// resume 判定在路由级硬门之后:Codex danger-full-access 等被路由阻断的
-    /// provider 在进入 resume 决策前即被拒绝。
+    /// (T12)旧「路由级 Codex danger 阻断先于 resume 决策」的门已退役;
+    /// resume 判定仍晚于 capability/投影复验。
     pub fn resume_or_start(
         &self,
         request: ResumeSessionLaunchRequest,
@@ -2891,17 +2886,11 @@ pub(crate) fn provider_name_for_dialect(dialect: ProviderDialect) -> ProviderNam
     }
 }
 
-/// Codex 当前唯一配置的 sandbox 模式即 `danger-full-access`。受限写(restricted-
-/// write)sandbox 尚未就绪,故 gateway 在路由级对 Codex 启动 fail-closed:不论
-/// UI 是否隐藏该 provider,validate 阶段直接拒绝。这与「UI 隐藏」不同——路由级
-/// 阻断无法被 CLI/脚本等 UI 外路径绕过。
-///
-/// 该常量与 `cross_cutting::codex_provider::CODEX_DEFAULT_SANDBOX_MODE` 对齐,作为
-/// gateway 侧的路由门基准。当受限写 sandbox 配置可用后,此常量与 guard 逻辑应
-/// 一并演进以放行受限写模式。
-pub const CODEX_DANGER_FULL_ACCESS_SANDBOX_MODE: &str = "danger-full-access";
-
-/// gateway 路由阻断码:Codex 在 danger-full-access sandbox 下不被支持。
+/// (T12,REQ-LCG-04 改版)历史诊断解码冻结码:改版前存量 capability 记录
+/// 迁移等待原因 `codex_danger_full_access_unsupported` 的逐字解码依赖
+/// (provider_capability_store 迁移码表/automation preflight 历史行诊断)。
+/// 当前启动路径不再产生本码——danger-full-access 是 LC 全相位的合法基线,
+/// 新合法 danger 绝不判 unsupported。
 pub const CODEX_DANGER_FULL_ACCESS_UNSUPPORTED: &str = "codex_danger_full_access_unsupported";
 
 /// C-2 集中映射的 fail-closed 判别码:`ProviderName` 不属于 gateway 支持的

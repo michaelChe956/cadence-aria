@@ -70,10 +70,11 @@ pub(crate) fn codex_launch_params(input: &StreamingProviderInput) -> serde_json:
     }
 }
 
-/// LC 受限启动参数(Task 5,REQ-LCG-04):thread/start 与 thread/resume 共用,
-/// 只能来自已投影的 `CodexSandboxProjection`——`cwd`=投影冻结的协议 cwd
-/// (Coding=target,只读=root),不以 raw 输入的 working_dir 覆盖。direct
-/// `codex_launch_params` 原签名/分支保留,仅供 direct 启动消费。
+/// LC 全相位 danger 启动参数(T12,REQ-LCG-04 改版):thread/start 与
+/// thread/resume 共用,只能来自已投影的 `CodexSandboxProjection`
+/// (sandbox 恒 danger-full-access;approval=独立映射值;`cwd`=投影冻结的
+/// 协议 cwd,Coding=target,只读=root),不以 raw 输入的 working_dir 覆盖。
+/// direct `codex_launch_params` 原签名/分支保留,仅供 direct 启动消费。
 pub(crate) fn codex_lc_launch_params(
     lc: &super::projection::CodexSandboxProjection,
 ) -> serde_json::Value {

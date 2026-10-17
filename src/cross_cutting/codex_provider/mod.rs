@@ -40,10 +40,10 @@ pub use projection::CodexPolicyProjector;
 pub(crate) use response::*;
 pub(crate) use support::*;
 pub(crate) const CODEX_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-/// Codex app-server 默认 sandbox 模式。当前唯一支持的是 `danger-full-access`,
-/// 这是受限写尚未就绪的已知 gap。gateway 据此在路由级阻断 Codex 启动(见
-/// `provider_gateway::CODEX_DANGER_FULL_ACCESS_SANDBOX_MODE`),直到受限写
-/// sandbox 配置可用。
+/// Codex app-server 默认 sandbox 模式(T12,REQ-LCG-04 改版):
+/// `danger-full-access` 是 direct Coder 与 LC 全相位的当前执行基线
+/// (LC 投影的 `CodexSandboxMode::DangerFullAccess` 同值;旧 gateway 路由
+/// 阻断与受限档已退役)。
 pub const CODEX_DEFAULT_SANDBOX_MODE: &str = "danger-full-access";
 pub(crate) const CODEX_RESUME_STALL_ERROR: &str = "Codex resume stalled before provider progress";
 
@@ -217,26 +217,12 @@ impl CodexProvider {
             .await
     }
 
-    /// LC 版本观测不可得的 fail-closed 映射(Task 5b):Coder 危险形态以
-    /// 危险稳定码拒绝(版本未知即受限投影不可认证);其余沿 LC validated
-    /// 错误前缀。
+    /// LC 版本观测不可得的 fail-closed 映射(T12):danger 是当前合法基线,
+    /// 版本不可得是普通准入失败——沿 LC validated 错误前缀,不再映射到废止
+    /// 的 `codex_danger_full_access_unsupported` 稳定码(缺版本=0 会话)。
     fn lc_version_unavailable(
-        envelope: &crate::product::logical_codebase::policy::SessionPolicyEnvelope,
-        tool_policy: Option<&crate::cross_cutting::streaming_provider::ProviderToolPolicy>,
         error: crate::cross_cutting::streaming_provider::VersionProbeError,
     ) -> ProviderAdapterError {
-        if projection::lc_coder_danger_shape(envelope, tool_policy) {
-            tracing::warn!(
-                target: "codex_provider",
-                %error,
-                "codex lc coder launch uncertifiable: exact version unknown"
-            );
-            return ProviderAdapterError::parse_error(
-                crate::product::logical_codebase::provider_gateway::CODEX_DANGER_FULL_ACCESS_UNSUPPORTED,
-                String::new(),
-                String::new(),
-            );
-        }
         ProviderAdapterError::parse_error(
             format!("codex lc validated start: {error}"),
             String::new(),
@@ -250,8 +236,8 @@ impl CodexProvider {
     /// projection 判定归 Task 3/8;此前真实 gateway validate 无法为 Codex
     /// 产出 validated policy,tests 子模块直接驱动本私有方法锁定受限分支)。
     ///
-    /// 顺序契约(REQ-LCG-04):角色守卫 → adapter 匹配 → 危险门(零 child)
-    /// → audit sink → exact version → 受限投影 → 以 canonical root 为进程
+    /// 顺序契约(T12,REQ-LCG-04 改版):角色守卫 → adapter 匹配 → audit
+    /// sink → exact version → danger 投影 → 以 canonical root 为进程
     /// cwd spawn → LC 握手(协议 params 来自投影)→ provider_start 统一审计
     /// (`lc_projection` 必填)→ 会话循环。
     #[cfg(test)]
@@ -319,45 +305,33 @@ impl CodexProvider {
             ));
         }
 
-        // 3) REQ-LCG-04 危险门(在任何 spawn 之前,零 child):Coder 形态
-        //    (Coding action + 无通用 tool policy)若受限写面未冻结,启动后
-        //    direct 映射只能是 danger-full-access——永久拒绝,details 即
-        //    稳定码(与 gateway 路由门同源字节)。
-        if let Some(reason) = projection::lc_danger_refusal(envelope, input.tool_policy.as_ref()) {
-            return Err(ProviderAdapterError::parse_error(
-                reason,
-                String::new(),
-                String::new(),
-            ));
-        }
+        // (T12,REQ-LCG-04 改版):旧 danger 危险门(受限写面未冻结即永久
+        //  拒绝)已废止——danger 是当前合法执行基线,准入由 capability 行/
+        //  trust/版本观测与角色合同裁决。
 
-        // 4) 统一 launch audit sink:LC 会话必须绑定 run-bound sink,缺失
+
+        // 3) 统一 launch audit sink:LC 会话必须绑定 run-bound sink,缺失
         //    fail-closed(1b 的 prepare 契约之前由本路径强制)。
         let sink = input.audit_sink.clone().ok_or_else(|| {
             lc_error("codex lc validated start: audit sink is required for LC launches".to_string())
         })?;
 
-        // 5) exact version(Task 3.4/B0c:LC 权威观测走 `LcVersionCache` 60 秒
+        // 4) exact version(Task 3.4/B0c:LC 权威观测走 `LcVersionCache` 60 秒
         //    TTL/single-flight,supplier seam 优先,默认真实 `--version` 有界
-        //    探测;不可得 fail-closed)。全 LC 路径必填,非仅策略角色。Coder
-        //    形态(direct 映射=danger-full-access)的预认证失败同以危险
-        //    稳定码拒绝(Task 5b):版本未知即受限投影不可认证,唯一替代是
-        //    永久拒绝的 danger-full-access。
+        //    探测;不可得 fail-closed,普通准入失败零 child)。
         let provider_version = self
             .observe_lc_exact_version(cancel.clone())
             .await
-            .map_err(|error| {
-                Self::lc_version_unavailable(envelope, input.tool_policy.as_ref(), error)
-            })?
+            .map_err(Self::lc_version_unavailable)?
             .exact_version()
             .to_string();
 
-        // 6) 受限投影(REQ-LCG-04):gateway full 上下文路径冻结的候选投影
-        //    直接消费——spawn 前复验冻结 exact version 与当前 TTL 观测一致
-        //    (不一致以 `CODEX_LC_PREPARED_VERSION_DRIFT` 稳定码 child 前拒绝,
-        //    零 ②③),sandbox/audit 与 prepared full 投影同源;裸 validate
-        //    (None)沿 adapter 侧自建投影(trust/MCP 空串同样纳入 session
-        //    digest,装配后任一漂移都会改变 projection_digest)。
+        // 5) danger 投影(T12,REQ-LCG-04 改版):gateway full 上下文路径冻结的
+        //    候选投影直接消费——spawn 前复验冻结 exact version 与当前 TTL
+        //    观测一致(不一致以 `CODEX_LC_PREPARED_VERSION_DRIFT` 稳定码
+        //    child 前拒绝,零 ②③),sandbox/audit 与 prepared full 投影同源;
+        //    裸 validate(None)沿 adapter 侧自建投影(trust/MCP 空串同样纳入
+        //    session digest,装配后任一漂移都会改变 projection_digest)。
         let (lc_projection, sandbox) = match frozen_lc_projection {
             Some(frozen) => {
                 if frozen.exact_version() != provider_version {
@@ -373,8 +347,7 @@ impl CodexProvider {
                 (frozen, sandbox)
             }
             None => {
-                let boundary = projection::lc_boundary_plan(envelope)
-                    .map_err(|error| lc_error(format!("codex lc validated start: {error}")))?;
+                let boundary = projection::lc_boundary_plan(envelope);
                 let projection_input =
                     crate::product::logical_codebase::provider_projection::ProviderProjectionInput::new(
                         envelope.clone(),
@@ -452,7 +425,7 @@ impl CodexProvider {
             }
         }
 
-        // 7) spawn:进程 cwd=投影冻结的 canonical LC root(双 cwd 合同,协议
+        // 6) spawn:进程 cwd=投影冻结的 canonical LC root(双 cwd 合同,协议
         //    target 只进 wire params,不进进程 cwd)。
         let args = self.build_args();
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
@@ -473,7 +446,7 @@ impl CodexProvider {
         let stderr = process.stderr;
         let mut child = process.child;
 
-        // 8) LC 握手:thread/start|thread/resume 共用受限投影 params(协议
+        // 7) LC 握手:thread/start|thread/resume 共用 danger 投影 params(协议
         //    cwd=投影冻结面,不以 raw 输入覆盖);失败终止子进程 fail-closed;
         //    LC 路径必得非空 thread id(与 direct 策略路径同源兜底)。
         //    Task 9b:resume 请求的握手失败(thread/resume 应答缺/错 id)
@@ -513,7 +486,7 @@ impl CodexProvider {
             ));
         };
 
-        // 9) provider_start 统一审计:sandbox/approvalPolicy 与 wire 同源;
+        // 8) provider_start 统一审计:sandbox/approvalPolicy 与 wire 同源;
         //    lc_projection 必填(LC 会话不因 tool_policy=None 跳过统一 audit);
         //    boundary 引用同样从 sandbox 投影单一来源取值。
         let tool_policy_digest =
@@ -1029,9 +1002,9 @@ impl StreamingProviderAdapter for CodexProvider {
             commands,
         })
     }
-    /// LC validated 启动(Task 5,REQ-LCG-04):只接受 gateway 产出的
-    /// validated input,经 `CodexPolicyProjector` 投影受限 sandbox
-    /// (read-only/workspace-write,danger-full-access 永久拒绝),以 canonical
+    /// LC validated 启动(T12,REQ-LCG-04 改版):只接受 gateway 产出的
+    /// validated input,经 `CodexPolicyProjector` 投影全相位 danger sandbox
+    /// (Planning/Review/Coding wire 均 danger-full-access),以 canonical
     /// LC root 为进程 cwd、投影 protocol cwd 为协议 cwd 启动;统一落盘
     /// `ProviderStartAudit.lc_projection`(sandbox/approvalPolicy 与 wire
     /// 同源;无通用 tool policy 的角色不早退)。
@@ -1052,12 +1025,13 @@ impl StreamingProviderAdapter for CodexProvider {
         .await
     }
 
-    /// Task 3.4(B0c):本家只读 LC prepare facts——guard(role 一致/危险门)
-    /// 先于 ①版本观测与一切 child;exact version 走 `LcVersionCache` 60 秒
-    /// TTL/single-flight(supplier seam 优先);boundary 由 envelope 派生;
-    /// approval 取 REQ-LCG-04 冻结映射;Codex LC 无 MCP bundle(空串,与
-    /// adapter 侧投影输入同源);projector 与 exact version 同源。全程零
-    /// durable 写/零 spawn(gateway 消费本 facts 装配 full 投影)。
+    /// Task 3.4(B0c):本家只读 LC prepare facts——guard(role 一致)先于
+    /// ①版本观测与一切 child;exact version 走 `LcVersionCache` 60 秒
+    /// TTL/single-flight(supplier seam 优先);boundary 由 envelope 派生
+    /// (逻辑交付面);approval 取独立映射(权限模式/Author 恒 on-request);
+    /// Codex LC 无 MCP bundle(空串,与 adapter 侧投影输入同源);projector
+    /// 与 exact version 同源。全程零 durable 写/零 spawn(gateway 消费本
+    /// facts 装配 full 投影)。
     async fn prepare_lc_facts(
         &self,
         input: &StreamingProviderInput,
@@ -1090,31 +1064,22 @@ impl StreamingProviderAdapter for CodexProvider {
             ));
         }
 
-        // 3) REQ-LCG-04 危险门(Coder 形态受限写面未冻结):零观测零 child
-        //    拒绝(稳定码与 gateway 路由门同源字节)。
-        if let Some(reason) = projection::lc_danger_refusal(envelope, input.tool_policy.as_ref()) {
-            return Err(ProviderAdapterError::parse_error(
-                reason,
-                String::new(),
-                String::new(),
-            ));
-        }
+        // 3) (T12)旧 REQ-LCG-04 危险门(受限写面未冻结即零观测零 child 拒绝)
+        //    已废止——danger 是当前合法执行基线,不在此预拒。
 
         // 4) exact version:60 秒 TTL/single-flight(①口径;不可得
-        //    fail-closed,Coder 危险形态同以危险稳定码拒绝)。
+        //    fail-closed,普通准入失败零观测零 child)。
         let observation = self
             .observe_lc_exact_version(cancel)
             .await
-            .map_err(|error| {
-                Self::lc_version_unavailable(envelope, input.tool_policy.as_ref(), error)
-            })?;
+            .map_err(Self::lc_version_unavailable)?;
 
-        // 5) 受限 boundary/approval fact 与同版本 projector(readonly,零写;
-        //    sandbox 受限观测约束——Codex LC 恒 read-only/workspace-write)。
-        let boundary = projection::lc_boundary_plan(envelope)
-            .map_err(|error| lc_error(format!("codex lc prepare facts: {error}")))?;
+        // 5) danger boundary/approval fact 与同版本 projector(readonly,零写;
+        //    全相位 danger 基线,approval 按权限模式独立映射/Author 恒
+        //    on-request)。
+        let boundary = projection::lc_boundary_plan(envelope);
         let approval_policy =
-            projection::lc_approval_policy(envelope.action, &input.permission_mode);
+            projection::lc_approval_policy(input.tool_policy.as_ref(), &input.permission_mode);
 
         Ok(ProviderLcPrepareFacts::new(
             crate::product::logical_codebase::provider_gateway::ProviderRefType::Codex,

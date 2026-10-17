@@ -1139,24 +1139,23 @@ done
     }
 }
 
-/// Task 5 Step 1(断言组 323-324):LC 危险请求零 child——Coder 形态
-/// (无通用 tool policy)的 Coding 启动在受限写面未冻结(writable roots 非
-/// target-only)时,direct 映射的唯一替代是 danger-full-access;REQ-LCG-04
-/// 永久拒绝,稳定 reason=`codex_danger_full_access_unsupported`,拒绝发生在
-/// spawn 之前(Auto/Supervised × fresh/resume 四组合,零 provider_start)。
+/// T12(REQ-LCG-04 改版):旧 danger 拒绝语义退役——合法 danger(Coding
+/// +target 写面+Coder 全开)在 fresh/resume × Auto/Supervised 全组合下
+/// 正常启动:真实 child、wire danger-full-access、provider_start 审计
+/// sandbox/approval 与独立审批映射同源。
 #[cfg(unix)]
 #[tokio::test]
-async fn lcg_t05_danger_full_access_zero_child_for_fresh_resume_and_permission_modes() {
+async fn lcg_t12_valid_danger_launches_start_for_fresh_resume_and_permission_modes() {
     let fixture = LcCodexFixture::new();
     let resume = Some("codex-thread-lc".to_string());
     let combinations = [
-        (ProviderPermissionMode::Auto, None),
-        (ProviderPermissionMode::Auto, resume.clone()),
-        (ProviderPermissionMode::Supervised, None),
-        (ProviderPermissionMode::Supervised, resume),
+        (ProviderPermissionMode::Auto, "never", None),
+        (ProviderPermissionMode::Auto, "never", resume.clone()),
+        (ProviderPermissionMode::Supervised, "on-request", None),
+        (ProviderPermissionMode::Supervised, "on-request", resume),
     ];
 
-    for (permission_mode, resume_id) in combinations {
+    for (permission_mode, expected_approval, resume_id) in combinations {
         let sink = RecordingToolPolicyAuditSink::new();
         let marker_root = tempfile::tempdir().expect("danger marker dir").keep();
         let mut raw = fixture.lc_input(
@@ -1167,38 +1166,51 @@ async fn lcg_t05_danger_full_access_zero_child_for_fresh_resume_and_permission_m
             Some(sink.clone().bound()),
             fixture.canonical_root(),
         );
-        let (_cwd, _wire, spawn_marker) = lc_markers(&mut raw, &marker_root);
+        let (_cwd, wire_marker, spawn_marker) = lc_markers(&mut raw, &marker_root);
         let provider = CodexProvider::new(lc_app_server_fixture())
             .with_version_supplier(lc_version_supplier());
 
-        // 写面未冻结(writable roots 为空,非 target-only):受限投影无法成立。
-        let Err(error) = provider
+        // 合法 danger(target 写面齐备)必须启动成功——旧
+        // codex_danger_full_access_unsupported 拒绝语义已废止。
+        let mut session = provider
             .start_lc_validated(
                 raw,
-                &fixture.envelope(SessionPolicyAction::CodingTargetWrite, Vec::new()),
+                &fixture.envelope(
+                    SessionPolicyAction::CodingTargetWrite,
+                    vec![fixture.target_worktree()],
+                ),
                 "cap_codex_lc_fixture",
                 CancellationToken::new(),
             )
             .await
-        else {
-            panic!("danger request must be rejected ({permission_mode:?})");
-        };
-
-        // 稳定 reason(断言组 323):与 gateway 路由门同源的字节级稳定码。
+            .unwrap_or_else(|error| {
+                panic!("valid danger launch must start ({permission_mode:?}): {error}")
+            });
         assert_eq!(
-            error.details, "codex_danger_full_access_unsupported",
-            "danger refusal must carry the stable reason ({permission_mode:?})"
+            recv_completed(&mut session.events).await,
+            "lc restricted done"
         );
-        // 零 child(断言组 324):拒绝发生在 ProcessManager::spawn 之前,
-        // fixture 从未执行、provider_start 从未落盘。
+
+        // 真实 child + wire danger-full-access + 独立审批映射。
         assert!(
-            !spawn_marker.exists(),
-            "no codex child may spawn for a danger request ({permission_mode:?})"
+            spawn_marker.exists(),
+            "a valid danger launch really spawns ({permission_mode:?})"
         );
-        assert!(
-            sink.events().is_empty(),
-            "no provider_start audit may be written for a danger request"
-        );
+        let params = lc_wire_params(&wire_marker);
+        assert_eq!(params["sandbox"], "danger-full-access", "{permission_mode:?}");
+        assert_eq!(params["approvalPolicy"], expected_approval, "{permission_mode:?}");
+
+        // provider_start 审计与 wire 同源。
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "exactly one provider_start is written");
+        let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record) =
+            &events[0]
+        else {
+            panic!("expected provider_start");
+        };
+        assert_eq!(record.sandbox.as_deref(), Some("danger-full-access"));
+        assert_eq!(record.approval_policy.as_deref(), Some(expected_approval));
+        assert!(record.lc_projection.is_some());
     }
 }
 
@@ -1220,14 +1232,14 @@ fn t09a_expected_codex_lc_projection(
     fixture: &LcCodexFixture,
 ) -> crate::product::logical_codebase::provider_projection::ProviderPolicyProjection {
     let envelope = fixture.envelope(SessionPolicyAction::PlanningReadOnly, Vec::new());
-    let boundary = t09a_lc_boundary_plan(&envelope).expect("boundary plan");
+    let boundary = t09a_lc_boundary_plan(&envelope);
     let projection_input = ProviderProjectionInput::new(
         envelope.clone(),
         crate::product::logical_codebase::provider_gateway::ProviderRef::codex(
             "cap_codex_lc_fixture",
         ),
         envelope.action,
-        AdapterRole::Reviewer,
+        AdapterRole::Orchestrator,
         ProviderPermissionMode::Auto,
         Some(ProviderToolPolicy::deny_file_write_builtins()),
         String::new(),
@@ -1261,12 +1273,12 @@ async fn lcg_t09a_codex_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
     };
     let stored_record = |lc_projection: Option<LcProjectionAudit>| ProviderStartAudit {
         provider: "codex".to_string(),
-        role: "reviewer".to_string(),
+        role: "orchestrator".to_string(),
         workspace_session_id: "ws-test".to_string(),
         provider_session_id: "codex-thread-lc".to_string(),
         tool_policy_canonical_digest: "sha256:seed".to_string(),
         argv: Vec::new(),
-        sandbox: Some("read-only".to_string()),
+        sandbox: Some("danger-full-access".to_string()),
         approval_policy: Some("on-request".to_string()),
         provider_version: "codex 0.124.0-lc-fixture".to_string(),
         adapter_dialect: "codex-app-server-rpc".to_string(),
@@ -1280,7 +1292,7 @@ async fn lcg_t09a_codex_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
             .expect("t09a codex matching marker dir")
             .keep();
         let mut raw = fixture.lc_input(
-            AdapterRole::Reviewer,
+            AdapterRole::Orchestrator,
             Some(ProviderToolPolicy::deny_file_write_builtins()),
             ProviderPermissionMode::Auto,
             Some("codex-thread-lc".to_string()),
@@ -1337,7 +1349,7 @@ async fn lcg_t09a_codex_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
         sink.with_stored_provider_start(record);
         let marker_root = tempfile::tempdir().expect("t09a codex marker dir").keep();
         let mut raw = fixture.lc_input(
-            AdapterRole::Reviewer,
+            AdapterRole::Orchestrator,
             Some(ProviderToolPolicy::deny_file_write_builtins()),
             ProviderPermissionMode::Auto,
             Some("codex-thread-lc".to_string()),
@@ -1412,7 +1424,7 @@ async fn lcg_t09_codex_missing_or_wrong_native_id_never_fresh() {
             .expect("t09b codex matching marker dir")
             .keep();
         let mut raw = fixture.lc_input(
-            AdapterRole::Reviewer,
+            AdapterRole::Orchestrator,
             Some(ProviderToolPolicy::deny_file_write_builtins()),
             ProviderPermissionMode::Auto,
             Some(requested_native_id.clone()),
@@ -1466,7 +1478,7 @@ async fn lcg_t09_codex_missing_or_wrong_native_id_never_fresh() {
         let server = resume_without_thread_confirmation_fixture(&pid_marker, mode);
         let sink = RecordingToolPolicyAuditSink::new();
         let raw = fixture.lc_input(
-            AdapterRole::Reviewer,
+            AdapterRole::Orchestrator,
             Some(ProviderToolPolicy::deny_file_write_builtins()),
             ProviderPermissionMode::Auto,
             Some(requested_native_id.clone()),
@@ -1585,12 +1597,12 @@ impl AnchorT34CapabilitySource {
 fn anchor_t34_capability_profile_digest(version: &str) -> String {
     let fixture = LcCodexFixture::new();
     let envelope = fixture.envelope(SessionPolicyAction::PlanningReadOnly, Vec::new());
-    let boundary = t09a_lc_boundary_plan(&envelope).expect("anchor t34 boundary plan");
+    let boundary = t09a_lc_boundary_plan(&envelope);
     let projection_input = ProviderProjectionInput::new(
         envelope.clone(),
         ProviderRef::codex("cap_anchor_t34_digest_probe"),
         envelope.action,
-        AdapterRole::Reviewer,
+        AdapterRole::Orchestrator,
         ProviderPermissionMode::Auto,
         Some(ProviderToolPolicy::deny_file_write_builtins()),
         String::new(),
@@ -1783,7 +1795,7 @@ pub(super) fn anchor_t34_lc_input(
         tool_policy: Some(ProviderToolPolicy::deny_file_write_builtins()),
         audit_sink: None,
         provider_type: ProviderType::Codex,
-        role: AdapterRole::Reviewer,
+        role: AdapterRole::Orchestrator,
         prompt: "anchor t34 codex prepare".to_string(),
         working_dir: authority_root.join("raw-working-dir-ignored"),
         workspace_session_id: None,
@@ -1954,13 +1966,12 @@ async fn anchor_t34_provider_prepare_and_audit_share_full_fingerprint() {
         candidate.facts().version_probe_key().provider,
         ProviderName::Codex
     );
-    // 受限 approval 冻结映射:read-only 恒 on-request(REQ-LCG-04)。
+    // 独立 approval 映射:Author 承载角色(Orchestrator+deny)恒 on-request。
     assert_eq!(candidate.facts().approval_policy(), "on-request");
 
-    // 受限 sandbox/protocol cwd:full 投影与 facts 同版本 projector 产出,
-    // 绝不 danger-full-access;read-only 协议 cwd=canonical root。
-    assert_ne!(candidate.full_projection().sandbox(), "danger-full-access");
-    assert_eq!(candidate.full_projection().sandbox(), "read-only");
+    // 全相位 danger sandbox/protocol cwd:full 投影与 facts 同版本 projector
+    // 产出;read-only action 协议 cwd=canonical root。
+    assert_eq!(candidate.full_projection().sandbox(), "danger-full-access");
     assert_eq!(
         candidate.full_projection().protocol_working_directory(),
         harness.authority_root.as_path()
@@ -2028,7 +2039,7 @@ async fn anchor_t34_provider_prepare_and_audit_share_full_fingerprint() {
         "resume wire must carry the requested thread id: {wire}"
     );
     let params = lc_wire_params(&wire_marker);
-    assert_eq!(params["sandbox"], serde_json::json!("read-only"));
+    assert_eq!(params["sandbox"], serde_json::json!("danger-full-access"));
     assert_eq!(params["approvalPolicy"], serde_json::json!("on-request"));
     assert_eq!(
         params["cwd"],

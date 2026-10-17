@@ -1205,12 +1205,12 @@ mod coverage_tests {
     }
 }
 
-/// Task 13: Codex `danger-full-access` 路由级阻断、resume 一致性与配置来源审计。
+/// Task 13(r47/T12 修订):Codex LC 会话放行、resume 一致性与配置来源审计。
 ///
 /// 三个验收维度:
-/// 1. Codex 在受限写配置(danger-full-access)下经 gateway 路由级阻断——不论 UI
-///    是否选择该 provider,validate 即拒绝,不触达 registry。这与「UI 隐藏」
-///    不同:路由级阻断无法被绕过。
+/// 1. (T12)Codex LC 全相位 danger-full-access 是合法基线——旧路由级阻断与
+///    受限档(read-only/workspace-write)已退役,validate 由 capability 行与
+///    投影复验裁决,不再因 danger 形态拒绝。
 /// 2. resume 一致性:`resume_or_start` 只有当 policy digest、target、provider exact
 ///    version、dialect 与 capability snapshot 全一致(fingerprint 相等)才 resume;
 ///    任一漂移则 supersede 旧会话并新建。
@@ -1239,13 +1239,10 @@ mod task13_gateway_hardening {
         }
     }
 
-    /// r47 修订:Task 13 期的 Codex 路由级全阻已移除——LC 投影(REQ-LCG-04)
-    /// 后 Codex 会话恒非 danger(Planning/Review→read-only,Coding→
-    /// workspace-write;projection 无 Danger 变体),全阻把 2d 探针签发的
-    /// Confirmed 行一并拒之门外(r47 codex 首轮现场)。LC 会话的 Codex 放行
-    /// 由 capability 行(探针 Confirmed)与投影复验裁决;direct coder 的
-    /// danger 缺陷属 direct 路径(danger 模式不进入本 gateway)。本测试改钉
-    /// 新契约:capability double 放行时 validate 成功(danger 全阻不复存在)。
+    /// r47 修订(T12 收口):Codex 路由级全阻已彻底退役——danger-full-access
+    /// 是 LC 全相位(REQ-LCG-04 改版)的当前执行基线,LC 会话的 Codex 放行
+    /// 由 capability 行(探针 Confirmed)与投影复验裁决。本测试钉住新契约:
+    /// capability double 放行时 validate 成功(无路由级 danger 全阻)。
     #[test]
     fn codex_danger_full_access_is_blocked_at_gateway_route_even_outside_ui() {
         let _ = CODEX_DEFAULT_SANDBOX_MODE;
@@ -1260,7 +1257,7 @@ mod task13_gateway_hardening {
         assert_eq!(
             validated.envelope().provider_dialect,
             crate::product::logical_codebase::policy::ProviderDialect::CodexCliV1,
-            "Codex LC 会话经投影正常 validated(sandbox=workspace-write 非 danger)"
+            "Codex LC 会话经投影正常 validated(全相位 danger 基线,无路由阻断)"
         );
         assert_eq!(fixture.registry_start_count(), 0);
     }
@@ -2954,7 +2951,7 @@ pub(crate) mod anchor_t10_support {
 
         pub(crate) fn audit_sandbox(&self) -> Option<String> {
             match self {
-                AnchorT10Family::Codex => Some("read-only".to_string()),
+                AnchorT10Family::Codex => Some("danger-full-access".to_string()),
                 _ => None,
             }
         }
@@ -2976,7 +2973,7 @@ pub(crate) mod anchor_t10_support {
         }
 
         /// 本家 argv 形态(claude 携 `--resume <id>`;pi 携预生成 session id;
-        /// codex 携受限 sandbox/approval 片段;kimi 携 acp 冻结片段)。
+        /// codex 携 danger sandbox/approval 片段(T12 基线);kimi 携 acp 冻结片段)。
         fn audit_argv(&self, native_id: &str, resume_id: Option<&str>) -> Vec<String> {
             match self {
                 AnchorT10Family::Claude => {
@@ -2990,7 +2987,7 @@ pub(crate) mod anchor_t10_support {
                 AnchorT10Family::Codex => vec![
                     self.tag().to_string(),
                     "--sandbox".to_string(),
-                    "read-only".to_string(),
+                    "danger-full-access".to_string(),
                     "--ask".to_string(),
                     "on-request".to_string(),
                 ],
@@ -4149,8 +4146,8 @@ mod anchor_t10_convergence {
                     assert!(!record.argv.contains(&"--resume".to_string()));
                 }
                 AnchorT10Family::Codex => {
-                    assert_eq!(record.sandbox.as_deref(), Some("read-only"));
-                    assert!(record.argv.contains(&"read-only".to_string()));
+                    assert_eq!(record.sandbox.as_deref(), Some("danger-full-access"));
+                    assert!(record.argv.contains(&"danger-full-access".to_string()));
                 }
                 AnchorT10Family::Pi => {
                     assert_eq!(

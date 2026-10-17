@@ -1,84 +1,85 @@
-//! Codex 的 LC 受限 sandbox 投影(Task 5,REQ-LCG-04)。
+//! Codex 的 LC 全相位 danger 投影(T12,REQ-LCG-04 改版)。
 //!
 //! `CodexPolicyProjector` 实现 1a 冻结的 `ProviderPolicyProjector`:消费
 //! gateway 构造的 `ProviderProjectionInput`,产出 21 个冻结字段全量填充的
 //! `ProviderPolicyProjection`,并派生 codex 专属的 `CodexSandboxProjection`
 //! (双 cwd 合同:process cwd=canonical root,protocol cwd=action 冻结面)。
 //!
-//! REQ-LCG-04 冻结语义:
-//! - `CodexSandboxMode::{ReadOnly,WorkspaceWrite}`——无 DangerFullAccess 变体;
-//!   danger-full-access 永久拒绝(稳定码 `codex_danger_full_access_unsupported`,
-//!   与 gateway 路由门同源),LC 启动绝不回退 direct Coder 危险映射。
-//! - Planning/Review 固定 `read-only` + `on-request`;Coding 固定
-//!   `workspace-write`,approval=Auto→`never`/Supervised→`on-request`。
-//! - Coding 写面必须 target-only(恰一个等于 target 的可写 root);受限投影
-//!   无法成立时唯一替代是 danger-full-access,以稳定码拒绝——拒绝发生在
-//!   `ProcessManager::spawn` 之前,零 child。
+//! REQ-LCG-04 改版语义(provider-desandbox-full-open):
+//! - Planning/Review/Coding 全相位 wire 恒 `danger-full-access`——平台不
+//!   投影 read-only/workspace-write,不永久拒绝有效全开档,旧
+//!   `codex_danger_full_access_unsupported` 拒绝语义废止。
+//! - approval 按权限模式独立映射(Auto→`never`/Supervised→`on-request`);
+//!   Author 岗位纪律(tool policy=deny)恒 `on-request`,与 sandbox 档解耦。
+//! - 逻辑 Coding 唯一 target 根约束是平台交付合同(`SessionPolicyEnvelope`
+//!   构造层强制);投影层不再保留物理 target-only 形状拒绝,boundary plan
+//!   描述逻辑交付面(非物理隔离声明)。
 //!
-//! digest 分层同三家先例(Task 4):`capability_projection_digest` 为该
-//! provider+version+action 的完整权限 profile 摘要(不随单次 role/target
-//! 变化);`projection_digest` 为含当前 role/cwd/target/roots/trust/config
-//! 的会话全投影摘要;digest 输入=固定字段序+长度分隔+schema 前缀,禁止
-//! Debug 文本与递归哈希。
+//! digest 分层:`capability_projection_digest` 为该 provider+version+action
+//! 的完整权限 profile 摘要(不随单次 role/target 变化);`projection_digest`
+//! 为含当前 role/cwd/target/roots/trust/config 的会话全投影摘要;LC 摘要使用
+//! 独立 canonical 序列——绝不复用 direct 的 `deny_file_write_builtins_tokens`
+//! 冻结片段或 `canonical_tool_policy`/`tool_policy_digest` 函数。
 
 use std::path::PathBuf;
 
 use sha2::{Digest as ShaDigest, Sha256};
 
-use crate::cross_cutting::codex_provider::session::{
-    TOOL_POLICY_PROVIDER_NAME, deny_file_write_builtins_tokens,
-};
 use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoundaryPlan};
 use crate::cross_cutting::streaming_provider::{
-    ProviderPermissionMode, ProviderToolPolicy, TOOL_POLICY_APPROVAL_POLICY_VERSION,
-    adapter_role_text, canonical_tool_policy, tool_policy_digest,
+    ProviderPermissionMode, ProviderToolPolicy, ToolPolicyIntent, adapter_role_text,
 };
 use crate::product::logical_codebase::policy::{
     ProviderDialect, ProviderWireDialect, SessionPolicyAction, SessionPolicyEnvelope,
 };
-use crate::product::logical_codebase::provider_gateway::{
-    CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, ProviderRefType,
-};
+use crate::product::logical_codebase::provider_gateway::ProviderRefType;
 use crate::product::logical_codebase::provider_projection::{
     ProviderPolicyProjection, ProviderPolicyProjector, ProviderProjectionError,
     ProviderProjectionInput,
 };
 
-/// LC 只读 action(Planning/Review)的冻结 sandbox wire 文本。
-pub const CODEX_LC_SANDBOX_READ_ONLY: &str = "read-only";
-/// LC Coding 的冻结 sandbox wire 文本(REQ-LCG-04:workspace-write)。
-pub const CODEX_LC_SANDBOX_WORKSPACE_WRITE: &str = "workspace-write";
-/// LC 只读 approval 冻结值(Planning/Review 恒 on-request)。
+/// LC 全相位(Planning/Review/Coding)的冻结 sandbox wire 文本
+/// (REQ-LCG-04 改版:danger-full-access 是当前执行基线)。
+pub const CODEX_LC_SANDBOX_DANGER_FULL_ACCESS: &str = "danger-full-access";
+/// LC Author 岗位纪律(tool policy=deny)与 Supervised 档的 approval 冻结值。
 pub const CODEX_LC_APPROVAL_ON_REQUEST: &str = "on-request";
-/// LC Coding Auto 档的 approval 冻结值。
+/// LC 全开角色 Auto 档的 approval 冻结值。
 pub const CODEX_LC_APPROVAL_NEVER: &str = "never";
 /// gateway 提供的 boundary plan 与 envelope 冻结面不符时的稳定拒绝码
 /// (Task 5b;计划 Step 3:native/plan 未证实不得放行)。
 pub const CODEX_TARGET_BOUNDARY_UNVERIFIED: &str = "codex_target_boundary_unverified";
 
-/// capability profile 摘要的 schema 前缀(字段序变化必须换 schema 版本)。
-const PROFILE_DIGEST_SCHEMA: &str = "lc-codex-profile-v1";
-/// 会话全投影摘要的 schema 前缀。
-const SESSION_DIGEST_SCHEMA: &str = "lc-codex-session-v1";
-/// boundary 计划内容引用的 schema 前缀。
+/// capability profile 摘要的 schema 前缀(字段序变化必须换 schema 版本;
+/// v2:T12 改版后的字段序与 LC 独立 canonical 序列,v1 旧值不得复现)。
+const PROFILE_DIGEST_SCHEMA: &str = "lc-codex-profile-v2";
+/// 会话全投影摘要的 schema 前缀(v2 同上)。
+const SESSION_DIGEST_SCHEMA: &str = "lc-codex-session-v2";
+/// boundary 计划内容引用的 schema 前缀(内容字段未变,保持 v1)。
 const BOUNDARY_PLAN_REF_SCHEMA: &str = "lc-codex-boundary-plan-v1";
+/// LC tool-policy 独立 canonical 摘要的 schema 前缀。
+const LC_TOOL_POLICY_DIGEST_SCHEMA: &str = "lc-codex-tool-policy-v1";
 
-/// 固定 role×policy 映射的冻结快照(与 `validate_tool_policy_for_role` 同源:
-/// 策略角色必带 DenyFileWriteBuiltins,普通 Executor/Handoff 无通用策略;
-/// BootstrapExecutorMarker 是 root-recipe 例外,不进 LC profile)。
-const CODEX_LC_ROLE_POLICY_MAP: &str = "orchestrator=deny_file_write_builtins;work_item_splitter=deny_file_write_builtins;reviewer=deny_file_write_builtins;executor=none;handoff=none";
+/// 固定 role×policy 映射的冻结快照(T11 公共角色矩阵:deny 是 Author 岗位
+/// 纪律的物理投影,仅 Author 可承载角色合法;Reviewer/Coder/Handoff 全开)。
+const CODEX_LC_ROLE_POLICY_MAP: &str = "author_duty=deny_file_write_builtins;author_carriers=orchestrator+work_item_splitter;reviewer=none;coder=none;handoff=none";
 
-/// action×permission → approval 的冻结映射快照(REQ-LCG-04:只读恒
-/// on-request;Coding Auto→never/Supervised→on-request)。
-const CODEX_LC_APPROVAL_MAP: &str =
-    "read_only=on-request;coding_auto=never;coding_supervised=on-request";
+/// approval 映射的冻结快照(T12:按权限模式独立映射,Author 恒 on-request,
+/// action 不参与)。
+const CODEX_LC_APPROVAL_MAP: &str = "author=on-request;auto=never;supervised=on-request";
 
-/// codex 受限 sandbox 模式(REQ-LCG-04 冻结):只有只读与 target 写两种,
-/// 无 DangerFullAccess 变体——danger-full-access 永久拒绝,不进枚举。
+/// LC 全相位 danger 基线的独立 canonical 冻结片段(T12):LC capability
+/// profile 摘要专用——绝不复用 direct `deny_file_write_builtins_tokens` 的
+/// 只读冻结序列(sandbox/approval 控制面的 LC 自有快照)。
+const CODEX_LC_WIRE_CONTROL_TOKENS: [&str; 2] = [
+    "sandbox=danger-full-access",
+    "approvalPolicy=author:on-request|auto:never|supervised:on-request",
+];
+
+/// codex LC sandbox 模式(REQ-LCG-04 改版):仅当前 danger 执行基线一种——
+/// Planning/Review/Coding 全相位 wire 均 `danger-full-access`,无受限档。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexSandboxMode {
-    ReadOnly,
-    WorkspaceWrite,
+    DangerFullAccess,
 }
 
 impl CodexSandboxMode {
@@ -86,8 +87,7 @@ impl CodexSandboxMode {
     /// 同源的冻结文本。
     pub fn wire_text(self) -> &'static str {
         match self {
-            CodexSandboxMode::ReadOnly => CODEX_LC_SANDBOX_READ_ONLY,
-            CodexSandboxMode::WorkspaceWrite => CODEX_LC_SANDBOX_WORKSPACE_WRITE,
+            CodexSandboxMode::DangerFullAccess => CODEX_LC_SANDBOX_DANGER_FULL_ACCESS,
         }
     }
 }
@@ -167,18 +167,14 @@ impl CodexPolicyProjector {
         }
     }
 
-    /// 由全投影派生 codex 受限 sandbox 投影(单一来源;wire 参数与
-    /// `process_cwd`/`protocol_cwd` 消费同源,调用方不能自造)。
+    /// 由全投影派生 codex danger sandbox 投影(单一来源;wire 参数与
+    /// `process_cwd`/`protocol_cwd` 消费同源,调用方不能自造)。全相位恒
+    /// danger 基线,action 只影响协议 cwd(双 cwd 合同)。
     pub(crate) fn sandbox_projection(
         &self,
         projection: &ProviderPolicyProjection,
     ) -> CodexSandboxProjection {
-        let mode = match projection.action() {
-            SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
-                CodexSandboxMode::ReadOnly
-            }
-            SessionPolicyAction::CodingTargetWrite => CodexSandboxMode::WorkspaceWrite,
-        };
+        let mode = CodexSandboxMode::DangerFullAccess;
         CodexSandboxProjection::new(
             mode,
             projection.approval_policy().to_string(),
@@ -278,145 +274,53 @@ fn lc_roots_field(roots: &[PathBuf]) -> String {
     field
 }
 
-/// LC 会话的 tool-policy canonical digest:`Some(deny)` 沿既有 canonical
-/// 形态;`None`(无通用策略角色)使用空 token 序列的 canonical 形态——digest
-/// 仍非空且稳定,统一 launch audit 不以 `tool_policy=None` 跳过。
+/// LC 会话 tool-policy 的独立 canonical digest(T12):绝不与 direct 策略
+/// 会话的 `canonical_tool_policy`/`tool_policy_digest` 共用函数或冻结序列。
+/// `Some(DenyFileWriteBuiltins)`(Author 岗位纪律投影)与 `None`(全开
+/// 角色)都走 LC 冻结 schema,digest 恒非空且稳定(统一 launch audit 不以
+/// `tool_policy=None` 跳过);其余 intent(marker)对 codex LC 不合法,
+/// fail-closed 拒绝(root recipe 自举通道要求固定 Claude provider)。
 pub(crate) fn lc_tool_policy_canonical_digest(
     policy: Option<&ProviderToolPolicy>,
 ) -> Result<String, ProviderProjectionError> {
-    match policy {
-        Some(policy) => canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy)
-            .map(|canonical| canonical.digest)
-            .map_err(|error| {
-                ProviderProjectionError::Invalid(format!(
-                    "codex lc tool policy is not canonicalizable: {error}"
-                ))
-            }),
-        None => Ok(tool_policy_digest(
-            TOOL_POLICY_PROVIDER_NAME,
-            &[],
-            TOOL_POLICY_APPROVAL_POLICY_VERSION,
-        )),
-    }
+    let intent = match policy.map(|policy| &policy.intent) {
+        None => "none",
+        Some(ToolPolicyIntent::DenyFileWriteBuiltins) => "deny_file_write_builtins",
+        Some(ToolPolicyIntent::BootstrapExecutorMarker(_)) => {
+            return Err(ProviderProjectionError::Invalid(
+                "codex lc tool policy digest: bootstrap executor markers are not codex LC policies"
+                    .to_string(),
+            ));
+        }
+    };
+    Ok(lc_digest(LC_TOOL_POLICY_DIGEST_SCHEMA, &[intent]))
 }
 
-/// 由 gateway 冻结的 envelope 派生不可伪造 boundary plan(Coding 恰一个可写
-/// target;read-only action 无可写面)。`protected_roots` 的 launcher/probe
-/// 语义归 Task 6a/6c,此处为空并不宣称物理隔离。
+/// 由 gateway 冻结的 envelope 派生 boundary plan(逻辑交付面描述:Coding
+/// =target 写面,read-only action 无写面)。`protected_roots` 的
+/// launcher/probe 语义归 6a/6c,此处为空并不宣称物理隔离;物理 sandbox 恒
+/// danger-full-access(REQ-LCG-04 改版),本 plan 只承载平台交付合同引用。
 ///
-/// REQ-LCG-04 危险门:Coding 写面非 target-only 时受限投影无法成立——
-/// direct 映射的唯一替代是 danger-full-access,以稳定码拒绝(调用侧在
-/// `ProcessManager::spawn` 之前失败,零 child)。
-pub(crate) fn lc_boundary_plan(
-    envelope: &SessionPolicyEnvelope,
-) -> Result<ProviderBoundaryPlan, ProviderProjectionError> {
+/// T12:物理 target-only 形状拒绝退役——Coding 唯一 target 根约束由
+/// `SessionPolicyEnvelope` 构造层(平台交付合同)强制;投影层不再以废止的
+/// 受限权限证明门拒绝非合同形态 envelope。
+pub(crate) fn lc_boundary_plan(envelope: &SessionPolicyEnvelope) -> ProviderBoundaryPlan {
     match envelope.action {
-        SessionPolicyAction::CodingTargetWrite => {
-            let expected = envelope.target.worktree.clone();
-            if envelope.writable_roots.len() != 1 || envelope.writable_roots[0] != expected {
-                return Err(coding_danger_refusal(envelope));
-            }
-            Ok(ProviderBoundaryPlan::new(
-                ProviderBoundaryMode::TargetWriteOnly,
-                envelope.working_directory.clone(),
-                Some(expected),
-                Vec::new(),
-            ))
-        }
+        SessionPolicyAction::CodingTargetWrite => ProviderBoundaryPlan::new(
+            ProviderBoundaryMode::TargetWriteOnly,
+            envelope.working_directory.clone(),
+            Some(envelope.target.worktree.clone()),
+            Vec::new(),
+        ),
         SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
-            if !envelope.writable_roots.is_empty() {
-                return Err(ProviderProjectionError::Invalid(
-                    "codex lc projection: read-only envelope must freeze no writable roots"
-                        .to_string(),
-                ));
-            }
-            Ok(ProviderBoundaryPlan::new(
+            ProviderBoundaryPlan::new(
                 ProviderBoundaryMode::ReadOnly,
                 envelope.working_directory.clone(),
                 None,
                 Vec::new(),
-            ))
+            )
         }
     }
-}
-
-/// Coder 形态判定(Coding action + 无通用 tool policy):该形态的 direct
-/// 映射是 danger-full-access——其一切预认证失败(写面未冻结、exact
-/// version 不可得等)都以 `CODEX_DANGER_FULL_ACCESS_UNSUPPORTED` 稳定码
-/// 拒绝,不放行泛化错误(Task 5b 受限门深化)。
-pub(crate) fn lc_coder_danger_shape(
-    envelope: &SessionPolicyEnvelope,
-    tool_policy: Option<&ProviderToolPolicy>,
-) -> bool {
-    envelope.action == SessionPolicyAction::CodingTargetWrite && tool_policy.is_none()
-}
-
-/// REQ-LCG-04 危险门:Coder 形态的 LC 启动若受限写面未冻结(非
-/// target-only),启动后的 direct 映射只能是 danger-full-access——永久
-/// 拒绝,details 即稳定码(与 gateway 路由门同源字节)。返回 `Some(稳定码)`
-/// 表示必须以该 reason 拒绝(spawn 之前,零 child);`lc_boundary_plan`
-/// 的 Coding 形状分支复用本错误。
-pub(crate) fn lc_danger_refusal(
-    envelope: &SessionPolicyEnvelope,
-    tool_policy: Option<&ProviderToolPolicy>,
-) -> Option<&'static str> {
-    if !lc_coder_danger_shape(envelope, tool_policy) {
-        return None;
-    }
-    let target_only = envelope.writable_roots.len() == 1
-        && envelope.writable_roots[0] == envelope.target.worktree;
-    if target_only {
-        None
-    } else {
-        Some(CODEX_DANGER_FULL_ACCESS_UNSUPPORTED)
-    }
-}
-
-/// `lc_boundary_plan` Coding 形状违规的 danger 拒绝错误(稳定码进消息,
-/// 供 projector 直连调用方观测;adapter 侧 `start_lc_validated` 先行危险门
-/// 返回 details=稳定码本体)。
-fn coding_danger_refusal(envelope: &SessionPolicyEnvelope) -> ProviderProjectionError {
-    ProviderProjectionError::Invalid(format!(
-        "{CODEX_DANGER_FULL_ACCESS_UNSUPPORTED}: coding write face must freeze exactly one \
-         writable root equal to the target worktree (got {} roots); danger-full-access \
-         fallback is permanently refused (target {})",
-        envelope.writable_roots.len(),
-        envelope.target.worktree.display()
-    ))
-}
-
-/// gateway 提供的 boundary plan 路径上对 envelope 写面冻结的同强度复核
-/// (T5-P3-1):`Some(plan)` 分支不得弱于 `None` 分支(`lc_boundary_plan` 强制
-/// Coding 恰一个==target 的可写 root、只读空 writable_roots)。plan 自身形状
-/// 合法不等于 envelope 写面已冻结——两条都要过,否则外部 plan 构成绕过
-/// target-only/只读冻结的 seam;违规以 `CODEX_TARGET_BOUNDARY_UNVERIFIED`
-/// 稳定码拒绝。
-fn verify_envelope_write_face(
-    envelope: &SessionPolicyEnvelope,
-) -> Result<(), ProviderProjectionError> {
-    match envelope.action {
-        SessionPolicyAction::CodingTargetWrite => {
-            if envelope.writable_roots.len() != 1
-                || envelope.writable_roots[0] != envelope.target.worktree
-            {
-                return Err(ProviderProjectionError::Invalid(format!(
-                    "{CODEX_TARGET_BOUNDARY_UNVERIFIED}: coding envelope write face must \
-                     freeze exactly one writable root equal to the target worktree (got {} \
-                     roots) before accepting a provided boundary plan",
-                    envelope.writable_roots.len()
-                )));
-            }
-        }
-        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
-            if !envelope.writable_roots.is_empty() {
-                return Err(ProviderProjectionError::Invalid(format!(
-                    "{CODEX_TARGET_BOUNDARY_UNVERIFIED}: read-only envelope must freeze no \
-                     writable roots before accepting a provided boundary plan"
-                )));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// gateway 提供的 boundary plan 按 action 复核形状(不合法即拒绝,不静默
@@ -477,18 +381,18 @@ fn boundary_evidence_ref_for(plan: &ProviderBoundaryPlan) -> String {
     boundary_plan_ref(plan)
 }
 
-/// action×permission 的冻结 approval 映射(REQ-LCG-04:只读恒 on-request;
-/// Coding Auto→never/Supervised→on-request)。Task 3.4(B0c)起同时是
-/// `prepare_lc_facts` approval fact 的单一来源。
+/// approval 的独立映射(T12,REQ-LCG-04 改版):按权限模式映射
+/// (Auto→never/Supervised→on-request),与 sandbox 档和 action 解耦;
+/// Author 岗位纪律(tool policy=deny)恒 on-request。Task 3.4(B0c)起
+/// 同时是 `prepare_lc_facts` approval fact 的单一来源。
 pub(crate) fn lc_approval_policy(
-    action: SessionPolicyAction,
+    tool_policy: Option<&ProviderToolPolicy>,
     permission_mode: &ProviderPermissionMode,
 ) -> String {
-    match action {
-        SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
-            CODEX_LC_APPROVAL_ON_REQUEST.to_string()
-        }
-        SessionPolicyAction::CodingTargetWrite => match permission_mode {
+    match tool_policy {
+        // Author 岗位纪律投影(deny):恒 on-request。
+        Some(_) => CODEX_LC_APPROVAL_ON_REQUEST.to_string(),
+        None => match permission_mode {
             ProviderPermissionMode::Auto => CODEX_LC_APPROVAL_NEVER.to_string(),
             ProviderPermissionMode::Supervised => CODEX_LC_APPROVAL_ON_REQUEST.to_string(),
         },
@@ -540,32 +444,29 @@ impl ProviderPolicyProjector for CodexPolicyProjector {
         }
 
         // boundary:gateway 提供的 plan 优先并按 action 复核形状;未提供时由
-        // envelope 派生(Coding 写面非 target-only → danger 稳定码拒绝)。
+        // envelope 派生(逻辑交付面;物理 sandbox 恒 danger,plan 不承载
+        // 物理隔离声明)。
         let boundary = match input.boundary() {
             Some(plan) => {
-                verify_envelope_write_face(envelope)?;
                 verify_boundary_shape(envelope, plan)?;
                 plan.clone()
             }
-            None => lc_boundary_plan(envelope)?,
+            None => lc_boundary_plan(envelope),
         };
 
-        // 冻结 mapping(REQ-LCG-04):sandbox/approval/协议 cwd 都由投影派生,
-        // 不读 raw 输入。
-        let sandbox_mode = match envelope.action {
-            SessionPolicyAction::PlanningReadOnly | SessionPolicyAction::ReviewReadOnly => {
-                CodexSandboxMode::ReadOnly
-            }
-            SessionPolicyAction::CodingTargetWrite => CodexSandboxMode::WorkspaceWrite,
-        };
-        let approval_policy = lc_approval_policy(envelope.action, input.permission_mode());
+        // 冻结 mapping(T12):sandbox/approval/协议 cwd 都由投影派生,不读
+        // raw 输入;全相位恒 danger 基线。
+        let sandbox_mode = CodexSandboxMode::DangerFullAccess;
+        let approval_policy = lc_approval_policy(input.tool_policy(), input.permission_mode());
         let protocol_cwd = lc_protocol_cwd(envelope);
 
         // 1) capability profile 摘要(证据摘要分层):该 provider+version+
-        //    action 的完整权限 profile——固定 role×policy 映射、deny token
-        //    序列、approval/sandbox/MCP 控制规范。不含单次 role/target/
-        //    config/trust,不含任何 evidence_ref/digest(禁止递归哈希)。
-        let deny_tokens = deny_file_write_builtins_tokens().join(",");
+        //    action 的完整权限 profile——固定 role×policy 映射、LC 独立
+        //    canonical wire 控制序列(danger 基线 + 独立 approval 映射)、
+        //    boundary/MCP 控制规范。不含单次 role/target/config/trust,
+        //    不含任何 evidence_ref/digest(禁止递归哈希);绝不复用 direct
+        //    `deny_file_write_builtins_tokens` 冻结片段。
+        let wire_control_tokens = CODEX_LC_WIRE_CONTROL_TOKENS.join(",");
         let profile_parts = [
             provider_ref_type_text(ProviderRefType::Codex),
             provider_dialect_text(envelope.provider_dialect),
@@ -573,9 +474,7 @@ impl ProviderPolicyProjector for CodexPolicyProjector {
             self.exact_version.as_str(),
             action_text(envelope.action),
             CODEX_LC_ROLE_POLICY_MAP,
-            deny_tokens.as_str(),
-            CODEX_LC_APPROVAL_MAP,
-            sandbox_mode.wire_text(),
+            wire_control_tokens.as_str(),
             boundary_mode_text(boundary.mode()),
             input.mcp_bundle_digest(),
         ];
@@ -643,5 +542,290 @@ impl ProviderPolicyProjector for CodexPolicyProjector {
             capability_projection_digest,
             projection_digest,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cross_cutting::codex_provider::session::deny_file_write_builtins_tokens;
+    use crate::cross_cutting::streaming_provider::canonical_tool_policy;
+    use crate::protocol::contracts::AdapterRole;
+    use crate::product::logical_codebase::policy::PolicyTarget;
+    use crate::product::logical_codebase::provider_gateway::ProviderRef;
+    use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector;
+
+    fn t12_root() -> PathBuf {
+        std::env::temp_dir().join("codex-t12-projection-root")
+    }
+
+    fn t12_target() -> PathBuf {
+        t12_root().join("member-worktree")
+    }
+
+    /// 旁路构造的 envelope(平台交付合同在 `SessionPolicyEnvelope` 构造层;
+    /// 投影层测试需要非合同形态变体时经 struct literal 构造)。
+    fn t12_envelope(
+        action: SessionPolicyAction,
+        writable_roots: Vec<PathBuf>,
+    ) -> SessionPolicyEnvelope {
+        let root = t12_root();
+        SessionPolicyEnvelope {
+            policy_id: "policy_lc_codex_t12".to_string(),
+            policy_revision: 1,
+            policy_digest: "sha256:policy-lc-codex-t12".to_string(),
+            action,
+            target: PolicyTarget::checkout("logical_repo_0001", "checkout_0001", t12_target()),
+            working_directory: root.clone(),
+            readable_roots: vec![root.clone()],
+            writable_roots,
+            provider_dialect: ProviderDialect::CodexCliV1,
+            config_artifact_ref: "sha256:managed-config-artifact".to_string(),
+            config_digest: "sha256:cfg-digest-t12".to_string(),
+            created_at: "2026-10-17T00:00:00Z".to_string(),
+            authority_root: root,
+        }
+    }
+
+    fn t12_input(
+        action: SessionPolicyAction,
+        role: AdapterRole,
+        permission_mode: ProviderPermissionMode,
+        tool_policy: Option<ProviderToolPolicy>,
+        writable_roots: Vec<PathBuf>,
+    ) -> ProviderProjectionInput {
+        let envelope = t12_envelope(action, writable_roots);
+        ProviderProjectionInput::new(
+            envelope.clone(),
+            ProviderRef::codex("cap_codex_t12"),
+            action,
+            role,
+            permission_mode,
+            tool_policy,
+            String::new(),
+            String::new(),
+            envelope.config_artifact_ref.clone(),
+            String::new(),
+            None,
+        )
+    }
+
+    fn t12_coding_input(
+        role: AdapterRole,
+        permission_mode: ProviderPermissionMode,
+        tool_policy: Option<ProviderToolPolicy>,
+        writable_roots: Vec<PathBuf>,
+    ) -> ProviderProjectionInput {
+        t12_input(
+            SessionPolicyAction::CodingTargetWrite,
+            role,
+            permission_mode,
+            tool_policy,
+            writable_roots,
+        )
+    }
+
+    /// T12(REQ-LCG-04 改版):Codex LC 全相位(Planning/Review/Coding)投影
+    /// danger-full-access——read-only/workspace-write 档不再产出,无 Danger
+    /// 拒绝;合法 danger 不判 unsupported。
+    #[test]
+    fn lc_projects_danger_full_access_wire_for_all_three_actions() {
+        for action in [
+            SessionPolicyAction::PlanningReadOnly,
+            SessionPolicyAction::CodingTargetWrite,
+            SessionPolicyAction::ReviewReadOnly,
+        ] {
+            let writable_roots = match action {
+                SessionPolicyAction::CodingTargetWrite => vec![t12_target()],
+                _ => Vec::new(),
+            };
+            let projection = CodexPolicyProjector::new("codex 0.124.0-t12")
+                .project(&t12_input(
+                    action,
+                    AdapterRole::Executor,
+                    ProviderPermissionMode::Auto,
+                    None,
+                    writable_roots,
+                ))
+                .unwrap_or_else(|error| panic!("{action:?} danger projection: {error}"));
+            assert_eq!(projection.sandbox(), "danger-full-access", "{action:?}");
+            assert_ne!(projection.sandbox(), "read-only", "{action:?}");
+            assert_ne!(projection.sandbox(), "workspace-write", "{action:?}");
+            let sandbox =
+                CodexPolicyProjector::new("codex 0.124.0-t12").sandbox_projection(&projection);
+            assert_eq!(
+                sandbox.mode().wire_text(),
+                "danger-full-access",
+                "{action:?}"
+            );
+            assert_eq!(projection.approval_policy(), "never", "{action:?} Auto→never");
+        }
+    }
+
+    /// T12:approval 按权限模式独立映射(Auto→never/Supervised→on-request),
+    /// Author 岗位纪律(tool policy=deny)恒 on-request;action 不再参与。
+    #[test]
+    fn lc_approval_maps_independently_by_permission_mode_with_author_on_request() {
+        let deny = ProviderToolPolicy::deny_file_write_builtins();
+        let cases: [(SessionPolicyAction, AdapterRole, ProviderPermissionMode, bool, &str); 6] = [
+            (
+                SessionPolicyAction::PlanningReadOnly,
+                AdapterRole::Orchestrator,
+                ProviderPermissionMode::Auto,
+                true,
+                "on-request",
+            ),
+            (
+                SessionPolicyAction::PlanningReadOnly,
+                AdapterRole::Orchestrator,
+                ProviderPermissionMode::Supervised,
+                true,
+                "on-request",
+            ),
+            (
+                SessionPolicyAction::ReviewReadOnly,
+                AdapterRole::Reviewer,
+                ProviderPermissionMode::Auto,
+                false,
+                "never",
+            ),
+            (
+                SessionPolicyAction::ReviewReadOnly,
+                AdapterRole::Reviewer,
+                ProviderPermissionMode::Supervised,
+                false,
+                "on-request",
+            ),
+            (
+                SessionPolicyAction::CodingTargetWrite,
+                AdapterRole::Executor,
+                ProviderPermissionMode::Auto,
+                false,
+                "never",
+            ),
+            (
+                SessionPolicyAction::CodingTargetWrite,
+                AdapterRole::Executor,
+                ProviderPermissionMode::Supervised,
+                false,
+                "on-request",
+            ),
+        ];
+        for (action, role, permission_mode, author, expected) in cases {
+            let tool_policy = author.then(|| deny.clone());
+            let writable_roots = match action {
+                SessionPolicyAction::CodingTargetWrite => vec![t12_target()],
+                _ => Vec::new(),
+            };
+            let projection = CodexPolicyProjector::new("codex 0.124.0-t12")
+                .project(&t12_input(
+                    action,
+                    role.clone(),
+                    permission_mode.clone(),
+                    tool_policy,
+                    writable_roots,
+                ))
+                .unwrap_or_else(|error| panic!("{action:?} projection: {error}"));
+            assert_eq!(
+                projection.approval_policy(),
+                expected,
+                "{action:?} {permission_mode:?} author={author}"
+            );
+        }
+    }
+
+    /// T12:LC capability/profile/session digest 使用独立 canonical 序列——
+    /// 绝不与 direct 的 `deny_file_write_builtins_tokens` 冻结片段或
+    /// `canonical_tool_policy`/`tool_policy_digest` 共用序列/函数;旧 v1
+    /// 冻结序列(复用 direct 只读片段)的摘要值不得复现。
+    #[test]
+    fn lc_digests_use_independent_canonical_sequence() {
+        let deny = ProviderToolPolicy::deny_file_write_builtins();
+
+        // (a) tool-policy 摘要与 direct canonical 序列不同源、不共用函数产物。
+        let lc_policy_digest =
+            lc_tool_policy_canonical_digest(Some(&deny)).expect("lc tool policy digest");
+        let direct_digest = canonical_tool_policy(
+            crate::cross_cutting::codex_provider::session::TOOL_POLICY_PROVIDER_NAME,
+            &deny,
+        )
+        .expect("direct canonical digest")
+        .digest;
+        assert_ne!(lc_policy_digest, direct_digest);
+        assert_ne!(
+            lc_policy_digest,
+            format!("sha256:{direct_digest}"),
+            "lc digest must not be a prefix-wrapped reuse of the direct canonical digest"
+        );
+        let lc_none_digest = lc_tool_policy_canonical_digest(None).expect("none digest");
+        assert!(lc_none_digest.starts_with("sha256:"));
+        assert_ne!(lc_none_digest, lc_policy_digest);
+
+        // (b) capability profile 摘要不再复现旧 v1 冻结序列(direct deny tokens
+        // 进 profile 的摘要值)。
+        let projection = CodexPolicyProjector::new("codex 0.124.0-t12")
+            .project(&t12_input(
+                SessionPolicyAction::PlanningReadOnly,
+                AdapterRole::Orchestrator,
+                ProviderPermissionMode::Auto,
+                Some(deny),
+                Vec::new(),
+            ))
+            .expect("author planning projection");
+        let deny_tokens = deny_file_write_builtins_tokens().join(",");
+        let legacy_v1_parts = [
+            provider_ref_type_text(ProviderRefType::Codex),
+            provider_dialect_text(ProviderDialect::CodexCliV1),
+            wire_dialect_text(ProviderWireDialect::CodexAppServerRpc),
+            "codex 0.124.0-t12",
+            action_text(SessionPolicyAction::PlanningReadOnly),
+            "orchestrator=deny_file_write_builtins;work_item_splitter=deny_file_write_builtins;reviewer=deny_file_write_builtins;executor=none;handoff=none",
+            deny_tokens.as_str(),
+            "read_only=on-request;coding_auto=never;coding_supervised=on-request",
+            "read-only",
+            "read-only",
+            "",
+        ];
+        let legacy_v1_digest = lc_digest("lc-codex-profile-v1", &legacy_v1_parts);
+        assert_ne!(
+            projection.capability_projection_digest(),
+            legacy_v1_digest.as_str(),
+            "capability digest must not reproduce the retired v1 sequence reusing direct deny tokens"
+        );
+    }
+
+    /// T12:物理 target-only 形状拒绝退役——Coding 写面非 target-only(旁路
+    /// 构造的 envelope)按新基线 danger 放行投影,不再以废止的受限权限证明门
+    /// /`codex_danger_full_access_unsupported` 稳定码拒绝;read-only action 带
+    /// 可写 root 同样不再被投影层拒绝(平台交付合同在 envelope 构造层)。
+    #[test]
+    fn lc_retires_physical_target_only_shape_refusal() {
+        let target = t12_target();
+        let other = t12_root().join("other-member");
+
+        // Coding:写面非 target-only(writable roots 含 target 之外的 root)。
+        let coding = CodexPolicyProjector::new("codex 0.124.0-t12")
+            .project(&t12_coding_input(
+                AdapterRole::Executor,
+                ProviderPermissionMode::Auto,
+                None,
+                vec![target, other.clone()],
+            ))
+            .expect("non-target-only coding write face must project danger (retired gate)");
+        assert_eq!(coding.sandbox(), "danger-full-access");
+        assert!(!coding.boundary_evidence_ref().is_empty());
+
+        // read-only action 携带可写 root:投影层不再拒绝。
+        let planning = CodexPolicyProjector::new("codex 0.124.0-t12")
+            .project(&t12_input(
+                SessionPolicyAction::PlanningReadOnly,
+                AdapterRole::Reviewer,
+                ProviderPermissionMode::Auto,
+                None,
+                vec![other],
+            ))
+            .expect("planning projection no longer re-refuses writable roots at the projector");
+        assert_eq!(planning.sandbox(), "danger-full-access");
+        assert!(planning.boundary_evidence_ref().is_empty());
     }
 }

@@ -240,6 +240,8 @@ pub const CODEX_TARGET_BOUNDARY_UNVERIFIED: &str = "codex_target_boundary_unveri
 /// 逐枚消费;policy/body 漂移沿用 gateway Display 判别码
 /// (`provider_gateway_policy_drift` 等)与 admission waiting reason
 /// (`policy_digest_drift`/`authority_root_drift`),不另立第二套。
+/// (T12)`CODEX_DANGER_FULL_ACCESS_UNSUPPORTED` 仅作改版前存量行的历史
+/// 解码保留——当前 codex LC 全相位 danger 基线不再产生该码。
 pub const PROVIDER_CAPABILITY_MIGRATION_REASON_CODES: [&str; 8] = [
     PROVIDER_UNSUPPORTED_FOR_GATEWAY_LAUNCH,
     PROVIDER_CAPABILITY_ACTION_UNKNOWN,

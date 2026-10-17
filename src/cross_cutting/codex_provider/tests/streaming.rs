@@ -123,28 +123,59 @@ use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAu
 use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector;
 use crate::product::logical_codebase::provider_projection::ProviderProjectionInput;
 
-/// Task 5 Step 1(断言组 325-326 + 329 只读档):LC Planning/Review 的真实
-/// RPC params 固定 `sandbox=read-only` + `approvalPolicy=on-request`,协议
+/// T12(REQ-LCG-04 改版):LC Planning/Review 的真实 RPC params 固定
+/// `sandbox=danger-full-access`;approval 按权限模式独立映射(Author 岗位
+/// 纪律恒 on-request,全开角色 Auto→never/Supervised→on-request);协议
 /// cwd=canonical root(raw working_dir=target 不覆盖);进程 cwd=canonical
 /// root;provider_start 审计带统一 `lc_projection`。
 #[cfg(unix)]
 #[tokio::test]
-async fn lcg_t05_planning_review_wire_is_read_only_on_request() {
+async fn lcg_t12_planning_review_wire_is_danger_full_access() {
     let fixture = LcCodexFixture::new();
     let canonical_root = fixture.canonical_root();
     let target = fixture.target_worktree();
+    let deny = ProviderToolPolicy::deny_file_write_builtins();
 
-    for action in [
-        SessionPolicyAction::PlanningReadOnly,
-        SessionPolicyAction::ReviewReadOnly,
-    ] {
+    let cases: [(
+        SessionPolicyAction,
+        AdapterRole,
+        Option<ProviderToolPolicy>,
+        ProviderPermissionMode,
+        &str,
+    ); 3] = [
+        // Author 岗位纪律(Orchestrator 承载 deny)恒 on-request。
+        (
+            SessionPolicyAction::PlanningReadOnly,
+            AdapterRole::Orchestrator,
+            Some(deny),
+            ProviderPermissionMode::Auto,
+            "on-request",
+        ),
+        // Reviewer 全开角色:审批独立按权限模式映射。
+        (
+            SessionPolicyAction::ReviewReadOnly,
+            AdapterRole::Reviewer,
+            None,
+            ProviderPermissionMode::Auto,
+            "never",
+        ),
+        (
+            SessionPolicyAction::ReviewReadOnly,
+            AdapterRole::Reviewer,
+            None,
+            ProviderPermissionMode::Supervised,
+            "on-request",
+        ),
+    ];
+
+    for (action, role, tool_policy, permission_mode, expected_approval) in cases {
         let sink = RecordingToolPolicyAuditSink::new();
         let marker_root = tempfile::tempdir().expect("planning marker dir").keep();
         // raw working_dir 故意=target:证明协议 cwd 来自投影(root)而非 raw。
         let mut raw = fixture.lc_input(
-            AdapterRole::Reviewer,
-            Some(ProviderToolPolicy::deny_file_write_builtins()),
-            ProviderPermissionMode::Auto,
+            role.clone(),
+            tool_policy.clone(),
+            permission_mode.clone(),
             None,
             Some(sink.clone().bound()),
             target.clone(),
@@ -161,7 +192,9 @@ async fn lcg_t05_planning_review_wire_is_read_only_on_request() {
                 CancellationToken::new(),
             )
             .await
-            .unwrap_or_else(|error| panic!("{action:?} lc launch must be restricted: {error}"));
+            .unwrap_or_else(|error| {
+                panic!("{action:?} lc danger launch must start: {error}")
+            });
 
         assert_eq!(
             session.native_session_id.as_deref(),
@@ -172,18 +205,17 @@ async fn lcg_t05_planning_review_wire_is_read_only_on_request() {
             "lc restricted done"
         );
 
-        // 真实 RPC params(断言组 325-326):来自 fixture 捕获的 thread/start
-        // 请求原文。
-        let readonly_params = lc_wire_params(&wire_marker);
-        assert_eq!(readonly_params["sandbox"], "read-only");
-        assert_eq!(readonly_params["approvalPolicy"], "on-request");
+        // 真实 RPC params:来自 fixture 捕获的 thread/start 请求原文。
+        let params = lc_wire_params(&wire_marker);
+        assert_eq!(params["sandbox"], "danger-full-access");
+        assert_eq!(params["approvalPolicy"], expected_approval);
         assert_eq!(
-            readonly_params["cwd"].as_str(),
+            params["cwd"].as_str(),
             Some(canonical_root.to_string_lossy().as_ref()),
             "protocol cwd must be the projection's canonical root, not raw working_dir"
         );
 
-        // 进程 cwd(断言组 329 只读档观测):canonical LC root。
+        // 进程 cwd:canonical LC root。
         assert_eq!(
             std::fs::read_to_string(&cwd_marker)
                 .expect("cwd marker is written")
@@ -192,7 +224,7 @@ async fn lcg_t05_planning_review_wire_is_read_only_on_request() {
         );
 
         // 统一 launch audit:sandbox/approvalPolicy 与 wire 同源;lc_projection
-        // 必填(boundary 引用为空串=只读无写面)。
+        // 必填(read-only action 的 boundary 引用为空串)。
         let events = sink.events();
         assert_eq!(events.len(), 1, "exactly one provider_start is written");
         let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record) =
@@ -201,8 +233,8 @@ async fn lcg_t05_planning_review_wire_is_read_only_on_request() {
             panic!("expected provider_start");
         };
         assert_eq!(record.provider, "codex");
-        assert_eq!(record.sandbox.as_deref(), Some("read-only"));
-        assert_eq!(record.approval_policy.as_deref(), Some("on-request"));
+        assert_eq!(record.sandbox.as_deref(), Some("danger-full-access"));
+        assert_eq!(record.approval_policy.as_deref(), Some(expected_approval));
         let lc_projection = record.lc_projection.as_ref().expect("lc projection audit");
         assert_eq!(lc_projection.action, lc_action_text(action));
         assert!(
@@ -212,12 +244,13 @@ async fn lcg_t05_planning_review_wire_is_read_only_on_request() {
     }
 }
 
-/// Task 5 Step 1(断言组 327-330):LC Coding 的真实 RPC params 固定
-/// `sandbox=workspace-write` + 协议 cwd=target(投影覆盖 raw),进程 cwd=
-/// canonical root(双 cwd 合同);target-only 写面证据缺失时拒绝。
+/// T12(REQ-LCG-04 改版):LC Coding 的真实 RPC params 固定
+/// `sandbox=danger-full-access` + 协议 cwd=target(投影覆盖 raw),进程
+/// cwd=canonical root(双 cwd 合同);写面非 target-only(旧受限权限证明门
+/// 废止)同样以 danger 放行——旧拒绝不复存在。
 #[cfg(unix)]
 #[tokio::test]
-async fn lcg_t05_coding_requires_protocol_target_and_target_only_evidence() {
+async fn lcg_t12_coding_wire_is_danger_full_access_with_dual_cwd() {
     let fixture = LcCodexFixture::new();
     let canonical_root = fixture.canonical_root();
     let target = fixture.target_worktree();
@@ -244,7 +277,7 @@ async fn lcg_t05_coding_requires_protocol_target_and_target_only_evidence() {
             CancellationToken::new(),
         )
         .await
-        .expect("coding lc launch with target-only evidence succeeds");
+        .expect("valid danger coding lc launch succeeds");
 
     assert_eq!(
         session.native_session_id.as_deref(),
@@ -255,9 +288,9 @@ async fn lcg_t05_coding_requires_protocol_target_and_target_only_evidence() {
         "lc restricted done"
     );
 
-    // 真实 RPC params(断言组 327-328):workspace-write + 协议 cwd=target。
+    // 真实 RPC params:danger-full-access + 协议 cwd=target。
     let coding_params = lc_wire_params(&wire_marker);
-    assert_eq!(coding_params["sandbox"], "workspace-write");
+    assert_eq!(coding_params["sandbox"], "danger-full-access");
     assert_eq!(
         coding_params["cwd"].as_str(),
         Some(target.to_string_lossy().as_ref()),
@@ -265,41 +298,46 @@ async fn lcg_t05_coding_requires_protocol_target_and_target_only_evidence() {
     );
     assert_eq!(
         coding_params["approvalPolicy"], "never",
-        "Auto→never 冻结映射"
+        "Auto→never 独立审批映射"
     );
 
-    // 进程 cwd(断言组 329):canonical root,双 cwd 合同与协议 target 分离。
+    // 进程 cwd:canonical root,双 cwd 合同与协议 target 分离。
     let process_cwd = std::fs::read_to_string(&cwd_marker)
         .expect("cwd marker is written")
         .trim()
         .to_string();
     assert_eq!(process_cwd, canonical_root.to_string_lossy().as_ref());
 
-    // 统一 launch audit:lc_projection 必填且 Coding 的 boundary 引用非空。
+    // 统一 launch audit:lc_projection 必填且 Coding 的 boundary 引用非空
+    //(逻辑交付面引用;物理 sandbox 恒 danger)。
     let events = sink.events();
     let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record) =
         &events[0]
     else {
         panic!("expected provider_start");
     };
-    assert_eq!(record.sandbox.as_deref(), Some("workspace-write"));
+    assert_eq!(record.sandbox.as_deref(), Some("danger-full-access"));
     assert_eq!(record.approval_policy.as_deref(), Some("never"));
     let lc_projection = record.lc_projection.as_ref().expect("lc projection audit");
     assert_eq!(lc_projection.action, "coding_target_write");
     assert!(!lc_projection.boundary_evidence_ref.is_empty());
 
-    // 证据缺失(断言组 330):写面非 target-only(多出 root 可写)→ 拒绝,
-    // 不得回退 danger-full-access。
-    let missing_any_required_evidence = provider
+    // 写面非 target-only(旧受限权限证明门废止):同样以 danger 放行,
+    // 不再被 `codex_danger_full_access_unsupported` 拒绝(独立 run-bound
+    // sink——provider_start 首行唯一,不复用首启绑定)。
+    let second_sink = RecordingToolPolicyAuditSink::new();
+    let mut second_raw = fixture.lc_input(
+        AdapterRole::Executor,
+        None,
+        ProviderPermissionMode::Auto,
+        None,
+        Some(second_sink.bound()),
+        canonical_root.clone(),
+    );
+    let (_second_cwd, _second_wire, _second_spawn) = lc_markers(&mut second_raw, &marker_root);
+    let mut non_target_only = provider
         .start_lc_validated(
-            fixture.lc_input(
-                AdapterRole::Executor,
-                None,
-                ProviderPermissionMode::Auto,
-                None,
-                Some(sink.clone().bound()),
-                canonical_root.clone(),
-            ),
+            second_raw,
             &fixture.envelope(
                 SessionPolicyAction::CodingTargetWrite,
                 vec![target.clone(), canonical_root.clone()],
@@ -307,10 +345,16 @@ async fn lcg_t05_coding_requires_protocol_target_and_target_only_evidence() {
             "cap_codex_lc_fixture",
             CancellationToken::new(),
         )
-        .await;
+        .await
+        .expect("non-target-only coding write face must launch danger (retired gate)");
+    assert_eq!(
+        recv_completed(&mut non_target_only.events).await,
+        "lc restricted done"
+    );
+    let wire = std::fs::read_to_string(&wire_marker).expect("wire marker is rewritten");
     assert!(
-        missing_any_required_evidence.is_err(),
-        "coding without target-only writable evidence must be rejected"
+        wire.contains("\"sandbox\":\"danger-full-access\""),
+        "non-target-only danger launch wires danger-full-access: {wire}"
     );
 }
 
@@ -340,7 +384,7 @@ fn lcg_t05_version_or_protocol_cwd_drift_invalidates_projection() {
             String::new(),
             "sha256:managed-config-artifact".to_string(),
             "sha256:trust-lc-fixture".to_string(),
-            Some(lc_boundary_plan(&envelope).expect("target-only boundary plan derives")),
+            Some(lc_boundary_plan(&envelope)),
         )
     };
 
@@ -384,21 +428,20 @@ fn lcg_t05_version_or_protocol_cwd_drift_invalidates_projection() {
         drifted_sandbox.process_cwd(),
         fixture.canonical_root().as_path()
     );
-    // sandbox 投影冻结面逐字段:mode=workspace-write,target_root 跟随漂移
-    // target,Coding 的 boundary 引用非空(计划内容引用;真实 probe evidence
-    // 归 6c/2d)。
-    assert_eq!(drifted_sandbox.mode().wire_text(), "workspace-write");
+    // sandbox 投影冻结面逐字段:mode=danger-full-access(全相位基线),
+    // target_root 跟随漂移 target,Coding 的 boundary 引用非空(计划内容
+    // 引用;真实 probe evidence 归 6c/2d)。
+    assert_eq!(drifted_sandbox.mode().wire_text(), "danger-full-access");
     assert_eq!(drifted_sandbox.target_root(), target_b.as_path());
     assert!(!drifted_sandbox.boundary_evidence_ref().is_empty());
 }
 
-/// Task 5b 受限门深化:Coder 形态的 Coding 启动在 exact version 不可得时
-/// 同样以稳定码 `codex_danger_full_access_unsupported` 拒绝(受限投影无法
-/// 认证,唯一替代是永久拒绝的 danger-full-access),零 child——版本错误
-/// 不得以泛化错误放行或改走其它路径。
+/// T12(REQ-LCG-04 改版):exact version 不可得时 LC 启动仍 fail-closed
+/// 拒绝(缺版本=0 会话),但不再以废止的 `codex_danger_full_access_unsupported`
+/// danger 稳定码拒绝——danger 是当前合法基线,版本不可得是普通准入失败。
 #[cfg(unix)]
 #[tokio::test]
-async fn lcg_t05_coder_shape_unknown_version_refuses_danger_zero_child() {
+async fn lcg_t12_unknown_version_fails_closed_zero_child_without_danger_code() {
     let fixture = LcCodexFixture::new();
     let sink = RecordingToolPolicyAuditSink::new();
     let marker_root = tempfile::tempdir().expect("version marker dir").keep();
@@ -429,15 +472,19 @@ async fn lcg_t05_coder_shape_unknown_version_refuses_danger_zero_child() {
         )
         .await
     else {
-        panic!("coder-shaped launch with unknown version must be rejected");
+        panic!("launch with unknown version must still be rejected (fail-closed)");
     };
-    assert_eq!(
-        error.details, "codex_danger_full_access_unsupported",
-        "version-uncertified coder launch must surface the stable danger refusal"
+    assert!(
+        error.details.contains("codex lc validated start"),
+        "version-unavailable rejection keeps the LC validated start failure surface: {error:?}"
+    );
+    assert!(
+        !error.details.contains("codex_danger_full_access_unsupported"),
+        "legal danger baseline must not be judged unsupported: {error:?}"
     );
     assert!(
         !spawn_marker.exists(),
-        "no codex child may spawn when the restricted projection is uncertifiable"
+        "no codex child may spawn when the version cannot be observed"
     );
     assert!(sink.events().is_empty());
 }
@@ -486,98 +533,20 @@ fn lcg_t05_mismatched_boundary_plan_reports_target_boundary_unverified() {
     );
 }
 
-/// T5-P3-1(审查修复):`Some(plan)` 分支不得弱于 `None` 分支——plan 自身
-/// 形状合法也不能绕过 envelope 写面冻结:Coding 的 writable_roots 必须仍
-/// 恰一个==target,只读必须空 writable_roots;违规以
-/// `codex_target_boundary_unverified` 拒绝,合法形态照常投影。
-#[test]
-fn lcg_t05_provided_plan_cannot_bypass_envelope_write_face_freeze() {
-    let fixture = LcCodexFixture::new();
-    let target = fixture.target_worktree();
-    let other = fixture.root.join("other-member");
-    let mut envelope = fixture.envelope(SessionPolicyAction::CodingTargetWrite, vec![other]);
-    envelope.target = PolicyTarget::checkout("logical_repo_0001", "checkout_0001", target.clone());
-    // plan 自身形状合法(TargetWriteOnly 且指向 envelope target),但 envelope
-    // 写面冻结的是非 target root——必须拒绝,不得静默采纳 plan。
-    let well_formed_plan = crate::cross_cutting::provider_boundary::ProviderBoundaryPlan::new(
-        crate::cross_cutting::provider_boundary::ProviderBoundaryMode::TargetWriteOnly,
-        fixture.canonical_root(),
-        Some(target.clone()),
-        Vec::new(),
-    );
-    let projection_input =
-        |envelope: SessionPolicyEnvelope,
-         plan: crate::cross_cutting::provider_boundary::ProviderBoundaryPlan| {
-            ProviderProjectionInput::new(
-                envelope.clone(),
-                ProviderRef::codex("cap_codex_lc_fixture"),
-                envelope.action,
-                AdapterRole::Executor,
-                ProviderPermissionMode::Auto,
-                None,
-                String::new(),
-                String::new(),
-                "sha256:managed-config-artifact".to_string(),
-                "sha256:trust-lc-fixture".to_string(),
-                Some(plan),
-            )
-        };
 
-    // 1) Coding:envelope writable_roots 含非 target(恰一个但 ≠target)→ 拒绝。
-    let error = LcProjector::new("codex 0.124.0-lc-fixture")
-        .project(&projection_input(
-            envelope.clone(),
-            well_formed_plan.clone(),
-        ))
-        .expect_err("provided plan must not bypass the envelope write-face freeze");
-    assert!(
-        error
-            .to_string()
-            .contains("codex_target_boundary_unverified"),
-        "write-face bypass must carry the stable reason, got: {error}"
-    );
-
-    // 2) 只读:envelope 带非空 writable_roots + 合法只读 plan → 同码拒绝。
-    let mut read_only =
-        fixture.envelope(SessionPolicyAction::PlanningReadOnly, vec![target.clone()]);
-    read_only.target = PolicyTarget::checkout("logical_repo_0001", "checkout_0001", target.clone());
-    let read_only_plan = crate::cross_cutting::provider_boundary::ProviderBoundaryPlan::new(
-        crate::cross_cutting::provider_boundary::ProviderBoundaryMode::ReadOnly,
-        fixture.canonical_root(),
-        None,
-        Vec::new(),
-    );
-    let error = LcProjector::new("codex 0.124.0-lc-fixture")
-        .project(&projection_input(read_only, read_only_plan))
-        .expect_err("read-only envelope with writable roots must be rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("codex_target_boundary_unverified"),
-        "read-only write-face bypass must carry the stable reason, got: {error}"
-    );
-
-    // 3) 合法形态(Some(plan) + envelope 写面已冻结)照常产出受限投影。
-    let mut frozen = fixture.envelope(SessionPolicyAction::CodingTargetWrite, vec![target.clone()]);
-    frozen.target = PolicyTarget::checkout("logical_repo_0001", "checkout_0001", target.clone());
-    let projection = LcProjector::new("codex 0.124.0-lc-fixture")
-        .project(&projection_input(frozen, well_formed_plan))
-        .expect("legal provided plan with frozen write face still projects");
-    assert_eq!(projection.sandbox(), "workspace-write");
-}
-
-/// Task 5b wire 深化:LC read-only 的 thread/resume 与 thread/start 共享同
-/// 一受限投影——resume 请求在真实 wire 上携带同 sandbox/approvalPolicy/
-/// cwd 与原 threadId,并由应答确认(F1)。
+/// T12 wire 深化:LC danger 会话的 thread/resume 与 thread/start 共享同一
+/// 投影——resume 请求在真实 wire 上携带同 sandbox/approvalPolicy/cwd 与
+/// 原 threadId,并由应答确认(F1);Author 承载角色(Orchestrator+deny)
+/// 的 approval 恒 on-request。
 #[cfg(unix)]
 #[tokio::test]
-async fn lcg_t05_thread_resume_shares_restricted_projection_on_wire() {
+async fn lcg_t12_thread_resume_shares_danger_projection_on_wire() {
     let fixture = LcCodexFixture::new();
     let canonical_root = fixture.canonical_root();
     let sink = RecordingToolPolicyAuditSink::new();
     let marker_root = tempfile::tempdir().expect("resume marker dir").keep();
     let mut raw = fixture.lc_input(
-        AdapterRole::Reviewer,
+        AdapterRole::Orchestrator,
         Some(ProviderToolPolicy::deny_file_write_builtins()),
         ProviderPermissionMode::Auto,
         Some("codex-thread-lc".to_string()),
@@ -596,7 +565,7 @@ async fn lcg_t05_thread_resume_shares_restricted_projection_on_wire() {
             CancellationToken::new(),
         )
         .await
-        .expect("lc read-only resume launch succeeds");
+        .expect("lc danger resume launch succeeds");
 
     // F1:原生 thread id 只能来自 thread/resume 应答确认。
     assert_eq!(
@@ -615,7 +584,7 @@ async fn lcg_t05_thread_resume_shares_restricted_projection_on_wire() {
         "resume launch must use thread/resume on the wire"
     );
     let resume_params = lc_wire_params(&wire_marker);
-    assert_eq!(resume_params["sandbox"], "read-only");
+    assert_eq!(resume_params["sandbox"], "danger-full-access");
     assert_eq!(resume_params["approvalPolicy"], "on-request");
     assert_eq!(
         resume_params["cwd"].as_str(),

@@ -488,13 +488,13 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure
 
 use crate::cross_cutting::tool_policy_audit::test_support::RecordingToolPolicyAuditSink;
 
-/// Task 5b approval 深化:LC read-only 会话沿用策略审批冻结(GC6)——
-/// fileChange/commandExecution 在真实 wire 上得到即时 decline(不经
-/// ApprovalBridge 上抛),MCP accept;thread/start 三联动 read-only +
-/// on-request 复用既有 policy fixture 校验。
+/// T12(REQ-LCG-04 改版):Author 承载角色(Orchestrator+deny)的 LC danger
+/// 会话沿用策略审批冻结(GC6)——fileChange/commandExecution 在真实 wire 上
+/// 得到即时 decline(不经 ApprovalBridge 上抛),MCP accept;thread/start
+/// danger-full-access + on-request(LC danger fixture 逐字校验)。
 #[cfg(unix)]
 #[tokio::test]
-async fn lcg_t05_read_only_lc_session_declines_write_approvals_on_wire() {
+async fn lcg_t12_author_danger_lc_session_declines_write_approvals_on_wire() {
     let fixture = LcCodexFixture::new();
     let sink = RecordingToolPolicyAuditSink::new();
     let raw = fixture.lc_input(
@@ -506,7 +506,7 @@ async fn lcg_t05_read_only_lc_session_declines_write_approvals_on_wire() {
         fixture.target_worktree(),
     );
     let provider = CodexProvider::new(executable_fixture(
-        "tests/fixtures/provider/codex_app_server_policy_approval_fixture.sh",
+        "tests/fixtures/provider/codex_app_server_lc_danger_policy_approval_fixture.sh",
     ))
     .with_version_supplier(lc_version_supplier());
 
@@ -518,7 +518,7 @@ async fn lcg_t05_read_only_lc_session_declines_write_approvals_on_wire() {
             CancellationToken::new(),
         )
         .await
-        .expect("lc read-only policy session launches");
+        .expect("author danger lc policy session launches");
 
     // fixture 对任何未 decline/accept 的审批直接退出失败——完成即证明
     // fileChange/commandExecution=decline、MCP=accept 在 wire 上成立。
@@ -527,22 +527,23 @@ async fn lcg_t05_read_only_lc_session_declines_write_approvals_on_wire() {
         "policy approvals done"
     );
 
-    // 统一审计:LC 会话的 provider_start 带 lc_projection(只读无写面)。
+    // 统一审计:LC 会话的 provider_start 带 lc_projection(danger 基线;
+    // read-only action 无写面引用)。
     let events = sink.events();
     let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record) =
         &events[0]
     else {
         panic!("expected provider_start");
     };
-    assert_eq!(record.sandbox.as_deref(), Some("read-only"));
+    assert_eq!(record.sandbox.as_deref(), Some("danger-full-access"));
     assert_eq!(record.approval_policy.as_deref(), Some("on-request"));
     let lc_projection = record.lc_projection.as_ref().expect("lc projection audit");
     assert_eq!(lc_projection.action, "planning_read_only");
 }
 
-/// Task 5b approval 映射深化:LC Coding 的 Supervised 档在真实 wire 与
-/// 统一审计上都是 approvalPolicy=on-request(REQ-LCG-04 冻结映射;
-/// Auto=never 已由 coding 主测试锁定)。
+/// T12 approval 映射:LC Coding 的 Supervised 档在真实 wire 与统一审计上
+/// 都是 approvalPolicy=on-request(独立审批映射;Auto=never 已由 coding
+/// 主测试锁定),sandbox 全相位 danger-full-access。
 #[cfg(unix)]
 #[tokio::test]
 async fn lcg_t05_coding_supervised_maps_on_request_approval_on_wire() {
@@ -578,10 +579,10 @@ async fn lcg_t05_coding_supervised_maps_on_request_approval_on_wire() {
     );
 
     let coding_params = lc_wire_params(&wire_marker);
-    assert_eq!(coding_params["sandbox"], "workspace-write");
+    assert_eq!(coding_params["sandbox"], "danger-full-access");
     assert_eq!(
         coding_params["approvalPolicy"], "on-request",
-        "Supervised→on-request 冻结映射"
+        "Supervised→on-request 独立审批映射"
     );
     let events = sink.events();
     let crate::cross_cutting::tool_policy_audit::DurableToolPolicyEvent::ProviderStart(record) =
@@ -590,7 +591,7 @@ async fn lcg_t05_coding_supervised_maps_on_request_approval_on_wire() {
         panic!("expected provider_start");
     };
     assert_eq!(record.approval_policy.as_deref(), Some("on-request"));
-    assert_eq!(record.sandbox.as_deref(), Some("workspace-write"));
+    assert_eq!(record.sandbox.as_deref(), Some("danger-full-access"));
 }
 
 // ==== Task 3.4(B0c):真实漂移零 session/child 与错 ID kill/reap ====
