@@ -2106,4 +2106,101 @@ mod lcg_t07_validated_dispatch_tests {
 
         assert!(audit_sink_allocated_when_tool_policy_is_none);
     }
+    /// T22 b45 现场(coder 段同形缺口):LC Coder 角色经
+    /// `prepare_streaming_launch_for_role` 的生产启动必须携带受信白名单环境
+    /// ——裸名 CLI(kimi)在 env_clear+空 env_vars 下 ProviderCommandMissing,
+    /// coding 主格无从起跑。与 plan split/author root launch 同一接线源断言:
+    /// PATH 精确继承、HOME 冻结受信 owner home。
+    struct T22EnvCaptureAdapter {
+        captured:
+            std::sync::Mutex<Option<crate::cross_cutting::streaming_provider::StreamingProviderInput>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
+        for T22EnvCaptureAdapter
+    {
+        async fn start(
+            &self,
+            input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<crate::cross_cutting::streaming_provider::ProviderSession, ProviderAdapterError>
+        {
+            *self.captured.lock().expect("t22 capture lock") = Some(input);
+            Ok(probe_session())
+        }
+
+        async fn start_validated(
+            &self,
+            launch: ValidatedStreamingProviderInput,
+            cancel: CancellationToken,
+        ) -> Result<crate::cross_cutting::streaming_provider::ProviderSession, ProviderAdapterError>
+        {
+            let (input, _launch) = launch.into_parts();
+            self.start(input, cancel).await
+        }
+    }
+
+    #[tokio::test]
+    async fn lcg_t22_coder_role_launch_carries_frozen_environment_with_path() {
+        let root = tempfile::tempdir().expect("lcg t22 env root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store = CodingAttemptStore::new(paths.clone());
+        let attempt = t07_logical_running_attempt(&store);
+        let authority_root = std::fs::canonicalize(root.path()).expect("canonical authority root");
+        let worktree = attempt.worktree_path.clone().expect("worktree");
+        t07_ensure_bootstrap(&paths);
+
+        let probe = std::sync::Arc::new(T22EnvCaptureAdapter {
+            captured: std::sync::Mutex::new(None),
+        });
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, probe.clone());
+        let gateway = std::sync::Arc::new(t07_gateway(
+            &paths,
+            registry,
+            std::sync::Arc::new(T07DispatchProbeSyncAdapter::new()),
+            authority_root.clone(),
+        ));
+        let engine = t07_engine(&store, Some(gateway.clone()));
+
+        // 与生产 Coder 调用同源:input 显式携带 envelope 冻结的 canonical cwd。
+        let mut coder_input = t07_coder_input(worktree.clone(), None);
+        coder_input.working_directory = Some(authority_root.clone());
+        let prepared = engine
+            .prepare_streaming_launch_for_role(
+                &attempt,
+                crate::product::coding_models::CodingProviderRole::Coder,
+                &worktree,
+                coder_input,
+            )
+            .expect("prepare lc coder launch")
+            .expect("logical attempt with gateway must prepare");
+        let _session = gateway
+            .start_streaming(prepared, CancellationToken::new())
+            .await
+            .expect("start validated coder launch");
+
+        let captured = probe
+            .captured
+            .lock()
+            .expect("t22 capture lock")
+            .clone()
+            .expect("validated coder start captured");
+        let owner_home =
+            crate::cross_cutting::provider_environment::resolve_trusted_owner_home_from_env()
+                .expect("test host must provide an absolute HOME for the frozen environment");
+        assert_eq!(
+            captured.env_vars.get("PATH"),
+            std::env::var_os("PATH")
+                .map(|value| value.to_string_lossy().into_owned())
+                .as_ref(),
+            "coder 角色启动必须携带精确继承的宿主 PATH(裸名 CLI 可解析的充要条件)"
+        );
+        assert_eq!(
+            captured.env_vars.get("HOME").map(String::as_str),
+            Some(owner_home.display().to_string().as_str()),
+            "HOME 必须冻结受信 owner home"
+        );
+    }
 }

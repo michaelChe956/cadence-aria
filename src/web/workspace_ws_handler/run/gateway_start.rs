@@ -603,6 +603,16 @@ pub(crate) async fn start_work_item_plan_author(
     // spawn 前复验恒以 envelope root 为准,`input.working_dir` 保持 target
     // 语义原样透传(与 2.1 author 链 `provider_drive.rs` 的重绑同型)。
     input.working_directory = Some(plan.validated.envelope().working_directory.clone());
+    // b45 现场根因 r2(T22):plan/split 启动统一接受信环境——以 durable run
+    // 事实构造 duty=Splitter、承载 input.role 的受信身份,冻结 HostCoding
+    // 合同后经 `trusted_launch_environment` 产出白名单 env(PATH 精确继承、
+    // HOME 冻结受信 owner home;裸名 CLI 靠最终 PATH 可解析),caller 传入
+    // env_vars 被覆盖。owner home 缺失/装配失配零副作用拒绝(fail-closed,
+    // 先于 prepare/validate/spawn)。与 author root launch、aggregate root
+    // recipe turn 同一接线源;合同绑定进 launch 语义仍归 T16,此处只作环境
+    // 构造权威,零指纹变化。
+    input.env_vars = plan_split_trusted_environment(&input, plan_split_run)
+        .map_err(ProviderAdapterError::provider_unavailable)?;
     // Task 1b 段②:WS plan/split caller 携 run handle 时,经 gateway
     // `prepare_streaming_launch` 在 prepare 前绑定 run-bound sink(含无通用
     // tool_policy 角色)并以冻结接口组装 validated input;无 handle 的存量
@@ -648,6 +658,77 @@ pub(crate) async fn start_work_item_plan_author(
             );
             mapped
         })
+}
+
+/// b45 现场根因 r2(T22):plan/split 启动的受信环境构造——以 durable run
+/// 事实(run id/承载角色/能力引用)构造 duty=Splitter 的 `TrustedRunIdentity`,
+/// 按权威装配矩阵冻结 `HostCoding` 执行合同(Splitter×HostCoding×无岗位
+/// 策略×无窗口,合法组合),再产出统一白名单环境(单一接线源
+/// `trusted_launch_environment`)。任何失配/owner home 缺失都以稳定原因码
+/// 字符串上抛,由调用点映射 `provider_unavailable` 零副作用拒绝——绝不
+/// 回退空 env(env_clear+空表=裸名 CLI 必然 ProviderCommandMissing)。
+fn plan_split_trusted_environment(
+    input: &crate::cross_cutting::streaming_provider::StreamingProviderInput,
+    plan_split_run: Option<&PlanSplitRunContext>,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    use crate::cross_cutting::provider_execution::{
+        ProviderExecutionProfile, TrustedProviderRole, TrustedRunIdentity,
+        freeze_provider_execution,
+    };
+    let workspace_session_id = plan_split_run
+        .map(|run_ctx| run_ctx.audit_context().workspace_session_id.clone())
+        .or_else(|| input.workspace_session_id.clone())
+        .unwrap_or_else(|| "plan_split".to_string());
+    let run_record = crate::protocol::contracts::ProviderRunRecord {
+        provider_run_id: format!(
+            "plan_split_{}_{}",
+            workspace_session_id,
+            uuid::Uuid::new_v4().simple()
+        ),
+        node_id: "plan_split_author_launch".to_string(),
+        provider_type: input.provider_type.clone(),
+        runtime_role: crate::protocol::contracts::RuntimeRole::Orchestrator,
+        adapter_role: input.role.clone(),
+        provider_capability_ref: "cap_managed_snapshot".to_string(),
+        adapter_compatibility_ref: "compat_1".to_string(),
+        context_package_ref: format!("ctx_plan_split_{workspace_session_id}"),
+        adapter_input_ref: format!("ain_plan_split_{workspace_session_id}"),
+        adapter_output_ref: format!("aout_plan_split_{workspace_session_id}"),
+        raw_artifact_refs: Vec::new(),
+        exit_code: None,
+        error_code: None,
+        error_details: None,
+        stdout_ref: None,
+        stderr_ref: None,
+        structured_output_ref: None,
+        files_modified: Vec::new(),
+        status: crate::protocol::contracts::ProviderRunStatus::Running,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        completed_at: None,
+        duration_ms: None,
+        timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
+        retry_count: 0,
+        approval_policy: crate::protocol::contracts::ApprovalPolicy::OnRequest,
+        sandbox_mode: crate::protocol::contracts::SandboxMode::FullAccess,
+        constraint_check_ref: None,
+        traceability_binding_refs: Vec::new(),
+    };
+    let identity = TrustedRunIdentity::from_durable_run(
+        &run_record,
+        &workspace_session_id,
+        TrustedProviderRole::Splitter,
+    );
+    let contract = freeze_provider_execution(
+        &identity,
+        ProviderExecutionProfile::HostCoding,
+        None,
+        format!("plan_split_{workspace_session_id}"),
+        None,
+    )
+    .map_err(|error| format!("plan split execution contract freeze failed: {}", error.details))?;
+    crate::cross_cutting::provider_environment::trusted_launch_environment(&contract)
+        .map(|environment| environment.env().clone())
+        .map_err(|error| format!("plan split launch environment build failed: {}", error.details))
 }
 
 fn map_gateway_error_to_adapter(error: &ProviderGatewayError) -> ProviderAdapterError {

@@ -515,6 +515,66 @@ async fn start_work_item_plan_author_binds_normal_input_cwd_to_envelope_root() {
     );
 }
 
+/// b45 现场根因 r2(T22):plan/split 唯一物理启动口必须携带受信白名单
+/// 环境——kimi 现场裸名 CLI 在 env_clear+空 env_vars 下
+/// ProviderCommandMissing("provider command not found: kimi"),plan 永不
+/// Confirmed,coding/cancel 双 400。与 author root launch/aggregate recipe
+/// turn 同一接线源(`trusted_launch_environment`):PATH 精确继承、HOME
+/// 冻结受信 owner home,caller 传入 env_vars 被覆盖。
+#[tokio::test]
+async fn start_work_item_plan_author_carries_frozen_environment_with_path() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let fixture = t14_logical_fixture_with_gateway_extras(Arc::new(CapturingStreamingAdapter {
+        inputs: input_tx,
+        start_mark: None,
+        observed_start_mark: Arc::default(),
+    }));
+    let canonical_root = t14_canonical_root(&fixture);
+    let launch = {
+        let engine = fixture.engine.lock().await;
+        resolve_plan_author_launch(&engine).expect("resolve logical launch")
+    };
+
+    let input = streaming_input(canonical_root.clone());
+    let session = start_work_item_plan_author(
+        launch,
+        Arc::new(CapturingStreamingAdapter {
+            inputs: mpsc::unbounded_channel().0,
+            start_mark: None,
+            observed_start_mark: Arc::default(),
+        }),
+        input,
+        CancellationToken::new(),
+        None,
+    )
+    .await;
+
+    assert!(
+        session.is_ok(),
+        "plan author 启动不得被环境构造拒绝: {:?}",
+        session.as_ref().err()
+    );
+    let captured = tokio::time::timeout(std::time::Duration::from_secs(1), input_rx.recv())
+        .await
+        .expect("capture adapter input")
+        .expect("captured input");
+    let owner_home =
+        crate::cross_cutting::provider_environment::resolve_trusted_owner_home_from_env()
+            .expect("test host must provide an absolute HOME for the frozen environment");
+    assert_eq!(
+        captured.env_vars.get("PATH"),
+        std::env::var_os("PATH")
+            .map(|value| value.to_string_lossy().into_owned())
+            .as_ref(),
+        "plan author 启动必须携带精确继承的宿主 PATH(裸名 CLI 可解析的充要条件)"
+    );
+    assert_eq!(
+        captured.env_vars.get("HOME").map(String::as_str),
+        Some(owner_home.display().to_string().as_str()),
+        "HOME 必须冻结受信 owner home"
+    );
+}
+
 fn workspace_engine(fixture: &GatewayFixture, with_gateway: bool) -> WorkspaceEngine {
     workspace_engine_with_author(fixture, with_gateway, ProviderName::ClaudeCode)
 }
