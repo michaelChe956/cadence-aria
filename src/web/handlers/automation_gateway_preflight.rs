@@ -1141,6 +1141,37 @@ mod tests {
         );
     }
 
+    /// T10/DEV-01(RevB2T9 ⚠1):Claude bootstrap 过渡桥形态(矩阵全
+    /// Unknown + legacy supported_actions 全列)不再放行——role-chain
+    /// preflight 沿同源 `action_admission_verdict` 以
+    /// `provider_capability_launch_not_confirmed` 拒绝全部角色,零 provider
+    /// 启动;等待真实 probe 写入 v2 Confirmed 行后才可通过。
+    #[test]
+    fn claude_bootstrap_legacy_allow_is_rejected_by_role_chain() {
+        let fixture = role_chain_fixture(&[claude_bootstrap_record()]);
+        let error = validate_role_chain_for_declared_enrollment_target(
+            Some(&fixture.gateway),
+            &ProviderName::ClaudeCode,
+            &ProviderName::ClaudeCode,
+            &lc_declared_target(),
+            true,
+            false,
+        )
+        .expect_err("bootstrap bridge shape must not satisfy the role chain (DEV-01)");
+        let violations = violations_of(error);
+        assert!(
+            violations.len() >= 5,
+            "全部角色(plan_author/coder/plan_reviewer/code_reviewer/internal_reviewer)都必须列出:{violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .all(|v| v["reason_code"] == "provider_capability_launch_not_confirmed"),
+            "桥形态拒绝必须携带稳定判别码:{violations:?}"
+        );
+        assert_eq!(fixture.streaming_adapter.start_count(), 0);
+    }
+
     /// Task 14(lcg_t14 诊断投影):waiting detail 携带任一冻结迁移判别码
     /// 时,`detailed_reason_code` 投影该冻结码(不折叠为泛化 waiting
     /// reason);policy/body 漂移以 gateway Display 判别码透传;未命中时

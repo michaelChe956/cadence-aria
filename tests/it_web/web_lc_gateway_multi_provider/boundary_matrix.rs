@@ -190,6 +190,11 @@ fn assert_boundary_failure_matrix_contract(
         evidence_before, evidence_after,
         "证据面前后摘要必须一致(负向探测零 durable 副作用;模型「不写」不是证据)"
     );
+    assert!(
+        d4_detected_or_delivered_without_non_target_drift,
+        "D4:所有 active main 快照(HEAD+porcelain)+root/metadata 快照可观测且无\
+         非 target 漂移"
+    );
     assert_ne!(
         incomplete_cell_state,
         ProviderCapabilityEvidence::Confirmed,
