@@ -156,11 +156,12 @@ async fn workspace_review_and_repair_policy_runs_receive_durable_audit_sink() {
 // 随消息族退役——T1 矩阵 legacy 回归全绿证据在案
 // （wp1-gate-retest/evidence-matrix.md §2），见 wp5-attribution-table.md。
 
-/// Task 4.1 修复轮（I2）：真实事件链 wire fixture 的路径（chmod 后便给真实
-/// CodexProvider 策略会话使用；首次 run thread/start、修复 run thread/resume）。
+/// 批2 Task 11（T20/T13 前中间态）：reviewer run 为非策略会话——改用无
+/// 三联动前置的 completed-only wire fixture（thread/start 无策略前置），
+/// 驱动干净收口；engine 侧审计分配断言不受影响。
 fn workspace_policy_audit_fixture() -> std::path::PathBuf {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/provider/codex_app_server_workspace_policy_audit_fixture.sh");
+        .join("tests/fixtures/provider/codex_app_server_completed_only_fixture.sh");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -183,8 +184,13 @@ fn workspace_policy_audit_fixture() -> std::path::PathBuf {
 /// 的既有 lifecycle 产物不含任何 tool-policy 事件标记。（手动 append 属
 /// LifecycleStore 单元测试用途，由 lifecycle_store/tests/tool_policy_audit.rs
 /// 覆盖，本 wiring 测试不再伪造事件。）
+/// 批2 Task 11（T20/T13 前中间态）：reviewer wire 面去 deny 后，adapter 侧
+/// durable provider_start/approval 写仍为 deny 门控（codex 策略会话机制只
+/// 服务 deny 意图），本测试锁定 engine 侧审计分配在位（`role-run-seq.jsonl`
+/// 高水位 marker，与 review/repair 面 sink 绑定口径一致）与通道分离；durable
+/// run 事件文件补齐归 T13/T20 窗口。
 #[tokio::test]
-async fn workspace_policy_review_run_writes_canonical_events_via_real_provider_chain() {
+async fn workspace_policy_review_run_keeps_engine_audit_allocation_via_real_provider_chain() {
     use crate::cross_cutting::codex_provider::CodexProvider;
     use crate::cross_cutting::streaming_provider::ProviderVersionSupplier;
 
@@ -230,65 +236,16 @@ async fn workspace_policy_review_run_writes_canonical_events_via_real_provider_c
         })
         .cloned()
         .collect();
+    // 批2 Task 11（T20/T13 前中间态）：去 deny reviewer run 不产生 run 事件
+    // 文件（adapter durable 写 deny 门控）；engine 侧审计分配在位（高水位
+    // marker）。与 review/repair 面 sink 绑定断言同口径。
     assert!(
-        !run_files.is_empty(),
-        "real policy review runs must land durable files in the tool-policy partition"
+        run_files.is_empty(),
+        "non-deny reviewer run must not fabricate durable partition run files: {run_files:?}"
     );
-
-    let mut all_event_types: Vec<String> = Vec::new();
-    for run_file in &run_files {
-        let lines: Vec<serde_json::Value> = std::fs::read_to_string(run_file)
-            .unwrap_or_else(|error| panic!("partition file {}: {error}", run_file.display()))
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("partition jsonl line"))
-            .collect();
-        // 真实 provider_start 首行不变量 + D7 冻结字段（engine 注入的 sink 以
-        // 文件 key 盖章 workspace_session_id，真实 adapter 写入其余字段）。
-        assert_eq!(
-            lines[0]["event_type"],
-            "provider_start",
-            "provider_start must be the first durable event in {}",
-            run_file.display()
-        );
-        assert_eq!(lines[0]["provider"], "codex");
-        assert_eq!(lines[0]["role"], "reviewer");
-        assert_eq!(
-            lines[0]["workspace_session_id"], "sess_audit_real_chain",
-            "LifecycleStore must stamp the file-key workspace id"
-        );
-        assert_eq!(lines[0]["provider_session_id"], "codex-thread-ws-audit");
-        assert_eq!(lines[0]["sandbox"], "read-only");
-        assert_eq!(lines[0]["approval_policy"], "on-request");
-        assert_eq!(
-            lines
-                .iter()
-                .filter(|line| line["event_type"] == "provider_start")
-                .count(),
-            1,
-            "each durable run file carries exactly one provider_start"
-        );
-        for line in &lines {
-            let event_type = line["event_type"].as_str().expect("event_type");
-            assert!(
-                matches!(
-                    event_type,
-                    "provider_start"
-                        | "approval_decision"
-                        | "protocol_warning"
-                        | "session_terminated"
-                ),
-                "tool-policy partition must carry only canonical events: {line}"
-            );
-            all_event_types.push(event_type.to_string());
-        }
-    }
-    // wire fixture 的三类审批（fileChange/commandExecution decline + MCP accept）
-    // 必须经真实 adapter 决策链落盘为 approval_decision。
     assert!(
-        all_event_types
-            .iter()
-            .any(|kind| kind == "approval_decision"),
-        "real codex approvals must persist as approval_decision: {all_event_types:?}"
+        partition_dir.join("role-run-seq.jsonl").exists(),
+        "engine must still allocate the reviewer tool-policy role run seq (audit kept post-deny)"
     );
 
     // 分区之外的既有 lifecycle 产物不含任何 tool-policy 事件标记（通道分离）。

@@ -962,8 +962,9 @@ fn collect_files_recursive(dir: &std::path::Path, out: &mut Vec<std::path::PathB
 }
 
 /// Coder（非策略）run 的执行审计只落既有 role-run-events（execution_event_audit
-/// 通道）；策略 reviewer run（真实 CodexProvider + wire fixture）的四类 canonical
-/// 事件只落 `tool-policy-run-audit/` 分区。两通道无交叉记录。
+/// 通道）；批2 Task 11（T20/T13 前中间态）reviewer wire 面去 deny 后，engine 侧
+/// 只保 role-run seq 分配（`role-run-seq.jsonl`），durable run 事件文件暂缺
+/// （adapter durable 写仍为 deny 门控，补齐归 T13/T20 窗口）。两通道无交叉记录。
 #[tokio::test]
 async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
     use crate::cross_cutting::codex_provider::CodexProvider;
@@ -1115,7 +1116,8 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
         "reviewer run must complete via the wire fixture: {policy_outcome:?}"
     );
 
-    // 策略通道：分区文件存在，首行 provider_start，含 approval_decision。
+    // 策略通道（T20/T13 前中间态）：分区无 run 事件文件（adapter durable 写
+    // 仍为 deny 门控），但 engine 侧 seq 分配 marker 在位——见下方断言。
     // （`role-run-seq.jsonl` 是 seq 分配高水位 marker，不是事件文件，排除。）
     let partition_dir = tool_policy_partition.join("ws-coding-audit-isolation");
     let mut partition_files = Vec::new();
