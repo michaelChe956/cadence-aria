@@ -1,7 +1,12 @@
 //! Terminal request handlers for the kimi client services: the five
-//! `terminal/*` endpoints plus their command-construction, isolation, and
-//! cwd-anchoring helpers.
+//! `terminal/*` endpoints plus their command-form and cwd-anchoring helpers.
+//!
+//! 批2 Task 6:全角色 Host 单路径——普通 `command+args[]` 原样 argv,legacy
+//! 单字符串用受信 SHELL 的 `-c`;不再有 isolation_for/bwrap/固定解释器/
+//! 只读 grammar。cwd 仍走原 canonical 身份校验(no-follow openat 锚定),
+//! 未声明/出界 cwd 回退面根只是起始目录选择,不是物理隔离。
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -10,14 +15,12 @@ use serde_json::{Value, json};
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
 };
+#[cfg(test)]
 use crate::protocol::contracts::AdapterRole;
 
-use super::grammar::{Binary, ParsedCommand, parse_command};
 use super::policy::ClientAction;
-use super::sandbox::{
-    canonical_path_of_fd, open_dir_no_follow, resolve_trusted_binary, validate_path_no_follow,
-};
-use super::terminal::{TerminalCommand, TerminalIsolation, TerminalResult};
+use super::sandbox::{canonical_path_of_fd, open_dir_no_follow};
+use super::terminal::{TerminalCommand, TerminalResult};
 use super::{ClientServiceError, ClientServiceState, check_session, evaluate_policy};
 
 use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoundaryPlan};
@@ -26,102 +29,21 @@ use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoun
 use super::policy::ClientServicePolicy;
 #[cfg(test)]
 use super::terminal::TerminalManager;
-#[cfg(test)]
-use super::writable_git_paths_for;
 
-/// Server-injected git hardening config. The grammar forbids the model from
-/// supplying `-c`, but the server may add these itself to disable every
-/// executable local config item (fsmonitor, external diff/textconv, ssh and
-/// credential helpers).
-const GIT_HARDENING: [&str; 14] = [
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.externalDiff=",
-    "-c",
-    "core.textconv=",
-    "-c",
-    "diff.external=",
-    "-c",
-    "diff.textconv=",
-    "-c",
-    "core.sshCommand=",
-    "-c",
-    "credential.helper=",
-];
-
-fn build_final_argv(parsed: &ParsedCommand) -> Vec<String> {
-    let mut out = vec![parsed.binary.name().to_string()];
-    match parsed.binary {
-        Binary::Git => {
-            out.push("--no-pager".to_string());
-            out.extend(GIT_HARDENING.iter().map(ToString::to_string));
-            let subcommand = &parsed.argv[1];
-            out.push(subcommand.clone());
-            if subcommand == "diff" {
-                out.push("--no-ext-diff".to_string());
-                out.push("--no-textconv".to_string());
-            }
-            out.extend(parsed.argv[2..].iter().cloned());
-        }
-        _ => out.extend(parsed.argv[1..].iter().cloned()),
-    }
-    out
+/// 受信 SHELL:legacy 单字符串形态的解释器。取冻结会话环境的 `SHELL`
+/// (与 provider 进程同一环境合同;缺失时回退 POSIX `/bin/sh`)——不来自
+/// ACP 参数,宿主也不施加固定解释器白名单。
+fn trusted_shell(env: &BTreeMap<String, String>) -> String {
+    env.get("SHELL")
+        .filter(|shell| !shell.is_empty())
+        .cloned()
+        .unwrap_or_else(|| "/bin/sh".to_string())
 }
-
-fn isolation_for(state: &ClientServiceState) -> Result<TerminalIsolation, ClientServiceError> {
-    match state.permission_mode {
-        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto => state
-            .bwrap
-            .clone()
-            .map(|bwrap| {
-                // The coding (Executor) contract writes and commits inside
-                // its worktree; a linked worktree keeps its git dir outside
-                // the root, so those paths are bound with it (F-17). The
-                // git bind face is frozen at construction — never
-                // re-resolved here: the coder can rewrite `.git` inside
-                // the writable root and aim a fresh resolution at any
-                // valid host git dir (F-17 fix round 2).
-                //
-                // Task 4c 读写面分离:LC 会话的可写面由 boundary plan 决定
-                // (TargetWriteOnly → face root 可写,ReadOnly → 全只读);
-                // direct 会话保持 role 判定原值。
-                let writable_root = match state.target_boundary.as_ref() {
-                    Some(plan) => plan.mode() == ProviderBoundaryMode::TargetWriteOnly,
-                    None => matches!(state.policy.role, AdapterRole::Executor),
-                };
-                TerminalIsolation::Bubblewrap {
-                    bwrap,
-                    writable_root,
-                    // P3-b(REQ-KACS-IDLE-RO):authority 只读面只来自可信
-                    // boundary plan 的 working_directory(canonical 聚合
-                    // 根;计划构造为 pub(crate),模型/调用方无法自造),
-                    // 由 sandbox 在私有 /tmp tmpfs 之后以 ro bind 恢复其
-                    // 原路径可见性。direct 会话恒 None。
-                    readable_root: state
-                        .target_boundary
-                        .as_ref()
-                        .map(|plan| plan.working_directory().to_path_buf()),
-                    writable_git_paths: state.writable_git_paths.clone(),
-                }
-            })
-            .ok_or_else(|| {
-                ClientServiceError::Rejected(
-                    "bubblewrap is unavailable; terminal execution is disabled in auto mode"
-                        .to_string(),
-                )
-            }),
-        crate::cross_cutting::streaming_provider::ProviderPermissionMode::Supervised => {
-            Ok(TerminalIsolation::Unavailable)
-        }
-    }
-}
-
 /// Task 4c 读写面分离:terminal 的授权面根——LC 会话(TargetWriteOnly)为
-/// boundary plan 的 target root(bwrap 写面与 cwd 锚定都以它为界;
-/// read-only plan/direct 会话为会话根)。terminal 实际 cwd 只在该面内
-/// 解析,不改变 provider 进程 cwd(进程 cwd 由 start_validated 冻结为
-/// canonical LC root)。
+/// boundary plan 的 target root(cwd 锚定以它为起始面;read-only plan/
+/// direct 会话为会话根)。terminal 实际 cwd 只在该面内解析,不改变
+/// provider 进程 cwd(进程 cwd 由 start_validated 冻结为 canonical LC
+/// root)。批2 Task 6:face root 只决定 cwd 锚定面,不再是物理写边界。
 fn terminal_face_root(state: &ClientServiceState) -> Result<PathBuf, ClientServiceError> {
     match state.target_boundary.as_ref() {
         Some(plan) => match plan.mode() {
@@ -152,9 +74,8 @@ fn terminal_face_root(state: &ClientServiceState) -> Result<PathBuf, ClientServi
 /// 两 run 30/30 全拒,含模型 cwd 与守卫提示根 220 字节逐字节相同的调用;
 /// coder 60 分钟 16 轮 plan-defect blocked 后泵超时,coding fresh 落
 /// 「缺完成产物」)。修:CLI cwd 无法锚定进 face root(出界/父遍历/前缀
-/// 混淆/no-follow 拒绝)时不再拒绝,锚定 face_root 本身——terminal 的
-/// 执行面与 sandbox 挂载仍以 face root 为界,脚本自带 `cd` 由 sandbox
-/// 边界约束,边界语义不放宽。
+/// 混淆/no-follow 拒绝)时不再拒绝,锚定 face_root 本身——这是起始目录
+/// 选择而非物理隔离(Host 单路径下脚本自带 `cd` 不受挂载面约束)。
 fn resolve_cwd(
     state: &ClientServiceState,
     cwd: Option<&str>,
@@ -202,78 +123,44 @@ pub(super) async fn handle_terminal_create(
         .filter(|command| !command.trim().is_empty())
         .ok_or_else(|| ClientServiceError::Rejected("terminal command is required".to_string()))?;
 
-    // kimi 0.38.0 sends the argv form: `command` is the interpreter path
-    // (e.g. "/bin/bash") and the model's shell script rides in `args`
-    // (["-c", "cd '/root' && <script>"]). Verified by raw ACP capture.
-    let args = params.get("args").and_then(Value::as_array);
-
-    let (script, parsed) = if let Some(args) = args {
-        let interpreter = Path::new(command)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if interpreter != "bash" && interpreter != "sh" {
-            return Err(ClientServiceError::Rejected(format!(
-                "terminal interpreter is not allowed: {command}"
-            )));
-        }
-        let args: Vec<&str> = args
+    // 批2 Task 6 原生命令形态:
+    // - argv 形态(带 `args[]`):`command` + `args[]` 原样 argv——解释器/
+    //   工具与参数均由 ACP server 决定(如 `/bin/bash -c <script>`、
+    //   `mvn --version`、`node -e ...`),宿主不再施加固定解释器白名单,
+    //   也不改写/注入参数。
+    // - legacy 形态(无 `args`):单字符串经受信 SHELL 的 `-c` 执行,管道/
+    //   重定向等 shell 操作符与原参数语义保留。
+    let (program, args, display) = if let Some(array) = params.get("args").and_then(Value::as_array)
+    {
+        let args: Vec<String> = array
             .iter()
-            .map(|arg| arg.as_str().unwrap_or_default())
+            .map(|arg| arg.as_str().unwrap_or_default().to_string())
             .collect();
-        if args.len() != 2 || !(args[0] == "-c" || args[0] == "-lc") {
-            return Err(ClientServiceError::Rejected(
-                "terminal args must be a single -c script".to_string(),
-            ));
-        }
-        (args[1].to_string(), None)
+        let display = format!("{command} {}", args.join(" "));
+        (command.to_string(), args, display)
     } else {
-        // Legacy single-string form: validated against the closed grammar.
+        let shell = trusted_shell(&state.session_env);
         (
+            shell,
+            vec!["-c".to_string(), command.to_string()],
             command.to_string(),
-            Some(parse_command(command).map_err(ClientServiceError::Grammar)?),
         )
     };
 
-    evaluate_policy(state, ClientAction::Terminal, &script).await?;
+    evaluate_policy(state, ClientAction::Terminal, &display).await?;
 
-    let isolation = isolation_for(state)?;
-
-    let (binary, final_argv) = match parsed.as_ref() {
-        Some(parsed) => {
-            let binary = resolve_trusted_binary(parsed.binary.name()).ok_or_else(|| {
-                ClientServiceError::Internal(format!(
-                    "trusted binary not found: {}",
-                    parsed.binary.name()
-                ))
-            })?;
-            (binary, build_final_argv(parsed))
-        }
-        None => resolve_trusted_binary("bash")
-            .or_else(|| resolve_trusted_binary("sh"))
-            .map(|binary| (binary, vec!["-c".to_string(), script.clone()]))
-            .ok_or_else(|| ClientServiceError::Internal("trusted shell not found".to_string()))?,
-    };
-
-    // Task 4c 读写面分离:cwd 与 sandbox 面都锚定 boundary plan 的 face
-    // root(LC Coding=target;terminal 实际 cwd 不改 provider 进程 cwd)。
-    let face_root = terminal_face_root(state)?;
+    // Task 4c 读写面分离:cwd 锚定 boundary plan 的 face root(LC Coding=
+    // target;terminal 实际 cwd 不改 provider 进程 cwd)。
     let cwd = resolve_cwd(state, params.get("cwd").and_then(Value::as_str))?;
-    if let Some(parsed) = parsed.as_ref() {
-        for operand in &parsed.path_operands {
-            validate_path_no_follow(&cwd, Path::new(operand)).map_err(|error| {
-                ClientServiceError::Rejected(format!("path operand rejected: {operand}: {error}"))
-            })?;
-        }
-    }
     let terminal_command = TerminalCommand {
-        argv: final_argv,
-        binary,
-        root: face_root,
+        program,
+        args,
         cwd,
-        isolation,
+        env: state.session_env.clone(),
     };
 
+    // 进程先登记后启动:`create` 占住并发名额并登记命令,`start` 才
+    // spawn(spawn 失败由 manager 释放名额)。
     let terminal_id = state
         .terminal
         .create(terminal_command.clone())
@@ -284,8 +171,12 @@ pub(super) async fn handle_terminal_create(
         state,
         ProviderExecutionEventKind::Command,
         ProviderExecutionEventStatus::Started,
-        script.clone(),
-        Some(terminal_command.argv.join(" ")),
+        display,
+        Some(format!(
+            "{} {}",
+            terminal_command.program,
+            terminal_command.args.join(" ")
+        )),
         Some(terminal_command.cwd.to_string_lossy().into_owned()),
         None,
         None,
@@ -436,31 +327,9 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::cross_cutting::approval_bridge::ApprovalBridge;
-    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
-
-    #[test]
-    fn git_argv_prepends_no_pager_and_hardening() {
-        let parsed = parse_command("git status").expect("parse");
-        let argv = build_final_argv(&parsed);
-        assert_eq!(argv[0], "git");
-        assert_eq!(argv[1], "--no-pager");
-        assert!(argv.contains(&"-c".to_string()));
-        assert!(argv.contains(&"core.fsmonitor=false".to_string()));
-        assert!(argv.contains(&"status".to_string()));
-
-        let parsed = parse_command("git diff --stat").expect("parse");
-        let argv = build_final_argv(&parsed);
-        let diff_index = argv.iter().position(|arg| arg == "diff").expect("diff");
-        assert_eq!(argv[diff_index + 1], "--no-ext-diff");
-        assert_eq!(argv[diff_index + 2], "--no-textconv");
-    }
-
-    #[test]
-    fn non_git_argv_is_passthrough() {
-        let parsed = parse_command("rg -n -- foo src").expect("parse");
-        let argv = build_final_argv(&parsed);
-        assert_eq!(argv, vec!["rg", "-n", "--", "foo", "src"]);
-    }
+    use crate::cross_cutting::streaming_provider::{
+        ProviderCommand, ProviderEvent, ProviderPermissionMode,
+    };
 
     fn test_state(role: AdapterRole) -> (Arc<ClientServiceState>, mpsc::Receiver<ProviderEvent>) {
         let (event_tx, events) = mpsc::channel(512);
@@ -475,8 +344,7 @@ mod tests {
             )),
             event_tx,
             terminal: TerminalManager::new(),
-            bwrap: None,
-            writable_git_paths: Vec::new(),
+            session_env: BTreeMap::new(),
             cleanup_cancel: CancellationToken::new().child_token(),
             baseline_tree: None,
             target_boundary: None,
@@ -536,34 +404,6 @@ mod tests {
         assert_eq!(unique.len(), ids.len(), "event ids must be unique");
     }
 
-    #[tokio::test]
-    async fn kimi_038_create_rejects_unexpected_interpreter_and_args() {
-        let (state, _events) = test_state(AdapterRole::Executor);
-        // Validation of the kimi 0.38.0 argv form happens before policy and
-        // isolation, so these reject deterministically without bwrap.
-        let bad_interpreter = json!({
-            "sessionId": "client-service-test",
-            "command": "/usr/bin/python3",
-            "args": ["-c", "print('nope')"],
-            "cwd": ""
-        });
-        let error = handle_terminal_create(&state, &bad_interpreter)
-            .await
-            .expect_err("interpreter rejected");
-        assert!(error.to_string().contains("interpreter is not allowed"));
-
-        let bad_args = json!({
-            "sessionId": "client-service-test",
-            "command": "/bin/bash",
-            "args": ["-c", "echo a", "echo b"],
-            "cwd": ""
-        });
-        let error = handle_terminal_create(&state, &bad_args)
-            .await
-            .expect_err("args rejected");
-        assert!(error.to_string().contains("single -c script"));
-    }
-
     fn cwd_state(root: PathBuf) -> Arc<ClientServiceState> {
         let (event_tx, _events) = mpsc::channel(32);
         Arc::new(ClientServiceState {
@@ -577,259 +417,11 @@ mod tests {
             )),
             event_tx,
             terminal: TerminalManager::new(),
-            bwrap: None,
-            writable_git_paths: writable_git_paths_for(&AdapterRole::Executor, &root, None),
+            session_env: BTreeMap::new(),
             cleanup_cancel: CancellationToken::new().child_token(),
             baseline_tree: None,
             target_boundary: None,
         })
-    }
-
-    /// F-17:可写沙箱授权只发给 Executor(coder 契约:写路径+commit 责任);
-    /// Orchestrator 的终端保持只读挂载语义。bwrap 路径仅作形状参数,
-    /// `isolation_for` 只探测 Some/None,不执行该二进制。git bind 面在
-    /// 构造期解析一次(与 `ClientServiceState::new` 同款)。
-    fn bwrap_state_at(role: AdapterRole, root: PathBuf) -> Arc<ClientServiceState> {
-        let (event_tx, _events) = mpsc::channel(32);
-        Arc::new(ClientServiceState {
-            session_id: "client-service-test".to_string(),
-            root: root.clone(),
-            policy: ClientServicePolicy::new(role.clone(), ProviderPermissionMode::Auto),
-            permission_mode: ProviderPermissionMode::Auto,
-            bridge: Arc::new(ApprovalBridge::new(
-                ProviderPermissionMode::Auto,
-                event_tx.clone(),
-            )),
-            event_tx,
-            terminal: TerminalManager::new(),
-            bwrap: Some(PathBuf::from("/usr/bin/bwrap")),
-            writable_git_paths: writable_git_paths_for(&role, &root, None),
-            cleanup_cancel: CancellationToken::new().child_token(),
-            baseline_tree: None,
-            target_boundary: None,
-        })
-    }
-
-    fn bwrap_state(role: AdapterRole) -> Arc<ClientServiceState> {
-        let dir = tempfile::tempdir().expect("dir");
-        bwrap_state_at(role, dir.path().canonicalize().expect("canonical root"))
-    }
-
-    /// P3-b:LC 会话状态(bwrap Some + boundary plan),其余同
-    /// `bwrap_state_at`(plan.working_directory 必须等于 root,与
-    /// `ClientServiceState::new` 的一致性早门同款约束)。
-    fn bwrap_state_with_boundary(
-        root: PathBuf,
-        plan: Option<ProviderBoundaryPlan>,
-    ) -> Arc<ClientServiceState> {
-        let (event_tx, _events) = mpsc::channel(32);
-        Arc::new(ClientServiceState {
-            session_id: "client-service-test".to_string(),
-            root: root.clone(),
-            policy: ClientServicePolicy::new(AdapterRole::Executor, ProviderPermissionMode::Auto),
-            permission_mode: ProviderPermissionMode::Auto,
-            bridge: Arc::new(ApprovalBridge::new(
-                ProviderPermissionMode::Auto,
-                event_tx.clone(),
-            )),
-            event_tx,
-            terminal: TerminalManager::new(),
-            bwrap: Some(PathBuf::from("/usr/bin/bwrap")),
-            writable_git_paths: writable_git_paths_for(
-                &AdapterRole::Executor,
-                &root,
-                plan.as_ref(),
-            ),
-            cleanup_cancel: CancellationToken::new().child_token(),
-            baseline_tree: None,
-            target_boundary: plan,
-        })
-    }
-
-    /// P3-b(REQ-KACS-IDLE-RO)direct 冒烟红测③:readable_root 只来自可信
-    /// boundary authority——direct 会话恒 None 且原角色 rw/ro 判定不变;
-    /// LC 会话取 plan 的 working_directory(TargetWriteOnly 与 ReadOnly
-    /// 同规:后者的面根即 authority,由 build_bwrap_args 去重)。
-    #[tokio::test]
-    async fn isolation_readable_root_lc_authority_direct_none() {
-        // direct Executor/Orchestrator:角色 rw/ro 判定原值 + readable_root None。
-        for (role, expected_writable) in [
-            (AdapterRole::Executor, true),
-            (AdapterRole::Orchestrator, false),
-        ] {
-            match isolation_for(&bwrap_state(role.clone())).expect("direct isolation") {
-                TerminalIsolation::Bubblewrap {
-                    writable_root,
-                    readable_root,
-                    ..
-                } => {
-                    assert_eq!(
-                        writable_root, expected_writable,
-                        "direct role rw/ro judgement unchanged: {role:?}"
-                    );
-                    assert_eq!(
-                        readable_root, None,
-                        "direct sessions carry no authority read face: {role:?}"
-                    );
-                }
-                TerminalIsolation::Unavailable => panic!("expected bubblewrap isolation"),
-            }
-        }
-
-        // LC TargetWriteOnly:authority=plan.working_directory(聚合根),
-        // 可写面判定仍由 plan 决定。
-        let aggregate = tempfile::tempdir().expect("aggregate");
-        let aggregate = aggregate
-            .path()
-            .canonicalize()
-            .expect("canonical aggregate");
-        let target = aggregate.join("member");
-        std::fs::create_dir_all(&target).expect("mkdir member");
-        let plan = ProviderBoundaryPlan::new(
-            ProviderBoundaryMode::TargetWriteOnly,
-            aggregate.clone(),
-            Some(target),
-            Vec::new(),
-        );
-        match isolation_for(&bwrap_state_with_boundary(aggregate.clone(), Some(plan)))
-            .expect("lc target-write-only isolation")
-        {
-            TerminalIsolation::Bubblewrap {
-                writable_root,
-                readable_root,
-                ..
-            } => {
-                assert!(writable_root, "LC coding face stays writable");
-                assert_eq!(
-                    readable_root,
-                    Some(aggregate.clone()),
-                    "LC authority read face is the boundary working directory"
-                );
-            }
-            TerminalIsolation::Unavailable => panic!("expected bubblewrap isolation"),
-        }
-
-        // LC ReadOnly:面根=会话根=authority,readable_root 同规(挂载去重
-        // 由 build_bwrap_args 处理),写面保持关闭。
-        let plan = ProviderBoundaryPlan::new(
-            ProviderBoundaryMode::ReadOnly,
-            aggregate.clone(),
-            None,
-            Vec::new(),
-        );
-        match isolation_for(&bwrap_state_with_boundary(aggregate.clone(), Some(plan)))
-            .expect("lc read-only isolation")
-        {
-            TerminalIsolation::Bubblewrap {
-                writable_root,
-                readable_root,
-                ..
-            } => {
-                assert!(!writable_root, "LC read-only action keeps no write face");
-                assert_eq!(
-                    readable_root,
-                    Some(aggregate),
-                    "read-only LC sessions still name the authority root"
-                );
-            }
-            TerminalIsolation::Unavailable => panic!("expected bubblewrap isolation"),
-        }
-    }
-
-    #[tokio::test]
-    async fn isolation_grants_writable_root_to_executor_role_only() {
-        match isolation_for(&bwrap_state(AdapterRole::Executor)).expect("executor isolation") {
-            TerminalIsolation::Bubblewrap { writable_root, .. } => assert!(
-                writable_root,
-                "coder contract (F-17): executor worktree must be writable inside the sandbox"
-            ),
-            TerminalIsolation::Unavailable => panic!("expected bubblewrap isolation"),
-        }
-        match isolation_for(&bwrap_state(AdapterRole::Orchestrator)).expect("orchestrator") {
-            TerminalIsolation::Bubblewrap { writable_root, .. } => assert!(
-                !writable_root,
-                "planning terminal keeps the read-only mount"
-            ),
-            TerminalIsolation::Unavailable => panic!("expected bubblewrap isolation"),
-        }
-    }
-
-    /// fix round 2(F-17/k3 P1,安全洞):git bind 面在构造期冻结。root 在
-    /// Executor 沙箱内 rw,coder 可改写 `.git` 指针;若每条 terminal 命令
-    /// 重跑 rev-parse,后续命令的额外 rw bind 会被瞄准宿主任意合法 git 仓。
-    #[tokio::test]
-    async fn isolation_git_binds_frozen_at_construction_survive_pointer_swap() {
-        fn host_git(args: &[&str], cwd: &Path) {
-            let status = std::process::Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .status()
-                .expect("host git");
-            assert!(status.success(), "host git {args:?} failed");
-        }
-        let base = tempfile::tempdir().expect("workspace");
-        let base = base.path().canonicalize().expect("canonical base");
-        // Aria 准备的真实形态:主仓 + linked worktree(授权根)。
-        let main = base.join("main");
-        host_git(&["init", "-q", "main"], &base);
-        host_git(
-            &[
-                "-c",
-                "user.name=f17",
-                "-c",
-                "user.email=f17@example.com",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "base",
-            ],
-            &main,
-        );
-        host_git(&["worktree", "add", "../wt", "-b", "f17wt"], &main);
-        let root = base.join("wt");
-        let root = root.canonicalize().expect("canonical worktree");
-        // 宿主上另一个合法 git 仓:coder 想让额外 rw bind 瞄准的目标。
-        host_git(&["init", "-q", "evil"], &base);
-        let evil_gitdir = base.join("evil").join(".git");
-
-        let state = bwrap_state_at(AdapterRole::Executor, root.clone());
-        let before = isolation_for(&state).expect("isolation before swap");
-        let TerminalIsolation::Bubblewrap {
-            writable_git_paths: before_paths,
-            ..
-        } = &before
-        else {
-            panic!("expected bubblewrap isolation");
-        };
-        assert_eq!(
-            before_paths,
-            &[main.join(".git").canonicalize().expect("commondir")]
-        );
-
-        // coder 在沙箱内改写 `.git` 指针(根内文件,rw 可写)指向 evil 仓。
-        std::fs::write(
-            root.join(".git"),
-            format!("gitdir: {}\n", evil_gitdir.display()),
-        )
-        .expect("swap pointer");
-
-        // 后续 terminal 命令的 bind 面不得漂移:构造期冻结。
-        let after = isolation_for(&state).expect("isolation after swap");
-        let TerminalIsolation::Bubblewrap {
-            writable_git_paths: after_paths,
-            ..
-        } = &after
-        else {
-            panic!("expected bubblewrap isolation");
-        };
-        assert_eq!(
-            after_paths, before_paths,
-            "git bind face must stay frozen at construction (F-17 fix round 2)"
-        );
     }
 
     #[tokio::test]
@@ -853,8 +445,8 @@ mod tests {
     #[tokio::test]
     async fn terminal_cwd_anchors_outside_cli_cwd_at_face_root() {
         // kimi-9 现场修订:kimi CLI 不转发模型 cwd,params.cwd 恒为会话
-        // cwd;出界 cwd(绝对出界/父遍历/前缀混淆)不再拒绝,锚定 face root
-        // ——终端执行面仍以 face root 为界,脚本自带 cd 由 sandbox 约束。
+        // cwd;出界 cwd(绝对出界/父遍历/前缀混淆)不再拒绝,锚定 face
+        // root——这是起始目录选择,不是物理隔离(Host 单路径)。
         let dir = tempfile::tempdir().expect("dir");
         std::fs::create_dir_all(dir.path().join("nested/dir")).expect("mkdir nested");
         let outside = tempfile::tempdir().expect("outside");
@@ -957,8 +549,7 @@ mod tests {
             )),
             event_tx,
             terminal: TerminalManager::new(),
-            bwrap: None,
-            writable_git_paths: Vec::new(),
+            session_env: BTreeMap::new(),
             cleanup_cancel: CancellationToken::new().child_token(),
             baseline_tree: None,
             target_boundary: Some(ProviderBoundaryPlan::new(
@@ -986,5 +577,431 @@ mod tests {
         let resolved = resolve_cwd(&state, Some(intermediate.to_str().expect("utf-8 alpha")))
             .expect("intermediate aggregate dir anchors at the target face root");
         assert_eq!(resolved, canonical_member);
+    }
+
+    // —— 批2 Task 6 红测:Kimi 全角色 Host 单路径与原生命令形态 ——
+
+    /// Host 执行态的冻结会话环境:携带宿主 PATH(裸名 program 与脚本内
+    /// 工具经它解析)+ SHELL(钉 /bin/sh,legacy 形态确定性);与宿主是否
+    /// 安装 bubblewrap 无关——Host 单路径无 bwrap 依赖。
+    fn host_env() -> BTreeMap<String, String> {
+        let mut env = BTreeMap::new();
+        if let Some(path) = std::env::var_os("PATH") {
+            env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
+        }
+        env.insert("SHELL".to_string(), "/bin/sh".to_string());
+        env
+    }
+
+    /// Auto 档 Host 执行态。
+    fn host_state(role: AdapterRole, root: PathBuf) -> Arc<ClientServiceState> {
+        let (event_tx, _events) = mpsc::channel(64);
+        Arc::new(ClientServiceState {
+            session_id: "client-service-test".to_string(),
+            root,
+            policy: ClientServicePolicy::new(role, ProviderPermissionMode::Auto),
+            permission_mode: ProviderPermissionMode::Auto,
+            bridge: Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            terminal: TerminalManager::new(),
+            session_env: host_env(),
+            cleanup_cancel: CancellationToken::new().child_token(),
+            baseline_tree: None,
+            target_boundary: None,
+        })
+    }
+
+    /// Supervised 档状态 + 审批通道(测试充当审批人)。
+    fn supervised_host_state(
+        role: AdapterRole,
+        root: PathBuf,
+    ) -> (
+        Arc<ClientServiceState>,
+        mpsc::Receiver<ProviderEvent>,
+        mpsc::Sender<ProviderCommand>,
+    ) {
+        let (event_tx, events) = mpsc::channel(64);
+        let bridge = Arc::new(ApprovalBridge::new(
+            ProviderPermissionMode::Supervised,
+            event_tx.clone(),
+        ));
+        let commands = bridge.command_sender();
+        let state = Arc::new(ClientServiceState {
+            session_id: "client-service-test".to_string(),
+            root,
+            policy: ClientServicePolicy::new(role, ProviderPermissionMode::Supervised),
+            permission_mode: ProviderPermissionMode::Supervised,
+            bridge,
+            event_tx,
+            terminal: TerminalManager::new(),
+            session_env: host_env(),
+            cleanup_cancel: CancellationToken::new().child_token(),
+            baseline_tree: None,
+            target_boundary: None,
+        });
+        (state, events, commands)
+    }
+
+    /// 对第一条 PermissionRequest 回复审批决定。
+    async fn answer_first_permission(
+        events: &mut mpsc::Receiver<ProviderEvent>,
+        commands: &mpsc::Sender<ProviderCommand>,
+        approved: bool,
+        reason: Option<String>,
+    ) {
+        while let Some(event) = events.recv().await {
+            if let ProviderEvent::PermissionRequest(request) = event {
+                commands
+                    .send(ProviderCommand::PermissionResponse {
+                        id: request.id,
+                        approved,
+                        reason,
+                    })
+                    .await
+                    .expect("send permission response");
+                return;
+            }
+        }
+        panic!("no PermissionRequest arrived");
+    }
+
+    /// Task 6 红测①(无 bwrap):六职责经 5 个 wire 角色承载(Author 由
+    /// Orchestrator 承载,岗位纪律归 T8);冻结 policy 面允许 terminal 的
+    /// 角色(Auto 档)必须直接启动 Host 进程并完成——现状:bwrap 缺失时
+    /// Auto 档死于 "bubblewrap is unavailable"。拒绝型角色维持 policy
+    /// 拒绝(拒绝原因必须是角色 policy,不是 bwrap 缺失)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn host_terminal_starts_for_permitted_roles_without_bwrap_auto() {
+        for role in [AdapterRole::Orchestrator, AdapterRole::Executor] {
+            let dir = tempfile::tempdir().expect("dir");
+            let state = host_state(role.clone(), dir.path().canonicalize().expect("root"));
+            let params = json!({
+                "sessionId": "client-service-test",
+                "command": "/bin/sh",
+                "args": ["-c", "echo host-start-ok"],
+                "cwd": ""
+            });
+            let id = handle_terminal_create(&state, &params)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("host terminal must start without bwrap ({role:?}): {error}")
+                });
+            let result = state.terminal.wait_for_exit(&id).await.expect("wait");
+            assert_eq!(result.exit_code, Some(0), "{role:?}");
+            assert!(
+                state
+                    .terminal
+                    .output(&id)
+                    .expect("output")
+                    .contains("host-start-ok"),
+                "{role:?}"
+            );
+            state.terminal.release(&id).await.expect("release");
+        }
+        for role in [
+            AdapterRole::Reviewer,
+            AdapterRole::WorkItemSplitter,
+            AdapterRole::Handoff,
+        ] {
+            let dir = tempfile::tempdir().expect("dir");
+            let state = host_state(role.clone(), dir.path().canonicalize().expect("root"));
+            let params = json!({
+                "sessionId": "client-service-test",
+                "command": "/bin/sh",
+                "args": ["-c", "echo denied"],
+                "cwd": ""
+            });
+            let error = handle_terminal_create(&state, &params)
+                .await
+                .expect_err("role policy denial is unchanged");
+            let message = error.to_string();
+            assert!(
+                message.contains("not permitted") || message.contains("read-only"),
+                "{role:?}: {message}"
+            );
+        }
+    }
+
+    /// Task 6 红测②(非 bash 解释器/普通 argv):`command+args[]` 原样
+    /// argv——不再有 bash/sh 固定解释器白名单,也不再限定「单 -c 脚本」;
+    /// 参数逐字透传(含内嵌空格)。现状:`interpreter is not allowed` /
+    /// `single -c script` 拒绝。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn argv_form_runs_non_bash_programs_verbatim() {
+        let dir = tempfile::tempdir().expect("dir");
+        let state = host_state(
+            AdapterRole::Executor,
+            dir.path().canonicalize().expect("root"),
+        );
+
+        let params = json!({
+            "sessionId": "client-service-test",
+            "command": "/bin/echo",
+            "args": ["argv-ok", "two  spaces"],
+            "cwd": ""
+        });
+        let id = handle_terminal_create(&state, &params)
+            .await
+            .unwrap_or_else(|error| panic!("non-bash program must run verbatim: {error}"));
+        let result = state.terminal.wait_for_exit(&id).await.expect("wait");
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(
+            state.terminal.output(&id).expect("output"),
+            "argv-ok two  spaces\n"
+        );
+        state.terminal.release(&id).await.expect("release");
+
+        let params = json!({
+            "sessionId": "client-service-test",
+            "command": "/usr/bin/printf",
+            "args": ["%s-%s\\n", "multi", "arg"],
+            "cwd": ""
+        });
+        let id = handle_terminal_create(&state, &params)
+            .await
+            .expect("multi-arg argv form");
+        let result = state.terminal.wait_for_exit(&id).await.expect("wait");
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(state.terminal.output(&id).expect("output"), "multi-arg\n");
+        state.terminal.release(&id).await.expect("release");
+    }
+
+    /// Task 6 红测③(legacy 构建语法):无 `args` 的单字符串经受信 SHELL
+    /// `-c` 执行,管道/重定向等 shell 操作符与原参数语义保留。Author
+    /// 职责由 Orchestrator 承载,岗位纪律不在本面用 grammar 实现(归 T8)。
+    /// 现状:封闭 grammar 以 "shell operator is not allowed" 拒绝。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_single_string_keeps_shell_semantics_via_trusted_shell() {
+        let dir = tempfile::tempdir().expect("dir");
+        let state = host_state(
+            AdapterRole::Orchestrator,
+            dir.path().canonicalize().expect("root"),
+        );
+        let params = json!({
+            "sessionId": "client-service-test",
+            "command": "printf 'legacy-pipe' | tr a-z A-Z > redirect.txt && cat redirect.txt",
+            "cwd": ""
+        });
+        let id = handle_terminal_create(&state, &params)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("legacy shell form must keep operator semantics: {error}")
+            });
+        let result = state.terminal.wait_for_exit(&id).await.expect("wait");
+        assert_eq!(result.exit_code, Some(0));
+        assert!(
+            state
+                .terminal
+                .output(&id)
+                .expect("output")
+                .contains("LEGACY-PIPE"),
+            "output: {}",
+            state.terminal.output(&id).expect("output")
+        );
+        state.terminal.release(&id).await.expect("release");
+    }
+
+    /// Task 6 红测④(Supervised 审批通过):审批放行后同样启动 Host
+    /// (不偷换 Auto 为 Supervised 拒绝)。现状:审批通过后仍死于
+    /// bwrap 缺失。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervised_approval_granted_starts_host_terminal() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (state, mut events, commands) = supervised_host_state(
+            AdapterRole::Executor,
+            dir.path().canonicalize().expect("root"),
+        );
+        let create = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                handle_terminal_create(
+                    &state,
+                    &json!({
+                        "sessionId": "client-service-test",
+                        "command": "/bin/sh",
+                        "args": ["-c", "echo supervised-host-ok"],
+                        "cwd": ""
+                    }),
+                )
+                .await
+            }
+        });
+        answer_first_permission(&mut events, &commands, true, None).await;
+        let id = create
+            .await
+            .expect("create task")
+            .expect("approved supervised terminal starts on host");
+        let result = state.terminal.wait_for_exit(&id).await.expect("wait");
+        assert_eq!(result.exit_code, Some(0));
+        assert!(
+            state
+                .terminal
+                .output(&id)
+                .expect("output")
+                .contains("supervised-host-ok")
+        );
+        state.terminal.release(&id).await.expect("release");
+    }
+
+    /// Task 6 红测⑤(Supervised 拒绝):拒绝审批 → 该工具不执行,但会话
+    /// 继续——同一 state 上后续审批通过的调用照常执行(现状:后续调用
+    /// 死于 bwrap 缺失 → 后半红)。AskUserQuestion 等待语义由
+    /// approval_tests 的既有断言钉住,本面不重复。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervised_rejection_skips_execution_and_session_continues() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (state, mut events, commands) = supervised_host_state(
+            AdapterRole::Orchestrator,
+            dir.path().canonicalize().expect("root"),
+        );
+        let denied = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                handle_terminal_create(
+                    &state,
+                    &json!({
+                        "sessionId": "client-service-test",
+                        "command": "/bin/sh",
+                        "args": ["-c", "echo must-not-run"],
+                        "cwd": ""
+                    }),
+                )
+                .await
+            }
+        });
+        answer_first_permission(
+            &mut events,
+            &commands,
+            false,
+            Some("user said no".to_string()),
+        )
+        .await;
+        let error = denied
+            .await
+            .expect("create task")
+            .expect_err("rejected approval must not execute");
+        assert!(error.to_string().contains("user said no"), "{error}");
+
+        let granted = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                handle_terminal_create(
+                    &state,
+                    &json!({
+                        "sessionId": "client-service-test",
+                        "command": "/bin/sh",
+                        "args": ["-c", "echo resumed-ok"],
+                        "cwd": ""
+                    }),
+                )
+                .await
+            }
+        });
+        answer_first_permission(&mut events, &commands, true, None).await;
+        let id = granted
+            .await
+            .expect("create task")
+            .expect("session continues after a rejected approval");
+        let result = state.terminal.wait_for_exit(&id).await.expect("wait");
+        assert_eq!(result.exit_code, Some(0));
+        assert!(
+            state
+                .terminal
+                .output(&id)
+                .expect("output")
+                .contains("resumed-ok")
+        );
+        state.terminal.release(&id).await.expect("release");
+    }
+
+    /// Task 6 绿证(冻结环境消费):terminal 子进程 env_clear 后只注入
+    /// dispatcher 的冻结会话环境——自定义键可见、未注入键不可见;两种
+    /// 命令形态(argv/legacy)消费同一 map。旧的固定 HOME/GIT_CONFIG_GLOBAL
+    /// 手搓环境已删,不再按授权根构造。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_children_consume_frozen_session_env() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (state, _events) = {
+            let (event_tx, events) = mpsc::channel(64);
+            let mut env = host_env();
+            env.insert("T6_FROZEN_ENV".to_string(), "frozen-env-ok".to_string());
+            let state = Arc::new(ClientServiceState {
+                session_id: "client-service-test".to_string(),
+                root: dir.path().canonicalize().expect("root"),
+                policy: ClientServicePolicy::new(
+                    AdapterRole::Executor,
+                    ProviderPermissionMode::Auto,
+                ),
+                permission_mode: ProviderPermissionMode::Auto,
+                bridge: Arc::new(ApprovalBridge::new(
+                    ProviderPermissionMode::Auto,
+                    event_tx.clone(),
+                )),
+                event_tx,
+                terminal: TerminalManager::new(),
+                session_env: env,
+                cleanup_cancel: CancellationToken::new().child_token(),
+                baseline_tree: None,
+                target_boundary: None,
+            });
+            (state, events)
+        };
+
+        // argv 形态:冻结键可见、未注入键不可见。
+        let params = json!({
+            "sessionId": "client-service-test",
+            "command": "/bin/sh",
+            "args": ["-c", "printf '%s' \"$T6_FROZEN_ENV\"; test -z \"$T6_ABSENT_VAR\""],
+            "cwd": ""
+        });
+        let id = handle_terminal_create(&state, &params)
+            .await
+            .expect("argv form consumes frozen env");
+        let result = state.terminal.wait_for_exit(&id).await.expect("wait");
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(state.terminal.output(&id).expect("output"), "frozen-env-ok");
+        state.terminal.release(&id).await.expect("release");
+
+        // legacy 形态:受信 SHELL(-c)同环境执行。
+        let params = json!({
+            "sessionId": "client-service-test",
+            "command": "printf 'legacy-%s' \"$T6_FROZEN_ENV\"",
+            "cwd": ""
+        });
+        let id = handle_terminal_create(&state, &params)
+            .await
+            .expect("legacy form consumes frozen env");
+        let result = state.terminal.wait_for_exit(&id).await.expect("wait");
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(
+            state.terminal.output(&id).expect("output"),
+            "legacy-frozen-env-ok"
+        );
+        state.terminal.release(&id).await.expect("release");
+    }
+
+    /// Task 6 绿证(受信 SHELL 选择):SHELL 取冻结环境值;空/缺失回退
+    /// POSIX `/bin/sh`(不来自 ACP 参数,无固定解释器白名单)。
+    #[test]
+    fn trusted_shell_follows_frozen_env_with_posix_fallback() {
+        let with_shell = BTreeMap::from([
+            ("SHELL".to_string(), "/bin/bash".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+        ]);
+        assert_eq!(trusted_shell(&with_shell), "/bin/bash");
+        assert_eq!(trusted_shell(&BTreeMap::new()), "/bin/sh");
+        assert_eq!(
+            trusted_shell(&BTreeMap::from([("SHELL".to_string(), String::new())])),
+            "/bin/sh"
+        );
     }
 }

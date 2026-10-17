@@ -8,13 +8,12 @@
 
 mod fs_handlers;
 mod fs_service;
-mod grammar;
 mod policy;
 mod sandbox;
 mod terminal;
 mod terminal_handlers;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::cross_cutting::provider_boundary::ProviderBoundaryPlan;
@@ -30,9 +29,8 @@ use crate::protocol::contracts::AdapterRole;
 
 use self::fs_handlers::{handle_fs_read, handle_fs_write};
 use self::fs_service::FsError;
-use self::grammar::GrammarError;
 use self::policy::{ClientAction, ClientServicePolicy, PolicyDecision};
-use self::sandbox::{canonicalize_root, frozen_writable_git_paths, probe_bwrap};
+use self::sandbox::canonicalize_root;
 use self::terminal::{TerminalError, TerminalManager};
 use self::terminal_handlers::{
     handle_terminal_create, handle_terminal_kill, handle_terminal_output, handle_terminal_release,
@@ -60,21 +58,21 @@ struct ClientServiceState {
     bridge: Arc<ApprovalBridge>,
     event_tx: mpsc::Sender<ProviderEvent>,
     terminal: TerminalManager,
-    bwrap: Option<PathBuf>,
+    /// 冻结会话环境(批2 Task 6):与 provider 进程 spawn 消费的同一 env
+    /// map——T3 白名单环境经 `StreamingProviderInput::env_vars` 传输注入,
+    /// dispatcher 与主会话绑定同一个冻结合同,不能根据 ACP 参数造
+    /// profile。terminal 子进程 `env_clear` 后只注入该 map(裸名 program
+    /// 经其 PATH 解析;legacy 形态的受信 SHELL 取其 `SHELL`)。
+    session_env: std::collections::BTreeMap<String, String>,
     /// REQ-PIB-02：基线会话锚点。`Some` 时 fs 读路由基线树、terminal 一律
     /// 拒绝（见 `evaluate_policy` 前置与 `fs_handlers`）；`None` 行为不变。
     baseline_tree: Option<BaselineTreeRef>,
-    /// Extra read-write sandbox binds for the coding role, resolved ONCE at
-    /// construction — when the root is still Aria-prepared and untouched by
-    /// the coder. Re-resolving per terminal command would follow a
-    /// coder-rewritten `.git` pointer at an arbitrary valid host git dir and
-    /// aim the next extra rw bind at it (F-17 fix round 2).
-    writable_git_paths: Vec<PathBuf>,
     /// LC target 写边界(Task 4c):`Some` 时宿主 fs read/write 与 terminal
-    /// 消费同一不可伪造 boundary plan——host root 保持 ro、target root rw,
-    /// linked-worktree git-dir 沿冻结授权;terminal 实际 cwd 不改变
-    /// provider 进程 cwd。`None`(direct 会话)行为不变,原 24 格
-    /// ClientServicePolicy 决策表保持原值。
+    /// 消费同一不可伪造 boundary plan——fs 写唯一锚定 target root;terminal
+    /// 的 cwd 锚定面取 plan 的 target root。批2 Task 6:plan 只决定 fs 写面
+    /// 与 terminal cwd 锚定面,不再是物理执行边界(Host 单路径)。
+    /// `None`(direct 会话)行为不变,原 24 格 ClientServicePolicy 决策表
+    /// 保持原值。
     target_boundary: Option<ProviderBoundaryPlan>,
     /// 会话私有清理 token：随引擎 run token（父）取消而取消；dispatcher Drop 时
     /// 只取消它，绝不反噬父 token——否则 kimi 正常完成后会 cancel 引擎 run，
@@ -90,7 +88,6 @@ pub struct KimiClientServiceDispatcher<W> {
 #[derive(Debug)]
 enum ClientServiceError {
     Rejected(String),
-    Grammar(GrammarError),
     Terminal(TerminalError),
     Fs(FsError),
     Internal(String),
@@ -100,7 +97,6 @@ impl ClientServiceError {
     fn code(&self) -> i64 {
         match self {
             ClientServiceError::Rejected(_) => ERROR_REJECTED,
-            ClientServiceError::Grammar(_) => ERROR_REJECTED,
             ClientServiceError::Terminal(TerminalError::UnknownTerminal(_)) => {
                 ERROR_UNKNOWN_TERMINAL
             }
@@ -115,7 +111,6 @@ impl std::fmt::Display for ClientServiceError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClientServiceError::Rejected(detail) => write!(formatter, "{detail}"),
-            ClientServiceError::Grammar(error) => write!(formatter, "{error}"),
             ClientServiceError::Terminal(error) => write!(formatter, "{error}"),
             ClientServiceError::Fs(error) => write!(formatter, "{error}"),
             ClientServiceError::Internal(detail) => write!(formatter, "{detail}"),
@@ -127,9 +122,10 @@ impl<W> KimiClientServiceDispatcher<W>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    /// 9 个参数均为构造期一次性注入的运行时依赖（peer/session/working_dir/role/
-    /// permission_mode/bridge/event_tx/cancel/baseline_tree/target_boundary），
-    /// 无自然聚合语义且仅在 `new` 使用一次，重构为 struct 会引入额外间接层，故允许 clippy::too_many_arguments。
+    /// 11 个参数均为构造期一次性注入的运行时依赖（peer/session/working_dir/
+    /// role/permission_mode/session_env/bridge/event_tx/cancel/baseline_tree/
+    /// target_boundary），无自然聚合语义且仅在 `new` 使用一次，重构为
+    /// struct 会引入额外间接层，故允许 clippy::too_many_arguments。
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer: JsonRpcPeer<W>,
@@ -137,6 +133,7 @@ where
         working_dir: PathBuf,
         role: AdapterRole,
         permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode,
+        session_env: std::collections::BTreeMap<String, String>,
         bridge: Arc<ApprovalBridge>,
         event_tx: mpsc::Sender<ProviderEvent>,
         cancel: CancellationToken,
@@ -159,12 +156,6 @@ where
                 root.display()
             );
         }
-        // Freeze the git bind face before the coder can touch the root:
-        // per-command re-resolution would follow a swapped `.git` pointer
-        // (F-17 fix round 2). LC 会话(Task 4c)按 plan 的 target root
-        // 解析(read-only plan 无写面,不解析);direct 会话按 role。
-        let writable_git_paths = writable_git_paths_for(&role, &root, target_boundary.as_ref());
-        let bwrap = probe_bwrap();
         // Command output is served through `terminal/output`
         // request/response (see `handle_terminal_output`); kimi 0.38.0
         // ignores unsolicited `terminal/output` notifications.
@@ -175,11 +166,10 @@ where
             root,
             policy: ClientServicePolicy::new(role, permission_mode.clone()),
             permission_mode,
+            session_env,
             bridge,
             event_tx,
             terminal,
-            bwrap,
-            writable_git_paths,
             target_boundary,
             baseline_tree,
             cleanup_cancel: cancel.child_token(),
@@ -293,9 +283,10 @@ async fn evaluate_policy(
     action: ClientAction,
     description: &str,
 ) -> Result<(), ClientServiceError> {
-    // REQ-PIB-02：基线会话 terminal 一律拒绝——bwrap `--ro-bind / /` 是写边界
-    // 非读边界（宿主全量只读可见，F-57 现场通道），命令语法收窄也不足以绑定
-    // 基线 ref。前置判定独立于 policy.rs 决策矩阵（24 格冻结，零改动）。
+    // REQ-PIB-02：基线会话 terminal 一律拒绝——Host terminal 读到的是工作区
+    // 检出而非基线树（F-57 现场通道：未提交污染与 `.worktrees/` 兄弟件对
+    // terminal 可见），命令语法收窄也不足以绑定基线 ref。前置判定独立于
+    // policy.rs 决策矩阵（24 格冻结，零改动）。
     if state.baseline_tree.is_some() && matches!(action, ClientAction::Terminal) {
         return Err(ClientServiceError::Rejected(
             "baseline session: terminal access is denied (REQ-PIB-02; issue baseline tree is the only readable source)"
@@ -332,42 +323,6 @@ async fn evaluate_policy(
         }
     }
 }
-/// Git paths to bind read-write alongside a writable root, resolved once at
-/// construction time — when the root is still Aria-prepared and untouched by
-/// the coder — and frozen for the whole attempt via the host-side provider
-/// session cache (F-17 fix round 2/4): re-resolving per terminal command, or
-/// per retry/rework round, would let a sandboxed coder rewrite the `.git`
-/// pointer (or `<gitdir>/gitdir`/`commondir`) and aim the extra rw binds at
-/// an arbitrary valid host git dir.
-fn writable_git_paths_for(
-    role: &AdapterRole,
-    root: &Path,
-    boundary: Option<&ProviderBoundaryPlan>,
-) -> Vec<PathBuf> {
-    match boundary {
-        // LC 会话(Task 4c):git bind 面唯一锚定 plan 的 target root
-        // (linked-worktree git-dir 沿冻结授权);read-only plan 无写面。
-        Some(plan) => frozen_git_mount_binds_for_boundary(plan),
-        // direct 会话:保持原值(仅 Executor 解析,其余角色为空)。
-        None if matches!(role, AdapterRole::Executor) => frozen_writable_git_paths(root),
-        None => Vec::new(),
-    }
-}
-
-/// 只读 mount-plan 先行接口(Task 6a):LC boundary plan → 冻结授权 git-dir
-/// 挂载面。纯读取(不 spawn、不产生额外副作用),使 Kimi 宿主 terminal/fs
-/// 与产品写边界 launcher 对齐同一冻结授权链;既有 direct/LC 方法行为不变。
-pub(crate) fn frozen_git_mount_binds_for_boundary(plan: &ProviderBoundaryPlan) -> Vec<PathBuf> {
-    match plan.mode() {
-        // TargetWriteOnly:linked-worktree git-dir 沿冻结授权;plain repo 的
-        // `.git` 在 target 内,无需额外 bind。
-        crate::cross_cutting::provider_boundary::ProviderBoundaryMode::TargetWriteOnly => plan
-            .target_root()
-            .map(frozen_writable_git_paths)
-            .unwrap_or_default(),
-        crate::cross_cutting::provider_boundary::ProviderBoundaryMode::ReadOnly => Vec::new(),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -386,6 +341,17 @@ mod tests {
         assert_eq!(capabilities["fs"]["writeTextFile"], json!(true));
     }
 
+    /// Host 执行态测试环境:PATH 供裸名工具/脚本内命令解析;SHELL 钉
+    /// /bin/sh(legacy 形态确定性)。
+    fn host_env() -> std::collections::BTreeMap<String, String> {
+        let mut env = std::collections::BTreeMap::new();
+        if let Some(path) = std::env::var_os("PATH") {
+            env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
+        }
+        env.insert("SHELL".to_string(), "/bin/sh".to_string());
+        env
+    }
+
     #[tokio::test]
     async fn reviewer_role_is_read_only_and_confined_to_authorized_root() {
         let dir = tempfile::tempdir().expect("dir");
@@ -399,6 +365,7 @@ mod tests {
             dir.path().to_path_buf(),
             AdapterRole::Reviewer,
             ProviderPermissionMode::Auto,
+            host_env(),
             Arc::new(ApprovalBridge::new(
                 ProviderPermissionMode::Auto,
                 event_tx.clone(),
@@ -487,11 +454,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn kimi_038_terminal_flow_serves_output_as_request_response() {
-        if probe_bwrap().is_none() {
-            // Auto mode requires bubblewrap for terminal execution; skip the
-            // happy path where no sandbox is installed.
-            return;
-        }
+        // 批2 Task 6:Host 单路径无 bwrap 依赖,不再按 bwrap 存在性跳过。
         let dir = tempfile::tempdir().expect("dir");
         let (client, server) = tokio::io::duplex(64 * 1024);
         let (reader, writer) = tokio::io::split(client);
@@ -503,6 +466,7 @@ mod tests {
             dir.path().to_path_buf(),
             AdapterRole::Executor,
             ProviderPermissionMode::Auto,
+            host_env(),
             Arc::new(ApprovalBridge::new(
                 ProviderPermissionMode::Auto,
                 event_tx.clone(),
@@ -638,6 +602,7 @@ mod tests {
             repo.path().to_path_buf(),
             AdapterRole::Orchestrator,
             ProviderPermissionMode::Auto,
+            host_env(),
             Arc::new(ApprovalBridge::new(
                 ProviderPermissionMode::Auto,
                 event_tx.clone(),
@@ -761,6 +726,7 @@ mod tests {
             repo.path().to_path_buf(),
             AdapterRole::Orchestrator,
             ProviderPermissionMode::Auto,
+            host_env(),
             Arc::new(ApprovalBridge::new(
                 ProviderPermissionMode::Auto,
                 event_tx.clone(),
@@ -855,19 +821,17 @@ mod tests {
         drop(dispatcher);
     }
 
-    /// Task 4c Step 1(`lcg_t04_kimi_host_fs_and_terminal_share_target_boundary`):
-    /// LC 会话(host root ro / target root rw)的宿主 fs read/write 与
-    /// terminal 消费同一不可伪造 target boundary plan——fs 读保持 host root
-    /// 只读面;fs 写与 terminal 的可写面唯一锚定 plan 的 target root;terminal
-    /// 实际 cwd 可为 target,不改变宿主读根(provider 进程 cwd 由
-    /// start_validated 冻结,另由启动测试钉住)。
+    /// Task 4c(`lcg_t04_kimi_host_fs_and_terminal_share_target_boundary`):
+    /// LC 会话的宿主 fs read/write 与 terminal 消费同一不可伪造 target
+    /// boundary plan——fs 读锚定 host root;fs 写唯一锚定 plan 的 target
+    /// root;terminal 实际 cwd 可为 target,不改变宿主读根(provider 进程
+    /// cwd 由 start_validated 冻结,另由启动测试钉住)。批2 Task 6:terminal
+    /// 在 Host 单路径执行,host 物理可达(无 bwrap 只读面)。
     #[cfg(unix)]
     #[tokio::test]
     async fn lcg_t04_kimi_host_fs_and_terminal_share_target_boundary() {
-        if probe_bwrap().is_none() {
-            // Auto 模式 terminal 依赖 bubblewrap;未安装时无法验证共享边界。
-            return;
-        }
+        // 批2 Task 6:Host 单路径无 bwrap 依赖(bwrap 只读面断言已按
+        // Host 语义反转)。
         use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoundaryPlan};
 
         let dir = tempfile::tempdir().expect("lc root dir");
@@ -893,6 +857,7 @@ mod tests {
             host_root.clone(),
             AdapterRole::Executor,
             ProviderPermissionMode::Auto,
+            host_env(),
             Arc::new(ApprovalBridge::new(
                 ProviderPermissionMode::Auto,
                 event_tx.clone(),
@@ -977,9 +942,9 @@ mod tests {
         assert_eq!(reply["result"]["exitCode"], json!(0), "{reply}");
         assert!(target.join("terminal-inside.txt").exists());
 
-        // 5) terminal:host root 写必须被共享边界拒绝(bwrap 只读面),
-        //    host 文件不落盘;terminal 实际 cwd 在 target 内,宿主读根
-        //    仍是 host root(读写面分离,terminal cwd 不改读根/进程 cwd)。
+        // 5) 批2 Task 6 反转:Host 单路径下 terminal 无 bwrap 只读面——
+        //    host root 物理可达且写入落盘(执行隔离已删,fs API 的 target
+        //    锚定仍由上方 fs 写断言钉住;terminal cwd 不改读根/进程 cwd)。
         let host_write = host_root.join("host-write.txt");
         assert!(dispatcher.dispatch(
             "terminal/create",
@@ -996,40 +961,39 @@ mod tests {
             })
         ));
         let reply = read_reply(&mut server_reader, 25).await;
-        let denied_terminal = reply["result"]["terminalId"]
+        let host_terminal = reply["result"]["terminalId"]
             .as_str()
             .expect("terminalId")
             .to_string();
         assert!(dispatcher.dispatch(
             "terminal/wait_for_exit",
             json!(26),
-            json!({"sessionId": "executor-lc", "terminalId": denied_terminal})
+            json!({"sessionId": "executor-lc", "terminalId": host_terminal})
         ));
         let reply = read_reply(&mut server_reader, 26).await;
-        assert_ne!(
+        assert_eq!(
             reply["result"]["exitCode"],
             json!(0),
-            "host-root write must be refused by the shared target boundary: {reply}"
+            "host terminal write must succeed on the host path: {reply}"
         );
-        assert!(!host_write.exists());
+        assert!(
+            host_write.exists(),
+            "host single path: terminal writes land at real host paths"
+        );
 
         let _ = server_writer.shutdown().await;
         drop(dispatcher);
     }
 
-    /// P3-b(REQ-KACS-IDLE-RO)聚合 fixture 真跑(/tmp 下两成员仓):LC 会话的
-    /// boundary authority(聚合根)必须后置于 `--tmpfs /tmp` 挂载——修复前
-    /// root bind 先于 tmpfs,/tmp 下成员仓被私有 tmpfs 遮蔽,terminal 对
-    /// 真实上游路径不可读。断言:terminal Read 真实上游文件、native
-    /// Read(fs/read_text_file)同面、target 写成功、上游写失败且宿主不
-    /// 落盘。bwrap 缺失时跳过(先例 `lcg_t04`)。
+    /// P3-b 聚合 fixture(/tmp 下两成员仓):LC 会话的 terminal Read 真实
+    /// 上游文件、native Read(fs/read_text_file)同面、target 写成功;
+    /// fs 写唯一锚定 target(上游 fs 写拒绝且不落盘)。批2 Task 6:terminal
+    /// 为 Host 单路径,上游 terminal 写物理可达(EROFS 断言已反转)。
     #[cfg(unix)]
     #[tokio::test]
     async fn lc_terminal_reads_real_upstream_under_tmp_aggregate_root() {
-        if probe_bwrap().is_none() {
-            // Auto 模式 terminal 依赖 bubblewrap;未安装时跳过真机沙箱路径。
-            return;
-        }
+        // 批2 Task 6:Host 单路径无 bwrap 依赖(上游 EROFS 断言已按 Host
+        // 语义反转)。
         use crate::cross_cutting::provider_boundary::{ProviderBoundaryMode, ProviderBoundaryPlan};
 
         // 遮蔽 bug 只在 /tmp 子路径显形:聚合 fixture 必须钉在 /tmp 下。
@@ -1068,6 +1032,7 @@ mod tests {
             aggregate.clone(),
             AdapterRole::Executor,
             ProviderPermissionMode::Auto,
+            host_env(),
             Arc::new(ApprovalBridge::new(
                 ProviderPermissionMode::Auto,
                 event_tx.clone(),
@@ -1172,29 +1137,26 @@ mod tests {
             "target-write-ok\n"
         );
 
-        // 3) terminal 写上游:authority 只读面 → EROFS,宿主不落盘。
-        let evil = upstream.join("evil.txt");
+        // 3) 批2 Task 6 反转:Host 单路径下无 authority EROFS 面——上游
+        //    物理可达且写入落盘(native fs 写仍唯一锚定 target,见 5))。
+        let upstream_note = upstream.join("host-reach.txt");
         let (wait_reply, output_reply) = run_terminal(
             &dispatcher,
             &mut server_reader,
             &mut 50,
-            &format!("echo pwn > {}", evil.to_string_lossy()),
+            &format!("echo host-reach > {}", upstream_note.to_string_lossy()),
             &session_cwd,
         )
         .await;
-        assert_ne!(
+        assert_eq!(
             wait_reply["result"]["exitCode"],
             json!(0),
-            "upstream write must be refused: {wait_reply} {output_reply}"
+            "upstream write must succeed on the host path: {wait_reply} {output_reply}"
         );
         assert!(
-            output_reply["result"]["output"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("Read-only file system"),
-            "upstream must fail as read-only, not as a shadowed path: {output_reply}"
+            upstream_note.exists(),
+            "host single path: no read-only mount keeps upstream writes off"
         );
-        assert!(!evil.exists(), "no host file may land upstream");
 
         // 4) native Read 同面:绝对路径锚定聚合根读真实上游(LC 读面回归锁)。
         assert!(dispatcher.dispatch(

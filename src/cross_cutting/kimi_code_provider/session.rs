@@ -411,6 +411,10 @@ where
         input.working_dir.clone(),
         input.role.clone(),
         input.permission_mode.clone(),
+        // 批2 Task 6:dispatcher 与主会话绑定同一个冻结合同——terminal
+        // 子进程消费 provider 进程 spawn 所用的同一 env map(T3 白名单
+        // 环境经 env_vars 传输),不根据 ACP 参数另造环境。
+        input.env_vars.clone(),
         Arc::clone(&bridge),
         event_tx.clone(),
         cancel.clone(),

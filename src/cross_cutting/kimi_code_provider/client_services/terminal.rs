@@ -1,11 +1,16 @@
 //! Terminal execution manager for the kimi `terminal/*` client services.
 //!
-//! Every terminal runs as `pipe` + process group + per-command timeout +
-//! combined stdout/stderr output cap, with a concurrency limit of
+//! Every terminal runs on the host as `pipe` + process group + per-command
+//! timeout + combined stdout/stderr output cap, with a concurrency limit of
 //! `MAX_TERMINALS`. Lifecycle is `created -> running -> (exited|killed) ->
 //! released`; `kill`/`release` are idempotent and unknown ids are
-//! distinguishable errors. The caller resolves the trusted binary and builds
-//! the argv through the closed grammar before reaching this module.
+//! distinguishable errors. 进程/目录先登记(`create` 先于 `start`,spawn
+//! 前占住并发名额),spawn 失败立即释放名额。
+//!
+//! 批2 Task 6:全角色 Host 单路径——不再有 bwrap/netns/no-new-privs 执行
+//! 隔离,也没有固定解释器/只读 grammar。子进程环境是冻结会话环境(与
+//! provider 进程 spawn 消费的同一 env map):`env_clear` 后只注入该 map,
+//! 裸名 program 经该环境的 `PATH` 解析(fail-closed,不回退宿主 PATH)。
 
 use std::collections::{BTreeMap, HashMap};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -19,51 +24,27 @@ use tokio::process::{Child, Command};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use super::sandbox::{build_bwrap_args, open_dir_no_follow_inherit, trusted_path_env};
+use super::sandbox::open_dir_no_follow_inherit;
 
 pub const MAX_TERMINALS: usize = 4;
 pub const MAX_TERMINAL_OUTPUT_BYTES: usize = 1_048_576;
 pub const TERMINAL_COMMAND_TIMEOUT_SECS: u64 = 120;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TerminalIsolation {
-    /// Run inside a bubblewrap sandbox. `writable_root` selects the mount
-    /// mode of the authorized root (and the anchored cwd): the coding
-    /// (Executor) role needs a read-write worktree to honour its TDD write
-    /// path + commit responsibility (F-17), while every other role keeps the
-    /// read-only mount. `writable_git_paths` carries git dir paths resolved
-    /// outside the root (linked worktree) that are bound read-write with it.
-    /// Everything else outside the authorized root stays read-only.
-    Bubblewrap {
-        bwrap: PathBuf,
-        writable_root: bool,
-        /// P3-b (REQ-KACS-IDLE-RO): read-only authority root — the trusted
-        /// LC boundary plan's working directory (canonical aggregate root),
-        /// mounted read-only at its original path AFTER the private `/tmp`
-        /// tmpfs so sibling member worktrees beneath `/tmp` stay visible to
-        /// terminal Read. `None` for direct sessions; never a writable face
-        /// (the writable root stays the sole write authorization).
-        readable_root: Option<PathBuf>,
-        writable_git_paths: Vec<PathBuf>,
-    },
-    Unavailable,
-}
-
 #[derive(Debug, Clone)]
 pub struct TerminalCommand {
-    /// Full argv excluding the binary name (e.g. `["status"]` for git). The
-    /// binary is resolved to a trusted absolute path by the caller.
-    pub argv: Vec<String>,
-    /// Absolute trusted path of the executable.
-    pub binary: PathBuf,
-    /// Authorized root (canonical) — bind-mounted read-only (or read-write
-    /// for the coding role, see [`TerminalIsolation::Bubblewrap`]) inside
-    /// bwrap.
-    pub root: PathBuf,
-    /// Verified working directory (inside the authorized root).
+    /// Program exactly as the ACP server sent it: a bare name resolved
+    /// through the frozen environment's `PATH`, or an absolute path. 原样
+    /// argv——宿主不再施加固定解释器白名单,也不改写参数。
+    pub program: String,
+    /// Arguments passed verbatim (argv form) or the shell wrapper
+    /// (`["-c", script]` for the legacy single-string form).
+    pub args: Vec<String>,
+    /// Verified working directory (canonical, anchored at the face root).
     pub cwd: PathBuf,
-    /// OS-level isolation selected by the permission policy.
-    pub isolation: TerminalIsolation,
+    /// 冻结会话环境(与 provider 进程 spawn 消费的同一 env map)。子进程
+    /// `env_clear` 后只注入该 map;ACP 参数不参与构造(不能根据 ACP 参数
+    /// 造 profile)。
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,20 +320,9 @@ impl Drop for TerminalChild {
     }
 }
 
-fn terminal_environment(root: &Path) -> BTreeMap<String, String> {
-    let mut env = BTreeMap::new();
-    env.insert("PATH".to_string(), trusted_path_env());
-    env.insert("HOME".to_string(), root.to_string_lossy().into_owned());
-    env.insert("TMPDIR".to_string(), "/tmp".to_string());
-    env.insert("LANG".to_string(), "C.UTF-8".to_string());
-    env.insert("LC_ALL".to_string(), "C".to_string());
-    env.insert("TERM".to_string(), "dumb".to_string());
-    env.insert("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string());
-    env.insert("GIT_CONFIG_GLOBAL".to_string(), "/dev/null".to_string());
-    env.insert("GIT_CONFIG_SYSTEM".to_string(), "/dev/null".to_string());
-    env.insert("GIT_CONFIG_COUNT".to_string(), "0".to_string());
-    env
-}
+// 批2 Task 6:固定 HOME/GIT_CONFIG_GLOBAL 等手搓子进程环境已删——终端
+// 子进程消费冻结会话环境(TerminalCommand::env,与 provider 进程同一
+// env map),不再按授权根另行构造。
 
 async fn run_terminal(
     entry: Arc<TerminalEntry>,
@@ -378,8 +348,7 @@ async fn run_terminal(
     }
 
     let anchor: Option<OwnedFd> = open_dir_no_follow_inherit(&command.cwd, Path::new("")).ok();
-    let env = terminal_environment(&command.root);
-    let mut builder = build_terminal_command(&command, &env, &command.isolation, anchor.as_ref());
+    let mut builder = build_terminal_command(&command, anchor.as_ref());
     // ETXTBSY（目标正被写打开，含并发「写脚本→exec」压力与异步句柄释放
     // 延迟）是瞬态错误：有界退避重试，而不是把 spawn 失败伪装成
     // 「exit_code=None 的正常完成」——那会让调用方无法区分真实完成。
@@ -415,7 +384,9 @@ async fn run_terminal(
                 });
                 entry.done.notify_waiters();
                 let mut state = entry.state.lock().expect("terminal state lock");
-                *state = TerminalState::Finished;
+                // 批2 Task 6:spawn 失败释放并发名额——失败终端不得占住
+                // 1/4 配额(登记已先行,失败即回收;结果/output 仍可查询)。
+                *state = TerminalState::Released;
                 return;
             }
         }
@@ -493,48 +464,22 @@ async fn run_terminal(
     }
 }
 
-fn build_terminal_command(
-    command: &TerminalCommand,
-    env: &BTreeMap<String, String>,
-    isolation: &TerminalIsolation,
-    anchor: Option<&OwnedFd>,
-) -> Command {
-    let mut builder = match isolation {
-        TerminalIsolation::Bubblewrap {
-            bwrap,
-            writable_root,
-            readable_root,
-            writable_git_paths,
-        } => {
-            let mut builder = Command::new(bwrap);
-            let args = build_bwrap_args(
-                &command.root,
-                readable_root.as_deref(),
-                &command.cwd,
-                anchor.map(AsRawFd::as_raw_fd),
-                *writable_root,
-                writable_git_paths,
-                env,
-                &command.binary,
-                &command.argv,
-            );
-            builder.args(args);
-            builder
-        }
-        TerminalIsolation::Unavailable => {
-            let mut builder = Command::new(&command.binary);
-            builder.args(&command.argv);
-            if let Some(fd) = anchor {
-                builder.current_dir(format!("/proc/self/fd/{}", fd.as_raw_fd()));
-            } else {
-                builder.current_dir(&command.cwd);
-            }
-            builder
-        }
-    };
+fn build_terminal_command(command: &TerminalCommand, anchor: Option<&OwnedFd>) -> Command {
+    let mut builder = Command::new(&command.program);
+    builder.args(&command.args);
+    if let Some(fd) = anchor {
+        builder.current_dir(format!("/proc/self/fd/{}", fd.as_raw_fd()));
+    } else {
+        builder.current_dir(&command.cwd);
+    }
     builder
         .env_clear()
-        .envs(env.iter().map(|(key, value)| (key.clone(), value.clone())))
+        .envs(
+            command
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        )
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -612,14 +557,23 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn command(binary: &Path, cwd: &Path, argv: &[&str]) -> TerminalCommand {
+    fn command(program: &Path, cwd: &Path, args: &[&str]) -> TerminalCommand {
         TerminalCommand {
-            argv: argv.iter().map(|arg| arg.to_string()).collect(),
-            binary: binary.to_path_buf(),
-            root: cwd.to_path_buf(),
+            program: program.to_string_lossy().into_owned(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
             cwd: cwd.to_path_buf(),
-            isolation: TerminalIsolation::Unavailable,
+            env: test_env(),
         }
+    }
+
+    /// 测试用冻结会话环境:携带宿主 PATH(脚本内裸名工具经它解析),
+    /// 其余键不伪造。
+    fn test_env() -> BTreeMap<String, String> {
+        let mut env = BTreeMap::new();
+        if let Some(path) = std::env::var_os("PATH") {
+            env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
+        }
+        env
     }
 
     #[cfg(unix)]
@@ -835,194 +789,6 @@ mod tests {
         manager.release(&id).await.expect("idempotent release");
     }
 
-    // —— F-17:kimi coder 承包契约(TDD 写路径 + commit 责任)与只读终端
-    // 沙箱的系统性冲突——授权根 ro-bind 下终端内 `git add/commit` 必死于
-    // index.lock 只读,coder 只能判 plan defect 掷骰 blocked 门。修复 =
-    // Executor 角色的授权根以 rw bind-mount 进入沙箱(宿主其余路径仍只
-    // 读、网络/pid 隔离不变);其他角色保持只读挂载。真实 bwrap 端到端。
-    #[cfg(unix)]
-    fn bwrap_isolation(
-        writable_root: bool,
-        readable_root: Option<PathBuf>,
-        writable_git_paths: Vec<PathBuf>,
-    ) -> Option<TerminalIsolation> {
-        use super::super::sandbox::probe_bwrap;
-        probe_bwrap().map(|bwrap| TerminalIsolation::Bubblewrap {
-            bwrap,
-            writable_root,
-            readable_root,
-            writable_git_paths,
-        })
-    }
-
-    #[cfg(unix)]
-    fn host_git(args: &[&str], cwd: &Path) {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .status()
-            .expect("host git");
-        assert!(
-            status.success(),
-            "host git {args:?} failed in {}",
-            cwd.display()
-        );
-    }
-
-    #[cfg(unix)]
-    async fn run_bwrap_script(
-        root: &Path,
-        isolation: TerminalIsolation,
-        script: &str,
-    ) -> (TerminalResult, String) {
-        use super::super::sandbox::resolve_trusted_binary;
-        let manager = manager(Duration::from_secs(60));
-        let command = TerminalCommand {
-            argv: vec!["-c".to_string(), script.to_string()],
-            binary: resolve_trusted_binary("bash").expect("trusted bash"),
-            root: root.to_path_buf(),
-            cwd: root.to_path_buf(),
-            isolation,
-        };
-        let id = manager.create(command).await.expect("create");
-        manager.start(&id).expect("start");
-        // 60s 负载不敏感口径(与真实进程 smoke 一致)。
-        let result = tokio::time::timeout(Duration::from_secs(60), manager.wait_for_exit(&id))
-            .await
-            .expect("sandbox script timed out (60s load-insensitive budget)")
-            .expect("wait result");
-        let output = manager.output(&id).expect("retained output");
-        manager.release(&id).await.expect("release");
-        (result, output)
-    }
-
-    /// 首轮红证据(标准仓形态):只读挂载下该脚本死于
-    /// `index.lock: Read-only file system`。
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn executor_writable_root_sandbox_allows_git_commit_inside_root() {
-        use super::super::sandbox::frozen_writable_git_paths;
-        let dir = tempfile::tempdir().expect("worktree");
-        let root = dir.path().canonicalize().expect("canonical root");
-        let Some(isolation) = bwrap_isolation(true, None, frozen_writable_git_paths(&root)) else {
-            return; // bubblewrap 不在时跳过真机隔离路径
-        };
-        let script = "git init -q \
-                      && echo f17 > f17.txt \
-                      && git add f17.txt \
-                      && git -c user.name=f17 -c user.email=f17@example.com commit -qm f17 \
-                      && echo COMMIT_OK";
-        let (result, output) = run_bwrap_script(&root, isolation, script).await;
-        assert_eq!(
-            result.exit_code,
-            Some(0),
-            "coder contract: git add/commit must succeed inside the writable \
-             worktree; output: {output}"
-        );
-        assert!(output.contains("COMMIT_OK"), "{output}");
-        assert!(root.join(".git").is_dir(), "committed worktree");
-        assert!(root.join("f17.txt").is_file());
-    }
-
-    /// fix round 1 主证据(P1/P2,生产形态):aria coding attempt 的
-    /// worktree 是 git linked worktree——`.git` 是指针,gitdir/commondir
-    /// 位于授权根外 `<repo>/.git/worktrees/<name>`,rw root bind 覆盖不到
-    /// → git add/commit 仍死于 `index.lock: Read-only file system`
-    /// (attempt 544a1b51 现场形态)。修复 = 服务端 rev-parse 解析根外
-    /// git 路径(commondir 一条覆盖两者)随 rw root 一并 bind。
-    /// 绑定前必红。
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn executor_writable_root_sandbox_allows_git_commit_in_linked_worktree() {
-        use super::super::sandbox::frozen_writable_git_paths;
-        let base = tempfile::tempdir().expect("workspace");
-        let base = base.path().canonicalize().expect("canonical base");
-        let main = base.join("main");
-        host_git(&["init", "-q", "main"], &base);
-        host_git(
-            &[
-                "-c",
-                "user.name=f17",
-                "-c",
-                "user.email=f17@example.com",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "base",
-            ],
-            &main,
-        );
-        host_git(&["worktree", "add", "../wt", "-b", "f17wt"], &main);
-        let root = main.parent().unwrap().join("wt");
-        let root = root.canonicalize().expect("canonical worktree");
-        assert!(root.join(".git").is_file(), "linked worktree shape");
-        let git_paths = frozen_writable_git_paths(&root);
-        assert_eq!(
-            git_paths,
-            vec![main.join(".git").canonicalize().expect("commondir")],
-            "only the out-of-root common dir needs an extra rw bind"
-        );
-        let Some(isolation) = bwrap_isolation(true, None, git_paths) else {
-            return; // bubblewrap 不在时跳过真机隔离路径
-        };
-        let script = "echo f17 > f17.txt \
-                      && git add f17.txt \
-                      && git -c user.name=f17 -c user.email=f17@example.com commit -qm f17 \
-                      && echo WT_COMMIT_OK";
-        let (result, output) = run_bwrap_script(&root, isolation, script).await;
-        assert_eq!(
-            result.exit_code,
-            Some(0),
-            "linked worktree: git add/commit must reach the out-of-root \
-             gitdir/commondir; output: {output}"
-        );
-        assert!(output.contains("WT_COMMIT_OK"), "{output}");
-        assert!(root.join("f17.txt").is_file());
-        host_git(&["log", "--oneline", "-1", "f17wt"], &main);
-    }
-
-    /// 安全边界回归锁 1:非 Executor 挂载语义不变——授权根内写仍被拒。
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn read_only_root_sandbox_still_blocks_writes_inside_root() {
-        let Some(isolation) = bwrap_isolation(false, None, Vec::new()) else {
-            return;
-        };
-        let dir = tempfile::tempdir().expect("worktree");
-
-        let root = dir.path().canonicalize().expect("canonical root");
-        let (result, output) =
-            run_bwrap_script(&root, isolation, "touch ro-probe.txt; echo done").await;
-        assert_eq!(result.exit_code, Some(0), "{output}");
-        assert!(
-            !root.join("ro-probe.txt").exists(),
-            "read-only mount must keep rejecting writes inside the root"
-        );
-    }
-
-    /// 安全边界回归锁 2:可写模式下宿主其余路径仍只读(ro-bind / / 不变)。
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn writable_root_sandbox_keeps_host_outside_root_read_only() {
-        let Some(isolation) = bwrap_isolation(true, None, Vec::new()) else {
-            return;
-        };
-        let dir = tempfile::tempdir().expect("worktree");
-        let root = dir.path().canonicalize().expect("canonical root");
-        let (result, output) =
-            run_bwrap_script(&root, isolation, "touch /etc/f17-must-fail 2>&1; true").await;
-        assert_eq!(result.exit_code, Some(0), "{output}");
-        assert!(
-            output.contains("Read-only file system"),
-            "host outside the authorized root must stay read-only; output: {output}"
-        );
-        assert!(!Path::new("/etc/f17-must-fail").exists());
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn failed_start_frees_concurrency_quota() {
@@ -1046,6 +812,39 @@ mod tests {
                 .create(command(&bin, dir.path(), &[]))
                 .await
                 .expect("create within limit after failed start freed quota");
+            manager.start(&id).expect("start");
+        }
+        manager.cleanup_all();
+    }
+
+    /// 批2 Task 6 红测:spawn 失败(如目标二进制不存在)必须释放并发
+    /// 名额——失败终端不得永久占住 1/4 配额(现状:失败后状态停在
+    /// Finished,未 Released,后续第 4 个 create 被顶死)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_failure_releases_concurrency_quota() {
+        let dir = tempfile::tempdir().expect("dir");
+        let manager = manager(Duration::from_secs(5));
+        let id = manager
+            .create(command(
+                &dir.path().join("definitely-missing-bin"),
+                dir.path(),
+                &[],
+            ))
+            .await
+            .expect("create");
+        manager.start(&id).expect("start");
+        let result = manager.wait_for_exit(&id).await.expect("wait");
+        assert_eq!(result.exit_code, None);
+        assert!(!result.killed);
+
+        // spawn 失败释放名额后:满额 4 个 create 必须全部成功。
+        let bin = write_executable(dir.path(), "slow", "sleep 30");
+        for _ in 0..MAX_TERMINALS {
+            let id = manager
+                .create(command(&bin, dir.path(), &[]))
+                .await
+                .expect("create within limit after spawn failure freed the slot");
             manager.start(&id).expect("start");
         }
         manager.cleanup_all();
