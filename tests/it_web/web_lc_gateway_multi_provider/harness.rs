@@ -4728,42 +4728,6 @@ impl MatrixEnvironment {
         observation.build_cell(self)
     }
 
-    /// revision 重驱公共路径:连接会话 WS → request_revision → pump。
-    /// confirm 轮次由调用面给定:实体 resume=1(修订→回门→确认定稿);
-    /// lc-root 先例的长门链场景保留更高预算的调用自由。timeout 由调用面
-    /// 传入(实体长阶段独立放宽)。
-    async fn drive_revision_resume(
-        &self,
-        session_id: &str,
-        observation: &mut StageObservation,
-        description: &str,
-        confirm_rounds: usize,
-        timeout: Duration,
-    ) -> DriveOutcome {
-        let mut ws = match self.connect_session_ws(session_id).await {
-            Ok(ws) => ws,
-            Err(error) => {
-                observation.push_event(json!({"type": "matrix_error", "message": error}));
-                observation.run_failure = Some(format!("resume WS 连接失败:{error}"));
-                return DriveOutcome::default();
-            }
-        };
-        let revision = json!({
-            "type": "request_revision",
-            "feedback": {
-                "feedback_types": ["scope"],
-                "description": description,
-                "target_artifact_version": null
-            }
-        });
-        if let Err(error) = ws.send_json(&revision).await {
-            observation.push_event(json!({"type": "matrix_error", "message": error}));
-            observation.run_failure = Some(format!("request_revision 发送失败:{error}"));
-            return DriveOutcome::default();
-        }
-        self.pump_workspace_session(&mut ws, observation, confirm_rounds, timeout)
-            .await
-    }
 
     /// 连接 workspace 会话 WS 并完成 hello。
     async fn connect_session_ws(&self, session_id: &str) -> Result<LiveWs, String> {
@@ -6425,21 +6389,34 @@ impl MatrixEnvironment {
             .unwrap_or_default()
             .to_string();
         if session_id.is_empty() {
-            cells.push(observation.denied_cell(format!("review 响应缺会话:{body}")));
+            observation.denied_cell(format!("review 响应缺会话:{body}"));
             let mut review_resume = StageObservation::new("review", &self.provider);
             review_resume.force_resume = true;
             cells.push(review_resume.denied_cell("review fresh 未启动,resume 无会话".to_string()));
             return cells;
         }
+        // r63(T22 b45 现场):review 载体 spec id 捕获(generate 响应携带,
+        // fresh 产物判据=spec 在场×门到,与实体阶段同口径)。
+        let spec_captured = body["design_specs"][0]["design_spec_id"]
+            .as_str()
+            .is_some();
         observation.workspace_session_id = session_id.clone();
         self.prior_review_session_id = Some(session_id.clone());
-        let (drive, _ws) = self
-            .drive_workspace_session_ws(&session_id, &mut observation, 8, self.entity_stage_timeout)
+        // r63 根修(T22 b45 现场协议错):review 段对齐实体阶段 r21 C1 模型
+        // ——fresh 以零确认预算停在人工门(reviewer 轮在 author 产物后、
+        // 门 confirm 前已跑完,评审证据不丢),连接留给 resume 格同连接
+        // request_revision(AuthorConfirm×非 SC 流合法)。旧形态 fresh 以
+        // 8 轮确认预算就地 confirm 到 Completed,resume 新连接在 Completed
+        // 上发 request_revision 被协议矩阵正确拒收(INVALID_MESSAGE_FOR_
+        // STAGE(stage=completed),b45 现场 reviewer resume 格实拍)。
+        let (drive, gate_ws) = self
+            .drive_workspace_session_ws(&session_id, &mut observation, 0, self.entity_stage_timeout)
             .await;
-        observation.completed_product_artifact_exists = drive.artifact_confirmed;
+        observation.completed_product_artifact_exists = spec_captured && drive.gate_reached;
         cells.push(observation.build_cell(self));
 
-        // resume:评审修订重驱(reviewer 原生恢复)。
+        // resume:同一连接门上 request_revision 修订重驱(reviewer 原生恢复)
+        // →回门→真实 HTTP confirm 定稿。
         let mut resume = StageObservation::new("review", &self.provider);
         if self.snapshot_boot {
             resume.execution_origin = "snapshot_boot".to_string();
@@ -6449,16 +6426,18 @@ impl MatrixEnvironment {
         resume.action = "review_read_only".to_string();
         resume.force_resume = true;
         resume.workspace_session_id = session_id.clone();
+        // 请求基准=修订 turn 实际携带的 resume id 同源:reviewer 面最新审计
+        // (与 drive_entity_session_resume 的 author 面同构,role 过滤防读到
+        // author 轮 id 造成假阳/假阴)。
         resume.requested_resume_id =
             self.latest_audit_native_id(&session_id, &self.provider, Some("reviewer"));
         resume.frozen_digest = self.latest_audit_projection_digest(&session_id, &self.provider);
         let drive = self
-            .drive_revision_resume(
+            .drive_review_gate_resume(
                 &session_id,
+                gate_ws,
                 &mut resume,
                 "矩阵 review resume:显式修订重驱,须原生恢复 reviewer 会话",
-                8,
-                self.entity_stage_timeout,
             )
             .await;
         resume.completed_product_artifact_exists = drive.artifact_confirmed;
@@ -6466,6 +6445,40 @@ impl MatrixEnvironment {
             self.latest_audit_native_id(&session_id, &self.provider, Some("reviewer"));
         cells.push(resume.build_cell(self));
         cells
+    }
+
+    /// r63(T22 b45 现场):review 段门上修订——fresh 轮保留下来的同一条
+    /// 连接上发 request_revision(修订→回门→1 轮真实 HTTP confirm 定稿)。
+    /// 与 `drive_entity_session_resume` 同模型;独立方法保持两阶段各自的
+    /// 审计基准/产物判据演进自由。
+    async fn drive_review_gate_resume(
+        &self,
+        session_id: &str,
+        gate_ws: Option<LiveWs>,
+        observation: &mut StageObservation,
+        description: &str,
+    ) -> DriveOutcome {
+        let Some(mut ws) = gate_ws else {
+            observation.run_failure =
+                Some("review fresh 未达人工门(无干净的同连接会话可供门上修订)".to_string());
+            return DriveOutcome::default();
+        };
+        fp("review_gate_resume_begin", format_args!("session={session_id}"));
+        let revision = json!({
+            "type": "request_revision",
+            "feedback": {
+                "feedback_types": ["scope"],
+                "description": description,
+                "target_artifact_version": null
+            }
+        });
+        if let Err(error) = ws.send_json(&revision).await {
+            observation.push_event(json!({"type": "matrix_error", "message": error}));
+            observation.run_failure = Some(format!("request_revision 发送失败:{error}"));
+            return DriveOutcome::default();
+        }
+        self.pump_workspace_session(&mut ws, observation, 1, self.entity_stage_timeout)
+            .await
     }
 
     // -----------------------------------------------------------------------
