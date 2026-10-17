@@ -136,7 +136,8 @@ async fn successful_choice_completion_does_not_cancel_engine_run_token() {
             ProviderEvent::ChoiceRequest(choice) => break choice,
             ProviderEvent::StatusChanged(_)
             | ProviderEvent::TextDelta { .. }
-            | ProviderEvent::Execution(_) => {}
+            | ProviderEvent::Execution(_)
+            | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected event before choice: {other:?}"),
         }
     };

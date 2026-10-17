@@ -179,6 +179,20 @@ pub(super) async fn handle_terminal_create(
         .create(terminal_command.clone())
         .await
         .map_err(ClientServiceError::Terminal)?;
+    // 批2 Task 7 修复轮(F2)：create() 占名额与 dispatcher Drop→cleanup_all
+    // 之间存在竞态窗口——Drop 只收割当时已登记的 terminal，过门后插入的
+    // 登记若不复核会被 start() 照常 spawn，且 120s 独立上限已删，孤儿进程
+    // 将无时间上限。create 后复核取消态：已终结则立刻 release 回收名额并
+    // 拒绝（无逃逸登记、无逃逸 spawn）。
+    if state.cleanup_cancel.is_cancelled() {
+        let _ = state.terminal.release(&terminal_id).await;
+        return Err(ClientServiceError::Rejected(
+            "terminal create rejected: the invocation has ended before spawn (total deadline \
+             exhausted or cancelled); starting a command beyond the remaining invocation budget \
+             is a configuration problem"
+                .to_string(),
+        ));
+    }
 
     emit_terminal_lifecycle_event(
         state,
@@ -496,6 +510,65 @@ mod tests {
             !state.terminal.has_active_terminals(),
             "迟到 create 不得登记/启动任何 terminal"
         );
+    }
+
+    /// 批2 Task 7 修复轮(F2)钉测：terminal/create 与「dispatcher Drop→
+    /// cleanup_all + cleanup_cancel」交错时无逃逸登记——create 要么在
+    /// spawn 前被门/复核拒绝，要么其进程被 manager 级收编 token 级联
+    /// 收割（120s 独立上限已删，孤儿不允许无时间上限）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_create_racing_session_end_never_escapes() {
+        for round in 0..8 {
+            let _dir = tempfile::tempdir().expect("dir");
+            let (state, _events) = test_state(AdapterRole::Executor);
+            let params = json!({
+                "sessionId": "client-service-test",
+                "command": "/bin/sleep",
+                "args": ["30"],
+                "cwd": ""
+            });
+            let create = {
+                let state = Arc::clone(&state);
+                let params = params.clone();
+                tokio::spawn(async move { handle_terminal_create(&state, &params).await })
+            };
+            // Drop 形态：cleanup_all（此刻可能为空）+ cleanup_cancel。
+            tokio::task::yield_now().await;
+            state.terminal.cleanup_all();
+            state.cleanup_cancel.cancel();
+            match create.await.expect("create task") {
+                Err(error) => {
+                    assert!(
+                        error.to_string().contains("invocation"),
+                        "round {round}: 拒绝原因必须是预算/配置问题: {error}"
+                    );
+                }
+                Ok(terminal_id) => {
+                    // 过门竞态胜出：登记必须被级联收割（有界收口）。
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        state.terminal.wait_for_exit(&terminal_id),
+                    )
+                    .await
+                    .expect("round {round}: 竞态登记不得无上限悬置")
+                    .expect("wait racing terminal");
+                    assert!(
+                        result.killed,
+                        "round {round}: 级联必须收割竞态登记: {result:?}"
+                    );
+                    state
+                        .terminal
+                        .release(&terminal_id)
+                        .await
+                        .expect("release racing terminal");
+                }
+            }
+            assert!(
+                !state.terminal.has_active_terminals(),
+                "round {round}: 不得残留逃逸登记"
+            );
+        }
     }
 
     fn cwd_state(root: PathBuf) -> Arc<ClientServiceState> {

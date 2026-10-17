@@ -97,10 +97,10 @@ struct TerminalEntry {
 }
 
 impl TerminalEntry {
-    fn new(command: TerminalCommand) -> Self {
+    fn new(command: TerminalCommand, kill: CancellationToken) -> Self {
         Self {
             state: Mutex::new(TerminalState::Created),
-            kill: CancellationToken::new(),
+            kill,
             done: Arc::new(Notify::new()),
             result: Mutex::new(None),
             command: Mutex::new(Some(command)),
@@ -121,14 +121,22 @@ struct ManagerInner {
 /// 命令时长上限——命令的唯一预算是受信 invocation 总 deadline（经会话
 /// 取消链 kill 收口），双层看门狗在总 deadline 内对真实在途 terminal
 /// 暂停「无工作 stall」判定（见 `has_active_terminals`）。
+///
+/// 修复轮(F2)：`cleanup` 是 manager 级收编 token——每个 entry 的 kill
+/// token 都是它的 child，`cleanup_all` 取消它即级联收割**当前与此后**
+/// 登记的一切 terminal。这关闭「create/start 与 dispatcher Drop→
+/// cleanup_all 并发」的逃逸窗口：晚于 cleanup_all 插入的登记/spawn 同样
+/// 有界收口（120s 已删，孤儿不允许无时间上限）。
 pub struct TerminalManager {
     inner: Arc<Mutex<ManagerInner>>,
+    cleanup: CancellationToken,
 }
 
 impl Clone for TerminalManager {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            cleanup: self.cleanup.clone(),
         }
     }
 }
@@ -137,9 +145,9 @@ impl TerminalManager {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(ManagerInner::default())),
+            cleanup: CancellationToken::new(),
         }
     }
-
     /// Register a new terminal. Returns the terminal id once the concurrency
     /// limit permits it. The process is not started until [`Self::start`] so
     /// the caller can send the `terminal/create` response first and no output
@@ -158,9 +166,10 @@ impl TerminalManager {
         }
         inner.next_id += 1;
         let id = format!("term-{}", inner.next_id);
-        inner
-            .terminals
-            .insert(id.clone(), Arc::new(TerminalEntry::new(command)));
+        inner.terminals.insert(
+            id.clone(),
+            Arc::new(TerminalEntry::new(command, self.cleanup.child_token())),
+        );
         Ok(id)
     }
 
@@ -263,12 +272,11 @@ impl TerminalManager {
         Ok(())
     }
 
-    /// Kill every live terminal (session cancel / teardown).
+    /// Kill every live terminal (session cancel / teardown)。取消 manager 级
+    /// 收编 token：级联收割当前已登记与并发窗口内后续登记的 terminal
+    /// （见结构体注释修复轮 F2）。
     pub fn cleanup_all(&self) {
-        let inner = self.inner.lock().expect("terminal manager lock");
-        for entry in inner.terminals.values() {
-            entry.kill.cancel();
-        }
+        self.cleanup.cancel();
     }
 
     /// 批2 Task 7（Bug45）：真实活动 registry 读口——在途 = Created（已
@@ -950,6 +958,31 @@ mod tests {
         manager.start(&fail_id).expect("start doomed");
         manager.wait_for_exit(&fail_id).await.expect("wait doomed");
         assert!(!manager.has_active_terminals(), "创建失败移除在途状态");
+    }
+
+    /// 批2 Task 7 修复轮(F2)钉测：cleanup_all 之后才登记并 spawn 的
+    /// terminal（「过门 create 与 dispatcher Drop 并发」的竞态形态）必须
+    /// 被 manager 级收编 token 级联收割——无逃逸登记、无无上限孤儿进程。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_all_reaps_terminals_registered_after_it() {
+        let dir = tempfile::tempdir().expect("dir");
+        let bin = write_executable(dir.path(), "late-slow", "sleep 30");
+        let manager = manager();
+        // dispatcher Drop 形态：先 cleanup_all（此刻 registry 为空）。
+        manager.cleanup_all();
+        // 竞态窗口内插入的登记 + spawn。
+        let late = manager
+            .create(command(&bin, dir.path(), &[]))
+            .await
+            .expect("late create still registers");
+        manager.start(&late).expect("late start");
+        let result = tokio::time::timeout(Duration::from_secs(10), manager.wait_for_exit(&late))
+            .await
+            .expect("late terminal must be reaped by the cascade, not left unbounded")
+            .expect("wait late");
+        assert!(result.killed, "cleanup 级联必须收割晚登记进程: {result:?}");
+        assert!(!manager.has_active_terminals(), "收割后不得残留在途登记");
     }
     // —— DEF-7 桶确定性边界族（D4/kimi-acp MODIFIED 确定性验证条款）——
     // 受控内存流（tokio::io::duplex）直接驱动 read_terminal_stream 的预算/截断

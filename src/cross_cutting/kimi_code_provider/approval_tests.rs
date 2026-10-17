@@ -163,21 +163,27 @@ async fn supervised_tool_approval_approved_maps_to_allow_once() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    let permission_id = match tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
-        .await
-        .expect("permission request event")
-        .expect("permission request value")
-    {
-        ProviderEvent::StatusChanged(_) => match events.recv().await.expect("permission event") {
-            ProviderEvent::PermissionRequest(request) => {
-                assert_eq!(request.tool_name, "Bash");
-                assert_eq!(request.description, "pwd");
-                request.id
+    let permission_id = loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("permission request event")
+            .expect("permission request value");
+        match event {
+            // 批2 Task 7：会话启动时一次投递的活动快照，跳过后再收权限事件。
+            ProviderEvent::TerminalActivity(_) => continue,
+            ProviderEvent::StatusChanged(_) => {
+                match events.recv().await.expect("permission event") {
+                    ProviderEvent::PermissionRequest(request) => {
+                        assert_eq!(request.tool_name, "Bash");
+                        assert_eq!(request.description, "pwd");
+                        break request.id;
+                    }
+                    other => panic!("unexpected provider event: {other:?}"),
+                }
             }
+            ProviderEvent::PermissionRequest(request) => break request.id,
             other => panic!("unexpected provider event: {other:?}"),
-        },
-        ProviderEvent::PermissionRequest(request) => request.id,
-        other => panic!("unexpected provider event: {other:?}"),
+        }
     };
     commands
         .send(ProviderCommand::PermissionResponse {
@@ -268,7 +274,7 @@ async fn supervised_tool_approval_rejected_maps_to_reject_once_and_continues() {
             .expect("permission request value")
         {
             ProviderEvent::PermissionRequest(request) => break request.id,
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     };
@@ -377,7 +383,7 @@ async fn askuserquestion_maps_to_choice_request() {
                     .expect("choice response");
                 break;
             }
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     }
@@ -420,7 +426,7 @@ async fn askuserquestion_select_option_returns_selected_and_continues() {
             .expect("event")
         {
             ProviderEvent::ChoiceRequest(request) => break request,
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     };
@@ -487,7 +493,7 @@ async fn askuserquestion_free_text_takes_priority_over_selected() {
             .expect("event")
         {
             ProviderEvent::ChoiceRequest(request) => break request,
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     };
@@ -561,7 +567,7 @@ async fn askuserquestion_free_text_only_no_selected() {
             .expect("event")
         {
             ProviderEvent::ChoiceRequest(request) => break request,
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     };
@@ -618,7 +624,7 @@ async fn multiquestion_serial_one_at_a_time() {
             .expect("event")
         {
             ProviderEvent::ChoiceRequest(request) => break request,
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     };
@@ -876,7 +882,7 @@ async fn fake_peer_fixture_replay_matches_recorded_transcript() {
                 assert_eq!(request.tool_name, "Bash");
                 break request.id;
             }
-            ProviderEvent::StatusChanged(_) => {}
+            ProviderEvent::StatusChanged(_) | ProviderEvent::TerminalActivity(_) => {}
             other => panic!("unexpected provider event: {other:?}"),
         }
     };
