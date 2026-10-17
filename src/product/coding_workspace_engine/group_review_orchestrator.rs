@@ -858,6 +858,8 @@ impl<'a> GroupReviewOrchestrator<'a> {
             raw_provider_output_ref: Some(raw_ref.clone()),
             role_run_id: None,
             run_no: None,
+            acceptance: None,
+            review_window_id: None,
         };
         match self.store.save_internal_pr_review_if_active(
             &snapshot.attempt_id,
