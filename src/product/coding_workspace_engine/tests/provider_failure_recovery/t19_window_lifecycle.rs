@@ -191,8 +191,6 @@ async fn reviewer_violation_blocks_retry_and_keeps_manual_gate_lock() {
     let (root, store, attempt) = running_attempt_with_worktree();
     let worktree = attempt.worktree_path.clone().expect("worktree");
     init_test_git_repo(&worktree);
-    let baseline_config =
-        fs::read_to_string(worktree.join(".git/config")).expect("baseline config");
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
@@ -332,8 +330,6 @@ async fn invalidated_report_content_approve_never_drives_progression() {
     let (root, store, attempt) = running_attempt_with_worktree();
     let worktree = attempt.worktree_path.clone().expect("worktree");
     init_test_git_repo(&worktree);
-    let baseline_config =
-        fs::read_to_string(worktree.join(".git/config")).expect("baseline config");
     let (tx, _rx) = mpsc::channel(16);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
     // provider:违规直写 Git 域,随后输出 approve 内容——报告即使内容
@@ -486,4 +482,159 @@ impl StreamingProviderAdapter for ResumeCapturingProvider {
     ) -> Result<ProviderSession, ProviderAdapterError> {
         self.inner.start(input, cancel).await
     }
+}
+
+/// N2(修复轮 2):F2 回归——成功后落盘链失败必须收口窗口,树不锁死。
+/// 注入:provider raw 输出的 stage 目录被普通文件占位 →
+/// `save_provider_raw_output` 的 create_dir_all 失败(确定性 Io)。
+#[tokio::test]
+async fn code_review_post_run_persist_failure_releases_window_no_deadlock() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
+    let raw_root =
+        store.provider_raw_output_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
+    fs::create_dir_all(&raw_root).expect("raw root");
+    fs::write(raw_root.join("code_review"), "collision").expect("stage dir collision");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = TransportFailuresThenSuccessProvider::new(0, APPROVE_OUTPUT);
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let error = engine
+        .execute_code_review_with_commands(&attempt, &provider, &mut command_rx)
+        .await
+        .expect_err("persist failure must surface");
+    assert!(
+        error.to_string().contains("code_review"),
+        "unexpected error: {error}"
+    );
+
+    // F2:窗口收口——离开 Running,干净回收释放锁,树不永久锁死。
+    let runs = reviewer_runs(&store, &attempt);
+    let window_id = format!("{}-w01", runs[0].id);
+    let window_store = t19_window_store(root.path());
+    let record = window_store
+        .load_window(&window_id)
+        .expect("window record after persist failure");
+    assert_ne!(
+        record.state,
+        crate::product::reviewer_window_store::ReviewerWindowState::Running
+    );
+    assert_eq!(
+        record.state,
+        crate::product::reviewer_window_store::ReviewerWindowState::ClosedInvalidated,
+        "clean recycle must release the tree"
+    );
+    assert!(
+        window_store.list_leases().expect("leases").is_empty(),
+        "no lease may survive the persist-failure close"
+    );
+    // 后续开窗可继续(死锁反证)。
+    let reopened = engine
+        .begin_reviewer_window_for_run(
+            "t19-reopen-after-persist-failure",
+            &attempt,
+            &runs[0].id,
+            &ProviderName::ClaudeCode,
+            &worktree,
+        )
+        .await
+        .expect("tree must be reopenable after close");
+    engine
+        .recycle_reviewer_window(&reopened, "t19 teardown")
+        .await
+        .expect("teardown recycle");
+}
+
+/// N2(修复轮 2):F3 回归——internal review 流后落盘失败同样收口窗口。
+#[tokio::test]
+async fn internal_pr_review_persist_failure_releases_window_no_deadlock() {
+    let (root, store, attempt) = running_attempt_with_worktree();
+    let worktree = attempt.worktree_path.clone().expect("worktree");
+    init_test_git_repo(&worktree);
+    let attempt = store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            crate::product::coding_models::CodingExecutionStage::InternalPrReview,
+        )
+        .expect("stage to internal review");
+    store
+        .save_review_request(
+            &attempt,
+            &crate::product::coding_models::ReviewRequest {
+                id: "review_request_0001".to_string(),
+                attempt_id: attempt.id.clone(),
+                kind: crate::product::coding_models::ReviewRequestKind::GitBranchOnly,
+                remote_kind: crate::product::coding_models::RemoteKind::GenericGit,
+                remote: "origin".to_string(),
+                base_branch: attempt.base_branch.clone(),
+                branch_name: attempt.branch_name.clone(),
+                commit_sha: "unknown".to_string(),
+                push_status: crate::product::coding_models::PushStatus::Pushed,
+                external_url: None,
+                manual_instructions: Vec::new(),
+                created_at: "2026-07-01T00:00:00Z".to_string(),
+                updated_at: "2026-07-01T00:00:00Z".to_string(),
+                push_error: None,
+                owner_kind: crate::product::coding_models::ReviewRequestOwnerKind::Attempt,
+                pointer_publication_id: None,
+                revoked: false,
+            },
+        )
+        .expect("seed review request");
+    let raw_root =
+        store.provider_raw_output_root(&attempt.project_id, &attempt.issue_id, &attempt.id);
+    fs::create_dir_all(&raw_root).expect("raw root");
+    fs::write(raw_root.join("internal_pr_review"), "collision").expect("stage dir collision");
+    let (tx, _rx) = mpsc::channel(16);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    let provider = TransportFailuresThenSuccessProvider::new(0, APPROVE_OUTPUT);
+    let (_command_tx, mut command_rx) = mpsc::channel(1);
+
+    let error = engine
+        .execute_internal_pr_review_with_commands(&attempt, &provider, &mut command_rx)
+        .await
+        .expect_err("persist failure must surface");
+    assert!(
+        error.to_string().contains("internal_pr_review"),
+        "unexpected error: {error}"
+    );
+
+    let run = store
+        .list_role_runs(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("role runs")
+        .into_iter()
+        .find(|run| run.role == CodingProviderRole::InternalReviewer)
+        .expect("internal reviewer run");
+    let window_store = t19_window_store(root.path());
+    let record = window_store
+        .load_window(&format!("{}-w01", run.id))
+        .expect("window record after persist failure");
+    assert_eq!(
+        record.state,
+        crate::product::reviewer_window_store::ReviewerWindowState::ClosedInvalidated,
+        "F3 close must recycle the window cleanly"
+    );
+    assert!(
+        window_store.list_leases().expect("leases").is_empty(),
+        "no lease may survive the internal-review close"
+    );
+    let reopened = engine
+        .begin_reviewer_window_for_run(
+            "t19-reopen-after-internal-persist-failure",
+            &attempt,
+            &run.id,
+            &ProviderName::ClaudeCode,
+            &worktree,
+        )
+        .await
+        .expect("tree must be reopenable after close");
+    engine
+        .recycle_reviewer_window(&reopened, "t19 teardown")
+        .await
+        .expect("teardown recycle");
 }

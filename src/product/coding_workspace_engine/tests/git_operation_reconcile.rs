@@ -819,7 +819,7 @@ async fn review_request_platform_write_rejected_while_window_frozen_resumes_afte
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
-    let handle = t19_open_window(&root.path(), &attempt, &worktree, "t19-guard-window").await;
+    let handle = t19_open_window(root.path(), &attempt, &worktree, "t19-guard-window").await;
     let head_before = git_stdout(&worktree, &["rev-parse", "HEAD"])
         .trim()
         .to_string();
@@ -876,9 +876,6 @@ async fn cancelled_review_commit_compensation_rejected_while_window_frozen() {
     let (root, store, attempt) = running_attempt_with_worktree();
     let worktree = attempt.worktree_path.clone().expect("worktree");
     init_test_git_repo(&worktree);
-    let base_branch = git_stdout(&worktree, &["branch", "--show-current"])
-        .trim()
-        .to_string();
     let (tx, _rx) = mpsc::channel(8);
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
@@ -887,7 +884,6 @@ async fn cancelled_review_commit_compensation_rejected_while_window_frozen() {
     let before_head = git_stdout(&worktree, &["rev-parse", "HEAD"])
         .trim()
         .to_string();
-    let base_branch = attempt.base_branch.clone();
     fs::write(worktree.join("committed.rs"), "pub fn committed() {}\n").expect("staged change");
     git_stdout(&worktree, &["add", "."]);
     git_stdout(
@@ -913,7 +909,7 @@ async fn cancelled_review_commit_compensation_rejected_while_window_frozen() {
                 repo_path: worktree.clone(),
                 worktree_path: worktree.clone(),
                 branch_name: attempt.branch_name.clone(),
-                base_branch,
+                base_branch: attempt.base_branch.clone(),
                 before_head: before_head.clone(),
                 remote: Some("origin".to_string()),
                 commit_message: Some("t19 commit".to_string()),
@@ -938,7 +934,7 @@ async fn cancelled_review_commit_compensation_rejected_while_window_frozen() {
         .expect("commit created");
 
     // 冻结窗口(无在途 writer,直接 Frozen)。
-    let handle = t19_open_window(&root.path(), &attempt, &worktree, "t19-comp-window").await;
+    let handle = t19_open_window(root.path(), &attempt, &worktree, "t19-comp-window").await;
 
     // 补偿(reset)被拒:窗口冻结期间平台补偿同样拒绝。
     let error = engine
@@ -1057,7 +1053,7 @@ async fn compensation_reguards_after_commit_created_advance_when_frozen_mid_flow
         )
         .expect("commit created advance clears channel registration");
     // 冻结恰好发生在 enter 之后(间隙窗口):
-    let handle = t19_open_window(&root.path(), &attempt, &worktree, "t19-midflow-window").await;
+    let handle = t19_open_window(root.path(), &attempt, &worktree, "t19-midflow-window").await;
 
     // inner 直驱:re-guard 必须拒绝,reset 不在冻结窗口内裸跑。
     let error = engine
@@ -1150,7 +1146,7 @@ async fn terminated_attempt_reconcile_rejected_while_window_frozen() {
         )
         .expect("commit created");
 
-    let handle = t19_open_window(&root.path(), &attempt, &worktree, "t19-terminate-window").await;
+    let handle = t19_open_window(root.path(), &attempt, &worktree, "t19-terminate-window").await;
 
     // terminate(AbortAttempt 收口面):reconcile_for_termination 驱动补偿,
     // 冻结窗口内被拒——不 partial 收口、HEAD 不动。

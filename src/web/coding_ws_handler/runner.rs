@@ -1160,7 +1160,6 @@ mod tests {
         store: CodingAttemptStore,
         attempt: CodingExecutionAttempt,
         unit: crate::product::coding_models::CodingExecutionUnit,
-        original_head: String,
     }
 
     fn run_git(worktree: &Path, args: &[&str]) {
@@ -1555,7 +1554,6 @@ mod tests {
             store,
             attempt: seeded,
             unit,
-            original_head,
         }
     }
 
