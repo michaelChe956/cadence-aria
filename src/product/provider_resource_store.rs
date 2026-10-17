@@ -148,14 +148,18 @@ impl ProviderResourceStore {
                 _ => {}
             }
             record.started_identity = Some(identity.clone());
-            record.cleanup_cursor = CleanupStep::Confirmed;
+            // F3(审查修复轮):重放不得回退游标——仅 Reserved(< Confirmed)
+            // 才写 Confirmed,Quiesced/Removed 前进态原样保留。
+            if record.cleanup_cursor < CleanupStep::Confirmed {
+                record.cleanup_cursor = CleanupStep::Confirmed;
+            }
             record.updated_at = Utc::now().to_rfc3339();
             write_json(&path, &record)?;
             Ok(record)
         })
     }
 
-    /// cleanup cursor 单调推进(Quiesced/Removed);回退或越级跳步拒绝。
+    /// cleanup cursor 单调推进(Quiesced/Removed);拒绝回退,同值幂等。
     pub(crate) fn advance_cleanup_cursor(
         &self,
         key: &ResourceScopeKey,

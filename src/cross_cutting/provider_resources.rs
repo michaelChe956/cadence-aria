@@ -395,6 +395,18 @@ fn read_process_stat(pid: u32) -> Option<(char, u64)> {
     Some((state, start_time_ticks))
 }
 
+/// 读 `/proc/<pid>/stat` 的 state(第3字段)与 pgrp(第5字段)——
+/// 组残留扫描用(与 [`read_process_stat`] 同款 `) ` 切分解析)。
+#[cfg(unix)]
+fn read_process_stat_group(pid: u32) -> Option<(char, u32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, tail) = stat.rsplit_once(") ")?;
+    let state = tail.chars().next()?;
+    // tail 从第3字段(state)开始:pgrp=第5字段 → nth(2)。
+    let pgrp = tail.split_whitespace().nth(2)?.parse().ok()?;
+    Some((state, pgrp))
+}
+
 /// 身份核对后的组清理:仅当 (pid, starttime) 仍匹配登记身份时 killpg;
 /// PID 复用/已消失一律不发信号。返回是否发出了信号。
 #[cfg(unix)]
@@ -414,6 +426,50 @@ fn kill_process_group_if_ours(pid: u32, start_time_ticks: u64) -> bool {
 
 #[cfg(not(unix))]
 fn kill_process_group_if_ours(_pid: u32, _start_time_ticks: u64) -> bool {
+    false
+}
+
+/// 组长身份是否仍以登记身份存活(quiesce 记录 kill 前的组长状态)。
+#[cfg(unix)]
+fn process_leader_matches_identity(pid: u32, start_time_ticks: u64) -> bool {
+    matches!(
+        observe_process(pid, start_time_ticks),
+        ProcessObservation::Ours
+    )
+}
+
+#[cfg(not(unix))]
+fn process_leader_matches_identity(_pid: u32, _start_time_ticks: u64) -> bool {
+    false
+}
+
+/// 进程组(pgid=spawn 时组长 pid)内是否仍有存活进程(非僵尸;僵尸不再
+/// 可能写任何文件)。F2:组长已退出时组内残留=无法安全组杀的未知
+/// writer,必须停等。
+#[cfg(unix)]
+fn process_group_has_members(pgid: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let Some((state, pgrp)) = read_process_stat_group(pid) else {
+            continue;
+        };
+        if state != 'Z' && pgrp == pgid {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(unix))]
+fn process_group_has_members(_pgid: u32) -> bool {
     false
 }
 
@@ -581,9 +637,11 @@ impl ProviderRunResourceScope {
                         canonical.display()
                     )));
                 }
-                if !canonical.starts_with(&self.private_root) {
+                // F4(审查修复轮):根自身不可登记——remove_dir_all(根)会
+                // 连带清除其它资源的私有目录;必须是严格子路径。
+                if canonical == self.private_root || !canonical.starts_with(&self.private_root) {
                     return Err(ProviderAdapterError::provider_unavailable(format!(
-                        "provider_resources_private_path_outside_root: {} 不在冻结私有根 {} 之下",
+                        "provider_resources_private_path_outside_root: {} 必须是冻结私有根 {} 的严格子路径(根自身不可登记)",
                         canonical.display(),
                         self.private_root.display()
                     )));
@@ -715,12 +773,29 @@ impl ProviderRunResourceScope {
                         start_time_ticks,
                     }) => {
                         // killpg 仅其中一步:先发组信号,再以真实身份观察。
+                        // F2(审查修复轮):组长已退出(daemonize/调用方先
+                        // wait)时无法安全 killpg(PID 可能已被复用为新组
+                        // 长),组内残留进程须检出停等——与
+                        // ManagedProcessChild「组长回收后组清理仍须可达」
+                        // 同一风险面,但 quiesce 只凭 durable 身份,不能无
+                        // 身份核对地组杀。
+                        let leader_alive = process_leader_matches_identity(*pid, *start_time_ticks);
                         kill_process_group_if_ours(*pid, *start_time_ticks);
                         if !self.wait_process_gone(*pid, *start_time_ticks).await {
                             return Ok(quiesce_recovery(
                                 "provider_resources_quiesce_registered_resource_running",
                                 format!(
                                     "resource={} pid={pid}: killpg 已发但 (pid,starttime) 身份仍存活,静止未证明",
+                                    record.resource_id
+                                ),
+                                records,
+                            ));
+                        }
+                        if !leader_alive && process_group_has_members(*pid) {
+                            return Ok(quiesce_recovery(
+                                "provider_resources_quiesce_process_group_residual",
+                                format!(
+                                    "resource={} pgid={pid}: 组长已退出但组内仍有存活进程——无法安全组杀,停等",
                                     record.resource_id
                                 ),
                                 records,
@@ -805,14 +880,20 @@ impl ProviderRunResourceScope {
                 }
             }
         }
-        // 全部静止:推进游标并构造证明(交接完整 manifest,不传布尔 killed)。
+        // 全部静止:构造证明(交接完整 manifest,不传布尔 killed)。
+        // F1(审查修复轮):游标已 >= Quiesced 的记录(如 cleanup 在 Removed
+        // 写入后、解除登记前崩溃)原样保留,不回推 Quiesced——恢复路径
+        // 重入 quiesce 不再因「回退拒绝」永久卡死;只有低于 Quiesced 才推进。
         let mut manifest = Vec::with_capacity(records.len());
         for record in records {
-            manifest.push(
+            let record = if record.cleanup_cursor >= CleanupStep::Quiesced {
+                record
+            } else {
                 self.store
                     .advance_cleanup_cursor(&self.key, &record.resource_id, CleanupStep::Quiesced)
-                    .map_err(store_error)?,
-            );
+                    .map_err(store_error)?
+            };
+            manifest.push(record);
         }
         Ok(QuiesceOutcome::Quiescent(QuiescentScope {
             key: self.key.clone(),
@@ -914,9 +995,13 @@ impl ProviderRunResourceScope {
                     }
                     // 共享/owner HOME 面(私有根外路径)永不清理——预留期
                     // 已挡,这里再挡一次(defense in depth)。
-                    if !registered.starts_with(&self.private_root) {
+                    // F4(审查修复轮):根自身与根外路径一样永不清理——
+                    // remove_dir_all(根)会连带其它资源的私有目录。
+                    if registered == self.private_root
+                        || !registered.starts_with(&self.private_root)
+                    {
                         return Err(ProviderAdapterError::provider_unavailable(format!(
-                            "provider_resources_cleanup_outside_private_root: {} 不在 {} 之下,永不清理",
+                            "provider_resources_cleanup_outside_private_root: {} 必须是 {} 的严格子路径(根自身/根外永不清理)",
                             registered.display(),
                             self.private_root.display()
                         )));
@@ -999,6 +1084,14 @@ impl ProviderRunResourceScope {
         env_vars: &BTreeMap<String, String>,
         cancel: CancellationToken,
     ) -> Result<(ResourceReservation, ManagedProcess), ProviderAdapterError> {
+        // ⚠4(审查修复轮):fail-fast——引擎资源(容器/网络/目录)不走进程
+        // 包装器,先拒绝再谈预留,避免登记 kind 与启动形态错位。
+        if spec.kind != OwnedResourceKind::Process {
+            return Err(ProviderAdapterError::provider_unavailable(format!(
+                "provider_resources_start_owned_process_kind_mismatch: {:?} 不是进程资源",
+                spec.kind
+            )));
+        }
         // ① 持久预留先行:登记写失败必须发生在任何 spawn 副作用之前。
         let reservation = self.reserve_owned_resource(&spec)?;
         // ② spawn:确认失败时进程未产生,解除登记不留孤儿登记。
@@ -1921,6 +2014,10 @@ mod tests {
             QuiesceOutcome::Quiescent(quiescent) => quiescent,
             QuiesceOutcome::RecoveryRequired(unknown) => panic!("{unknown:?}"),
         };
+        assert!(
+            !quiescent.quiesced_at().is_empty(),
+            "静止证明须携带时间戳(交接材料)"
+        );
         assert!(!engine.is_running("ctr_owned"), "登记容器被 stop");
         assert!(engine.exists("ctr_owned"), "remove 留给 cleanup");
 
@@ -2224,5 +2321,253 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    // ---------- 修复轮 F1:Removed 游标崩溃窗口后恢复不卡死 ----------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn removed_cursor_crash_window_recovery_completes() {
+        let env = scope_env();
+        let execution = frozen_contract(
+            TrustedProviderRole::Coder,
+            "run_0001",
+            "scope_run_0001",
+            None,
+        );
+        let scope = open_scope(&env, &execution, "boot_a", None);
+
+        // 目录资源走完 quiesce 并把游标推到 Removed,模拟 cleanup 在
+        // 「Removed 已写、登记未删」之间崩溃。
+        let private_dir = env.private_root.join("removed-window");
+        fs::create_dir_all(&private_dir).expect("create");
+        let canonical = private_dir.canonicalize().unwrap();
+        let reservation = scope
+            .reserve_owned_resource(
+                &OwnedResourceSpec::new("res_dir_f1", OwnedResourceKind::Directory, "scratch")
+                    .with_private_path(canonical.clone()),
+            )
+            .expect("reserve");
+        scope
+            .confirm_started_resource(&reservation, StartedResourceIdentity::directory(&canonical))
+            .expect("confirm");
+        fs::remove_dir_all(&canonical).expect("物理清理先完成(窗口内崩溃点)");
+        scope
+            .resource_store()
+            .advance_cleanup_cursor(scope.key(), "res_dir_f1", CleanupStep::Removed)
+            .expect("durable 停在 Removed");
+        drop(scope);
+
+        // 新 boot 接管:quiesce 不得回推 Quiesced(regression 卡死),要
+        // 得 Quiescent 且 cleanup 可收口。
+        let keys = Store::new(&env.store_root).scope_keys().unwrap();
+        let recovery = ProviderRunResourceScope::open_for_recovery(
+            &keys[0],
+            None,
+            &env.private_root,
+            &env.store_root,
+            None,
+        )
+        .expect("open recovery");
+        let quiescent = match recovery.quiesce_scope().await.expect("quiesce") {
+            QuiesceOutcome::Quiescent(quiescent) => quiescent,
+            QuiesceOutcome::RecoveryRequired(unknown) => panic!("F1: {unknown:?}"),
+        };
+        assert_eq!(
+            quiescent.manifest()[0].cleanup_cursor,
+            CleanupStep::Removed,
+            "已前进游标原样保留"
+        );
+        recovery
+            .cleanup_owned_scope(&quiescent)
+            .expect("Removed 态可直接收口(不重复物理动作)");
+        assert!(
+            recovery
+                .resource_store()
+                .list_scope(recovery.key())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    // ---------- 修复轮 F2:组长已退出+组内残留 ≠ Quiescent ----------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn leader_exited_with_group_residual_is_not_quiescent() {
+        let env = scope_env();
+        let execution = frozen_contract(
+            TrustedProviderRole::Coder,
+            "run_0001",
+            "scope_run_0001",
+            None,
+        );
+        let scope = open_scope(&env, &execution, "boot_a", None);
+
+        // fixture:组长打印 pid 后留下组内孙进程再自己退出(daemonize 形态)。
+        let fixture_dir = env.private_root.canonicalize().unwrap();
+        let leader_pid_file = fixture_dir.join("f2-leader.pid");
+        let child_pid_file = fixture_dir.join("f2-child.pid");
+        let daemon = fixture_dir.join("f2-daemon");
+        write_executable(
+            &daemon,
+            &format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nsh -c 'printf \"%s\" \"$$\" > \"$1\"; sleep 300' f2-child '{}' &\nsleep 1\nexit 0\n",
+                leader_pid_file.display(),
+                child_pid_file.display(),
+            ),
+        );
+
+        let reservation = scope
+            .reserve_owned_resource(&OwnedResourceSpec::new(
+                "res_proc_f2",
+                OwnedResourceKind::Process,
+                "f2-daemon",
+            ))
+            .expect("reserve");
+        let mut managed = crate::cross_cutting::process_manager::ProcessManager::spawn(
+            &daemon.display().to_string(),
+            &[],
+            &fixture_dir,
+            &unix_path_env(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn daemon fixture");
+        let leader_pid = managed.child.spawn_leader_pid().expect("leader pid");
+        let ticks = process_start_time_ticks(leader_pid).expect("leader starttime");
+        scope
+            .confirm_started_resource(
+                &reservation,
+                StartedResourceIdentity::process(leader_pid, ticks),
+            )
+            .expect("confirm");
+
+        // 等组长自然退出(组内孙进程仍存活)。
+        wait_for_path(&child_pid_file).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while process_alive(leader_pid as i32) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("leader exits by itself");
+        let child_pid = read_pid_file(&child_pid_file);
+        assert!(process_alive(child_pid), "组内孙进程仍存活");
+
+        // quiesce:组长身份已不可核对 → 不能组杀;组内残留必须检出停等。
+        match scope.quiesce_scope().await.expect("quiesce attempt") {
+            QuiesceOutcome::Quiescent(_) => panic!("组长退出+组内残留时不得宣称 Quiescent"),
+            QuiesceOutcome::RecoveryRequired(unknown) => {
+                assert!(
+                    unknown.reason.contains("process_group_residual"),
+                    "原因码须指向组残留: {}",
+                    unknown.reason
+                );
+            }
+        }
+        assert!(process_alive(child_pid), "停等不动未知 writer");
+
+        // 人工清掉残留后,恢复重试可正常静止收口。
+        unsafe { libc::kill(child_pid, libc::SIGKILL) };
+        wait_process_gone(child_pid).await;
+        match scope.quiesce_scope().await.expect("quiesce retry") {
+            QuiesceOutcome::Quiescent(_) => {}
+            QuiesceOutcome::RecoveryRequired(unknown) => panic!("残留清后应静止: {unknown:?}"),
+        }
+        let _ = &mut managed; // 持有至断言后,Drop 的组清理在此无害(组已空)
+    }
+
+    // ---------- 修复轮 F3:confirm 重放不回退游标 ----------
+
+    #[tokio::test]
+    async fn confirm_replay_does_not_regress_cursor() {
+        let env = scope_env();
+        let execution = frozen_contract(
+            TrustedProviderRole::Coder,
+            "run_0001",
+            "scope_run_0001",
+            None,
+        );
+        let scope = open_scope(&env, &execution, "boot_a", None);
+        let private_dir = env.private_root.join("f3-scratch");
+        fs::create_dir_all(&private_dir).expect("create");
+        let canonical = private_dir.canonicalize().unwrap();
+        let reservation = scope
+            .reserve_owned_resource(
+                &OwnedResourceSpec::new("res_dir_f3", OwnedResourceKind::Directory, "scratch")
+                    .with_private_path(canonical.clone()),
+            )
+            .expect("reserve");
+        let identity = StartedResourceIdentity::directory(&canonical);
+        scope
+            .confirm_started_resource(&reservation, identity.clone())
+            .expect("confirm #1");
+        scope
+            .resource_store()
+            .advance_cleanup_cursor(scope.key(), "res_dir_f3", CleanupStep::Quiesced)
+            .expect("advance to Quiesced");
+
+        // 重放 confirm:身份一致,游标不得回退到 Confirmed。
+        scope
+            .confirm_started_resource(&reservation, identity)
+            .expect("replay confirm ok");
+        let record = scope
+            .resource_store()
+            .load_record(scope.key(), "res_dir_f3")
+            .unwrap()
+            .expect("record");
+        assert_eq!(
+            record.cleanup_cursor,
+            CleanupStep::Quiesced,
+            "confirm 重放不得回退前进游标"
+        );
+    }
+
+    // ---------- 修复轮 F4:私有根自身不可登记/不可清理 ----------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_root_itself_is_never_registered_or_cleaned() {
+        let env = scope_env();
+        let execution = frozen_contract(
+            TrustedProviderRole::Coder,
+            "run_0001",
+            "scope_run_0001",
+            None,
+        );
+        let scope = open_scope(&env, &execution, "boot_a", None);
+        let root_canonical = env.private_root.canonicalize().unwrap();
+
+        // reserve 拒绝根自身。
+        let error = scope
+            .reserve_owned_resource(
+                &OwnedResourceSpec::new("res_dir_f4", OwnedResourceKind::Directory, "root itself")
+                    .with_private_path(root_canonical.clone()),
+            )
+            .expect_err("根自身登记必须拒绝");
+        assert!(
+            error.details.contains("outside_root"),
+            "拒绝原因须指向根边界: {}",
+            error.details
+        );
+
+        // 漂移数据面:直接落一条路径=根的记录(模拟旧数据/越权写),cleanup
+        // 也必须拒绝且不删根。
+        let record = dir_record(scope.key(), "res_dir_f4b", &root_canonical, None);
+        scope.resource_store().reserve(&record).expect("insert");
+        let quiescent = match scope.quiesce_scope().await.expect("quiesce") {
+            QuiesceOutcome::Quiescent(quiescent) => quiescent,
+            QuiesceOutcome::RecoveryRequired(unknown) => panic!("{unknown:?}"),
+        };
+        let error = scope
+            .cleanup_owned_scope(&quiescent)
+            .expect_err("根自身清理必须拒绝");
+        assert!(
+            error.details.contains("outside_private_root"),
+            "清理拒绝原因须指向根边界: {}",
+            error.details
+        );
+        assert!(root_canonical.is_dir(), "私有根目录原样保留");
     }
 }
