@@ -1601,54 +1601,47 @@ fn task11_coding_positive_cell(env: &MatrixEnvironment) -> Result<EvidenceCell, 
     Ok(cell)
 }
 
-/// 保护面拒绝格:组装层五通道×保护面逐条拒绝原文+digest,叠加 6c 工件
-/// 四通道负向与 D4 受保护面 pre/post 摘要。
+/// 保护面拒绝格:组装层五通道×保护面逐条拒绝原文+digest(批2 Task 9 起
+/// 只取 harness 自有写矩阵——6c 探针工件已随 host-open 语义退役
+/// negatives/D4 物理拒写面);受保护面 pre/post 摘要取 harness 自身快照
+/// (逐 attempt digest 聚合,非工件)。
 fn task11_protected_writes_cell(
     env: &MatrixEnvironment,
     write_matrix: &Task11WriteMatrix,
 ) -> Result<EvidenceCell, LiveMatrixFailure> {
     fp_enter_phase("t11-boundary", "protected_writes", "fresh");
-    let (artifact_path, artifact) = latest_task11_coding_probe_artifact(env)?;
-    let negatives = artifact
-        .get("negatives")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let all_6c_refused = !negatives.is_empty()
-        && negatives.iter().all(|attempt| {
+    let all_matrix_refused = !write_matrix.attempts.is_empty()
+        && write_matrix.attempts.iter().all(|attempt| {
             attempt.get("outcome").and_then(Value::as_str) == Some("refused")
                 && attempt
-                    .get("evidence")
+                    .get("refusal_text")
                     .and_then(Value::as_str)
-                    .is_some_and(|evidence| !evidence.trim().is_empty())
+                    .is_some_and(|text| !text.trim().is_empty())
+                && attempt.get("digest_before") == attempt.get("digest_after")
         });
-    let all_matrix_refused = write_matrix.attempts.iter().all(|attempt| {
-        attempt.get("outcome").and_then(Value::as_str) == Some("refused")
-            && attempt
-                .get("refusal_text")
-                .and_then(Value::as_str)
-                .is_some_and(|text| !text.trim().is_empty())
-            && attempt.get("digest_before") == attempt.get("digest_after")
-    });
-    // 6c 工件的 D4(受保护面 pre/post 摘要;缺证据=哨兵,现场断言红)。
-    let d4 = artifact.get("d4").cloned().unwrap_or(Value::Null);
-    let protected_digest_before = d4
-        .get("protected_pre_digest")
-        .and_then(Value::as_str)
-        .unwrap_or("evidence-missing#protected_digest_before")
-        .to_string();
-    let protected_digest_after = d4
-        .get("protected_post_digest")
-        .and_then(Value::as_str)
-        .unwrap_or("evidence-missing#protected_digest_after")
-        .to_string();
-    let flag = all_6c_refused && all_matrix_refused;
+    // 受保护面 pre/post 摘要:harness 自身快照(组装层逐 attempt digest
+    // 聚合;组装层已强制每条 before==after,聚合相等=保护面零漂移)。
+    let aggregate_digest = |field: &str| {
+        write_matrix
+            .attempts
+            .iter()
+            .map(|attempt| {
+                attempt
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .unwrap_or("evidence-missing")
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+    let protected_digest_before = aggregate_digest("digest_before");
+    let protected_digest_after = aggregate_digest("digest_after");
+    let flag = all_matrix_refused;
     fp(
         "t11_protected_writes_verdict",
         format_args!(
-            "all_refused={flag} matrix_attempts={} 6c_negatives={}",
+            "all_refused={flag} matrix_attempts={}",
             write_matrix.attempts.len(),
-            negatives.len()
         ),
     );
     let mut events = vec![json!({
@@ -1658,9 +1651,8 @@ fn task11_protected_writes_cell(
             "protected_writes_all_refused_by_os_or_native_policy": flag,
             "protected_digest_before": protected_digest_before,
             "protected_digest_after": protected_digest_after,
-            "attempt_count": write_matrix.attempts.len() + negatives.len(),
+            "attempt_count": write_matrix.attempts.len(),
             "write_matrix_fixture": write_matrix.fixture_base.display().to_string(),
-            "probe_artifact": artifact_path.display().to_string(),
         },
     })];
     // 逐条 attempt 留证(拒绝原文+digest);extension/MCP 通道探针在沙箱内
@@ -1688,7 +1680,9 @@ fn task11_protected_writes_cell(
             }));
         }
     }
-    // availability `--version` 另记:6c 工件的真实版本探测(argv+结果)。
+    // availability `--version` 另记:探针工件的真实版本探测(argv+结果;
+    // v2 工件仍携带该字段,与退役的物理拒写面无关)。
+    let (artifact_path, artifact) = latest_task11_coding_probe_artifact(env)?;
     events.push(json!({
         "ts": task11_now_ts(),
         "event": {
