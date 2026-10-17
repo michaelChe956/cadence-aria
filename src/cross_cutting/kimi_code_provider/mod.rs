@@ -378,6 +378,11 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         .map_err(|error| {
             ProviderAdapterError::parse_error(error.to_string(), String::new(), String::new())
         })?;
+        // 版本兼容门(既有 direct start 契约,微修复轮 2 恢复):守卫先行,
+        // 版本探测紧随——CLI 版本低于兼容线或 --version 不可解析时在
+        // adapter 层 fail-closed,不推迟到 ACP 握手。
+        let version = probe_kimi_version(&self.command).await;
+        ensure_kimi_version_compatible(&version)?;
         let args = self.build_args();
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let process = ProcessManager::spawn(
