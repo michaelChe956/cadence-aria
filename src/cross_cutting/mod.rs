@@ -38,6 +38,8 @@ pub use provider_boundary::{
 };
 pub mod provider_capabilities;
 pub mod provider_context_builder;
+// 批2 Task 3:统一白名单环境构造器与 trust 发现一致性(§环境精确合同)。
+pub mod provider_environment;
 pub mod provider_execution;
 pub mod provider_health;
 pub mod provider_registry;

@@ -587,10 +587,9 @@ fn now_millis() -> u64 {
 }
 
 fn home_from_env() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .filter(|home| home.is_absolute())
+    // 批2 Task 3:trust 发现与环境构造器同源(owner home 解析单一入口),
+    // 禁止两处各自解析造成 HOME/CODEX_HOME 发现漂移。
+    crate::cross_cutting::provider_environment::resolve_trusted_owner_home_from_env()
 }
 
 /// Temp-file + rename atomic text write, mirroring `json_store::write_json`.

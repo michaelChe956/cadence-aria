@@ -292,6 +292,11 @@ pub(crate) fn provider_child_exit_error(message: String) -> ProviderAdapterError
 pub struct ProcessManager;
 
 impl ProcessManager {
+    /// 批2 Task 3(§环境精确合同):统一 env_clear——spawn 不再隐式继承
+    /// 宿主环境;冻结白名单环境(provider_environment::build_provider_
+    /// environment 产物)经 env_vars 既有 env map 传输注入。与
+    /// spawn_isolated 同一语义(engine T11/T12 接线前生产调用方传
+    /// 空 map 即显式空环境,fail-closed)。
     pub async fn spawn(
         command: &str,
         args: &[&str],
@@ -299,9 +304,10 @@ impl ProcessManager {
         env_vars: &BTreeMap<String, String>,
         _cancel: CancellationToken,
     ) -> Result<ManagedProcess, ProviderAdapterError> {
-        Self::spawn_with_environment(command, args, working_dir, env_vars, true).await
+        Self::spawn_with_environment(command, args, working_dir, env_vars).await
     }
 
+    /// 兼容别名:与 spawn 同一 env_clear 语义(既有调用方零迁移)。
     pub async fn spawn_isolated(
         command: &str,
         args: &[&str],
@@ -309,7 +315,7 @@ impl ProcessManager {
         env_vars: &BTreeMap<String, String>,
         _cancel: CancellationToken,
     ) -> Result<ManagedProcess, ProviderAdapterError> {
-        Self::spawn_with_environment(command, args, working_dir, env_vars, false).await
+        Self::spawn_with_environment(command, args, working_dir, env_vars).await
     }
 
     async fn spawn_with_environment(
@@ -317,16 +323,15 @@ impl ProcessManager {
         args: &[&str],
         working_dir: &Path,
         env_vars: &BTreeMap<String, String>,
-        inherit_environment: bool,
     ) -> Result<ManagedProcess, ProviderAdapterError> {
         if !command_is_resolvable(command, working_dir, env_vars) {
             return Err(command_missing(command));
         }
 
+        // 批2 Task 3:统一 env_clear(§环境精确合同)——无隐式宿主继承,
+        // 白名单键值只经 env_vars 显式注入。
         let mut command_builder = Command::new(command);
-        if !inherit_environment {
-            command_builder.env_clear();
-        }
+        command_builder.env_clear();
         command_builder
             .args(args)
             .current_dir(working_dir)
@@ -473,10 +478,11 @@ fn command_is_resolvable(
 }
 
 fn path_env(env_vars: &BTreeMap<String, String>) -> Option<OsString> {
+    // 批2 Task 3:不回退未冻结宿主 PATH——env_vars 无 PATH 即显式缺工具
+    // (command_missing),绝不解析 Aria 进程自身 PATH。
     env_vars
         .get("PATH")
         .map(OsString::from)
-        .or_else(|| std::env::var_os("PATH"))
 }
 
 fn command_missing(command: &str) -> ProviderAdapterError {
@@ -574,6 +580,69 @@ mod tests {
 
         let status = process.child.wait().await.expect("wait fixture");
         assert!(status.success());
+    }
+
+    /// 批2 Task 3:spawn 不隐式继承宿主环境——子进程只看到显式传入的键。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_does_not_implicitly_inherit_host_environment() {
+        use tokio::io::{AsyncRead, AsyncReadExt};
+
+        let root = std::path::Path::new("/tmp/aria-bug45/t3");
+        fs::create_dir_all(root).expect("create t3 fixture root");
+        let dir = tempfile::tempdir_in(root).expect("t3 fixture dir");
+        let script = dir.path().join("print-env-keys");
+        fs::write(&script, "#!/bin/sh\nenv | cut -d= -f1 | sort\n").expect("write fixture");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
+            .expect("chmod fixture");
+
+        let env = BTreeMap::from([
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("ARIA_T3_MARKER".to_string(), "1".to_string()),
+        ]);
+        let mut process = ProcessManager::spawn(
+            &script.to_string_lossy(),
+            &[],
+            dir.path(),
+            &env,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn key printer fixture");
+
+        let mut stdout = String::new();
+        let mut reader = std::pin::pin!(process.stdout);
+        reader.read_to_string(&mut stdout).await.expect("read keys");
+        let _ = process.child.wait().await.expect("wait fixture");
+        // /bin/sh 自身会补 PWD/SHLVL/_ 等 shell 运行时键(非继承注入),
+        // 排除后必须与显式传入键集完全一致。
+        let keys: Vec<&str> = stdout
+            .lines()
+            .filter(|key| !matches!(*key, "PWD" | "SHLVL" | "_" | "OLDPWD"))
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["ARIA_T3_MARKER", "PATH"],
+            "spawn 后子进程必须只看到显式传入的环境键",
+        );
+    }
+
+    /// 批2 Task 3:env_vars 无 PATH 时不回退未冻结宿主 PATH——裸命令显式
+    /// 缺工具(command_missing),绝不解析宿主 PATH。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_without_path_does_not_fall_back_to_host_path() {
+        let result = ProcessManager::spawn(
+            "sh",
+            &["-c", "exit 0"],
+            &std::env::current_dir().expect("cwd"),
+            &BTreeMap::new(),
+            CancellationToken::new(),
+        )
+        .await;
+
+        let error = result.expect_err("无 PATH 的裸命令必须显式缺工具");
+        assert_eq!(error.code, ProviderErrorCode::ProviderCommandMissing);
     }
 }
 

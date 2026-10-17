@@ -191,6 +191,10 @@ fn bridge_streaming_input(
         tool_policy,
         audit_sink,
         structured_output_contract: None,
+        // 批2 Task 3(§环境精确合同):同步旁路不隐式继承宿主环境——最终
+        // 环境只经 env_vars 既有传输注入(build_provider_environment
+        // 产物,engine T11/T12 接线);ProcessManager 已统一 env_clear,
+        // 本桥不再存在隐式继承面。
         env_vars: std::collections::BTreeMap::new(),
         timeout_secs: input.timeout,
         baseline_tree: None,

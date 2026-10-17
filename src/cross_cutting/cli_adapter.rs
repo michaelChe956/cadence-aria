@@ -84,10 +84,16 @@ impl ProviderAdapter for CliProviderAdapter {
                 sink: Arc::clone(sink),
             });
         let stream_log_dir = input.provider_stream_log_dir.as_deref().map(Path::new);
+        // 批2 Task 3(§环境精确合同):同步 CLI 旁路不隐式全继承——
+        // AdapterInput 无 env 传输字段,fail-closed 为显式空环境
+        // (env_clear);engine T11/T12 接线后由受信 launch 注入
+        // build_provider_environment 产物。
+        let frozen_env_transport: BTreeMap<String, String> = BTreeMap::new();
         let raw = run_command_capture_with_stream(
             &command,
             worktree_path,
             stream_log_dir,
+            Some(&frozen_env_transport),
             Some(&input.prompt),
             Some(Duration::from_secs(input.timeout)),
             stream_context,
@@ -195,7 +201,36 @@ pub fn run_command_capture(
     stdin_text: Option<&str>,
     timeout: Option<Duration>,
 ) -> Result<CapturedCommandOutput, ProviderAdapterError> {
-    run_command_capture_with_stream(command_spec, current_dir, None, stdin_text, timeout, None)
+    run_command_capture_with_stream(
+        command_spec,
+        current_dir,
+        None,
+        None,
+        stdin_text,
+        timeout,
+        None,
+    )
+}
+
+/// 批2 Task 3:同步 CLI 旁路的冻结环境捕获入口——env_clear 后只注入给定
+/// 键值(build_provider_environment 产物经既有 env map 传输到达),不隐式
+/// 全继承宿主环境。
+pub fn run_command_capture_with_environment(
+    command_spec: &CommandSpec,
+    current_dir: Option<&Path>,
+    environment: &BTreeMap<String, String>,
+    stdin_text: Option<&str>,
+    timeout: Option<Duration>,
+) -> Result<CapturedCommandOutput, ProviderAdapterError> {
+    run_command_capture_with_stream(
+        command_spec,
+        current_dir,
+        None,
+        Some(environment),
+        stdin_text,
+        timeout,
+        None,
+    )
 }
 
 /// `current_dir` 是 provider 子进程的工作目录（目标仓库），`stream_log_dir` 是
@@ -205,6 +240,7 @@ fn run_command_capture_with_stream(
     command_spec: &CommandSpec,
     current_dir: Option<&Path>,
     stream_log_dir: Option<&Path>,
+    environment: Option<&BTreeMap<String, String>>,
     stdin_text: Option<&str>,
     timeout: Option<Duration>,
     stream_context: Option<OutputStreamContext>,
@@ -214,6 +250,13 @@ fn run_command_capture_with_stream(
     command.args(&command_spec.args);
     if let Some(current_dir) = current_dir {
         command.current_dir(current_dir);
+    }
+    // 批2 Task 3(§环境精确合同):冻结白名单环境——env_clear 后只注入给定
+    // 键值,不隐式全继承;None 仅供平台侧能力探针(provider_capabilities,
+    // T9 换代重写面)沿既有宿主继承,provider 子进程/同步旁路必须传 Some。
+    if let Some(env) = environment {
+        command.env_clear();
+        command.envs(env);
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     if stdin_text.is_some() {

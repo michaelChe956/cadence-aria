@@ -9,6 +9,12 @@ use tokio_util::sync::CancellationToken;
 
 use super::ProcessManager;
 
+/// 批2 Task 3:spawn 不再隐式继承宿主环境——进程树 fixture 内部以裸名
+/// 调用 sh/sleep,测试须显式携带 PATH(与 boundary 用例同款注入)。
+fn unix_path_env() -> BTreeMap<String, String> {
+    BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())])
+}
+
 struct ProcessTreeFixture {
     command: PathBuf,
     parent_pid: PathBuf,
@@ -105,7 +111,7 @@ async fn spawn_and_wait(fixture: &ProcessTreeFixture) {
         &command,
         &[],
         fixture.command.parent().expect("fixture root"),
-        &BTreeMap::new(),
+        &unix_path_env(),
         CancellationToken::new(),
     )
     .await
@@ -132,7 +138,7 @@ async fn unix_managed_process_wait_uses_tokio_cancel_safe_child() {
         &command,
         &[],
         root.path(),
-        &BTreeMap::new(),
+        &unix_path_env(),
         CancellationToken::new(),
     )
     .await
@@ -151,7 +157,7 @@ async fn successful_wait_does_not_start_drop_reaper() {
         &command,
         &[],
         root.path(),
-        &BTreeMap::new(),
+        &unix_path_env(),
         CancellationToken::new(),
     )
     .await
@@ -176,7 +182,7 @@ async fn cancelled_wait_can_still_terminate_original_group() {
         &command,
         &[],
         root.path(),
-        &BTreeMap::new(),
+        &unix_path_env(),
         CancellationToken::new(),
     )
     .await
@@ -205,7 +211,7 @@ async fn dropping_managed_process_child_is_non_blocking() {
         &command,
         &[],
         root.path(),
-        &BTreeMap::new(),
+        &unix_path_env(),
         CancellationToken::new(),
     )
     .await
@@ -258,7 +264,7 @@ async fn task_panic_drops_and_kills_managed_process_group() {
                 &command_text,
                 &[],
                 command.parent().expect("fixture root"),
-                &BTreeMap::new(),
+                &unix_path_env(),
                 CancellationToken::new(),
             )
             .await
