@@ -527,6 +527,30 @@ impl super::CodingAttemptStore {
                 .join(format!("{role_run_id}.json")),
         )
     }
+
+    /// T14:attempt 的 code_delivery 资源窗 scope 键枚举(终止/崩溃恢复
+    /// 驱动消费;engine `begin_coder_delivery_scope` 的 stale 残留 sweep
+    /// 同源)。scope_id 形态与 engine
+    /// `CodingWorkspaceEngine::coder_delivery_scope_id` 同源:
+    /// `code-delivery-<attempt_id>`;store 生产根 `<aria>/provider-resources`
+    /// 与 reviewer 窗口/通道守卫共用约定(code_review.rs 锚定)。
+    pub(crate) fn coder_delivery_scope_keys_for_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<crate::cross_cutting::provider_resources::ResourceScopeKey>, ProductStoreError>
+    {
+        let expected_scope_id = format!("code-delivery-{attempt_id}");
+        let resource_store_root = self.paths().root().join("provider-resources");
+        Ok(
+            crate::product::provider_resource_store::ProviderResourceStore::new(
+                &resource_store_root,
+            )
+            .scope_keys()?
+            .into_iter()
+            .filter(|key| key.scope_id == expected_scope_id)
+            .collect(),
+        )
+    }
 }
 
 fn validate_retry_metadata(retry: &CodingRoleRunRetryMetadata) -> Result<(), ProductStoreError> {

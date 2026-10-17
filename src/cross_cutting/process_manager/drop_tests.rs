@@ -344,3 +344,122 @@ async fn lcg_t10_host_spawn_child_tree_is_killed_on_drop() {
     drop(process);
     assert_process_tree_stopped(&fixture).await;
 }
+
+/// T14:Coder code_delivery 资源窗进程面——经 `start_owned_process` 登记
+/// 的 run-owned 进程树在 quiesce 后以 /proc 证明真实静止(killpg 只是
+/// 其中一步);未登记的用户进程与文件不受影响;登记 scratch 清理、
+/// 未登记文件保留;`aria.worktree` 协调标签由 scope 注入(硬约束2)。
+#[tokio::test]
+async fn t14_code_delivery_scope_quiesce_stops_owned_process_tree_only() {
+    use crate::cross_cutting::provider_resources::{
+        OwnedResourceKind, OwnedResourceSpec, PROVIDER_RESOURCE_LABEL_WORKTREE,
+        ProviderRunResourceScope, QuiesceOutcome, ResourceScopeKey, StartedResourceIdentity,
+    };
+
+    let base = tempdir().expect("tempdir");
+    let store_root = base.path().join("resource-store");
+    let private_root = base.path().join("private-root");
+    fs::create_dir_all(&private_root).expect("private root");
+    let key = ResourceScopeKey {
+        scope_id: "code-delivery-coding_attempt_0001".to_string(),
+        run_id: "coding_role_run_0001".to_string(),
+        boot_identity: "aria-engine-drop-test".to_string(),
+    };
+    let scope =
+        ProviderRunResourceScope::open_for_recovery(&key, None, &private_root, &store_root, None)
+            .expect("open code_delivery scope")
+            .with_worktree_key("/drop-test-worktree");
+
+    // 登记的 run-owned scratch + 未登记用户文件(同在私有根下)。
+    let scratch = private_root.join("scratch");
+    fs::create_dir_all(&scratch).expect("scratch");
+    fs::write(scratch.join("temp.txt"), "run-owned\n").expect("temp artifact");
+    let user_file = private_root.join("user-notes.txt");
+    fs::write(&user_file, "user file\n").expect("user file");
+    let canonical_scratch = scratch.canonicalize().expect("canonical scratch");
+    let scratch_reservation = scope
+        .reserve_owned_resource(
+            &OwnedResourceSpec::new(
+                "coder-run-scratch",
+                OwnedResourceKind::Directory,
+                "code_delivery run-owned scratch directory",
+            )
+            .with_private_path(canonical_scratch.clone()),
+        )
+        .expect("reserve scratch");
+    scope
+        .confirm_started_resource(
+            &scratch_reservation,
+            StartedResourceIdentity::directory(&canonical_scratch),
+        )
+        .expect("confirm scratch");
+
+    // 登记的 run-owned 进程树(真实 sh 孙进程)。
+    let fixture = process_tree_fixture(base.path());
+    let command = fixture.command.to_string_lossy().to_string();
+    let (reservation, mut managed) = scope
+        .start_owned_process(
+            OwnedResourceSpec::new(
+                "coder-worker",
+                OwnedResourceKind::Process,
+                "coder worker process tree",
+            ),
+            &command,
+            &[],
+            fixture.command.parent().expect("fixture root"),
+            &unix_path_env(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn owned process tree");
+    wait_for_path(&fixture.parent_pid).await;
+    wait_for_path(&fixture.grandchild_pid).await;
+
+    // 未登记的用户进程必须不受资源窗静止影响。
+    let mut outsider = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn unregistered user process");
+    let outsider_pid = outsider.id() as i32;
+
+    // 硬约束2:aria.worktree 协调标签由 scope 注入。
+    let labels = reservation.reserved_labels().clone();
+    assert_eq!(
+        labels
+            .get(PROVIDER_RESOURCE_LABEL_WORKTREE)
+            .map(String::as_str),
+        Some("/drop-test-worktree"),
+        "aria.worktree 协调标签必须由 scope 注入(T19 quiesce_targets 枚举依据)"
+    );
+
+    // 先 quiesce(静止证明)再清:
+    let proof = match scope.quiesce_scope().await.expect("quiesce delivery scope") {
+        QuiesceOutcome::Quiescent(proof) => proof,
+        QuiesceOutcome::RecoveryRequired(unknown) => {
+            panic!(
+                "owned process tree must quiesce: {} {}",
+                unknown.reason, unknown.detail
+            )
+        }
+    };
+    // 组长收割(quiesce 只发信号;不收割则僵尸态不代表存活但会污染
+    // /proc 断言——收割后以真实消亡断言)。
+    let _ = managed.child.wait().await;
+    assert_process_tree_stopped(&fixture).await;
+    assert!(
+        process_state(outsider_pid).is_some(),
+        "未登记用户进程不得被资源窗静止波及"
+    );
+    scope
+        .cleanup_owned_scope(&proof)
+        .expect("cleanup delivery scope");
+    assert!(!scratch.exists(), "登记 run-owned scratch 必须清理");
+    assert!(
+        user_file.exists(),
+        "私有根内未登记文件不得清理(保留≠忽略未知 resource)"
+    );
+
+    // 测试卫生:收尾未登记进程(owned 子进程已在上方收割)。
+    let _ = outsider.kill();
+    let _ = outsider.wait();
+}

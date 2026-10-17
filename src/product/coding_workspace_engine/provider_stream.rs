@@ -46,6 +46,18 @@ pub(crate) struct ProviderStreamOutcome {
     pub(crate) structured_output: StructuredOutputState,
 }
 
+/// T14:code_delivery 资源窗错误统一映射(Store Io 载体,与 reviewer
+/// scope 面同款;classify_provider_failure 对 Store 非重试,恢复停等
+/// 不触发技术重试)。
+fn coder_delivery_error(
+    context: &str,
+    error: impl std::fmt::Display,
+) -> CodingWorkspaceEngineError {
+    CodingWorkspaceEngineError::Store(ProductStoreError::Io(format!(
+        "coder_delivery_{context}: {error}"
+    )))
+}
+
 impl CodingWorkspaceEngine {
     /// 供外层重试协调器使用的单次调用入口；stream 层不在此路径创建失败门禁。
     #[allow(dead_code)]
@@ -107,6 +119,191 @@ impl CodingWorkspaceEngine {
         Ok(())
     }
 
+    // ---------- T14:Coder code_delivery 资源窗与中断保留 ----------
+
+    /// T14:Coder code_delivery 资源窗 scope_id(kind=code_delivery,绑定
+    /// attempt;run 维度=真实 role run id,boot 维度=本平台进程身份——
+    /// 三元组即 T5 资源 store 的 durable 归属,不另复制接口)。
+    /// 普通 CLI/MCP/ACP 三入口在 engine 收敛于同一 retry cycle,同归属。
+    pub(crate) fn coder_delivery_scope_id(attempt: &CodingExecutionAttempt) -> String {
+        format!("code-delivery-{}", attempt.id)
+    }
+
+    /// T14:run-owned 私有根——`<provider-streams>/code-delivery/`(与证据
+    /// 日志同区但严格分离;cleanup 只删本根下登记的严格子路径,证据日志
+    /// 与 worktree 源码/dirty/staged/untracked/ignored/commit 永不触及)。
+    pub(crate) fn coder_delivery_private_root(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> std::path::PathBuf {
+        self.store
+            .provider_stream_log_root(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .join("code-delivery")
+    }
+
+    /// T14:开窗(Preparing→Running):绑定真实 role_run/run_id;stale
+    /// boot 残留先收口(open_for_recovery→quiesce→cleanup;未知 writer
+    /// 停等=Err,fail-closed 不开工);协调标签 aria.worktree 由 scope
+    /// 注入(硬约束2:T19 Reviewer 窗口 quiesce_targets 据此枚举兄弟
+    /// Coder);本轮 run-owned scratch 目录先创建/canonicalize/登记
+    /// (预留→确认)。
+    pub(crate) async fn begin_coder_delivery_scope(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role_run: &CodingRoleRun,
+        worktree_path: &Path,
+    ) -> Result<
+        crate::cross_cutting::provider_resources::ProviderRunResourceScope,
+        CodingWorkspaceEngineError,
+    > {
+        use crate::cross_cutting::provider_resources::{
+            OwnedResourceKind, OwnedResourceSpec, ResourceScopeKey, StartedResourceIdentity,
+        };
+        let scope_id = Self::coder_delivery_scope_id(attempt);
+        let private_root = self.coder_delivery_private_root(attempt);
+        std::fs::create_dir_all(&private_root)
+            .map_err(|error| coder_delivery_error("private_root_create_failed", error))?;
+        let key = ResourceScopeKey {
+            scope_id: scope_id.clone(),
+            run_id: role_run.id.clone(),
+            boot_identity: format!("aria-engine-{}", std::process::id()),
+        };
+        // stale boot/前 run 残留先收口(崩溃/收口失败后的下一次开窗):
+        // 未知 writer 停等=Err,fail-closed 不开工(不动 durable)。
+        self.recover_coder_delivery_scope_keys(attempt, &private_root, Some(&key))
+            .await?;
+        // 协调标签(硬约束2):aria.worktree=canonical worktree 的
+        // tree_key,由 scope 注入(Reviewer 窗口 quiesce_targets 枚举依据)。
+        let worktree = worktree_path
+            .canonicalize()
+            .map_err(|error| coder_delivery_error("worktree_not_resolvable", error))?;
+        let tree_key = crate::product::reviewer_window_store::tree_key_of(&worktree);
+        let scope =
+            crate::cross_cutting::provider_resources::ProviderRunResourceScope::open_for_recovery(
+                &key,
+                None,
+                &private_root,
+                &self.coder_delivery_resource_store_root(),
+                None,
+            )
+            .map_err(|error| coder_delivery_error("scope_open_failed", error))?
+            .with_worktree_key(&tree_key);
+        // Preparing→Running:本轮 run-owned scratch 先创建/canonicalize/
+        // 登记(预留→确认;kind=code_delivery 业务标签)。
+        let scratch = private_root.join("scratch");
+        std::fs::create_dir_all(&scratch)
+            .map_err(|error| coder_delivery_error("scratch_create_failed", error))?;
+        let canonical_scratch = scratch
+            .canonicalize()
+            .map_err(|error| coder_delivery_error("scratch_not_canonical", error))?;
+        let reservation = scope
+            .reserve_owned_resource(
+                &OwnedResourceSpec::new(
+                    "coder-run-scratch",
+                    OwnedResourceKind::Directory,
+                    "code_delivery run-owned scratch directory",
+                )
+                .with_private_path(canonical_scratch.clone())
+                .with_label("kind", "code_delivery"),
+            )
+            .map_err(|error| coder_delivery_error("scratch_reserve_failed", error))?;
+        scope
+            .confirm_started_resource(
+                &reservation,
+                StartedResourceIdentity::directory(&canonical_scratch),
+            )
+            .map_err(|error| coder_delivery_error("scratch_confirm_failed", error))?;
+        Ok(scope)
+    }
+
+    /// T14:收口(Quiescing→Reconciled→Closed)——先 quiesce(静止证明)
+    /// 再 cleanup(只清登记 run-owned;重试同 worktree 读中断改动,不调
+    /// Reviewer baseline restore);RecoveryRequired=显式恢复等待(Err
+    /// 停等,durable 记录与游标不动)。重复收口幂等(登记项缺失=已清)。
+    pub(crate) async fn recycle_coder_delivery_scope(
+        &self,
+        scope: &crate::cross_cutting::provider_resources::ProviderRunResourceScope,
+        note: &str,
+    ) -> Result<(), CodingWorkspaceEngineError> {
+        use crate::cross_cutting::provider_resources::QuiesceOutcome;
+        match scope.quiesce_scope().await {
+            Ok(QuiesceOutcome::Quiescent(proof)) => scope
+                .cleanup_owned_scope(&proof)
+                .map_err(|error| coder_delivery_error(&format!("cleanup_failed[{note}]"), error)),
+            Ok(QuiesceOutcome::RecoveryRequired(unknown)) => Err(coder_delivery_error(
+                &format!("quiesce_recovery_required[{note}]"),
+                format!(
+                    "{} — {};停等恢复(不清理、不动 durable,manifest {} 项)",
+                    unknown.reason,
+                    unknown.detail,
+                    unknown.manifest.len()
+                ),
+            )),
+            Err(error) => Err(coder_delivery_error(
+                &format!("quiesce_failed[{note}]"),
+                error,
+            )),
+        }
+    }
+
+    /// T14:终止/崩溃恢复驱动——枚举 attempt 的全部 code_delivery scope
+    /// (任意 boot/run)并逐一收口;返回收口数。未知 writer 停等=Err
+    /// (首个失败即返回,余下不动,可重入幂等重试)。runner/socket 终止
+    /// 入口的接线由共享集成人串行落地(brief Step 3)。
+    pub(crate) async fn recover_coder_delivery_scopes_for_attempt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<usize, CodingWorkspaceEngineError> {
+        let private_root = self.coder_delivery_private_root(attempt);
+        std::fs::create_dir_all(&private_root)
+            .map_err(|error| coder_delivery_error("private_root_create_failed", error))?;
+        self.recover_coder_delivery_scope_keys(attempt, &private_root, None)
+            .await
+    }
+
+    /// T14:资源 store 生产根(与 reviewer 窗口/通道守卫共用约定,
+    /// code_review.rs 锚定的 `<aria>/provider-resources`)。
+    fn coder_delivery_resource_store_root(&self) -> std::path::PathBuf {
+        self.store
+            .paths()
+            .root()
+            .join(super::code_review::PROVIDER_RESOURCE_STORE_DIR)
+    }
+
+    /// T14:枚举匹配 scope_id 的全部 scope 键(exclude 指定时跳过该键,
+    /// 即开窗 sweep 排除本轮键)并逐一收口。
+    async fn recover_coder_delivery_scope_keys(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        private_root: &Path,
+        exclude: Option<&crate::cross_cutting::provider_resources::ResourceScopeKey>,
+    ) -> Result<usize, CodingWorkspaceEngineError> {
+        let store_root = self.coder_delivery_resource_store_root();
+        let mut recovered = 0usize;
+        for key in self
+            .store
+            .coder_delivery_scope_keys_for_attempt(&attempt.id)
+            .map_err(CodingWorkspaceEngineError::Store)?
+        {
+            if exclude.is_some_and(|current| current == &key) {
+                continue;
+            }
+            let scope =
+                crate::cross_cutting::provider_resources::ProviderRunResourceScope::open_for_recovery(
+                    &key,
+                    None,
+                    private_root,
+                    &store_root,
+                    None,
+                )
+                .map_err(|error| coder_delivery_error("stale_scope_open_failed", error))?;
+            self.recycle_coder_delivery_scope(&scope, "recover_stale_boot")
+                .await?;
+            recovered += 1;
+        }
+        Ok(recovered)
+    }
+
     /// 策略会话审计接线（Task 3.2 → Task 7 统一）：为 input 绑定 run-bound
     /// durable sink 并分配新的 `role_run_seq`；gateway validated input 同步重建。
     /// 每次 provider run 重新分配（重试 run 独立审计文件）。Task 7 起不因
@@ -134,8 +331,7 @@ impl CodingWorkspaceEngine {
             // Reviewer 以 deny 策略会话身份获得 sink,矩阵退役后改为按角色
             // 显式保留(非 LC legacy 直连同分配;LC prepared launch 的 sink
             // 已在 gateway prepare 阶段绑定,不重复分配)。
-            let is_reviewer_run =
-                input.role == crate::protocol::contracts::AdapterRole::Reviewer;
+            let is_reviewer_run = input.role == crate::protocol::contracts::AdapterRole::Reviewer;
             if (!is_lc_run && !is_reviewer_run) || input.audit_sink.is_some() {
                 return Ok((input, validated));
             }

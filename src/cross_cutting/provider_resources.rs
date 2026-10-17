@@ -61,7 +61,11 @@ use crate::product::provider_resource_store::ProviderResourceStore;
 pub(crate) const PROVIDER_RESOURCE_LABEL_SCOPE: &str = "aria.scope_id";
 /// 归属标签:run 维度。
 pub(crate) const PROVIDER_LABEL_RUN: &str = "aria.run_id";
-/// 归属标签:Reviewer 窗口维度(仅 Reviewer 冻结合同绑定)。
+/// 归属标签:协调 scope 归属 worktree(T19 已预留消费合同——Reviewer
+/// 窗口 quiesce_targets 按 `aria.worktree`==tree_key 枚举兄弟 Coder/
+/// terminal scope;T14 Coder code_delivery 登记时由 scope 注入,
+/// 调用方伪造 aria.* 即拒绝)。
+pub(crate) const PROVIDER_RESOURCE_LABEL_WORKTREE: &str = "aria.worktree";
 pub(crate) const PROVIDER_RESOURCE_LABEL_WINDOW: &str = "aria.window_id";
 
 /// quiesce 等待进程组真实静止的有界窗口(测试缩短保持回归秒级;
@@ -490,6 +494,8 @@ fn quiesce_recovery(
 pub(crate) struct ProviderRunResourceScope {
     key: ResourceScopeKey,
     review_window_id: Option<String>,
+    /// T14:协调归属 worktree(tree_key;预留时注入 aria.worktree)。
+    worktree_key: Option<String>,
     /// T3 冻结私有根(open 时 canonical 一次;清理目标必须仍在其下)。
     private_root: PathBuf,
     store: ProviderResourceStore,
@@ -557,10 +563,21 @@ impl ProviderRunResourceScope {
         Ok(Self {
             key,
             review_window_id,
+            worktree_key: None,
             private_root: canonical_root,
             store: ProviderResourceStore::new(store_root),
             engine_observer,
         })
+    }
+
+    /// T14:协调归属——绑定 worktree(tree_key)。`aria.worktree` 归属
+    /// 标签由 scope 在预留时注入(调用方伪造 aria.* 即拒绝);必须在
+    /// 任何 reserve 之前调用——此前已落盘的登记记录不回填该标签。
+    /// 消费方:T19 Reviewer 窗口 quiesce_targets 按
+    /// `aria.worktree`==tree_key 枚举兄弟 Coder scope。
+    pub(crate) fn with_worktree_key(mut self, tree_key: &str) -> Self {
+        self.worktree_key = Some(tree_key.to_string());
+        self
     }
 
     pub(crate) fn key(&self) -> &ResourceScopeKey {
@@ -577,6 +594,12 @@ impl ProviderRunResourceScope {
         labels.insert(PROVIDER_LABEL_RUN.to_string(), self.key.run_id.clone());
         if let Some(window) = &self.review_window_id {
             labels.insert(PROVIDER_RESOURCE_LABEL_WINDOW.to_string(), window.clone());
+        }
+        if let Some(tree_key) = &self.worktree_key {
+            labels.insert(
+                PROVIDER_RESOURCE_LABEL_WORKTREE.to_string(),
+                tree_key.clone(),
+            );
         }
         labels
     }
@@ -1291,6 +1314,52 @@ mod tests {
 
     fn unix_path_env() -> BTreeMap<String, String> {
         BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())])
+    }
+
+    /// T14:aria.worktree 协调标签由 scope 注入(硬约束2——T19
+    /// quiesce_targets 据此枚举兄弟 Coder;调用方伪造 aria.* 的拒绝
+    /// 由既有钉测覆盖)。
+    #[test]
+    fn with_worktree_key_injects_coordination_label() {
+        let env = scope_env();
+        let execution = frozen_contract(
+            TrustedProviderRole::Coder,
+            "run_wt_1",
+            "code-delivery-coding_attempt_0001",
+            None,
+        );
+        let scope =
+            open_scope(&env, &execution, "boot_wt_1", None).with_worktree_key("/wt/tree-key-a");
+        let scratch = env.private_root.join("scratch");
+        fs::create_dir_all(&scratch).expect("create scratch");
+        let reservation = scope
+            .reserve_owned_resource(
+                &OwnedResourceSpec::new(
+                    "coder-run-scratch",
+                    OwnedResourceKind::Directory,
+                    "code_delivery run-owned scratch directory",
+                )
+                .with_private_path(scratch),
+            )
+            .expect("reserve scratch");
+        let labels = reservation.reserved_labels();
+        assert_eq!(
+            labels
+                .get(PROVIDER_RESOURCE_LABEL_WORKTREE)
+                .map(String::as_str),
+            Some("/wt/tree-key-a"),
+            "aria.worktree 协调标签必须由 scope 注入(T19 quiesce_targets 枚举依据)"
+        );
+        assert_eq!(
+            labels
+                .get(PROVIDER_RESOURCE_LABEL_SCOPE)
+                .map(String::as_str),
+            Some("code-delivery-coding_attempt_0001")
+        );
+        assert_eq!(
+            labels.get(PROVIDER_LABEL_RUN).map(String::as_str),
+            Some("run_wt_1")
+        );
     }
 
     /// 引擎 fake:内存容器/网络状态,严格精确 ID+标签匹配。

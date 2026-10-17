@@ -261,6 +261,49 @@ impl CodingWorkspaceEngine {
         &self,
         input: CoderRetryCycleInput<'_>,
     ) -> Result<ProviderRetryCycleSuccess, CodingWorkspaceEngineError> {
+        // T14:Coder code_delivery 资源窗——cycle 级持有,绑定首个真实
+        // role_run/run_id(技术重试旋转到新 run)。普通 CLI/MCP/ACP 三
+        // 入口在 engine 收敛于同一 retry cycle,同归属。
+        let attempt_id = input.attempt.id.clone();
+        let mut delivery = Some(
+            self.begin_coder_delivery_scope(
+                input.attempt,
+                &input.initial_role_run,
+                input.worktree_path,
+            )
+            .await?,
+        );
+        let result = self
+            .coder_retry_cycle_with_delivery(input, &mut delivery)
+            .await;
+        // T14:全部退出路径单点收口——先 quiesce 再清;恢复停等在成功
+        // 路径显式 Err,失败/取消路径 warn 不掩盖原始错误(durable 停等
+        // 事实留给恢复驱动;下一轮开窗 sweep 亦会重试收口)。
+        if let Some(scope) = delivery.take() {
+            if let Err(recovery) = self
+                .recycle_coder_delivery_scope(&scope, "coder_cycle_exit")
+                .await
+            {
+                if result.is_ok() {
+                    return Err(recovery);
+                }
+                tracing::warn!(
+                    attempt_id = %attempt_id,
+                    error = %recovery,
+                    "coder_delivery_scope_close_deferred_to_recovery"
+                );
+            }
+        }
+        result
+    }
+
+    /// 原 coder retry cycle 主体(`run_coder_with_retry_cycle` 委托;
+    /// `delivery` 持有当前 run 的 code_delivery 资源窗,技术重试时旋转)。
+    async fn coder_retry_cycle_with_delivery(
+        &self,
+        input: CoderRetryCycleInput<'_>,
+        delivery: &mut Option<crate::cross_cutting::provider_resources::ProviderRunResourceScope>,
+    ) -> Result<ProviderRetryCycleSuccess, CodingWorkspaceEngineError> {
         let CoderRetryCycleInput {
             attempt,
             initial_node,
@@ -280,7 +323,6 @@ impl CodingWorkspaceEngine {
         let mut role_run = self.ensure_retry_cycle_metadata(attempt, initial_role_run)?;
         // P4-a：本 cycle 内 idle 挂起计数（纯 idle 最多 2 次调用后收口）。
         let mut idle_stalls = 0u32;
-
         for attempt_no in 1..=MAX_PROVIDER_INVOCATIONS_PER_CYCLE {
             if attempt_no > 1 {
                 (node, role_run) = self
@@ -292,6 +334,18 @@ impl CodingWorkspaceEngine {
                     )
                     .await?;
             }
+            // T14:技术重试资源窗旋转——前 run scope 先收口(quiesce+
+            // cleanup;恢复停等=Err,不重试不加次数),新 run 开新
+            // scope。重试预算(MAX_PROVIDER_INVOCATIONS_PER_CYCLE)
+            // 不因窗口旋转增加(invocation 计数与资源窗解耦)。
+            if let Some(prior) = delivery.take() {
+                self.recycle_coder_delivery_scope(&prior, "coder_technical_retry_rotation")
+                    .await?;
+            }
+            *delivery = Some(
+                self.begin_coder_delivery_scope(attempt, &role_run, worktree_path)
+                    .await?,
+            );
 
             let (prompt, prompt_mode, resume_provider_session_id) = if attempt_no == 1 {
                 (
