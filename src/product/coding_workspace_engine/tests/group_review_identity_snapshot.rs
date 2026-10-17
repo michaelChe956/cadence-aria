@@ -237,6 +237,24 @@ fn group_attempt_with_completed_unit_run() -> (
     let root = tempdir().expect("tempdir");
     let worktree = root.path().join("worktree");
     std::fs::create_dir_all(&worktree).expect("worktree");
+    // 批2 T20(对齐 T19 契约):审查窗口需要 git 身份——无 .git 的 worktree
+    // 不可开窗即不可跑 review(fail-closed);fixture 补 git init+种子提交。
+    {
+        use std::process::Command as StdCommand;
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["commit", "-m", "init", "--quiet", "--allow-empty"],
+        ] {
+            let status = StdCommand::new("git")
+                .current_dir(&worktree)
+                .args(&args)
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git fixture {args:?} must succeed");
+        }
+    }
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let attempt = store
         .create_group_attempt(CreateGroupCodingAttemptInput {
@@ -863,7 +881,10 @@ async fn drive_reviewer_root_launch(
                 "root-cwd-group-node".to_string(),
                 role_run,
                 ProviderName::ClaudeCode,
-            );
+            )
+            // 批2 Task 20:Reviewer 会话必须携 ReviewerVerify 窗口合同
+            //（测试 fixture 窗口引用;生产由开窗后的调用方注入真实窗口 id）。
+            .with_review_window_id("w-t20-group-fixture");
             executor
                 .execute("root cwd group review probe")
                 .await

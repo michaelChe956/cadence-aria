@@ -563,25 +563,36 @@ impl StreamingProviderAdapter for PiProvider {
         // 「标记 superseded」仅带内 ToolPolicyWarning（🔴 无旧文件可写，不伪造
         // durable 文件），在事件通道建立后送出。
         let mut superseded_record_missing = false;
-        // Task 1.2（BOOT-04）：策略会话机制只服务 deny 意图；BootstrapExecutor
-        // marker 已在上方守卫完成结构复核，不进入策略握手/审计（自举执行器
-        // 的 durable 审计由 root recipe receipt 承担）。
-        if let Some(
-            policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
-                intent:
-                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
-            },
-        ) = input.tool_policy.as_ref()
-        {
-            let sink = input.audit_sink.clone().ok_or_else(|| {
+        // 批2 Task 20（硬约束6，codex T13 同构）：run-bound audit sink 在位
+        // 即统一 launch 审计合同——岗位纪律会话（Author deny 投影）必须
+        // 携带 sink（缺失 fail-closed 保持）；ReviewerVerify 窗口合同等
+        // 合同 run 同样走预生成 id 握手+provider_start 首行。marker 不进
+        // 本合同（BOOT-04，root recipe receipt 承担）。
+        let discipline_policy = input.tool_policy.as_ref().is_some_and(|policy| {
+            matches!(
+                policy.intent,
+                crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins
+            )
+        });
+        let audit_contract_sink = if discipline_policy {
+            Some(input.audit_sink.clone().ok_or_else(|| {
                 tool_policy_session_error("audit sink is required for policy sessions")
-            })?;
+            })?)
+        } else {
+            input.audit_sink.clone()
+        };
+        if let Some(sink) = audit_contract_sink {
+            let context_label = if discipline_policy {
+                "pi policy session"
+            } else {
+                "pi contract session"
+            };
             // 版本解析（Task 3.3）：supplier seam 优先；默认走真实 `--version` 探测
-            // （进程内缓存、有界超时），不可得则策略会话启动 fail-closed。
+            // （进程内缓存、有界超时），不可得则合同会话启动 fail-closed。
             let provider_version = match self.version_supplier.clone() {
                 Some(supplier) => supplier().map_err(tool_policy_session_error)?,
                 None => {
-                    // P2-2：策略会话版本探测走既有进程内缓存（GC9；claude/codex 同法）。
+                    // P2-2：版本探测走既有进程内缓存（GC9；claude/codex 同法）。
                     let command = self.command.clone();
                     crate::cross_cutting::streaming_provider::cached_cli_version(
                         &self.command,
@@ -596,16 +607,26 @@ impl StreamingProviderAdapter for PiProvider {
                     .map_err(tool_policy_session_error)?
                 }
             };
-            let canonical = canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy)
-                .map_err(|error| tool_policy_session_error(error.to_string()))?;
-            // resume 冻结三元组比对（Task 3.3，spawn 前）：记录缺失或 digest/version/
-            // dialect 任一不一致 → 追加 superseded 终止审计并新建会话（丢弃 resume id）。
-            let resume_id = input
-                .resume_provider_session_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(ToString::to_string);
+            let canonical = canonical_tool_policy(
+                TOOL_POLICY_PROVIDER_NAME,
+                input
+                    .tool_policy
+                    .as_ref()
+                    .expect("sink-in-place contract implies a wire policy or discipline policy"),
+            )
+            .map_err(|error| tool_policy_session_error(format!("{context_label}: {error}")))?;
+            // 批2 Task 20（RevB2T13 ⚠4 同构）：resume 三元组门只服务岗位
+            // 纪律会话；非策略合同 run 连续性由 native 会话承担。
+            let resume_id = if discipline_policy {
+                input
+                    .resume_provider_session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(ToString::to_string)
+            } else {
+                None
+            };
             if let Some(resume_id) = resume_id.as_ref() {
                 let stored = sink
                     .find_provider_start(resume_id)

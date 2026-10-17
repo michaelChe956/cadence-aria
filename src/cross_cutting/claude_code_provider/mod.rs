@@ -835,28 +835,40 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
             String,
             String,
         )> = None;
-        // Task 1.2（BOOT-04）：策略会话机制只服务 deny 意图；BootstrapExecutor
-        // marker 已在上方守卫完成结构复核，作为「有写权限的 Executor」以普通
-        // 会话运行（无 disallowedTools argv、无策略审计三元组；其 durable 审计
-        // 由 root recipe receipt 承担）。
-        if let Some(
-            policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
-                intent:
-                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
-            },
-        ) = input.tool_policy.as_ref()
-        {
-            let sink = input.audit_sink.clone().ok_or_else(|| {
+        // 批2 Task 20（硬约束6，codex T13 同构）：run-bound audit sink 在位
+        // 即统一 launch 审计合同——岗位纪律会话（Author deny 投影）必须携带
+        // sink（缺失 fail-closed 保持）；ReviewerVerify 窗口合同/其余合同
+        // run（engine attach 的 sink）同样走握手+provider_start 首行，
+        // digest 为窗口域 canonical；无 sink 的普通 Coder 会话零变化。
+        // BootstrapExecutor marker 不进本合同（BOOT-04，root recipe receipt
+        // 承担）。
+        let discipline_policy = input.tool_policy.as_ref().is_some_and(|policy| {
+            matches!(
+                policy.intent,
+                crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins
+            )
+        });
+        let audit_contract_sink = if discipline_policy {
+            Some(input.audit_sink.clone().ok_or_else(|| {
                 ProviderAdapterError::parse_error(
                     "claude policy session: audit sink is required for policy sessions",
                     String::new(),
                     String::new(),
                 )
-            })?;
+            })?)
+        } else {
+            input.audit_sink.clone()
+        };
+        if let Some(sink) = audit_contract_sink {
+            let context_label = if discipline_policy {
+                "claude policy session"
+            } else {
+                "claude contract session"
+            };
             let provider_version = match self.version_supplier.clone() {
                 Some(supplier) => supplier().map_err(|error| {
                     ProviderAdapterError::parse_error(
-                        format!("claude policy session: {error}"),
+                        format!("{context_label}: {error}"),
                         String::new(),
                         String::new(),
                     )
@@ -868,26 +880,39 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 .await
                 .map_err(|error| {
                     ProviderAdapterError::parse_error(
-                        format!("claude policy session: {error}"),
+                        format!("{context_label}: {error}"),
                         String::new(),
                         String::new(),
                     )
                 })?,
             };
-            let canonical =
-                canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy).map_err(|error| {
-                    ProviderAdapterError::parse_error(
-                        format!("claude policy session: {error}"),
-                        String::new(),
-                        String::new(),
-                    )
-                })?;
-            let resume_id = input
-                .resume_provider_session_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(ToString::to_string);
+            let canonical = canonical_tool_policy(
+                TOOL_POLICY_PROVIDER_NAME,
+                input
+                    .tool_policy
+                    .as_ref()
+                    .expect("sink-in-place contract implies a wire policy or discipline policy"),
+            )
+            .map_err(|error| {
+                ProviderAdapterError::parse_error(
+                    format!("{context_label}: {error}"),
+                    String::new(),
+                    String::new(),
+                )
+            })?;
+            // 批2 Task 20（RevB2T13 ⚠4 同构）：resume 三元组门只服务岗位
+            // 纪律会话——非策略合同 run（ReviewerVerify）的连续性由 native
+            // 会话承担，不按策略记录门控（不清 id、不误报告警）。
+            let resume_id = if discipline_policy {
+                input
+                    .resume_provider_session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(ToString::to_string)
+            } else {
+                None
+            };
             if let Some(resume_id) = resume_id.as_ref() {
                 let stored = sink.find_provider_start(resume_id).map_err(|error| {
                     ProviderAdapterError::parse_error(

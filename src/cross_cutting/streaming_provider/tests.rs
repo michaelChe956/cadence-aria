@@ -611,7 +611,9 @@ async fn run_streaming_bridge_derives_no_policy_for_any_role() {
             }
         }
         assert!(
-            !provider.saw_policy.load(std::sync::atomic::Ordering::SeqCst),
+            !provider
+                .saw_policy
+                .load(std::sync::atomic::Ordering::SeqCst),
             "legacy bridge must not derive deny for {role:?} (T11 matrix)"
         );
     }
@@ -880,13 +882,12 @@ fn adapter_tool_policy_guard_is_bidirectional_for_every_role() {
     use crate::protocol::contracts::AdapterRole;
 
     let deny = ProviderToolPolicy::deny_file_write_builtins();
-    // 全角色 wire 面默认全开（None 合法）：Coder/Reviewer/规划族不再按
+    // 非 Reviewer 角色 wire 面默认全开（None 合法）：Coder/规划族不再按
     // AdapterRole 一概套 deny——纪律移入受信冻结合同（Author 岗位策略/
-    // Reviewer 窗口合同）。
+    // Reviewer 窗口合同，批2 Task 20 起 Reviewer 必须携窗）。
     for role in [
         AdapterRole::Orchestrator,
         AdapterRole::WorkItemSplitter,
-        AdapterRole::Reviewer,
         AdapterRole::Executor,
         AdapterRole::Handoff,
     ] {
@@ -895,6 +896,12 @@ fn adapter_tool_policy_guard_is_bidirectional_for_every_role() {
             "role {role:?} without policy must be accepted (deny matrix retired by T11)"
         );
     }
+    // 批2 Task 20：Reviewer 无窗口合同（None）不再合法——0 会话
+    //（fail-closed;详见 reviewer_verify_window_contract_matrix）。
+    assert!(
+        validate_tool_policy_for_role(&AdapterRole::Reviewer, None).is_err(),
+        "reviewer without the ReviewerVerify window contract must not start (T20)"
+    );
     // DenyFileWriteBuiltins = Author 岗位纪律的唯一 wire 物理投影，只在
     // Author 可承载的角色（Orchestrator=story/design/revision、
     // WorkItemSplitter=plan authoring）合法；Coder（Executor）、Reviewer、
@@ -943,6 +950,89 @@ fn duty_tool_policy_matrix_is_author_only() {
             tool_policy_for_duty(&duty),
             None,
             "duty {duty:?} must keep the wire fully open (T11 matrix)"
+        );
+    }
+}
+
+/// 批2 Task 20：Reviewer 会话的启动检查——wire 面必须携带
+/// `ReviewerVerify{window_id}` 窗口合同（受信装配铸造）；无合同/空窗口/
+/// deny 回退一律 fail-closed（0 会话），非 Reviewer 携带该合同同样拒绝。
+#[test]
+fn reviewer_verify_window_contract_matrix() {
+    use super::validate_tool_policy_for_role;
+    use crate::protocol::contracts::AdapterRole;
+
+    let windowed = ProviderToolPolicy::reviewer_verify("reviewer_window_t20_0001");
+    // Reviewer + 有效窗口合同 → 合法（全工具，完整 terminal/MCP/skills）。
+    assert!(
+        validate_tool_policy_for_role(&AdapterRole::Reviewer, Some(&windowed)).is_ok(),
+        "reviewer with a ReviewerVerify window contract must start with full tools"
+    );
+    // 无合同（None）→ 拒绝：不以「无窗全开」或旧 deny fallback 替代窗口纪律。
+    assert!(
+        validate_tool_policy_for_role(&AdapterRole::Reviewer, None).is_err(),
+        "reviewer without the ReviewerVerify window contract must not start (0 sessions)"
+    );
+    // 空窗口引用 → 拒绝（窗口引用必须非空；深度校验属 engine assert 面）。
+    let blank = ProviderToolPolicy::reviewer_verify("  ");
+    assert!(
+        validate_tool_policy_for_role(&AdapterRole::Reviewer, Some(&blank)).is_err(),
+        "reviewer with a blank window reference must be rejected"
+    );
+    // 旧 deny 回退 → 拒绝（不 fallback 补 deny）。
+    let deny = ProviderToolPolicy::deny_file_write_builtins();
+    assert!(
+        validate_tool_policy_for_role(&AdapterRole::Reviewer, Some(&deny)).is_err(),
+        "reviewer must not fall back to the retired deny projection"
+    );
+    // 合同专属 Reviewer：其它角色携带一律拒绝。
+    for role in [
+        AdapterRole::Orchestrator,
+        AdapterRole::WorkItemSplitter,
+        AdapterRole::Executor,
+        AdapterRole::Handoff,
+    ] {
+        assert!(
+            validate_tool_policy_for_role(&role, Some(&windowed)).is_err(),
+            "role {role:?} carrying the reviewer window contract must be rejected"
+        );
+    }
+}
+
+/// 批2 Task 20：受信装配矩阵——Reviewer duty 必须铸造 ReviewerVerify 窗口
+/// 合同（缺窗 fail-closed），Author 保持 deny 投影，其余职责全开。
+#[test]
+fn duty_matrix_mints_reviewer_verify_with_window() {
+    use crate::cross_cutting::provider_execution::TrustedProviderRole;
+    use crate::cross_cutting::streaming_provider::tool_policy_for_duty_in_window;
+
+    let minted = tool_policy_for_duty_in_window(&TrustedProviderRole::Reviewer, Some("w-t20-1"))
+        .expect("reviewer duty must mint the window contract")
+        .expect("minted policy is present");
+    assert_eq!(
+        minted,
+        ProviderToolPolicy::reviewer_verify("w-t20-1"),
+        "reviewer duty mints the ReviewerVerify window contract"
+    );
+    assert!(
+        tool_policy_for_duty_in_window(&TrustedProviderRole::Reviewer, None).is_err(),
+        "reviewer duty without a window must fail closed (no mintable contract)"
+    );
+    assert_eq!(
+        tool_policy_for_duty_in_window(&TrustedProviderRole::Author, None)
+            .expect("author duty keeps the deny projection"),
+        Some(ProviderToolPolicy::deny_file_write_builtins())
+    );
+    for duty in [
+        TrustedProviderRole::Orchestrator,
+        TrustedProviderRole::Splitter,
+        TrustedProviderRole::Handoff,
+        TrustedProviderRole::Coder,
+    ] {
+        assert_eq!(
+            tool_policy_for_duty_in_window(&duty, Some("w-t20-1")).expect("open duties"),
+            None,
+            "duty {duty:?} stays fully open"
         );
     }
 }
@@ -1052,12 +1142,33 @@ async fn tool_policy_guard_rejects_invalid_role_policy_before_spawn() {
     .await;
     expect_guard_rejection(
         "codex",
-        &CodexProvider::new(missing_cli),
+        &CodexProvider::new(missing_cli.clone()),
         base_input(
             ProviderType::Codex,
             AdapterRole::Executor,
             Some(ProviderToolPolicy::deny_file_write_builtins()),
         ),
+    )
+    .await;
+
+    // 批2 Task 20：Reviewer 无窗口合同（None）——四家启动检查 spawn 前拒绝
+    //（0 会话；不以 Pi 特例或 Author deny 替补）。
+    expect_guard_rejection(
+        "pi",
+        &PiProvider::new(missing_cli.clone()),
+        base_input(ProviderType::Pi, AdapterRole::Reviewer, None),
+    )
+    .await;
+    expect_guard_rejection(
+        "claude",
+        &ClaudeCodeProvider::new(missing_cli.clone()),
+        base_input(ProviderType::ClaudeCode, AdapterRole::Reviewer, None),
+    )
+    .await;
+    expect_guard_rejection(
+        "codex",
+        &CodexProvider::new(missing_cli),
+        base_input(ProviderType::Codex, AdapterRole::Reviewer, None),
     )
     .await;
 }

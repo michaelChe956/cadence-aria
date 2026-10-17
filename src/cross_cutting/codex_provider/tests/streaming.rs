@@ -151,18 +151,19 @@ async fn lcg_t12_planning_review_wire_is_danger_full_access() {
             ProviderPermissionMode::Auto,
             "on-request",
         ),
-        // Reviewer 全开角色:审批独立按权限模式映射。
+        // Reviewer 全开角色(T20 起携 ReviewerVerify 窗口合同):审批独立按
+        // 权限模式映射;物理面恒 danger。
         (
             SessionPolicyAction::ReviewReadOnly,
             AdapterRole::Reviewer,
-            None,
+            Some(ProviderToolPolicy::reviewer_verify("w-t20-lc-review")),
             ProviderPermissionMode::Auto,
             "never",
         ),
         (
             SessionPolicyAction::ReviewReadOnly,
             AdapterRole::Reviewer,
-            None,
+            Some(ProviderToolPolicy::reviewer_verify("w-t20-lc-review")),
             ProviderPermissionMode::Supervised,
             "on-request",
         ),

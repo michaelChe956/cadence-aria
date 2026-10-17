@@ -57,7 +57,16 @@ pub fn deny_file_write_builtins_tokens() -> Vec<String> {
 /// - Coder/Reviewer（`None`）保持 `danger-full-access` 与既有 permission mode
 ///   映射（Auto→never / Supervised→on-request，原生 approval）。
 pub(crate) fn codex_launch_params(input: &StreamingProviderInput) -> serde_json::Value {
-    if input.tool_policy.is_some() {
+    // 批2 Task 20:approvalPolicy 只按岗位纪律会话(Author deny 投影)恒
+    // on-request;ReviewerVerify 窗口合同/其余合同 run 走原生权限档映射
+    //（Reviewer/Coder danger 原生 approval,不因携带合同而收紧）。
+    let discipline_session = input.tool_policy.as_ref().is_some_and(|policy| {
+        matches!(
+            policy.intent,
+            crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins
+        )
+    });
+    if discipline_session {
         json!({
             "cwd": input.working_dir.clone(),
             "approvalPolicy": "on-request",
@@ -152,10 +161,16 @@ fn audit_policy_event(
 }
 
 /// 会话 tool-policy canonical digest（决策审计归属指纹，D7 `policy_digest`）：
-/// 从 input 策略确定性重算，与 provider_start 记录的 digest 同源（GC8）。
+/// LC 会话用启动侧已算的 LC 冻结 digest（与 provider_start 同源，批2
+/// Task 20/RevB2T13 P3——不同序列不可等值 join）；direct 会话从 input
+/// 策略确定性重算（GC8）。
 fn policy_digest_for_input(
     input: &crate::cross_cutting::streaming_provider::StreamingProviderInput,
+    lc_override: Option<&str>,
 ) -> String {
+    if let Some(digest) = lc_override.map(str::trim).filter(|digest| !digest.is_empty()) {
+        return digest.to_string();
+    }
     input
         .tool_policy
         .as_ref()
@@ -185,6 +200,7 @@ async fn fail_turn_on_author_file_change(
     item_id: &str,
     summary: &str,
     source_method: &str,
+    lc_policy_digest: Option<&str>,
 ) -> ProviderAdapterError {
     let warning = CodexProtocolWarningEvent {
         reason_code: crate::cross_cutting::tool_policy_audit::AUTHOR_FILE_CHANGE_DETECTED
@@ -207,7 +223,7 @@ async fn fail_turn_on_author_file_change(
                 disposition:
                     crate::cross_cutting::tool_policy_audit::AUTHOR_FILE_CHANGE_DISPOSITION
                         .to_string(),
-                policy_digest: policy_digest_for_input(input),
+                policy_digest: policy_digest_for_input(input, lc_policy_digest),
             },
         ),
     ) {
@@ -299,7 +315,7 @@ where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let handshake = codex_session_handshake(&peer, &input).await?;
-    run_codex_session_loop(peer, bridge, event_tx, input, cancel, handshake).await
+    run_codex_session_loop(peer, bridge, event_tx, input, cancel, handshake, None).await
 }
 
 /// codex 的 adapter dialect 常量（GC9 冻结：`codex-app-server-rpc`）。
@@ -441,10 +457,16 @@ pub(crate) async fn run_codex_session_loop<W>(
     input: StreamingProviderInput,
     cancel: CancellationToken,
     handshake: CodexSessionHandshake,
+    lc_policy_digest: Option<String>,
 ) -> Result<(), ProviderAdapterError>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    // 批2 Task 20（RevB2T13 P3）：LC 会话传入启动侧已算的 LC 冻结
+    // digest——决策审计（file_change_detected/approval 等 `policy_digest`）
+    // 与 provider_start 同源可 join；direct 会话 None=按 input 实算
+    // direct canonical digest（既有语义）。
+    let lc_policy_digest = lc_policy_digest.filter(|digest| !digest.trim().is_empty());
     let CodexSessionHandshake {
         resume_session_id,
         thread_id,
@@ -481,7 +503,13 @@ where
     // 同一会话连续未知审批形态计数，`>=3` 次终止。
     let mut file_change_summaries: HashMap<String, String> = HashMap::new();
     let mut unknown_approval_occurrence: u32 = 0;
-    let tool_policy_session = input.tool_policy.is_some();
+    // 批2 Task 20(RevB2T13 ⚠2 收窄):岗位纪律=Author 的 deny 投影唯一;
+    // ReviewerVerify 窗口合同/其它 intent 不触发检测型纪律(fileChange
+    // 中断纪律属 Author 岗位,Reviewer 写入由平台窗口对账承担)。
+    let tool_policy_session = matches!(
+        input.tool_policy.as_ref().map(|policy| &policy.intent),
+        Some(crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins)
+    );
     let mut empty_output_retry_used = false;
     let timeout_secs = input.timeout_secs.max(1);
     let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
@@ -550,6 +578,7 @@ where
                     &item_id,
                     &summary,
                     &source_method,
+                    lc_policy_digest.as_deref(),
                 )
                 .await);
             }
@@ -659,7 +688,7 @@ where
                             decision: decision_event.decision.to_string(),
                             reason_code: policy_decision_reason_code(request.category.clone())
                                 .to_string(),
-                            policy_digest: policy_digest_for_input(&input),
+                            policy_digest: policy_digest_for_input(&input, lc_policy_digest.as_deref()),
                         }),
                     )?;
                     write_approval_decision(
@@ -675,7 +704,8 @@ where
                         &input,
                         &request.request_id,
                         &request.description,
-                        "item/fileChange/requestApproval",
+                    "item/fileChange/requestApproval",
+                    lc_policy_digest.as_deref(),
                     )
                     .await);
                 }
@@ -706,7 +736,7 @@ where
                         decision: decision_event.decision.to_string(),
                         reason_code: policy_decision_reason_code(request.category.clone())
                             .to_string(),
-                        policy_digest: policy_digest_for_input(&input),
+                        policy_digest: policy_digest_for_input(&input, lc_policy_digest.as_deref()),
                     }),
                 )?;
                 tracing::info!(

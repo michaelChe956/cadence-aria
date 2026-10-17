@@ -1743,6 +1743,24 @@ impl LogicalCodebaseProviderGateway {
                 input.tool_policy,
             );
         }
+        // 批2 Task 20（gateway 只复验 profile/window，不 fallback 补 deny）：
+        // Reviewer 启动必须携带非空 ReviewerVerify 窗口合同——缺失即拒
+        //（深层窗口有效性由 engine 开窗/assert 承担）。
+        if input.role == crate::protocol::contracts::AdapterRole::Reviewer {
+            let windowed = input.tool_policy.as_ref().is_some_and(|policy| {
+                matches!(
+                    &policy.intent,
+                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify {
+                        window_id
+                    } if !window_id.trim().is_empty()
+                )
+            });
+            if !windowed {
+                return Err(ProviderGatewayError::UnsupportedCapability(
+                    "reviewer streaming launch requires a ReviewerVerify window contract".to_string(),
+                ));
+            }
+        }
         let is_resume = input.resume_provider_session_id.is_some();
         if let Err(error) =
             self.revalidate_before_spawn(&validated, input.effective_working_directory(), is_resume)
@@ -1945,14 +1963,19 @@ impl LogicalCodebaseProviderGateway {
             profile,
             author_policy,
             resource_scope_id,
-            review_window_id,
+                review_window_id.clone(),
         )
         .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.details))?;
-        // 批2 Task 11:受信装配独占 deny 投影——按 duty 强制覆盖 caller
-        // 传入的 tool_policy(Author=deny;其余=None),随后经
+        // 批2 Task 11→T20:受信装配独占 wire 投影——按 duty+窗口强制覆盖
+        // caller 传入的 tool_policy(Author=deny;Reviewer=ReviewerVerify
+        // 窗口合同,缺窗 freeze 已拒;其余=None),随后经
         // prepare_streaming_launch 的双向守卫复核。
         input.tool_policy =
-            crate::cross_cutting::streaming_provider::tool_policy_for_duty(&identity.duty());
+            crate::cross_cutting::streaming_provider::tool_policy_for_duty_in_window(
+                &identity.duty(),
+                review_window_id.as_deref(),
+            )
+            .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.to_string()))?;
         self.prepare_streaming_launch(input, request, context)
             .map(|launch| launch.with_frozen_execution(contract))
     }
@@ -2296,6 +2319,24 @@ impl LogicalCodebaseProviderGateway {
             input.tool_policy = crate::cross_cutting::streaming_provider::kimi_exempted_tool_policy(
                 input.tool_policy,
             );
+        }
+        // 批2 Task 20(gateway 只复验,不 fallback 补 deny;与 start_streaming
+        // 同款):Reviewer LC 启动必须携带非空 ReviewerVerify 窗口合同。
+        if input.role == crate::protocol::contracts::AdapterRole::Reviewer {
+            let windowed = input.tool_policy.as_ref().is_some_and(|policy| {
+                matches!(
+                    &policy.intent,
+                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify {
+                        window_id
+                    } if !window_id.trim().is_empty()
+                )
+            });
+            if !windowed {
+                return Err(ProviderGatewayError::UnsupportedCapability(
+                    "reviewer lc streaming launch requires a ReviewerVerify window contract"
+                        .to_string(),
+                ));
+            }
         }
         let policy_digest = validated_full.envelope().policy_digest.clone();
         // 批2 Task 2:该次启动冻结(或显式缺失)的执行合同摘要进审计。

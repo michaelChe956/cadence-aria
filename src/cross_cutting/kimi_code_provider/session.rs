@@ -69,6 +69,11 @@ pub(crate) struct LcValidatedSession {
     pub(crate) boundary: ProviderBoundaryPlan,
     pub(crate) audit_sink: Arc<dyn ToolPolicyAuditSink>,
     pub(crate) audit_template: ProviderStartAudit,
+    /// 批2 Task 20：冻结执行合同的受信岗位授予（duty/承载/窗口引用）——
+    /// `start_validated` 从 validated launch 的 `frozen_execution` 提取；
+    /// 无合同 launch 为 `None`（行为=direct 承载角色矩阵）。
+    pub(crate) trusted_duty:
+        Option<crate::cross_cutting::kimi_code_provider::client_services::TrustedDutyGrant>,
     pub(crate) native_id_tx: tokio::sync::oneshot::Sender<
         Result<String, crate::cross_cutting::provider_adapter::ProviderAdapterError>,
     >,
@@ -389,6 +394,24 @@ where
     // 落盘失败 fail-closed(会话终止,由 mod.rs 会话任务的既有 kill 链
     // 回收子进程)。
     let target_boundary = lc.as_ref().map(|lc| lc.boundary.clone());
+    // 批2 Task 20：受信岗位授予——LC 冻结合同优先；direct 会话消费
+    // ReviewerVerify wire 合同的窗口引用（受信装配铸造）；其余 None
+    //（行为=承载角色映射矩阵）。
+    let trusted_duty = lc
+        .as_ref()
+        .and_then(|lc| lc.trusted_duty.clone())
+        .or_else(|| {
+            input.tool_policy.as_ref().and_then(|policy| {
+                match &policy.intent {
+                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify {
+                        window_id,
+                    } => Some(
+                        crate::cross_cutting::kimi_code_provider::client_services::TrustedDutyGrant::from_reviewer_wire_contract(window_id),
+                    ),
+                    _ => None,
+                }
+            })
+        });
     if let Some(lc) = lc {
         let mut audit_event = lc.audit_template;
         audit_event.provider_session_id = session_id.clone();
@@ -409,7 +432,7 @@ where
     // 它执行 terminal/*；会话 stall 判定读同一真实活动 registry（同一
     // terminal_id 的 Started→Running→Exited/Killed/Released 状态源）。
     let terminal = super::client_services::SessionTerminalManager::new();
-    let dispatcher = KimiClientServiceDispatcher::new(
+    let dispatcher = KimiClientServiceDispatcher::new_with_trusted_duty(
         peer.clone(),
         session_id.clone(),
         input.working_dir.clone(),
@@ -428,6 +451,9 @@ where
         // LC target 边界(Task 4c):fs read/write 与 terminal 消费同一
         // 不可伪造 plan;direct 入口为 None,行为不变。
         target_boundary,
+        // 批2 Task 20：受信岗位授予（LC 冻结合同/ReviewerVerify wire
+        // 合同;None=direct 承载角色矩阵,行为不变）。
+        trusted_duty,
     );
 
     // 批2 Task 7（Bug45）：向消费方投递真实终端活动快照——每会话一次、

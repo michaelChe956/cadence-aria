@@ -1023,6 +1023,8 @@ pub(crate) struct RealGroupReviewExecutor<'a> {
     node_id: String,
     role_run: CodingRoleRun,
     provider_name: ProviderName,
+    /// 批2 Task 20:durable 审查窗口引用(开窗后经 builder 注入)。
+    review_window_id: Option<String>,
 }
 
 impl<'a> RealGroupReviewExecutor<'a> {
@@ -1041,7 +1043,17 @@ impl<'a> RealGroupReviewExecutor<'a> {
             node_id,
             role_run,
             provider_name,
+            review_window_id: None,
         }
+    }
+
+
+    /// 批2 Task 20:绑定 durable 审查窗口(开窗后传入;shard/reduction/
+    /// repair 共享同窗,材料与 baseline 同指纹;无窗 fail-closed 由
+    /// adapter 启动检查承担,不在测试专用 executor 路径伪铸)。
+    pub(crate) fn with_review_window_id(mut self, window_id: &str) -> Self {
+        self.review_window_id = Some(window_id.to_string());
+        self
     }
 }
 
@@ -1088,6 +1100,15 @@ impl GroupReviewExecutor for RealGroupReviewExecutor<'_> {
         // 的 canonical cwd（LC=root），spawn 前复验消费；无政策路径保持 None
         // （回填 working_dir，单仓零变化）。
         let mut provider_input = provider_input;
+        // 批2 Task 20:绑定窗口时铸 ReviewerVerify 合同(shard/reduction/
+        // repair 同窗共享;无窗 legacy 测试路径保持 None,由四家启动检查
+        // 拒绝真实 provider——不伪铸)。
+        if let Some(window_id) = self.review_window_id.as_deref() {
+            provider_input.tool_policy =
+                Some(crate::cross_cutting::streaming_provider::ProviderToolPolicy::reviewer_verify(
+                    window_id,
+                ));
+        }
         if let Some(policy) = policy.as_ref() {
             provider_input.working_directory = Some(policy.envelope().working_directory.clone());
         }

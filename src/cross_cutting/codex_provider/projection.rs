@@ -283,9 +283,14 @@ fn lc_roots_field(roots: &[PathBuf]) -> String {
 pub(crate) fn lc_tool_policy_canonical_digest(
     policy: Option<&ProviderToolPolicy>,
 ) -> Result<String, ProviderProjectionError> {
-    let intent = match policy.map(|policy| &policy.intent) {
-        None => "none",
-        Some(ToolPolicyIntent::DenyFileWriteBuiltins) => "deny_file_write_builtins",
+    let (intent, window) = match policy.map(|policy| &policy.intent) {
+        None => ("none", None),
+        Some(ToolPolicyIntent::DenyFileWriteBuiltins) => ("deny_file_write_builtins", None),
+        // 批2 Task 20：ReviewerVerify 窗口合同——独立 LC 冻结标签+窗口域
+        //（换窗必失配）；物理面=全开（danger），窗口纪律由平台 durable 窗口承担。
+        Some(ToolPolicyIntent::ReviewerVerify { window_id }) => {
+            ("reviewer_verify_window", Some(window_id.as_str()))
+        }
         Some(ToolPolicyIntent::BootstrapExecutorMarker(_)) => {
             return Err(ProviderProjectionError::Invalid(
                 "codex lc tool policy digest: bootstrap executor markers are not codex LC policies"
@@ -293,7 +298,11 @@ pub(crate) fn lc_tool_policy_canonical_digest(
             ));
         }
     };
-    Ok(lc_digest(LC_TOOL_POLICY_DIGEST_SCHEMA, &[intent]))
+    let mut fields = vec![intent];
+    if let Some(window_id) = window {
+        fields.push(window_id);
+    }
+    Ok(lc_digest(LC_TOOL_POLICY_DIGEST_SCHEMA, &fields))
 }
 
 /// 由 gateway 冻结的 envelope 派生 boundary plan(逻辑交付面描述:Coding
@@ -390,9 +399,15 @@ pub(crate) fn lc_approval_policy(
     permission_mode: &ProviderPermissionMode,
 ) -> String {
     match tool_policy {
-        // Author 岗位纪律投影(deny):恒 on-request。
-        Some(_) => CODEX_LC_APPROVAL_ON_REQUEST.to_string(),
-        None => match permission_mode {
+        // Author 岗位纪律投影(deny):恒 on-request。批2 Task 20:
+        // ReviewerVerify 窗口合同非纪律会话——审批按权限档独立映射
+        //（与 None 同款,Reviewer danger 原生 approval）。
+        Some(
+            crate::cross_cutting::streaming_provider::ProviderToolPolicy {
+                intent: crate::cross_cutting::streaming_provider::ToolPolicyIntent::DenyFileWriteBuiltins,
+            },
+        ) => CODEX_LC_APPROVAL_ON_REQUEST.to_string(),
+        Some(_) | None => match permission_mode {
             ProviderPermissionMode::Auto => CODEX_LC_APPROVAL_NEVER.to_string(),
             ProviderPermissionMode::Supervised => CODEX_LC_APPROVAL_ON_REQUEST.to_string(),
         },

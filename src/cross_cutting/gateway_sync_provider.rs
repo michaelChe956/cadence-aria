@@ -142,9 +142,8 @@ fn bridge_streaming_input(
     >,
     frozen_execution: Option<&crate::cross_cutting::provider_execution::FrozenProviderExecution>,
 ) -> crate::cross_cutting::streaming_provider::StreamingProviderInput {
-    use crate::cross_cutting::provider_execution::TrustedProviderRole;
     use crate::cross_cutting::streaming_provider::{
-        ProviderPermissionMode, ProviderToolPolicy, StreamingProviderInput,
+        ProviderPermissionMode, StreamingProviderInput,
     };
 
     let working_dir = input
@@ -155,11 +154,18 @@ fn bridge_streaming_input(
         .unwrap_or_else(||
             // 与 legacy bridge 同语义:无 target 时回填进程 cwd。
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
-    // 批2 Task 11:deny 只由冻结合同的 duty=Author 岗位投影铸造
-    // (tool_policy_for_duty 同源);无合同/非 Author duty 一律全开。
+    // 批2 Task 11→T20:wire 投影只由冻结合同铸造——Author=deny 岗位纪律;
+    // Reviewer=ReviewerVerify 窗口合同(缺窗 fail-closed→None 由 adapter
+    // 启动检查拒绝,不 fallback);其余 duty 一律全开。
     let tool_policy = frozen_execution
-        .filter(|contract| contract.duty() == TrustedProviderRole::Author)
-        .map(|_| ProviderToolPolicy::deny_file_write_builtins());
+        .and_then(|contract| {
+            crate::cross_cutting::streaming_provider::tool_policy_for_duty_in_window(
+                &contract.duty(),
+                contract.review_window_id(),
+            )
+            .ok()
+        })
+        .flatten();
     // kimi 例外映射(r61 kimi 现场):sync/split_sync 栈的岗位投影与
     // 流式漏斗(start_streaming)同款例外——kimi 的 DenyFileWriteBuiltins
     // 由既有 ClientServicePolicy/T8 岗位策略等价承担(spec「kimi 既有

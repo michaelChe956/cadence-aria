@@ -518,6 +518,21 @@ pub(crate) fn platform_directives_section() -> String {
         .to_string()
 }
 
+/// 批2 Task 20(删旧注入的对位面):Reviewer 会话的纪律段——删除「提交
+/// 责任归你/自行 Git 提交/必须在 worktree 内复跑」旧注入,保留禁止
+/// Git mutation/平台交付与资源登记/清理纪律;复跑验证命令的落点由
+/// durable 审查窗口对账承担(违规=整轮作废,恢复成功不洗白)。
+pub(crate) fn reviewer_verify_discipline_section(worktree_path: &std::path::Path) -> String {
+    format!(
+        "\n[reviewer_verify_discipline]\n\
+         - 你在 ReviewerVerify 岗位执行验证:构建、测试、脚本、容器均可运行;写入与临时文件允许发生在 {path} 内,轮次结束由平台按审查窗口基线恢复与对账。\n\
+         - 禁止任何 Git mutation(git add/commit/push/reset 等,含 --force 变体);交付分支的提交与推送由平台执行,你不得代行。\n\
+         - 你启动的进程、容器与临时目录按资源登记纪律使用,轮次结束前清理自己创建的临时产物;无法清理的在报告中列明。\n\
+         - 违反以上纪律会使本轮审查整轮作废(窗口对账失败→人工门),恢复成功也不改变作废结论。\n",
+        path = worktree_path.display()
+    )
+}
+
 /// P3-a（REQ-COD-07）：跨仓上游交付清单段。事实来自
 /// `resolved_upstream_deliveries_for_attempt`（cross_attempt_handoff.rs 的
 /// 权威 resolver），渲染为运行期注入段：上游逻辑 WI/revision、owner

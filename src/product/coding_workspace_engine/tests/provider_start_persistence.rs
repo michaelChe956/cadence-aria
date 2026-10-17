@@ -929,13 +929,21 @@ async fn coding_policy_review_input_carries_run_bound_durable_audit_sink() {
         .execute_code_review(&fixture.attempt, &provider)
         .await;
 
-    // 批2 Task 11（T20 前中间态）：CodeReviewer wire 面全开（共享工厂恒
-    // None，纪律=ReviewerVerify+窗口合同，真窗归 T20）；engine 仍必须在
-    // provider 启动前绑定 run-bound durable sink（执行审计不随去 deny 丢失）。
+    // 批2 Task 20:CodeReviewer wire 面携 ReviewerVerify 窗口合同(T19 开窗
+    // 的窗口 id;无合同=0 会话);engine 在 provider 启动前绑定 run-bound
+    // durable sink(执行审计不随去 deny 丢失)。
     let input = provider.input();
     assert!(
-        input.tool_policy.is_none(),
-        "review input must not carry deny policy (T20 intermediate)"
+        matches!(
+            input.tool_policy.as_ref().map(|policy| &policy.intent),
+            Some(
+                crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify {
+                    ..
+                }
+            )
+        ),
+        "review input must carry the ReviewerVerify window contract (T20): {:?}",
+        input.tool_policy
     );
     assert!(
         input.audit_sink.is_some(),
@@ -1057,12 +1065,17 @@ async fn coding_coder_and_policy_runs_keep_audit_channels_strictly_separated() {
         std::sync::Arc::new(|| Ok("codex 0.124.0-isolation-fixture".to_string()));
     let policy_provider = CodexProvider::new(fixture).with_version_supplier(supplier);
     let worktree = attempt.worktree_path.clone().expect("worktree path");
-    // 批2 Task 11（T20 前中间态）：reviewer wire 面全开（无 deny）；审计
-    // 通道分离语义不变——sink 由 engine 按 Reviewer 角色分配。
+    // 批2 Task 20:reviewer wire 面携 ReviewerVerify 窗口合同(受信装配
+    // 铸造;无合同=0 会话);审计通道分离语义不变——sink 由 engine 按
+    // Reviewer 角色分配。
     let policy_input = StreamingProviderInput {
         working_directory: None,
         baseline_tree: None,
-        tool_policy: None,
+        tool_policy: Some(
+            crate::cross_cutting::streaming_provider::ProviderToolPolicy::reviewer_verify(
+                "w-t20-audit-isolation",
+            ),
+        ),
         audit_sink: None,
         provider_type: ProviderType::Codex,
         role: AdapterRole::Reviewer,

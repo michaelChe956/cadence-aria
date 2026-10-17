@@ -347,7 +347,29 @@ async fn lc_group_reviewer_prompt_carries_worktree_discipline() {
         prompt.ends_with("最终结论的 JSON 必须是合法对象。\n"),
         "终端结构化契约必须保持收尾"
     );
-    assert_worktree_discipline(&prompt, &fx.worktree);
+    // 批2 Task 20:Reviewer prompt 删「必须worktree内复跑/平台提交责任」
+    // 旧注入,改携 ReviewerVerify 纪律段(保留禁 Git mutation/平台交付与
+    // 资源登记/清理纪律,worktree 路径钉保持)。
+    assert!(
+        prompt.contains("[reviewer_verify_discipline]"),
+        "T20:LC reviewer prompt 必须携带 ReviewerVerify 纪律段:\n{}",
+        prompt
+    );
+    assert!(
+        prompt.contains(&fx.worktree.display().to_string()),
+        "ReviewerVerify 纪律段必须钉 worktree 绝对路径:\n{}",
+        prompt
+    );
+    assert!(
+        !prompt.contains("[worktree_discipline]"),
+        "T20:Reviewer prompt 不得再携带旧 worktree_discipline 段:\n{}",
+        prompt
+    );
+    assert!(
+        !prompt.contains("提交责任归你"),
+        "T20:Reviewer prompt 不得再携带平台提交责任旧注入:\n{}",
+        prompt
+    );
 }
 
 #[tokio::test]

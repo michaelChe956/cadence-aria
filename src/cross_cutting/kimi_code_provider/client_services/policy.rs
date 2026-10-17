@@ -39,6 +39,18 @@ impl TrustedDutyGrant {
             review_window_id: execution.review_window_id().map(ToString::to_string),
         }
     }
+
+    /// 批2 Task 20：direct 会话的 ReviewerVerify wire 合同消费面——窗口
+    /// 引用经受信装配铸造的 `ToolPolicyIntent::ReviewerVerify` 到达（无
+    /// LC validated launch 的 direct 形态）；duty/carrier 固定 Reviewer，
+    /// 与会话 wire 角色一致性由 `evaluate` 的载体校验承担。
+    pub(crate) fn from_reviewer_wire_contract(window_id: &str) -> Self {
+        Self {
+            duty: TrustedProviderRole::Reviewer,
+            carrier: AdapterRole::Reviewer,
+            review_window_id: Some(window_id.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

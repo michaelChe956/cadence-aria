@@ -354,6 +354,8 @@ async fn codex_provider_request_user_input_emits_protocol_error_on_write_failure
                 resume_session_id: None,
                 thread_id: Some("codex_input_thread".to_string()),
             },
+            // direct 形态:决策审计 digest 按 input 实算(无 LC 覆盖)。
+            None,
         )
         .await
     });

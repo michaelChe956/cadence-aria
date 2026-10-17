@@ -203,6 +203,17 @@ pub(crate) fn lc_tool_policy_canonical_digest(
                         ))
                     })
             }
+            // 批2 Task 20：ReviewerVerify 窗口合同——canonical digest 以窗口
+            // 引用为域（换窗必失配），LC 投影与统一 launch audit 同源消费。
+            ToolPolicyIntent::ReviewerVerify { .. } => {
+                canonical_tool_policy(TOOL_POLICY_PROVIDER_NAME, policy)
+                    .map(|canonical| canonical.digest)
+                    .map_err(|error| {
+                        ProviderProjectionError::Invalid(format!(
+                            "claude lc tool policy is not canonicalizable: {error}"
+                        ))
+                    })
+            }
             ToolPolicyIntent::BootstrapExecutorMarker(marker) => {
                 if !root_recipe_phase {
                     return Err(ProviderProjectionError::Invalid(

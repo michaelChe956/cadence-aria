@@ -497,7 +497,7 @@ impl CodexProvider {
                 .to_string(),
             workspace_session_id: input.workspace_session_id.clone().unwrap_or_default(),
             provider_session_id: thread_id.clone(),
-            tool_policy_canonical_digest: tool_policy_digest,
+            tool_policy_canonical_digest: tool_policy_digest.clone(),
             argv: args.clone(),
             sandbox: Some(sandbox.mode().wire_text().to_string()),
             approval_policy: Some(sandbox.approval_policy().to_string()),
@@ -570,6 +570,7 @@ impl CodexProvider {
                     input,
                     cancel.clone(),
                     handshake,
+                    Some(tool_policy_digest.clone()),
                 ),
                 &mut child,
                 PROVIDER_CHILD_EXIT_STREAM_DRAIN,
@@ -761,12 +762,20 @@ impl StreamingProviderAdapter for CodexProvider {
             // 不一致 → 追加 superseded 终止审计并新建会话，丢弃 resume id
             //（GC9：缺失与 drift 同路径处置；「标记 superseded」仅带内
             // ToolPolicyWarning——无旧文件可写，不伪造 durable 文件）。
-            let resume_id = input
-                .resume_provider_session_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(ToString::to_string);
+            // 批2 Task 20（RevB2T13 ⚠4）：三元组门只服务岗位纪律会话
+            //（Author deny 投影）——非策略合同 run（ReviewerVerify 直连
+            // 合同）的连续性由 native thread 承担，不按策略记录门控
+            //（否则 reviewer 续接被误清+误导告警，连续性丢失）。
+            let resume_id = if discipline_policy {
+                input
+                    .resume_provider_session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(ToString::to_string)
+            } else {
+                None
+            };
             if let Some(resume_id) = resume_id.as_ref() {
                 let stored = sink.find_provider_start(resume_id).map_err(|error| {
                     ProviderAdapterError::parse_error(
@@ -953,6 +962,9 @@ impl StreamingProviderAdapter for CodexProvider {
                         input,
                         cancel.clone(),
                         handshake,
+                        // direct 会话:决策审计 digest 按 input 实算 direct
+                        // canonical(与 direct provider_start 同源)。
+                        None,
                     ))
                         as std::pin::Pin<
                             Box<dyn Future<Output = Result<(), ProviderAdapterError>> + Send>,

@@ -498,8 +498,20 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         let envelope = launch.envelope().clone();
 
         // 1) 拒绝非空通用策略(version/child 之前;Global Constraints:
-        //    Kimi 拒绝非空通用策略,继续既有 ClientServicePolicy)。
-        if input.tool_policy.is_some() {
+        //    Kimi 拒绝非空通用策略,继续既有 ClientServicePolicy)。批2
+        //    Task 20 唯一例外:`ReviewerVerify` 窗口合同——kimi 侧由
+        //    冻结执行合同的受信岗位授予等价消费(窗口引用进 grant,不
+        //    造通用策略物理面),不在此拒绝。
+        if input.tool_policy.is_some()
+            && !matches!(
+                input.tool_policy.as_ref().map(|policy| &policy.intent),
+                Some(
+                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify {
+                        ..
+                    }
+                )
+            )
+        {
             return Err(ProviderAdapterError::parse_error(
                 format!(
                     "kimi lc validated start rejected: {}: kimi carries no generic tool policy",
@@ -685,6 +697,11 @@ impl StreamingProviderAdapter for KimiCodeProvider {
             boundary,
             audit_sink: sink,
             audit_template,
+            // 批2 Task 20：冻结执行合同的受信岗位授予（duty/承载/窗口
+            // 引用）——ReviewerVerify 会话据此获得窗口引用的 FsWrite 判定。
+            trusted_duty: launch
+                .frozen_execution()
+                .map(crate::cross_cutting::kimi_code_provider::client_services::TrustedDutyGrant::from_frozen_execution),
             native_id_tx,
         };
 

@@ -1138,6 +1138,10 @@ async fn codex_contract_bound_non_policy_run_writes_provider_start_without_disci
     let sink = RecordingToolPolicyAuditSink::new();
     let mut input = streaming_input(ProviderType::Codex, ProviderPermissionMode::Auto);
     input.role = AdapterRole::Reviewer;
+    // 批2 Task 20:Reviewer direct 合同 run 必须携带 ReviewerVerify 窗口
+    // 合同(受信装配铸造;无合同=0 会话);provider_start 冻结 digest 仍为
+    // 空串(非岗位纪律 run 无策略指纹,与实际启动参数同源口径不变)。
+    input.tool_policy = Some(ProviderToolPolicy::reviewer_verify("w-t20-contract-run"));
     input.audit_sink = Some(sink.clone().bound());
     let mut session = provider
         .start(input, CancellationToken::new())

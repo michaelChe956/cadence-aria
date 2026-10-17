@@ -571,15 +571,13 @@ impl CodingWorkspaceEngine {
                     .await?
                 }
             };
-            // r54 越界根修:LC attempt 的 reviewer prompt 同样硬钉 worktree
-            // 纪律段——r54 现场 reviewer 复跑验证命令落在成员主 checkout
-            //(alpha ?? target/ 工件贡献者);只追加,终端契约仍收尾。
+            // r54 越界根修残留→批2 Task 20:Reviewer prompt 不再注入
+            // 「必须worktree内复跑」与平台提交责任段(旧注入删除);改为
+            // ReviewerVerify 纪律段——保留禁止 Git mutation/平台交付与
+            // 资源登记/清理纪律,复跑验证命令的落点由窗口对账承担。
             if attempt.target_snapshot.is_some() {
-                prompt.push_str(&worktree_discipline_section(worktree_path));
+                prompt.push_str(&reviewer_verify_discipline_section(worktree_path));
             }
-            // S6（DesignPushLocal2 Q6/Q4②）：reviewer 重驱轮同样追加平台
-            // 指令段（统一注入族；终端契约仍收尾）。
-            prompt.push_str(&platform_directives_section());
             if !prompt.ends_with(&terminal_contract) {
                 prompt.push_str(&terminal_contract);
             }
@@ -625,6 +623,14 @@ impl CodingWorkspaceEngine {
             // 的 root envelope 接线（Task 2.7）后本重绑自动跟随，spawn 前复验
             // 不因字段分离而漂移。无政策路径保持 None（回填，零行为变化）。
             let mut provider_input = provider_input;
+            // 批2 Task 20:Reviewer launch 携 ReviewerVerify 窗口合同——
+            // T19 已在材料采集前开窗(本 cycle 持 `review_window`),此处
+            // 经窗口 id 铸造;无有效窗=0 会话(fail-closed,不 fallback)。
+            provider_input.tool_policy = Some(
+                crate::cross_cutting::streaming_provider::ProviderToolPolicy::reviewer_verify(
+                    review_window.window_id.clone(),
+                ),
+            );
             if let Some(policy) = policy.as_ref() {
                 provider_input.working_directory =
                     Some(policy.envelope().working_directory.clone());

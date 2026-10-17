@@ -395,6 +395,14 @@ impl CodingWorkspaceEngine {
             // 的 canonical cwd（LC=root），spawn 前复验消费；无政策路径保持 None
             // （回填 working_dir，单仓零变化）。
             let mut provider_input = provider_input;
+            // 批2 Task 20:InternalReviewer launch 携 ReviewerVerify 窗口
+            // 合同——T19 已在材料采集前开窗(本流持 `review_window`);
+            // 无有效窗=0 会话(fail-closed)。
+            provider_input.tool_policy = Some(
+                crate::cross_cutting::streaming_provider::ProviderToolPolicy::reviewer_verify(
+                    review_window.window_id.clone(),
+                ),
+            );
             if let Some(policy) = policy.as_ref() {
                 provider_input.working_directory =
                     Some(policy.envelope().working_directory.clone());

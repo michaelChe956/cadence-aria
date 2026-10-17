@@ -89,6 +89,13 @@ pub enum ToolPolicyIntent {
     BootstrapExecutorMarker(
         crate::product::logical_codebase::provider_admission_preflight::BootstrapExecutorMarker,
     ),
+    /// 批2 Task 20：Reviewer 会话的窗口合同（ReviewerVerify profile 的 wire
+    /// 投影）。`window_id` 为 durable 审查窗口引用（engine 开窗产物）——
+    /// 受信装配在开窗之后铸造；深度有效性（Running/同 run/expired）由
+    /// engine 材料采集前的同源 assert 承担，adapter/gateway 只复验非空
+    /// 引用（fail-closed，不 fallback 补 deny）。物理面=全工具（完整
+    /// 工具/terminal/MCP/skills），无 deny 片段。
+    ReviewerVerify { window_id: String },
 }
 
 /// Provider 无关的语义工具策略。只表达语义意图，不携带 provider 物理片段；
@@ -106,6 +113,18 @@ impl ProviderToolPolicy {
     pub fn deny_file_write_builtins() -> Self {
         Self {
             intent: ToolPolicyIntent::DenyFileWriteBuiltins,
+        }
+    }
+
+    /// 批2 Task 20：Reviewer 会话窗口合同的唯一铸造器（受信装配面：engine
+    /// 开窗后 / gateway `prepare_trusted_*` 按 duty 铸造）。窗口引用非空性
+    /// 由 [`validate_tool_policy_for_role`] 复验；kimi 侧由
+    /// `ClientServicePolicy` 受信授予等价消费（grant 携带窗口引用）。
+    pub fn reviewer_verify(window_id: impl Into<String>) -> Self {
+        Self {
+            intent: ToolPolicyIntent::ReviewerVerify {
+                window_id: window_id.into(),
+            },
         }
     }
 }
@@ -521,21 +540,36 @@ pub fn tool_policy_for_duty(
     }
 }
 
-/// 双向角色×策略守卫（批2 Task 11 改造）：按 AdapterRole 一概套 deny 的
-/// 旧矩阵退役——全角色 `None` 合法（Coder/Reviewer/规划族 wire 面全开，
-/// 纪律移入受信冻结合同）；`DenyFileWriteBuiltins` 是 Author 岗位纪律的
-/// 物理投影，只在 Author 可承载的角色（Orchestrator=story/design/
-/// revision、WorkItemSplitter=plan authoring）合法，Coder（Executor）、
-/// Reviewer、Handoff 携带一律拒绝（Coder 不带 deny；Reviewer 只携窗口
-/// 合同）；Executor 的 `BootstrapExecutorMarker` 自举通道（REQ-BOOT-04/
-/// D1，Task 1.2）保持不变。非法组合在 provider 创建子进程之前拒绝（四
-/// adapter `start` 首步调用）。
+/// 双向角色×策略守卫（批2 Task 20 收口）：按 AdapterRole 一概套 deny 的
+/// 旧矩阵退役——`DenyFileWriteBuiltins` 是 Author 岗位纪律的物理投影，
+/// 只在 Author 可承载的角色（Orchestrator=story/design/revision、
+/// WorkItemSplitter=plan authoring）合法。**Reviewer 会话（四家启动检查）
+/// 必须携带 `ReviewerVerify{window_id}` 窗口合同**：无合同/空窗口引用/
+/// deny 回退一律 spawn 前拒绝（0 会话，不以 Pi 特例或 Author deny 替补）；
+/// 深度窗口有效性（Running/同 run/expired）由 engine 材料采集前的同源
+/// assert 承担。Coder/规划族 wire 面全开（None）；Executor 的
+/// `BootstrapExecutorMarker` 自举通道（REQ-BOOT-04/D1）保持不变。非法
+/// 组合在 provider 创建子进程之前拒绝（四 adapter `start` 首步调用）。
 pub fn validate_tool_policy_for_role(
     role: &AdapterRole,
     policy: Option<&ProviderToolPolicy>,
 ) -> Result<(), ToolPolicyGuardError> {
     match policy.map(|policy| &policy.intent) {
+        // 批2 Task 20：Reviewer 无窗口合同——0 会话（fail-closed）。
+        None if role == &AdapterRole::Reviewer => Err(ToolPolicyGuardError::PolicyRequired {
+            role: adapter_role_text(role).to_string(),
+        }),
         None => Ok(()),
+        // 批2 Task 20：ReviewerVerify 窗口合同专属 Reviewer；窗口引用
+        // 必须非空（空引用=装配缺陷，拒绝）。
+        Some(ToolPolicyIntent::ReviewerVerify { window_id }) => {
+            if role != &AdapterRole::Reviewer || window_id.trim().is_empty() {
+                return Err(ToolPolicyGuardError::PolicyForbidden {
+                    role: adapter_role_text(role).to_string(),
+                });
+            }
+            Ok(())
+        }
         // Author 岗位投影：仅 Author 可承载的角色合法。
         Some(ToolPolicyIntent::DenyFileWriteBuiltins)
             if matches!(
@@ -564,20 +598,47 @@ pub fn validate_tool_policy_for_role(
         Some(ToolPolicyIntent::BootstrapExecutorMarker(_))
             if matches!(
                 role,
-                AdapterRole::Orchestrator
-                    | AdapterRole::WorkItemSplitter
-                    | AdapterRole::Reviewer
+                AdapterRole::Orchestrator | AdapterRole::WorkItemSplitter | AdapterRole::Reviewer
             ) =>
         {
             Err(ToolPolicyGuardError::PolicyRequired {
                 role: adapter_role_text(role).to_string(),
             })
         }
-        // 其余组合（非 Author 承载角色带 deny、Handoff/Reviewer 带任何
-        // 策略、未来未知 intent）一律 fail-closed。
+        // 其余组合（非 Author 承载角色带 deny、Handoff/Reviewer 带旧 deny、
+        // 未来未知 intent）一律 fail-closed。
         Some(_) => Err(ToolPolicyGuardError::PolicyForbidden {
             role: adapter_role_text(role).to_string(),
         }),
+    }
+}
+
+/// 批2 Task 20：受信装配的 duty→wire 投影（窗口感知版）。Reviewer duty
+/// 必须携带有效窗口引用铸造 `ReviewerVerify` 合同（缺窗 fail-closed，
+/// 返回 `Err`）；Author 保持 deny 投影（不依赖窗口）；其余职责全开
+/// `None`。[`tool_policy_for_duty`] 为无窗上下文的旧口径（Reviewer 返回
+/// `None` 仅用于「尚未接线的中间态」断言），生产装配一律走本函数。
+pub fn tool_policy_for_duty_in_window(
+    duty: &crate::cross_cutting::provider_execution::TrustedProviderRole,
+    review_window_id: Option<&str>,
+) -> Result<Option<ProviderToolPolicy>, ToolPolicyGuardError> {
+    match duty {
+        crate::cross_cutting::provider_execution::TrustedProviderRole::Author => {
+            Ok(Some(ProviderToolPolicy::deny_file_write_builtins()))
+        }
+        crate::cross_cutting::provider_execution::TrustedProviderRole::Reviewer => {
+            let window_id = review_window_id
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| ToolPolicyGuardError::PolicyRequired {
+                    role: adapter_role_text(&AdapterRole::Reviewer).to_string(),
+                })?;
+            Ok(Some(ProviderToolPolicy::reviewer_verify(window_id)))
+        }
+        crate::cross_cutting::provider_execution::TrustedProviderRole::Orchestrator
+        | crate::cross_cutting::provider_execution::TrustedProviderRole::Splitter
+        | crate::cross_cutting::provider_execution::TrustedProviderRole::Handoff
+        | crate::cross_cutting::provider_execution::TrustedProviderRole::Coder => Ok(None),
     }
 }
 
@@ -792,6 +853,22 @@ pub fn canonical_tool_policy(
                 approval_policy_version: TOOL_POLICY_APPROVAL_POLICY_VERSION.to_string(),
             })
         }
+        // 批2 Task 20：ReviewerVerify 窗口合同——物理面=全工具（无 deny
+        // 片段）；canonical digest 以窗口引用为域（同窗同 digest、换窗必
+        // 失配），供 durable provider_start 与 resume 三元组比对消费。
+        ToolPolicyIntent::ReviewerVerify { window_id } => {
+            let tokens = Vec::new();
+            Ok(CanonicalToolPolicy {
+                provider: provider.to_string(),
+                digest: tool_policy_digest(
+                    provider,
+                    &[format!("reviewer-verify-window:{window_id}")],
+                    TOOL_POLICY_APPROVAL_POLICY_VERSION,
+                ),
+                tokens,
+                approval_policy_version: TOOL_POLICY_APPROVAL_POLICY_VERSION.to_string(),
+            })
+        }
         // marker 不是 deny 策略会话：不产出 canonical digest/tokens（自举
         // 执行器的 durable 审计由 root recipe receipt 承担，Task 1.5）。
         ToolPolicyIntent::BootstrapExecutorMarker(_) => {
@@ -808,6 +885,9 @@ pub fn translate_tool_policy(
 ) -> Result<Vec<String>, ToolPolicyError> {
     match &policy.intent {
         ToolPolicyIntent::DenyFileWriteBuiltins => deny_file_write_builtins_tokens(provider),
+        // 批2 Task 20：ReviewerVerify=全工具（无 deny argv 片段）；窗口纪律
+        // 由平台 durable 窗口与对账承担，不物理限制工具面。
+        ToolPolicyIntent::ReviewerVerify { .. } => Ok(Vec::new()),
         // marker 意图没有物理 deny 片段：自举执行器保持完整工具面（写权限
         // 来自 credential 的 admission 判定，而非 argv 黑名单）。
         ToolPolicyIntent::BootstrapExecutorMarker(_) => {
@@ -815,6 +895,7 @@ pub fn translate_tool_policy(
         }
     }
 }
+
 
 /// Author 会话基线树锚点（per-issue-base-branch，REQ-PIB-02）。两级语义
 ///（防误读，design D3）：
