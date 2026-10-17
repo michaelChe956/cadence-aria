@@ -1942,8 +1942,7 @@ async fn kimi_child_death_after_initialize_write_terminates_session_promptly() {
 // ==== Task 3.6(B0e):kimi 真实 facts 与 full 投影/audit 同源接线 ====
 
 use crate::cross_cutting::kimi_code_provider::projection::{
-    KIMI_GENERIC_TOOL_POLICY_FORBIDDEN, KIMI_LC_APPROVAL_POLICY, KIMI_NATIVE_MCP_SOURCE,
-    KimiPolicyProjector,
+    KIMI_LC_APPROVAL_POLICY, KIMI_NATIVE_MCP_SOURCE, KimiPolicyProjector,
 };
 use crate::product::logical_codebase::RootRecipeReceiptStore;
 use crate::product::logical_codebase::policy::{
@@ -2286,30 +2285,25 @@ async fn anchor_t36_provider_prepare_and_audit_share_full_fingerprint() {
     let provider = Arc::new(KimiCodeProvider::new(fixture_bin.clone()));
     let gateway = fixture.gateway_with_streaming_adapter(provider.clone());
 
-    // 1) Kimi 通用策略例外保持:gateway 为 Orchestrator 注入非空通用策略
-    //    → adapter 以稳定码 typed 拒,且拒于 version probe 之前(计数 0)。
+    // 1) 批2 Task 11 矩阵:gateway 不再按 AdapterRole 注入 deny(Orchestrator
+    //    承载的规划候选 wire 面全开)——prepare 成功且候选 input 的
+    //    tool_policy=None(kimi 通用策略例外口径由「零派发」承接;adapter
+    //    对到达的非空通用策略仍稳定码 typed 拒,该面由 kimi adapter 自测
+    //    与 lcg_t01 映射测试钉住);prepare 只读零探测(计数 0)。
     let mut orchestrator_raw = fixture.lc_streaming_input(None, None);
     orchestrator_raw.role = AdapterRole::Orchestrator;
-    let policy_rejection = gateway
+    let orchestrator_candidate = gateway
         .prepare_lc_streaming_candidate(
             orchestrator_raw,
             fixture.coding_request(),
             anchor_t36_audit_context(sink.clone()),
             CancellationToken::new(),
         )
-        .await;
-    let policy_error = match policy_rejection {
-        Err(ProviderGatewayError::Adapter(error)) => error,
-        Err(other) => panic!("unexpected gateway rejection shape: {other:?}"),
-        Ok(_) => {
-            panic!("a non-empty generic tool policy must be typed-rejected by the kimi adapter")
-        }
-    };
+        .await
+        .expect("T11: orchestrator planning candidate prepares with no derived deny");
     assert!(
-        policy_error
-            .details
-            .contains(KIMI_GENERIC_TOOL_POLICY_FORBIDDEN),
-        "unexpected rejection: {policy_error:?}"
+        orchestrator_candidate.input().tool_policy.is_none(),
+        "T11: no deny must be derived from the Orchestrator carrier for kimi"
     );
     assert_eq!(anchor_t36_probe_invocations(&fixture_bin), 0);
 
