@@ -377,3 +377,356 @@ async fn reviewer_gateway_rejection_without_trust_face_stays_bare() {
         error.details
     );
 }
+
+// ---- 批2 Task 20b 修复轮 1(F1,Main 裁定):聚合根视图窗口目标钉测 ----
+// 形态枚举(报告同步):
+// A. Story focus=Some(成员):业务解析→focus 成员 checkout(git)→窗口锚成员;
+// B. Story focus=None(聚合视图回落):无唯一成员→plan_review_window_target_unresolved;
+// C. Design involved 空/WorkItemPlan 多 target 非唯一:同 B(聚合视图/解析失败
+//    →专用码,不以 IdentityDrift 误报)。
+mod t20b_f1_plan_window_target {
+    use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+    use crate::cross_cutting::streaming_provider::{
+        ProviderCompletion, ProviderEvent, ProviderSession, StreamingProviderAdapter,
+        StreamingProviderInput,
+    };
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::LifecycleStore;
+    use crate::product::logical_codebase::{
+        IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseStore,
+        LogicalRepositoryId,
+    };
+    use crate::product::workspace_engine::types::{EngineEvent, WorkspaceEngine, WorkspaceSession};
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    /// 最小 verdict provider:approve JSON 按结构化合同回nonce。
+    struct ApproveReviewProvider;
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for ApproveReviewProvider {
+        async fn start(
+            &self,
+            input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let (command_tx, _command_rx) = mpsc::channel(8);
+            let output = r#"可以确认。
+
+```json
+{
+  "verdict": "approve",
+  "summary": "可以确认",
+  "findings": []
+}
+```"#
+                .to_string();
+            let contract = input.structured_output_contract;
+            tokio::spawn(async move {
+                let _ = event_tx
+                    .send(ProviderEvent::TextDelta {
+                        content: output.clone(),
+                    })
+                    .await;
+                let full_output = if let Some(contract) = contract.as_ref() {
+                    format!(
+                        "{output}\n<ARIA_STRUCTURED_OUTPUT nonce=\"{}\">{{\"verdict\":\"approve\",\"summary\":\"可以确认\",\"findings\":[]}}</ARIA_STRUCTURED_OUTPUT>",
+                        contract.nonce
+                    )
+                } else {
+                    output
+                };
+                let _ = event_tx
+                    .send(ProviderEvent::Completed(ProviderCompletion::from_output(
+                        full_output,
+                        contract.as_ref(),
+                        None,
+                    )))
+                    .await;
+            });
+            Ok(ProviderSession {
+                native_session_id: None,
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+    }
+
+    /// 逻辑 fixture:project+2 git 成员仓(逻辑特性)+manifest/selection+
+    /// issue(legacy LC)+story spec(focus 可空)。
+    struct PlanWindowFixture {
+        _root: tempfile::TempDir,
+        paths: ProductAppPaths,
+        lifecycle: LifecycleStore,
+        member_a: std::path::PathBuf,
+        project_id: String,
+        issue_id: String,
+        story_entity_id: String,
+    }
+
+    fn git_init(dir: &std::path::Path) {
+        use std::process::Command;
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "t20b@example.test"],
+            vec!["config", "user.name", "T20B F1"],
+            vec!["commit", "-m", "init", "--quiet", "--allow-empty"],
+        ] {
+            let status = Command::new("git")
+                .current_dir(dir)
+                .args(&args)
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git fixture {args:?} must succeed");
+        }
+    }
+
+    fn logical_story_fixture(focus_first_member: bool) -> PlanWindowFixture {
+        use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+        use crate::product::lifecycle_store::{
+            AggregateStorySpecScope, CreateStorySpecInput, CreateWorkspaceSessionInput,
+        };
+        use crate::product::logical_codebase::LogicalCodebaseFeature;
+        use crate::product::models::WorkspaceType;
+        use crate::product::project_store::{CreateProjectInput, ProjectStore};
+        use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
+
+        let root = tempfile::tempdir().expect("root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let project = ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "T20B-F1".to_string(),
+                description: None,
+            })
+            .expect("project");
+        let project_id = project.id.clone();
+
+        let mut logical_ids = Vec::new();
+        let mut member_paths = Vec::new();
+        for name in ["member-a", "member-b"] {
+            let dir = root.path().join(name);
+            std::fs::create_dir_all(&dir).expect("member dir");
+            git_init(&dir);
+            let record = RepositoryStore::with_logical_codebase_feature(
+                paths.clone(),
+                LogicalCodebaseFeature::enabled(),
+            )
+            .create(CreateRepositoryInput {
+                project_id: project_id.clone(),
+                name: name.to_string(),
+                path: dir.clone(),
+                default_policy_preset: None,
+                default_provider_mode: None,
+                idempotency_key: format!("t20b-f1-{name}"),
+            })
+            .expect("member repository");
+            logical_ids.push(record.logical_repository_id.expect("logical id"));
+            member_paths.push(dir);
+        }
+        let [a, b] = [logical_ids[0], logical_ids[1]];
+
+        let manifest = LogicalCodebaseStore::new(paths.clone())
+            .load_manifest(&project_id)
+            .expect("manifest io")
+            .expect("manifest");
+        let legacy_lc = crate::product::logical_codebase::legacy_logical_codebase_id(&project_id);
+        let issue = IssueStore::new(paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: project_id.clone(),
+                repo_id: None,
+                logical_codebase_id: Some(legacy_lc.to_string()),
+                base_branch: None,
+                title: "t20b f1".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .expect("issue");
+        let issue_id = issue.id.clone();
+        IssueCodebaseSelectionStore::new(paths.clone())
+            .save(&IssueCodebaseSelection::explicit(
+                &project_id,
+                &issue_id,
+                vec![a, b],
+                Vec::new(),
+                Vec::new(),
+                None,
+            ))
+            .expect("selection");
+
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let focus = if focus_first_member {
+            Some(logical_ids[0])
+        } else {
+            None
+        };
+        let story = lifecycle
+            .create_story_spec(CreateStorySpecInput {
+                project_id: project_id.clone(),
+                issue_id: issue_id.clone(),
+                repository_id: record_physical_id(&paths, &project_id),
+                title: "t20b f1 story".to_string(),
+                aggregate_codebase: Some(AggregateStorySpecScope {
+                    logical_codebase_ref: manifest.logical_codebase_id,
+                    effective_member_ids: vec![a, b],
+                    involved_repository_ids: vec![a, b],
+                    focus_repository_id: focus,
+                }),
+            })
+            .expect("story spec");
+        PlanWindowFixture {
+            _root: root,
+            paths,
+            lifecycle,
+            member_a: member_paths[0].clone(),
+            project_id,
+            issue_id,
+            story_entity_id: story.id,
+        }
+    }
+
+    fn record_physical_id(paths: &ProductAppPaths, project_id: &str) -> String {
+        // story spec 的 repository_id 传成员 A 的物理仓 id(迁移期投影字段)。
+        crate::product::repository_store::RepositoryStore::with_logical_codebase_feature(
+            paths.clone(),
+            crate::product::logical_codebase::LogicalCodebaseFeature::enabled(),
+        )
+        .list(project_id)
+        .expect("list repositories")
+        .into_iter()
+        .map(|record| record.id)
+        .next()
+        .expect("physical repository id")
+    }
+
+    fn engine_with_aggregate_view(
+        fixture: &PlanWindowFixture,
+    ) -> (
+        tempfile::TempDir,
+        mpsc::Receiver<EngineEvent>,
+        WorkspaceEngine,
+    ) {
+        use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
+        use crate::product::models::{ProviderName, WorkspaceType};
+        use crate::product::workspace_engine::types::WorkspaceSession;
+        let aggregate_view = tempfile::tempdir().expect("aggregate view");
+        std::fs::create_dir_all(aggregate_view.path()).expect("aggregate view dir");
+        let record = fixture
+            .lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: fixture.project_id.clone(),
+                issue_id: fixture.issue_id.clone(),
+                entity_id: fixture.story_entity_id.clone(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::ClaudeCode),
+                review_rounds: 2,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            })
+            .expect("workspace session");
+        let checkpoint = Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+            fixture
+                .paths
+                .issue_lifecycle_root(&fixture.project_id, &fixture.issue_id),
+        ));
+        let (tx, rx) = mpsc::channel(64);
+        let mut engine = WorkspaceEngine::new_persistent(
+            checkpoint,
+            LifecycleStore::new(fixture.paths.clone()),
+            tx,
+            WorkspaceSession::from_record(record),
+        );
+        // 模拟生产 LC 聚合根视图:session 仓库路径=非 git 的 provider_context_root;
+        // 系统上下文携带聚合 scope marker(生产 LC 聚合会话形态——baseline
+        // 链据此跳过 git 基线解析)。
+        engine.session.repository_path = Some(aggregate_view.path().to_path_buf());
+        engine
+            .session
+            .messages
+            .push(crate::product::workspace_engine::types::SessionMessage {
+                id: "t20b_f1_aggregate_scope".to_string(),
+                role: "system".to_string(),
+                content: "## 聚合代码库成员清单\n- member-a\n- member-b".to_string(),
+                checkpoint_id: None,
+                created_at: "2026-10-17T00:00:00Z".to_string(),
+            });
+        engine.session.artifact = Some(crate::web::workspace_ws_types::ArtifactPayload::Markdown {
+            markdown: "# Artifact\n\n可以确认".to_string(),
+            diff: None,
+        });
+        (aggregate_view, rx, engine)
+    }
+
+    /// 形态 A:Story focus=Some → 窗口锚定 focus 成员 checkout,评审正常走。
+    #[tokio::test]
+    async fn story_focus_aggregate_view_windows_on_focus_member_and_completes() {
+        let mut fixture = logical_story_fixture(true);
+        let (_view, mut rx, mut engine) = engine_with_aggregate_view(&fixture);
+        let session_id = engine.session().session_id.to_string();
+        let member_a = fixture.member_a.clone();
+        let window_root = fixture.paths.root().join("reviewer-windows");
+        // 根目录 keep(窗口记录断言在 engine 轮次收口后仍可读)。
+        let _kept = fixture._root.keep();
+
+        engine.start_review_or_skip().await;
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        engine
+            .drive_review_session(Arc::new(ApproveReviewProvider), command_rx)
+            .await;
+
+        // 无 Error 事件(窗口解析成功,评审走通)。
+        let mut saw_error = None;
+        while let Ok(event) = rx.try_recv() {
+            if let EngineEvent::Error { message } = event {
+                saw_error = Some(message);
+            }
+        }
+        assert!(
+            saw_error.is_none(),
+            "aggregate view with story focus must review on the focus member: {saw_error:?}"
+        );
+        // 窗口记录锚定成员 A(git checkout),非聚合视图/非 IdentityDrift。
+        let window_store =
+            crate::product::reviewer_window_store::ReviewerWindowStore::new(window_root);
+        let record = window_store
+            .load_window(&format!("plan-{session_id}-w01"))
+            .expect("window record must exist");
+        let expected = member_a.canonicalize().expect("member a canonical");
+        assert_eq!(
+            record.identity.canonical_worktree, expected,
+            "window must anchor the focus member checkout, not the aggregate view"
+        );
+    }
+
+    /// 形态 B:Story focus=None(聚合视图,真无唯一成员)→专用错误码,非静默/非 IdentityDrift。
+    #[tokio::test]
+    async fn story_without_focus_reports_dedicated_unresolved_code_not_identity_drift() {
+        let fixture = logical_story_fixture(false);
+        let (_view, mut rx, mut engine) = engine_with_aggregate_view(&fixture);
+
+        engine.start_review_or_skip().await;
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        engine
+            .drive_review_session(Arc::new(ApproveReviewProvider), command_rx)
+            .await;
+
+        let mut error_message = None;
+        while let Ok(event) = rx.try_recv() {
+            if let EngineEvent::Error { message } = event {
+                error_message = Some(message);
+            }
+        }
+        let message = error_message
+            .expect("aggregate view without unique member must surface an explicit error");
+        assert!(
+            message.contains("plan_review_window_target_unresolved"),
+            "must use the dedicated owner-ruling error code, got: {message}"
+        );
+        assert!(
+            !message.contains("IdentityDrift") && !message.contains("identity_drift"),
+            "must not misreport as git identity drift, got: {message}"
+        );
+    }
+}

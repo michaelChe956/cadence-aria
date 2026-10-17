@@ -40,11 +40,16 @@ impl WorkspaceEngine {
         };
         // T20b:开窗早于材料采集(生产入口无条件;测试内层直调走
         // `drive_review_session_with_window`,无窗形态=内层测试 seam)。
-        let review_target = self
-            .session
-            .repository_path
-            .clone()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        // 修复轮 1(F1):窗口目标经聚合根视图感知解析(成员 checkout/
+        // direct 原样;聚合视图落唯一/focus 成员;无唯一成员=专用码)。
+        let review_target = match self.plan_review_window_worktree() {
+            Ok(worktree) => worktree,
+            Err(message) => {
+                let _ = self.event_tx.send(EngineEvent::Error { message }).await;
+                self.finish_failed_run().await;
+                return;
+            }
+        };
         if let Err(message) = self
             .begin_plan_review_window(&reviewer, review_target)
             .await
@@ -1500,6 +1505,10 @@ fn map_gateway_error_to_adapter(error: &ProviderGatewayError) -> ProviderAdapter
 const PLAN_REVIEWER_WINDOW_STORE_DIR: &str = "reviewer-windows";
 const PLAN_REVIEWER_SNAPSHOT_STORE_DIR: &str = "reviewer-snapshots";
 const PLAN_PROVIDER_RESOURCE_STORE_DIR: &str = "provider-resources";
+/// 修复轮 1(F1):聚合根规划评审窗口目标待 owner 裁定的专用错误码
+/// (真·无唯一成员面不静默杀、不以 IdentityDrift 误报)。
+pub(crate) const PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED: &str =
+    "plan_review_window_target_unresolved";
 
 impl WorkspaceEngine {
     fn plan_reviewer_window_store(
@@ -1575,6 +1584,65 @@ impl WorkspaceEngine {
         )
         .map_err(|error| format!("plan_review_scope_open_failed: {error}"))?;
         Ok(vec![scope])
+    }
+
+    /// 修复轮 1(F1,Main 裁定):规划审查窗口目标解析——与
+    /// `review_launch_target_and_cwd` 同源起步:目标带 `.git` 原样返回
+    /// (成员 checkout/direct);聚合根视图(非 git 的 provider_context_
+    /// root,Story focus=None/Design involved 空/WorkItemPlan 多 target
+    /// 非唯一三形态可达)时经实体四事实 resolver 落到本次评审实际的
+    /// 唯一/focus 成员 checkout;真·无唯一成员面不静默杀——返回专用
+    /// 错误码(聚合根规划评审窗口目标待 owner 裁定),不得以
+    /// IdentityDrift 形态误报。
+    fn plan_review_window_worktree(&self) -> Result<std::path::PathBuf, String> {
+        let target = self
+            .session
+            .repository_path
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        if target.join(".git").exists() {
+            return Ok(target);
+        }
+        // 聚合根视图形态:解析业务仓(唯一/focus 成员)。
+        let Some(store) = self.lifecycle_store.as_ref() else {
+            return Err(format!(
+                "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: aggregate root view without a persistent lifecycle store; owner ruling pending"
+            ));
+        };
+        let context = crate::product::workspace_repository::resolve_workspace_repository_context_for_entity(
+            &store.app_paths(),
+            store,
+            &self.session.project_id,
+            &self.session.issue_id,
+            &self.session.entity_id,
+            self.session.workspace_type.clone(),
+        )
+        .map_err(|error| {
+            format!(
+                "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: business repository resolution failed ({error}); owner ruling pending"
+            )
+        })?;
+        let repository = context.business_repository.map_err(|error| {
+            format!(
+                "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: business repository unresolved ({error}); owner ruling pending"
+            )
+        })?;
+        if crate::product::workspace_repository::is_aggregate_root_view_repository(&repository) {
+            // Story focus=None / WorkItemPlan 多 target 回落聚合视图:无唯一
+            // 成员面——不静默杀,交 owner 裁定(候选替代=manifest 主成员
+            // checkout 锚,见修复轮 1 报告建议)。
+            return Err(format!(
+                "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: aggregate root view with no unique/focus member (repository id {}); owner ruling pending",
+                repository.id
+            ));
+        }
+        if !repository.path.join(".git").exists() {
+            return Err(format!(
+                "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: resolved member checkout {} is not a git worktree; owner ruling pending",
+                repository.path.display()
+            ));
+        }
+        Ok(repository.path)
     }
 
     /// 入口开窗(T17 冻结顺序):必须早于 `ensure_review_invocation_scope`/

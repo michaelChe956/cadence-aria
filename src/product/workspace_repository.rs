@@ -64,23 +64,120 @@ pub fn resolve_workspace_repository_context(
     lifecycle: &LifecycleStore,
     session: &WorkspaceSessionRecord,
 ) -> Result<WorkspaceRepositoryContext, ProductStoreError> {
-    let routing =
-        RepositoryRouting::load_for_issue(app_paths, &session.project_id, &session.issue_id)?;
+    // WorkItem 运行态解析消费 record 专属字段(runtime binding)——保留
+    // record 专臂;规划三型(Story/Design/WorkItemPlan)走实体四事实入口。
+    if session.workspace_type == WorkspaceType::WorkItem {
+        return resolve_work_item_repository_context(app_paths, lifecycle, session);
+    }
+    resolve_workspace_repository_context_for_entity(
+        app_paths,
+        lifecycle,
+        &session.project_id,
+        &session.issue_id,
+        &session.entity_id,
+        session.workspace_type.clone(),
+    )
+}
+
+/// WorkItem(record 专臂:runtime binding 解析是 record 字段消费,不进
+/// 实体四事实入口)。
+fn resolve_work_item_repository_context(
+    app_paths: &ProductAppPaths,
+    lifecycle: &LifecycleStore,
+    session: &WorkspaceSessionRecord,
+) -> Result<WorkspaceRepositoryContext, ProductStoreError> {
+    WorkItemRuntimeReader::new(app_paths.clone()).resolve_workspace(session)?;
+    match RepositoryRouting::load_for_issue(app_paths, &session.project_id, &session.issue_id)? {
+        RepositoryRouting::Legacy { .. } => {
+            let repository = resolve_issue_repository_record(app_paths, session)?;
+            Ok(same_anchor_context(repository))
+        }
+        RepositoryRouting::Logical {
+            manifest,
+            selection,
+        } => {
+            let work_item = lifecycle
+                .list_work_items(&session.project_id, &session.issue_id)?
+                .into_iter()
+                .find(|work_item| work_item.id == session.entity_id)
+                .ok_or_else(|| ProductStoreError::NotFound {
+                    kind: "work_item",
+                    id: session.entity_id.clone(),
+                })?;
+            let logical_id = work_item.target_repository_id.ok_or_else(|| {
+                routing_error(
+                    RepositoryRoutingErrorCode::TargetMissing,
+                    format!("work item {} has no target repository", work_item.id),
+                )
+            })?;
+            let repository = resolve_selected_logical_repository(
+                app_paths,
+                &session.project_id,
+                &session.issue_id,
+                logical_id,
+                &manifest,
+                &selection,
+            )?;
+            Ok(same_anchor_context(repository))
+        }
+        RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
+    }
+}
+
+fn resolve_issue_repository_record(
+    app_paths: &ProductAppPaths,
+    session: &WorkspaceSessionRecord,
+) -> Result<RepositoryRecord, ProductStoreError> {
+    let physical_repository_id = IssueStore::new(app_paths.clone())
+        .get(&session.project_id, &session.issue_id)?
+        .repo_id
+        .ok_or_else(|| ProductStoreError::NotFound {
+            kind: "repository",
+            id: format!("issue:{}:repo_id", session.issue_id),
+        })?;
+    resolve_legacy_physical_repository(app_paths, &session.project_id, &physical_repository_id)
+}
+
+/// 批2 Task 20b 修复轮 1(F1):实体四事实(engine `WorkspaceSession` 与
+/// durable record 共用同一 resolver——engine 侧规划审查窗口目标解析
+/// 消费,不复制选仓规则;字段名与 record 对齐,body 零改动)。
+struct EntityFacts<'a> {
+    project_id: &'a str,
+    issue_id: &'a str,
+    entity_id: &'a str,
+    workspace_type: WorkspaceType,
+}
+
+pub fn resolve_workspace_repository_context_for_entity(
+    app_paths: &ProductAppPaths,
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    entity_id: &str,
+    workspace_type: WorkspaceType,
+) -> Result<WorkspaceRepositoryContext, ProductStoreError> {
+    let routing = RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)?;
+    let session = EntityFacts {
+        project_id,
+        issue_id,
+        entity_id,
+        workspace_type,
+    };
     match session.workspace_type {
         WorkspaceType::Story => {
             let story = lifecycle
-                .list_story_specs(&session.project_id, &session.issue_id)?
+                .list_story_specs(session.project_id, session.issue_id)?
                 .into_iter()
                 .find(|story| story.id == session.entity_id)
                 .ok_or_else(|| ProductStoreError::NotFound {
                     kind: "story_spec",
-                    id: session.entity_id.clone(),
+                    id: session.entity_id.to_string(),
                 })?;
             match routing {
                 RepositoryRouting::Legacy { .. } => {
                     let repository = resolve_legacy_physical_repository(
                         app_paths,
-                        &session.project_id,
+                        session.project_id,
                         &story.repository_id,
                     )?;
                     Ok(same_anchor_context(repository))
@@ -95,8 +192,8 @@ pub fn resolve_workspace_repository_context(
                     business_repository: match story.focus_repository_id {
                         Some(logical_id) => resolve_selected_logical_repository(
                             app_paths,
-                            &session.project_id,
-                            &session.issue_id,
+                            session.project_id,
+                            session.issue_id,
                             logical_id,
                             &manifest,
                             &selection,
@@ -124,16 +221,16 @@ pub fn resolve_workspace_repository_context(
         }
         WorkspaceType::Design => {
             let design = lifecycle
-                .list_design_specs(&session.project_id, &session.issue_id)?
+                .list_design_specs(session.project_id, session.issue_id)?
                 .into_iter()
                 .find(|design| design.id == session.entity_id)
                 .ok_or_else(|| ProductStoreError::NotFound {
                     kind: "design_spec",
-                    id: session.entity_id.clone(),
+                    id: session.entity_id.to_string(),
                 })?;
             match routing {
                 RepositoryRouting::Legacy { .. } => {
-                    let repository = resolve_issue_repository(app_paths, session)?;
+                    let repository = resolve_issue_repository(app_paths, &session)?;
                     Ok(same_anchor_context(repository))
                 }
                 RepositoryRouting::Logical {
@@ -143,8 +240,8 @@ pub fn resolve_workspace_repository_context(
                     native_launch_anchor: planning_native_launch_anchor(&manifest, &selection),
                     business_repository: resolve_logical_design_repository(
                         app_paths,
-                        &session.project_id,
-                        &session.issue_id,
+                        session.project_id,
+                        session.issue_id,
                         &design,
                         &manifest,
                         &selection,
@@ -155,13 +252,13 @@ pub fn resolve_workspace_repository_context(
         }
         WorkspaceType::WorkItemPlan => {
             let plan = lifecycle.get_issue_work_item_plan(
-                &session.project_id,
-                &session.issue_id,
-                &session.entity_id,
+                session.project_id,
+                session.issue_id,
+                session.entity_id,
             )?;
             match routing {
                 RepositoryRouting::Legacy { .. } => {
-                    let repository = resolve_issue_repository(app_paths, session)?;
+                    let repository = resolve_issue_repository(app_paths, &session)?;
                     Ok(same_anchor_context(repository))
                 }
                 RepositoryRouting::Logical {
@@ -170,68 +267,18 @@ pub fn resolve_workspace_repository_context(
                 } => Ok(WorkspaceRepositoryContext {
                     native_launch_anchor: planning_native_launch_anchor(&manifest, &selection),
                     business_repository: resolve_logical_plan_repository(
-                        app_paths, lifecycle, session, &plan, &manifest, &selection,
+                        app_paths, lifecycle, &session, &plan, &manifest, &selection,
                     ),
                 }),
                 RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
             }
         }
         WorkspaceType::WorkItem => {
-            WorkItemRuntimeReader::new(app_paths.clone()).resolve_workspace(session)?;
-            match routing {
-                RepositoryRouting::Legacy { .. } => {
-                    let physical_repository_id = lifecycle
-                        .list_work_items(&session.project_id, &session.issue_id)?
-                        .into_iter()
-                        .find(|work_item| work_item.id == session.entity_id)
-                        .map(|work_item| work_item.repository_id)
-                        .or_else(|| {
-                            IssueStore::new(app_paths.clone())
-                                .get(&session.project_id, &session.issue_id)
-                                .ok()
-                                .and_then(|issue| issue.repo_id)
-                        })
-                        .ok_or_else(|| ProductStoreError::NotFound {
-                            kind: "work_item",
-                            id: session.entity_id.clone(),
-                        })?;
-                    let repository = resolve_legacy_physical_repository(
-                        app_paths,
-                        &session.project_id,
-                        &physical_repository_id,
-                    )?;
-                    Ok(same_anchor_context(repository))
-                }
-                RepositoryRouting::Logical {
-                    manifest,
-                    selection,
-                } => {
-                    let work_item = lifecycle
-                        .list_work_items(&session.project_id, &session.issue_id)?
-                        .into_iter()
-                        .find(|work_item| work_item.id == session.entity_id)
-                        .ok_or_else(|| ProductStoreError::NotFound {
-                            kind: "work_item",
-                            id: session.entity_id.clone(),
-                        })?;
-                    let logical_id = work_item.target_repository_id.ok_or_else(|| {
-                        routing_error(
-                            RepositoryRoutingErrorCode::TargetMissing,
-                            format!("work item {} has no target repository", work_item.id),
-                        )
-                    })?;
-                    let repository = resolve_selected_logical_repository(
-                        app_paths,
-                        &session.project_id,
-                        &session.issue_id,
-                        logical_id,
-                        &manifest,
-                        &selection,
-                    )?;
-                    Ok(same_anchor_context(repository))
-                }
-                RepositoryRouting::FailClosed { code, reason } => Err(routing_error(code, reason)),
-            }
+            // 实体四事实入口不承载 WorkItem 运行态(runtime binding 是
+            // record 字段消费,见 record 专臂);规划审查窗口不驱动该型。
+            Err(ProductStoreError::Io(
+                "entity_facts_entry_unsupported_for_work_item_runtime".to_string(),
+            ))
         }
     }
 }
@@ -304,7 +351,7 @@ fn resolve_logical_design_repository(
 fn resolve_logical_plan_repository(
     app_paths: &ProductAppPaths,
     lifecycle: &LifecycleStore,
-    session: &WorkspaceSessionRecord,
+    session: &EntityFacts<'_>,
     plan: &crate::product::models::IssueWorkItemPlan,
     manifest: &crate::product::logical_codebase::LogicalCodebaseManifest,
     selection: &crate::product::logical_codebase::IssueCodebaseSelection,
@@ -329,8 +376,8 @@ fn resolve_logical_plan_repository(
     match plan_session_repository_target(target_ids, &plan.id, selection)? {
         PlanSessionRepositoryTarget::Member(logical_id) => resolve_selected_logical_repository(
             app_paths,
-            &session.project_id,
-            &session.issue_id,
+            session.project_id,
+            session.issue_id,
             logical_id,
             manifest,
             selection,
@@ -462,16 +509,16 @@ fn aggregate_root_view(
 
 fn resolve_issue_repository(
     app_paths: &ProductAppPaths,
-    session: &WorkspaceSessionRecord,
+    session: &EntityFacts<'_>,
 ) -> Result<RepositoryRecord, ProductStoreError> {
     let physical_repository_id = IssueStore::new(app_paths.clone())
-        .get(&session.project_id, &session.issue_id)?
+        .get(session.project_id, session.issue_id)?
         .repo_id
         .ok_or_else(|| ProductStoreError::NotFound {
             kind: "repository",
             id: format!("issue:{}:repo_id", session.issue_id),
         })?;
-    resolve_legacy_physical_repository(app_paths, &session.project_id, &physical_repository_id)
+    resolve_legacy_physical_repository(app_paths, session.project_id, &physical_repository_id)
 }
 
 fn unique_ids(ids: Vec<LogicalRepositoryId>) -> BTreeSet<LogicalRepositoryId> {
