@@ -34,6 +34,8 @@ pub mod provider_resource_store;
 pub mod provider_workspace_runner;
 pub mod repository_store;
 pub mod reviewer_snapshot;
+pub mod reviewer_window;
+pub mod reviewer_window_store;
 pub mod runtime_binding_store;
 pub mod test_executor;
 pub mod work_item_contract;

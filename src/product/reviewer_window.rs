@@ -1,0 +1,2320 @@
+#![cfg_attr(not(test), allow(dead_code))]
+//! 批2 Task 17:Reviewer 窗口 durable 租约与「先停 writer 后采材料」
+//! 准入编排。
+//!
+//! 冻结顺序(brief 逐字):**先 durable 租约 + 平台写通道锁 → 停止/确认
+//! 全部已登记 writer 及在途 Git mutation → 持久完整 baseline → 允许采
+//! 材料 → 构造 ReviewerVerify → Running**。未知 writer/锁失败/快照失败
+//! 不采材料、不 spawn;租约不是进程内 Mutex、无 Drop 释放——锁持有跨
+//! 取消/重启,只有恢复完整且相应裁决完成(终态)才释放。
+//!
+//! 窗口主键绑定 canonical worktree identity(共享 common-dir 的 linked
+//! 冲突身份纳入锁集:树级租约互斥 + 通道闸门按 common-dir 键控),并
+//! 绑定 attempt/run/provider——**不能只按 attempt_id 锁同一树**。
+//!
+//! T18 契约(条目级 Io Err 与 RecoveryRequired 的分离,审查硬约束 4):
+//! `restore_window` 里 T16 `Err`(Io/Store/Integrity 等瞬时/存储错误)
+//! **不**迁移窗口状态,只记 `last_error` 并原样返回——T18 对账时计入
+//! 非通过并从 `restore.cursor_phase/entry_index` 带出游标;T16
+//! `RestoreOutcome::RecoveryRequired`(域内无法安全恢复)才把窗口迁入
+//! `RecoveryRequired` 停等(锁保留)。
+//!
+//! T16 掉电窗口披露(RevB2T16 ⚠1):blobs/manifest 目录项 fsync 缺口
+//! 按审查约定接受该掉电窗口;本模块自身的租约/窗口/闸门记录 rename 后
+//! 由 `reviewer_window_store::sync_dir` 补目录 fsync。若掉电丢失
+//! manifest 目录项,`assert_review_window_current` 的 Running 复核因
+//! manifest 缺失/哈希不符拒绝材料——fail-closed,不产生假通过。
+
+use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+
+use crate::cross_cutting::provider_resources::{
+    ProviderRunResourceScope, QuiesceOutcome, QuiescentScope,
+};
+use crate::product::json_store::ProductStoreError;
+use crate::product::reviewer_snapshot::{
+    CaptureRequest, PlatformWritePath, QuiescenceEvidence, RestoreOutcome,
+    ReviewWorktreeLockIdentity, ReviewerSnapshotError, ReviewerSnapshotStore, SnapshotBudget,
+};
+use crate::product::reviewer_window_store::{
+    ALL_WRITE_CHANNELS, BaselineBinding, ChannelGateError, ChannelWriter, RecoveryPhase,
+    ReportAcceptance, RestoreBinding, ReviewerWindowRecord, ReviewerWindowState,
+    ReviewerWindowStore, WindowLeaseRecord, tree_key_of,
+};
+
+/// 排空轮询间隔(测试缩短保持秒级;同 T5 cfg 分档)。
+#[cfg(not(test))]
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(test)]
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+// ---------------------------------------------------------------------------
+// 错误
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReviewerWindowError {
+    #[error("reviewer_window_invalid_request: {0}")]
+    InvalidRequest(String),
+    #[error("reviewer_window_identity_drift: {0}")]
+    IdentityDrift(String),
+    /// 跨窗口互斥(同树/共享 common-dir/通道持有/同窗重建)。
+    #[error("reviewer_window_conflict[{kind}]: {id}: {detail}")]
+    Conflict {
+        kind: &'static str,
+        id: String,
+        detail: String,
+    },
+    /// 排空超时:在途 writer 仍存活——停等(窗口 RecoveryRequired,锁保留)。
+    #[error("reviewer_window_channel_drain_timeout: {detail}")]
+    ChannelDrainTimeout { detail: String },
+    /// T5 静止未证明(未知 writer/killpg 后仍写/未确认预留)——停等。
+    #[error("reviewer_window_quiesce_not_proven: {reason}: {detail}")]
+    QuiesceNotProven { reason: String, detail: String },
+    /// T5 quiesce 存储/引擎通道错误——停等(不伪称静止)。
+    #[error("reviewer_window_quiesce_failed: {0}")]
+    QuiesceFailed(String),
+    #[error("reviewer_window_snapshot: {0}")]
+    Snapshot(#[from] ReviewerSnapshotError),
+    #[error("reviewer_window_channel: {0}")]
+    Channel(#[from] ChannelGateError),
+    #[error("reviewer_window_store: {0}")]
+    Store(#[from] ProductStoreError),
+    /// `assert_review_window_current` 同源复验失败(gateway/spawn 与平台
+    /// mutation 守卫的统一拒绝面)。
+    #[error("reviewer_window_not_current: window={window_id}: {reason}")]
+    WindowNotCurrent { window_id: String, reason: String },
+    #[error("reviewer_window_invalid_transition: {from} -> {to}: {detail}")]
+    InvalidTransition {
+        from: String,
+        to: String,
+        detail: String,
+    },
+    /// 恢复域无法安全继续(T16 RecoveryRequired)——窗口停等,锁保留。
+    #[error("reviewer_window_recovery_stopped: {reason}: {detail} (cursor={cursor})")]
+    RecoveryStopped {
+        reason: String,
+        detail: String,
+        cursor: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// 请求/产物/证明
+// ---------------------------------------------------------------------------
+
+pub(crate) struct ReviewerWindowBeginRequest<'a> {
+    pub(crate) window_id: &'a str,
+    pub(crate) attempt_id: &'a str,
+    pub(crate) run_id: &'a str,
+    pub(crate) provider: &'a str,
+    pub(crate) worktree: &'a Path,
+    /// 全部已登记 writer 的 T5 scope(顺序固定:**[0] 为主 scope**——
+    /// 其静止证明交接 T16 manifest;后续为协调 scope,如共享 common-dir
+    /// 兄弟树的 coder scope)。主 scope 即使无登记资源也必须传入
+    /// (空 manifest 的 Quiescent 即合法静止证明)。
+    pub(crate) quiesce_targets: &'a [&'a ProviderRunResourceScope],
+    /// 平台合法写入路径精确预枚举(必须在 worktree 之外且不在 Git 域)。
+    pub(crate) platform_write_paths: Vec<PlatformWritePath>,
+    /// 快照预算(生产默认由调用方给定;测试用 `SnapshotBudget::generous`)。
+    pub(crate) budget: SnapshotBudget,
+    /// 通道排空等待窗(在途 writer 退出/被收割的期限;超时停等)。
+    pub(crate) drain_timeout: Duration,
+}
+
+/// 开窗成功产物(Running;材料采集与 ReviewerVerify 构造从此刻准入)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewerWindowHandle {
+    pub(crate) window_id: String,
+    pub(crate) generation: u64,
+    pub(crate) identity: ReviewWorktreeLockIdentity,
+    pub(crate) manifest_path: PathBuf,
+    pub(crate) manifest_sha256: String,
+    pub(crate) entry_count: usize,
+    pub(crate) total_bytes: u64,
+}
+
+/// `assert_review_window_current` 的期望(window_id + attempt/run/provider
+/// + worktree):同源复验时全部重核,任何漂移即拒。
+pub(crate) struct WindowExpectation<'a> {
+    pub(crate) window_id: &'a str,
+    pub(crate) attempt_id: &'a str,
+    pub(crate) run_id: &'a str,
+    pub(crate) provider: &'a str,
+    pub(crate) worktree: &'a Path,
+}
+
+/// 同源复验证明:gateway/spawn/材料采集方据此确认窗口当前有效且材料
+/// 与 baseline manifest 同指纹。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CurrentWindowProof {
+    pub(crate) window_id: String,
+    pub(crate) generation: u64,
+    pub(crate) state: ReviewerWindowState,
+    pub(crate) report_acceptance: ReportAcceptance,
+    pub(crate) manifest_path: PathBuf,
+    pub(crate) manifest_sha256: String,
+    pub(crate) entry_count: usize,
+    pub(crate) total_bytes: u64,
+}
+
+/// 恢复结局摘要(T18 消费 `RestoreReport` 做三域判定;`manual_gate`
+#[derive(Debug)]
+pub(crate) struct RestoreSummary {
+    pub(crate) record: ReviewerWindowRecord,
+    pub(crate) manual_gate: bool,
+}
+
+/// 人工门裁决(ManualGate 专属)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManualGateDecision {
+    /// 作废关闭(旧报告永久 Invalidated)。
+    Invalidate,
+    /// 作废后要求新一轮评审(新窗口重加锁/新 baseline/新材料)。
+    RequireNewReview,
+}
+
+// ---------------------------------------------------------------------------
+// 身份解析(worktree → canonical/gitdir/common-dir;镜像 T16 语义,
+// capture/restore 侧仍以 T16 严格校验为准)
+// ---------------------------------------------------------------------------
+
+/// 解析被审 worktree 的锁身份三路径。root `.git` 为 symlink/特殊文件
+/// 拒绝;gitfile 指针与 commondir 相对/绝对均解析。
+pub(crate) fn resolve_worktree_git_identity(
+    worktree: &Path,
+) -> Result<(PathBuf, PathBuf, PathBuf), ReviewerWindowError> {
+    let canonical = worktree.canonicalize().map_err(|error| {
+        ReviewerWindowError::InvalidRequest(format!(
+            "worktree 不可解析 {}: {error}",
+            worktree.display()
+        ))
+    })?;
+    let drift = |detail: String| ReviewerWindowError::IdentityDrift(detail);
+    let dot_git = canonical.join(".git");
+    let metadata = std::fs::symlink_metadata(&dot_git)
+        .map_err(|error| drift(format!("stat {}: {error}", dot_git.display())))?;
+    let gitdir = if metadata.is_dir() {
+        dot_git
+            .canonicalize()
+            .map_err(|error| drift(format!("canonicalize gitdir: {error}")))?
+    } else if metadata.is_file() {
+        let content = std::fs::read_to_string(&dot_git)
+            .map_err(|error| drift(format!("read gitfile: {error}")))?;
+        let target = content
+            .strip_prefix("gitdir:")
+            .map(str::trim)
+            .ok_or_else(|| drift(format!("gitfile 内容非法: {content:?}")))?;
+        let target_path = PathBuf::from(target);
+        let resolved = if target_path.is_absolute() {
+            target_path
+        } else {
+            canonical.join(target_path)
+        };
+        resolved
+            .canonicalize()
+            .map_err(|error| drift(format!("gitfile 指向不可解析: {error}")))?
+    } else {
+        return Err(drift("root .git 为 symlink/特殊文件,拒绝解析".to_string()));
+    };
+    let common_dir = match std::fs::read_to_string(gitdir.join("commondir")) {
+        Ok(raw) => {
+            let target = PathBuf::from(raw.trim());
+            let resolved = if target.is_absolute() {
+                target
+            } else {
+                gitdir.join(target)
+            };
+            resolved
+                .canonicalize()
+                .map_err(|error| drift(format!("commondir 不可解析: {error}")))?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => gitdir.clone(),
+        Err(error) => return Err(drift(format!("read commondir: {error}"))),
+    };
+    Ok((canonical, gitdir, common_dir))
+}
+
+/// 词法规范化绝对路径(平台合法写入路径可能尚不存在,不能 canonicalize)。
+fn normalized_absolute(path: &Path) -> Result<PathBuf, ReviewerWindowError> {
+    if !path.is_absolute() {
+        return Err(ReviewerWindowError::InvalidRequest(format!(
+            "平台合法写入路径必须为绝对路径: {}",
+            path.display()
+        )));
+    }
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => out.push("/"),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(part) => out.push(part),
+            Component::Prefix(_) => {
+                return Err(ReviewerWindowError::InvalidRequest(
+                    "平台合法写入路径含非 unix 前缀".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// 校验平台合法写入路径预枚举(T16 ⚠8):必须在被审 worktree 之外,
+/// 且不得位于 Git 域(gitdir/common-dir——Git 观察域由 T16 单独基线)。
+fn validate_platform_write_paths(
+    paths: &[PlatformWritePath],
+    canonical_worktree: &Path,
+    gitdir: &Path,
+    common_dir: &Path,
+) -> Result<(), ReviewerWindowError> {
+    for spec in paths {
+        if spec.ownership.trim().is_empty() {
+            return Err(ReviewerWindowError::InvalidRequest(
+                "平台合法写入域归属必须非空".to_string(),
+            ));
+        }
+        let normalized = normalized_absolute(&spec.path)?;
+        let inside = |root: &Path| normalized == *root || normalized.starts_with(root);
+        if inside(canonical_worktree) {
+            return Err(ReviewerWindowError::InvalidRequest(format!(
+                "平台合法写入路径必须在 worktree 之外: {} (worktree={})",
+                normalized.display(),
+                canonical_worktree.display()
+            )));
+        }
+        if inside(gitdir) || inside(common_dir) {
+            return Err(ReviewerWindowError::InvalidRequest(format!(
+                "平台合法写入路径不得位于 Git 域: {} (gitdir/common-dir)",
+                normalized.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+// ---------------------------------------------------------------------------
+// 开窗编排
+// ---------------------------------------------------------------------------
+
+/// 开窗(冻结顺序的单一实现点)。任何失败:窗口记录迁入
+/// `RecoveryRequired`(保留可诊断恢复状态,不重新冻结当前态)、租约与
+/// 已冻结通道保留(fail-closed),由恢复驱动/人工经 `abandon_window`
+/// 或重试处置;材料/spawn 闸门(`assert_review_window_current`)因窗口
+/// 未达 Running 而全部拒绝。
+pub(crate) async fn begin_review_window(
+    store: &ReviewerWindowStore,
+    snapshot: &ReviewerSnapshotStore,
+    request: &ReviewerWindowBeginRequest<'_>,
+) -> Result<ReviewerWindowHandle, ReviewerWindowError> {
+    for (label, value) in [
+        ("window_id", request.window_id),
+        ("attempt_id", request.attempt_id),
+        ("run_id", request.run_id),
+        ("provider", request.provider),
+    ] {
+        if value.trim().is_empty() {
+            return Err(ReviewerWindowError::InvalidRequest(format!(
+                "{label} 必须非空"
+            )));
+        }
+    }
+    crate::product::json_store::validate_relative_id(request.window_id)
+        .map_err(|error| ReviewerWindowError::InvalidRequest(format!("window_id 非法: {error}")))?;
+
+    // 冻结顺序从此处开始固定:身份解析 → 租约 → 通道锁 → 静止 →
+    // baseline → Running(材料/spawn 准入)。
+    let (canonical, gitdir, common_dir) = resolve_worktree_git_identity(request.worktree)?;
+    // T16 ⚠8:平台合法写入路径预枚举必须在 worktree 之外(且不在 Git 域)。
+    validate_platform_write_paths(
+        &request.platform_write_paths,
+        &canonical,
+        &gitdir,
+        &common_dir,
+    )?;
+    let identity = ReviewWorktreeLockIdentity {
+        canonical_worktree: canonical.clone(),
+        gitdir: gitdir.clone(),
+        common_dir: common_dir.clone(),
+        lease_id: format!("wlease-{}", request.window_id),
+    };
+
+    // 1. 窗口 durable 记录(Preparing;同 id 崩溃重入幂等)。
+    let mut current = store
+        .create_or_resume_window(&ReviewerWindowRecord::new(
+            request.window_id,
+            identity.clone(),
+            request.attempt_id,
+            request.run_id,
+            request.provider,
+            request.platform_write_paths.clone(),
+        ))
+        .map_err(|error| match error {
+            ProductStoreError::Conflict { id, .. } => ReviewerWindowError::Conflict {
+                kind: "reviewer_window",
+                id,
+                detail: "窗口记录已存在(非 Preparing 或身份不一致)".to_string(),
+            },
+            other => ReviewerWindowError::Store(other),
+        })?;
+
+    // 2. durable 树级租约(先于一切冻结动作;两 attempt 同树只能一窗,
+    // 共享 common-dir 的兄弟树窗口互斥)。
+    let lease = WindowLeaseRecord {
+        schema: crate::product::reviewer_window_store::REVIEWER_WINDOW_SCHEMA.to_string(),
+        lease_id: identity.lease_id.clone(),
+        tree_key: tree_key_of(&canonical),
+        canonical_worktree: canonical.display().to_string(),
+        gitdir: gitdir.display().to_string(),
+        common_dir: common_dir.display().to_string(),
+        window_id: request.window_id.to_string(),
+        attempt_id: request.attempt_id.to_string(),
+        run_id: request.run_id.to_string(),
+        provider: request.provider.to_string(),
+        acquired_at: now_rfc3339(),
+    };
+    if let Err(error) = store.acquire_lease(&lease) {
+        let detail = lease_conflict_detail(store, &lease, &error);
+        mark_begin_recovery(
+            store,
+            &current,
+            "reviewer_window_lease_conflict",
+            detail.clone(),
+        );
+        return Err(ReviewerWindowError::Conflict {
+            kind: "reviewer_window_lease",
+            id: lease.tree_key,
+            detail,
+        });
+    }
+
+    // 3. 平台写通道锁:四通道 Draining→等待在途 writer 退出→Frozen
+    // (锁域覆盖 stage/commit/push/补偿,不能只禁新请求)。
+    if let Err(error) =
+        freeze_all_channels(store, &common_dir, request.window_id, request.drain_timeout).await
+    {
+        let reason = match &error {
+            ReviewerWindowError::ChannelDrainTimeout { .. } => {
+                "reviewer_window_channel_drain_timeout"
+            }
+            ReviewerWindowError::Conflict { .. } => "reviewer_window_channel_conflict",
+            _ => "reviewer_window_channel_failure",
+        };
+        mark_begin_recovery(store, &current, reason, error.to_string());
+        return Err(error);
+    }
+
+    // 4. 停止/确认全部已登记 writer(T5 真实静止;killpg 成功≠静止,
+    // 未知 daemon/未确认预留停等)。
+    let mut evidences: Vec<QuiescentScope> = Vec::new();
+    let mut quiesced_scope_keys = Vec::new();
+    for scope in request.quiesce_targets {
+        match scope.quiesce_scope().await {
+            Err(error) => {
+                let detail = error.to_string();
+                mark_begin_recovery(
+                    store,
+                    &current,
+                    "reviewer_window_quiesce_store_failure",
+                    detail.clone(),
+                );
+                return Err(ReviewerWindowError::QuiesceFailed(detail));
+            }
+            Ok(QuiesceOutcome::RecoveryRequired(unknown)) => {
+                mark_begin_recovery(store, &current, &unknown.reason, unknown.detail.clone());
+                return Err(ReviewerWindowError::QuiesceNotProven {
+                    reason: unknown.reason,
+                    detail: unknown.detail,
+                });
+            }
+            Ok(QuiesceOutcome::Quiescent(evidence)) => {
+                quiesced_scope_keys.push(evidence.key().clone());
+                evidences.push(evidence);
+            }
+        }
+    }
+    let Some(primary) = evidences.first() else {
+        let detail = "quiesce_targets 至少包含主 scope(空 manifest 的静止证明亦须传入)".to_string();
+        mark_begin_recovery(
+            store,
+            &current,
+            "reviewer_window_quiesce_target_missing",
+            detail.clone(),
+        );
+        return Err(ReviewerWindowError::InvalidRequest(detail));
+    };
+
+    // 5. 持久完整 baseline(T16:全部 blob+manifest 落盘成功才返回;
+    // 失败整单拒绝,无已发布 manifest)。
+    let captured = match snapshot.capture_baseline(CaptureRequest {
+        window_id: request.window_id,
+        attempt_id: request.attempt_id,
+        run_id: request.run_id,
+        worktree: &canonical,
+        lock_identity: Some(identity.clone()),
+        quiescence: Some(QuiescenceEvidence::from_quiescent_scope(primary)),
+        platform_write_paths: request.platform_write_paths.clone(),
+        budget: request.budget,
+    }) {
+        Ok(captured) => captured,
+        Err(error) => {
+            mark_begin_recovery(
+                store,
+                &current,
+                "reviewer_window_snapshot_failed",
+                error.to_string(),
+            );
+            return Err(ReviewerWindowError::Snapshot(error));
+        }
+    };
+    let manifest_sha256 = match std::fs::read(&captured.manifest_path) {
+        Ok(bytes) => sha256_hex(&bytes),
+        Err(error) => {
+            let detail = format!("manifest 读取失败: {error}");
+            mark_begin_recovery(
+                store,
+                &current,
+                "reviewer_window_manifest_unreadable",
+                detail.clone(),
+            );
+            return Err(ReviewerWindowError::Store(ProductStoreError::Io(detail)));
+        }
+    };
+
+    // 6. Preparing → Running:完整持久 manifest 之后才允许采材料与
+    // 构造 ReviewerVerify(T20 经 assert_review_window_current 准入)。
+    let expected = current.generation;
+    current.baseline = Some(BaselineBinding {
+        manifest_path: captured.manifest_path.display().to_string(),
+        manifest_sha256: manifest_sha256.clone(),
+        entry_count: captured.entry_count,
+        total_bytes: captured.total_bytes,
+        captured_at: now_rfc3339(),
+    });
+    current.quiesced_scopes = quiesced_scope_keys;
+    current.bump_transition(
+        ReviewerWindowState::Running,
+        "baseline 持久完整;材料采集与 ReviewerVerify 构造准入",
+    );
+    let saved = store.save_window_transition(current, expected)?;
+    Ok(ReviewerWindowHandle {
+        window_id: request.window_id.to_string(),
+        generation: saved.generation,
+        identity,
+        manifest_path: captured.manifest_path,
+        manifest_sha256,
+        entry_count: captured.entry_count,
+        total_bytes: captured.total_bytes,
+    })
+}
+
+/// 通道排空冻结(四个通道全部 Draining→在途清零→Frozen;「不能只禁
+/// 新请求」)。任何通道他窗持有/超时未排空 → Err(调用方停等)。
+async fn freeze_all_channels(
+    store: &ReviewerWindowStore,
+    common_dir: &Path,
+    window_id: &str,
+    drain_timeout: Duration,
+) -> Result<(), ReviewerWindowError> {
+    let mut frozen = [false; ALL_WRITE_CHANNELS.len()];
+    for (index, channel) in ALL_WRITE_CHANNELS.iter().enumerate() {
+        let status = store
+            .mark_channel_draining(common_dir, *channel, window_id)
+            .map_err(|error| map_channel_gate_error(window_id, error))?;
+        frozen[index] = status.frozen;
+    }
+    let deadline = tokio::time::Instant::now() + drain_timeout;
+    loop {
+        if frozen.iter().all(|&done| done) {
+            return Ok(());
+        }
+        for (index, channel) in ALL_WRITE_CHANNELS.iter().enumerate() {
+            if frozen[index] {
+                continue;
+            }
+            let status = store
+                .poll_channel_drain(common_dir, *channel, window_id)
+                .map_err(|error| map_channel_gate_error(window_id, error))?;
+            frozen[index] = status.frozen;
+        }
+        if frozen.iter().all(|&done| done) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let mut live_writer_ids = Vec::new();
+            for channel in ALL_WRITE_CHANNELS {
+                if let Ok(status) = store.poll_channel_drain(common_dir, channel, window_id) {
+                    live_writer_ids.extend(
+                        status
+                            .live_writers
+                            .into_iter()
+                            .map(|writer| writer.writer_id),
+                    );
+                }
+            }
+            return Err(ReviewerWindowError::ChannelDrainTimeout {
+                detail: format!("在途 writer 未退出: [{}]", live_writer_ids.join(",")),
+            });
+        }
+        tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+    }
+}
+
+fn map_channel_gate_error(window_id: &str, error: ChannelGateError) -> ReviewerWindowError {
+    match error {
+        ChannelGateError::OwnerMismatch {
+            channel: held_channel,
+            held_by,
+            caller,
+        } => ReviewerWindowError::Conflict {
+            kind: "reviewer_window_channel",
+            id: held_channel,
+            detail: format!("channel 持有人不匹配: held_by={held_by} caller={caller}({window_id})"),
+        },
+        ChannelGateError::Store(error) => ReviewerWindowError::Store(error),
+        other => ReviewerWindowError::Channel(other),
+    }
+}
+
+/// 开窗失败停等落账(尽力写:写失败时窗口停在 Preparing——同样非
+/// Running,fail-closed;返回原错误)。
+fn mark_begin_recovery(
+    store: &ReviewerWindowStore,
+    record: &ReviewerWindowRecord,
+    reason: &str,
+    detail: String,
+) {
+    let mut next = record.clone();
+    next.note_recovery(RecoveryPhase::Begin, reason, &detail, None);
+    next.bump_transition(
+        ReviewerWindowState::RecoveryRequired,
+        "开窗失败停等(租约/已冻结通道保留)",
+    );
+    let expected = record.generation;
+    let _ = store.save_window_transition(next, expected);
+}
+
+/// 租约冲突归因(同树 vs 共享 common-dir 兄弟树;审查硬约束 2 的
+/// 协调面:冲突身份纳入锁集,报可诊断 detail)。
+fn lease_conflict_detail(
+    store: &ReviewerWindowStore,
+    lease: &WindowLeaseRecord,
+    error: &ProductStoreError,
+) -> String {
+    if let Ok(Some(existing)) = store.load_lease(&lease.tree_key)
+        && existing.window_id != lease.window_id
+    {
+        if existing.canonical_worktree != lease.canonical_worktree {
+            return format!(
+                "共享 common-dir 的树 {} 已被窗口 {} (attempt={}) 持有",
+                existing.canonical_worktree, existing.window_id, existing.attempt_id
+            );
+        }
+        return format!(
+            "同树已被窗口 {} (attempt={}) 持有",
+            existing.window_id, existing.attempt_id
+        );
+    }
+    if let Ok(leases) = store.list_leases()
+        && let Some(other) = leases.iter().find(|other| {
+            other.common_dir == lease.common_dir && other.window_id != lease.window_id
+        })
+    {
+        return format!(
+            "共享 common-dir 的树 {} 已被窗口 {} (attempt={}) 持有",
+            other.canonical_worktree, other.window_id, other.attempt_id
+        );
+    }
+    error.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// 同源复验(gateway/spawn/材料采集守卫)
+// ---------------------------------------------------------------------------
+
+/// 同源复验当前窗口:重载 durable 记录,核对期望身份(attempt/run/
+/// provider + worktree 现场重解析 canonical/gitdir/common-dir 均不得
+/// 漂移)与状态;`Running` 时额外核验 baseline manifest 仍在且字节
+/// sha256 与绑定指纹一致(材料同源证明)。gateway/spawn 用
+/// `allowed=[Running]`;平台写通道守卫走 `enter_platform_write`(同一
+/// durable 闸门文件,同源)。
+pub(crate) fn assert_review_window_current(
+    store: &ReviewerWindowStore,
+    _snapshot: &ReviewerSnapshotStore,
+    expectation: &WindowExpectation<'_>,
+    allowed_states: &[ReviewerWindowState],
+) -> Result<CurrentWindowProof, ReviewerWindowError> {
+    let not_current = |reason: String| ReviewerWindowError::WindowNotCurrent {
+        window_id: expectation.window_id.to_string(),
+        reason,
+    };
+    let record = store
+        .load_window(expectation.window_id)
+        .map_err(|error| match error {
+            ProductStoreError::NotFound { .. } => not_current(format!("窗口记录不存在: {error}")),
+            other => ReviewerWindowError::Store(other),
+        })?;
+    if record.attempt_id != expectation.attempt_id
+        || record.run_id != expectation.run_id
+        || record.provider != expectation.provider
+    {
+        return Err(not_current(
+            "attempt/run/provider 与窗口记录不符".to_string(),
+        ));
+    }
+    let canonical = expectation
+        .worktree
+        .canonicalize()
+        .map_err(|error| not_current(format!("worktree 不可解析: {error}")))?;
+    if canonical != record.identity.canonical_worktree {
+        return Err(not_current(format!(
+            "worktree 漂移: {} != {}",
+            canonical.display(),
+            record.identity.canonical_worktree.display()
+        )));
+    }
+    let (_, gitdir, common_dir) = resolve_worktree_git_identity(&canonical)
+        .map_err(|error| not_current(format!("git 身份解析失败: {error}")))?;
+    if gitdir != record.identity.gitdir || common_dir != record.identity.common_dir {
+        return Err(not_current("gitdir/common-dir 漂移".to_string()));
+    }
+    if !allowed_states.contains(&record.state) {
+        return Err(not_current(format!(
+            "窗口状态 {} 不在允许集",
+            record.state.as_str()
+        )));
+    }
+    let (manifest_path, manifest_sha256, entry_count, total_bytes) =
+        if record.state == ReviewerWindowState::Running {
+            // 材料同源证明:Running 窗口的材料必须来自同一 manifest
+            // (字节指纹与绑定期初值一致;被改/被删即拒)。
+            let baseline = record
+                .baseline
+                .as_ref()
+                .ok_or_else(|| not_current("Running 无 baseline 绑定".to_string()))?;
+            let path = PathBuf::from(&baseline.manifest_path);
+            let bytes = std::fs::read(&path)
+                .map_err(|error| not_current(format!("baseline manifest 读取失败: {error}")))?;
+            let digest = sha256_hex(&bytes);
+            if digest != baseline.manifest_sha256 {
+                return Err(not_current(
+                    "manifest 指纹不符——材料不再与 baseline 同源".to_string(),
+                ));
+            }
+            (path, digest, baseline.entry_count, baseline.total_bytes)
+        } else {
+            (PathBuf::new(), String::new(), 0, 0)
+        };
+    Ok(CurrentWindowProof {
+        window_id: record.window_id,
+        generation: record.generation,
+        state: record.state,
+        report_acceptance: record.report_acceptance,
+        manifest_path,
+        manifest_sha256,
+        entry_count,
+        total_bytes,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 平台写通道守卫(T19 接线消费;与窗口同源)
+// ---------------------------------------------------------------------------
+
+/// 平台 git mutation(stage/commit/push/补偿)准入:窗口冻结期间拒绝
+/// (Draining/Frozen 均拒,携带持有窗口);进入成功后必须 `exit_platform_write`。
+pub(crate) fn enter_platform_write(
+    store: &ReviewerWindowStore,
+    worktree: &Path,
+    channel: crate::product::reviewer_window_store::WriteChannelKind,
+    writer: ChannelWriter,
+) -> Result<(), ReviewerWindowError> {
+    let (_, _, common_dir) = resolve_worktree_git_identity(worktree)?;
+    store
+        .enter_write_channel(&common_dir, channel, writer)
+        .map_err(ReviewerWindowError::Channel)
+}
+
+/// 平台 git mutation 退出(幂等)。
+pub(crate) fn exit_platform_write(
+    store: &ReviewerWindowStore,
+    worktree: &Path,
+    channel: crate::product::reviewer_window_store::WriteChannelKind,
+    writer_id: &str,
+) -> Result<(), ReviewerWindowError> {
+    let (_, _, common_dir) = resolve_worktree_git_identity(worktree)?;
+    store
+        .exit_write_channel(&common_dir, channel, writer_id)
+        .map_err(ReviewerWindowError::Channel)
+}
+
+fn invalid_transition(
+    from: ReviewerWindowState,
+    to: ReviewerWindowState,
+    detail: &str,
+) -> ReviewerWindowError {
+    ReviewerWindowError::InvalidTransition {
+        from: from.as_str().to_string(),
+        to: to.as_str().to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+/// T16 恢复阶段 → 稳定字符串(T18 游标交接用)。
+fn restore_phase_str(phase: crate::product::reviewer_snapshot::RestorePhase) -> &'static str {
+    use crate::product::reviewer_snapshot::RestorePhase;
+    match phase {
+        RestorePhase::Started => "started",
+        RestorePhase::WorktreeRestore => "worktree_restore",
+        RestorePhase::WorktreeExtra => "worktree_extra",
+        RestorePhase::GitDomain => "git_domain",
+        RestorePhase::PlatformDomain => "platform_domain",
+        RestorePhase::Completed => "completed",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 状态机迁移(全部 CAS + 状态合法性守卫;journal 单调追加)
+// ---------------------------------------------------------------------------
+
+fn load_for_transition(
+    store: &ReviewerWindowStore,
+    window_id: &str,
+    expected_generation: u64,
+) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
+    let record = store.load_window(window_id)?;
+    if record.generation != expected_generation {
+        return Err(ReviewerWindowError::Conflict {
+            kind: "reviewer_window_generation",
+            id: window_id.to_string(),
+            detail: format!(
+                "expected={expected_generation} actual={}",
+                record.generation
+            ),
+        });
+    }
+    Ok(record)
+}
+
+/// Running → Quiescing(窗口收口:材料面停,等违规判定/恢复)。
+pub(crate) fn begin_quiesce(
+    store: &ReviewerWindowStore,
+    window_id: &str,
+    expected_generation: u64,
+    note: &str,
+) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
+    let mut record = load_for_transition(store, window_id, expected_generation)?;
+    if record.state != ReviewerWindowState::Running {
+        return Err(invalid_transition(
+            record.state,
+            ReviewerWindowState::Quiescing,
+            "仅 Running 可进入 Quiescing",
+        ));
+    }
+    record.bump_transition(ReviewerWindowState::Quiescing, note);
+    Ok(store.save_window_transition(record, expected_generation)?)
+}
+
+/// Quiescing → ViolationRecorded(违规事实已落;T18 journal 驱动)。
+pub(crate) fn record_violation(
+    store: &ReviewerWindowStore,
+    window_id: &str,
+    expected_generation: u64,
+    note: &str,
+) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
+    let mut record = load_for_transition(store, window_id, expected_generation)?;
+    if record.state != ReviewerWindowState::Quiescing {
+        return Err(invalid_transition(
+            record.state,
+            ReviewerWindowState::ViolationRecorded,
+            "仅 Quiescing 可记录违规",
+        ));
+    }
+    record.bump_transition(ReviewerWindowState::ViolationRecorded, note);
+    Ok(store.save_window_transition(record, expected_generation)?)
+}
+
+/// 恢复(Quiescing[无违规]/ViolationRecorded/恢复停等重入 → Restoring;
+/// T16 差异恢复+游标续接)。结局:
+/// - `Restored`:无违规 → 记录 `restore.completed`(等 `close_accepted`);
+///   有违规 → ManualGate。
+/// - T16 `RecoveryRequired`:窗口 → `RecoveryRequired`(锁保留,停等;
+///   原因/游标入记录,可重入本函数续接)。
+/// - T16 `Err`(Io/Store/Integrity):**状态不动**(仍在 Restoring),
+///   `last_error` 记录并原样返回——T18 对账计入非通过并带出游标
+///   (审查硬约束 4 的接口约定)。
+pub(crate) async fn restore_window(
+    store: &ReviewerWindowStore,
+    snapshot: &ReviewerSnapshotStore,
+    window_id: &str,
+    expected_generation: u64,
+) -> Result<RestoreSummary, ReviewerWindowError> {
+    let mut record = load_for_transition(store, window_id, expected_generation)?;
+    let from_violation = record.state == ReviewerWindowState::ViolationRecorded;
+    let resumable = matches!(
+        record.state,
+        ReviewerWindowState::Quiescing | ReviewerWindowState::ViolationRecorded
+    ) || (record.state == ReviewerWindowState::RecoveryRequired
+        && record.baseline.is_some()
+        && record
+            .recovery
+            .as_ref()
+            .is_some_and(|note| note.phase == RecoveryPhase::Restore));
+    if !resumable {
+        return Err(invalid_transition(
+            record.state,
+            ReviewerWindowState::Restoring,
+            "仅 Quiescing/ViolationRecorded/恢复停等(带 baseline)可进入恢复",
+        ));
+    }
+    record.restore = Some(RestoreBinding {
+        completed: false,
+        from_violation,
+        outcome: "in_progress".to_string(),
+        cursor_phase: None,
+        entry_index: None,
+        detail: String::new(),
+    });
+    record.last_error = None;
+    record.bump_transition(ReviewerWindowState::Restoring, "T16 差异恢复开始(游标续接)");
+    record = store.save_window_transition(record, expected_generation)?;
+    let expected_next = record.generation;
+
+    match snapshot.restore_baseline(window_id, &record.identity) {
+        Ok(RestoreOutcome::Restored(report)) => {
+            record.restore = Some(RestoreBinding {
+                completed: true,
+                from_violation,
+                outcome: "restored".to_string(),
+                cursor_phase: Some(restore_phase_str(report.resumed_from.phase).to_string()),
+                entry_index: Some(report.resumed_from.entry_index),
+                detail: format!(
+                    "worktree_fixed={} removed_extras={} git_head={} git_index={} refs_restored={} extra_refs_observed={} platform_verified={}",
+                    report.worktree_fixed_entries.len(),
+                    report.worktree_removed_extras.len(),
+                    report.git_head_restored as u8,
+                    report.git_index_restored as u8,
+                    report.git_refs_restored.len(),
+                    report.git_extra_refs_observed.len(),
+                    report.platform_verified.len()
+                ),
+            });
+            if from_violation {
+                record.bump_transition(
+                    ReviewerWindowState::ManualGate,
+                    "违规流:恢复完整,进入人工门(仅作废关闭/作废后新轮)",
+                );
+            } else {
+                record.bump_transition(ReviewerWindowState::Restoring, "恢复完整,待采信裁决后关闭");
+            }
+            let manual_gate = from_violation;
+            record = store.save_window_transition(record, expected_next)?;
+            Ok(RestoreSummary {
+                record,
+                manual_gate,
+            })
+        }
+        Ok(RestoreOutcome::RecoveryRequired {
+            reason,
+            detail,
+            cursor,
+        }) => {
+            // T16 域内无法安全恢复 → 窗口停等(锁保留);游标入记录,
+            // 处置后可重入本函数续接。
+            let cursor_phase = restore_phase_str(cursor.phase).to_string();
+            record.restore = Some(RestoreBinding {
+                completed: false,
+                from_violation,
+                outcome: "recovery_required".to_string(),
+                cursor_phase: Some(cursor_phase.clone()),
+                entry_index: Some(cursor.entry_index),
+                detail: detail.clone(),
+            });
+            record.note_recovery(
+                RecoveryPhase::Restore,
+                &reason,
+                &detail,
+                Some(cursor_phase.clone()),
+            );
+            record.bump_transition(
+                ReviewerWindowState::RecoveryRequired,
+                "T16 恢复停等(游标已记录;锁保留)",
+            );
+            let stopped = ReviewerWindowError::RecoveryStopped {
+                reason,
+                detail,
+                cursor: format!("{cursor_phase}+{}", cursor.entry_index),
+            };
+            if let Err(error) = store.save_window_transition(record, expected_next) {
+                return Err(ReviewerWindowError::Store(error));
+            }
+            Err(stopped)
+        }
+        Err(error) => {
+            // 审查硬约束 4:瞬时 store 错误(Io/Store/Integrity)不迁移
+            // 窗口状态——T18 对账计入非通过并从 restore.cursor 带出游标。
+            record.last_error = Some(error.to_string());
+            let _ = store.save_window_transition(record, expected_next);
+            Err(ReviewerWindowError::Snapshot(error))
+        }
+    }
+}
+
+/// 报告采信投影记录(T18 主导;数据级 CAS 写,不改状态)。
+pub(crate) fn record_report_acceptance(
+    store: &ReviewerWindowStore,
+    window_id: &str,
+    expected_generation: u64,
+    acceptance: ReportAcceptance,
+) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
+    let mut record = load_for_transition(store, window_id, expected_generation)?;
+    if matches!(
+        record.state,
+        ReviewerWindowState::Preparing | ReviewerWindowState::Running
+    ) {
+        return Err(invalid_transition(
+            record.state,
+            record.state,
+            "采信投影仅 Quiescing 起(T18 采信流)记录",
+        ));
+    }
+    record.report_acceptance = acceptance;
+    record.bump_transition(record.state, "报告采信投影记录(T18)");
+    Ok(store.save_window_transition(record, expected_generation)?)
+}
+
+/// 终态释放(先解冻通道+释放租约,再落终态记录;释放幂等,中间崩溃
+/// 重入即收口)。仅终态进入调用。
+fn finalize_terminal(
+    store: &ReviewerWindowStore,
+    record: &ReviewerWindowRecord,
+    terminal: ReviewerWindowState,
+    note: &str,
+    expected_generation: u64,
+) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
+    // 释放顺序:解冻四通道 → 释放租约 → 落终态。任何一步失败即返回
+    // (记录停在非终态,重入幂等收口);只有全部释放成功才 Closed*。
+    for channel in ALL_WRITE_CHANNELS {
+        store
+            .unfreeze_channel(&record.identity.common_dir, channel, &record.window_id)
+            .map_err(|error| map_channel_gate_error(&record.window_id, error))?;
+    }
+    store.release_lease(
+        &record.window_id,
+        &tree_key_of(&record.identity.canonical_worktree),
+    )?;
+    let mut final_record = record.clone();
+    final_record.bump_transition(terminal, note);
+    Ok(store.save_window_transition(final_record, expected_generation)?)
+}
+
+/// 采信关闭:Restoring(恢复完整,无违规)+ 报告采信 Accepted →
+/// ClosedAccepted(锁释放)。
+pub(crate) fn close_accepted(
+    store: &ReviewerWindowStore,
+    window_id: &str,
+    expected_generation: u64,
+) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
+    let record = load_for_transition(store, window_id, expected_generation)?;
+    let restore = record.restore.as_ref();
+    let completed = restore.is_some_and(|binding| binding.completed);
+    let from_violation = restore.is_some_and(|binding| binding.from_violation);
+    if record.state != ReviewerWindowState::Restoring || !completed || from_violation {
+        return Err(invalid_transition(
+            record.state,
+            ReviewerWindowState::ClosedAccepted,
+            "需 Restoring 且恢复完整且无违规(违规流只能走人工门)",
+        ));
+    }
+    if record.report_acceptance != ReportAcceptance::Accepted {
+        return Err(invalid_transition(
+            record.state,
+            ReviewerWindowState::ClosedAccepted,
+            "需先经 T18 采信流记录 Accepted",
+        ));
+    }
+    finalize_terminal(
+        store,
+        &record,
+        ReviewerWindowState::ClosedAccepted,
+        "恢复完整+采信完成;通道解冻、租约释放",
+        expected_generation,
+    )
+}
+
+/// 人工门裁决:ManualGate → ClosedInvalidated | NewReviewRequired
+/// (锁释放;旧报告永久 Invalidated,新轮重开新窗口)。
+pub(crate) fn resolve_manual_gate(
+    store: &ReviewerWindowStore,
+    window_id: &str,
+    expected_generation: u64,
+    decision: ManualGateDecision,
+) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
+    let record = load_for_transition(store, window_id, expected_generation)?;
+    if record.state != ReviewerWindowState::ManualGate {
+        return Err(invalid_transition(
+            record.state,
+            ReviewerWindowState::ClosedInvalidated,
+            "仅 ManualGate 可人工裁决",
+        ));
+    }
+    let (terminal, note) = match decision {
+        ManualGateDecision::Invalidate => (
+            ReviewerWindowState::ClosedInvalidated,
+            "人工门:作废关闭;旧报告永久 Invalidated",
+        ),
+        ManualGateDecision::RequireNewReview => (
+            ReviewerWindowState::NewReviewRequired,
+            "人工门:作废并要求新一轮评审(新窗口重加锁/新 baseline)",
+        ),
+    };
+    finalize_terminal(store, &record, terminal, note, expected_generation)
+}
+
+/// 停等/卡死窗口的人工弃置(Preparing/RecoveryRequired/ManualGate/
+/// Restoring → ClosedInvalidated,锁释放)。Running 窗口必须先走
+/// Quiescing 恢复流(取消也保持锁到恢复完整)。
+pub(crate) fn abandon_window(
+    store: &ReviewerWindowStore,
+    window_id: &str,
+    expected_generation: u64,
+    reason: &str,
+) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
+    let record = load_for_transition(store, window_id, expected_generation)?;
+    match record.state {
+        ReviewerWindowState::Preparing
+        | ReviewerWindowState::RecoveryRequired
+        | ReviewerWindowState::ManualGate
+        | ReviewerWindowState::Restoring => {}
+        other => {
+            return Err(invalid_transition(
+                other,
+                ReviewerWindowState::ClosedInvalidated,
+                "Running 须先 Quiescing/恢复;仅停等/人工门/恢复中/Preparing 可弃置",
+            ));
+        }
+    }
+    finalize_terminal(
+        store,
+        &record,
+        ReviewerWindowState::ClosedInvalidated,
+        &format!("人工弃置: {reason}"),
+        expected_generation,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// 内测
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cross_cutting::provider_resources::{
+        OwnedEngineObserver, OwnedResourceSpec, ResourceScopeKey, StartedResourceIdentity,
+        new_boot_identity,
+    };
+    use crate::product::reviewer_window_store::WriteChannelKind;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    // ---------- fixtures ----------
+
+    fn t17_dir() -> tempfile::TempDir {
+        let root = Path::new("/tmp/aria-bug45/t17");
+        fs::create_dir_all(root).expect("create /tmp/aria-bug45/t17");
+        tempfile::tempdir_in(root).expect("t17 fixture dir")
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {:?} in {} failed: {}",
+            args,
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    struct WindowFixture {
+        worktree: PathBuf,
+        window_root: PathBuf,
+        snapshot_root: PathBuf,
+        base: PathBuf,
+        _keep: Vec<tempfile::TempDir>,
+    }
+
+    impl WindowFixture {
+        fn store(&self) -> ReviewerWindowStore {
+            ReviewerWindowStore::new(&self.window_root)
+        }
+
+        fn snapshot(&self) -> ReviewerSnapshotStore {
+            ReviewerSnapshotStore::new(&self.snapshot_root)
+        }
+
+        fn common_dir(&self) -> PathBuf {
+            resolve_worktree_git_identity(&self.worktree)
+                .expect("resolve identity")
+                .2
+        }
+    }
+
+    fn init_repo(worktree: &Path) {
+        fs::write(worktree.join("tracked.txt"), "base\n").unwrap();
+        git_ok(worktree, &["init", "-q", "-b", "main"]);
+        git_ok(worktree, &["config", "user.email", "t17@aria.invalid"]);
+        git_ok(worktree, &["config", "user.name", "t17-fixture"]);
+        git_ok(worktree, &["add", "-A"]);
+        git_ok(worktree, &["commit", "-qm", "base"]);
+    }
+
+    fn window_fixture() -> WindowFixture {
+        let base = t17_dir();
+        let win = t17_dir();
+        let snap = t17_dir();
+        let worktree = base.path().join("repo");
+        fs::create_dir_all(&worktree).unwrap();
+        init_repo(&worktree);
+        WindowFixture {
+            worktree,
+            window_root: win.path().to_path_buf(),
+            snapshot_root: snap.path().to_path_buf(),
+            base: base.path().to_path_buf(),
+            _keep: vec![base, win, snap],
+        }
+    }
+
+    /// 主仓 + linked worktree(共享 common-dir 的兄弟树)。
+    fn linked_fixture() -> (WindowFixture, PathBuf) {
+        let fx = window_fixture();
+        let linked = fx.base.join("linked");
+        let linked_arg = linked.display().to_string();
+        git_ok(&fx.worktree, &["worktree", "add", "-q", &linked_arg]);
+        fx.worktree.canonicalize().unwrap();
+        (fx, linked)
+    }
+
+    fn open_scope(
+        base: &Path,
+        scope_id: &str,
+        engine: Option<Arc<dyn OwnedEngineObserver>>,
+    ) -> ProviderRunResourceScope {
+        let store_root = base.join("scope-store");
+        let private = base.join("private").join(scope_id);
+        fs::create_dir_all(&private).unwrap();
+        let key = ResourceScopeKey {
+            scope_id: scope_id.to_string(),
+            run_id: format!("run-{scope_id}"),
+            boot_identity: new_boot_identity(),
+        };
+        ProviderRunResourceScope::open_for_recovery(
+            &key,
+            Some("w-test"),
+            &private,
+            &store_root,
+            engine,
+        )
+        .expect("open scope")
+    }
+
+    /// fake 引擎观察者:stop 声称成功但容器仍在运行(killpg 成功≠静止)。
+    struct StopOkRunningObserver;
+
+    impl OwnedEngineObserver for StopOkRunningObserver {
+        fn observe_running(
+            &self,
+            _kind: crate::cross_cutting::provider_resources::OwnedResourceKind,
+            _exact_id: &str,
+        ) -> Result<bool, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+            Ok(true)
+        }
+
+        fn find_by_reserved_labels(
+            &self,
+            _kind: crate::cross_cutting::provider_resources::OwnedResourceKind,
+            _labels: &std::collections::BTreeMap<String, String>,
+        ) -> Result<Vec<String>, crate::cross_cutting::provider_adapter::ProviderAdapterError>
+        {
+            Ok(Vec::new())
+        }
+
+        fn stop_exact(
+            &self,
+            _kind: crate::cross_cutting::provider_resources::OwnedResourceKind,
+            _exact_id: &str,
+            _labels: &std::collections::BTreeMap<String, String>,
+        ) -> Result<bool, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+            Ok(true)
+        }
+
+        fn remove_exact(
+            &self,
+            _kind: crate::cross_cutting::provider_resources::OwnedResourceKind,
+            _exact_id: &str,
+            _labels: &std::collections::BTreeMap<String, String>,
+        ) -> Result<bool, crate::cross_cutting::provider_adapter::ProviderAdapterError> {
+            Ok(false)
+        }
+    }
+
+    fn begin_request<'a>(
+        window_id: &'a str,
+        attempt: &'a str,
+        worktree: &'a Path,
+        targets: &'a [&'a ProviderRunResourceScope],
+    ) -> ReviewerWindowBeginRequest<'a> {
+        ReviewerWindowBeginRequest {
+            window_id,
+            attempt_id: attempt,
+            run_id: "run-1",
+            provider: "claude_code",
+            worktree,
+            quiesce_targets: targets,
+            platform_write_paths: Vec::new(),
+            budget: SnapshotBudget::generous(),
+            drain_timeout: Duration::from_secs(5),
+        }
+    }
+
+    fn expectation<'a>(
+        window_id: &'a str,
+        attempt: &'a str,
+        worktree: &'a Path,
+    ) -> WindowExpectation<'a> {
+        WindowExpectation {
+            window_id,
+            attempt_id: attempt,
+            run_id: "run-1",
+            provider: "claude_code",
+            worktree,
+        }
+    }
+
+    fn own_writer(writer_id: &str) -> ChannelWriter {
+        ChannelWriter {
+            writer_id: writer_id.to_string(),
+            boot_identity: "boot-test".to_string(),
+            pid: std::process::id(),
+            start_time_ticks: crate::cross_cutting::process_manager::process_start_time_ticks(
+                std::process::id(),
+            )
+            .unwrap_or(0),
+            entered_at: now_rfc3339(),
+        }
+    }
+
+    /// 材料采集/ReviewerVerify spawn 的同源闸门 harness:闸门放行才计数。
+    #[derive(Default)]
+    struct GatedCounts {
+        material: usize,
+        spawn: usize,
+    }
+
+    impl GatedCounts {
+        fn try_material_and_spawn(
+            &mut self,
+            store: &ReviewerWindowStore,
+            snapshot: &ReviewerSnapshotStore,
+            exp: &WindowExpectation<'_>,
+        ) {
+            if assert_review_window_current(store, snapshot, exp, &[ReviewerWindowState::Running])
+                .is_ok()
+            {
+                self.material += 1;
+                self.spawn += 1;
+            }
+        }
+    }
+
+    /// 完整采信收口(Running → Quiescing → Restoring → Accepted →
+    /// ClosedAccepted);返回终态记录。
+    async fn close_accepted_flow(
+        fx: &WindowFixture,
+        window_id: &str,
+    ) -> Result<ReviewerWindowRecord, ReviewerWindowError> {
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let quiescing = begin_quiesce(&store, window_id, 2, "cancel")?;
+        let summary = restore_window(&store, &snapshot, window_id, quiescing.generation).await?;
+        assert!(!summary.manual_gate);
+        let accepted = record_report_acceptance(
+            &store,
+            window_id,
+            summary.record.generation,
+            ReportAcceptance::Accepted,
+        )?;
+        close_accepted(&store, window_id, accepted.generation)
+    }
+
+    fn futures_block_on<F: Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
+
+    // ---------- Step 1 红测矩阵 ----------
+
+    #[tokio::test]
+    async fn two_attempts_same_tree_only_one_window() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+
+        let w1 = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-1", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("first window opens");
+        assert_eq!(
+            store.load_window("w-1").unwrap().state,
+            ReviewerWindowState::Running
+        );
+
+        // 同树第二 attempt:不能因 attempt_id 不同而放行
+        let err = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-2", "attempt-2", &fx.worktree, &targets),
+        )
+        .await
+        .expect_err("same tree second attempt must conflict");
+        assert!(
+            matches!(&err, ReviewerWindowError::Conflict { kind, .. } if *kind == "reviewer_window_lease"),
+            "{err:?}"
+        );
+        let w2_record = store.load_window("w-2").unwrap();
+        assert_eq!(w2_record.state, ReviewerWindowState::RecoveryRequired);
+        // 失败开窗保留可诊断恢复状态,不扰动现有窗口
+        assert_eq!(
+            store.load_window("w-1").unwrap().state,
+            ReviewerWindowState::Running
+        );
+        // 闸门:w1 放行,w2 拒绝
+        assert!(
+            assert_review_window_current(
+                &store,
+                &snapshot,
+                &expectation("w-1", "attempt-1", &fx.worktree),
+                &[ReviewerWindowState::Running]
+            )
+            .is_ok()
+        );
+        assert!(
+            assert_review_window_current(
+                &store,
+                &snapshot,
+                &expectation("w-2", "attempt-2", &fx.worktree),
+                &[ReviewerWindowState::Running]
+            )
+            .is_err()
+        );
+
+        // 无关树可开(租约按树)
+        let other = window_fixture();
+        let other_scope = open_scope(&other.base, "coder", None);
+        let other_targets: [&ProviderRunResourceScope; 1] = [&other_scope];
+        begin_review_window(
+            &other.store(),
+            &other.snapshot(),
+            &begin_request("w-other", "attempt-1", &other.worktree, &other_targets),
+        )
+        .await
+        .expect("unrelated tree opens");
+        let _ = w1;
+    }
+
+    #[tokio::test]
+    async fn inflight_channel_writer_barrier_blocks_material_until_drained() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let common = fx.common_dir();
+
+        // 在途 git mutation writer 先进入通道
+        store
+            .enter_write_channel(
+                &common,
+                WriteChannelKind::Commit,
+                own_writer("git-writer-1"),
+            )
+            .expect("writer enters open channel");
+
+        let begin_store = fx.store();
+        let begin_snapshot = fx.snapshot();
+        let worktree = fx.worktree.clone();
+        let base = fx.base.clone();
+        let begin = std::thread::spawn(move || {
+            let scope = open_scope(&base, "coder", None);
+            let targets: [&ProviderRunResourceScope; 1] = [&scope];
+            futures_block_on(begin_review_window(
+                &begin_store,
+                &begin_snapshot,
+                &begin_request("w-bar", "attempt-1", &worktree, &targets),
+            ))
+        });
+
+        // 排空屏障:新 writer 被拒 = Draining 已置(baseline 前写通道已关;
+        // 有界条件等待,不靠 sleep 竞速断言)
+        let mut draining = false;
+        for i in 0..2000 {
+            let probe_id = format!("probe-{i}");
+            match store.enter_write_channel(
+                &common,
+                WriteChannelKind::Commit,
+                own_writer(&probe_id),
+            ) {
+                Err(ChannelGateError::Blocked { .. }) => {
+                    draining = true;
+                    break;
+                }
+                Ok(()) => {
+                    store
+                        .exit_write_channel(&common, WriteChannelKind::Commit, &probe_id)
+                        .unwrap();
+                }
+                Err(other) => panic!("unexpected channel error: {other:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(draining, "drain must engage before baseline");
+
+        // 屏障点:在途 writer 未退出 → snapshot/material/spawn 计数全 0
+        assert!(
+            !fx.snapshot_root.join("windows/w-bar").exists(),
+            "no snapshot window dir while writer in flight"
+        );
+        let mut counts = GatedCounts::default();
+        counts.try_material_and_spawn(
+            &store,
+            &snapshot,
+            &expectation("w-bar", "attempt-1", &fx.worktree),
+        );
+        assert_eq!(counts.material, 0, "material count must be 0");
+        assert_eq!(counts.spawn, 0, "spawn count must be 0");
+
+        // 在途 writer 退出(等待已有 writer 退出,而非只禁新请求)
+        store
+            .exit_write_channel(&common, WriteChannelKind::Commit, "git-writer-1")
+            .expect("exit while draining");
+
+        let handle = begin
+            .join()
+            .expect("join begin thread")
+            .expect("begin completes after drain");
+        assert_eq!(handle.window_id, "w-bar");
+        let record = store.load_window("w-bar").unwrap();
+        assert_eq!(record.state, ReviewerWindowState::Running);
+
+        // 材料闸门放行;材料与 manifest 同指纹(同一材料源)
+        counts.try_material_and_spawn(
+            &store,
+            &snapshot,
+            &expectation("w-bar", "attempt-1", &fx.worktree),
+        );
+        assert_eq!(counts.material, 1);
+        assert_eq!(counts.spawn, 1);
+        let manifest_bytes = fs::read(&handle.manifest_path).unwrap();
+        assert_eq!(sha256_hex(&manifest_bytes), handle.manifest_sha256);
+
+        // 窗口期间新 git mutation 仍拒绝
+        let err = store
+            .enter_write_channel(&common, WriteChannelKind::Commit, own_writer("late"))
+            .expect_err("frozen during window");
+        assert!(matches!(err, ChannelGateError::Blocked { .. }));
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_writer_waits_no_capture_no_material() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        // 未知 daemon:预留未确认(崩溃窗口)——是否已 spawn 不可证
+        let scope = open_scope(&fx.base, "coder", None);
+        scope
+            .reserve_owned_resource(&OwnedResourceSpec::new(
+                "coder-1",
+                crate::cross_cutting::provider_resources::OwnedResourceKind::Process,
+                "claude-code session",
+            ))
+            .expect("reserve only");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+
+        let err = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-unconf", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect_err("unconfirmed writer must stop-and-wait");
+        match &err {
+            ReviewerWindowError::QuiesceNotProven { reason, .. } => {
+                assert!(reason.contains("unconfirmed"), "{reason}");
+            }
+            other => panic!("expected QuiesceNotProven, got {other:?}"),
+        }
+        let record = store.load_window("w-unconf").unwrap();
+        assert_eq!(record.state, ReviewerWindowState::RecoveryRequired);
+        assert!(!fx.snapshot_root.join("windows/w-unconf").exists());
+        let mut counts = GatedCounts::default();
+        counts.try_material_and_spawn(
+            &store,
+            &snapshot,
+            &expectation("w-unconf", "attempt-1", &fx.worktree),
+        );
+        assert_eq!((counts.material, counts.spawn), (0, 0));
+        // 停等窗口持锁:同树新窗口仍拒绝
+        let empty = open_scope(&fx.base, "coder-2", None);
+        let empty_targets: [&ProviderRunResourceScope; 1] = [&empty];
+        let err = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-after", "attempt-9", &fx.worktree, &empty_targets),
+        )
+        .await
+        .expect_err("lease held while recovery pending");
+        assert!(
+            matches!(err, ReviewerWindowError::Conflict { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_stop_ok_but_still_running_waits() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        // killpg/stop 声称成功但登记容器仍在写——T5 观察语义否决静止
+        let scope = open_scope(&fx.base, "coder", Some(Arc::new(StopOkRunningObserver)));
+        let reservation = scope
+            .reserve_owned_resource(&OwnedResourceSpec::new(
+                "builder-1",
+                crate::cross_cutting::provider_resources::OwnedResourceKind::Container,
+                "podman build helper",
+            ))
+            .expect("reserve container");
+        scope
+            .confirm_started_resource(
+                &reservation,
+                StartedResourceIdentity::container("ctr-exact-1"),
+            )
+            .expect("confirm container");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+
+        let err = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-ctr", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect_err("container still running must stop-and-wait");
+        match &err {
+            ReviewerWindowError::QuiesceNotProven { reason, .. } => {
+                assert!(reason.contains("registered_resource_running"), "{reason}");
+            }
+            other => panic!("expected QuiesceNotProven, got {other:?}"),
+        }
+        assert!(!fx.snapshot_root.join("windows/w-ctr").exists());
+        assert_eq!(
+            store.load_window("w-ctr").unwrap().state,
+            ReviewerWindowState::RecoveryRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn quiesce_store_failure_waits() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        // 登记失败面:scope store 损坏(list_scope Err)——停等,不伪称静止
+        let scope_root = fx.base.join("broken-scope-store");
+        fs::write(&scope_root, "not-a-dir").unwrap();
+        let private = fx.base.join("private/broken");
+        fs::create_dir_all(&private).unwrap();
+        let key = ResourceScopeKey {
+            scope_id: "broken".into(),
+            run_id: "run-broken".into(),
+            boot_identity: new_boot_identity(),
+        };
+        let scope =
+            ProviderRunResourceScope::open_for_recovery(&key, None, &private, &scope_root, None)
+                .expect("open broken-store scope");
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+
+        let err = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-broken", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect_err("quiesce store failure must stop-and-wait");
+        assert!(
+            matches!(err, ReviewerWindowError::QuiesceFailed(_)),
+            "{err:?}"
+        );
+        assert_eq!(
+            store.load_window("w-broken").unwrap().state,
+            ReviewerWindowState::RecoveryRequired
+        );
+        assert!(!fx.snapshot_root.join("windows/w-broken").exists());
+    }
+
+    #[tokio::test]
+    async fn snapshot_failure_no_material_no_spawn() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        // 快照失败:FIFO 不支持项 → capture 整单拒绝 → 不采材料不 spawn
+        let fifo = fx.worktree.join("pipe.fifo");
+        let cstr = std::ffi::CString::new(fifo.as_os_str().to_string_lossy().as_bytes()).unwrap();
+        let rc = unsafe { libc::mkfifo(cstr.as_ptr(), 0o644) };
+        assert_eq!(rc, 0, "mkfifo fixture");
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+
+        let err = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-snapfail", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect_err("snapshot failure must stop-and-wait");
+        assert!(matches!(err, ReviewerWindowError::Snapshot(_)), "{err:?}");
+        let record = store.load_window("w-snapfail").unwrap();
+        assert_eq!(record.state, ReviewerWindowState::RecoveryRequired);
+        // capture 整单拒绝:无已发布 manifest
+        assert!(
+            !fx.snapshot_root
+                .join("windows/w-snapfail/manifest.json")
+                .exists()
+        );
+        let mut counts = GatedCounts::default();
+        counts.try_material_and_spawn(
+            &store,
+            &snapshot,
+            &expectation("w-snapfail", "attempt-1", &fx.worktree),
+        );
+        assert_eq!((counts.material, counts.spawn), (0, 0));
+    }
+
+    #[test]
+    fn preparing_window_material_rejected() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        // 崩溃于开窗中途:Preparing 记录(无 Running/baseline)→ 材料拒绝
+        let (canonical, gitdir, common) = resolve_worktree_git_identity(&fx.worktree).unwrap();
+        let record = ReviewerWindowRecord::new(
+            "w-prep",
+            ReviewWorktreeLockIdentity {
+                canonical_worktree: canonical,
+                gitdir,
+                common_dir: common,
+                lease_id: "wlease-w-prep".into(),
+            },
+            "attempt-1",
+            "run-1",
+            "claude_code",
+            Vec::new(),
+        );
+        store.create_or_resume_window(&record).unwrap();
+        let mut counts = GatedCounts::default();
+        counts.try_material_and_spawn(
+            &store,
+            &snapshot,
+            &expectation("w-prep", "attempt-1", &fx.worktree),
+        );
+        assert_eq!((counts.material, counts.spawn), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn lease_and_journal_survive_store_rebuild() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-rebuild", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("begin");
+
+        // 「重启」:store/snapshot 实例全部重建(实例无内存态)
+        let rebuilt_store = fx.store();
+        let rebuilt_snapshot = fx.snapshot();
+        let err = begin_review_window(
+            &rebuilt_store,
+            &rebuilt_snapshot,
+            &begin_request("w-rebuild-2", "attempt-2", &fx.worktree, &targets),
+        )
+        .await
+        .expect_err("lease survives rebuild");
+        assert!(
+            matches!(err, ReviewerWindowError::Conflict { .. }),
+            "{err:?}"
+        );
+        // journal 与材料闸门跨重建有效
+        let record = rebuilt_store.load_window("w-rebuild").unwrap();
+        assert_eq!(record.state, ReviewerWindowState::Running);
+        assert!(record.transitions.iter().any(|entry| entry.to == "running"));
+        let proof = assert_review_window_current(
+            &rebuilt_store,
+            &rebuilt_snapshot,
+            &expectation("w-rebuild", "attempt-1", &fx.worktree),
+            &[ReviewerWindowState::Running],
+        )
+        .expect("gate works after rebuild");
+        assert_eq!(proof.state, ReviewerWindowState::Running);
+
+        // 完整收口后同树可再开
+        let terminal = close_accepted_flow(&fx, "w-rebuild").await.expect("close");
+        assert_eq!(terminal.state, ReviewerWindowState::ClosedAccepted);
+        begin_review_window(
+            &rebuilt_store,
+            &rebuilt_snapshot,
+            &begin_request("w-rebuild-3", "attempt-3", &fx.worktree, &targets),
+        )
+        .await
+        .expect("tree reopens after accepted close");
+    }
+
+    #[tokio::test]
+    async fn lease_held_through_cancel_and_restart_until_verdict() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-cancel", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("begin");
+        let window_id = handle.window_id.clone();
+
+        // 取消+「重启」:丢句柄、重建 store——租约仍在(fail-closed)
+        drop(handle);
+        let store2 = fx.store();
+        let snapshot2 = fx.snapshot();
+        let empty = open_scope(&fx.base, "coder-2", None);
+        let empty_targets: [&ProviderRunResourceScope; 1] = [&empty];
+        let conflict = begin_review_window(
+            &store2,
+            &snapshot2,
+            &begin_request("w-other", "attempt-2", &fx.worktree, &empty_targets),
+        )
+        .await
+        .expect_err("lease held across restart");
+        assert!(matches!(conflict, ReviewerWindowError::Conflict { .. }));
+
+        // Quiescing/Restoring 期间仍持锁
+        let quiescing = begin_quiesce(&store2, &window_id, 2, "cancel").unwrap();
+        let conflict = begin_review_window(
+            &store2,
+            &snapshot2,
+            &begin_request("w-other", "attempt-2", &fx.worktree, &empty_targets),
+        )
+        .await
+        .expect_err("lease held while quiescing");
+        assert!(matches!(conflict, ReviewerWindowError::Conflict { .. }));
+
+        let summary = restore_window(&store2, &snapshot2, &window_id, quiescing.generation)
+            .await
+            .expect("restore");
+        assert!(!summary.manual_gate);
+        let conflict = begin_review_window(
+            &store2,
+            &snapshot2,
+            &begin_request("w-other", "attempt-2", &fx.worktree, &empty_targets),
+        )
+        .await
+        .expect_err("lease held until verdict complete");
+        assert!(matches!(conflict, ReviewerWindowError::Conflict { .. }));
+
+        // 裁决完成(采信关闭)才释放
+        let accepted = record_report_acceptance(
+            &store2,
+            &window_id,
+            summary.record.generation,
+            ReportAcceptance::Accepted,
+        )
+        .unwrap();
+        let terminal = close_accepted(&store2, &window_id, accepted.generation).unwrap();
+        assert_eq!(terminal.state, ReviewerWindowState::ClosedAccepted);
+        begin_review_window(
+            &store2,
+            &snapshot2,
+            &begin_request("w-next", "attempt-3", &fx.worktree, &empty_targets),
+        )
+        .await
+        .expect("lease released after terminal verdict");
+    }
+
+    #[tokio::test]
+    async fn assert_rejects_identity_mismatch_state_and_tamper() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-assert", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("begin");
+        let running = &[ReviewerWindowState::Running];
+
+        // attempt/run/provider 不匹配 → 拒
+        for wrong in [
+            expectation("w-assert", "attempt-2", &fx.worktree),
+            WindowExpectation {
+                window_id: "w-assert",
+                attempt_id: "attempt-1",
+                run_id: "run-2",
+                provider: "claude_code",
+                worktree: &fx.worktree,
+            },
+            WindowExpectation {
+                window_id: "w-assert",
+                attempt_id: "attempt-1",
+                run_id: "run-1",
+                provider: "codex",
+                worktree: &fx.worktree,
+            },
+        ] {
+            assert!(
+                assert_review_window_current(&store, &snapshot, &wrong, running).is_err(),
+                "identity mismatch must reject"
+            );
+        }
+
+        // worktree 现场漂移(以另一棵真实树冒充)→ 拒(canonical 不符)
+        let other_tree = fx.base.join("other-repo");
+        fs::create_dir_all(&other_tree).unwrap();
+        init_repo(&other_tree);
+        assert!(
+            assert_review_window_current(
+                &store,
+                &snapshot,
+                &expectation("w-assert", "attempt-1", &other_tree),
+                running
+            )
+            .is_err(),
+            "different worktree must reject (identity drift)"
+        );
+
+        // 状态不符(Quiescing 后要求 Running)→ 拒
+        begin_quiesce(&store, "w-assert", handle.generation, "cancel").unwrap();
+        assert!(
+            assert_review_window_current(
+                &store,
+                &snapshot,
+                &expectation("w-assert", "attempt-1", &fx.worktree),
+                running
+            )
+            .is_err(),
+            "quiescing window must not admit material"
+        );
+
+        // manifest 字节被改 → Running 指纹不符 → 拒(材料不再同源)。
+        // 以独立 Running 窗口验证(w-assert 已 Quiescing,不走指纹分支)
+        let fx2 = window_fixture();
+        let scope2 = open_scope(&fx2.base, "coder", None);
+        let targets2: [&ProviderRunResourceScope; 1] = [&scope2];
+        let h2 = begin_review_window(
+            &fx2.store(),
+            &fx2.snapshot(),
+            &begin_request("w-tamper", "attempt-1", &fx2.worktree, &targets2),
+        )
+        .await
+        .expect("begin 2");
+        let manifest2 = fx2.snapshot_root.join("windows/w-tamper/manifest.json");
+        let raw = fs::read(&manifest2).unwrap();
+        fs::write(&manifest2, format!("{}\n", String::from_utf8_lossy(&raw))).unwrap();
+        assert!(
+            assert_review_window_current(
+                &fx2.store(),
+                &fx2.snapshot(),
+                &expectation("w-tamper", "attempt-1", &fx2.worktree),
+                running
+            )
+            .is_err(),
+            "tampered manifest must fail fingerprint"
+        );
+        let _ = h2;
+    }
+
+    #[tokio::test]
+    async fn platform_write_paths_must_be_outside_worktree() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+
+        let inside = PlatformWritePath {
+            path: fx.worktree.join("aria-store/report.json"),
+            ownership: "report-store".into(),
+        };
+        let mut request = begin_request("w-plat", "attempt-1", &fx.worktree, &targets);
+        request.platform_write_paths = vec![inside];
+        let err = begin_review_window(&store, &snapshot, &request)
+            .await
+            .expect_err("inside-worktree platform path rejected");
+        assert!(
+            matches!(err, ReviewerWindowError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(store.load_window("w-plat").is_err(), "no window created");
+
+        // Git 域也拒绝
+        let git_domain = PlatformWritePath {
+            path: fx.common_dir().join("config"),
+            ownership: "git-config".into(),
+        };
+        let mut request = begin_request("w-plat", "attempt-1", &fx.worktree, &targets);
+        request.platform_write_paths = vec![git_domain];
+        assert!(
+            begin_review_window(&store, &snapshot, &request)
+                .await
+                .is_err()
+        );
+
+        // worktree 之外的合法平台路径放行,并进入基线
+        let outside = PlatformWritePath {
+            path: fx.window_root.join("platform/report.json"),
+            ownership: "report-store".into(),
+        };
+        let mut request = begin_request("w-plat", "attempt-1", &fx.worktree, &targets);
+        request.platform_write_paths = vec![outside];
+        begin_review_window(&store, &snapshot, &request)
+            .await
+            .expect("outside platform path accepted");
+        let manifest = snapshot.load_manifest("w-plat").unwrap();
+        assert_eq!(manifest.platform_write_baseline.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sibling_linked_worktree_conflict_and_channel_drain() {
+        let (fx, linked) = linked_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let common = fx.common_dir();
+
+        // 兄弟树(linked,共享 common-dir)的在途 git writer:经兄弟身份
+        // 进入同一 common-dir 通道(闸门按 common-dir 键控)
+        store
+            .enter_write_channel(
+                &common,
+                WriteChannelKind::Push,
+                own_writer("sibling-writer"),
+            )
+            .expect("sibling writer enters via common-dir channel");
+
+        let begin_store = fx.store();
+        let begin_snapshot = fx.snapshot();
+        let worktree = fx.worktree.clone();
+        let base = fx.base.clone();
+        let begin = std::thread::spawn(move || {
+            let scope = open_scope(&base, "coder", None);
+            let targets: [&ProviderRunResourceScope; 1] = [&scope];
+            futures_block_on(begin_review_window(
+                &begin_store,
+                &begin_snapshot,
+                &begin_request("w-main", "attempt-1", &worktree, &targets),
+            ))
+        });
+
+        // 兄弟 writer 在途 → 主树窗口不能达成 baseline(排空等待)
+        let mut draining = false;
+        for i in 0..2000 {
+            let probe_id = format!("sib-probe-{i}");
+            match store.enter_write_channel(&common, WriteChannelKind::Push, own_writer(&probe_id))
+            {
+                Err(ChannelGateError::Blocked { .. }) => {
+                    draining = true;
+                    break;
+                }
+                Ok(()) => {
+                    store
+                        .exit_write_channel(&common, WriteChannelKind::Push, &probe_id)
+                        .unwrap();
+                }
+                Err(other) => panic!("{other:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(draining, "sibling writer must be drained before baseline");
+        assert!(!fx.snapshot_root.join("windows/w-main").exists());
+        store
+            .exit_write_channel(&common, WriteChannelKind::Push, "sibling-writer")
+            .unwrap();
+        begin.join().unwrap().expect("main window after drain");
+
+        // 主树窗口持有期间:兄弟树窗口(共享 common-dir)被纳入协调——拒绝
+        let linked_scope = open_scope(&fx.base, "coder-2", None);
+        let linked_targets: [&ProviderRunResourceScope; 1] = [&linked_scope];
+        let err = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-linked", "attempt-1", &linked, &linked_targets),
+        )
+        .await
+        .expect_err("sibling window on shared common-dir must conflict");
+        match &err {
+            ReviewerWindowError::Conflict { kind, detail, .. } => {
+                assert_eq!(*kind, "reviewer_window_lease");
+                assert!(detail.contains("common-dir"), "{detail}");
+            }
+            other => panic!("expected lease conflict, got {other:?}"),
+        }
+        assert_eq!(
+            store.load_window("w-linked").unwrap().state,
+            ReviewerWindowState::RecoveryRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn violation_flow_reaches_manual_gate_and_release() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-viol", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("begin");
+
+        // 固定违规流:Running→Quiescing→ViolationRecorded→Restoring→ManualGate
+        let quiescing = begin_quiesce(&store, "w-viol", handle.generation, "review end").unwrap();
+        let violated =
+            record_violation(&store, "w-viol", quiescing.generation, ".aria 直写").unwrap();
+        let summary = restore_window(&store, &snapshot, "w-viol", violated.generation)
+            .await
+            .expect("violation restore");
+        assert!(summary.manual_gate, "violation path must gate manually");
+        assert_eq!(summary.record.state, ReviewerWindowState::ManualGate);
+
+        // 恢复成功也不能洗白:人工仅作废/新轮,不能 Accepted
+        let err = close_accepted(&store, "w-viol", summary.record.generation)
+            .expect_err("manual gate cannot accept");
+        assert!(
+            matches!(err, ReviewerWindowError::InvalidTransition { .. }),
+            "{err:?}"
+        );
+        // 人工门期间锁仍持有
+        let empty = open_scope(&fx.base, "coder-2", None);
+        let empty_targets: [&ProviderRunResourceScope; 1] = [&empty];
+        assert!(
+            begin_review_window(
+                &store,
+                &snapshot,
+                &begin_request("w-after", "attempt-2", &fx.worktree, &empty_targets),
+            )
+            .await
+            .is_err()
+        );
+
+        let terminal = resolve_manual_gate(
+            &store,
+            "w-viol",
+            summary.record.generation,
+            ManualGateDecision::Invalidate,
+        )
+        .unwrap();
+        assert_eq!(terminal.state, ReviewerWindowState::ClosedInvalidated);
+        // 终态释放:同树可开新窗口(新轮重加锁/新 baseline)
+        begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-new-round", "attempt-2", &fx.worktree, &empty_targets),
+        )
+        .await
+        .expect("new round after invalidation");
+    }
+
+    #[tokio::test]
+    async fn invalid_transitions_and_generation_cas_rejected() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-guard", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("begin");
+
+        // Running 直接采信关闭(未恢复)→ 拒
+        let err = close_accepted(&store, "w-guard", handle.generation)
+            .expect_err("running cannot close accepted");
+        assert!(
+            matches!(err, ReviewerWindowError::InvalidTransition { .. }),
+            "{err:?}"
+        );
+        // Running 弃置 → 拒(必须先 Quiescing/恢复)
+        let err = abandon_window(&store, "w-guard", handle.generation, "nope")
+            .expect_err("running cannot abandon");
+        assert!(matches!(err, ReviewerWindowError::InvalidTransition { .. }));
+        // 陈旧 generation → Conflict
+        let quiescing = begin_quiesce(&store, "w-guard", handle.generation, "c").unwrap();
+        let err = begin_quiesce(&store, "w-guard", handle.generation, "stale")
+            .expect_err("stale generation rejected");
+        assert!(
+            matches!(err, ReviewerWindowError::Conflict { .. }),
+            "{err:?}"
+        );
+        // Quiescing 直接采信关闭(未恢复)→ 拒
+        let err = close_accepted(&store, "w-guard", quiescing.generation)
+            .expect_err("must restore before accept");
+        assert!(matches!(err, ReviewerWindowError::InvalidTransition { .. }));
+        // 恢复未采信就关闭 → 拒
+        let summary = restore_window(&store, &snapshot, "w-guard", quiescing.generation)
+            .await
+            .expect("restore");
+        let err = close_accepted(&store, "w-guard", summary.record.generation)
+            .expect_err("acceptance must be recorded (T18)");
+        assert!(matches!(err, ReviewerWindowError::InvalidTransition { .. }));
+
+        // 开窗失败的 RecoveryRequired 窗口(无 baseline)不能重入恢复。
+        // 用独立 fixture:w-guard 仍持本树租约,同树新开只会得到租约冲突。
+        let fx2 = window_fixture();
+        let broken_root = fx2.base.join("broken2");
+        fs::write(&broken_root, "x").unwrap();
+        let private2 = fx2.base.join("private/broken2");
+        fs::create_dir_all(&private2).unwrap();
+        let key2 = ResourceScopeKey {
+            scope_id: "b2".into(),
+            run_id: "r2".into(),
+            boot_identity: new_boot_identity(),
+        };
+        let broken_scope =
+            ProviderRunResourceScope::open_for_recovery(&key2, None, &private2, &broken_root, None)
+                .unwrap();
+        let broken_targets: [&ProviderRunResourceScope; 1] = [&broken_scope];
+        let err = begin_review_window(
+            &fx2.store(),
+            &fx2.snapshot(),
+            &begin_request("w-nb", "attempt-1", &fx2.worktree, &broken_targets),
+        )
+        .await
+        .expect_err("begin failure");
+        assert!(matches!(err, ReviewerWindowError::QuiesceFailed(_)));
+        let nb = fx2.store().load_window("w-nb").unwrap();
+        assert_eq!(nb.state, ReviewerWindowState::RecoveryRequired);
+        let err = restore_window(&fx2.store(), &fx2.snapshot(), "w-nb", nb.generation)
+            .await
+            .expect_err("no-baseline recovery cannot resume into restore");
+        assert!(
+            matches!(err, ReviewerWindowError::InvalidTransition { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_starts_pending_acceptance() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-pend", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("begin");
+
+        let record = store.load_window("w-pend").unwrap();
+        assert_eq!(
+            record.report_acceptance,
+            ReportAcceptance::PendingAcceptance
+        );
+        let proof = assert_review_window_current(
+            &store,
+            &snapshot,
+            &expectation("w-pend", "attempt-1", &fx.worktree),
+            &[ReviewerWindowState::Running],
+        )
+        .unwrap();
+        assert_eq!(proof.report_acceptance, ReportAcceptance::PendingAcceptance);
+    }
+
+    #[tokio::test]
+    async fn drain_timeout_waits_when_writer_never_exits() {
+        // 在途 writer 永不退出 → 冻结超时停等(不伪称静止、不采基线)
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let common = fx.common_dir();
+        let mut stuck = own_writer("stuck-writer");
+        // 存活但永不过期的"外部进程":以本测试进程身份注册(必存活)
+        stuck.writer_id = "stuck-writer".into();
+        store
+            .enter_write_channel(&common, WriteChannelKind::Commit, stuck)
+            .unwrap();
+
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let mut request = begin_request("w-stuck", "attempt-1", &fx.worktree, &targets);
+        request.drain_timeout = Duration::from_millis(300);
+        let err = begin_review_window(&store, &snapshot, &request)
+            .await
+            .expect_err("stuck writer must time out the drain");
+        match &err {
+            ReviewerWindowError::ChannelDrainTimeout { detail } => {
+                assert!(detail.contains("stuck-writer"), "{detail}");
+            }
+            other => panic!("expected drain timeout, got {other:?}"),
+        }
+        assert_eq!(
+            store.load_window("w-stuck").unwrap().state,
+            ReviewerWindowState::RecoveryRequired
+        );
+        assert!(!fx.snapshot_root.join("windows/w-stuck").exists());
+        // 停等窗口持锁:清理后弃置可释放
+        store
+            .exit_write_channel(&common, WriteChannelKind::Commit, "stuck-writer")
+            .unwrap();
+        let rec = store.load_window("w-stuck").unwrap();
+        abandon_window(&store, "w-stuck", rec.generation, "drain stuck").unwrap();
+    }
+}
