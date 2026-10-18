@@ -263,7 +263,14 @@ fn reviewer_trust_streaming_input(
         workspace_session_id: Some("session_0001".to_string()),
         resume_provider_session_id: None,
         permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
-        tool_policy: None,
+        // W0-3 N5-1(T20a 守卫对齐):Reviewer 启动必须携带非空
+        // ReviewerVerify 窗口合同(镜像生产 reviewer_verify_policy 铸造),
+        // 否则网关 UnsupportedCapability 先拒、到不了 trust 复验。
+        tool_policy: Some(
+            crate::cross_cutting::streaming_provider::ProviderToolPolicy::reviewer_verify(
+                "review_window_0001",
+            ),
+        ),
         audit_sink: None,
         structured_output_contract: None,
         env_vars: Default::default(),

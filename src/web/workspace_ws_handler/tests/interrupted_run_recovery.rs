@@ -111,10 +111,23 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
     let root = tempfile::tempdir().expect("app root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    // W0-3 N5-3:repository_path 注入后 issue 基线解析真实读取——补
+    // issue 记录(store 生成 id,story/session 与 issue 链一致)。
+    let issue = crate::product::issue_store::IssueStore::new(app_paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            logical_codebase_id: None,
+            title: "Interrupted review issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("issue record");
     let story = lifecycle
         .create_story_spec(CreateStorySpecInput {
             project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
+            issue_id: issue.id.clone(),
             repository_id: "repository_0001".to_string(),
             title: "Interrupted review".to_string(),
             aggregate_codebase: None,
@@ -123,7 +136,7 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
     let session_record: WorkspaceSessionRecord = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
+            issue_id: issue.id.clone(),
             entity_id: story.id,
             workspace_type: WorkspaceType::Story,
             author_provider: ProviderName::ClaudeCode,
@@ -139,6 +152,11 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
     let (engine_tx, _engine_rx) = mpsc::channel::<EngineEvent>(64);
     let mut session = WorkspaceSession::from_record(session_record.clone());
     session.stage = WorkspaceStage::PrepareContext;
+    // W0-3 N5-3(T20b 规划面接窗):review 重试经 drive_review_session
+    // 无条件开窗,repository_path=None 时窗口目标回落测试进程 CWD
+    //(包根,含 target/ 数 GB)→ baseline 超限 → provider 零启动、
+    // channel 关闭 recv None。锚定小体积真实 git 仓(生产形态=业务仓)。
+    session.repository_path = Some(interrupted_review_git_repository(root.path()));
     let payload = ArtifactPayload::Markdown {
         markdown: "# Story Spec\n".to_string(),
         diff: None,
@@ -219,6 +237,46 @@ async fn retry_interrupted_review_starts_reviewer_provider() {
         input.role,
         crate::protocol::contracts::AdapterRole::Reviewer
     );
+}
+
+/// W0-3 N5-3:小体积真实 git 仓(init+一次 commit)——规划审查窗口
+/// 目标锚点,与生产形态(评审目标=业务仓)一致,baseline 快照秒级。
+fn interrupted_review_git_repository(root: &std::path::Path) -> std::path::PathBuf {
+    let repo = root.join("review-repository");
+    std::fs::create_dir_all(&repo).expect("review repo dir");
+    std::fs::write(repo.join("README.md"), "review fixture\n").expect("review repo readme");
+    for arguments in [
+        vec![
+            "init".to_string(),
+            "-q".to_string(),
+            "--initial-branch=main".to_string(),
+        ],
+        vec!["add".to_string(), "-A".to_string()],
+        vec![
+            "commit".to_string(),
+            "-q".to_string(),
+            "-m".to_string(),
+            "review fixture baseline".to_string(),
+        ],
+    ] {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args([
+                "-c",
+                "user.email=review-fixture@example.invalid",
+                "-c",
+                "user.name=review fixture",
+            ])
+            .args(&arguments)
+            .status()
+            .expect("review repo git command spawns");
+        assert!(
+            status.success(),
+            "review repo git {arguments:?} must succeed"
+        );
+    }
+    repo
 }
 
 fn handler_interrupted_timeline_node(

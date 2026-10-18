@@ -135,6 +135,50 @@ impl ProviderAdapter for D21aCountingRestProvider {
     }
 }
 
+/// W0-3 N5-2(T20b 规划面接窗):`drive_review_session` 入口无条件开窗,
+/// session.repository_path=None 时窗口目标回落测试进程 CWD(包根,
+/// 含 target/ 数 GB)→ baseline 快照超限 → run 失败、provider 零启动。
+/// 注入小体积真实 git 仓(init+一次 commit),与生产形态(评审目标=
+/// 业务仓)一致,快照秒级完成。
+fn d21a_business_git_repository(root: &Path, tag: &str) -> std::path::PathBuf {
+    let repo = root.join(format!("business-repo-{tag}"));
+    std::fs::create_dir_all(&repo).expect("d21a business repo dir");
+    std::fs::write(repo.join("README.md"), "d2.1a business repository\n")
+        .expect("d21a business repo readme");
+    for arguments in [
+        vec![
+            "init".to_string(),
+            "-q".to_string(),
+            "--initial-branch=main".to_string(),
+        ],
+        vec!["add".to_string(), "-A".to_string()],
+        vec![
+            "commit".to_string(),
+            "-q".to_string(),
+            "-m".to_string(),
+            "d21a fixture baseline".to_string(),
+        ],
+    ] {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args([
+                "-c",
+                "user.email=d21a-fixture@example.invalid",
+                "-c",
+                "user.name=d21a fixture",
+            ])
+            .args(&arguments)
+            .status()
+            .expect("d21a business repo git command spawns");
+        assert!(
+            status.success(),
+            "d21a business repo git {arguments:?} must succeed"
+        );
+    }
+    repo
+}
+
 /// manager/WS 面真实 fixture：真 LifecycleStore 会话记录 + 持久 engine +
 /// PendingStart 族 provider（ClaudeCode=author、Codex=reviewer 均挂起）。
 struct D21aManagerFixture {
@@ -152,11 +196,26 @@ async fn d21a_manager_fixture(tag: &str) -> D21aManagerFixture {
     let root = tempfile::tempdir().expect("d21a fixture root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths.clone());
-    let (project_id, issue_id, entity_id) = (
+    let (project_id, entity_id) = (
         format!("project_d21a_{tag}"),
-        format!("issue_d21a_{tag}"),
         format!("story_d21a_{tag}"),
     );
+    // W0-3 N5-2:repository_path 注入后,issue 基线解析(resolve_issue_
+    // baseline_tree)从"无仓库路径跳过"变为真实读取——须补 issue 记录
+    //(store 生成 id,session 与 issue 链一致),否则 product_store_
+    // not_found fail-closed、provider 零启动。
+    let issue = IssueStore::new(app_paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: project_id.clone(),
+            repo_id: None,
+            logical_codebase_id: None,
+            title: format!("d2.1a manager issue {tag}"),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("d21a manager issue");
+    let issue_id = issue.id;
     let session_record = lifecycle
         .create_workspace_session(CreateWorkspaceSessionInput {
             project_id: project_id.clone(),
@@ -172,13 +231,17 @@ async fn d21a_manager_fixture(tag: &str) -> D21aManagerFixture {
         })
         .expect("d21a workspace session");
     let (engine_tx, engine_rx) = mpsc::channel::<EngineEvent>(256);
+    let mut session = WorkspaceSession::from_record(session_record.clone());
+    // W0-3 N5-2:窗口目标锚定小体积真实 git 仓(生产形态=业务仓),
+    // 避免 current_dir 回落包根导致 baseline 超限、provider 零启动。
+    session.repository_path = Some(d21a_business_git_repository(root.path(), tag));
     let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
         Arc::new(CheckpointStore::new(
             app_paths.issue_lifecycle_root(&project_id, &issue_id),
         )),
         lifecycle,
         engine_tx.clone(),
-        WorkspaceSession::from_record(session_record.clone()),
+        session,
     )));
     let starts = Arc::new(AtomicUsize::new(0));
     let held: Arc<SyncMutex<Vec<mpsc::Sender<ProviderEvent>>>> =
