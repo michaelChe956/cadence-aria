@@ -292,6 +292,42 @@ cd web && pnpm dev --port 5173
 
 worktree 内的 `.aria/bin/aria-evidence-query` 脚本走**专用 evidence token 语义**：鉴权由 handler 既有的 token→attempt→role→预算链承担（与运行中 attempt 绑定、仅证据只读），不持有也不需要管理会话。平台认证中间件对该端点保留 Host/Origin 来源卫生（脚本自动携带 `Origin: http://127.0.0.1:<port>`），body 内的 evidence token 由 `.aria/evidence-token`（0600）提供。残余边界（R9/GC8，与鉴权设计一致）：该 token 文件是同 UID 可读材料——平台鉴权阻止未授权/跨站调用，不抵御同 UID 恶意进程截获或复用。
 
+#### 受信执行环境与 Git 禁桥（批2 T2–T5）
+
+- Provider（Claude/Codex/Pi/Kimi）子进程不再继承宿主全部环境：只透传工具链与语言环境白名单（`PATH`、`JAVA_HOME`、`MAVEN_HOME`、`LANG` 等）；代理、包管理器、SSL/CA、容器连接等键必须写进受信 Provider 配置才生效。平台入站令牌（`ARIA_BOOTSTRAP_TOKEN`、`aria_session`）永不进入 Provider 环境。
+- 给 Provider 额外环境变量（如 `DOCKER_HOST`、`NODE_OPTIONS`）只能通过受信配置批准，仅设置 shell 变量不再生效。`HOME` 固定为 owner 家目录；同时存在第二个 `CODEX_HOME` 会被拒绝并给出配置发现诊断。
+- Provider CLI 以裸名（`claude`/`codex`/`pi`/`kimi`）调用而 `PATH` 不在冻结环境中时，会明确报「缺少工具」，不会回退宿主 `PATH`。平台自身的仓库注册、终审与版本探测已显式携带 `PATH`，不受此影响。
+- 平台自己的 Git 操作（提交、worktree、状态、注册快照等）不执行仓库的 hooks 与 fsmonitor：仓库里的 `pre-commit` 等只在你自己终端或 Provider 会话执行 Git 时生效，平台提交不会被 hooks 拦截或偷偷触发。`git push` 到远端时，远端仓库自己的 hooks 仍会执行。
+- 取消或失败的运行只回收平台登记的进程组、容器与临时目录；owner 家目录与登记私有根之外的内容永不清理。自行 daemonize、绕过平台登记的后台进程/容器不保证回收，需要时请人工确认后处理。
+- 恢复：若运行记录显示资源未静止（存在未知 writer），平台会停等而不是强行继续；按提示人工结束残留进程/容器后可重试。
+
+#### Kimi 执行通道（批2 T6–T8）
+
+- Kimi 终端不再要求把命令包成 `bash -c "..."`：普通 `command` + `args` 原样执行（如 `mvn --version`、`node -e ...`、带空格参数）；只给单个字符串时仍按受信 `SHELL` 的 `-c` 语义执行。
+- Kimi 终端直接运行在宿主上，不再尝试 bubblewrap 隔离；写入宿主受管目录是预期行为。并发终端名额在启动失败时立即归还。
+- 终端命令不再有固定 120 秒上限：命令时长只受本次 Provider 调用的总 deadline 约束；有终端在活动时不会触发空闲超时，但也不会延长总 deadline。会话结束或取消后新的终端请求会被拒绝，已登记终端会被级联收割。
+- 岗位策略：Author 岗位不能用 fs 写接口编辑代码文件（作者文档走平台通道），但读取、终端、报告通道可用；Reviewer 只有在有效评审窗口内才能通过 fs 写接口写入授权根，越界或符号链接逃逸会被拒绝且目标不变。
+- 恢复：终端生命周期事件使用稳定的 `kimi_terminal_<id>` 关联；会话取消后不要再等待该终端输出，以事件流中的 Exited/Killed 终态为准。
+
+#### Coder 执行与岗位策略（批2 T9–T15）
+
+- 能力证据换代：旧版本（v1/v2）保存的「全开能力」记录一律按 Unknown 处理，原文件不被改写；需要重新探测确认后才会放行。宿主全开的判定改为「受控宿主写成功即全开事实」，探测必须带岗位、Reviewer 窗口与资源身份，缺一即 Unknown。
+- 双阶段准入：只有当前语义 Confirmed 的记录才能同时通过启动与写边界检查；旧的「Unknown 但 actions 命中」迁移放行已删除。Provider 进程统一以受信宿主方式启动，不再有 bwrap launcher。
+- 工具策略按岗位：Coder/Reviewer/Orchestrator/Splitter/Handoff 的会话全开（不再注入 deny 文件写内建工具）；Author 岗位只拒绝代码文件写内建工具，文档交付走平台通道。Author 首轮与续跑都绑定同一 Author 合同，模型不能通过 prompt/env 提升岗位。
+- Codex：LC 的规划/评审/编码三个动作与 Direct 会话均为 `danger-full-access`，审批为 `on-request`（Auto 的 `never` 只用于非策略会话）；旧的 read-only/workspace-write 记录恢复时会失配并显式开新会话。Author 的 Codex 会话若出现 fileChange 项，平台会持久记录检测事实并把该轮中断为 Failed，迟到事件不会洗白；这只是检测与审计，不宣称回滚已发生的写入。
+- Coder 运行有独立的 `code_delivery` 资源窗：取消/失败只清平台登记的临时目录，源码、dirty/staged/commit/HEAD 原样保留，下一轮重试可接着改；未登记的后台进程不保证回收。
+- 自跑 CHECK：计划中的验证命令由 Coder 本人执行，并回报实际命令/cwd/退出码/测试数量/原始输出；平台不代跑，A′ 只覆盖外部硬件、人工检查或临时缺项。失败按缺依赖/认证/权限/断言分类展示，原始输出摘录可在分诊卡查看；「重跑」只是唤回原 Coder，不会由平台执行命令。
+- 恢复：历史能力记录显示 Unknown 时，在 Provider 能力页重新探测即可（需真机 CLI 可用）；探测被拒签通常表示缺少岗位/窗口/资源身份，而非 CLI 不可用。
+
+#### Reviewer 评审窗口（批2 T16–T21）
+
+- 每次评审在受管 worktree 上开一个 durable 窗口：同一棵树同时只能有一个评审窗口。开窗前先冻结平台写通道并等待在途 Git 写入真实退出，再停 Coder 资源并确认静止，然后采基线；材料采集只在窗口 Running 后开始。
+- 评审结束后按基线恢复：Reviewer 的修改/新增/删除痕迹被清除，Coder 原有的 staged/unstaged/untracked/ignored/dirty、commit、HEAD 原样保留，不使用 `git clean` 或整树 reset。平台合法写入域发生漂移时窗口会停等（RecoveryRequired）而不是伪称恢复完成，处置后重入可续接。
+- 违规判定：自提交、改 Git 域（HEAD/index/refs）、改平台元数据、绕过写通道、可观察 journal 篡改等整轮 Invalidated，旧报告永久不可 Accepted，只能人工裁决（作废或要求新评审）。push 类外部副作用不可回滚，报告只如实标注。
+- 采信门：内容 approve 但报告未被采信（Pending/Invalidated）时不会推进交付，会落人工分诊门；Runner 交付前会再查一次采信状态。窗口冻结期间平台的 stage/commit/push 与取消补偿全部拒绝，释放后自动续接。
+- 四家 Reviewer 都与窗口合同绑定：Reviewer 会话缺窗口或空窗直接 0 会话启动；规划面评审（Story/Design/WorkItemPlan）也开窗，聚合视图锚主成员 checkout（非主成员面不对账，事件中会注明）。Reviewer 可用全部工具，验证临时文件允许，轮次结束按基线恢复对账。
+- 启动与恢复：平台启动时先补偿未终态窗口再放行 Runner；人工门中的 attempt 显示 AwaitingManualRecovery。用 `POST /api/coding-attempts/{attempt_id}/reviewer-window:resolve`（`decision` = `invalidate` | `require_new_review`）裁决：`invalidate` 后 attempt 不自动恢复，`require_new_review` 会另取租约与新基线。删除/终止 attempt 会先收口窗口并保留 Coder dirty；未知 writer 未静止时窗口持锁停等。
+
 #### 首次启动依赖自检
 
 首次启动时 Aria 会检查环境：
