@@ -5295,16 +5295,31 @@ impl MatrixEnvironment {
             observation.run_failure = Some(format!("human_gate_feedback 发送失败:{error}"));
             return observation.build_cell(self);
         }
-        let revision_done = self
+        let revision_outcome = self
             .pump_plan_sc_phase(
                 &mut ws,
                 &mut observation,
                 PlanScPumpPhase::AwaitRevisionComplete,
             )
             .await;
-        if !revision_done {
-            return observation.build_cell(self);
-        }
+        // r65:修订收束形态分叉——DoneGateOpen=门重开帧即收束帧(无结构
+        // grant 流不发 human_gate_turn_completed),门等相位已被满足,跳过;
+        // Done=turn 完成帧收束,门等相位照常泵(门开后才发 confirm)。
+        let gate_open = match revision_outcome {
+            PlanScPumpOutcome::Failed => return observation.build_cell(self),
+            PlanScPumpOutcome::DoneGateOpen => true,
+            PlanScPumpOutcome::Done => {
+                matches!(
+                    self.pump_plan_sc_phase(
+                        &mut ws,
+                        &mut observation,
+                        PlanScPumpPhase::AwaitConfirmGate,
+                    )
+                    .await,
+                    PlanScPumpOutcome::Done | PlanScPumpOutcome::DoneGateOpen
+                )
+            }
+        };
         // ---- 阶段 2(r58 根修):等 SC 门重开(stage_change human_confirm)
         // 才发 confirm。修订回门 ≠ 门开:产品合法走复评/修复循环(r58 现场
         // reviewer 判修订版仍有缺陷→repairs_used=1/1 自动返修→再复评,全程
@@ -5314,9 +5329,6 @@ impl MatrixEnvironment {
         // MESSAGE_FOR_STAGE: confirm not allowed in stage cross_review)。
         // 门帧驱动:期间 choice 语义应答/心跳照常,确定终态秒收口,阶段
         // 超时兜底(有界,不空转)。
-        let gate_open = self
-            .pump_plan_sc_phase(&mut ws, &mut observation, PlanScPumpPhase::AwaitConfirmGate)
-            .await;
         if !gate_open {
             return observation.build_cell(self);
         }
@@ -5335,13 +5347,15 @@ impl MatrixEnvironment {
                 observation.run_failure = Some(format!("typed confirm 发送失败:{error}"));
                 return observation.build_cell(self);
             }
-            confirmed = self
-                .pump_plan_sc_phase(
+            confirmed = matches!(
+                self.pump_plan_sc_phase(
                     &mut ws,
                     &mut observation,
                     PlanScPumpPhase::AwaitConfirmTerminal,
                 )
-                .await;
+                .await,
+                PlanScPumpOutcome::Done | PlanScPumpOutcome::DoneGateOpen
+            );
             if confirmed {
                 break;
             }
@@ -5437,7 +5451,7 @@ impl MatrixEnvironment {
         ws: &mut LiveWs,
         observation: &mut StageObservation,
         phase: PlanScPumpPhase,
-    ) -> bool {
+    ) -> PlanScPumpOutcome {
         let deadline = tokio::time::Instant::now() + self.entity_stage_timeout;
         let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
         let phase_started = std::time::Instant::now();
@@ -5454,7 +5468,7 @@ impl MatrixEnvironment {
                     "plan_sc_pump_timeout",
                     format_args!("phase={phase:?} elapsed={:?}", phase_started.elapsed()),
                 );
-                return false;
+                return PlanScPumpOutcome::Failed;
             }
             let message = tokio::time::timeout_at(idle_deadline, ws.recv_json()).await;
             let message = match message {
@@ -5464,11 +5478,11 @@ impl MatrixEnvironment {
                 }
                 Ok(Ok(None)) => {
                     observation.run_failure = Some("plan SC 门会话 WS 在终态前关闭".to_string());
-                    return false;
+                    return PlanScPumpOutcome::Failed;
                 }
                 Ok(Err(error)) => {
                     observation.run_failure = Some(format!("plan SC 门会话 WS 错误:{error}"));
-                    return false;
+                    return PlanScPumpOutcome::Failed;
                 }
                 Err(_) => {
                     fp(
@@ -5478,7 +5492,7 @@ impl MatrixEnvironment {
                     if ws.send_json(&json!({"type": "ping"})).await.is_err() {
                         observation.run_failure =
                             Some("plan SC 门会话 WS 在终态前关闭".to_string());
-                        return false;
+                        return PlanScPumpOutcome::Failed;
                     }
                     idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
                     continue;
@@ -5542,7 +5556,17 @@ impl MatrixEnvironment {
                             phase_started.elapsed()
                         ),
                     );
-                    return true;
+                    return PlanScPumpOutcome::Done;
+                }
+                PlanScFrameSignal::PhaseDoneGateAlreadyOpen => {
+                    fp(
+                        "plan_sc_phase_done_gate_already_open",
+                        format_args!(
+                            "phase={phase:?} elapsed={:?} events={events_seen}",
+                            phase_started.elapsed()
+                        ),
+                    );
+                    return PlanScPumpOutcome::DoneGateOpen;
                 }
                 PlanScFrameSignal::ServerError => {
                     fp(
@@ -5551,7 +5575,7 @@ impl MatrixEnvironment {
                     );
                     observation.run_failure =
                         Some(format!("plan SC 门服务端错误帧收口(kind={kind}):{message}"));
-                    return false;
+                    return PlanScPumpOutcome::Failed;
                 }
             }
         }
@@ -7157,11 +7181,27 @@ fn coding_waiting_human_confirms(frame: &Value) -> bool {
 
 /// r26 问题2:SC 门泵单帧信号决策(纯函数,决策表可单测)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// pump_plan_sc_phase 的收束形态(r65):Done=相位完成;
+/// DoneGateOpen=相位完成且门已开(修订收束帧即门重开帧,门等相位跳过);
+/// Failed=超时/错误/失败终态(run_failure 已落格)。
+enum PlanScPumpOutcome {
+    Failed,
+    Done,
+    DoneGateOpen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum PlanScFrameSignal {
     /// 继续泵送。
     Listen,
     /// 当前相位完成(revision 轮回门 / confirm 定稿终态)。
     PhaseDone,
+    /// 相位完成且门已开(r65:T22 r4 现场——无结构 grant 的 SC 修订+复评
+    /// 流,产品不发 `human_gate_turn_completed`(该帧由 ReviewOnly 臂仅
+    /// 在 structural grant 绑定 turn 且 verdict 收口后发送),门重开
+    /// `stage_change human_confirm` 是修订收束的唯一权威信号;且该帧即
+    /// 门开本身,AwaitConfirmGate 相位已被本帧满足,驱动侧跳过门等)。
+    PhaseDoneGateAlreadyOpen,
     /// 服务端拒收/错误帧:立即失败收口。
     ServerError,
 }
@@ -7230,6 +7270,16 @@ fn plan_sc_frame_signal(kind: &str, message: &Value, phase: PlanScPumpPhase) -> 
                 // 被处理;定时发送在 r58 撞 cross_review 被矩阵拒)。
                 (PlanScPumpPhase::AwaitConfirmGate, "human_confirm") => {
                     PlanScFrameSignal::PhaseDone
+                }
+                // r65 根修(T22 r4 现场):修订收束的权威信号缺帧形态——
+                // 无结构 grant 的 SC 修订流不发 human_gate_turn_completed
+                //(该帧由 ReviewOnly 臂仅在 structural grant 绑定 turn 且
+                // verdict 收口后发送),cross_review 复评完直接回
+                // human_confirm(r4 实拍:反馈后 20s,01:15:53)。门重开
+                // 本身=修订 turn 已收束+门已开,双相位一并满足;旧判定
+                // Listen=泵空转到阶段超时(r2-r4 现场)。
+                (PlanScPumpPhase::AwaitRevisionComplete, "human_confirm") => {
+                    PlanScFrameSignal::PhaseDoneGateAlreadyOpen
                 }
                 (PlanScPumpPhase::AwaitConfirmTerminal, "completed") => {
                     PlanScFrameSignal::PhaseDone
@@ -8706,6 +8756,19 @@ mod pump_disposition_tests {
         assert_eq!(
             plan_sc_frame_signal("human_gate_turn_failed", &turn_failed, confirm),
             PlanScFrameSignal::ServerError
+        );
+        // r65(T22 r4 现场):无结构 grant 的 SC 修订流不发
+        // human_gate_turn_completed,门重开帧是修订收束的唯一权威信号——
+        // AwaitRevisionComplete 相位收束为 DoneGateOpen(门等相位跳过);
+        // 终态相位仍 Listen(不误收)。
+        let gate_reopen = json!({"type": "stage_change", "stage": "human_confirm"});
+        assert_eq!(
+            plan_sc_frame_signal("stage_change", &gate_reopen, revision),
+            PlanScFrameSignal::PhaseDoneGateAlreadyOpen
+        );
+        assert_eq!(
+            plan_sc_frame_signal("stage_change", &gate_reopen, confirm),
+            PlanScFrameSignal::Listen
         );
     }
     /// r58 回归锚点:SC 门 confirm 时序必须门帧驱动——修订轮回门后产品
