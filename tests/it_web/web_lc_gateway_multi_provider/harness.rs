@@ -12199,17 +12199,9 @@ impl MatrixEnvironment {
         }))
     }
 
-    /// T24:释放 in-process 服跑态,固定根交由真实 `aria web` 进程接管。
-    /// 返回(workspace 根, 聚合根, bare-origin TempDir 持活)——bare origin
-    /// 必须由调用方持有至演练结束(交付链 push/ls-remote 契约)。
-    fn t24_release_for_handover(self) -> (PathBuf, PathBuf, TempDir) {
-        self._server.abort();
-        (
-            self.workspace_root_path.clone(),
-            self.aggregate_root_path().to_path_buf(),
-            self._bare_origin_root.expect("bare origin root"),
-        )
-    }
+    /// T24:释放 in-process 服跑态(固定根交真实 `aria web` 进程接管)。
+    /// 由 `run_b45_t24_crash` 内联执行(server.abort + 根/bare-origin 摘取
+    /// 后 drop(env));bare origin 必须持活至演练结束(push 契约)。
 
     /// T24 durable 观测:reviewer-windows 面(windows/violation-journal/leases)。
     fn b45_t24_reviewer_window_snapshot(&self) -> Value {
