@@ -861,6 +861,19 @@ pub(crate) fn validate_b45_host_check_evidence(
         if record.cwd.trim().is_empty() {
             failures.push(format!("{label} 缺 cwd"));
         }
+        // r74(F4):maven/npm 全 facet 与 podman/build 的 cwd 必须含 fixture
+        // 路径段(钉定命令均 cd 进 fixtures/*;podman/run 按命令(6)从仓库
+        // 根执行,豁免)——外层聚合根 cd 遮蔽内层 fixture cd 的失真取法
+        // 在此暴露。
+        let requires_fixture_cwd = record.tool == "maven"
+            || record.tool == "npm"
+            || (record.tool == "podman" && record.facet == "build");
+        if requires_fixture_cwd && !record.cwd.contains("fixture") {
+            failures.push(format!(
+                "{label} cwd 缺 fixture 路径段(实测 {:?})",
+                record.cwd
+            ));
+        }
         if record.exit_code.is_none() {
             failures.push(format!("{label} 缺退出码"));
         }
@@ -955,7 +968,7 @@ fn b45_complete_baseline_evidence() -> B45HostCheckEvidence {
         planned_command: format!("planned {tool} {facet}"),
         actual_command: format!("actual {tool} {facet}"),
         argv: vec![tool.to_string(), facet.to_string()],
-        cwd: "/worktree/fixtures".to_string(),
+        cwd: "/worktree/fixtures/maven-fixture".to_string(),
         exit_code: Some(0),
         test_count,
         output_excerpt: "T22 excerpt".to_string(),
@@ -998,6 +1011,125 @@ fn b45_complete_baseline_evidence() -> B45HostCheckEvidence {
         snapshot_after: "head=bbb porcelain=src/lib.rs".to_string(),
         coder_dirty_preserved: true,
     }
+}
+
+/// r74-F1(T22 审查):参数位工具名不得产出工具格——r17 绿灯实证
+/// `git status…which podman npm mvn`/`grep 'podman run'`/echo 文案被当执行。
+#[test]
+fn b45_classify_rejects_argument_position_tool_tokens() {
+    // 参数位(which/grep/echo 文案):一律不分类。
+    assert_eq!(
+        b45_classify_command("/bin/bash -c which podman npm mvn java"),
+        (String::new(), String::new()),
+        "which 的参数位工具名不得当执行"
+    );
+    assert_eq!(
+        b45_classify_command("grep -n 'podman run --rm aria-t22-check' log.txt"),
+        (String::new(), String::new()),
+        "grep 的模式串不得当执行"
+    );
+    assert_eq!(
+        b45_command_facets("echo \"next: npm test and podman build\" | tee log"),
+        Vec::<(String, String)>::new(),
+        "echo 文案不得产出任何面目"
+    );
+    // 命令位(段首/操作符后):正常分类。
+    assert_eq!(
+        b45_command_facets("cd fixtures/npm-fixture && npm ci; npm test; npm run build"),
+        vec![
+            ("npm".to_string(), "ci".to_string()),
+            ("npm".to_string(), "test".to_string()),
+            ("npm".to_string(), "build".to_string()),
+        ],
+        "复合命令操作符后的命令位全提取"
+    );
+    assert_eq!(
+        b45_command_facets("podman build -t aria-t22-check . && podman run --rm aria-t22-check"),
+        vec![
+            ("podman".to_string(), "build".to_string()),
+            ("podman".to_string(), "run".to_string()),
+        ]
+    );
+    // 粘连分号形态(x; podman run)。
+    assert_eq!(
+        b45_classify_command("echo x; podman run --rm aria-t22-check"),
+        ("podman".to_string(), "run".to_string())
+    );
+}
+
+/// r74-F2(T22 审查):退出码按 (role_run_id, event_id) 配对——裸 id 跨
+/// 会话撞号可把真实非零覆盖成同号 0(假绿);CHECK 工具格只认 coder 行。
+/// 以 r17 实证形态构造:coder term-7 exit=1,code_reviewer 同号 term-7
+/// exit=0 在后——工具格必须取 coder 的 1(真实失败不被掩盖)。
+#[test]
+fn b45_tool_exit_pairs_within_coder_role_run() {
+    let run = json!({
+        "coding_main": {
+            "role_run_rows": [
+                {"role": "coder", "role_run_id": "coding_role_run_0002", "created_at": "2026-10-18T09:00:00Z", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-7", "status": "Started", "command": "/bin/bash -c cd '/w/fixtures/maven-fixture' && podman run --rm maven:3.9 mvn -B test"}},
+                {"role": "coder", "role_run_id": "coding_role_run_0002", "created_at": "2026-10-18T09:02:30Z", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-7", "status": "Completed", "exit_code": 1}},
+                {"role": "code_reviewer", "role_run_id": "coding_role_run_0004", "created_at": "2026-10-18T09:05:00Z", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-7", "status": "Started", "command": "/bin/bash -c cd '/w' && echo probe; npm --version"}},
+                {"role": "code_reviewer", "role_run_id": "coding_role_run_0004", "created_at": "2026-10-18T09:05:01Z", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-7", "status": "Completed", "exit_code": 0}},
+            ],
+            "verification_evidence": {"status": 422, "body": {"code": "x"}},
+            "check_evidence_log": "Tests run: 2, Failures: 0\n2 passed, 0 failed\n",
+        },
+        "fixtures": {"versions": {"maven_container": {"stdout": "Apache Maven 3.9.16\n"}, "npm": {"stdout": "11.13.0\n"}, "podman": {"stdout": "6.1.1\n"}}},
+    });
+    let evidence = b45_evidence_from_run(&run);
+    let maven = evidence
+        .tools
+        .iter()
+        .find(|record| record.tool == "maven" && record.facet == "test")
+        .expect("coder 的 mvn 执行必须建格");
+    assert_eq!(maven.exit_code, Some(1), "退出码必须取 coder 同 role_run 的 1,不被 reviewer 同号 0 覆盖");
+    // reviewer 的探测命令(echo probe; npm --version)不产出 npm 工具格。
+    assert!(
+        !evidence.tools.iter().any(|record| record.tool == "npm"),
+        "code_reviewer 行不得入 coder CHECK 工具格"
+    );
+}
+
+/// r74-F3(T22 审查):npm 计数不得吞任意行尾数字——r17 实测 144=
+/// TOTAL_LINES(split().next() 对无 passed 行返回整行)。
+#[test]
+fn b45_npm_count_requires_passed_marker() {
+    let run = json!({
+        "coding_main": {
+            "role_run_rows": [
+                {"role": "coder", "role_run_id": "r1", "created_at": "2026-10-18T09:00:00Z", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-1", "status": "Started", "command": "/bin/bash -c cd '/w/fixtures/npm-fixture' && npm test"}},
+                {"role": "coder", "role_run_id": "r1", "created_at": "2026-10-18T09:00:05Z", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-1", "status": "Completed", "exit_code": 0}},
+            ],
+            "verification_evidence": {"status": 422, "body": {}},
+            "check_evidence_log": "TOTAL_LINES=144\nfiles checked=7\n2 passed, 0 failed\n",
+        },
+        "fixtures": {"versions": {"maven_container": {"stdout": "Apache Maven 3.9.16\n"}, "npm": {"stdout": "11.13.0\n"}, "podman": {"stdout": "6.1.1\n"}}},
+    });
+    let evidence = b45_evidence_from_run(&run);
+    let npm_test = evidence
+        .tools
+        .iter()
+        .find(|record| record.tool == "npm" && record.facet == "test")
+        .expect("npm test 建格");
+    assert_eq!(npm_test.test_count, Some(2), "计数必须来自含 passed 的行(2),不得吞 TOTAL_LINES=144");
+}
+
+/// r74-F4(T22 审查):cwd 取最后一个 cd 的目标段——外层聚合根 cd 遮蔽
+/// 内层 fixture cd 的失真取法(r17 实证)必须修正;validator 侧
+/// fixture 段规则由 b45_host_check_validator 的 cwd 校验承载。
+#[test]
+fn b45_command_cwd_takes_last_cd_segment() {
+    assert_eq!(
+        b45_command_cwd("cd '/tmp/.tmpXXX' && cd '/tmp/.tmpXXX/alpha/fixtures/maven-fixture' && podman run --rm maven mvn -B test"),
+        "/tmp/.tmpXXX/alpha/fixtures/maven-fixture",
+        "取最后一个 cd 目标(内层 fixture),非外层聚合根"
+    );
+    assert_eq!(
+        b45_command_cwd("cd /workspace && npm ci"),
+        "/workspace",
+        "无引号 cd 形态"
+    );
+    assert_eq!(b45_command_cwd("podman run --rm aria-t22-check"), "", "无 cd 为空");
 }
 
 /// Step 1 红测锚点:缺项 fixture 定向确认拒绝(每缺一项一拒,完整基线放行)。
@@ -1139,7 +1271,7 @@ fn tool_record(tool: &str, facet: &str, version: &str, test_count: Option<u64>) 
         planned_command: format!("planned {tool} {facet}"),
         actual_command: format!("actual {tool} {facet}"),
         argv: vec![tool.to_string(), facet.to_string()],
-        cwd: "/worktree/fixtures".to_string(),
+        cwd: "/worktree/fixtures/maven-fixture".to_string(),
         exit_code: Some(0),
         test_count,
         output_excerpt: "T22 excerpt".to_string(),
@@ -1243,22 +1375,32 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                     .and_then(|count| count.trim().parse::<u64>().ok())
             })
             .max();
+        // r74(F3):split_once("passed")——无 passed 的行(split().next()
+        // 返回整行)曾把任意行尾数字当计数(r17 实测 144=TOTAL_LINES)。
         let npm_count = check_log
             .lines()
             .filter_map(|line| {
-                let rest = line.split("passed").next()?;
-                rest.trim()
+                let (before, _) = line.split_once("passed")?;
+                before
+                    .trim()
                     .rsplit(|ch: char| !ch.is_ascii_digit())
                     .next()
                     .and_then(|count| count.parse::<u64>().ok())
             })
             .filter(|count| *count > 0)
             .max();
-        // 同一 terminal(事件 id)的 Started 携带命令、Completed 携带退出码:
-        // 按 id 配对后分类建格(同 facet 首条为准,后续复跑只并入生命周期)。
-        let mut exits: std::collections::BTreeMap<String, Option<i64>> =
+        // r74(F2):同一 terminal(事件 id)的 Started 携带命令、Completed
+        // 携带退出码——退出码按 (role_run_id, event_id) 配对:event_id 跨
+        // provider 会话撞号(code_reviewer/coder 各有 term-N),按裸 id 配对
+        // 可把真实非零覆盖成同号 0(假绿);且 CHECK 工具格只认 role=coder
+        // 终端(评审会话的探测命令不入 coder CHECK 证据)。
+        let coder_rows: Vec<&Value> = lifecycle_rows
+            .iter()
+            .filter(|row| row.get("role").and_then(Value::as_str) == Some("coder"))
+            .collect();
+        let mut exits: std::collections::BTreeMap<(String, String), Option<i64>> =
             std::collections::BTreeMap::new();
-        for row in &lifecycle_rows {
+        for row in &coder_rows {
             let Some(payload) = row.get("payload") else { continue };
             let Some(event_id) = payload.get("event_id").and_then(Value::as_str) else {
                 continue;
@@ -1271,12 +1413,18 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                 Some("Completed") | Some("Failed") | Some("Aborted")
             ) {
                 exits.insert(
-                    event_id.to_string(),
+                    (
+                        row.get("role_run_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        event_id.to_string(),
+                    ),
                     payload.get("exit_code").and_then(Value::as_i64),
                 );
             }
         }
-        for row in &lifecycle_rows {
+        for row in &coder_rows {
             let Some(payload) = row.get("payload") else { continue };
             if payload.get("status").and_then(Value::as_str) != Some("Started") {
                 continue;
@@ -1336,19 +1484,15 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                                     .split_whitespace()
                                     .map(str::to_string)
                                     .collect::<Vec<_>>(),
-                                cwd: command
-                                    .split("cd ")
-                                    .nth(1)
-                                    .and_then(|rest| {
-                                        rest.trim()
-                                            .trim_start_matches('\'')
-                                            .split('\'')
-                                            .next()
-                                    })
-                                    .unwrap_or_default()
-                                    .to_string(),
+                                cwd: b45_command_cwd(command),
                                 exit_code: exits
-                                    .get(event_id)
+                                    .get(&(
+                                        row.get("role_run_id")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        event_id.to_string(),
+                                    ))
                                     .and_then(|code| *code)
                                     .map(|code| code as i32),
                                 test_count,
@@ -1394,16 +1538,15 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                         .split_whitespace()
                         .map(str::to_string)
                         .collect::<Vec<_>>(),
-                    cwd: command
-                        .split("cd ")
-                        .nth(1)
-                        .and_then(|rest| {
-                            rest.trim().trim_start_matches('\'').split('\'').next()
-                        })
-                        .unwrap_or_default()
-                        .to_string(),
+                    cwd: b45_command_cwd(command),
                     exit_code: exits
-                        .get(event_id)
+                        .get(&(
+                            row.get("role_run_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            event_id.to_string(),
+                        ))
                         .and_then(|code| *code)
                         .map(|code| code as i32),
                     test_count: if extra_test {
@@ -1420,12 +1563,7 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                     resource_ids: Vec::new(),
                 });
             }
-            let cwd = command
-                .split("cd ")
-                .nth(1)
-                .and_then(|rest| rest.trim().trim_start_matches('\'').split('\'').next())
-                .unwrap_or_default()
-                .to_string();
+            let cwd = b45_command_cwd(command);
             let test_count = if is_test_facet {
                 if tool == "maven" {
                     maven_count
@@ -1447,7 +1585,13 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                     .collect::<Vec<_>>(),
                 cwd,
                 exit_code: exits
-                    .get(event_id)
+                    .get(&(
+                        row.get("role_run_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        event_id.to_string(),
+                    ))
                     .and_then(|code| *code)
                     .map(|code| code as i32),
                 test_count,
@@ -1664,17 +1808,76 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
     }
 }
 
+
+/// r74(F4):从命令串提取工作目录——取**最后一个** `cd '目标'`/`cd 目标` 的
+/// 目标段(外层聚合根 cd 会遮蔽内层 fixture cd,首段取法失真);脚本内联
+/// 路径同用(r17 实证外层 cd /tmp/.tmpXXX 遮蔽 fixtures/maven-fixture)。
+fn b45_command_cwd(command: &str) -> String {
+    let mut cwd = String::new();
+    let mut rest = command;
+    while let Some(position) = rest.find("cd ") {
+        let after = &rest[position + 3..];
+        let target = after.trim_start();
+        let segment = if let Some(stripped) = target.strip_prefix('\'') {
+            stripped.split('\'').next().unwrap_or_default()
+        } else if let Some(stripped) = target.strip_prefix('"') {
+            stripped.split('"').next().unwrap_or_default()
+        } else {
+            target
+                .split_whitespace()
+                .next()
+                .map(|token| token.trim_end_matches(';'))
+                .unwrap_or_default()
+        };
+        if !segment.is_empty() {
+            cwd = segment.to_string();
+        }
+        rest = after;
+    }
+    cwd
+}
+
+/// r74(F1):token 是否处于命令位——段首,或前一 token 是/以
+/// &&/||/;/|/(/!/{ 操作符收尾(echo "x"; podman run 的粘连分号形态)。
+fn token_is_command_position(tokens: &[&str], index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+    let previous = tokens[index - 1];
+    matches!(previous, "&&" | "||" | ";" | "|" | "(" | "{" | "!")
+        || previous.ends_with(';')
+        || previous.ends_with('|')
+        || previous.ends_with('&')
+}
+
 /// 命令族分类(podman/npm/maven + facet)。
 fn b45_classify_command(command: &str) -> (String, String) {
     let tokens: Vec<&str> = command.split_whitespace().collect();
-    // 首 token 是 /bin/bash;取首个工具 token(podman/npm/mvn)按其子命令分类。
+    // r74(F1):只认命令位的工具 token——段首,或 &&/||/;/|/(/!/{ 之后
+    //(含前 token 以这些操作符收尾的粘连形态)。参数位(which podman/
+    // grep 'podman run'/echo 文案)不产出工具格(r17 绿灯实证该缺陷:
+    // maven/test 的 actual_command=git status…which,无真实 mvn 执行)。
     let tool_index = tokens
         .iter()
-        .position(|token| matches!(*token, "podman" | "npm" | "mvn"))
+        .enumerate()
+        .find(|(index, token)| {
+            matches!(**token, "podman" | "npm" | "mvn") && token_is_command_position(&tokens, *index)
+        })
+        .map(|(index, _)| index)
         .unwrap_or(0);
     let head = tokens.get(tool_index).copied().unwrap_or_default();
-    let sub = tokens.get(tool_index + 1).copied().unwrap_or_default();
-    let third = tokens.get(tool_index + 2).copied().unwrap_or_default();
+    // r74:粘连操作符形态(npm ci; npm test)的子命令 token 带尾分号,
+    // 归一化后再分类。
+    let sub = tokens
+        .get(tool_index + 1)
+        .copied()
+        .unwrap_or_default()
+        .trim_end_matches([';', '|', '&']);
+    let third = tokens
+        .get(tool_index + 2)
+        .copied()
+        .unwrap_or_default()
+        .trim_end_matches([';', '|', '&']);
     match head {
         "podman" => {
             match sub {
@@ -1712,7 +1915,9 @@ fn b45_command_facets(command: &str) -> Vec<(String, String)> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     let mut facets: Vec<(String, String)> = Vec::new();
     for index in 0..tokens.len() {
-        if !matches!(tokens[index], "podman" | "npm" | "mvn") {
+        if !matches!(tokens[index], "podman" | "npm" | "mvn")
+            || !token_is_command_position(&tokens, index)
+        {
             continue;
         }
         let (tool, facet) = b45_classify_command(&tokens[index..].join(" "));
