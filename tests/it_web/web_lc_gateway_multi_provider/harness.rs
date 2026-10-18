@@ -11573,6 +11573,7 @@ fn b45_t24_write_fixture_sources(scenario: B45T24Scenario) -> Result<Value, Stri
              echo '[verify] container begin'\n\
              NAME=\"b45-t24-$RANDOM$RANDOM\"\n\
              CTR_ID=$(podman run -d --name \"$NAME\" --label io.aria.b45.scene={scene} --label io.aria.b45.worktree=\"$PWD\" docker.io/library/ubuntu:24.04 sleep 120)\n\
+             echo \"[verify] container exact_id=$CTR_ID name=$NAME\"\n\
              echo \"[verify] container labels io.aria.b45.scene={scene} io.aria.b45.worktree=$PWD\"\n\
              podman exec \"$NAME\" sh -c 'echo container-check-ok'\n\
              podman stop \"$NAME\" >/dev/null\n\

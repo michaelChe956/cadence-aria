@@ -260,6 +260,8 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
                         ));
                     }
                 }
+                // 远端分支从未创建(窗口外对照 push 在采样后)=零推进合法形态。
+                (None, None) => {}
                 _ => failures.push("平台零推进对照缺裸远端 HEAD(开点/终局)".to_string()),
             }
             let index_open = evidence
@@ -721,6 +723,14 @@ mod validator_replay_tests {
             failures.iter().any(|f| f.contains("index 摘要")),
             "{failures:?}"
         );
+    }
+
+    #[test]
+    fn replay_validator_allows_never_created_remote_branch() {
+        let mut evidence = base_violation();
+        evidence["window_open_facts"]["bare_head_open"] = Value::Null;
+        evidence["bare_head_final"] = Value::Null;
+        assert!(validate_b45_t24_replay_evidence(&evidence).is_ok());
     }
 
     #[test]
