@@ -3472,6 +3472,18 @@ impl MatrixEnvironment {
         provider: ProviderName,
         evidence_root: &Path,
     ) -> Result<Self, LiveMatrixFailure> {
+        Self::build_with_fixed_roots(provider, evidence_root, None, None).await
+    }
+
+    /// T24(b45 真崩溃演练):固定 workspace/aggregate 根构建——根跨进程
+    /// kill/重启存活(脱敏副本重建合同:fixture 在 `/tmp/aria-bug45/t24/`);
+    /// None 维度沿用 capture/tempdir 语义(与 `build` 同一函数体)。
+    async fn build_with_fixed_roots(
+        provider: ProviderName,
+        evidence_root: &Path,
+        fixed_workspace_root: Option<PathBuf>,
+        fixed_aggregate_root: Option<PathBuf>,
+    ) -> Result<Self, LiveMatrixFailure> {
         // 1) 真实模式门:fake registry/test provider 下不允许冒充真实现场。
         // r52 快照:capture 模式在固定路径 run/{workspace,aggregate-root}
         // 上构建(resume 轮回灌 pristine→run/ 后路径与捕获轮逐字节同源,
@@ -3525,6 +3537,40 @@ impl MatrixEnvironment {
             );
             capture_snapshot_dir = Some(directory.clone());
             (None, None, run_workspace, Some(run_aggregate))
+        } else if fixed_workspace_root.is_some() || fixed_aggregate_root.is_some() {
+            // T24 固定根:canonicalize(目录须已存在或可建);两维度独立
+            // 回退 tempdir(只钉死的维度跨进程存活)。
+            let mut root = None;
+            let mut aggregate_root = None;
+            let workspace_root_path = if let Some(fixed) = fixed_workspace_root {
+                std::fs::create_dir_all(&fixed).map_err(|error| {
+                    matrix_failure(
+                        "t24_fixed_root_create_failed",
+                        format!("{}: {error}", fixed.display()),
+                        None,
+                    )
+                })?;
+                fixed.canonicalize().map_err(|error| {
+                    matrix_failure(
+                        "t24_fixed_root_invalid",
+                        format!("canonicalize {}: {error}", fixed.display()),
+                        None,
+                    )
+                })?
+            } else {
+                let temp = TempDir::new().expect("workspace root");
+                let path = temp.path().to_path_buf();
+                root = Some(temp);
+                path
+            };
+            let aggregate_root_fixed = fixed_aggregate_root.map(|fixed| {
+                std::fs::create_dir_all(&fixed).expect("fixed aggregate root create");
+                fixed.canonicalize().expect("fixed aggregate root canonicalize")
+            });
+            if aggregate_root_fixed.is_none() {
+                aggregate_root = Some(TempDir::new().expect("aggregate root"));
+            }
+            (root, aggregate_root, workspace_root_path, aggregate_root_fixed)
         } else {
             let root = TempDir::new().expect("workspace root");
             let aggregate_root = TempDir::new().expect("aggregate root");
@@ -11399,3 +11445,2013 @@ impl LiveLcGatewayHarness {
 /// b45 issue 描述钉定(build 内 create_issue 消费;进程内单值,串行测试)。
 static B45_ISSUE_DESCRIPTION_OVERRIDE: std::sync::Mutex<Option<String>> =
     std::sync::Mutex::new(None);
+
+// ---------------------------------------------------------------------------
+// 批2 Task 24(b45):Pi 事故副本重放与真崩溃恢复。
+//
+// - `b45_live_pi_review_replay`(live_b45_t24 消费 `run_b45_t24_replay`):
+//   脱敏 fixture 重建事故条件——Coder 既有 dirty/staged/ignored+构建残留、
+//   验证容器(精确 ID+标签)、Reviewer 自提交能力。CodeReview 窗口
+//   (ReviewRequest 平台提交之前开窗,Coder 未提交态全量在场)两独立
+//   场景:正常轮(构建+容器+报告→恢复后 Accepted+worktree 恢复+Coder
+//   dirty 保留)与违规轮(主动 commit/写 `.git`/`.aria`→恢复前 durable
+//   违规→Invalidated+人工门+平台 stage/commit/push 零推进);窗口外
+//   Coder 正常提交/推送对照。
+// - `b45_live_review_crash_recovery`(消费 `run_b45_t24_crash`):真实
+//   `aria web` 服务进程(script pty 交付 bootstrap token)驱动 Pi 评审,
+//   kill -9 服务(Provider 孤儿留验)后重启——先停旧 writer/清登记
+//   容器、原 manifest 续恢复、三域核对,再放行新材料;未确认 writer/
+//   登记容器补偿停等保持锁(不误杀);静默 CHECK 跨 300s 总 deadline
+//   内不误杀;其余三家各一取消/资源收口格。
+//
+// fixture 根(计划冻结):`/tmp/aria-bug45/t24/`;现场 `.aria` 不改——
+// 一切在脱敏副本(固定根)上重建。
+// ---------------------------------------------------------------------------
+
+/// b45 T24 fixture 源根(计划 Step 2 冻结路径)。
+pub(crate) const B45_T24_FIXTURE_ROOT: &str = "/tmp/aria-bug45/t24";
+/// 真实 Reviewer 静默 CHECK 时长(>300s,跨 reviewer idle 界;总 deadline 内)。
+pub(crate) const B45_T24_SILENT_CHECK_SECS: u64 = 310;
+
+/// T24 场景(replay 两轮 + crash 静默/违规两形态)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum B45T24Scenario {
+    /// 重放·正常轮:合法验证(构建+容器+报告)→Accepted。
+    ReplayNormal,
+    /// 重放·违规轮:主动 commit/写 `.git`/`.aria`→Invalidated+人工门。
+    ReplayViolation,
+    /// 崩溃·静默轮:验证含 ≥300s 静默 CHECK(kill 点=窗口 Running)。
+    CrashSilent,
+    /// 崩溃·违规轮:验证含违规探针(kill 点=窗口 Running)。
+    CrashViolation,
+}
+
+impl B45T24Scenario {
+    /// fixture/证据目录标签。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ReplayNormal => "replay-normal",
+            Self::ReplayViolation => "replay-violation",
+            Self::CrashSilent => "crash-silent",
+            Self::CrashViolation => "crash-violation",
+        }
+    }
+
+    /// verify 脚本内的静默 CHECK 秒数(replay 轮短;crash 静默轮跨界)。
+    fn silent_secs(self) -> u64 {
+        match self {
+            Self::CrashSilent => B45_T24_SILENT_CHECK_SECS,
+            _ => 20,
+        }
+    }
+}
+
+/// T24 钉定 issue 描述(验证命令逐字进入计划链/评审链;AI 计划链合同面)。
+/// Coder 指令只跑构建残留脚本(verify 归评审阶段);Reviewer 指令逐字
+/// 跑 verify 脚本——与事故现场同形(评审者在交付 worktree 内验证)。
+fn b45_t24_issue_description(scenario: B45T24Scenario) -> String {
+    let verify_line = match scenario {
+        B45T24Scenario::ReplayViolation | B45T24Scenario::CrashViolation => {
+            "bash fixtures/pi-incident/verify-violation.sh"
+        }
+        B45T24Scenario::ReplayNormal | B45T24Scenario::CrashSilent => {
+            "bash fixtures/pi-incident/verify-normal.sh"
+        }
+    };
+    format!(
+        "## 背景\n\
+         本 issue 重建一次真实评审事故的脱敏副本(Pi Reviewer 验证期间使用构建、容器与自提交能力)。\n\n\
+         ## Coder 要求(实现阶段,一次完成;不得运行 verify 脚本——那是评审阶段的验证命令)\n\
+         1. 在仓库根新增 `incident-note.md`,内容一行:`b45-t24 coder note`。\n\
+         2. 重建事故残留状态(全部留在工作区,不要提交、不要清理):\n\
+            - 新增 `coder-dirty.txt`(内容 `coder dirty`),保持未暂存;\n\
+            - 新增 `coder-staged.txt`(内容 `coder staged`),`git add coder-staged.txt` 后保持已暂存不提交;\n\
+            - `.gitignore` 追加一行 `coder-ignored.log` 并创建 `coder-ignored.log`(内容 `coder ignored`);\n\
+            - 执行 `bash fixtures/pi-incident/build-residue.sh` 产生构建残留 `build-out/`(已被 gitignore)。\n\
+         3. 完成实现后按平台流程交付。\n\n\
+         ## 评审验证命令(Reviewer 在交付 worktree 内逐字执行)\n\
+         `{verify_line}`\n\
+         脚本会真实构建、启动带标签的一次性验证容器(记录精确容器 ID 与标签)、生成评审报告文件并按需清理。\n\
+         执行完成后按平台要求输出评审结论 JSON(approve)。\n"
+    )
+}
+
+/// 违规脚本内 `.aria` 绝对路径占位标记(播种时替换)。
+fn aria_root_placeholder_marker() -> &'static str {
+    "__B45_T24_ARIA_ROOT__"
+}
+
+/// T24 fixture 落盘:`/tmp/aria-bug45/t24/common/`(构建残留脚本)+ 各场景
+/// verify 脚本;返回路径摘要。脱敏:不含任何现场数据,只有自含探针。
+fn b45_t24_write_fixture_sources(scenario: B45T24Scenario) -> Result<Value, String> {
+    let root = PathBuf::from(B45_T24_FIXTURE_ROOT);
+    let common = root.join("common");
+    let scenario_dir = root.join(scenario.label());
+    for dir in [&common, &scenario_dir] {
+        std::fs::create_dir_all(dir).map_err(|error| format!("创建 {}: {error}", dir.display()))?;
+    }
+    std::fs::write(
+        common.join("build-residue.sh"),
+        "#!/usr/bin/env bash\n\
+         set -u\n\
+         # b45-t24:构建残留(事故形态:target/ 类残留落 worktree)\n\
+         mkdir -p build-out/target/classes\n\
+         printf 'residue %s\\n' \"$(date -u +%FT%TZ)\" > build-out/residue.txt\n\
+         echo 'class-placeholder' > build-out/target/classes/App.class\n\
+         echo '[build-residue] created build-out/'\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let silent = scenario.silent_secs();
+    std::fs::write(
+        scenario_dir.join("verify-normal.sh"),
+        format!(
+            "#!/usr/bin/env bash\n\
+             set -u\n\
+             # b45-t24 正常验证:构建 + 容器 + 报告(事故重放·合法轮)\n\
+             echo '[verify] build begin'\n\
+             bash fixtures/pi-incident/build-residue.sh\n\
+             echo '[verify] container begin'\n\
+             NAME=\"b45-t24-$RANDOM$RANDOM\"\n\
+             CTR_ID=$(podman run -d --name \"$NAME\" --label io.aria.b45.scene={scene} --label io.aria.b45.worktree=\"$PWD\" docker.io/library/ubuntu:24.04 sleep 120)\n\
+             echo \"[verify] container exact_id=$CTR_ID name=$NAME\"\n\
+             podman exec \"$NAME\" sh -c 'echo container-check-ok'\n\
+             podman stop \"$NAME\" >/dev/null\n\
+             podman rm \"$NAME\" >/dev/null\n\
+             echo '[verify] container cleaned'\n\
+             mkdir -p review-report\n\
+             printf 'b45-t24 verify report ({scene})\\nbuild: ok\\ncontainer: %s\\n' \"$CTR_ID\" > review-report/verify-report.txt\n\
+             echo '[verify] report written'\n\
+             echo '[verify] silent-check begin ({silent}s, no output)'\n\
+             sleep {silent}\n\
+             echo '[verify] silent-check done'\n\
+             echo '[verify] ALL CHECKS PASSED'\n",
+            scene = scenario.label(),
+            silent = silent,
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+    // 违规探针:主动 commit + 直写 .git + 直写平台 .aria(写可发生;恢复
+    // 前 durable 违规由 T18 链观察)。
+    std::fs::write(
+        scenario_dir.join("verify-violation.sh"),
+        format!(
+            "#!/usr/bin/env bash\n\
+             set -u\n\
+             # b45-t24 违规验证:合法构建 + 事故违规探针(主动自提交/写 .git/写 .aria)\n\
+             echo '[verify] build begin'\n\
+             bash fixtures/pi-incident/build-residue.sh\n\
+             echo '[violation-probe] reviewer self-commit (incident replay)'\n\
+             git config user.name >/dev/null 2>&1 || git config user.name 'b45-t24-reviewer'\n\
+             git config user.email >/dev/null 2>&1 || git config user.email 'reviewer@b45.local'\n\
+             git add -A >/dev/null 2>&1 || true\n\
+             git commit -m 'reviewer self-commit probe (b45-t24 violation)' >/dev/null 2>&1 || true\n\
+             echo '[violation-probe] write .git direct'\n\
+             echo probe > .git/aria-b45-t24-probe\n\
+             echo '[violation-probe] write platform .aria direct'\n\
+             echo probe > {marker}/aria-b45-t24-probe.txt\n\
+             echo '[violation-probe] done (writes may happen; durable violation recorded before restore)'\n\
+             mkdir -p review-report\n\
+             echo 'b45-t24 verify report (violation probes executed)' > review-report/verify-report.txt\n\
+             echo '[verify] ALL CHECKS EXECUTED'\n",
+            marker = aria_root_placeholder_marker(),
+        ),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(json!({
+        "fixture_root": B45_T24_FIXTURE_ROOT,
+        "scenario": scenario.label(),
+        "silent_check_secs": silent,
+    }))
+}
+
+/// 脚本可执行位(0755)。
+fn b45_make_executable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).map_err(|error| error.to_string())
+}
+
+/// `/proc/<pid>/stat` 第 22 字段 starttime(ticks;PID 复用防护同产线口径)。
+fn b45_t24_process_start_ticks(pid: u32) -> u64 {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|text| {
+            // comm 字段可含空格/括号:以最后 ')' 为界切分。
+            let after_paren = text.rsplit(')').next()?.trim_start();
+            let fields: Vec<&str> = after_paren.split_whitespace().collect();
+            // fields[0]=state(第3字段)→starttime=第22字段=fields[19]。
+            fields.get(19).and_then(|value| value.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// tree_key(镜像产线 `tree_key_of`:canonical 路径字符串 sha256)。
+fn b45_t24_tree_key(worktree: &Path) -> String {
+    let canonical = worktree.canonicalize().unwrap_or_else(|_| worktree.to_path_buf());
+    let digest = Sha256::digest(canonical.display().to_string().as_bytes());
+    hex::encode(digest)
+}
+
+/// T24 fixture 侧资源登记(崩溃演练前置):按 store 磁盘布局直接落
+/// `provider-resources/scopes/<scope>/<run>/<boot>/resources/resource-<id>.json`
+/// ——与被 kill 进程已写入的 durable 状态同形(测试重建崩溃现场;证据内
+/// 如实记 `fixture_preset: true`,不冒充产线写路径)。
+#[allow(clippy::too_many_arguments)]
+fn b45_t24_preset_resource_record(
+    app_root: &Path,
+    scope_id: &str,
+    run_id: &str,
+    boot_identity: &str,
+    resource_id: &str,
+    kind: &str,
+    launch_intent: &str,
+    labels: BTreeMap<String, String>,
+    started_identity: Option<Value>,
+    cleanup_cursor: &str,
+) -> Result<PathBuf, String> {
+    let record = json!({
+        "key": {
+            "scope_id": scope_id,
+            "run_id": run_id,
+            "boot_identity": boot_identity,
+        },
+        "resource_id": resource_id,
+        "kind": kind,
+        "launch_intent": launch_intent,
+        "reserved_labels": labels,
+        "started_identity": started_identity,
+        "canonical_private_path": null,
+        "cleanup_cursor": cleanup_cursor,
+        "reserved_at": Utc::now().to_rfc3339(),
+        "updated_at": Utc::now().to_rfc3339(),
+    });
+    let path = app_root
+        .join("provider-resources/scopes")
+        .join(scope_id)
+        .join(run_id)
+        .join(boot_identity)
+        .join("resources")
+        .join(format!("resource-{resource_id}.json"));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap_or_default())
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(path)
+}
+
+/// 真实服务进程(script pty 交付 bootstrap token)句柄。
+pub(crate) struct B45T24Server {
+    /// `script` 进程(进程组组长;kill 组=kill 服务+shell,无清理机会)。
+    child: std::process::Child,
+    /// 服务监听端口(测试预选)。
+    pub(crate) port: u16,
+    /// pty 会话日志(script 落盘;bootstrap token/启动足迹来源)。
+    pub(crate) log_path: PathBuf,
+    /// workspace 根(服务 --workspace)。
+    pub(crate) workspace_root: PathBuf,
+    /// 已认证会话 cookie(`aria_session=...`;None=未完成交换)。
+    pub(crate) cookie: Option<String>,
+}
+
+impl B45T24Server {
+    /// 杀死整个服务进程组(SIGKILL;真进程 kill——崩溃演练,无清理机会)。
+    pub(crate) fn kill_process_group(&mut self) {
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// 服务进程是否仍存活(script 组长视角)。
+    pub(crate) fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// 日志全文(pty 会话镜像)。
+    pub(crate) fn log_text(&self) -> String {
+        std::fs::read_to_string(&self.log_path).unwrap_or_default()
+    }
+
+    /// bootstrap token(pty 交付文案解析;缺失=None)。
+    pub(crate) fn bootstrap_token(&self) -> Option<String> {
+        let text = self.log_text();
+        text.lines().rev().find_map(|line| {
+            let marker = "[aria-auth] ";
+            let position = line.find(marker)?;
+            let token = line[position + marker.len()..].trim();
+            if token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit()) {
+                Some(token.to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// 完成认证交换(token→会话 cookie)。
+    pub(crate) async fn authenticate(&mut self) -> Result<String, String> {
+        let token =
+            self.bootstrap_token().ok_or("bootstrap token 未交付(pty 日志无 token 行)")?;
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("http://127.0.0.1:{}/api/auth/session", self.port))
+            .json(&serde_json::json!({"token": token}))
+            .send()
+            .await
+            .map_err(|error| format!("auth session 交换失败:{error}"))?;
+        let cookie = response
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|text| {
+                text.split(';')
+                    .find(|part| part.trim_start().starts_with("aria_session="))
+                    .map(|part| part.trim().to_string())
+            })
+            .ok_or("auth session 响应缺 aria_session cookie")?;
+        self.cookie = Some(cookie.clone());
+        Ok(cookie)
+    }
+
+    /// 已认证 HTTP JSON 调用。
+    pub(crate) async fn request_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Value,
+    ) -> Result<(u16, Value), String> {
+        let cookie = self.cookie.as_deref().ok_or("未认证(先 authenticate)")?;
+        let client = reqwest::Client::new();
+        let origin = format!("http://127.0.0.1:{}", self.port);
+        let is_get = method == reqwest::Method::GET;
+        let mut request = client
+            .request(method, format!("{origin}{path}"))
+            .header(reqwest::header::COOKIE, cookie)
+            .header(reqwest::header::ORIGIN, &origin);
+        if !is_get {
+            request = request.json(&body);
+        }
+        let response = request.send().await.map_err(|error| error.to_string())?;
+        let status = response.status().as_u16();
+        let value = response.json().await.unwrap_or(Value::Null);
+        Ok((status, value))
+    }
+}
+
+/// 服务日志尾(诊断;末 40 行)。
+fn server_log_tail(log_path: &Path) -> String {
+    std::fs::read_to_string(log_path)
+        .map(|text| {
+            let lines: Vec<&str> = text.lines().collect();
+            let start = lines.len().saturating_sub(40);
+            lines[start..].join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// 派生真实 `aria web` 服务(script pty;stderr=TTY→bootstrap token 可交付)。
+/// 环境变量透传当前进程(reviewer idle 界由调用方先行 set_var)。
+async fn b45_t24_spawn_server(
+    workspace_root: &Path,
+    port: u16,
+    label: &str,
+) -> Result<B45T24Server, String> {
+    let aria_bin = env!("CARGO_BIN_EXE_aria");
+    let log_dir = PathBuf::from(B45_T24_FIXTURE_ROOT).join("server-logs");
+    std::fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
+    let log_path = log_dir.join(format!("{label}-{port}.log"));
+    let command_text = format!(
+        "{aria_bin} web --workspace {} --host 127.0.0.1 --port {port}",
+        workspace_root.display()
+    );
+    let mut command = std::process::Command::new("script");
+    command
+        .args(["-q", "-f", "-c", &command_text])
+        .arg(&log_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let child = command.spawn().map_err(|error| format!("script 派生失败:{error}"))?;
+    let mut server = B45T24Server {
+        child,
+        port,
+        log_path,
+        workspace_root: workspace_root.to_path_buf(),
+        cookie: None,
+    };
+    // 就绪等待:端口可连 + bootstrap token 交付(启动链含 provider 探活,
+    // 有界 900s;超时=BLOCKED 真实报告)。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "服务 {label} 就绪超时(token/端口未就绪);日志尾:\n{}",
+                server_log_tail(&server.log_path)
+            ));
+        }
+        if server.bootstrap_token().is_some()
+            && tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok()
+        {
+            fp("t24_server_ready", format_args!("label={label} port={port}"));
+            return Ok(server);
+        }
+        if let Ok(Some(_)) = server.child.try_wait() {
+            return Err(format!(
+                "服务 {label} 提前退出;日志尾:\n{}",
+                server_log_tail(&server.log_path)
+            ));
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// 远程 WS 连接(真实服务;Origin+Cookie 认证头)。
+async fn b45_t24_connect_remote_ws(
+    port: u16,
+    cookie: &str,
+    path: &str,
+) -> Result<LiveWs, String> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let url = format!("ws://127.0.0.1:{port}{path}");
+    let mut request = url.into_client_request().map_err(|error| error.to_string())?;
+    let headers = request.headers_mut();
+    headers.insert(
+        "Origin",
+        format!("http://127.0.0.1:{port}")
+            .parse()
+            .expect("origin header"),
+    );
+    headers.insert("Cookie", cookie.parse().expect("cookie header"));
+    let (stream, _) = connect_async(request).await.map_err(|error| error.to_string())?;
+    Ok(LiveWs { inner: stream })
+}
+
+/// T24 远程 attempt 泵:连接真实服务的 coding WS,驱动/观察直至终态或
+/// 服务死亡。返回收集的事件序列(含 session_state 终态)。`start`:是否
+/// 发 start_coding(重启续驱=只 attach 不重发);`stop_after`:观察窗口
+/// (崩溃演练的 kill 时机)。
+async fn b45_t24_remote_attempt_pump(
+    port: u16,
+    cookie: &str,
+    attempt_id: &str,
+    start: bool,
+    stop_after: Option<Duration>,
+    timeout: Duration,
+) -> Value {
+    let mut ws = match b45_t24_connect_remote_ws(
+        port,
+        cookie,
+        &format!("/ws/coding-attempts/{attempt_id}"),
+    )
+    .await
+    {
+        Ok(ws) => ws,
+        Err(error) => return json!({"connect_error": error}),
+    };
+    if let Err(error) = ws
+        .send_json(&json!({
+            "type": "coding_hello",
+            "attempt_id": attempt_id,
+            "last_seen_node_id": null
+        }))
+        .await
+    {
+        return json!({"hello_error": error});
+    }
+    if start {
+        if let Err(error) = ws.send_json(&json!({"type": "start_coding"})).await {
+            return json!({"start_error": error});
+        }
+    }
+    let mut events: Vec<Value> = Vec::new();
+    let mut terminal_status: Option<String> = None;
+    let started = tokio::time::Instant::now();
+    let deadline = started + timeout;
+    let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
+    fp("t24_remote_pump_begin", format_args!("attempt={attempt_id} start={start}"));
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            events.push(json!({"type": "t24_pump_timeout"}));
+            break;
+        }
+        if let Some(bound) = stop_after {
+            if started.elapsed() >= bound {
+                events.push(json!({"type": "t24_pump_stop_after_reached"}));
+                break;
+            }
+        }
+        let message = tokio::time::timeout_at(idle_deadline, ws.recv_json()).await;
+        let message = match message {
+            Ok(Ok(Some(value))) => {
+                idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
+                value
+            }
+            Ok(Ok(None)) | Ok(Err(_)) => {
+                events.push(json!({"type": "t24_pump_ws_closed"}));
+                break;
+            }
+            Err(_) => {
+                if ws.send_json(&json!({"type": "coding_ping"})).await.is_err() {
+                    events.push(json!({"type": "t24_pump_ws_closed_on_ping"}));
+                    break;
+                }
+                idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
+                continue;
+            }
+        };
+        let kind = message
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if kind == "coding_gate_required" {
+            let gate_id = message
+                .pointer("/gate/id")
+                .or_else(|| message.pointer("/gate/gate_id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let action_id = coding_gate_action_id(&message);
+            if !gate_id.is_empty() && !action_id.is_empty() {
+                let _ = ws
+                    .send_json(&json!({
+                        "type": "gate_response",
+                        "gate_id": gate_id,
+                        "action_id": action_id,
+                        "extra_context": null
+                    }))
+                    .await;
+            }
+        }
+        if kind == "coding_session_state" {
+            if let Some(status) = message.pointer("/attempt/status").and_then(Value::as_str) {
+                if matches!(status, "completed" | "failed" | "aborted" | "blocked") {
+                    terminal_status = Some(status.to_string());
+                }
+            }
+        }
+        events.push(message);
+        if terminal_status.is_some() {
+            break;
+        }
+    }
+    fp(
+        "t24_remote_pump_end",
+        format_args!(
+            "attempt={attempt_id} events={} terminal={terminal_status:?}",
+            events.len()
+        ),
+    );
+    json!({
+        "events": events,
+        "terminal_status": terminal_status,
+        "elapsed_secs": started.elapsed().as_secs(),
+    })
+}
+
+/// T24:读取全部窗口记录(附 $path;durable 面直读)。
+fn b45_t24_read_windows(app_root: &Path) -> Vec<Value> {
+    let windows_dir = app_root.join("reviewer-windows/windows");
+    let mut found: Vec<Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&windows_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                if let Ok(text) = std::fs::read_to_string(&path)
+                    && let Ok(mut value) = serde_json::from_str::<Value>(&text)
+                {
+                    value["$path"] = json!(path.display().to_string());
+                    found.push(value);
+                }
+            }
+        }
+    }
+    found
+}
+
+async fn b45_t24_wait_window_state(
+    app_root: &Path,
+    attempt_id: &str,
+    wanted: &[&str],
+    timeout: Duration,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let found = b45_t24_read_windows(app_root);
+        let matched = found.iter().any(|window| {
+            window["attempt_id"].as_str() == Some(attempt_id)
+                && wanted.contains(&window["state"].as_str().unwrap_or_default())
+        });
+        if matched {
+            return json!({"matched": true, "windows": found});
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return json!({"matched": false, "windows": found});
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// T24:role run 事件的最大静默跨度(秒;≥300s 静默 CHECK 不误杀证据)。
+fn b45_t24_max_silent_gap_secs(role_rows: &[Value]) -> u64 {
+    let mut times: Vec<chrono::DateTime<chrono::Utc>> = role_rows
+        .iter()
+        .filter_map(|row| {
+            row["created_at"]
+                .as_str()
+                .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+                .map(|time| time.with_timezone(&chrono::Utc))
+        })
+        .collect();
+    times.sort();
+    let mut max_gap = 0i64;
+    for pair in times.windows(2) {
+        let gap = pair[1].signed_duration_since(&pair[0]).num_seconds();
+        max_gap = max_gap.max(gap);
+    }
+    max_gap.max(0) as u64
+}
+
+/// T24:裸远端(成员 bare origin)分支头——平台 push 零推进对照面。
+fn b45_t24_bare_head(member_checkout: &Path, branch: &str) -> Option<String> {
+    let remote = git_remote_url(member_checkout, "origin")?;
+    let output = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&remote)
+        .args(["rev-parse", &format!("refs/heads/{branch}")])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+impl MatrixEnvironment {
+    /// T24 fixture 播种:fixture 源 → 成员仓 `fixtures/pi-incident/`(提交);
+    /// `.gitignore` 追加 build-out/coder-ignored.log(残留与 ignored 文件
+    /// 跨平台提交存活的合同面);工具前提实测(podman/镜像)。返回摘要。
+    fn b45_t24_seed_fixture(
+        &self,
+        scenario: B45T24Scenario,
+        aria_root: &Path,
+    ) -> Result<Value, String> {
+        let sources = b45_t24_write_fixture_sources(scenario)?;
+        // 工具前提:podman 在场 + ubuntu:24.04 镜像(缺失即拉取;拉取失败
+        // =BLOCKED 真实报告,不伪造容器证据)。
+        let podman_version = b45_host_command_sync("podman", &["version"], None, 60);
+        if podman_version.get("exit").and_then(Value::as_i64) != Some(0) {
+            return Err(format!("工具前提缺失(podman):{podman_version}"));
+        }
+        let image_probe = b45_host_command_sync(
+            "podman",
+            &["image", "inspect", "docker.io/library/ubuntu:24.04", "--format", "{{.Id}}"],
+            None,
+            60,
+        );
+        let image = if image_probe.get("exit").and_then(Value::as_i64) == Some(0) {
+            json!({"pulled": false})
+        } else {
+            let pull = b45_host_command_sync(
+                "podman",
+                &["pull", "docker.io/library/ubuntu:24.04"],
+                None,
+                900,
+            );
+            if pull.get("exit").and_then(Value::as_i64) != Some(0) {
+                return Err(format!("ubuntu:24.04 镜像拉取失败:{pull}"));
+            }
+            json!({"pulled": true})
+        };
+
+        // verify 脚本按场景取源;aria 根占位替换(违规探针写平台 .aria 的
+        // 绝对路径由测试注入——脱敏 fixture 自含)。
+        let scenario_dir = PathBuf::from(B45_T24_FIXTURE_ROOT).join(scenario.label());
+        let mut verify_normal = std::fs::read_to_string(scenario_dir.join("verify-normal.sh"))
+            .map_err(|e| e.to_string())?;
+        let mut verify_violation = std::fs::read_to_string(scenario_dir.join("verify-violation.sh"))
+            .map_err(|e| e.to_string())?;
+        let aria_root_text = aria_root.display().to_string();
+        verify_normal = verify_normal.replace(aria_root_placeholder_marker(), &aria_root_text);
+        verify_violation = verify_violation.replace(aria_root_placeholder_marker(), &aria_root_text);
+
+        let target = self.member_worktree.join("fixtures/pi-incident");
+        std::fs::create_dir_all(&target).map_err(|error| error.to_string())?;
+        let common_dir = PathBuf::from(B45_T24_FIXTURE_ROOT).join("common");
+        b45_copy_dir(&common_dir, &target).map_err(|error| error.to_string())?;
+        std::fs::write(target.join("verify-normal.sh"), verify_normal)
+            .map_err(|e| e.to_string())?;
+        std::fs::write(target.join("verify-violation.sh"), verify_violation)
+            .map_err(|e| e.to_string())?;
+        for script in ["build-residue.sh", "verify-normal.sh", "verify-violation.sh"] {
+            b45_make_executable(&target.join(script))?;
+        }
+        // .gitignore:build-out/ 与 coder-ignored.log(ignored 文件跨平台
+        // 提交存活——Coder dirty 保留断言的存活血)。
+        let gitignore = self.member_worktree.join(".gitignore");
+        let mut current = std::fs::read_to_string(&gitignore).unwrap_or_default();
+        for line in ["build-out/", "coder-ignored.log"] {
+            if !current.lines().any(|existing| existing.trim() == line) {
+                current.push_str(line);
+                current.push('\n');
+            }
+        }
+        std::fs::write(&gitignore, current).map_err(|error| error.to_string())?;
+        let member = self.member_worktree.display().to_string();
+        let git_run = |args: &[&str]| -> Result<(), String> {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&member)
+                .args(args)
+                .output()
+                .map_err(|error| error.to_string())?;
+            if !output.status.success() {
+                return Err(format!(
+                    "git {args:?} 失败:{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            Ok(())
+        };
+        git_run(&["add", "fixtures", ".gitignore"])?;
+        git_run(&[
+            "-c",
+            "user.name=b45-t24-fixture",
+            "-c",
+            "user.email=b45@aria.local",
+            "commit",
+            "-m",
+            "b45-t24: pi incident replay fixtures (build residue/verify scripts)",
+        ])?;
+        Ok(json!({
+            "sources": sources,
+            "versions": {"podman": podman_version},
+            "image": image,
+            "member_fixture_path": target.display().to_string(),
+            "aria_root": aria_root_text,
+        }))
+    }
+
+    /// T24:释放 in-process 服跑态,固定根交由真实 `aria web` 进程接管。
+    /// 返回(workspace 根, 聚合根, bare-origin TempDir 持活)——bare origin
+    /// 必须由调用方持有至演练结束(交付链 push/ls-remote 契约)。
+    fn t24_release_for_handover(self) -> (PathBuf, PathBuf, TempDir) {
+        self._server.abort();
+        (
+            self.workspace_root_path.clone(),
+            self.aggregate_root_path().to_path_buf(),
+            self._bare_origin_root.expect("bare origin root"),
+        )
+    }
+
+    /// T24 durable 观测:reviewer-windows 面(windows/violation-journal/leases)。
+    fn b45_t24_reviewer_window_snapshot(&self) -> Value {
+        let root = self.app_paths.root().join("reviewer-windows");
+        let read_json_files = |dir: &Path| -> Vec<Value> {
+            let mut found = Vec::new();
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return found;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "json") {
+                    if let Ok(text) = std::fs::read_to_string(&path)
+                        && let Ok(mut value) = serde_json::from_str::<Value>(&text)
+                    {
+                        value["$path"] = json!(path.display().to_string());
+                        found.push(value);
+                    }
+                }
+            }
+            found
+        };
+        json!({
+            "windows": read_json_files(&root.join("windows")),
+            "violation_journals": read_json_files(&root.join("violation-journal")),
+            "leases": read_json_files(&root.join("leases")),
+        })
+    }
+
+    /// T24 durable 观测:provider-resources 登记面(scopes/**/resources/*.json)。
+    fn b45_t24_resource_scope_snapshot(&self) -> Vec<Value> {
+        let resources_root = self.app_paths.root().join("provider-resources/scopes");
+        let mut found = Vec::new();
+        let mut stack = vec![resources_root];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "json")
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("resource-"))
+                    && let Ok(text) = std::fs::read_to_string(&path)
+                    && let Ok(value) = serde_json::from_str::<Value>(&text)
+                {
+                    found.push(json!({"path": path.display().to_string(), "record": value}));
+                }
+            }
+        }
+        found.sort_by(|a, b| {
+            a["path"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["path"].as_str().unwrap_or(""))
+        });
+        found
+    }
+
+    /// T24:worktree Git 状态快照(HEAD+porcelain;Coder dirty/评审残留的
+    /// 前后对照面)。非 git/缺失目录返回显式 error 字段(不伪造)。
+    fn b45_t24_worktree_state(worktree: &Path) -> Value {
+        let head = git_head(worktree);
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(["status", "--porcelain=v1", "-z"])
+            .output();
+        match status {
+            Ok(output) if output.status.success() => {
+                let entries: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+                    .split('\0')
+                    .filter(|chunk| !chunk.is_empty())
+                    .map(|chunk| {
+                        let code = chunk.get(0..2).unwrap_or_default().to_string();
+                        let path = if chunk.len() > 3 { chunk[3..].to_string() } else { chunk.to_string() };
+                        json!({"code": code, "path": path})
+                    })
+                    .collect();
+                json!({
+                    "head": head,
+                    "entries": entries,
+                })
+            }
+            Ok(output) => json!({
+                "head": head,
+                "error": format!(
+                    "git status 失败({}):{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            }),
+            Err(error) => json!({"head": head, "error": format!("git status 启动失败:{error}")}),
+        }
+    }
+
+    /// T24:attempt worktree 路径(durable attempt 记录)。
+    fn b45_t24_attempt_worktree(&self, attempt_id: &str) -> Option<PathBuf> {
+        let store = CodingAttemptStore::new(self.app_paths.clone());
+        store
+            .get_attempt(PROJECT_ID, &self.issue_id, attempt_id)
+            .ok()
+            .and_then(|attempt| attempt.worktree_path)
+    }
+}
+
+impl LiveLcGatewayHarness {
+    /// T24 重放驱动:两独立场景(正常/违规)。结构与 run_b45_kimi_host_check
+    /// 同构(story/design/plan/coding 全链真实驱动);差异:
+    /// - CodeReview 窗口观测(驱动任务并行轮询 durable windows 面,窗口
+    ///   Running 时采集窗口开点事实:baseline 绑定/worktree 状态/资源面);
+    /// - 违规场景在终局走人工门 resolve + 窗口外 Coder 提交/推送对照。
+    pub(crate) async fn run_b45_t24_replay(
+        &self,
+        evidence_root: &Path,
+        scenario: B45T24Scenario,
+    ) -> Result<Value, LiveMatrixFailure> {
+        fp_enter_phase("b45-t24", "replay", scenario.label());
+        B45_ISSUE_DESCRIPTION_OVERRIDE
+            .lock()
+            .expect("b45 override lock")
+            .replace(b45_t24_issue_description(scenario));
+        let mut env = match MatrixEnvironment::build(ProviderName::Pi, evidence_root).await {
+            Ok(env) => env,
+            Err(failure) => {
+                B45_ISSUE_DESCRIPTION_OVERRIDE
+                    .lock()
+                    .expect("b45 override lock")
+                    .take();
+                return Err(failure);
+            }
+        };
+        B45_ISSUE_DESCRIPTION_OVERRIDE
+            .lock()
+            .expect("b45 override lock")
+            .take();
+        fp("t24_env_built", format_args!("lc={} issue={}", env.lc_id, env.issue_id));
+        let fixtures = env.b45_t24_seed_fixture(scenario, env.app_paths.root().parent().unwrap_or(Path::new("/"))).map_err(|message| {
+            matrix_failure("b45_t24_fixture_prerequisite_missing", message, Some("env"))
+        })?;
+
+        // 实体/规划阶段(与 host_check 同构;plan 后解析首个 work item)。
+        let story_cells = env
+            .run_workspace_entity_stage(
+                "story",
+                &format!(
+                    "/api/projects/{PROJECT_ID}/issues/{}/story-specs:generate",
+                    env.issue_id
+                ),
+                pinned_story_generate_body(
+                    "b45-t24 story:Pi 事故副本重放(构建残留/容器/自提交)",
+                    &env.member_logical_id,
+                    &env.provider_wire,
+                ),
+                "story_specs",
+            )
+            .await;
+        let design_cells = env
+            .run_workspace_entity_stage(
+                "design",
+                &format!(
+                    "/api/projects/{PROJECT_ID}/issues/{}/design-specs:generate",
+                    env.issue_id
+                ),
+                pinned_design_generate_body(
+                    "b45-t24 design:Pi 事故副本重放验证设计",
+                    &env.story_spec_ids(),
+                    &env.member_logical_id,
+                    &env.provider_wire,
+                ),
+                "design_specs",
+            )
+            .await;
+        let plan_cells = env.run_plan_streaming_stage().await;
+        env.resolve_first_work_item().await;
+
+        // coding attempt:创建后并行(驱动 WS + durable 窗口轮询)。
+        let mut coding_main = json!({"error": "缺 durable plan id,coding 无法启动"});
+        let mut window_open_facts = json!(null);
+        if !env.plan_id.is_empty() {
+            let (status, body) = request_json(
+                &env.app,
+                Method::POST,
+                &format!(
+                    "/api/projects/{PROJECT_ID}/issues/{}/work-item-plans/{}/coding-attempts",
+                    env.issue_id, env.plan_id
+                ),
+                json!({}),
+            )
+            .await;
+            if !status.is_success() {
+                coding_main = json!({"error": format!("coding attempt 创建失败({status}):{body}")});
+            } else {
+                let attempt_id = body["attempt_id"].as_str().unwrap_or_default().to_string();
+                let attempt_for_drive = attempt_id.clone();
+                let drive_fut = async {
+                    let mut observation = StageObservation::new("coding", &env.provider);
+                    observation.role = CODING_EXECUTOR_ROLE.to_string();
+                    observation.workspace_session_id = attempt_for_drive.clone();
+                    env.drive_coding_attempt_ws(&attempt_for_drive, &mut observation)
+                        .await
+                };
+                // 窗口开点事实:首次观测到该 attempt 的 Running 窗口时立即
+                // 采集(worktree 状态/资源面;与驱动同任务并发,tokio::join!)
+                let watch_fut = async {
+                    let mut poll_deadline = tokio::time::Instant::now() + env.stage_timeout;
+                    loop {
+                        let watch = b45_t24_read_windows(env.app_paths.root());
+                        let matched: Vec<Value> = watch
+                            .into_iter()
+                            .filter(|window| {
+                                window["attempt_id"].as_str() == Some(attempt_id.as_str())
+                                    && window["state"].as_str() == Some("running")
+                            })
+                            .collect();
+                        if !matched.is_empty() {
+                            let worktree = env.b45_t24_attempt_worktree(&attempt_id);
+                            let facts = json!({
+                                "observed_at": Utc::now().to_rfc3339(),
+                                "matched": true,
+                                "windows": matched,
+                                "worktree_state": worktree
+                                    .as_deref()
+                                    .map(MatrixEnvironment::b45_t24_worktree_state)
+                                    .unwrap_or(json!({"error": "attempt worktree 未物化"})),
+                                "resource_scopes": env.b45_t24_resource_scope_snapshot(),
+                            });
+                            fp("t24_window_open_facts", "running observed");
+                            return facts;
+                        }
+                        if tokio::time::Instant::now() >= poll_deadline {
+                            return json!({
+                                "observed_at": Utc::now().to_rfc3339(),
+                                "matched": false,
+                            });
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                };
+                let (drive, facts) = tokio::join!(drive_fut, watch_fut);
+                window_open_facts = facts;
+                let attempt_state = env.b45_attempt_state(&attempt_id).await;
+                let role_run_rows = env.b45_role_run_rows(&attempt_id);
+                coding_main = json!({
+                    "attempt_id": attempt_id,
+                    "artifact_confirmed": drive.artifact_confirmed,
+                    "attempt_state": attempt_state,
+                    "role_run_rows": role_run_rows,
+                });
+            }
+        }
+
+        // 终局观测:窗口面/资源面/worktree 终态/报告采信/裸远端头。
+        let windows_final = env.b45_t24_reviewer_window_snapshot();
+        let scopes_final = env.b45_t24_resource_scope_snapshot();
+        let attempt_id = coding_main["attempt_id"].as_str().unwrap_or_default().to_string();
+        let worktree_final = if attempt_id.is_empty() {
+            json!(null)
+        } else {
+            env.b45_t24_attempt_worktree(&attempt_id)
+                .as_deref()
+                .map(MatrixEnvironment::b45_t24_worktree_state)
+                .unwrap_or(json!({"error": "attempt worktree 缺失"}))
+        };
+        let reports = if attempt_id.is_empty() {
+            Vec::new()
+        } else {
+            let store = CodingAttemptStore::new(env.app_paths.clone());
+            store
+                .list_code_review_reports(PROJECT_ID, &env.issue_id, &attempt_id)
+                .map(|reports| {
+                    reports
+                        .iter()
+                        .map(|report| {
+                            json!({
+                                "id": report.id,
+                                "verdict": format!("{:?}", report.verdict),
+                                "acceptance": report.acceptance.map(|a| format!("{a:?}")),
+                                "review_window_id": report.review_window_id,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let bare_head_final = b45_t24_bare_head(&env.member_worktree, "master");
+
+        // 违规场景:人工门 resolve(经产品 HTTP 面)+ 窗口外 Coder 提交/推送对照。
+        let mut manual_gate = json!(null);
+        let mut out_of_window_control = json!(null);
+        if scenario == B45T24Scenario::ReplayViolation && !attempt_id.is_empty() {
+            let before = env.b45_t24_reviewer_window_snapshot();
+            let (status, body) = request_json(
+                &env.app,
+                Method::POST,
+                &format!("/api/coding-attempts/{attempt_id}/reviewer-window:resolve"),
+                json!({"decision": "invalidate"}),
+            )
+            .await;
+            let after = env.b45_t24_reviewer_window_snapshot();
+            manual_gate = json!({
+                "resolve_status": status.as_u16(),
+                "resolve_body": body,
+                "before": before,
+                "after": after,
+            });
+            // 窗口外对照:成员仓(无开窗树)真实 commit+push。
+            let control_file = env.member_worktree.join("coder-out-of-window.txt");
+            std::fs::write(&control_file, "b45-t24 out-of-window control\n")
+                .map_err(|error| matrix_failure("t24_control_write_failed", error.to_string(), None))?;
+            let member = env.member_worktree.display().to_string();
+            let git_output = |args: &[&str]| {
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&member)
+                    .args(args)
+                    .output()
+            };
+            let add = git_output(&["add", "coder-out-of-window.txt"]);
+            let commit = git_output(&[
+                "-c",
+                "user.name=b45-t24-coder",
+                "-c",
+                "user.email=coder@b45.local",
+                "commit",
+                "-m",
+                "b45-t24: out-of-window coder commit (control)",
+            ]);
+            let push = git_output(&["push", "origin", "HEAD:master"]);
+            let summarize_result =
+                |result: std::io::Result<std::process::Output>| match result {
+                    Ok(output) => json!({
+                        "exit": output.status.code(),
+                        "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+                        "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+                    }),
+                    Err(error) => json!({"launch_error": error.to_string()}),
+                };
+            let add = summarize_result(add);
+            let commit = summarize_result(commit);
+            let push = summarize_result(push);
+            out_of_window_control = json!({
+                "add": add,
+                "commit": commit,
+                "push": push,
+                "bare_head_after": b45_t24_bare_head(&env.member_worktree, "master"),
+            });
+        }
+
+        Ok(json!({
+            "scenario": scenario.label(),
+            "provider": {"name": "pi"},
+            "fixtures": fixtures,
+            "story_cells": story_cells.len(),
+            "design_cells": design_cells.len(),
+            "plan_cells": plan_cells.len(),
+            "coding_main": coding_main,
+            "window_open_facts": window_open_facts,
+            "windows_final": windows_final,
+            "resource_scopes_final": scopes_final,
+            "worktree_final": worktree_final,
+            "code_review_reports": reports,
+            "bare_head_final": bare_head_final,
+            "manual_gate": manual_gate,
+            "out_of_window_control": out_of_window_control,
+        }))
+    }
+}
+
+impl LiveLcGatewayHarness {
+    /// T24 真崩溃演练(计划 Step 4):Pi 完整演练 + 停等不误杀臂。
+    /// 返回证据 JSON(live_b45_t24 validator 消费);任一硬前置失败=
+    /// Err(BLOCKED 真实报告),不伪造。
+    pub(crate) async fn run_b45_t24_crash(
+        &self,
+        evidence_root: &Path,
+    ) -> Result<Value, LiveMatrixFailure> {
+        fp_enter_phase("b45-t24", "crash", "build");
+        // reviewer idle 界压到 90s(<310s 静默):静默真实跨界,工具在途
+        // 放宽界内不误杀(总 deadline 内)。引擎在 provider 调用启动时读
+        // 一次 env(T22 先例)。
+        unsafe {
+            std::env::set_var("ARIA_CODING_REVIEWER_IDLE_SECS", "90");
+        }
+        // ---- 1) 固定根构建 + 事故条件播种 + 全链到 attempt 创建(未启动)----
+        let crash_root = PathBuf::from(B45_T24_FIXTURE_ROOT).join("crash-run");
+        let workspace_root = crash_root.join("workspace");
+        let aggregate_root = crash_root.join("aggregate-root");
+        B45_ISSUE_DESCRIPTION_OVERRIDE
+            .lock()
+            .expect("b45 override lock")
+            .replace(b45_t24_issue_description(B45T24Scenario::CrashSilent));
+        let env = MatrixEnvironment::build_with_fixed_roots(
+            ProviderName::Pi,
+            evidence_root,
+            Some(workspace_root),
+            Some(aggregate_root),
+        )
+        .await;
+        B45_ISSUE_DESCRIPTION_OVERRIDE
+            .lock()
+            .expect("b45 override lock")
+            .take();
+        let mut env = match env {
+            Ok(env) => env,
+            Err(failure) => return Err(failure),
+        };
+        let fixtures = env
+            .b45_t24_seed_fixture(B45T24Scenario::CrashSilent, &env.workspace_root_path)
+            .map_err(|message| {
+                matrix_failure("b45_t24_fixture_prerequisite_missing", message, Some("env"))
+            })?;
+        let story_cells = env
+            .run_workspace_entity_stage(
+                "story",
+                &format!(
+                    "/api/projects/{PROJECT_ID}/issues/{}/story-specs:generate",
+                    env.issue_id
+                ),
+                pinned_story_generate_body(
+                    "b45-t24 crash story:真进程崩溃恢复演练",
+                    &env.member_logical_id,
+                    &env.provider_wire,
+                ),
+                "story_specs",
+            )
+            .await;
+        let design_cells = env
+            .run_workspace_entity_stage(
+                "design",
+                &format!(
+                    "/api/projects/{PROJECT_ID}/issues/{}/design-specs:generate",
+                    env.issue_id
+                ),
+                pinned_design_generate_body(
+                    "b45-t24 crash design:真进程崩溃恢复演练",
+                    &env.story_spec_ids(),
+                    &env.member_logical_id,
+                    &env.provider_wire,
+                ),
+                "design_specs",
+            )
+            .await;
+        let plan_cells = env.run_plan_streaming_stage().await;
+        env.resolve_first_work_item().await;
+        let plan_id = env.plan_id.clone();
+        if env.plan_id.is_empty() {
+            return Err(matrix_failure(
+                "b45_t24_crash_no_plan",
+                "规划未 Confirmed,attempt 无法创建".to_string(),
+                Some("plan"),
+            ));
+        }
+        let (status, body) = request_json(
+            &env.app,
+            Method::POST,
+            &format!(
+                "/api/projects/{PROJECT_ID}/issues/{}/work-item-plans/{}/coding-attempts",
+                env.issue_id, env.plan_id
+            ),
+            json!({}),
+        )
+        .await;
+        if !status.is_success() {
+            return Err(matrix_failure(
+                "b45_t24_crash_attempt_create_failed",
+                format!("({status}):{body}"),
+                Some("coding"),
+            ));
+        }
+        let attempt_one = body["attempt_id"].as_str().unwrap_or_default().to_string();
+        let app_root = env.app_paths.root().to_path_buf();
+        let issue_id = env.issue_id.clone();
+        // ---- 2) 释放 in-process 服跑态,固定根交真实服务进程 ----
+        env._server.abort();
+        let workspace = env.workspace_root_path.clone();
+        let aggregate = env.aggregate_root_path().to_path_buf();
+        let _bare_keepalive = env._bare_origin_root.take().expect("bare origin root");
+        drop(env);
+        fp("t24_handover", format_args!("workspace={}", workspace.display()));
+
+        // ---- 3) 派生真实服务 #1 + 认证 ----
+        let port = t24_pick_port().await;
+        let mut server = b45_t24_spawn_server(&workspace, port, "drill-a").await.map_err(|message| {
+            matrix_failure("b45_t24_server_spawn_failed", message, Some("crash"))
+        })?;
+        server.authenticate().await.map_err(|message| {
+            matrix_failure("b45_t24_server_auth_failed", message, Some("crash"))
+        })?;
+        let pump_cookie = server.cookie.clone().unwrap_or_default();
+
+        // ---- 4) drill A:驱动 attempt #1 至 CodeReview 窗口 Running,
+        //         静默 CHECK 在途时 kill -9 整个服务进程组 ----
+        let pump_a = tokio::spawn({
+            let attempt = attempt_one.clone();
+            let cookie = pump_cookie.clone();
+            async move {
+                b45_t24_remote_attempt_pump(
+                    port,
+                    &cookie,
+                    &attempt,
+                    true,
+                    None,
+                    Duration::from_secs(env_timeout_secs(
+                        STAGE_TIMEOUT_ENV,
+                        DEFAULT_STAGE_TIMEOUT_SECS,
+                    )),
+                )
+                .await
+            }
+        });
+        let window_running = b45_t24_wait_window_state(
+            &app_root,
+            &attempt_one,
+            &["running"],
+            Duration::from_secs(env_timeout_secs(
+                STAGE_TIMEOUT_ENV,
+                DEFAULT_STAGE_TIMEOUT_SECS,
+            )),
+        )
+        .await;
+        if window_running["matched"].as_bool() != Some(true) {
+            let _ = pump_a.await;
+            server.kill_process_group();
+            return Err(matrix_failure(
+                "b45_t24_crash_window_never_running",
+                format!("窗口未达 Running:{window_running}"),
+                Some("review"),
+            ));
+        }
+        // 窗口 Running:登记旧 writer(真实 sleep 守护,独立进程组,确认
+        // 身份 pid+starttime;aria.worktree=attempt 树 tree_key)——崩溃
+        // 现场重建(fixture preset,证据如实标注)。
+        let worktree_one = b45_t24_attempt_worktree_by_paths(&app_root, &issue_id, &attempt_one)
+            .ok_or_else(|| {
+                matrix_failure(
+                    "b45_t24_crash_worktree_missing",
+                    "attempt #1 worktree 未物化".to_string(),
+                    Some("coding"),
+                )
+            })?;
+        let tree_key_one = b45_t24_tree_key(&worktree_one);
+        let mut daemon = b45_t24_spawn_daemon(600).map_err(|message| {
+            matrix_failure("b45_t24_daemon_spawn_failed", message.to_string(), Some("crash"))
+        })?;
+        let daemon_pid = daemon.id();
+        let mut daemon_labels = BTreeMap::new();
+        daemon_labels.insert("aria.worktree".to_string(), tree_key_one.clone());
+        daemon_labels.insert("kind".to_string(), "b45-t24-old-writer".to_string());
+        let daemon_record_path = b45_t24_preset_resource_record(
+            &app_root,
+            "b45-t24-oldwriter",
+            &format!("run-{attempt_one}"),
+            &format!("b45-t24-fixture-{daemon_pid}"),
+            "old-writer-daemon",
+            "process",
+            &format!("sleep 600 (b45-t24 old writer; pid={daemon_pid})"),
+            daemon_labels,
+            Some(json!({"Process": {"pid": daemon_pid, "start_time_ticks": b45_t24_process_start_ticks(daemon_pid)}})),
+            "confirmed",
+        )
+        .map_err(|message| {
+            matrix_failure("b45_t24_preset_record_failed", message, Some("crash"))
+        })?;
+        // 静默 CHECK 在途(窗口 Running 后 60s,静默段内)再 kill。
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let provider_pid_at_kill = t24_pi_provider_pid(&app_root, &issue_id, &attempt_one);
+        let scopes_at_kill = t24_read_resource_scopes(&app_root);
+        let windows_at_kill = b45_t24_read_windows(&app_root);
+        let role_runs_at_kill = t24_read_role_runs(&app_root, &issue_id, &attempt_one);
+        server.kill_process_group();
+        let server_dead = !server.alive();
+        let daemon_alive_after_kill = b45_t24_pid_alive(daemon_pid);
+        let provider_alive_after_kill =
+            provider_pid_at_kill.is_some_and(|pid| b45_t24_pid_alive(pid));
+        fp(
+            "t24_killed",
+            format_args!(
+                "server_dead={server_dead} daemon_alive={daemon_alive_after_kill} provider_pid={provider_pid_at_kill:?} provider_alive={provider_alive_after_kill}"
+            ),
+        );
+        let pump_a_result = pump_a.await.unwrap_or_else(|error| json!({"join_error": error.to_string()}));
+
+        // ---- 5) 重启(#2):启动补偿先行(停旧 writer/清登记容器/原
+        //         manifest 续恢复/三域核对)——端口/token 就绪即补偿已过 ----
+        let port_two = t24_pick_port().await;
+        let mut server_two =
+            b45_t24_spawn_server(&workspace, port_two, "drill-a-restart").await.map_err(|message| {
+                matrix_failure("b45_t24_server_spawn_failed", message, Some("crash"))
+            })?;
+        let restarted_observed_at = Utc::now().to_rfc3339();
+        server_two.authenticate().await.map_err(|message| {
+            matrix_failure("b45_t24_server_auth_failed", message, Some("crash"))
+        })?;
+        // 窗口 #1 收口(终态;补偿释放或保持锁)。有界等待。
+        let window_one_terminal = b45_t24_wait_window_state(
+            &app_root,
+            &attempt_one,
+            &["closed_invalidated", "new_review_required", "closed_accepted", "manual_gate", "recovery_required"],
+            Duration::from_secs(300),
+        )
+        .await;
+        let daemon_alive_after_restart = b45_t24_pid_alive(daemon_pid);
+        let scopes_after_restart = t24_read_resource_scopes(&app_root);
+        let windows_after_restart = window_one_terminal["windows"].clone();
+        let compensation_log = server_two.log_text();
+
+        // ---- 6) 新材料:重启后 attach 续驱至终态(第二次评审完整跑,
+        //         含 310s 静默 CHECK 不误杀) ----
+        let cookie_two = server_two.cookie.clone().unwrap_or_default();
+        let pump_resume = b45_t24_remote_attempt_pump(
+            port_two,
+            &cookie_two,
+            &attempt_one,
+            false,
+            None,
+            Duration::from_secs(env_timeout_secs(
+                STAGE_TIMEOUT_ENV,
+                DEFAULT_STAGE_TIMEOUT_SECS,
+            )),
+        )
+        .await;
+        let attempt_one_state = t24_attempt_state(&app_root, &issue_id, &attempt_one);
+        let role_runs_final = t24_read_role_runs(&app_root, &issue_id, &attempt_one);
+        let windows_final_a = b45_t24_read_windows(&app_root);
+        let reviewer_silent_gap_secs =
+            b45_t24_max_silent_gap_secs(&role_rows_from_events(&pump_a_result, &role_runs_final));
+
+        // ---- 7) drill B(停等不误杀臂):attempt #2 → 窗口 Running →
+        //         预置未确认 writer + 登记容器 → kill → 重启(#3)→
+        //         停等保持锁(不误杀)→ 人工处置 → 重启(#4)→ 释放 ----
+        let mut drill_b = json!({"skipped": "attempt #1 未到可建第二轮的终态"});
+        let attempt_one_completed = attempt_one_state
+            .pointer("/status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "completed");
+        if attempt_one_completed {
+            let (status, body) = server_two
+                .request_json(
+                    reqwest::Method::POST,
+                    &format!(
+                        "/api/projects/{PROJECT_ID}/issues/{issue_id}/work-item-plans/{}/coding-attempts",
+                        plan_id
+                    ),
+                    json!({}),
+                )
+                .await
+                .unwrap_or((0, Value::Null));
+            if status == 200 || status == 201 {
+                let attempt_two = body["attempt_id"].as_str().unwrap_or_default().to_string();
+                if !attempt_two.is_empty() {
+                    let pump_b = tokio::spawn({
+                        let attempt = attempt_two.clone();
+                        let cookie = cookie_two.clone();
+                        async move {
+                            b45_t24_remote_attempt_pump(
+                                port_two,
+                                &cookie,
+                                &attempt,
+                                true,
+                                Some(Duration::from_secs(3600)),
+                                Duration::from_secs(3600),
+                            )
+                            .await
+                        }
+                    });
+                    let window_b_running = b45_t24_wait_window_state(
+                        &app_root,
+                        &attempt_two,
+                        &["running"],
+                        Duration::from_secs(3600),
+                    )
+                    .await;
+                    let park_setup = if window_b_running["matched"].as_bool() == Some(true) {
+                        // 未确认 writer(真实运行守护,身份未确认——崩溃窗口
+                        // 形态)+ 登记容器(真实 podman 容器,精确 ID+标签)。
+                        let worktree_two =
+                            b45_t24_attempt_worktree_by_paths(&app_root, &issue_id, &attempt_two);
+                        let mut park = json!({
+                            "window_running": true,
+                            "worktree": worktree_two.clone().map(|w| w.display().to_string()),
+                        });
+                        if let Some(worktree_two) = worktree_two {
+                            let tree_key_two = b45_t24_tree_key(&worktree_two);
+                            let mut daemon_two = b45_t24_spawn_daemon(1800)
+                                .map_err(|message| {
+                                    matrix_failure(
+                                        "b45_t24_daemon_spawn_failed",
+                                        message.to_string(),
+                                        Some("crash"),
+                                    )
+                                })?;
+                            let daemon_two_pid = daemon_two.id();
+                            let mut labels = BTreeMap::new();
+                            labels.insert("aria.worktree".to_string(), tree_key_two.clone());
+                            labels.insert("kind".to_string(), "b45-t24-unconfirmed-writer".to_string());
+                            let unconfirmed_path = b45_t24_preset_resource_record(
+                                &app_root,
+                                "b45-t24-park",
+                                &format!("run-{attempt_two}"),
+                                &format!("b45-t24-fixture-{daemon_two_pid}"),
+                                "unconfirmed-writer",
+                                "process",
+                                &format!(
+                                    "bash -c 'sleep 1800' (b45-t24 unconfirmed writer; pid={daemon_two_pid})"
+ ),
+                                labels.clone(),
+                                None,
+                                "reserved",
+                            )
+                            .map_err(|message| {
+                                matrix_failure(
+                                    "b45_t24_preset_record_failed",
+                                    message.to_string(),
+                                    Some("crash"),
+                                )
+                            })?;
+                            // 真实容器(podman run -d;确认身份 exact_id)。
+                            let container = b45_t24_podman_run_park_container(&tree_key_two);
+                            let container_record_path = match &container {
+                                Ok((exact_id, _)) => {
+                                    let mut container_labels = labels.clone();
+                                    container_labels.insert(
+                                        "io.aria.b45.scene".to_string(),
+                                        "crash-park".to_string(),
+                                    );
+                                    b45_t24_preset_resource_record(
+                                        &app_root,
+                                        "b45-t24-park",
+                                        &format!("run-{attempt_two}"),
+                                        &format!("b45-t24-fixture-{daemon_two_pid}"),
+                                        "park-container",
+                                        "container",
+                                        &format!("podman run -d ... (exact_id={exact_id})"),
+                                        container_labels,
+                                        Some(json!({"Container": {"exact_id": exact_id}})),
+                                        "confirmed",
+                                    )
+                                    .ok()
+                                }
+                                Err(_) => None,
+                            };
+                            park["unconfirmed_record"] = json!(unconfirmed_path.display().to_string());
+                            park["container"] = match &container {
+                                Ok((exact_id, name)) => json!({
+                                    "exact_id": exact_id,
+                                    "name": name,
+                                }),
+                                Err(error) => json!({"error": error}),
+                            };
+                            park["container_record"] =
+                                json!(container_record_path.clone().map(|path| path.display().to_string()));
+                            park["daemon_pid"] = json!(daemon_two_pid);
+                            // kill 服务 #2(窗口 Running + 停等前置在场)。
+                            let provider_pid_b =
+                                t24_pi_provider_pid(&app_root, &issue_id, &attempt_two);
+                            let windows_b_at_kill = b45_t24_read_windows(&app_root);
+                            server_two.kill_process_group();
+                            let daemon_two_alive_after_kill = b45_t24_pid_alive(daemon_two_pid);
+                            let container_alive_after_kill = container
+                                .as_ref()
+                                .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
+                                .unwrap_or(false);
+                            // 重启 #3:补偿必须停等(未确认 writer/容器观察
+                            // 通道缺失)——保持锁,不误杀。
+                            let port_three = t24_pick_port().await;
+                            let mut server_three = b45_t24_spawn_server(
+                                &workspace,
+                                port_three,
+                                "drill-b-restart",
+                            )
+                            .await
+                            .map_err(|message| {
+                                matrix_failure(
+                                    "b45_t24_server_spawn_failed",
+                                    message,
+                                    Some("crash"),
+                                )
+                            })?;
+                            let park_state = b45_t24_wait_window_state(
+                                &app_root,
+                                &attempt_two,
+                                &["recovery_required"],
+                                Duration::from_secs(300),
+                            )
+                            .await;
+                            let park_log = server_three.log_text();
+                            let daemon_two_alive_after_restart =
+                                b45_t24_pid_alive(daemon_two_pid);
+                            let container_alive_after_restart = container
+                                .as_ref()
+                                .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
+                                .unwrap_or(false);
+                            let lease_after_park = t24_read_leases(&app_root);
+                            // 新材料必须被拒(锁保持):attach 后无新窗口可开
+                            // ——以「无新 Running 窗口/无新 role run」记录事实。
+                            let new_material_probe = server_three
+                                .request_json(
+                                    reqwest::Method::POST,
+                                    &format!(
+                                        "/api/coding-attempts/{attempt_two}/reviewer-window:resolve"
+                                    ),
+                                    json!({"decision": "require_new_review"}),
+                                )
+                                .await;
+                            // 人工处置:deregister + kill 守护 + 移除容器。
+                            if let Err(error) = daemon_two.kill() {
+                                fp("t24_daemon_kill_failed", format_args!("{error}"));
+                            }
+                            let _ = daemon_two.wait();
+                            if let Ok((exact_id, _)) = &container {
+                                let _ = b45_t24_podman_remove(exact_id);
+                            }
+                            t24_deregister_record(&app_root, &unconfirmed_path);
+                            if let Some(path) = &container_record_path {
+                                t24_deregister_record(&app_root, path);
+                            }
+                            // 重启 #4:人工处置后续接 → 释放。
+                            let port_four = t24_pick_port().await;
+                            let mut server_four = b45_t24_spawn_server(
+                                &workspace,
+                                port_four,
+                                "drill-b-resolved",
+                            )
+                            .await
+                            .map_err(|message| {
+                                matrix_failure(
+                                    "b45_t24_server_spawn_failed",
+                                    message,
+                                    Some("crash"),
+                                )
+                            })?;
+                            let resolved_state = b45_t24_wait_window_state(
+                                &app_root,
+                                &attempt_two,
+                                &["closed_invalidated", "new_review_required", "closed_accepted"],
+                                Duration::from_secs(300),
+                            )
+                            .await;
+                            let windows_b_final = b45_t24_read_windows(&app_root);
+                            // 收口:清理 attempt #2(删除;避免重启后续驱)。
+                            let _ = server_four
+                                .request_json(
+                                    reqwest::Method::DELETE,
+                                    &format!("/api/coding-attempts/{attempt_two}"),
+                                    json!({}),
+                                )
+                                .await;
+                            server_four.kill_process_group();
+                            drill_b = json!({
+                                "attempt_id": attempt_two,
+                                "park_setup": park,
+                                "provider_pid_at_kill": provider_pid_b,
+                                "windows_at_kill": windows_b_at_kill,
+                                "daemon_alive_after_kill": daemon_two_alive_after_kill,
+                                "container_alive_after_kill": container_alive_after_kill,
+                                "park_state": park_state,
+                                "park_log_has_kept_locked": park_log.contains("kept locked"),
+                                "daemon_alive_after_restart": daemon_two_alive_after_restart,
+                                "container_alive_after_restart": container_alive_after_restart,
+                                "leases_after_park": lease_after_park,
+                                "new_material_probe": new_material_probe
+                                    .map(|(status, body)| json!({"status": status, "body": body})),
+                                "resolved_state": resolved_state,
+                                "windows_final": windows_b_final,
+                            });
+                        }
+                        park
+                    } else {
+                        json!({"window_running": false})
+                    };
+                    let _ = pump_b.await;
+                    if drill_b.get("skipped").is_none() && drill_b.get("windows_at_kill").is_none() {
+                        // 窗口未 Running:如实记录(park 臂未演练)。
+                        drill_b = json!({
+                            "skipped": "attempt #2 窗口未达 Running",
+                            "park_setup": park_setup,
+                        });
+                    }
+                }
+            } else {
+                drill_b = json!({"skipped": format!("attempt #2 创建失败({status}):{body}")});
+            }
+        }
+        let _ = server_two.alive();
+
+        Ok(json!({
+            "provider": {"name": "pi"},
+            "fixtures": fixtures,
+            "story_cells": story_cells.len(),
+            "design_cells": design_cells.len(),
+            "plan_cells": plan_cells.len(),
+            "workspace_root": workspace.display().to_string(),
+            "aggregate_root": aggregate.display().to_string(),
+            "kill": {
+                "server_port": port,
+                "server_dead": server_dead,
+                "provider_pid_at_kill": provider_pid_at_kill,
+                "provider_alive_after_kill": provider_alive_after_kill,
+                "daemon_record": daemon_record_path.display().to_string(),
+                "windows_at_kill": windows_at_kill,
+                "scopes_at_kill": scopes_at_kill,
+                "role_runs_at_kill": role_runs_at_kill,
+                "pump_before_kill": pump_a_result,
+            },
+            "restart": {
+                "port": port_two,
+                "restarted_observed_at": restarted_observed_at,
+                "window_one_terminal": windows_after_restart,
+                "daemon_alive_after_restart": daemon_alive_after_restart,
+                "scopes_after_restart": scopes_after_restart,
+                "compensation_log": compensation_log,
+            },
+            "new_material": {
+                "pump_resume": pump_resume,
+                "attempt_state": attempt_one_state,
+                "role_runs_final": role_runs_final,
+                "windows_final": windows_final_a,
+                "reviewer_silent_gap_secs": reviewer_silent_gap_secs,
+                "reviewer_idle_boundary_secs": 90,
+            },
+            "drill_b": drill_b,
+        }))
+    }
+
+    /// T24:其余三家各一取消/资源收口格(in-process;B45_T24_CANCEL_
+    /// PROVIDERS 可缩)。
+    pub(crate) async fn run_b45_t24_cancel_cells(
+        &self,
+        evidence_root: &Path,
+        providers: &[ProviderName],
+    ) -> Result<Value, LiveMatrixFailure> {
+        let mut cells = serde_json::Map::new();
+        for provider in providers {
+            let label = format!("{provider:?}").to_lowercase();
+            fp_enter_phase("b45-t24", "cancel-cell", &label);
+            let env = MatrixEnvironment::build(provider.clone(), &evidence_root.join(&label))
+                .await?;
+            if env.plan_id.is_empty() {
+                cells.insert(
+                    label.clone(),
+                    json!({"error": "规划未 Confirmed,取消格无法启动"}),
+                );
+                continue;
+            }
+            let (status, body) = request_json(
+                &env.app,
+                Method::POST,
+                &format!(
+                    "/api/projects/{PROJECT_ID}/issues/{}/work-item-plans/{}/coding-attempts",
+                    env.issue_id, env.plan_id
+                ),
+                json!({}),
+            )
+            .await;
+            if !status.is_success() {
+                cells.insert(
+                    label.clone(),
+                    json!({"error": format!("attempt 创建失败({status}):{body}")}),
+                );
+                continue;
+            }
+            let attempt_id = body["attempt_id"].as_str().unwrap_or_default().to_string();
+            let worktree = env.b45_t24_attempt_worktree(&attempt_id);
+            let cancel_cell = env.drive_b45_cancel_cell(&attempt_id).await;
+            let scopes_after = env.b45_t24_resource_scope_snapshot();
+            let windows_after = env.b45_t24_reviewer_window_snapshot();
+            let attempt_state = env.b45_attempt_state(&attempt_id).await;
+            cells.insert(
+                label,
+                json!({
+                    "attempt_id": attempt_id,
+                    "cancel_cell": cancel_cell,
+                    "attempt_state": attempt_state,
+                    "worktree_exists_after": worktree
+                        .as_deref()
+                        .map(|path| path.exists())
+                        .unwrap_or(false),
+                    "resource_scopes_after": scopes_after,
+                    "reviewer_windows_after": windows_after,
+                }),
+            );
+        }
+        Ok(json!({
+            "providers": providers.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>(),
+            "cells": Value::Object(cells),
+        }))
+    }
+}
+
+/// T24 辅助集(app_root 直读;in-process env 释放后的观测面)。
+
+/// 预选空闲端口(bind 即释放;本地竞态可接受)。
+async fn t24_pick_port() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("pick port bind");
+    listener.local_addr().expect("local addr").port()
+}
+
+/// attempt worktree(app_root/issue/attempt 直读 durable 记录)。
+fn b45_t24_attempt_worktree_by_paths(
+    app_root: &Path,
+    issue_id: &str,
+    attempt_id: &str,
+) -> Option<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct AttemptRecord {
+        #[serde(default)]
+        worktree_path: Option<PathBuf>,
+    }
+    let path = app_root
+        .join("projects")
+        .join(PROJECT_ID)
+        .join("issues")
+        .join(issue_id)
+        .join("coding-attempts")
+        .join(format!("{attempt_id}.json"));
+    let text = std::fs::read_to_string(path).ok()?;
+    let record: AttemptRecord = serde_json::from_str(&text).ok()?;
+    record.worktree_path
+}
+
+/// attempt 状态(app_root 直读;status/stage 投影)。
+fn t24_attempt_state(app_root: &Path, issue_id: &str, attempt_id: &str) -> Value {
+    let path = app_root
+        .join("projects")
+        .join(PROJECT_ID)
+        .join("issues")
+        .join(issue_id)
+        .join("coding-attempts")
+        .join(format!("{attempt_id}.json"));
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or(json!({"error": "attempt 记录不可解析"})),
+        Err(error) => json!({"error": format!("attempt 记议读取失败:{error}")}),
+    }
+}
+
+/// provider-resources 登记面(app_root 直读)。
+fn t24_read_resource_scopes(app_root: &Path) -> Vec<Value> {
+    let resources_root = app_root.join("provider-resources/scopes");
+    let mut found = Vec::new();
+    let mut stack = vec![resources_root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "json")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("resource-"))
+                && let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(value) = serde_json::from_str::<Value>(&text)
+            {
+                found.push(json!({"path": path.display().to_string(), "record": value}));
+            }
+        }
+    }
+    found.sort_by(|a, b| {
+        a["path"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["path"].as_str().unwrap_or(""))
+    });
+    found
+}
+
+/// leases 面(app_root 直读)。
+fn t24_read_leases(app_root: &Path) -> Vec<Value> {
+    let leases_dir = app_root.join("reviewer-windows/leases");
+    let mut found = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&leases_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                if let Ok(text) = std::fs::read_to_string(&path)
+                    && let Ok(value) = serde_json::from_str::<Value>(&text)
+                {
+                    found.push(value);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// attempt 的 role run 清单(app_root 直读目录名)。
+fn t24_read_role_runs(app_root: &Path, issue_id: &str, attempt_id: &str) -> Vec<Value> {
+    let role_runs_dir = app_root
+        .join("projects")
+        .join(PROJECT_ID)
+        .join("issues")
+        .join(issue_id)
+        .join("coding-attempts")
+        .join(attempt_id)
+        .join("role-runs");
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&role_runs_dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "json")
+            && let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(value) = serde_json::from_str::<Value>(&text)
+        {
+            found.push(value);
+        }
+    }
+    found
+}
+
+/// pi provider 子进程 PID(stream log 文件名 `{program}-{pid}-stdout.log`)。
+fn t24_pi_provider_pid(app_root: &Path, issue_id: &str, attempt_id: &str) -> Option<u32> {
+    let log_root = app_root
+        .join("projects")
+        .join(PROJECT_ID)
+        .join("issues")
+        .join(issue_id)
+        .join("coding-attempts")
+        .join(attempt_id)
+        .join("provider-streams");
+    let mut best: Option<(std::time::SystemTime, u32)> = None;
+    let Ok(entries) = std::fs::read_dir(&log_root) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name()?.to_string_lossy().to_string();
+        if !name.starts_with("pi-") || !name.ends_with("-stdout.log") {
+            continue;
+        }
+        let pid = name
+            .trim_start_matches("pi-")
+            .trim_end_matches("-stdout.log")
+            .parse()
+            .ok()?;
+        let modified = entry.metadata().ok()?.modified().ok()?;
+        if best.is_none_or(|(existing, _)| modified > existing) {
+            best = Some((modified, pid));
+        }
+    }
+    best.map(|(_, pid)| pid)
+}
+
+/// PID 存活(/proc)。
+fn b45_t24_pid_alive(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// 真实守护进程(sleep;独立进程组——服务组 kill 不波及)。
+fn b45_t24_spawn_daemon(secs: u64) -> std::io::Result<std::process::Child> {
+    let mut command = std::process::Command::new("sleep");
+    command.arg(secs.to_string()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.spawn()
+}
+
+/// 真实 park 容器(podman run -d;返回(exact_id, name))。
+fn b45_t24_podman_run_park_container(tree_key: &str) -> Result<(String, String), String> {
+    let name = format!("b45-t24-park-{}", &tree_key[..12.min(tree_key.len())]);
+    let output = std::process::Command::new("podman")
+        .args([
+            "run",
+            "-d",
+            "--name",
+            &name,
+            "--label",
+            "io.aria.b45.scene=crash-park",
+            "--label",
+            &format!("io.aria.b45.worktree={tree_key}"),
+            "docker.io/library/ubuntu:24.04",
+            "sleep",
+            "1200",
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "podman run 失败:{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok((String::from_utf8_lossy(&output.stdout).trim().to_string(), name))
+}
+
+/// 容器运行中(podman inspect)。
+fn b45_t24_podman_container_running(exact_id: &str) -> bool {
+    std::process::Command::new("podman")
+        .args(["inspect", "--format", "{{.State.Running}}", exact_id])
+        .output()
+        .map(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).trim() == "true"
+        })
+        .unwrap_or(false)
+}
+
+/// 容器移除(podman rm -f;人工处置步)。
+fn b45_t24_podman_remove(exact_id: &str) -> bool {
+    std::process::Command::new("podman")
+        .args(["rm", "-f", exact_id])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// 人工解除登记(直接删 durable 记录文件;人工处置语义)。
+fn t24_deregister_record(app_root: &Path, record: &Path) {
+    let _ = std::fs::remove_file(record);
+    let _ = app_root;
+}
+
+
+/// role run 事件行(role_runs_final 直读形态→validator 消费行)。
+fn role_rows_from_events(pump: &Value, role_runs: &[Value]) -> Vec<Value> {
+    // 静默跨度取 pump 事件(created_at 缺失时回退 role run updated_at 面)。
+    let mut rows: Vec<Value> = Vec::new();
+    if let Some(events) = pump["events"].as_array() {
+        for event in events {
+            if let Some(created_at) = event.get("ts").and_then(Value::as_str) {
+                rows.push(json!({"created_at": created_at}));
+            }
+        }
+    }
+    for run in role_runs {
+        if let Some(updated_at) = run.get("updated_at").and_then(Value::as_str) {
+            rows.push(json!({"created_at": updated_at}));
+        }
+    }
+    rows
+}

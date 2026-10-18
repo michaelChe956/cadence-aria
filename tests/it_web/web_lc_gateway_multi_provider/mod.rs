@@ -11,7 +11,7 @@ pub(crate) mod boundary_matrix;
 pub(crate) mod direct_comparison;
 pub(crate) mod failure_matrix;
 pub(crate) mod harness;
-pub(crate) mod live_b45_t23;
+pub(crate) mod live_b45_t24;
 pub(crate) mod live_matrix;
 pub(crate) mod policy_dependency;
 pub(crate) mod snapshot;
