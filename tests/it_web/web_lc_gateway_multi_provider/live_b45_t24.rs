@@ -244,25 +244,24 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
                 }
                 _ => failures.push("平台零推进对照缺 HEAD(开点/终局)".to_string()),
             }
-            let bare_open = evidence
-                .pointer("/window_open_facts/bare_head_open")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let bare_final = evidence
-                .pointer("/bare_head_final")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            let bare_open = evidence.pointer("/window_open_facts/bare_head_open");
+            let bare_final = evidence.pointer("/bare_head_final");
             match (bare_open, bare_final) {
-                (Some(open), Some(final_head)) if !open.is_empty() => {
-                    if open != final_head {
-                        failures.push(format!(
-                            "平台零推进被违反:裸远端 HEAD {open} → {final_head}(平台推进了 push)"
-                        ));
+                (Some(open), Some(final_head)) => match (open.as_str(), final_head.as_str()) {
+                    (Some(open), Some(final_head)) if !open.is_empty() => {
+                        if open != final_head {
+                            failures.push(format!(
+                                "平台零推进被违反:裸远端 HEAD {open} → {final_head}(平台推进了 push)"
+                            ));
+                        }
                     }
-                }
-                // 远端分支从未创建(窗口外对照 push 在采样后)=零推进合法形态。
-                (None, None) => {}
-                _ => failures.push("平台零推进对照缺裸远端 HEAD(开点/终局)".to_string()),
+                    // 两键存在且为 null(远端分支从未创建;窗口外对照 push
+                    // 在采样后)=零推进合法形态。缺键≠null:字段改名/漏发射
+                    // 必须仍 FAIL(合成夹具缺项必须 FAIL 契约)。
+                    (None, None) => {}
+                    _ => failures.push("平台零推进对照裸远端 HEAD 值形态非法(非串/空串)".to_string()),
+                },
+                _ => failures.push("平台零推进对照缺裸远端 HEAD(开点/终局键缺失)".to_string()),
             }
             let index_open = evidence
                 .pointer("/window_open_facts/index_digest_open")
@@ -731,6 +730,25 @@ mod validator_replay_tests {
         evidence["window_open_facts"]["bare_head_open"] = Value::Null;
         evidence["bare_head_final"] = Value::Null;
         assert!(validate_b45_t24_replay_evidence(&evidence).is_ok());
+    }
+
+    #[test]
+    fn replay_validator_rejects_missing_bare_head_keys() {
+        // 缺键(字段改名/漏发射)≠ 存在且 null:必须 FAIL(缺项必须 FAIL 契约)。
+        let mut evidence = base_violation();
+        evidence["window_open_facts"]
+            .as_object_mut()
+            .expect("window_open_facts object")
+            .remove("bare_head_open");
+        evidence
+            .as_object_mut()
+            .expect("evidence object")
+            .remove("bare_head_final");
+        let failures = validate_b45_t24_replay_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("键缺失")),
+            "{failures:?}"
+        );
     }
 
     #[test]
