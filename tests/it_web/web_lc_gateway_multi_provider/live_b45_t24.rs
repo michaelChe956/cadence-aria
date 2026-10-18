@@ -224,7 +224,8 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
             if !after_has_closed {
                 failures.push("人工门裁决后窗口未释放(ClosedInvalidated/NewReviewRequired)".to_string());
             }
-            // 平台零推进:终局 HEAD=开点 HEAD(自提交被恢复;branch 未推进)。
+            // 平台零推进三面(F9):终局 HEAD=开点 HEAD(自提交被恢复)、
+            // 裸远端 HEAD 前后一致(push 未推进)、index 摘要一致(stage 未推进)。
             let head_open = evidence
                 .pointer("/window_open_facts/worktree_state/head")
                 .and_then(Value::as_str)
@@ -242,6 +243,42 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
                     }
                 }
                 _ => failures.push("平台零推进对照缺 HEAD(开点/终局)".to_string()),
+            }
+            let bare_open = evidence
+                .pointer("/window_open_facts/bare_head_open")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let bare_final = evidence
+                .pointer("/bare_head_final")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            match (bare_open, bare_final) {
+                (Some(open), Some(final_head)) if !open.is_empty() => {
+                    if open != final_head {
+                        failures.push(format!(
+                            "平台零推进被违反:裸远端 HEAD {open} → {final_head}(平台推进了 push)"
+                        ));
+                    }
+                }
+                _ => failures.push("平台零推进对照缺裸远端 HEAD(开点/终局)".to_string()),
+            }
+            let index_open = evidence
+                .pointer("/window_open_facts/index_digest_open")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let index_final = evidence
+                .pointer("/index_digest_final")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            match (index_open, index_final) {
+                (Some(open), Some(final_digest)) if !open.is_empty() => {
+                    if open != final_digest {
+                        failures.push(format!(
+                            "平台零推进被违反:index 摘要 {open} → {final_digest}(平台推进了 stage)"
+                        ));
+                    }
+                }
+                _ => failures.push("平台零推进对照缺 index 摘要(开点/终局)".to_string()),
             }
             // 窗口外对照:commit+push exit=0。
             let control_ok = ["add", "commit", "push"].into_iter().all(|step| {
@@ -623,8 +660,14 @@ mod validator_replay_tests {
                     ]},
                 ],
             },
-            "window_open_facts": {"worktree_state": {"head": "sha-open"}},
+            "window_open_facts": {
+                "worktree_state": {"head": "sha-open"},
+                "bare_head_open": "bare-open",
+                "index_digest_open": "idx-open",
+            },
             "worktree_final": {"head": "sha-open"},
+            "index_digest_final": "idx-open",
+            "bare_head_final": "bare-open",
             "code_review_reports": [
                 {"id": "code_review_0001", "acceptance": "Invalidated", "verdict": "Approve"},
             ],
@@ -658,6 +701,24 @@ mod validator_replay_tests {
         let failures = validate_b45_t24_replay_evidence(&evidence).unwrap_err();
         assert!(
             failures.iter().any(|f| f.contains("平台零推进")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn replay_validator_rejects_bare_head_or_index_progression() {
+        let mut evidence = base_violation();
+        evidence["bare_head_final"] = json!("bare-moved");
+        let failures = validate_b45_t24_replay_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("裸远端")),
+            "{failures:?}"
+        );
+        let mut evidence = base_violation();
+        evidence["index_digest_final"] = json!("idx-moved");
+        let failures = validate_b45_t24_replay_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("index 摘要")),
             "{failures:?}"
         );
     }

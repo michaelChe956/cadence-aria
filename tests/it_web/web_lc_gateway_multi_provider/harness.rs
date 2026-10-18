@@ -11573,7 +11573,7 @@ fn b45_t24_write_fixture_sources(scenario: B45T24Scenario) -> Result<Value, Stri
              echo '[verify] container begin'\n\
              NAME=\"b45-t24-$RANDOM$RANDOM\"\n\
              CTR_ID=$(podman run -d --name \"$NAME\" --label io.aria.b45.scene={scene} --label io.aria.b45.worktree=\"$PWD\" docker.io/library/ubuntu:24.04 sleep 120)\n\
-             echo \"[verify] container exact_id=$CTR_ID name=$NAME\"\n\
+             echo \"[verify] container labels io.aria.b45.scene={scene} io.aria.b45.worktree=$PWD\"\n\
              podman exec \"$NAME\" sh -c 'echo container-check-ok'\n\
              podman stop \"$NAME\" >/dev/null\n\
              podman rm \"$NAME\" >/dev/null\n\
@@ -11606,7 +11606,7 @@ fn b45_t24_write_fixture_sources(scenario: B45T24Scenario) -> Result<Value, Stri
              git add -A >/dev/null 2>&1 || true\n\
              git commit -m 'reviewer self-commit probe (b45-t24 violation)' >/dev/null 2>&1 || true\n\
              echo '[violation-probe] write .git direct'\n\
-             echo probe > .git/aria-b45-t24-probe\n\
+             GIT_DIR_ACTUAL=$(git rev-parse --git-dir 2>/dev/null || printf '%s' .git) && echo probe > \"$GIT_DIR_ACTUAL/aria-b45-t24-probe\"\n\
              echo '[violation-probe] write platform .aria direct'\n\
              echo probe > {marker}/aria-b45-t24-probe.txt\n\
              echo '[violation-probe] done (writes may happen; durable violation recorded before restore)'\n\
@@ -11655,7 +11655,7 @@ fn b45_t24_tree_key(worktree: &Path) -> String {
 }
 
 /// T24 fixture 侧资源登记(崩溃演练前置):按 store 磁盘布局直接落
-/// `provider-resources/scopes/<scope>/<run>/<boot>/resources/resource-<id>.json`
+/// `provider-resources/scopes/<scope>/<run>/<boot>/resources/<id>.json`
 /// ——与被 kill 进程已写入的 durable 状态同形(测试重建崩溃现场;证据内
 /// 如实记 `fixture_preset: true`,不冒充产线写路径)。
 #[allow(clippy::too_many_arguments)]
@@ -11693,7 +11693,7 @@ fn b45_t24_preset_resource_record(
         .join(run_id)
         .join(boot_identity)
         .join("resources")
-        .join(format!("resource-{resource_id}.json"));
+        .join(format!("{resource_id}.json"));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -12093,6 +12093,21 @@ fn b45_t24_bare_head(member_checkout: &Path, branch: &str) -> Option<String> {
     }
 }
 
+/// F9:worktree index 只读摘要(`git ls-files -s` 全行 sha256)——平台
+/// stage/commit 零推进的 index 面对照。
+fn b45_t24_index_digest(worktree: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["ls-files", "-s"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(hex::encode(Sha256::digest(&output.stdout)))
+}
+
 impl MatrixEnvironment {
     /// T24 fixture 播种:fixture 源 → 成员仓 `fixtures/pi-incident/`(提交);
     /// `.gitignore` 追加 build-out/coder-ignored.log(残留与 ignored 文件
@@ -12203,7 +12218,7 @@ impl MatrixEnvironment {
     /// 由 `run_b45_t24_crash` 内联执行(server.abort + 根/bare-origin 摘取
     /// 后 drop(env));bare origin 必须持活至演练结束(push 契约)。
 
-    /// T24 durable 观测:reviewer-windows 面(windows/violation-journal/leases)。
+    /// T24 durable 观测:reviewer-windows 面(windows/violations/leases)。
     fn b45_t24_reviewer_window_snapshot(&self) -> Value {
         let root = self.app_paths.root().join("reviewer-windows");
         let read_json_files = |dir: &Path| -> Vec<Value> {
@@ -12226,7 +12241,7 @@ impl MatrixEnvironment {
         };
         json!({
             "windows": read_json_files(&root.join("windows")),
-            "violation_journals": read_json_files(&root.join("violation-journal")),
+            "violation_journals": read_json_files(&root.join("violations")),
             "leases": read_json_files(&root.join("leases")),
         })
     }
@@ -12248,7 +12263,7 @@ impl MatrixEnvironment {
                     && path
                         .file_name()
                         .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("resource-"))
+                        .is_some_and(|name| name != "manifest.json")
                     && let Ok(text) = std::fs::read_to_string(&path)
                     && let Ok(value) = serde_json::from_str::<Value>(&text)
                 {
@@ -12343,7 +12358,7 @@ impl LiveLcGatewayHarness {
             .expect("b45 override lock")
             .take();
         fp("t24_env_built", format_args!("lc={} issue={}", env.lc_id, env.issue_id));
-        let fixtures = env.b45_t24_seed_fixture(scenario, env.app_paths.root().parent().unwrap_or(Path::new("/"))).map_err(|message| {
+        let fixtures = env.b45_t24_seed_fixture(scenario, &env.app_paths.root()).map_err(|message| {
             matrix_failure("b45_t24_fixture_prerequisite_missing", message, Some("env"))
         })?;
 
@@ -12432,6 +12447,11 @@ impl LiveLcGatewayHarness {
                                     .map(MatrixEnvironment::b45_t24_worktree_state)
                                     .unwrap_or(json!({"error": "attempt worktree 未物化"})),
                                 "resource_scopes": env.b45_t24_resource_scope_snapshot(),
+                                // F9:平台零推进三面(HEAD/裸远端/index 摘要)。
+                                "bare_head_open": b45_t24_bare_head(&env.member_worktree, "master"),
+                                "index_digest_open": worktree
+                                    .as_deref()
+                                    .and_then(b45_t24_index_digest),
                             });
                             fp("t24_window_open_facts", "running observed");
                             return facts;
@@ -12492,6 +12512,13 @@ impl LiveLcGatewayHarness {
                 .unwrap_or_default()
         };
         let bare_head_final = b45_t24_bare_head(&env.member_worktree, "master");
+        let index_digest_final = if attempt_id.is_empty() {
+            None
+        } else {
+            env.b45_t24_attempt_worktree(&attempt_id)
+                .as_deref()
+                .and_then(b45_t24_index_digest)
+        };
 
         // 违规场景:人工门 resolve(经产品 HTTP 面)+ 窗口外 Coder 提交/推送对照。
         let mut manual_gate = json!(null);
@@ -12569,6 +12596,7 @@ impl LiveLcGatewayHarness {
             "worktree_final": worktree_final,
             "code_review_reports": reports,
             "bare_head_final": bare_head_final,
+            "index_digest_final": index_digest_final,
             "manual_gate": manual_gate,
             "out_of_window_control": out_of_window_control,
         }))
@@ -12592,6 +12620,15 @@ impl LiveLcGatewayHarness {
         }
         // ---- 1) 固定根构建 + 事故条件播种 + 全链到 attempt 创建(未启动)----
         let crash_root = PathBuf::from(B45_T24_FIXTURE_ROOT).join("crash-run");
+        // F10:固定根复位(上一轮现场残留会使 build 撞非空目录/陈旧 durable;
+        // 删除失败=硬前置失败,不静默复用)。
+        if crash_root.exists() && std::fs::remove_dir_all(&crash_root).is_err() {
+            return Err(matrix_failure(
+                "b45_t24_crash_root_reset_failed",
+                format!("{}: 上一轮固定根无法复位", crash_root.display()),
+                Some("env"),
+            ));
+        }
         let workspace_root = crash_root.join("workspace");
         let aggregate_root = crash_root.join("aggregate-root");
         B45_ISSUE_DESCRIPTION_OVERRIDE
@@ -12614,7 +12651,7 @@ impl LiveLcGatewayHarness {
             Err(failure) => return Err(failure),
         };
         let fixtures = env
-            .b45_t24_seed_fixture(B45T24Scenario::CrashSilent, &env.workspace_root_path)
+            .b45_t24_seed_fixture(B45T24Scenario::CrashSilent, &env.app_paths.root())
             .map_err(|message| {
                 matrix_failure("b45_t24_fixture_prerequisite_missing", message, Some("env"))
             })?;
@@ -12764,7 +12801,7 @@ impl LiveLcGatewayHarness {
             "process",
             &format!("sleep 600 (b45-t24 old writer; pid={daemon_pid})"),
             daemon_labels,
-            Some(json!({"Process": {"pid": daemon_pid, "start_time_ticks": b45_t24_process_start_ticks(daemon_pid)}})),
+            Some(json!({"process": {"pid": daemon_pid, "start_time_ticks": b45_t24_process_start_ticks(daemon_pid)}})),
             "confirmed",
         )
         .map_err(|message| {
@@ -12832,7 +12869,7 @@ impl LiveLcGatewayHarness {
         let role_runs_final = t24_read_role_runs(&app_root, &issue_id, &attempt_one);
         let windows_final_a = b45_t24_read_windows(&app_root);
         let reviewer_silent_gap_secs =
-            b45_t24_max_silent_gap_secs(&role_rows_from_events(&pump_a_result, &role_runs_final));
+            b45_t24_max_silent_gap_secs(&b45_t24_role_event_rows(&app_root, &issue_id, &attempt_one));
 
         // ---- 7) drill B(停等不误杀臂):attempt #2 → 窗口 Running →
         //         预置未确认 writer + 登记容器 → kill → 重启(#3)→
@@ -12941,7 +12978,7 @@ impl LiveLcGatewayHarness {
                                         "container",
                                         &format!("podman run -d ... (exact_id={exact_id})"),
                                         container_labels,
-                                        Some(json!({"Container": {"exact_id": exact_id}})),
+                                        Some(json!({"container": {"exact_id": exact_id}})),
                                         "confirmed",
                                     )
                                     .ok()
@@ -13261,7 +13298,7 @@ fn t24_read_resource_scopes(app_root: &Path) -> Vec<Value> {
                 && path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("resource-"))
+                    .is_some_and(|name| name != "manifest.json")
                 && let Ok(text) = std::fs::read_to_string(&path)
                 && let Ok(value) = serde_json::from_str::<Value>(&text)
             {
@@ -13429,20 +13466,35 @@ fn t24_deregister_record(app_root: &Path, record: &Path) {
 }
 
 
-/// role run 事件行(role_runs_final 直读形态→validator 消费行)。
-fn role_rows_from_events(pump: &Value, role_runs: &[Value]) -> Vec<Value> {
-    // 静默跨度取 pump 事件(created_at 缺失时回退 role run updated_at 面)。
-    let mut rows: Vec<Value> = Vec::new();
-    if let Some(events) = pump["events"].as_array() {
-        for event in events {
-            if let Some(created_at) = event.get("ts").and_then(Value::as_str) {
-                rows.push(json!({"created_at": created_at}));
+/// role run 事件行(F3:读 `role-run-events/*.jsonl` 每行的 created_at——
+/// durable 事件事实是静默跨度的唯一时序源;pump 帧顶层无 ts,role run
+/// 记录 updated_at 只反映终写)。
+fn b45_t24_role_event_rows(app_root: &Path, issue_id: &str, attempt_id: &str) -> Vec<Value> {
+    let events_dir = app_root
+        .join("projects")
+        .join(PROJECT_ID)
+        .join("issues")
+        .join(issue_id)
+        .join("coding-attempts")
+        .join(attempt_id)
+        .join("role-run-events");
+    let mut rows = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&events_dir) else {
+        return rows;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "jsonl") {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                for line in text.lines() {
+                    if let Ok(event) = serde_json::from_str::<Value>(line)
+                        && let Some(created_at) =
+                            event.get("created_at").and_then(Value::as_str)
+                    {
+                        rows.push(json!({"created_at": created_at}));
+                    }
+                }
             }
-        }
-    }
-    for run in role_runs {
-        if let Some(updated_at) = run.get("updated_at").and_then(Value::as_str) {
-            rows.push(json!({"created_at": updated_at}));
         }
     }
     rows
