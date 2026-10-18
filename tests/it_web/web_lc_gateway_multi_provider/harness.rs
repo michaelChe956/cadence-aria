@@ -5495,9 +5495,13 @@ impl MatrixEnvironment {
                              下列编号):\n{requirement_digest}"
                         )
                     };
+                    // r73(T22 r15 现场):command_id 每轮唯一——固定 id 在
+                    // 第二轮被 HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN
+                    // 拒收(首 turn 已消费该 id,r15 实拍)。
+                    let revision_round = 4 - mechanical_rounds_left;
                     feedback_command = json!({
                         "type": "human_gate_feedback",
-                        "command_id": "lcg-matrix-plan-revision",
+                        "command_id": format!("lcg-matrix-plan-revision-r{revision_round}"),
                         "feedback": feedback_text,
                     });
                     fp(
