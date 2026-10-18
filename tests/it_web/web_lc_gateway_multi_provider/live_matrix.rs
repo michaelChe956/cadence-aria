@@ -1872,12 +1872,12 @@ fn b45_classify_command(command: &str) -> (String, String) {
         .get(tool_index + 1)
         .copied()
         .unwrap_or_default()
-        .trim_end_matches([';', '|', '&']);
+        .trim_end_matches([';', '|', '&', ')']);
     let third = tokens
         .get(tool_index + 2)
         .copied()
         .unwrap_or_default()
-        .trim_end_matches([';', '|', '&']);
+        .trim_end_matches([';', '|', '&', ')']);
     match head {
         "podman" => {
             match sub {
