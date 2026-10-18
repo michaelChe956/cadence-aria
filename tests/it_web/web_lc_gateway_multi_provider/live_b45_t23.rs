@@ -144,15 +144,32 @@ fn b45_t23_assert_role_coverage(
             );
         }
     }
-    // Plan 双入口分列(Direct/LC:streaming 主入口与 split_sync 同步桥)。
+    // Plan 双入口分列(Direct/LC:streaming 主入口与 split_sync 同步桥):
+    // full_chain 轮每入口必须有 confirmed 格;resume 轮校验承继引用形态
+    //(carried + 来源轮快照链 + 非空 run_ref),不以格存在冒充。
     for entrypoint in [
         ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT,
         ENTRYPOINT_SPLIT_SYNC,
     ] {
-        assert!(
-            matrix.cells().iter().any(|cell| cell.entrypoint == entrypoint),
-            "M1 Author(plan)缺 {entrypoint} 入口证据(双栈分列,不以单入口冒充)"
-        );
+        if resume_round {
+            assert!(
+                matrix.cells().iter().any(|cell| {
+                    cell.entrypoint == entrypoint
+                        && cell.capability_state == "carried"
+                        && cell.execution_origin.starts_with("carried:")
+                        && !cell.run_ref.trim().is_empty()
+                }),
+                "M1 Author(plan)缺 {entrypoint} 承继格引用(来源轮证据链)"
+            );
+        } else {
+            assert!(
+                matrix.cells().iter().any(|cell| {
+                    cell.entrypoint == entrypoint && cell.capability_state == "confirmed"
+                }),
+                "M1 Author(plan)缺 {entrypoint} confirmed 入口证据\
+                 (双栈分列,不以格存在冒充)"
+            );
+        }
     }
     // M2 Coder / M3 Reviewer:真实执行轮必须有 confirmed 格。
     assert!(
@@ -192,13 +209,14 @@ fn b45_t23_assert_role_coverage(
         );
     }
 
-    // M4 group/repair:边界段 coding 正向(受控 commit+正向宿主写)、
-    // D4 前后快照格。
     let boundary_refs: Vec<&str> = boundary
         .cells()
         .iter()
         .map(|cell| cell.run_ref.as_str())
         .collect();
+    // M4 group/repair:边界段 coding 正向(受控 commit+正向宿主写)、
+    // 受控写保护面与 D4 前后快照——逐格按状态断言 confirmed(受控写
+    // 双拒/D4 无漂移),不以格存在冒充。
     assert!(
         boundary
             .cells()
@@ -206,27 +224,51 @@ fn b45_t23_assert_role_coverage(
             .any(|cell| cell.stage == "coding" && cell.capability_state == "confirmed"),
         "M4 group/repair:边界矩阵缺 coding 正向 confirmed 格"
     );
-    assert!(
-        boundary_refs.iter().any(|r#ref| r#ref.contains("d4")),
-        "M4 group/repair:缺 D4 前后快照格({:?})",
-        boundary_refs
-    );
+    for (label, prefix) in [
+        ("受控写保护面", "t11-boundary-protected-writes-"),
+        ("D4 前后快照", "t11-boundary-d4-"),
+    ] {
+        let cell = boundary
+            .cells()
+            .iter()
+            .find(|cell| cell.run_ref.starts_with(prefix))
+            .unwrap_or_else(|| panic!("M4 group/repair:缺 {label}格({prefix}*)"));
+        assert_eq!(
+            cell.capability_state, "confirmed",
+            "M4 group/repair:{label}格必须 confirmed(受控写双拒/D4 无漂移);\
+             denied_reason={:?}",
+            cell.denied_reason
+        );
+    }
     // M5 失败关闭:17 固定负向场景逐格(boundary_matrix_evidence_flags 的
-    // failure_scenario;真实零 spawn 三面证明由 harness 场景体与现场断言
-    // 承担,此处结构面要求场景格计数与固定场景清单一致)。
-    let failure_cells = boundary
+    // failure_scenario);计数对齐固定清单且逐格否定"未被真实拒绝"形态
+    //(真实零 spawn 三面证明由 harness 场景体与现场断言承担)。
+    let expected_failures = super::failure_matrix::FIXED_FAILURE_SCENARIOS.len();
+    let failure_cells: Vec<&EvidenceCell> = boundary
         .cells()
         .iter()
         .filter(|cell| {
             cell.boundary_matrix_evidence_flags()
                 .is_some_and(|flags| flags.contains_key("failure_scenario"))
         })
-        .count();
-    let expected_failures = super::failure_matrix::FIXED_FAILURE_SCENARIOS.len();
+        .collect();
     assert_eq!(
-        failure_cells, expected_failures,
-        "M5 失败关闭:负向场景格数({failure_cells})必须等于固定清单({expected_failures}),不删格"
+        failure_cells.len(),
+        expected_failures,
+        "M5 失败关闭:负向场景格数({})必须等于固定清单({expected_failures}),不删格",
+        failure_cells.len()
     );
+    for cell in &failure_cells {
+        assert!(
+            !cell.denied_reason
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("零 spawn 被拒验证失败"),
+            "M5 失败关闭:场景 {} 未被真实拒绝({:?})",
+            cell.run_ref,
+            cell.denied_reason
+        );
+    }
 
     json!({
         "provider": format!("{provider:?}"),
@@ -248,7 +290,7 @@ fn b45_t23_assert_role_coverage(
             "m2_coder": ["coding"],
             "m3_reviewer": ["review"],
             "m4_group_repair": boundary_refs,
-            "m5_fail_closed": format!("{failure_cells} scenarios"),
+            "m5_fail_closed": format!("{} scenarios", failure_cells.len()),
             "m6_codex_danger": "b45_live_codex_danger_apply_patch",
             "m7_lifecycle": if resume_round { "resume(same native id)" } else { "fresh(spawn counting)" },
         },
@@ -723,15 +765,17 @@ async fn b45_live_codex_danger_apply_patch() {
         "never 档出现审批请求({:?})——approvalPolicy=never 映射失真",
         never.permission_requests
     );
-    // 场景 B:fileChange 可观测性——apply_patch 生效(diff 变更)或事件流
-    // 有工具/执行活动;两者皆无=事件不可观测,该版本机制未通过。
-    let never_observable = never_diff == PATCH_TARGET_AFTER
-        || never.executions > 0
-        || !never.event_log.is_empty();
+    // 场景 B:fileChange 可观测性——apply_patch 必须真实执行并生效:diff
+    // 变更且事件流有工具/执行活动;仅"有事件"不构成 apply_patch 生效
+    // 证据(文本输出恒有事件,不可证伪)。
+    let never_observable = never_diff == PATCH_TARGET_AFTER && never.executions > 0;
     assert!(
         never_observable,
-        "never 档 apply_patch 完全不可观测(无 diff、无事件)——该 CLI 版本\
-         ({version})机制未通过"
+        "never 档 apply_patch 未真实执行生效(diff={}==after? {}, executions={})\
+         ——该 CLI 版本({version})机制未通过",
+        never_diff.trim_end(),
+        never_diff == PATCH_TARGET_AFTER,
+        never.executions
     );
     // 场景 B:非纪律会话不中断(终态完成;若 Failed 如实记录,由判读面
     // 裁决,此处要求事件事实完整落盘——已由 evidence 落盘承载)。
