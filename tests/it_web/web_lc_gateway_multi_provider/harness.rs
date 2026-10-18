@@ -10322,7 +10322,10 @@ return \"b45-host-check\"; }}。工作项验证命令(verification commands)是�
 (4) npm-build: cd fixtures/npm-fixture && npm run build ;\
 (5) podman-build: cd fixtures/podman-fixture && podman build -t aria-t22-check . ;\
 (6) podman-run: podman run --rm aria-t22-check 。\
-六条验证命令都必须由 Coder 自己在 CHECK 阶段真实执行并在完成报告记录退出码与测试数量。"
+六条验证命令都必须由 Coder 自己在 CHECK 阶段真实执行并在完成报告记录退出码与测试数量。\
+证据落盘要求:每条命令执行时把完整输出(含计数行,如 Maven 的 \"Tests run:\" 行、\
+npm 的 passed/failed 计数行、各命令的 EXIT 提示行)追加写入仓库根目录文件 \
+CHECK-EVIDENCE.log(可经 tee -a 或重定向后 cat 追加;该文件随工作区提交)。"
     )
 }
 
@@ -10944,11 +10947,20 @@ CMD ["sh", "-c", "cat /tmp/run-marker.txt && echo T22 podman run ok"]
             None,
             60,
         );
+        // r67(T22 r5 现场):遗留判定按容器名,不按镜像——宿主上同镜像的
+        // 无关常驻容器(r5 实拍 test-busi/test-gateway,maven:3.9 镜像
+        // Up 2 days)不是 b45 fixture 遗留。b45 的 fixture 容器:具名
+        // aria-t22-check(--rm 自清);maven CHECK 经 podman run --rm 匿名
+        // 自清——名字面只认 aria-t22-check。
         let lingering: Vec<String> = podman_ps["stdout"]
             .as_str()
             .unwrap_or_default()
             .lines()
-            .filter(|line| line.contains("aria-t22-check") || line.contains(B45_MAVEN_IMAGE))
+            .filter(|line| {
+                line.split('|')
+                    .next()
+                    .is_some_and(|name| name.trim() == "aria-t22-check")
+            })
             .map(str::to_string)
             .collect();
         let attempt_state = self.b45_attempt_state(attempt_id).await;
@@ -11104,10 +11116,47 @@ impl LiveLcGatewayHarness {
                 observation.role = CODING_EXECUTOR_ROLE.to_string();
                 observation.workspace_session_id = attempt_id.clone();
                 let drive = env.drive_coding_attempt_ws(&attempt_id, &mut observation).await;
+                // r67(T22 r5 现场):b45 未回填产物判据——drive 已到终门
+                // (artifact_confirmed=true)而 cell 以缺产物误判 denied(coder
+                // 职责终态随之缺)。与五阶段矩阵 run_coding_stage 同口径回填。
+                observation.completed_product_artifact_exists = drive.artifact_confirmed;
                 let verification = env.b45_verification_evidence(&attempt_id).await;
                 let role_run_rows = env.b45_role_run_rows(&attempt_id);
                 let approvals = env.b45_approval_decisions(&attempt_id);
                 let attempt_state = env.b45_attempt_state(&attempt_id).await;
+                // r67:CHECK-EVIDENCE.log 捕获(issue 描述钉定的证据落盘面,
+                // coder 在 attempt worktree 仓库根写入;测试计数解析源)。
+                // 叠加 coder 自建的重定向日志目录 /tmp/t22-checks/(terminal
+                // 在宿主执行,r5 实拍该目录在盘)——两源任一含计数行即可解析。
+                let mut check_evidence_log = attempt_state
+                    .pointer("/body/attempt/worktree_path")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+                    .map(|worktree| {
+                        std::fs::read_to_string(worktree.join("CHECK-EVIDENCE.log"))
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                if let Ok(entries) = std::fs::read_dir("/tmp/t22-checks") {
+                    let mut logs: Vec<_> = entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .filter(|path| {
+                            path.extension()
+                                .is_some_and(|extension| extension == "log")
+                                && path
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .is_some_and(|name| name.starts_with("CHECK-"))
+                        })
+                        .collect();
+                    logs.sort();
+                    for log in logs {
+                        check_evidence_log
+                            .push_str(&std::fs::read_to_string(&log).unwrap_or_default());
+                        check_evidence_log.push('\n');
+                    }
+                }
                 let cell = observation.build_cell(&env);
                 coding_main = json!({
                     "attempt_id": attempt_id,
@@ -11124,6 +11173,7 @@ impl LiveLcGatewayHarness {
                     "native_session_id": cell.native_session_id,
                     "argv": cell.argv,
                     "verification_evidence": verification,
+                    "check_evidence_log": check_evidence_log,
                     "role_run_rows": role_run_rows,
                     "approval_decisions": approvals,
                     "attempt_state": attempt_state,

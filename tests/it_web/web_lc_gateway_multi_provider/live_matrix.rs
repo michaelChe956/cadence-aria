@@ -1224,6 +1224,120 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
             resource_ids: Vec::new(),
         });
     }
+    // r67(T22 r5 现场):verification-command-evidence 端点面向 triage 窗口
+    //(active unit 在 waiting_for_human 已 completed→422 plan_revision_
+    // unresolvable,r5 实拍),端点空/失败时以 role_run_rows 的 kimi_terminal_
+    // Started/Completed 审计对构建工具格——同为产品 durable 审计(命令/退出
+    // 码/生命周期),测试计数从 issue 钉定的 CHECK-EVIDENCE.log 落盘面解析。
+    if tools.is_empty() {
+        let check_log = run
+            .pointer("/coding_main/check_evidence_log")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let maven_count = check_log
+            .lines()
+            .filter_map(|line| {
+                let rest = line.split("Tests run:").nth(1)?;
+                rest.split(',')
+                    .next()
+                    .and_then(|count| count.trim().parse::<u64>().ok())
+            })
+            .max();
+        let npm_count = check_log
+            .lines()
+            .filter_map(|line| {
+                let rest = line.split("passed").next()?;
+                rest.trim()
+                    .rsplit(|ch: char| !ch.is_ascii_digit())
+                    .next()
+                    .and_then(|count| count.parse::<u64>().ok())
+            })
+            .filter(|count| *count > 0)
+            .max();
+        // 同一 terminal(事件 id)的 Started 携带命令、Completed 携带退出码:
+        // 按 id 配对后分类建格(同 facet 首条为准,后续复跑只并入生命周期)。
+        let mut exits: std::collections::BTreeMap<String, Option<i64>> =
+            std::collections::BTreeMap::new();
+        for row in &lifecycle_rows {
+            let Some(payload) = row.get("payload") else { continue };
+            let Some(event_id) = payload.get("event_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if !event_id.starts_with("kimi_terminal_") {
+                continue;
+            }
+            if matches!(
+                payload.get("status").and_then(Value::as_str),
+                Some("Completed") | Some("Failed") | Some("Aborted")
+            ) {
+                exits.insert(
+                    event_id.to_string(),
+                    payload.get("exit_code").and_then(Value::as_i64),
+                );
+            }
+        }
+        for row in &lifecycle_rows {
+            let Some(payload) = row.get("payload") else { continue };
+            if payload.get("status").and_then(Value::as_str) != Some("Started") {
+                continue;
+            }
+            let Some(event_id) = payload.get("event_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(command) = payload.get("command").and_then(Value::as_str) else {
+                continue;
+            };
+            let (tool, facet) = b45_classify_command(command);
+            if tool.is_empty() || facet == "version" {
+                continue;
+            }
+            let is_test_facet =
+                (tool == "maven" && facet == "test") || (tool == "npm" && facet == "test");
+            let lifecycle = b45_terminal_lifecycle_for(&lifecycle_rows, command);
+            if let Some(existing) = tools
+                .iter()
+                .position(|record| record.tool == tool && record.facet == facet)
+            {
+                tools[existing].terminal_lifecycle.extend(lifecycle);
+                continue;
+            }
+            let cwd = command
+                .split("cd ")
+                .nth(1)
+                .and_then(|rest| rest.trim().trim_start_matches('\'').split('\'').next())
+                .unwrap_or_default()
+                .to_string();
+            let test_count = if is_test_facet {
+                if tool == "maven" {
+                    maven_count
+                } else {
+                    npm_count
+                }
+            } else {
+                None
+            };
+            tools.push(B45ToolRecord {
+                exact_version: version_of(&tool),
+                tool,
+                facet,
+                planned_command: String::new(),
+                actual_command: command.to_string(),
+                argv: command
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+                cwd,
+                exit_code: exits
+                    .get(event_id)
+                    .and_then(|code| *code)
+                    .map(|code| code as i32),
+                test_count,
+                output_excerpt: String::new(),
+                terminal_lifecycle: lifecycle,
+                resource_ids: Vec::new(),
+            });
+        }
+    }
     // 资源(T5 登记)附到工具格:aria.scope_id/run_id 标签的资源清单。
     let resource_ids = run
         .pointer("/provider_resources")
@@ -1434,10 +1548,16 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
 /// 命令族分类(podman/npm/maven + facet)。
 fn b45_classify_command(command: &str) -> (String, String) {
     let tokens: Vec<&str> = command.split_whitespace().collect();
-    let head = tokens.first().copied().unwrap_or_default();
+    // 首 token 是 /bin/bash;取首个工具 token(podman/npm/mvn)按其子命令分类。
+    let tool_index = tokens
+        .iter()
+        .position(|token| matches!(*token, "podman" | "npm" | "mvn"))
+        .unwrap_or(0);
+    let head = tokens.get(tool_index).copied().unwrap_or_default();
+    let sub = tokens.get(tool_index + 1).copied().unwrap_or_default();
+    let third = tokens.get(tool_index + 2).copied().unwrap_or_default();
     match head {
         "podman" => {
-            let sub = tokens.get(1).copied().unwrap_or_default();
             match sub {
                 "build" => ("podman".to_string(), "build".to_string()),
                 "run" => {
@@ -1452,11 +1572,10 @@ fn b45_classify_command(command: &str) -> (String, String) {
             }
         }
         "npm" => {
-            let sub = tokens.get(1).copied().unwrap_or_default();
             let facet = match sub {
                 "ci" => "ci",
                 "test" => "test",
-                "run" if tokens.get(2) == Some(&"build") => "build",
+                "run" if third == "build" => "build",
                 other => other,
             };
             ("npm".to_string(), facet.to_string())
