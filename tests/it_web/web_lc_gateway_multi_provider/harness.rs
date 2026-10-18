@@ -5444,7 +5444,15 @@ impl MatrixEnvironment {
                     break;
                 }
                 let failure_text = observation.run_failure.clone().unwrap_or_default();
-                if recovery_actions_left > 0 && plan_confirm_failure_is_recoverable(&failure_text) {
+                // r68(T22 r6 现场):机械校验失败族(SINGLE_CANDIDATE_APPROVAL_
+                // COMPILE_FAILED 且 cause 含 MechanicalValidationFailed)不走
+                // compile recovery——该族无活动 recovery 节点,r5/r6 实拍
+                // INVALID_COMPILE_RECOVERY_ACTION 白白一轮且覆盖失败文本。
+                let mechanical_failure = plan_confirm_failure_is_mechanical(&observation);
+                if !mechanical_failure
+                    && recovery_actions_left > 0
+                    && plan_confirm_failure_is_recoverable(&failure_text)
+                {
                     recovery_actions_left -= 1;
                     observation.run_failure = None;
                     fp(
@@ -5464,8 +5472,9 @@ impl MatrixEnvironment {
                 break;
             }
             // r66:机械校验失败族→门上返修轮(feedback 携 findings 原文)。
-            let failure_text = observation.run_failure.clone().unwrap_or_default();
-            if mechanical_rounds_left > 0 && failure_text.contains("MechanicalValidationFailed") {
+            // r68:判定扫事件帧——run_failure 可能已被后续 INVALID 错误覆盖
+            //(r6 实拍:recovery 白轮的 INVALID 文本覆盖机械文本致不触发)。
+            if mechanical_rounds_left > 0 && plan_confirm_failure_is_mechanical(&observation) {
                 if let Some(findings_feedback) =
                     self.plan_mechanical_findings_feedback(session_id, &observation)
                 {
@@ -7202,6 +7211,19 @@ fn find_requirement_token(text: &str) -> Option<(String, &str)> {
 /// continue 可续跑编译游标)。纯函数可单测。
 fn plan_confirm_failure_is_recoverable(failure_text: &str) -> bool {
     failure_text.contains("single-candidate approval compile failed")
+}
+
+/// r68(T22 r5/r6 现场):confirm 失败是否机械校验族——扫事件帧找
+/// SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED 且 cause 含 MechanicalValidation-
+/// Failed(不依赖 run_failure 文本:recovery 白轮的 INVALID 错误会覆盖它)。
+fn plan_confirm_failure_is_mechanical(observation: &StageObservation) -> bool {
+    observation.events.iter().rev().any(|event| {
+        event.get("code").and_then(Value::as_str) == Some("SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED")
+            && event
+                .pointer("/cause")
+                .and_then(Value::as_str)
+                .is_some_and(|cause| cause.contains("MechanicalValidationFailed"))
+    })
 }
 
 /// r27 问题1:帧是否携带非空产物 markdown(artifact_update 的 payload,或
