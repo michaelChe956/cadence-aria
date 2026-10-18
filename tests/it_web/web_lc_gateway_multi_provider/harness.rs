@@ -5239,6 +5239,79 @@ impl MatrixEnvironment {
         cells
     }
 
+    /// r66(T22 r4 现场):机械校验返修轮的反馈构造——从 observation 捕获的
+    /// SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED 帧取 mechanical_report_ref,
+    /// 经 WorkItemPlanSourceStore 读 findings 原文(取不到 ref/读取失败返回
+    /// None,调用侧不进返修轮,失败如实落格)。
+    fn plan_mechanical_findings_feedback(
+        &self,
+        session_id: &str,
+        observation: &StageObservation,
+    ) -> Option<String> {
+        let report_ref = observation
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| {
+                event
+                    .pointer("/context/mechanical_report_ref")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })?;
+        if self.plan_id.is_empty() {
+            fp(
+                "plan_sc_mechanical_findings_unavailable",
+                format_args!("session={session_id} report={report_ref} cause=plan_id_missing"),
+            );
+            return None;
+        }
+        let scope = cadence_aria::product::work_item_plan_source_store::SourceStoreScope {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: self.issue_id.clone(),
+            plan_id: self.plan_id.clone(),
+        };
+        let report = match cadence_aria::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
+            self.app_paths.clone(),
+        )
+        .get_mechanical_report(&scope, &report_ref)
+        {
+            Ok(record) => record.report,
+            Err(error) => {
+                fp(
+                    "plan_sc_mechanical_findings_unavailable",
+                    format_args!("session={session_id} report={report_ref} error={error:?}"),
+                );
+                return None;
+            }
+        };
+        if report.findings.is_empty() {
+            return None;
+        }
+        let findings = report
+            .findings
+            .iter()
+            .map(|finding| {
+                format!(
+                    "- [{}] {}: {} (work_items={:?})",
+                    finding.severity.as_str(),
+                    finding.code,
+                    finding.message,
+                    finding.work_item_ids
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fp(
+            "plan_sc_mechanical_findings_loaded",
+            format_args!("session={session_id} findings={}", report.findings.len()),
+        );
+        Some(format!(
+            "矩阵 plan resume(机械校验返修轮):上一版候选未通过产品机械校验。\
+             必须修订拆分方案,消除以下全部 findings(尤其 Error 级;不得引入新的\
+             编号或范围外变更):\n{findings}"
+        ))
+    }
+
     /// r26 问题2:SC plan 会话的门上修订重驱。SC human_confirm 门的消息集是
     /// typed 三命令:request_revision 不放行(r25 现场
     /// WORK_ITEM_PLAN_HUMAN_GATE_STAGE_INVALID)。修订入口 =
@@ -5285,41 +5358,52 @@ impl MatrixEnvironment {
                  引用它们(不得编造新编号,多余引用一律删除或改为下列编号):\n{requirement_digest}"
             )
         };
-        let feedback = json!({
+        let mut feedback_text = feedback_text;
+        // r66(T22 r4 现场):机械校验失败的有界返修轮——confirm 撞
+        // SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED 且 cause 含
+        // MechanicalValidationFailed 时,产品语义=门保持开(human_confirm),
+        // 期望人工再修订消除 Error 级 findings(manual_repairs 预算 3);
+        // compile_recovery_action 对该族不适用(r4 实拍 INVALID_COMPILE_
+        // RECOVERY_ACTION)。返修反馈携带 store 读取的机械 findings 原文,
+        // 有界 2 轮,失败如实落格。
+        let mut mechanical_rounds_left = 2usize;
+        let mut confirmed = false;
+        let mut feedback_command = json!({
             "type": "human_gate_feedback",
             "command_id": "lcg-matrix-plan-revision",
             "feedback": feedback_text,
         });
-        if let Err(error) = ws.send_json(&feedback).await {
-            observation.push_event(json!({"type": "matrix_error", "message": error}));
-            observation.run_failure = Some(format!("human_gate_feedback 发送失败:{error}"));
-            return observation.build_cell(self);
-        }
-        let revision_outcome = self
-            .pump_plan_sc_phase(
-                &mut ws,
-                &mut observation,
-                PlanScPumpPhase::AwaitRevisionComplete,
-            )
-            .await;
-        // r65:修订收束形态分叉——DoneGateOpen=门重开帧即收束帧(无结构
-        // grant 流不发 human_gate_turn_completed),门等相位已被满足,跳过;
-        // Done=turn 完成帧收束,门等相位照常泵(门开后才发 confirm)。
-        let gate_open = match revision_outcome {
-            PlanScPumpOutcome::Failed => return observation.build_cell(self),
-            PlanScPumpOutcome::DoneGateOpen => true,
-            PlanScPumpOutcome::Done => {
-                matches!(
-                    self.pump_plan_sc_phase(
-                        &mut ws,
-                        &mut observation,
-                        PlanScPumpPhase::AwaitConfirmGate,
-                    )
-                    .await,
-                    PlanScPumpOutcome::Done | PlanScPumpOutcome::DoneGateOpen
-                )
+        loop {
+            if let Err(error) = ws.send_json(&feedback_command).await {
+                observation.push_event(json!({"type": "matrix_error", "message": error}));
+                observation.run_failure = Some(format!("human_gate_feedback 发送失败:{error}"));
+                return observation.build_cell(self);
             }
-        };
+            let revision_outcome = self
+                .pump_plan_sc_phase(
+                    &mut ws,
+                    &mut observation,
+                    PlanScPumpPhase::AwaitRevisionComplete,
+                )
+                .await;
+            // r65:修订收束形态分叉——DoneGateOpen=门重开帧即收束帧(无结构
+            // grant 流不发 human_gate_turn_completed),门等相位已被满足,跳过;
+            // Done=turn 完成帧收束,门等相位照常泵(门开后才发 confirm)。
+            let gate_open = match revision_outcome {
+                PlanScPumpOutcome::Failed => break,
+                PlanScPumpOutcome::DoneGateOpen => true,
+                PlanScPumpOutcome::Done => {
+                    matches!(
+                        self.pump_plan_sc_phase(
+                            &mut ws,
+                            &mut observation,
+                            PlanScPumpPhase::AwaitConfirmGate,
+                        )
+                        .await,
+                        PlanScPumpOutcome::Done | PlanScPumpOutcome::DoneGateOpen
+                    )
+                }
+            };
         // ---- 阶段 2(r58 根修):等 SC 门重开(stage_change human_confirm)
         // 才发 confirm。修订回门 ≠ 门开:产品合法走复评/修复循环(r58 现场
         // reviewer 判修订版仍有缺陷→repairs_used=1/1 自动返修→再复评,全程
@@ -5329,50 +5413,76 @@ impl MatrixEnvironment {
         // MESSAGE_FOR_STAGE: confirm not allowed in stage cross_review)。
         // 门帧驱动:期间 choice 语义应答/心跳照常,确定终态秒收口,阶段
         // 超时兜底(有界,不空转)。
-        if !gate_open {
-            return observation.build_cell(self);
-        }
+            if !gate_open {
+                break;
+            }
         // ---- 阶段 3:typed confirm → 泵至终态(stage completed/confirmed)。
         // r34:v1.1 缺陷 #12 同族——首拍 approve 可撞 Final Compile
         // recovery_required(「single-candidate approval compile failed; human
         // gate remains open」)。按 v1.1 §5.1 先例续跑:发 WS
         // work_item_plan_compile_recovery_action: continue 步进编译游标,
         // 直至终态或真失败(有界 2 次;非该族失败不重试)。
-        let mut recovery_actions_left = 2usize;
-        let mut confirm_command = json!({"type": "confirm"});
-        let mut confirmed = false;
-        loop {
+            let mut recovery_actions_left = 2usize;
+            let mut confirm_command = json!({"type": "confirm"});
+            loop {
             if let Err(error) = ws.send_json(&confirm_command).await {
                 observation.push_event(json!({"type": "matrix_error", "message": error}));
                 observation.run_failure = Some(format!("typed confirm 发送失败:{error}"));
                 return observation.build_cell(self);
             }
-            confirmed = matches!(
-                self.pump_plan_sc_phase(
-                    &mut ws,
-                    &mut observation,
-                    PlanScPumpPhase::AwaitConfirmTerminal,
-                )
-                .await,
-                PlanScPumpOutcome::Done | PlanScPumpOutcome::DoneGateOpen
-            );
+                let round_confirmed = matches!(
+                    self.pump_plan_sc_phase(
+                        &mut ws,
+                        &mut observation,
+                        PlanScPumpPhase::AwaitConfirmTerminal,
+                    )
+                    .await,
+                    PlanScPumpOutcome::Done | PlanScPumpOutcome::DoneGateOpen
+                );
+                if round_confirmed {
+                    confirmed = true;
+                    break;
+                }
+                let failure_text = observation.run_failure.clone().unwrap_or_default();
+                if recovery_actions_left > 0 && plan_confirm_failure_is_recoverable(&failure_text) {
+                    recovery_actions_left -= 1;
+                    observation.run_failure = None;
+                    fp(
+                        "plan_sc_compile_recovery_continue",
+                        format_args!("left={}", recovery_actions_left + 1),
+                    );
+                    confirm_command = json!({
+                        "type": "work_item_plan_compile_recovery_action",
+                        "action": "continue",
+                        "reason": "lcg-matrix: 续跑 Final Compile(v1.1 缺陷 #12 先例)",
+                    });
+                    continue;
+                }
+                break;
+            }
             if confirmed {
                 break;
             }
+            // r66:机械校验失败族→门上返修轮(feedback 携 findings 原文)。
             let failure_text = observation.run_failure.clone().unwrap_or_default();
-            if recovery_actions_left > 0 && plan_confirm_failure_is_recoverable(&failure_text) {
-                recovery_actions_left -= 1;
-                observation.run_failure = None;
-                fp(
-                    "plan_sc_compile_recovery_continue",
-                    format_args!("left={}", recovery_actions_left + 1),
-                );
-                confirm_command = json!({
-                    "type": "work_item_plan_compile_recovery_action",
-                    "action": "continue",
-                    "reason": "lcg-matrix: 续跑 Final Compile(v1.1 缺陷 #12 先例)",
-                });
-                continue;
+            if mechanical_rounds_left > 0 && failure_text.contains("MechanicalValidationFailed") {
+                if let Some(findings_feedback) =
+                    self.plan_mechanical_findings_feedback(session_id, &observation)
+                {
+                    mechanical_rounds_left -= 1;
+                    observation.run_failure = None;
+                    feedback_text = findings_feedback;
+                    feedback_command = json!({
+                        "type": "human_gate_feedback",
+                        "command_id": "lcg-matrix-plan-revision",
+                        "feedback": feedback_text,
+                    });
+                    fp(
+                        "plan_sc_mechanical_revision_round",
+                        format_args!("left={}", mechanical_rounds_left + 1),
+                    );
+                    continue;
+                }
             }
             break;
         }
