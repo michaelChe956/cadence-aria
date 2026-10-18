@@ -480,7 +480,7 @@ impl EvidenceCell {
     /// Task 11 边界矩阵证据 flag:组装层经 `provider_events` 携带的
     /// `boundary_matrix_evidence` 事件(failure_scenario/受控写/保护面拒绝/
     /// D4 无漂移等逐格 flag)合并进 cell.json 顶层,首见为准。
-    fn boundary_matrix_evidence_flags(&self) -> Option<serde_json::Map<String, Value>> {
+    pub(crate) fn boundary_matrix_evidence_flags(&self) -> Option<serde_json::Map<String, Value>> {
         let mut merged = serde_json::Map::new();
         for event in &self.provider_events {
             let Some(payload) = event.get("event").and_then(Value::as_object) else {
