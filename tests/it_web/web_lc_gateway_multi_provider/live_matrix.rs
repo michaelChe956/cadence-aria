@@ -1114,6 +1114,59 @@ fn b45_npm_count_requires_passed_marker() {
     assert_eq!(npm_test.test_count, Some(2), "计数必须来自含 passed 的行(2),不得吞 TOTAL_LINES=144");
 }
 
+/// r19(T22 r18/r19 现场回归):coder 以 `cmd='…'` / `run_check ID '…'` 转发
+/// 载荷执行——三 npm 格必须建格,maven/test、podman/build、podman/run 的
+/// cwd 必须落到各自夹具目录(复合命令按 facet 取前缀,不得共用末尾 cd)。
+#[test]
+fn b45_evidence_recovers_subshell_and_mount_fixture_cwd() {
+    let maven_command = "/bin/bash -c cd '/tmp/outer' && cd /tmp/outer/alpha/.worktrees/aria-issues/issue_0001 && cmd='cd fixtures/maven-fixture && podman run --rm -v /tmp/aria-bug45/t22/m2-repo:/root/.m2 -v \"$PWD\":/workspace -w /workspace maven:3.9-eclipse-temurin-17 mvn -B test'; out=$(mktemp); bash -c \"$cmd\" >\"$out\" 2>&1; rc=$?; printf '===== CHECK-001 =====\\n' >> CHECK-EVIDENCE.log; cat \"$out\" >> CHECK-EVIDENCE.log; printf 'EXIT: %s\\n' \"$rc\" >> CHECK-EVIDENCE.log; echo \"CHECK-001 rc=$rc\"";
+    let combined_command = "/bin/bash -c cd '/tmp/outer' && cd /tmp/outer/alpha/.worktrees/aria-issues/issue_0001 && run_check() { id=\"$1\"; cmd=\"$2\"; out=$(mktemp); bash -c \"$cmd\" >\"$out\" 2>&1; rc=$?; cat \"$out\" >> CHECK-EVIDENCE.log; echo \"$id rc=$rc\"; }; run_check CHECK-002 'cd fixtures/npm-fixture && npm ci'; run_check CHECK-003 'cd fixtures/npm-fixture && npm test'; run_check CHECK-004 'cd fixtures/npm-fixture && npm run build'; run_check CHECK-005 'cd fixtures/podman-fixture && podman build -t aria-t22-check \"$PWD\"'; run_check CHECK-006 'cd fixtures/podman-fixture && podman run --rm aria-t22-check'";
+    let run = json!({
+        "coding_main": {
+            "role_run_rows": [
+                {"role": "coder", "role_run_id": "r1", "created_at": "2026-10-18T09:00:00Z", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-1", "status": "Started", "cwd": "/tmp/outer/alpha/.worktrees/aria-issues/issue_0001", "command": maven_command}},
+                {"role": "coder", "role_run_id": "r1", "created_at": "2026-10-18T09:02:00Z", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-1", "status": "Completed", "exit_code": 0}},
+                {"role": "coder", "role_run_id": "r1", "created_at": "2026-10-18T09:03:00Z", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-2", "status": "Started", "cwd": "/tmp/outer/alpha/.worktrees/aria-issues/issue_0001", "command": combined_command}},
+                {"role": "coder", "role_run_id": "r1", "created_at": "2026-10-18T09:05:00Z", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-2", "status": "Completed", "exit_code": 0}},
+                {"role": "coder", "role_run_id": "r1", "created_at": "2026-10-18T09:05:30Z", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-3", "status": "Started", "cwd": "/tmp/outer", "command": "npm -v; podman --version; mvn -v"}},
+                {"role": "coder", "role_run_id": "r1", "created_at": "2026-10-18T09:05:31Z", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-3", "status": "Completed", "exit_code": 0}},
+            ],
+            "verification_evidence": {"status": 422, "body": {}},
+            "check_evidence_log": "Tests run: 2, Failures: 0, Errors: 0, Skipped: 0\n2 passed, 0 failed\n",
+        },
+        "fixtures": {"versions": {"maven_container": {"stdout": "Apache Maven 3.9.16\n"}, "npm": {"stdout": "11.13.0\n"}, "podman": {"stdout": "6.1.1\n"}}},
+    });
+    let evidence = b45_evidence_from_run(&run);
+    for facet in ["ci", "test", "build"] {
+        let npm = evidence
+            .tools
+            .iter()
+            .find(|record| record.tool == "npm" && record.facet == facet)
+            .unwrap_or_else(|| panic!("npm {facet} 必须建格"));
+        assert_eq!(
+            npm.cwd, "/tmp/outer/alpha/.worktrees/aria-issues/issue_0001/fixtures/npm-fixture",
+            "npm {facet} cwd 必须绝对化到夹具目录"
+        );
+    }
+    for (tool, facet, expected) in [
+        ("maven", "test", "/tmp/outer/alpha/.worktrees/aria-issues/issue_0001/fixtures/maven-fixture"),
+        ("podman", "build", "/tmp/outer/alpha/.worktrees/aria-issues/issue_0001/fixtures/podman-fixture"),
+        ("podman", "run", "/tmp/outer/alpha/.worktrees/aria-issues/issue_0001/fixtures/podman-fixture"),
+    ] {
+        let record = evidence
+            .tools
+            .iter()
+            .find(|record| record.tool == tool && record.facet == facet)
+            .unwrap_or_else(|| panic!("{tool}/{facet} 必须建格"));
+        assert_eq!(record.cwd, expected, "{tool}/{facet} cwd");
+    }
+    assert!(
+        !evidence.tools.iter().any(|record| record.facet.starts_with('-')),
+        "版本探针不得建出 -v/--version 且: {:?}",
+        evidence.tools.iter().map(|record| format!("{}/{}", record.tool, record.facet)).collect::<Vec<_>>()
+    );
+}
+
 /// r74-F4(T22 审查):cwd 取最后一个 cd 的目标段——外层聚合根 cd 遮蔽
 /// 内层 fixture cd 的失真取法(r17 实证)必须修正;validator 侧
 /// fixture 段规则由 b45_host_check_validator 的 cwd 校验承载。
@@ -1130,6 +1183,106 @@ fn b45_command_cwd_takes_last_cd_segment() {
         "无引号 cd 形态"
     );
     assert_eq!(b45_command_cwd("podman run --rm aria-t22-check"), "", "无 cd 为空");
+}
+
+/// r18 实证形态:npm 在子壳 `(cd fixtures/npm-fixture && npm ci)` 内执行,
+/// sub token 带 `);` 尾缀(旧口径误判 facet `ci)` → 三格全缺)。
+#[test]
+fn b45_command_facets_normalizes_subshell_suffix() {
+    assert_eq!(
+        b45_command_facets("/bin/bash -c cd '/tmp/outer' && cd /tmp/outer/alpha/.worktrees/aria-issues/issue_0001 && { (cd fixtures/npm-fixture && npm ci); echo \"EXIT_CODE=$?\"; } 2>&1 | tee /tmp/aria-b45-evidence/CHECK-002.out"),
+        vec![("npm".to_string(), "ci".to_string())],
+        "子壳尾括号归一后必须识别 npm ci"
+    );
+    assert_eq!(
+        b45_command_facets("/bin/bash -c cd '/tmp/outer' && cd /tmp/outer/alpha/.worktrees/aria-issues/issue_0001 && { (cd fixtures/npm-fixture && npm run build); echo \"EXIT_CODE=$?\"; } 2>&1 | tee /tmp/x.out"),
+        vec![("npm".to_string(), "build".to_string())],
+        "子壳内 npm run build"
+    );
+}
+
+/// r19(T22 r18 现场):kimi 偏离钉定形态——maven/podman 从 issue 根以
+/// `-v 夹具:/workspace -w /workspace` / `podman build 夹具` 执行,cd 目标
+/// 止于 issue 根;cwd 必须取命令中最后的夹具路径 token(挂载宿主源/
+/// 构建上下文),不得留外层聚合根。
+#[test]
+fn b45_command_cwd_recovers_fixture_from_mount_and_build_context() {
+    assert_eq!(
+        b45_command_cwd("/bin/bash -c cd '/tmp/outer' && cd /tmp/outer/alpha/.worktrees/aria-issues/issue_0001 && podman run --rm -v /tmp/aria-bug45/t22/m2-repo:/root/.m2 -v fixtures/maven-fixture:/workspace -w /workspace maven:3.9-eclipse-temurin-17 mvn -B test"),
+        "fixtures/maven-fixture",
+        "maven -v 夹具宿主源即生效工作目录"
+    );
+    assert_eq!(
+        b45_command_cwd("cd /tmp/x/issue_0001 && podman run --rm -v \"$(pwd)/fixtures/maven-fixture:/workspace\" -w /workspace maven:3.9 mvn -B test"),
+        "fixtures/maven-fixture",
+        "$(pwd)/ 前缀与引号归一"
+    );
+    assert_eq!(
+        b45_command_cwd("cd /tmp/x/issue_0001 && podman build -t aria-t22-check fixtures/podman-fixture"),
+        "fixtures/podman-fixture",
+        "podman build 构建上下文即夹具目录"
+    );
+    assert_eq!(
+        b45_command_cwd("cd /tmp/x/issue_0001 && podman build -t aria-t22-check . && cat fixtures/podman-fixture/Containerfile"),
+        "/tmp/x/issue_0001",
+        "fixtures/<名>/<文件> 不得冒充夹具目录"
+    );
+    assert_eq!(
+        b45_resolve_cwd("cd fixtures/npm-fixture && npm ci", "/tmp/outer/issue_0001"),
+        "/tmp/outer/issue_0001/fixtures/npm-fixture",
+        "相对 cwd 按事件基线绝对化"
+    );
+    assert_eq!(
+        b45_resolve_cwd("cd /abs/fixtures/npm-fixture && npm ci", "/tmp/outer/issue_0001"),
+        "/abs/fixtures/npm-fixture",
+        "绝对 cwd 不重复拼接"
+    );
+}
+
+/// r19 实证形态:命令经 `run_check ID 'cd 夹具 && npm …'` 单引号载荷转发,
+/// 尾 token 为 `ci';`;引号不归一 → facet `ci'`,三 npm 格全缺。
+#[test]
+fn b45_command_facets_handles_quoted_bash_c_payload() {
+    let command = "/bin/bash -c cd '/tmp/outer' && cd /tmp/outer/alpha/.worktrees/aria-issues/issue_0001 && run_check() { id=\"$1\"; cmd=\"$2\"; bash -c \"$cmd\"; }; run_check CHECK-002 'cd fixtures/npm-fixture && npm ci'; run_check CHECK-003 'cd fixtures/npm-fixture && npm test'; run_check CHECK-004 'cd fixtures/npm-fixture && npm run build'; run_check CHECK-005 'cd fixtures/podman-fixture && podman build -t aria-t22-check \"$PWD\"'; run_check CHECK-006 'cd fixtures/podman-fixture && podman run --rm aria-t22-check'";
+    assert_eq!(
+        b45_command_facets(command),
+        vec![
+            ("npm".to_string(), "ci".to_string()),
+            ("npm".to_string(), "test".to_string()),
+            ("npm".to_string(), "build".to_string()),
+            ("podman".to_string(), "build".to_string()),
+            ("podman".to_string(), "run".to_string()),
+        ],
+        "引号载荷内的复合命令须全提取"
+    );
+}
+
+/// r19 实证:版本探针 `npm -v`/`podman --version` 曾建出 npm/-v 格并要求
+/// fixture cwd;版本形态一律归 version 且被 facet 提取过滤。
+#[test]
+fn b45_version_probes_do_not_build_tool_cells() {
+    let probes = "/bin/bash -c cd '/tmp/outer' && command -v podman; command -v npm; npm -v 2>/dev/null; node -v; podman --version; mvn -v";
+    assert_eq!(
+        b45_command_facets(probes),
+        Vec::<(String, String)>::new(),
+        "版本探针不得产出工具格"
+    );
+}
+
+/// r19 实证:终态 ExecutionEvent 无 command/detail——跨度的关键字过滤只
+/// 能落在 Started 行;否则 151s Maven 跨度整段丢弃,退化为行间 90s gap。
+#[test]
+fn b45_terminal_lifecycle_span_pairs_without_completion_command() {
+    let rows = vec![
+        json!({"created_at": "2026-10-18T17:22:50.976724144+00:00", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-10", "status": "Started", "command": "cmd='cd fixtures/maven-fixture && podman run --rm maven mvn -B test'; bash -c \"$cmd\""}}),
+        json!({"created_at": "2026-10-18T17:23:20.000000000+00:00", "event_type": "TextDelta", "payload": {"content": "still running"}}),
+        json!({"created_at": "2026-10-18T17:25:22.515046954+00:00", "event_type": "ExecutionEvent", "payload": {"event_id": "kimi_terminal_term-10", "status": "Completed", "exit_code": 0}}),
+    ];
+    assert_eq!(
+        b45_terminal_lifecycle_spans(&rows, "mvn").max_span_secs,
+        151,
+        "Maven 跨度取 Started→Completed(151s),不被行间 gap 稀释"
+    );
 }
 
 /// Step 1 红测锚点:缺项 fixture 定向确认拒绝(每缺一项一拒,完整基线放行)。
@@ -1435,8 +1588,10 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
             let Some(command) = payload.get("command").and_then(Value::as_str) else {
                 continue;
             };
-            let command_facets = b45_command_facets(command);
-            let (tool, facet) = match command_facets.first().cloned() {
+            // r19:事件自带 cwd 是命令执行基线,相对 cd/夹具路径据此绝对化。
+            let base_cwd = payload.get("cwd").and_then(Value::as_str).unwrap_or_default();
+            let command_facets = b45_command_facets_with_index(command);
+            let (tool, facet, facet_index) = match command_facets.first().cloned() {
                 Some(classified) => classified,
                 // r71(T22 r10 现场):kimi 把六条 CHECK 包进自写脚本单
                 // terminal 执行(bash /tmp/run-checks-t22.sh,无工具 token)
@@ -1484,7 +1639,7 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                                     .split_whitespace()
                                     .map(str::to_string)
                                     .collect::<Vec<_>>(),
-                                cwd: b45_command_cwd(command),
+                                cwd: b45_resolve_cwd(command, base_cwd),
                                 exit_code: exits
                                     .get(&(
                                         row.get("role_run_id")
@@ -1519,7 +1674,7 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                 continue;
             }
             // r72:同命令余下面目补格(复合命令 npm ci;test;build 等)。
-            for (extra_tool, extra_facet) in command_facets.iter().skip(1) {
+            for (extra_tool, extra_facet, extra_index) in command_facets.iter().skip(1) {
                 if tools
                     .iter()
                     .any(|record| record.tool == *extra_tool && record.facet == *extra_facet)
@@ -1538,7 +1693,7 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                         .split_whitespace()
                         .map(str::to_string)
                         .collect::<Vec<_>>(),
-                    cwd: b45_command_cwd(command),
+                    cwd: b45_resolve_facet_cwd(command, *extra_index, base_cwd),
                     exit_code: exits
                         .get(&(
                             row.get("role_run_id")
@@ -1563,7 +1718,7 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                     resource_ids: Vec::new(),
                 });
             }
-            let cwd = b45_command_cwd(command);
+            let cwd = b45_resolve_facet_cwd(command, facet_index, base_cwd);
             let test_count = if is_test_facet {
                 if tool == "maven" {
                     maven_count
@@ -1809,11 +1964,49 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
 }
 
 
+/// r19:路径 token 归一——引号/尾随操作符剥离、`$(pwd)/`/`$PWD/`/`./`
+/// 前缀剥离、`:容器端` 尾段剥离(podman `-v 源:目标` 挂载、镜像标签)。
+fn b45_normalize_path_token(token: &str) -> String {
+    let trimmed = token.trim_matches(['\'', '"', ',', ';', '&', '|', ')']);
+    let stripped = trimmed
+        .strip_prefix("$(pwd)/")
+        .or_else(|| trimmed.strip_prefix("$PWD/"))
+        .or_else(|| trimmed.strip_prefix("./"))
+        .unwrap_or(trimmed);
+    stripped
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// r19:夹具目录 token——只认 `fixtures/<名>` 精确两段(排除
+/// `fixtures/x/pom.xml` 之类文件路径与 `-w /workspace` 容器侧路径)。
+fn b45_fixture_path_token(token: &str) -> Option<String> {
+    let normalized = b45_normalize_path_token(token);
+    let mut segments = normalized.rsplit('/');
+    match (segments.next(), segments.next()) {
+        (Some(name), Some("fixtures")) if !name.is_empty() => Some(normalized),
+        _ => None,
+    }
+}
+
 /// r74(F4):从命令串提取工作目录——取**最后一个** `cd '目标'`/`cd 目标` 的
 /// 目标段(外层聚合根 cd 会遮蔽内层 fixture cd,首段取法失真);脚本内联
 /// 路径同用(r17 实证外层 cd /tmp/.tmpXXX 遮蔽 fixtures/maven-fixture)。
+/// r19(T22 r18 现场):kimi 偏离钉定形态时 maven/podman 从 issue 根以
+/// `podman run -v 夹具:/workspace -w /workspace` 或 `podman build 夹具`
+/// 执行,cd 目标止于 issue 根;此时以命令中最后的夹具路径 token(挂载
+/// 宿主源/构建上下文)作为生效工作目录,不得留外层聚合根。
 fn b45_command_cwd(command: &str) -> String {
     let mut cwd = String::new();
+    let mut fixture_cwd = String::new();
+    for token in command.split_whitespace() {
+        if let Some(path) = b45_fixture_path_token(token) {
+            fixture_cwd = path;
+        }
+    }
     let mut rest = command;
     while let Some(position) = rest.find("cd ") {
         let after = &rest[position + 3..];
@@ -1830,11 +2023,66 @@ fn b45_command_cwd(command: &str) -> String {
                 .unwrap_or_default()
         };
         if !segment.is_empty() {
-            cwd = segment.to_string();
+            cwd = b45_normalize_path_token(segment);
         }
         rest = after;
     }
-    cwd
+    if b45_fixture_path_token(&cwd).is_some() || fixture_cwd.is_empty() {
+        cwd
+    } else {
+        fixture_cwd
+    }
+}
+
+/// r19:相对 cwd 拼接事件声明的绝对基线(ExecutionEvent payload.cwd),
+/// 使证据落盘面的 cwd 为宿主绝对路径(validator 只校验 fixture 段,
+/// 绝对化保证人工复核可定位)。
+fn b45_join_cwd(cwd: String, base: &str) -> String {
+    if cwd.is_empty() || cwd.starts_with('/') || base.trim().is_empty() {
+        return cwd;
+    }
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        cwd.trim_start_matches("./")
+    )
+}
+
+fn b45_resolve_cwd(command: &str, base: &str) -> String {
+    b45_join_cwd(b45_command_cwd(command), base)
+}
+
+/// r19:按工具 token 位次取 cwd——复合 CHECK 命令各段 cd 到不同夹具时,
+/// 取该 token 之前前缀的最后一个 cd/夹具 token;前缀无夹具(如
+/// `podman build 夹具目录` 从仓库根执行)则取该段参数里的夹具(构建
+/// 上下文),仍无则回退前缀 cwd。
+fn b45_tool_cwd(command: &str, index: usize) -> String {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let prefix_cwd = b45_command_cwd(&tokens[..index.min(tokens.len())].join(" "));
+    if b45_fixture_path_token(&prefix_cwd).is_some() {
+        return prefix_cwd;
+    }
+    let mut segment_fixture = String::new();
+    for token in tokens.get(index..).unwrap_or_default() {
+        if let Some(path) = b45_fixture_path_token(token) {
+            segment_fixture = path;
+        }
+        if matches!(*token, "&&" | "||" | ";")
+            || token.ends_with(';')
+            || token.ends_with("&&")
+        {
+            break;
+        }
+    }
+    if segment_fixture.is_empty() {
+        prefix_cwd
+    } else {
+        segment_fixture
+    }
+}
+
+fn b45_resolve_facet_cwd(command: &str, index: usize, base: &str) -> String {
+    b45_join_cwd(b45_tool_cwd(command, index), base)
 }
 
 /// r74(F1):token 是否处于命令位——段首,或前一 token 是/以
@@ -1868,16 +2116,18 @@ fn b45_classify_command(command: &str) -> (String, String) {
     let head = tokens.get(tool_index).copied().unwrap_or_default();
     // r74:粘连操作符形态(npm ci; npm test)的子命令 token 带尾分号,
     // 归一化后再分类。
+    // r19:单引号包裹的 bash -c 载荷(`run_check CHECK-002 'cd x && npm ci'`)
+    // 尾 token 为 `ci';`——引号同属包裹符,不归一即误判 facet `ci'`。
     let sub = tokens
         .get(tool_index + 1)
         .copied()
         .unwrap_or_default()
-        .trim_end_matches([';', '|', '&', ')']);
+        .trim_end_matches([';', '|', '&', ')', '\'', '"']);
     let third = tokens
         .get(tool_index + 2)
         .copied()
         .unwrap_or_default()
-        .trim_end_matches([';', '|', '&', ')']);
+        .trim_end_matches([';', '|', '&', ')', '\'', '"']);
     match head {
         "podman" => {
             match sub {
@@ -1889,7 +2139,8 @@ fn b45_classify_command(command: &str) -> (String, String) {
                         ("podman".to_string(), "run".to_string())
                     }
                 }
-                "version" => ("podman".to_string(), "version".to_string()),
+                // r19:`podman --version`/`-v` 为版本探针,不是容器 CHECK。
+                "version" | "--version" | "-v" => ("podman".to_string(), "version".to_string()),
                 _ => ("podman".to_string(), sub.to_string()),
             }
         }
@@ -1898,11 +2149,20 @@ fn b45_classify_command(command: &str) -> (String, String) {
                 "ci" => "ci",
                 "test" => "test",
                 "run" if third == "build" => "build",
+                // r19:`npm -v`/`--version` 版本探针不得建 CHECK 格(曾产出
+                // npm/-v 并要求 fixture cwd)。
+                "--version" | "-v" => "version",
                 other => other,
             };
             ("npm".to_string(), facet.to_string())
         }
-        "mvn" => ("maven".to_string(), "test".to_string()),
+        "mvn" => {
+            if matches!(sub, "--version" | "-v") {
+                ("maven".to_string(), "version".to_string())
+            } else {
+                ("maven".to_string(), "test".to_string())
+            }
+        }
         _ => (String::new(), String::new()),
     }
 }
@@ -1912,8 +2172,18 @@ fn b45_classify_command(command: &str) -> (String, String) {
 /// podman run`),首 token 分类只出第一个 facet,后续全漏。扫描命令中
 /// 全部工具 token 位次,逐一分类去重(podman run 含 mvn 仍归 maven/test)。
 fn b45_command_facets(command: &str) -> Vec<(String, String)> {
+    b45_command_facets_with_index(command)
+        .into_iter()
+        .map(|(tool, facet, _)| (tool, facet))
+        .collect()
+}
+
+/// r19:带工具 token 位次的面目提取——复合 CHECK 命令内各段可 cd 到不同
+/// 夹具(`npm ci` 在 npm-fixture、`podman build` 在 podman-fixture),
+/// 工具格 cwd 必须取该 token 之前的命令前缀,不能共用命令末尾 cd。
+fn b45_command_facets_with_index(command: &str) -> Vec<(String, String, usize)> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
-    let mut facets: Vec<(String, String)> = Vec::new();
+    let mut facets: Vec<(String, String, usize)> = Vec::new();
     for index in 0..tokens.len() {
         if !matches!(tokens[index], "podman" | "npm" | "mvn")
             || !token_is_command_position(&tokens, index)
@@ -1924,8 +2194,8 @@ fn b45_command_facets(command: &str) -> Vec<(String, String)> {
         if tool.is_empty() || facet == "version" {
             continue;
         }
-        if !facets.iter().any(|(t, f)| *t == tool && *f == facet) {
-            facets.push((tool, facet));
+        if !facets.iter().any(|(t, f, _)| *t == tool && *f == facet) {
+            facets.push((tool, facet, index));
         }
     }
     facets
@@ -1990,22 +2260,23 @@ fn b45_terminal_lifecycle_spans(rows: &[Value], keyword: &str) -> B45LifecycleSp
         if !event_id.starts_with("kimi_terminal_") {
             continue;
         }
-        let command_or_detail = row
-            .pointer("/payload/command")
-            .and_then(Value::as_str)
-            .or_else(|| row.pointer("/payload/detail").and_then(Value::as_str))
-            .unwrap_or_default();
-        if !command_or_detail.contains(keyword) {
-            continue;
-        }
         let Some(timestamp) = parse_ts(row.get("created_at")) else {
             continue;
         };
         let status = row.pointer("/payload/status").and_then(Value::as_str).unwrap_or_default();
         if status == "Started" {
-            open_started.insert(event_id.to_string(), timestamp);
-        }
-        if matches!(status, "Completed" | "Failed" | "Aborted")
+            // 关键字只在 Started 行判定(命令载荷在 Started);终态行无
+            // command/detail——r19 实证:在终态行再做关键字过滤会把
+            // 151s 的 Maven 跨度整段丢弃,退化为 90s 行间 gap。
+            let command_or_detail = row
+                .pointer("/payload/command")
+                .and_then(Value::as_str)
+                .or_else(|| row.pointer("/payload/detail").and_then(Value::as_str))
+                .unwrap_or_default();
+            if command_or_detail.contains(keyword) {
+                open_started.insert(event_id.to_string(), timestamp);
+            }
+        } else if matches!(status, "Completed" | "Failed" | "Aborted")
             && let Some(start) = open_started.remove(event_id)
         {
             max_span_secs = max_span_secs.max(
