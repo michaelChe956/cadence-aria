@@ -5366,7 +5366,7 @@ impl MatrixEnvironment {
         // compile_recovery_action 对该族不适用(r4 实拍 INVALID_COMPILE_
         // RECOVERY_ACTION)。返修反馈携带 store 读取的机械 findings 原文,
         // 有界 2 轮,失败如实落格。
-        let mut mechanical_rounds_left = 2usize;
+        let mut mechanical_rounds_left = 3usize;
         let mut confirmed = false;
         let mut feedback_command = json!({
             "type": "human_gate_feedback",
@@ -5480,7 +5480,21 @@ impl MatrixEnvironment {
                 {
                     mechanical_rounds_left -= 1;
                     observation.run_failure = None;
-                    feedback_text = findings_feedback;
+                    // r70(T22 r9 现场):机械轮反馈必须同时携带有效需求编号
+                    // 清单——r9 实拍候选引用编造的 NFR-002(r33 老病在机械
+                    // 轮复发:首轮反馈的编号约束被机械 findings 文本替换),
+                    // findings 与编号约束合并下发。
+                    let requirement_digest = self.design_requirement_ids_digest();
+                    feedback_text = if requirement_digest.is_empty() {
+                        findings_feedback
+                    } else {
+                        format!(
+                            "{findings_feedback}\n此外,计划任务的 requirement 引用必须\
+                             且只能引用设计中真实存在的编号;有效需求编号只有以下这些\
+                             (不得编造新编号,例如任何 NFR-x;多余引用一律删除或改为\
+                             下列编号):\n{requirement_digest}"
+                        )
+                    };
                     feedback_command = json!({
                         "type": "human_gate_feedback",
                         "command_id": "lcg-matrix-plan-revision",
