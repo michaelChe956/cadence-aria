@@ -10394,8 +10394,9 @@ return \"b45-host-check\"; }}。工作项验证命令(verification commands)是�
 (5) podman-build: cd fixtures/podman-fixture && podman build -t aria-t22-check . ;\
 (6) podman-run: cd fixtures/podman-fixture && podman run --rm aria-t22-check 。\
 六条验证命令都必须由 Coder 自己在 CHECK 阶段真实执行并在完成报告记录退出码与测试数量。\
-验收与验证条目的路径必须使用仓库内具体相对路径(如 fixtures/ 或 src/),\
-禁止使用 [.]/仓库根作为验收或验证路径(机械校验拒绝基线树外路径)。\
+工作项划分约束:全部六条命令归属同一个工作项(即代码改动工作项),验收标准与验证计划\
+的路径字段一律填写 fixtures/ 开头的具体仓库内相对路径(机械校验拒绝基线树外路径);\
+禁止为 CHECK-EVIDENCE.log 或仓库根单独建立工作项或以 [.]/根路径作为验收/验证路径。\
 证据落盘要求:每条命令执行时把完整输出(含计数行,如 Maven 的 \"Tests run:\" 行、\
 npm 的 passed/failed 计数行、各命令的 EXIT 提示行)追加写入仓库根目录文件 \
 CHECK-EVIDENCE.log(可经 tee -a 或重定向后 cat 追加;该文件随工作区提交)。"
