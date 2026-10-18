@@ -1287,8 +1287,9 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
             let Some(command) = payload.get("command").and_then(Value::as_str) else {
                 continue;
             };
-            let (tool, facet) = match b45_classify_command(command) {
-                classified if !classified.0.is_empty() => classified,
+            let command_facets = b45_command_facets(command);
+            let (tool, facet) = match command_facets.first().cloned() {
+                Some(classified) => classified,
                 // r71(T22 r10 现场):kimi 把六条 CHECK 包进自写脚本单
                 // terminal 执行(bash /tmp/run-checks-t22.sh,无工具 token)
                 //——脚本文件在宿主在盘,读内容后逐行分类;行级命令共享该
@@ -1301,10 +1302,7 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                         .map(|script| {
                             script
                                 .lines()
-                                .map(b45_classify_command)
-                                .filter(|(tool, facet)| {
-                                    !tool.is_empty() && facet != "version"
-                                })
+                                .flat_map(b45_command_facets)
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
@@ -1375,6 +1373,52 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
             {
                 tools[existing].terminal_lifecycle.extend(lifecycle);
                 continue;
+            }
+            // r72:同命令余下面目补格(复合命令 npm ci;test;build 等)。
+            for (extra_tool, extra_facet) in command_facets.iter().skip(1) {
+                if tools
+                    .iter()
+                    .any(|record| record.tool == *extra_tool && record.facet == *extra_facet)
+                {
+                    continue;
+                }
+                let extra_test = (extra_tool == "maven" && extra_facet == "test")
+                    || (extra_tool == "npm" && extra_facet == "test");
+                tools.push(B45ToolRecord {
+                    exact_version: version_of(extra_tool),
+                    tool: extra_tool.clone(),
+                    facet: extra_facet.clone(),
+                    planned_command: String::new(),
+                    actual_command: command.to_string(),
+                    argv: command
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
+                    cwd: command
+                        .split("cd ")
+                        .nth(1)
+                        .and_then(|rest| {
+                            rest.trim().trim_start_matches('\'').split('\'').next()
+                        })
+                        .unwrap_or_default()
+                        .to_string(),
+                    exit_code: exits
+                        .get(event_id)
+                        .and_then(|code| *code)
+                        .map(|code| code as i32),
+                    test_count: if extra_test {
+                        if extra_tool == "maven" {
+                            maven_count
+                        } else {
+                            npm_count
+                        }
+                    } else {
+                        None
+                    },
+                    output_excerpt: String::new(),
+                    terminal_lifecycle: lifecycle.clone(),
+                    resource_ids: Vec::new(),
+                });
             }
             let cwd = command
                 .split("cd ")
@@ -1660,6 +1704,28 @@ fn b45_classify_command(command: &str) -> (String, String) {
     }
 }
 
+/// r72(T22 r14 现场):复合命令多面提取——coder 实执行常把多条 CHECK
+/// 串在一个 terminal(`npm ci; npm test; npm run build` / `podman build &&
+/// podman run`),首 token 分类只出第一个 facet,后续全漏。扫描命令中
+/// 全部工具 token 位次,逐一分类去重(podman run 含 mvn 仍归 maven/test)。
+fn b45_command_facets(command: &str) -> Vec<(String, String)> {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let mut facets: Vec<(String, String)> = Vec::new();
+    for index in 0..tokens.len() {
+        if !matches!(tokens[index], "podman" | "npm" | "mvn") {
+            continue;
+        }
+        let (tool, facet) = b45_classify_command(&tokens[index..].join(" "));
+        if tool.is_empty() || facet == "version" {
+            continue;
+        }
+        if !facets.iter().any(|(t, f)| *t == tool && *f == facet) {
+            facets.push((tool, facet));
+        }
+    }
+    facets
+}
+
 /// 从 role-run 行提取匹配命令的 terminal 生命周期状态序列。
 fn b45_terminal_lifecycle_for(rows: &[Value], command: &str) -> Vec<String> {
     let (_, facet) = b45_classify_command(command);
@@ -1705,8 +1771,13 @@ fn b45_terminal_lifecycle_spans(rows: &[Value], keyword: &str) -> B45LifecycleSp
             .map(|time| time.with_timezone(&chrono::Utc))
     };
     use std::collections::BTreeMap;
-    let mut spans: BTreeMap<String, (Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> =
-        BTreeMap::new();
+    // r72(T22 r14 现场):event_id 跨 provider 会话撞号(两个会话各有
+    // term-14)——按 id 合并会把后段 Started 覆盖前段,150s 静默 Maven
+    // (term-14 Started 09:08:38→Completed 09:11:09,exit 0)跨度归零、
+    // 实测退化成行间 gap。改时序开合配对:每 id 维护当前打开的 Started,
+    // 终态行闭合并记跨度后清空(后段同名 terminal 重新打开独立计时)。
+    let mut open_started: BTreeMap<String, chrono::DateTime<chrono::Utc>> = BTreeMap::new();
+    let mut max_span_secs: u64 = 0;
     for row in rows {
         let Some(event_id) = row.pointer("/payload/event_id").and_then(Value::as_str) else {
  continue;
@@ -1722,25 +1793,24 @@ fn b45_terminal_lifecycle_spans(rows: &[Value], keyword: &str) -> B45LifecycleSp
         if !command_or_detail.contains(keyword) {
             continue;
         }
-        let timestamp = parse_ts(row.get("created_at"));
+        let Some(timestamp) = parse_ts(row.get("created_at")) else {
+            continue;
+        };
         let status = row.pointer("/payload/status").and_then(Value::as_str).unwrap_or_default();
-        let entry = spans.entry(event_id.to_string()).or_insert((None, None));
-        if status == "Started" && timestamp.is_some() {
-            entry.0 = timestamp;
+        if status == "Started" {
+            open_started.insert(event_id.to_string(), timestamp);
         }
-        if matches!(status, "Completed" | "Failed" | "Aborted") && timestamp.is_some() {
-            entry.1 = timestamp;
+        if matches!(status, "Completed" | "Failed" | "Aborted")
+            && let Some(start) = open_started.remove(event_id)
+        {
+            max_span_secs = max_span_secs.max(
+                timestamp
+                    .signed_duration_since(start)
+                    .num_seconds()
+                    .max(0) as u64,
+            );
         }
     }
-    let max_span_secs = spans
-        .values()
-        .filter_map(|(start, end)| match (start, end) {
-            (Some(start), Some(end)) => Some((start, end)),
-            _ => None,
-        })
-        .map(|(start, end)| end.signed_duration_since(start).num_seconds().max(0) as u64)
-        .max()
-        .unwrap_or(0);
     B45LifecycleSpans { max_span_secs }
 }
 
