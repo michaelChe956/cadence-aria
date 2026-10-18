@@ -232,9 +232,15 @@ impl WorkspaceSessionManager {
                                 None,
                             );
                         }
-                        let mut session_state = manager.engine.lock().await.build_session_state();
-                        manager.project_automation_ownership(&mut session_state);
-                        manager.broadcast(session_state);
+                        // T22 r3 根因⑤(b45 现场 r2/r3,r16 死锁家族 router 臂):
+                        // 本臂曾以 `engine.lock().await` 阻塞等锁——provider run
+                        // 任务全程持锁,SC 修订→复评循环内门重开事件在锁内发出,
+                        // router 阻塞即停止消费,engine 事件通道(64)被后续流帧
+                        // 填满后 run 的 send 也阻塞,循环等待令 WS 零帧(r3 帧
+                        // 日志:reviewer 已 Completed 而连接零出帧含 pong)。改走
+                        // F-27R2/F-09 同款非阻塞面:try_lock 活引擎即时广播;锁
+                        // 被持时按 durable 投影即时广播+锁释放后活引擎补帧。
+                        manager.broadcast_gate_opened_state();
                     }
                     EngineEvent::ArtifactBatchUpdate { mut updates } => {
                         updates.sort_by_key(|update| update.version);
@@ -606,6 +612,36 @@ impl WorkspaceSessionManager {
     /// A1b2（设计 §4.4）：快照读取失败广播 typed ProtocolError
     ///（workspace_durable_projection_unavailable），不填 Open/null/ownership
     /// 假态；event_seq 沿 journal，客户端经 cursor/重连恢复。
+
+    /// T22 r3 根因⑤:HumanGateOpened 的非阻塞广播面(与 F-27R2
+    /// `broadcast_choice_pending_state` 同构)——try_lock 活引擎即时广播;
+    /// 锁被 provider run 持有(run 任务全期持锁)时按 durable 投影即时广播,
+    /// 并调度锁释放后的活引擎补帧收敛内存面。绝不在 router 事件臂内阻塞
+    /// 等 engine 锁:run 内发出的门事件+通道容量上限=循环等待(WS 零帧)。
+    fn broadcast_gate_opened_state(self: &Arc<Self>) {
+        if let Ok(engine) = self.engine.try_lock() {
+            let mut state = engine.build_session_state();
+            drop(engine);
+            self.project_automation_ownership(&mut state);
+            self.broadcast(state);
+            return;
+        }
+        match self.durable_projection() {
+            Ok(projection) => self.broadcast(projection.session_state),
+            // A1b2(设计 §4.4):durable 纯读失败发 typed ProtocolError,不发伪
+            // session_state;锁释放后的活引擎补帧仍会调度。
+            Err(error) => self.broadcast(error.unavailable_frame(&self.session_id)),
+        }
+        let engine = self.engine.clone();
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            let engine = engine.lock().await;
+            let mut state = engine.build_session_state();
+            drop(engine);
+            manager.project_automation_ownership(&mut state);
+            manager.broadcast(state);
+        });
+    }
     pub(crate) fn broadcast_current_session_state(self: &Arc<Self>) {
         match self.current_session_state() {
             Ok(frame) => self.broadcast(frame),

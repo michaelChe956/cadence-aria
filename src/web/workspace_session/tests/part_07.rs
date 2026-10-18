@@ -1211,3 +1211,62 @@ async fn sg_07a_projection_is_pure_and_preserves_anchor() {
     let birth_runtime = WorkspaceSession::from_record(birth.clone());
     assert_eq!(birth_runtime.structural_governance_state, None);
 }
+
+/// T22 r3(b45 现场 r2/r3 根因⑤):SC 修订 run 全程持有 engine 锁,run 内
+/// 发出的 `HumanGateOpened` 曾令 router 以 `engine.lock().await` 阻塞等待
+/// ——router 停止消费后 engine 事件通道(容量 64)被后续流帧填满,run 的
+/// send 也阻塞,构成循环等待:WS 零帧 90min(r3 帧日志实证:reviewer 已
+/// `StatusChanged(Completed)`+结构化产出,而连接零出帧含 pong)。钉测:
+/// engine 锁被持(run 形态)时,HumanGateOpened 之后的后续事件仍必须被
+/// router 持续消费——通道不楔死、发送方不悬停。
+#[tokio::test]
+async fn human_gate_opened_routing_survives_engine_mutex_held_by_run() {
+    let manager = claim_manager("session_gate_open_lock");
+    let (engine_tx, engine_rx) =
+        mpsc::channel::<crate::product::workspace_engine::EngineEvent>(4);
+    manager.spawn_event_router(
+        engine_rx,
+        crate::web::state::WorkspaceRunRegistry::default(),
+    );
+
+    // 模拟 provider run:任务全期持有 engine 锁(provider_run.rs run 任务形态)。
+    let _engine_guard = manager.engine.lock().await;
+
+    manager_set_gate_frame_probe(&manager).await;
+    engine_tx
+        .send(crate::product::workspace_engine::EngineEvent::HumanGateOpened {
+            stage: "human_confirm".to_string(),
+        })
+        .await
+        .expect("send gate opened");
+
+    // 超越通道容量继续发送:router 若阻塞在 HumanGateOpened 臂,通道填满
+    // 后这些 send 将楔死(每发限时 2s,阻塞形态=超时断言失败)。
+    for index in 0..64u32 {
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            engine_tx.send(crate::product::workspace_engine::EngineEvent::StreamChunk {
+                role: "reviewer".to_string(),
+                content: format!("chunk-{index}"),
+                node_id: None,
+            }),
+        )
+        .await;
+        assert!(
+            sent.is_ok(),
+            "router 必须在 engine 锁被持时持续消费(第 {index} 个流帧楔死=死锁形态)"
+        );
+    }
+}
+
+/// 广播目的地探针:挂一个 attachment 出站通道,断言帧可投递(锁持形态下
+/// 经 durable 投影广播;不要求具体帧型,只保证 router 存活)。
+async fn manager_set_gate_frame_probe(manager: &Arc<WorkspaceSessionManager>) {
+    let (outbound_tx, mut outbound_rx) =
+        mpsc::channel::<crate::web::workspace_ws_handler::OutboundControl>(64);
+    manager.attach("probe-connection", outbound_tx).await;
+    // 消费侧保持活到测试尾,防广播 try_send 满仓退化为 resync。
+    tokio::spawn(async move {
+        while outbound_rx.recv().await.is_some() {}
+    });
+}
