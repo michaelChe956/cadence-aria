@@ -28,9 +28,15 @@
 
 ## 规格来源与时序
 
-获批设计：`/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/designs/2026-10-11_方案设计_规划阶段会话锚点固定与漂移恢复闭环_v1.1.md`（owner 已在本对话确认，本文不重复字段级实施步骤）。REQ-PLN-08 已核主规划规格只到 07；源 `lc-root-initialization` 的 ENV04/08 有“拒 resume 并启动新会话”旧句，较新 gateway source 已禁止静默 fresh。gateway capability 尚未在主 specs 建立，本 delta 的 MODIFIED 标题来自 `/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/openspec/changes/lc-gateway-multi-provider/specs/lc-gateway-multi-provider/spec.md`，不是伪造主 spec 条目。
+获批设计：`/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/designs/2026-10-11_方案设计_规划阶段会话锚点固定与漂移恢复闭环_v1.1.md`（owner 已在本对话确认，本文不重复字段级实施步骤）。REQ-PLN-08 已核主规划规格只到 07；源 `lc-root-initialization` 的 ENV04/08 有“拒 resume 并启动新会话”旧句，较新 gateway source 已禁止静默 fresh。owner 对 --version 的裁决是“有界只读版本观测不算创建会话进程”，60 秒内变化识别可能滞后；不是扩大 provider 会话 spawn 或其它事实缓存。
 
-同步/归档前必须核实际状态：源先归档则基于最新主规格；源未归档则按获批 root→gateway→本 change 次序同步，保留 native aggregate 与 Coding member 的具体化，不让旧 delta 覆盖新安全合同。本次不改源 change/主规格。REQ-LCG 仅按源 change＋标题映射。owner 对 --version 的裁决是“有界只读版本观测不算创建会话进程”，60 秒内变化识别可能滞后；不是扩大 provider 会话 spawn 或其它事实缓存。
+### Delta 基线与同步次序（2026-10-19 依赖修订）
+
+- `lc-gateway-multi-provider`：源 change 已由 controller 归档，主 spec 现存于 `openspec/specs/lc-gateway-multi-provider/spec.md`。`provider-desandbox-full-open`（Bug45 四家全开）归档先于本 change；本 delta 按真实标题 MODIFIED、不重造 REQ-LCG 编号，且已承接其新版 write_boundary（Confirmed＝宿主全开执行及岗位/窗口合同被真实验证，不再表示物理禁止写入）、岗位纪律、Reviewer B 档窗口与 Codex danger 检测型 fileChange 纪律合同，归档应用时不让旧措辞覆盖新安全合同。
+- `logical-codebase-aggregate-planning`：基线为主规划规格＋未归档 lc-root-initialization 的同 capability delta；REQ-PLN-08 为本次新增，REQ-PLN-03/05/07 保留完整原场景并按获批设计修改；target 一词分为 native launch target 与业务材料/compile target，不让两者混用。
+- `session-policy-envelope`：主规格存在 REQ-ENV-04/08，本 delta 合并未归档 lc-root-initialization 同条目全部 root-cwd/native-MCP 场景；REQ-ENV-10/11 只交叉引用，不重造编号；LC 较新 gateway “Provider resume 与冻结指纹”禁止静默 fresh 为本次安全底线；direct 单仓原恢复三元组语义不改。
+
+同步/归档前必须核实际状态：源先归档则基于最新主规格；源未归档则按获批 root→gateway→本 change 次序同步，保留 native aggregate 与 Coding member 的具体化，不让旧 delta 覆盖新安全合同。本次不改源 change/主规格。REQ-LCG 仅按源 change＋标题映射。
 
 ## Non-Goals
 

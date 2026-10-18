@@ -1,6 +1,4 @@
-# Spec Delta
-
-> 基线：session-policy-envelope 主规格存在REQ-ENV-04/08，本delta合并未归档lc-root-initialization同条目全部root-cwd/native-MCP场景；REQ-ENV-10/11只交叉引用，不重造编号。LC较新gateway“Provider resume与冻结指纹”禁止静默fresh为本次安全底线；direct单仓原恢复三元组语义不改。owner 2026-10-11已裁定有界只读版本观测不算创建会话进程，LC版本观测采用60秒TTL。
+# Spec Delta: fix-planning-session-anchor-recovery × session-policy-envelope
 
 ## MODIFIED Requirements
 

@@ -1,6 +1,4 @@
-# Spec Delta
-
-> 基线：主规划规格＋未归档 lc-root-initialization 的同 capability delta；REQ-PLN-08 为本次新增，REQ-PLN-03/05/07 保留完整原场景并按获批设计修改。target 一词在本 delta 分为 native launch target 与业务材料/compile target，不让两者混用。
+# Spec Delta: fix-planning-session-anchor-recovery × logical-codebase-aggregate-planning
 
 ## MODIFIED Requirements
 

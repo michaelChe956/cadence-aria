@@ -4,6 +4,15 @@
 
 动机/范围见proposal；架构全文以owner已确认`/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-b-0808-add-monorepo/cadence/designs/2026-10-11_方案设计_规划阶段会话锚点固定与漂移恢复闭环_v1.1.md`（v1.1，以下“获批设计”）为准，本文件持久化该方案的实施边界与权衡，不把双审发现留给worker猜。双审：OracleAnchorFix C1–C3、GroundAnchorFix B1–B4及五建议已注入；OracleAnchorFixR2=ADOPT、无未闭合项；owner随后确认v1.1。
 
+## 依赖修订（2026-10-19，承接 provider-desandbox-full-open）
+
+Bug45 四家应用层去沙箱合并包已落地并将先行归档。本 change 据此完成 C5.4 依赖修订：
+
+- write_boundary 语义换代：Confirmed＝宿主全开执行及岗位/窗口合同被真实验证，不再表示物理禁止写入；旧隔离语义证据不得自动升级。lc-gateway delta 三条 MODIFIED（admission／projection／resume）已承接该语义、岗位纪律、Reviewer B 档窗口与 Codex danger 检测型 fileChange 纪律，归档应用时不让旧措辞覆盖新安全合同。
+- Codex 旧受限档退役：B0c/B0f 验收词汇改为 danger-full-access 档、never/on-request approval 映射与检测型纪律事实；不投影 read-only/workspace-write，不把检测型纪律当审批帧。
+- 基线事实更新：源 lc-gateway-multi-provider 已归档为主 spec（现存于 `openspec/specs/`）；本 change 于 provider-desandbox-full-open 归档后应用。原「trust T4 执行中」等波次账本以批2 SDD ledger（`cadence/plans/2026-10-17_实施计划_批量2_Bug45合并包_v1.0.md` + progress 账本）与实际 commits 为准，实施 Plan 冻结时由 controller 重新附移交证据。
+- 本修订只改契约措辞与依赖事实，不提前实施任何 anchor 工作包，不改 60 秒 TTL／Replay 顺序／原 turn 身份等已裁定行为。
+
 真实基线：workspace_repository返回值既供native launch，也供SC language.md/仓结构/IR target；manager durable fallback取出生旧record；完整projection在adapter start阶段才造且trust域空；Plan stale自动rebuild、manual turn另有durable身份。实际落点及原文核验见获批设计§2/§5.3，不把opaque gateway状态或原native指纹从当前环境倒造。
 
 ## Goals / Non-Goals
