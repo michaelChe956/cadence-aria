@@ -11347,7 +11347,18 @@ impl LiveLcGatewayHarness {
             },
             "coder": {
                 "attempt_id": coding_main.get("attempt_id"),
-                "terminal": coding_main.get("terminal_status").or(coding_main.pointer("/drive/terminal_status")),
+                // r71(T22 r10 现场):terminal_status 为 JSON null 时
+                // Option::or 仍取 Some(Null)——先取 drive 终态,空值过滤。
+                "terminal": coding_main
+                    .pointer("/drive/terminal_status")
+                    .and_then(Value::as_str)
+                    .filter(|status| !status.is_empty())
+                    .or_else(|| {
+                        coding_main
+                            .get("terminal_status")
+                            .and_then(Value::as_str)
+                            .filter(|status| !status.is_empty())
+                    }),
             },
             "reviewer": {
                 "review_cells": review_cells.iter().map(|cell| json!({

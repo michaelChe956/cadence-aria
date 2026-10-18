@@ -1287,7 +1287,82 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
             let Some(command) = payload.get("command").and_then(Value::as_str) else {
                 continue;
             };
-            let (tool, facet) = b45_classify_command(command);
+            let (tool, facet) = match b45_classify_command(command) {
+                classified if !classified.0.is_empty() => classified,
+                // r71(T22 r10 现场):kimi 把六条 CHECK 包进自写脚本单
+                // terminal 执行(bash /tmp/run-checks-t22.sh,无工具 token)
+                //——脚本文件在宿主在盘,读内容后逐行分类;行级命令共享该
+                // terminal 的退出码(脚本 set -u 整体退出)。
+                _ => {
+                    let script_facets = command
+                        .split_whitespace()
+                        .find(|token| token.ends_with(".sh"))
+                        .and_then(|path| std::fs::read_to_string(path).ok())
+                        .map(|script| {
+                            script
+                                .lines()
+                                .map(b45_classify_command)
+                                .filter(|(tool, facet)| {
+                                    !tool.is_empty() && facet != "version"
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    for (tool, facet) in script_facets {
+                        if !tools
+                            .iter()
+                            .any(|record| record.tool == tool && record.facet == facet)
+                        {
+                            let is_test_facet = (tool == "maven" && facet == "test")
+                                || (tool == "npm" && facet == "test");
+                            let lifecycle = b45_terminal_lifecycle_for(
+                                &lifecycle_rows,
+                                command,
+                            );
+                            let test_count = if is_test_facet {
+                                if tool == "maven" {
+                                    maven_count
+                                } else {
+                                    npm_count
+                                }
+                            } else {
+                                None
+                            };
+                            tools.push(B45ToolRecord {
+                                exact_version: version_of(&tool),
+                                tool,
+                                facet,
+                                planned_command: String::new(),
+                                actual_command: command.to_string(),
+                                argv: command
+                                    .split_whitespace()
+                                    .map(str::to_string)
+                                    .collect::<Vec<_>>(),
+                                cwd: command
+                                    .split("cd ")
+                                    .nth(1)
+                                    .and_then(|rest| {
+                                        rest.trim()
+                                            .trim_start_matches('\'')
+                                            .split('\'')
+                                            .next()
+                                    })
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                exit_code: exits
+                                    .get(event_id)
+                                    .and_then(|code| *code)
+                                    .map(|code| code as i32),
+                                test_count,
+                                output_excerpt: String::new(),
+                                terminal_lifecycle: lifecycle,
+                                resource_ids: Vec::new(),
+                            });
+                        }
+                    }
+                    continue;
+                }
+            };
             if tool.is_empty() || facet == "version" {
                 continue;
             }
