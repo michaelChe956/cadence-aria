@@ -10388,13 +10388,15 @@ fn b45_kimi_issue_description() -> String {
         "在 alpha 仓新增 fixtures/ 三套宿主验证样例并完成 CHECK。本需求不修改 beta 仓。\
 代码改动很小:在 alpha 仓 src/lib.rs 增加 pub fn host_check_marker() -> &'static str {{ \
 return \"b45-host-check\"; }}。工作项验证命令(verification commands)是本需求主体,\
-必须逐字包含以下六条命令(cwd 为仓库内相对路径):\
-(1) maven-container-check: cd fixtures/maven-fixture && podman run --rm \
+必须逐字包含以下六条命令(cwd 为仓库内相对路径),每条命令必须在独立的 terminal 中执行\
+(禁止将多条命令串行合并到同一个 terminal 里,否则后续命令会因前序超时而丢失):\
+先执行快速命令(npm 三条,各约 5 秒),再执行慢速命令(Maven/Podman,各约 90-150 秒):\
+(1) npm-ci: cd fixtures/npm-fixture && npm ci ;\
+(2) npm-test: cd fixtures/npm-fixture && npm test ;\
+(3) npm-build: cd fixtures/npm-fixture && npm run build ;\
+(4) maven-container-check: cd fixtures/maven-fixture && podman run --rm \
 -v /tmp/aria-bug45/t22/m2-repo:/root/.m2 -v \"$PWD\":/workspace -w /workspace \
 {B45_MAVEN_IMAGE} mvn -B test ;\
-(2) npm-ci: cd fixtures/npm-fixture && npm ci ;\
-(3) npm-test: cd fixtures/npm-fixture && npm test ;\
-(4) npm-build: cd fixtures/npm-fixture && npm run build ;\
 (5) podman-build: cd fixtures/podman-fixture && podman build -t aria-t22-check . ;\
 (6) podman-run: cd fixtures/podman-fixture && podman run --rm aria-t22-check 。\
 六条验证命令都必须由 Coder 自己在 CHECK 阶段真实执行并在完成报告记录退出码与测试数量。\
