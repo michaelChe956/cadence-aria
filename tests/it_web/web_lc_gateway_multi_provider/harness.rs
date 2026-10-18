@@ -5254,7 +5254,7 @@ impl MatrixEnvironment {
             .rev()
             .find_map(|event| {
                 event
-                    .pointer("/context/mechanical_report_ref")
+                    .pointer("/event/context/mechanical_report_ref")
                     .and_then(Value::as_str)
                     .map(str::to_string)
             })?;
@@ -7218,11 +7218,12 @@ fn plan_confirm_failure_is_recoverable(failure_text: &str) -> bool {
 /// Failed(不依赖 run_failure 文本:recovery 白轮的 INVALID 错误会覆盖它)。
 fn plan_confirm_failure_is_mechanical(observation: &StageObservation) -> bool {
     observation.events.iter().rev().any(|event| {
-        event.get("code").and_then(Value::as_str) == Some("SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED")
-            && event
-                .pointer("/cause")
-                .and_then(Value::as_str)
-                .is_some_and(|cause| cause.contains("MechanicalValidationFailed"))
+            event.pointer("/event/code").and_then(Value::as_str)
+                == Some("SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED")
+                && event
+                    .pointer("/event/context/cause")
+                    .and_then(Value::as_str)
+                    .is_some_and(|cause| cause.contains("MechanicalValidationFailed"))
     })
 }
 
@@ -8823,6 +8824,40 @@ mod pump_disposition_tests {
             "story involved 必须钉定单成员(产品面据此派生 focus,首轮即锚成员)"
         );
     }
+    /// r68/r69(T22 r8 现场):机械族谓词钉测——SINGLE_CANDIDATE_APPROVAL_
+    /// COMPILE_FAILED 帧的 cause 在 /context/cause(r8 实拍;r7 曾以 /cause
+    /// 误判恒 false→recovery 白轮)。谓词必须命中实拍帧形状。
+    #[test]
+    fn lcg_plan_mechanical_failure_predicate_matches_live_frame() {
+        let mut observation = StageObservation::new("plan", &ProviderName::KimiCode);
+        observation.push_event(json!({
+            "type": "protocol_error",
+            "code": "SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED",
+            "context": {
+                "approval_attempt_id": null,
+                "cause": "single candidate publish freshness failed: MechanicalValidationFailed",
+                "kind": "operational",
+                "mechanical_report_ref": "project/p1/issue/i1/plan/pl1/mechanical_report/report-x",
+            },
+            "message": "single-candidate approval compile failed; human gate remains open",
+        }));
+        assert!(
+            plan_confirm_failure_is_mechanical(&observation),
+            "机械族谓词必须命中实拍帧形状(code 顶层+cause 在 /context/cause)"
+        );
+        // INVALID 白轮错误在场(覆盖 run_failure)不影响判定:扫事件帧。
+        observation.push_event(json!({
+            "type": "protocol_error",
+            "code": "INVALID_COMPILE_RECOVERY_ACTION",
+            "context": null,
+            "message": "work_item_plan_compile_recovery_action requires active work_item_plan_compile_recovery node",
+        }));
+        assert!(plan_confirm_failure_is_mechanical(&observation));
+        // 非机械族(无该帧)不误报。
+        let clean = StageObservation::new("plan", &ProviderName::KimiCode);
+        assert!(!plan_confirm_failure_is_mechanical(&clean));
+    }
+
     /// r26 问题2 回归锚点:SC 门泵信号决策表——
     /// - SC 门修订轮回门信号=human_gate_turn_completed(仅阶段1);
     /// - confirm 定稿终态=stage_change completed / session_state confirmed
