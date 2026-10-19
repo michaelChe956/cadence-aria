@@ -41,6 +41,18 @@ pub(crate) const REVIEWER_WINDOW_SCHEMA: &str = "reviewer_window/1";
 /// 的静默分叉)。字面值不得变更(存量磁盘布局)。
 pub(crate) const REVIEWER_WINDOW_STORE_DIR: &str = "reviewer-windows";
 
+/// coding role-run 评审窗口 ID(`<attempt_id>-<role_run_id>-w01`)。
+///
+/// role run id 只在 attempt 目录内单调(每个 attempt 都从
+/// `coding_role_run_0001` 起),而窗口 store 是 project 级目录、窗口键就是
+/// 这个 ID——只用 role run id 会让不同 attempt 的同号 role run 撞同一窗口
+/// (第二个 attempt 开窗即 `reviewer_window_conflict`)。attempt 前缀保证
+/// 窗口 ID 全局唯一;`-w01` 后缀语义(同 run 首窗)保持不变。
+/// 全仓构造该 ID 只走本函数,不得另持格式化副本。
+pub(crate) fn role_run_window_id(attempt_id: &str, role_run_id: &str) -> String {
+    format!("{attempt_id}-{role_run_id}-w01")
+}
+
 // ---------------------------------------------------------------------------
 // 状态与通道
 // ---------------------------------------------------------------------------

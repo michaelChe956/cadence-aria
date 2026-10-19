@@ -90,7 +90,8 @@ impl CodingWorkspaceEngine {
         // T19:开窗必须在 reviewer_context/Git diff/material 采集之前——
         // 重试循环内的 prompt 构建/reviewer_context 渲染全部发生在窗口
         // Running 之后(材料与 baseline manifest 同指纹)。
-        let initial_window_id = format!("{}-w01", role_run.id);
+        let initial_window_id =
+            crate::product::reviewer_window_store::role_run_window_id(&attempt.id, &role_run.id);
         let mut review_window = self
             .begin_reviewer_window_for_run(
                 &initial_window_id,

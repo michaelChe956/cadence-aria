@@ -154,6 +154,58 @@ mod r4_e1_four_repository_campaign {
                     })
             })
             .await;
+        // 回归锚(REQ-WIGA-13 多 attempt):role run id 只在 attempt 目录内
+        // 单调,而评审窗口 store 是 project 级目录——窗口 ID 必须带 attempt
+        // 前缀(`<attempt_id>-<role_run_id>-w01`),否则两个 attempt 的同号
+        // CodeReviewer run 会撞同一窗口(第二个开窗
+        // `reviewer_window_conflict` → runner 死转 AMR)。三个 attempt 的
+        // reviewer 窗口必须各自存在、互不冲突、且已独立收口。
+        let window_store = crate::product::reviewer_window_store::ReviewerWindowStore::new(
+            fixture
+                .inner
+                .paths
+                .root()
+                .join(crate::product::reviewer_window_store::REVIEWER_WINDOW_STORE_DIR),
+        );
+        let mut window_ids = std::collections::BTreeSet::new();
+        let mut reviewer_run_count = 0usize;
+        for attempt in fixture.coding_attempts() {
+            let reviewer_runs =
+                crate::product::coding_attempt_store::CodingAttemptStore::new(
+                    fixture.inner.paths.clone(),
+                )
+                .list_role_runs(PROJECT_ID, ISSUE_ID, &attempt.id)
+                .expect("list role runs")
+                .into_iter()
+                .filter(|run| {
+                    run.role == crate::product::coding_models::CodingProviderRole::CodeReviewer
+                })
+                .collect::<Vec<_>>();
+            for run in reviewer_runs {
+                reviewer_run_count += 1;
+                let window_id = crate::product::reviewer_window_store::role_run_window_id(
+                    &attempt.id, &run.id,
+                );
+                assert!(
+                    window_ids.insert(window_id.clone()),
+                    "review window id must be unique across attempts: {window_id}"
+                );
+                let record = window_store
+                    .load_window(&window_id)
+                    .expect("review window record");
+                assert_eq!(record.attempt_id, attempt.id, "{window_id}");
+                assert_eq!(record.run_id, run.id, "{window_id}");
+                assert_ne!(
+                    record.state,
+                    crate::product::reviewer_window_store::ReviewerWindowState::Running,
+                    "{window_id}: review window must be closed at FinalConfirm"
+                );
+            }
+        }
+        assert_eq!(
+            reviewer_run_count, 3,
+            "each of the three actual buckets ran exactly one code reviewer"
+        );
         let worker = AutopilotOrchestrator::new(fixture.state.clone(), Default::default());
         assert_eq!(
             worker.reconcile(&fixture.state, PROJECT_ID, ISSUE_ID).await.unwrap(),

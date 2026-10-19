@@ -296,7 +296,8 @@ impl CodingWorkspaceEngine {
         };
         // T19:开窗必须在材料采集(prepare_group_reviewer_context/Git diff/
         // prompt 构建)之前。
-        let review_window_id = format!("{}-w01", role_run.id);
+        let review_window_id =
+            crate::product::reviewer_window_store::role_run_window_id(&attempt.id, &role_run.id);
         let review_window = self
             .begin_reviewer_window_for_run(
                 &review_window_id,

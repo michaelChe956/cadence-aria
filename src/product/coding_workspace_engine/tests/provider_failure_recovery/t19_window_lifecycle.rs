@@ -154,8 +154,10 @@ async fn reviewer_transport_failure_rotates_clean_window_within_budget() {
 
     let runs = reviewer_runs(&store, &attempt);
     assert_eq!(runs.len(), 2, "initial + automatic retry run");
-    let first_window_id = format!("{}-w01", runs[0].id);
-    let retry_window_id = format!("{}-w01", runs[1].id);
+    let first_window_id =
+        crate::product::reviewer_window_store::role_run_window_id(&attempt.id, &runs[0].id);
+    let retry_window_id =
+        crate::product::reviewer_window_store::role_run_window_id(&attempt.id, &runs[1].id);
     assert_eq!(
         report.review_window_id.as_deref(),
         Some(retry_window_id.as_str())
@@ -230,7 +232,8 @@ async fn reviewer_violation_blocks_retry_and_keeps_manual_gate_lock() {
     );
 
     let window_store = t19_window_store(root.path());
-    let window_id = format!("{}-w01", runs[0].id);
+    let window_id =
+        crate::product::reviewer_window_store::role_run_window_id(&attempt.id, &runs[0].id);
     let record = window_store
         .load_window(&window_id)
         .expect("violation window record");
@@ -513,7 +516,8 @@ async fn code_review_post_run_persist_failure_releases_window_no_deadlock() {
 
     // F2:窗口收口——离开 Running,干净回收释放锁,树不永久锁死。
     let runs = reviewer_runs(&store, &attempt);
-    let window_id = format!("{}-w01", runs[0].id);
+    let window_id =
+        crate::product::reviewer_window_store::role_run_window_id(&attempt.id, &runs[0].id);
     let window_store = t19_window_store(root.path());
     let record = window_store
         .load_window(&window_id)
@@ -612,7 +616,10 @@ async fn internal_pr_review_persist_failure_releases_window_no_deadlock() {
         .expect("internal reviewer run");
     let window_store = t19_window_store(root.path());
     let record = window_store
-        .load_window(&format!("{}-w01", run.id))
+        .load_window(&crate::product::reviewer_window_store::role_run_window_id(
+            &attempt.id,
+            &run.id,
+        ))
         .expect("window record after persist failure");
     assert_eq!(
         record.state,

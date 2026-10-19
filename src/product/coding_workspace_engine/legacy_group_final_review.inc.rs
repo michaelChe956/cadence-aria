@@ -98,7 +98,8 @@ impl CodingWorkspaceEngine {
         // baseline manifest 同指纹);shard 共享同窗,任一窗口违规整组
         // 不得 approve(采信走 T19/T20b 交付门回查)。开窗失败 fail-closed
         // 绝不以无窗继续编排。
-        let window_id = format!("{}-w01", role_run.id);
+        let window_id =
+            crate::product::reviewer_window_store::role_run_window_id(&attempt.id, &role_run.id);
         let review_window = match self
             .begin_reviewer_window_for_run(
                 &window_id,

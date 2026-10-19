@@ -1229,7 +1229,8 @@ impl CodingWorkspaceEngine {
     {
         self.recycle_reviewer_window(window, "technical_retry_window_recycle")
             .await?;
-        let window_id = format!("{}-w01", retry_run.id);
+        let window_id =
+            crate::product::reviewer_window_store::role_run_window_id(&attempt.id, &retry_run.id);
         self.begin_reviewer_window_for_run(
             &window_id,
             attempt,
