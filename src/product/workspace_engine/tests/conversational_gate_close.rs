@@ -567,6 +567,7 @@ fn sg3b_put_mechanical_report(
 
 /// 用真实 live context + SG1 纯评估冻结 Some 结构报告并落新 report ref
 ///（候选门同款冻结路径；返回 (report_ref, context_digest)）。
+#[allow(clippy::too_many_arguments)] // 门关门测试场景参数逐项对应契约
 fn sg3b_report_ref_with_frozen_structure(
     engine: &WorkspaceEngine,
     lifecycle: &LifecycleStore,
@@ -1806,6 +1807,7 @@ mod confirmation_trust {
     struct RecordingTrustGate {
         calls: Arc<Mutex<Vec<RecordedTrustCall>>>,
         scripted: Arc<Mutex<std::collections::VecDeque<ProviderTrustPreparationResult>>>,
+        #[allow(clippy::type_complexity)] // 测试夹具返回的多元组即被断言形状
         hook: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
     }
 
