@@ -103,22 +103,31 @@ fn collect_quoted_spans(statement: &str, refs: &mut Vec<String>) {
     }
 }
 
-/// 命令 token 提取：按空白切分、剥外层配对引号后按文件形态判定
+/// 命令 token 提取：按空白切分、**成对**剥外层同类引号后按文件形态判定
 /// （`node --test test/x.test.js` → `test/x.test.js`；`--test`/`node` 排除）。
+/// 无法精确确认路径本体的 token（残留/混合/不闭合引号）整体拒绝提取——
+/// 不扩成 shell parser，也绝不输出带引号的伪路径。
 fn collect_command_paths(command: &str, refs: &mut Vec<String>) {
     for token in command.split_whitespace() {
-        let token = token
-            .strip_prefix('`')
-            .or_else(|| token.strip_prefix('"'))
-            .or_else(|| token.strip_prefix('\''))
-            .unwrap_or(token);
-        let token = token
-            .strip_suffix('`')
-            .or_else(|| token.strip_suffix('"'))
-            .or_else(|| token.strip_suffix('\''))
-            .unwrap_or(token);
+        let Some(token) = strip_paired_quotes(token) else {
+            continue;
+        };
         push_repo_path(token, refs);
     }
+}
+
+/// 剥 token 外层的**同种**配对引号（反引号/双引号/单引号），只剥一层：
+/// - 无引号 token：原样返回；但含任何引号即拒绝（`incident-note.md'`）。
+/// - 有引号 token：必须以同一引号收尾，且剥除后内部不得再含引号
+///   （嵌套/混合形态无法确认路径本体）——否则返回 `None` 由调用方跳过。
+fn strip_paired_quotes(token: &str) -> Option<&str> {
+    const QUOTES: [char; 3] = ['`', '"', '\''];
+    let first = token.chars().next()?;
+    if QUOTES.contains(&first) {
+        let inner = token.strip_prefix(first)?.strip_suffix(first)?;
+        return (!inner.chars().any(|character| QUOTES.contains(&character))).then_some(inner);
+    }
+    (!token.chars().any(|character| QUOTES.contains(&character))).then_some(token)
 }
 
 /// 剥 span 内可选的方法前缀（`GET /x` → `/x`），无前缀原样返回。
@@ -147,13 +156,19 @@ fn push_repo_path(candidate: &str, refs: &mut Vec<String>) {
         || candidate.starts_with('/')
         || candidate.starts_with('-')
         || candidate.starts_with('$')
+        || candidate.starts_with('~')
+        || !candidate.is_ascii()
+        || candidate
+            .chars()
+            .any(|character| matches!(character, '`' | '"' | '\''))
     {
         return;
     }
-    if candidate
-        .bytes()
-        .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b':' | b'*' | b'?' | b'\\'))
-        || candidate.bytes().any(|byte| SHELL_PUNCT.contains(&byte))
+    if candidate.bytes().any(|byte| {
+        byte.is_ascii_whitespace()
+            || byte.is_ascii_control()
+            || matches!(byte, b':' | b'*' | b'?' | b'\\' | b'$')
+    }) || candidate.bytes().any(|byte| SHELL_PUNCT.contains(&byte))
     {
         return;
     }
@@ -229,5 +244,72 @@ mod tests {
             &mut refs,
         );
         assert_eq!(refs, vec!["status.html".to_string()]);
+    }
+
+    /// F3′:命令 token 的引号必须成对剥除;真实 r1 的
+    /// `"incident-note.md"'` 形态(双引号后残留单引号)无法确认路径本体,
+    /// 必须整体拒绝——绝不能输出带引号的伪路径。
+    #[test]
+    fn command_tokens_with_residual_quotes_are_rejected() {
+        let mut refs = Vec::new();
+        collect_command_paths(r#"sed -n '1p' "incident-note.md"'"#, &mut refs);
+        assert!(refs.is_empty(), "残留引号 token 不得入列:{refs:?}");
+
+        for command in [
+            "cat \"incident-note.md'",
+            "cat 'incident-note.md",
+            "cat \"incident-note.md",
+            "cat incident-note.md'",
+            "cat \"\"incident-note.md\"\"",
+            "cat \"'incident-note.md'\"",
+        ] {
+            let mut refs = Vec::new();
+            collect_command_paths(command, &mut refs);
+            assert!(refs.is_empty(), "无法确认路径本体的 token 不得入列 {command}:{refs:?}");
+        }
+    }
+
+    /// F3′:普通成对单/双引号/反引号仍命中原路径。
+    #[test]
+    fn command_tokens_with_paired_quotes_are_unwrapped() {
+        for command in [
+            "cat 'incident-note.md'",
+            "cat \"incident-note.md\"",
+            "cat `incident-note.md`",
+        ] {
+            let mut refs = Vec::new();
+            collect_command_paths(command, &mut refs);
+            assert_eq!(
+                refs,
+                vec!["incident-note.md".to_string()],
+                "成对引号必须剥除:{command}"
+            );
+        }
+    }
+
+    /// F3′:变量、绝对路径、通配符、中文标点、shell 链、尾分号等非仓库相对
+    /// 路径形态一律不得入列(拒绝方向 fail-safe)。
+    #[test]
+    fn command_tokens_outside_repository_relative_form_are_rejected() {
+        for command in [
+            "cat $HOME/incident-note.md",
+            "cat \"$DIR/incident-note.md\"",
+            "cat /tmp/incident-note.md",
+            "cat ~/incident-note.md",
+            "node --test src/*.test.js",
+            "node --test src/?.test.js",
+            "node --test test/x.test.js; npm run lint",
+            "node --test test/x.test.js，npm run lint",
+            "node --test 'test/x.test.js'；然后重启",
+            "cat a/../incident-note.md",
+        ] {
+            let mut refs = Vec::new();
+            collect_command_paths(command, &mut refs);
+            assert!(refs.is_empty(), "非仓库相对形态不得入列 {command}:{refs:?}");
+        }
+
+        let mut refs = Vec::new();
+        collect_command_paths("node --test test/x.test.js。", &mut refs);
+        assert_eq!(refs, vec!["test/x.test.js".to_string()]);
     }
 }

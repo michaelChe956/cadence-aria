@@ -138,6 +138,8 @@ impl IntoResponse for ApiError {
             | "invalid_execution_record_id"
             | "invalid_artifact_id"
             | "invalid_file_path"
+            // Bug45/F4:file_diff 的 base_checkpoint 形态白名单拒绝 → 400。
+            | "invalid_base_checkpoint"
             | "invalid_issue_id"
             | "invalid_project_id"
             | "invalid_workspace_message"
