@@ -362,20 +362,20 @@ impl ProviderPolicyProjector for KimiPolicyProjector {
         // Task 20a-fix(F1):ReviewerVerify 窗口合同例外——它是
         // ReviewerVerify 岗位的 wire 形态(物理面=无通用策略片段,窗口
         // 经 TrustedDutyGrant 消费),不得在投影层误杀。
-        if let Some(
-            policy @ crate::cross_cutting::streaming_provider::ProviderToolPolicy {
-                intent:
-                    crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify {
-                        ..
-                    },
-            },
-        ) = input.tool_policy()
-        {
-            let _ = policy;
-        } else if let Some(policy) = input.tool_policy() {
-            return Err(ProviderProjectionError::Unsupported(format!(
-                "{KIMI_GENERIC_TOOL_POLICY_FORBIDDEN}: kimi carries no generic tool policy (got {policy:?})"
-            )));
+        if let Some(policy) = input.tool_policy() {
+            let reviewer_verify_window = matches!(
+                policy,
+                ProviderToolPolicy {
+                    intent:
+                        crate::cross_cutting::streaming_provider::ToolPolicyIntent::ReviewerVerify { .. },
+                    ..
+                }
+            );
+            if !reviewer_verify_window {
+                return Err(ProviderProjectionError::Unsupported(format!(
+                    "{KIMI_GENERIC_TOOL_POLICY_FORBIDDEN}: kimi carries no generic tool policy (got {policy:?})"
+                )));
+            }
         }
 
         // MCP 来源:只接受 Aria bundle digest 或 native 标记,空串拒绝。
