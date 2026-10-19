@@ -140,6 +140,29 @@ fn b1_input(
     input
 }
 
+/// F10(adapter 级):direct/legacy 真实 spawn 的子进程读到宿主 PATH/HOME
+/// (fixture 落盘子进程实际环境,测试逐字比对,不靠 adapter 自述)。
+fn assert_marker_has_host_environment(marker: &Path) {
+    for _ in 0..200 {
+        if marker.is_file() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let text = std::fs::read_to_string(marker)
+        .unwrap_or_else(|error| panic!("read env marker {}: {error}", marker.display()));
+    let host_home = format!("HOME={}", std::env::var("HOME").expect("host HOME"));
+    let host_path = format!("PATH={}", std::env::var("PATH").expect("host PATH"));
+    assert!(
+        text.lines().any(|line| line == host_home),
+        "F10:direct/legacy 子进程必须读到宿主 HOME(实测 {text:?})"
+    );
+    assert!(
+        text.lines().any(|line| line == host_path),
+        "F10:direct/legacy 子进程必须读到宿主 PATH(实测 {text:?})"
+    );
+}
+
 /// direct 路径:真实子进程 spawn 后 store 有 Process 登记,归属与引擎
 /// scope 同源(scope/run/boot/worktree),身份为真实 PID+starttime;
 /// 会话真实收口后注销。
@@ -259,10 +282,21 @@ async fn b1_start_without_carrier_registers_nothing() {
     drop(ownership);
     let provider = KimiCodeProvider::new(fixture_command("kimi_acp_b1_fixture.sh"));
 
+    // F10:direct/legacy 真实 spawn 环境含宿主 PATH/HOME(fixture 落盘)。
+    let env_marker = tempfile::tempdir()
+        .expect("env marker dir")
+        .keep()
+        .join("kimi-b1-env.marker");
+    let mut bare_input = b1_input(Some("no_hold"), 30);
+    bare_input.env_vars.insert(
+        "KIMI_B1_ENV_MARKER".to_string(),
+        env_marker.display().to_string(),
+    );
     let mut session = provider
-        .start(b1_input(Some("no_hold"), 30), CancellationToken::new())
+        .start(bare_input, CancellationToken::new())
         .await
         .expect("bare direct start");
+    assert_marker_has_host_environment(&env_marker);
     assert!(
         b1_records(&env.store_root, &key).is_empty(),
         "裸 start 无归属零登记"

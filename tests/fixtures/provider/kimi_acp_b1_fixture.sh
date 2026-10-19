@@ -15,6 +15,12 @@
 # 供「预留失败零 spawn」探针使用。
 set -euo pipefail
 
+# F10(adapter 级):direct/legacy 真实 spawn 环境继承探针——把子进程实际
+# 读到的 HOME/PATH 落盘,测试逐字比对宿主值(不靠 adapter 传参自述)。
+if [[ -n "${KIMI_B1_ENV_MARKER:-}" ]]; then
+  printf 'HOME=%s\nPATH=%s\n' "${HOME:-}" "${PATH:-}" > "$KIMI_B1_ENV_MARKER"
+fi
+
 if [[ -n "${KIMI_B1_SPAWN_MARKER:-}" ]]; then
   printf '%s\n' "${1:-session}" >> "$KIMI_B1_SPAWN_MARKER"
 fi

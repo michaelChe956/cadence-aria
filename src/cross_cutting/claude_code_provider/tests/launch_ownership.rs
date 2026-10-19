@@ -212,6 +212,30 @@ async fn b1_drain(events: &mut tokio::sync::mpsc::Receiver<ProviderEvent>) {
     {}
 }
 
+/// F10(adapter 级):direct/legacy 真实 spawn 的子进程环境必须继承宿主
+/// PATH/HOME(A1 环境回退语义)——读 `/proc/<pid>/environ` 逐字比对,不靠
+/// adapter 传参自述。
+#[cfg(target_os = "linux")]
+fn assert_child_inherits_host_environment(pid: u32) {
+    let environ = std::fs::read(format!("/proc/{pid}/environ"))
+        .unwrap_or_else(|error| panic!("read /proc/{pid}/environ: {error}"));
+    let entries: Vec<String> = environ
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| String::from_utf8_lossy(entry).into_owned())
+        .collect();
+    let host_home = format!("HOME={}", std::env::var("HOME").expect("host HOME"));
+    let host_path = format!("PATH={}", std::env::var("PATH").expect("host PATH"));
+    assert!(
+        entries.contains(&host_home),
+        "F10:direct/legacy 子进程必须继承宿主 HOME(实测 environ 无 {host_home})"
+    );
+    assert!(
+        entries.contains(&host_path),
+        "F10:direct/legacy 子进程必须继承宿主 PATH(实测 environ 无宿主 PATH)"
+    );
+}
+
 // ---------- tests ----------
 
 /// raw direct 面(非 LC):`start_owned` 的载体在 spawn 点回填真实
@@ -396,6 +420,14 @@ async fn claude_start_without_carrier_registers_nothing() {
         .start(b1_raw_input(), CancellationToken::new())
         .await
         .expect("bare direct start");
+    // F10:direct/legacy 真实 spawn 环境含宿主 PATH/HOME。
+    wait_for_file(&pid_path).await;
+    let fixture_pid = std::fs::read_to_string(&pid_path)
+        .expect("read fixture pid")
+        .trim()
+        .parse::<u32>()
+        .expect("fixture pid");
+    assert_child_inherits_host_environment(fixture_pid);
     assert!(
         b1_process_records(&fixture, &key).is_empty(),
         "无归属零登记"

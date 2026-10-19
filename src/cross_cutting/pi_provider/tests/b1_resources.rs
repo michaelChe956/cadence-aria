@@ -141,6 +141,29 @@ fn b1_wait_for_pid_marker(marker: &Path) -> u32 {
     }
 }
 
+/// F10(adapter 级):direct/legacy 真实 spawn 的子进程环境必须继承宿主
+/// PATH/HOME(A1 环境回退语义)——读 `/proc/<pid>/environ` 逐字比对。
+#[cfg(target_os = "linux")]
+fn assert_child_inherits_host_environment(pid: u32) {
+    let environ = std::fs::read(format!("/proc/{pid}/environ"))
+        .unwrap_or_else(|error| panic!("read /proc/{pid}/environ: {error}"));
+    let entries: Vec<String> = environ
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| String::from_utf8_lossy(entry).into_owned())
+        .collect();
+    let host_home = format!("HOME={}", std::env::var("HOME").expect("host HOME"));
+    let host_path = format!("PATH={}", std::env::var("PATH").expect("host PATH"));
+    assert!(
+        entries.contains(&host_home),
+        "F10:direct/legacy 子进程必须继承宿主 HOME(实测 environ 无 {host_home})"
+    );
+    assert!(
+        entries.contains(&host_path),
+        "F10:direct/legacy 子进程必须继承宿主 PATH(实测 environ 无宿主 PATH)"
+    );
+}
+
 /// 有界轮询至 scope 内出现 Process 登记,返回首条(5s 上界)。
 #[cfg(unix)]
 fn b1_poll_process_record(store_root: &Path, key: &ResourceScopeKey) -> ProviderResourceRecord {
@@ -324,6 +347,8 @@ async fn pi_b1_start_owned_registers_process_and_releases_after_real_tail() {
         .expect("owned pi start");
 
     let pid = b1_wait_for_pid_marker(&pid_marker);
+    // F10:direct/legacy 真实 spawn 环境含宿主 PATH/HOME。
+    assert_child_inherits_host_environment(pid);
     let record = b1_poll_process_record(&store_root, scope.key());
     b1_assert_process_record_identity(&record, &ownership, pid, &tree_key);
 
@@ -445,6 +470,8 @@ async fn pi_b1_lc_validated_launch_registers_process_and_releases_after_tail() {
         .expect("owned lc validated start");
 
     let pid = b1_wait_for_pid_marker(&pid_marker);
+    // F10:direct/legacy 真实 spawn 环境含宿主 PATH/HOME。
+    assert_child_inherits_host_environment(pid);
     let record = b1_poll_process_record(&store_root, scope.key());
     b1_assert_process_record_identity(&record, &ownership, pid, &tree_key);
 
