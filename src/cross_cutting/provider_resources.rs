@@ -3008,6 +3008,12 @@ mod tests {
     struct B1SpawningAdapter {
         mode: &'static str,
         starts: std::sync::atomic::AtomicUsize,
+        /// spawn 点冻结的真实探针子进程 pid。退出必须定向 kill 这一个
+        /// pid——禁止按 comm 模糊扫描 `/proc/self/task/*/children`:并行
+        /// 测试里别的用例的 sleep/terminal 子进程同样是本进程的直接
+        /// child,模糊匹配会把它们误杀(现场:terminal deadline 用例被
+        /// 本 helper SIGKILL)。
+        probe_pid: std::sync::atomic::AtomicU32,
     }
 
     impl B1SpawningAdapter {
@@ -3015,7 +3021,12 @@ mod tests {
             Self {
                 mode,
                 starts: std::sync::atomic::AtomicUsize::new(0),
+                probe_pid: std::sync::atomic::AtomicU32::new(0),
             }
+        }
+
+        fn probe_pid(&self) -> u32 {
+            self.probe_pid.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -3037,6 +3048,9 @@ mod tests {
             )
             .await
             .expect("spawn sleep probe");
+            if let Some(pid) = managed.child.spawn_leader_pid() {
+                self.probe_pid.store(pid, Ordering::SeqCst);
+            }
             let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
             let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
             match self.mode {
@@ -3290,11 +3304,12 @@ mod tests {
             !b1_process_records(&env, &key).is_empty(),
             "协议 Completed 不提前注销"
         );
-        // 找到 sleep 子进程并让它退出(触发 adapter 关闭源通道)。
-        if let Some(pid) = b1_find_sleep_child() {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
-            }
+        // 定向结束探针子进程(触发 adapter 关闭源通道)。按 pid 定向,
+        // 不扫描进程表——并行测试里别人的 sleep 子进程也是本进程的 child。
+        let probe_pid = adapter.probe_pid();
+        assert_ne!(probe_pid, 0, "探针 pid 必须在 spawn 点冻结");
+        unsafe {
+            libc::kill(probe_pid as i32, libc::SIGKILL);
         }
         // 3) 通道终结后注销。
         while session.events.recv().await.is_some() {}
@@ -3322,29 +3337,5 @@ mod tests {
         assert_eq!(records.len(), 2, "两次 launch 两条登记: {records:?}");
         let ids: Vec<&str> = records.iter().map(|r| r.resource_id.as_str()).collect();
         assert!(ids.contains(&reservation.resource_id()));
-    }
-
-    #[cfg(unix)]
-    fn b1_find_sleep_child() -> Option<u32> {
-        // 扫描本进程全部线程的 children 文件(glob 不展开,逐 task 读取)。
-        let tasks = std::fs::read_dir("/proc/self/task").ok()?;
-        let mut children = Vec::new();
-        for task in tasks.flatten() {
-            if let Ok(content) = std::fs::read_to_string(task.path().join("children")) {
-                children.extend(
-                    content
-                        .split_whitespace()
-                        .filter_map(|value| value.parse::<u32>().ok()),
-                );
-            }
-        }
-        for pid in children {
-            if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                && comm.trim().contains("sleep")
-            {
-                return Some(pid);
-            }
-        }
-        None
     }
 }

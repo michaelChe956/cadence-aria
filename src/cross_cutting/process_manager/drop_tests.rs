@@ -45,7 +45,11 @@ struct FixtureIdentities {
 }
 
 fn capture_identity(pid_file: &Path) -> Option<ProcessIdentity> {
-    let pid = fs::read_to_string(pid_file).ok()?.trim().parse::<i32>().ok()?;
+    let pid = fs::read_to_string(pid_file)
+        .ok()?
+        .trim()
+        .parse::<i32>()
+        .ok()?;
     if pid <= 0 {
         return None;
     }
@@ -207,14 +211,98 @@ async fn spawn_and_wait(fixture: &ProcessTreeFixture) {
     process.child.wait().await.expect("wait process tree");
 }
 
-#[test]
-fn process_group_signal_target_rejects_reaped_or_reused_leader() {
-    assert_eq!(
-        super::unix_process_group_signal_target(Some(41), 41),
-        Some(41)
+/// PID 复用防护夹具:观察者自己 `setpgid(0,0)` 成为组长,它的 pid 就是
+/// 进程组 id——「pgid 被复用」等价于「该 pgid 位置换了主人」。
+#[cfg(unix)]
+fn spawn_bystander_group() -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", "sleep 30"]);
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    command.spawn().expect("spawn bystander group")
+}
+
+#[cfg(unix)]
+fn stop_bystander(mut bystander: std::process::Child) {
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    matches!(process_state(pid), Some(state) if state != 'Z')
+}
+
+/// PID 复用防护:组信号只在冻结的 (pid, starttime) 身份仍匹配时发射。
+/// 只看 pid(恒真的 `leader_pid == pgid`)会把复用后占位的新进程组打掉。
+#[cfg(unix)]
+#[tokio::test]
+async fn group_signal_requires_live_frozen_identity() {
+    use super::ProcessStartIdentity;
+    use crate::cross_cutting::process_manager::signal_group_if_live_identity;
+
+    // ① 身份匹配 → 信号送达(正常清理不得被关掉)。
+    let mut matched = spawn_bystander_group();
+    let matched_pid = matched.id() as i32;
+    let matched_identity =
+        ProcessStartIdentity::freeze(matched_pid as u32).expect("freeze live leader");
+    assert!(
+        signal_group_if_live_identity(Some(matched_identity), matched_pid, libc::SIGKILL),
+        "身份匹配时必须发射组信号"
     );
-    assert_eq!(super::unix_process_group_signal_target(None, 41), None);
-    assert_eq!(super::unix_process_group_signal_target(Some(42), 41), None);
+    let status = matched.wait().expect("wait matched bystander");
+    assert_eq!(status.code(), None, "身份匹配的旁观组应被组信号收口");
+
+    // ② 无冻结身份 → 拒绝发射(身份不可证不等于可以裸 killpg)。
+    let unproven = spawn_bystander_group();
+    let unproven_pid = unproven.id() as i32;
+    assert!(!signal_group_if_live_identity(
+        None,
+        unproven_pid,
+        libc::SIGKILL
+    ));
+    assert!(pid_alive(unproven_pid), "无身份不得发射组信号");
+    stop_bystander(unproven);
+
+    // ③ pid 已被复用(starttime 不同)→ 拒绝发射,占位者存活。
+    let reused = spawn_bystander_group();
+    let reused_pid = reused.id() as i32;
+    let live = ProcessStartIdentity::freeze(reused_pid as u32).expect("freeze live leader");
+    let stale =
+        ProcessStartIdentity::with_start_time_ticks(reused_pid as u32, live.start_time_ticks() + 1);
+    assert!(!signal_group_if_live_identity(
+        Some(stale),
+        reused_pid,
+        libc::SIGKILL
+    ));
+    assert!(pid_alive(reused_pid), "复用后的 pgid 占位者不得被误杀");
+    stop_bystander(reused);
+
+    // ④ 组长已回收(starttime 不可读)→ 拒绝发射。
+    let mut gone = spawn_bystander_group();
+    let gone_pid = gone.id() as i32;
+    let gone_identity = ProcessStartIdentity::freeze(gone_pid as u32).expect("freeze live leader");
+    stop_bystander_take(&mut gone);
+    assert!(!signal_group_if_live_identity(
+        Some(gone_identity),
+        gone_pid,
+        libc::SIGKILL
+    ));
+}
+
+#[cfg(unix)]
+fn stop_bystander_take(bystander: &mut std::process::Child) {
+    let _ = bystander.kill();
+    let _ = bystander.wait();
 }
 
 #[tokio::test]
@@ -553,4 +641,50 @@ async fn t14_code_delivery_scope_quiesce_stops_owned_process_tree_only() {
     // 测试卫生:收尾未登记进程(owned 子进程已在上方收割)。
     let _ = outsider.kill();
     let _ = outsider.wait();
+}
+
+/// PID 复用防护(状态面):pgid 位置已被旁观组占用时,
+/// `ManagedProcessChild::start_kill` 与 `Drop` 都不得 killpg——否则会打掉
+/// 无关进程组(现场:并行测试的 fixture/terminal 子进程被 SIGKILL)。
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_process_signal_paths_refuse_recycled_pgid() {
+    use super::ProcessStartIdentity;
+
+    let root = tempdir().expect("tempdir");
+    let mut process = ProcessManager::spawn(
+        "/bin/sh",
+        &["-c", "exit 0"],
+        root.path(),
+        &unix_path_env(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn");
+    process.child.wait().await.expect("wait");
+
+    let bystander = spawn_bystander_group();
+    let bystander_pid = bystander.id() as i32;
+    let bystander_start =
+        process_start_time_ticks(bystander_pid as u32).expect("bystander starttime");
+    // 「复用」等价状态:记录的 pgid 指向该位置,但冻结身份的 starttime
+    // 不再匹配(同一 pid 位置已换了主人)。
+    process.child.pgid = Some(bystander_pid);
+    process.child.group_leader_pid = Some(bystander_pid as u32);
+    process.child.leader_identity = Some(ProcessStartIdentity::with_start_time_ticks(
+        bystander_pid as u32,
+        bystander_start + 1,
+    ));
+
+    let _ = process.child.start_kill();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        pid_alive(bystander_pid),
+        "start_kill 不得向被复用的 pgid 发信号"
+    );
+
+    drop(process);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(pid_alive(bystander_pid), "Drop 不得向被复用的 pgid 发信号");
+    stop_bystander(bystander);
 }

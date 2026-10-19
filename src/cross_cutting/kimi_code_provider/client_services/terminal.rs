@@ -27,6 +27,9 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use super::sandbox::open_dir_no_follow_inherit;
+use crate::cross_cutting::process_manager::ProcessStartIdentity;
+#[cfg(unix)]
+use crate::cross_cutting::process_manager::signal_group_if_live_identity;
 
 pub const MAX_TERMINALS: usize = 4;
 pub const MAX_TERMINAL_OUTPUT_BYTES: usize = 1_048_576;
@@ -393,17 +396,17 @@ struct TerminalChild {
     child: Child,
     #[cfg(unix)]
     pgid: Option<i32>,
+    /// PID 复用防护:spawn 时冻结的终端组长 (pid, `/proc` starttime) 真实
+    /// 身份。终端自然退出被回收后 pgid 可能已被新进程组复用——裸 killpg
+    /// 会打掉无关进程组(现场:并行测试的 terminal 子进程被 SIGKILL)。
+    identity: Option<ProcessStartIdentity>,
 }
 
 impl TerminalChild {
     fn start_kill(&mut self) {
         #[cfg(unix)]
-        if let Some(pgid) = self.pgid
-            && pgid > 0
-        {
-            unsafe {
-                let _ = libc::killpg(pgid, libc::SIGKILL);
-            }
+        if let Some(pgid) = self.pgid {
+            let _ = signal_group_if_live_identity(self.identity, pgid, libc::SIGKILL);
         }
         let _ = self.child.start_kill();
     }
@@ -421,12 +424,8 @@ impl TerminalChild {
 impl Drop for TerminalChild {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let Some(pgid) = self.pgid
-            && pgid > 0
-        {
-            unsafe {
-                let _ = libc::killpg(pgid, libc::SIGKILL);
-            }
+        if let Some(pgid) = self.pgid {
+            let _ = signal_group_if_live_identity(self.identity, pgid, libc::SIGKILL);
         }
         let _ = self.child.start_kill();
     }
@@ -471,7 +470,12 @@ async fn run_terminal(
         match builder.spawn() {
             Ok(child) => {
                 let pgid = child.id().and_then(|pid| i32::try_from(pid).ok());
-                break TerminalChild { child, pgid };
+                let identity = child.id().and_then(ProcessStartIdentity::freeze);
+                break TerminalChild {
+                    child,
+                    pgid,
+                    identity,
+                };
             }
             Err(error)
                 if error.raw_os_error() == Some(libc::ETXTBSY)
@@ -1073,6 +1077,75 @@ mod tests {
         assert!(result.killed);
         assert_eq!(result.exit_code, None);
         assert!(!result.timed_out);
+    }
+
+    /// PID 复用防护:终端自然退出被回收后,同一 pgid 位置若已被新进程组
+    /// 复用,`start_kill`/`Drop` 都必须拒绝 killpg——否则会打掉无关进程组
+    /// (现场:并行测试的 terminal 子进程被 SIGKILL)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_kill_paths_refuse_recycled_process_group() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command as StdCommand;
+
+        fn process_state(pid: i32) -> Option<char> {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            stat.rsplit_once(") ")
+                .and_then(|(_, tail)| tail.chars().next())
+        }
+        fn pid_alive(pid: i32) -> bool {
+            matches!(process_state(pid), Some(state) if state != 'Z')
+        }
+
+        // 旁观组:自己 setpgid(0,0) 成组长,pid 即 pgid。
+        let mut bystander = {
+            let mut command = StdCommand::new("sh");
+            command.args(["-c", "sleep 30"]);
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
+            command.spawn().expect("spawn bystander group")
+        };
+        let bystander_pid = bystander.id() as i32;
+        let bystander_start =
+            crate::cross_cutting::process_manager::process_start_time_ticks(bystander_pid as u32)
+                .expect("bystander starttime");
+
+        // 真实终端子进程;pgid/身份被替换为「复用后」状态。
+        let mut builder = Command::new("sh");
+        builder.args(["-c", "sleep 30"]);
+        builder.process_group(0);
+        let child = builder.spawn().expect("spawn terminal child");
+        let mut terminal = TerminalChild {
+            child,
+            pgid: Some(bystander_pid),
+            identity: Some(ProcessStartIdentity::with_start_time_ticks(
+                bystander_pid as u32,
+                bystander_start + 1,
+            )),
+        };
+
+        terminal.start_kill();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            pid_alive(bystander_pid),
+            "start_kill 不得向复用的 pgid 发信号"
+        );
+
+        // 收掉真实终端子进程后走 Drop 路径(同一核对口径)。
+        let _ = terminal.child.wait().await;
+        drop(terminal);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(pid_alive(bystander_pid), "Drop 不得向复用的 pgid 发信号");
+
+        let _ = bystander.kill();
+        let _ = bystander.wait();
     }
 
     // —— 唯一保留的真实进程端到端用例（DEF-7 桶收敛，D4）——

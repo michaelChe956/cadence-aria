@@ -20,15 +20,9 @@ use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 const TRANSIENT_SPAWN_RETRY_COUNT: usize = 2;
 const TRANSIENT_SPAWN_RETRY_DELAY: Duration = Duration::from_millis(10);
 
-#[cfg(unix)]
-fn unix_process_group_signal_target(spawn_time_leader_pid: Option<u32>, pgid: i32) -> Option<i32> {
-    (spawn_time_leader_pid == u32::try_from(pgid).ok()).then_some(pgid)
-}
-
 /// 批2 Task 5:读取 `/proc/<pid>/stat` 的 starttime(第 22 字段,时钟 ticks)——
 /// 与 PID 组成 PID-start 真实身份,防 PID 复用误杀。进程消失/不可读返回 None。
 #[cfg(unix)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn process_start_time_ticks(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, tail) = stat.rsplit_once(") ")?;
@@ -37,9 +31,93 @@ pub(crate) fn process_start_time_ticks(pid: u32) -> Option<u64> {
 }
 
 #[cfg(not(unix))]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn process_start_time_ticks(_pid: u32) -> Option<u64> {
     None
+}
+
+/// PID-start 真实身份：pid + `/proc/<pid>/stat` starttime（时钟 ticks）。
+///
+/// starttime 随进程回收消失、随 pid 复用必然改变——它是「同一 pid 位置
+/// 是否仍是原主」的唯一可靠判据。信号发射前一律以此核对（PID 复用误杀
+/// 防护）：只看 pid 会把「复用后占位的新进程」当成自己人打掉。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProcessStartIdentity {
+    pid: u32,
+    start_time_ticks: u64,
+}
+
+impl ProcessStartIdentity {
+    /// spawn 后立即冻结。`/proc` 不可读（进程已消失/无 procfs）→ None；
+    /// 调用方按「身份不可证」处理，绝不凭 pid 裸发信号。
+    pub(crate) fn freeze(pid: u32) -> Option<Self> {
+        Some(Self {
+            pid,
+            start_time_ticks: process_start_time_ticks(pid)?,
+        })
+    }
+
+    /// 测试专用:构造「同一 pid 位置换了主人」的冻结身份(PID 复用场景)。
+    #[cfg(test)]
+    pub(crate) fn with_start_time_ticks(pid: u32, start_time_ticks: u64) -> Self {
+        Self {
+            pid,
+            start_time_ticks,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_time_ticks(self) -> u64 {
+        self.start_time_ticks
+    }
+
+    /// 该 pid 位置仍是冻结时的同一进程。僵尸仍占用 pid（回收前不会被
+    /// 复用），向它的进程组发信号是安全的，因此只比 starttime、不看 state。
+    pub(crate) fn still_same_process(self) -> bool {
+        process_start_time_ticks(self.pid) == Some(self.start_time_ticks)
+    }
+}
+
+/// 身份核对后的进程组信号——组信号发射的唯一出口（PID 复用误杀防护）。
+///
+/// 仅当冻结身份仍是同一进程、且 `pgid` 就是该身份的 pid（`process_group(0)`
+/// / `setpgid(0,0)` 使组长 pid 即 pgid）时才 `killpg`。已回收、已复用、
+/// 身份不可证 → 不发信号并返回 false：拒绝发射是可审计结果，不是静默。
+/// 组内残留清理的代价必须让位于「绝不误杀复用后的无关进程组」。
+pub(crate) fn signal_group_if_live_identity(
+    identity: Option<ProcessStartIdentity>,
+    pgid: i32,
+    signal: i32,
+) -> bool {
+    let Ok(pgid_pid) = u32::try_from(pgid) else {
+        return false;
+    };
+    let Some(identity) = identity.filter(|identity| identity.pid == pgid_pid) else {
+        tracing::debug!(
+            target: "process_manager",
+            pgid,
+            "process group signal skipped: no frozen leader identity"
+        );
+        return false;
+    };
+    if !identity.still_same_process() {
+        tracing::warn!(
+            target: "process_manager",
+            pgid,
+            start_time_ticks = identity.start_time_ticks,
+            "process group signal skipped: frozen leader identity is reaped or pid-reused"
+        );
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: killpg 只作用于已核对身份的正整数 pgid（组长 pid）。
+        unsafe { libc::killpg(pgid, signal) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = signal;
+        false
+    }
 }
 
 #[derive(Debug)]
@@ -58,11 +136,14 @@ pub struct ManagedProcessChild {
     #[cfg(unix)]
     pgid: Option<i32>,
     /// r19 根修:spawn 时冻结的进程组组长 pid(`process_group(0)` 使 child
-    /// 即组长)。组长回收后组清理仍须可达——组内残留进程(CLI 工具孙进程)
-    /// 持有 stdout/stderr 管道写端,会无限推迟 EOF(现场:sync 桥 epoll
-    /// 空等 57min+)。以 spawn 时身份判定组归属,不随 child 回收失效。
+    /// 即组长)。spawn 时身份判定组归属,不随 child 回收失效。
     #[cfg(unix)]
     group_leader_pid: Option<u32>,
+    /// PID 复用防护:spawn 时冻结的组长 (pid, `/proc` starttime) 真实身份。
+    /// 每次发射组信号前必须核对——组长已回收/pid 已被复用 → 绝不 killpg
+    /// (现场:并行测试中误杀无关进程组的 SIGKILL)。
+    #[cfg(unix)]
+    leader_identity: Option<ProcessStartIdentity>,
     #[cfg(all(unix, test))]
     drop_reaper_spawns: Arc<AtomicUsize>,
 }
@@ -85,10 +166,12 @@ impl ManagedProcessChild {
             let child = command.spawn()?;
             let pgid = child.id().and_then(|pid| i32::try_from(pid).ok());
             let group_leader_pid = child.id();
+            let leader_identity = group_leader_pid.and_then(ProcessStartIdentity::freeze);
             Ok(Self {
                 child: Some(child),
                 pgid,
                 group_leader_pid,
+                leader_identity,
                 #[cfg(test)]
                 drop_reaper_spawns: Arc::new(AtomicUsize::new(0)),
             })
@@ -141,26 +224,22 @@ impl ManagedProcessChild {
     }
 
     pub fn start_kill(&mut self) -> std::io::Result<()> {
-        // r19:以 spawn 时冻结的组长身份判定组归属——child 已退出/回收后
-        // 组清理仍须可达(组内残留进程持有管道写端,推迟 EOF 使事件流
-        // 无法终结)。
+        // PID 复用防护:组信号只在 spawn 时冻结的组长身份仍匹配时发射。
+        // 组长已回收/pid 已被复用 → 拒绝 killpg(否则会打掉复用后的无关
+        // 进程组),仅回收直接子进程。
         #[cfg(unix)]
-        if let Some(pgid) = self
-            .pgid
-            .and_then(|pgid| unix_process_group_signal_target(self.group_leader_pid, pgid))
+        if let Some(pgid) = self.pgid
+            && signal_group_if_live_identity(self.leader_identity, pgid, libc::SIGKILL)
         {
-            let result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
-            if result == 0 {
-                return Ok(());
-            }
+            return Ok(());
         }
         self.inner().start_kill()
     }
 
     pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
-        // r19:成功回收后不再清空 pgid——组内残留进程(继承管道写端的工具
-        // 孙进程)仍需后续 start_kill()/Drop 的组清理;组长身份以 spawn 时
-        // 冻结的 group_leader_pid 判定,不受回收影响。
+        // r19:成功回收后不清空 pgid——组内残留进程(继承管道写端的工具
+        // 孙进程)仍需后续 start_kill()/Drop 的组信号;是否发射由冻结的
+        // leader_identity 核对决定,不因 child 句柄状态而放行。
         self.inner().wait().await
     }
 
@@ -175,14 +254,9 @@ impl Drop for ManagedProcessChild {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
-            if let Some(pgid) = self
-                .pgid
-                .take()
-                .and_then(|pgid| unix_process_group_signal_target(self.group_leader_pid, pgid))
-            {
-                unsafe {
-                    let _ = libc::killpg(pgid, libc::SIGKILL);
-                }
+            if let Some(pgid) = self.pgid.take() {
+                // 与 start_kill 同一口径:身份不符即拒绝发射(可审计 warn)。
+                let _ = signal_group_if_live_identity(self.leader_identity, pgid, libc::SIGKILL);
             }
             if let Some(mut child) = self.child.take() {
                 match child.try_wait() {
