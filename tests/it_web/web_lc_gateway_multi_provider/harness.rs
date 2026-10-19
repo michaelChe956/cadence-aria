@@ -12083,20 +12083,22 @@ static B45_ISSUE_DESCRIPTION_OVERRIDE: std::sync::Mutex<Option<String>> =
 // ---------------------------------------------------------------------------
 // 批2 Task 24(b45):Pi 事故副本重放与真崩溃恢复。
 //
-// - `b45_live_pi_review_replay`(live_b45_t24 消费 `run_b45_t24_replay`):
-//   脱敏 fixture 重建事故条件——Coder 既有 dirty/staged/ignored+构建残留、
-//   验证容器(精确 ID+标签)、Reviewer 自提交能力。CodeReview 窗口
-//   (ReviewRequest 平台提交之前开窗,Coder 未提交态全量在场)两独立
-//   场景:正常轮(构建+容器+报告→恢复后 Accepted+worktree 恢复+Coder
-//   dirty 保留)与违规轮(主动 commit/写 `.git`/`.aria`→恢复前 durable
-//   违规→Invalidated+人工门+平台 stage/commit/push 零推进);窗口外
-//   Coder 正常提交/推送对照。
-// - `b45_live_review_crash_recovery`(消费 `run_b45_t24_crash`):真实
+// - `b45_live_pi_replay_normal` / `b45_live_pi_replay_violation`(两独立
+//   题,各消费一次 `run_b45_t24_replay`):脱敏 fixture 重建事故条件——
+//   Coder 既有 dirty/staged/ignored+构建残留、验证容器(精确 ID+标签)、
+//   Reviewer 自提交能力。CodeReview 窗口(ReviewRequest 平台提交之前
+//   开窗,Coder 未提交态全量在场)两独立场景:正常轮(构建+容器+报告→
+//   恢复后 Accepted+worktree 恢复+Coder dirty 保留)与违规轮(主动
+//   commit/写 `.git`/`.aria`→恢复前 durable 违规→Invalidated+人工门+
+//   平台 stage/commit/push 零推进);窗口外 Coder 正常提交/推送对照。
+// - `b45_live_review_crash`(消费 `run_b45_t24_crash`;不含取消格):真实
 //   `aria web` 服务进程(script pty 交付 bootstrap token)驱动 Pi 评审,
 //   kill -9 服务(Provider 孤儿留验)后重启——先停旧 writer/清登记
 //   容器、原 manifest 续恢复、三域核对,再放行新材料;未确认 writer/
 //   登记容器补偿停等保持锁(不误杀);静默 CHECK 跨 300s 总 deadline
-//   内不误杀;其余三家各一取消/资源收口格。
+//   内不误杀。
+// - `b45_live_review_cancel`(消费 `run_b45_t24_cancel_cells`):其余三家
+//   各一取消/资源收口格(`B45_T24_CANCEL_PROVIDERS` 可缩;集合精确)。
 //
 // fixture 根(计划冻结):`/tmp/aria-bug45/t24/`;现场 `.aria` 不改——
 // 一切在脱敏副本(固定根)上重建。
@@ -13860,7 +13862,7 @@ impl LiveLcGatewayHarness {
     ) -> Result<Value, LiveMatrixFailure> {
         let mut cells = serde_json::Map::new();
         for provider in providers {
-            let label = format!("{provider:?}").to_lowercase();
+            let label = b45_t24_cancel_provider_label(provider).to_string();
             fp_enter_phase("b45-t24", "cancel-cell", &label);
             let env = MatrixEnvironment::build(provider.clone(), &evidence_root.join(&label))
                 .await?;
@@ -13894,6 +13896,9 @@ impl LiveLcGatewayHarness {
             let scopes_after = env.b45_t24_resource_scope_snapshot();
             let windows_after = env.b45_t24_reviewer_window_snapshot();
             let attempt_state = env.b45_attempt_state(&attempt_id).await;
+            // 取消后无新 spawn 的基线:attempt 全部 role run 事件(含首事件
+            // 时刻;validator 以「run 首事件晚于 attempt 终态时刻」判新 spawn)。
+            let role_run_rows_after_cancel = env.b45_role_run_rows(&attempt_id);
             cells.insert(
                 label,
                 json!({
@@ -13905,14 +13910,30 @@ impl LiveLcGatewayHarness {
                         .map(|path| path.exists())
                         .unwrap_or(false),
                     "resource_scopes_after": scopes_after,
+                    "role_run_rows_after_cancel": role_run_rows_after_cancel,
                     "reviewer_windows_after": windows_after,
                 }),
             );
         }
         Ok(json!({
-            "providers": providers.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>(),
+            "providers": providers
+                .iter()
+                .map(b45_t24_cancel_provider_label)
+                .collect::<Vec<_>>(),
             "cells": Value::Object(cells),
         }))
+    }
+}
+
+/// T24 取消格 provider 标签(env 记号 = 证据键 = 每 provider 子目录名;
+/// validator 的集合精确口径依赖此一一映射)。
+pub(crate) fn b45_t24_cancel_provider_label(provider: &ProviderName) -> &'static str {
+    match provider {
+        ProviderName::ClaudeCode => "claude",
+        ProviderName::Codex => "codex",
+        ProviderName::KimiCode => "kimi",
+        ProviderName::Pi => "pi",
+        ProviderName::Fake => "fake",
     }
 }
 

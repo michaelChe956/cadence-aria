@@ -1,26 +1,48 @@
 //! 批2 Task 24(b45):Pi 事故副本重放与真崩溃恢复的现场测试与 validator。
 //!
-//! - `b45_live_pi_review_replay`(Step 3):两独立场景各一轮真实现场——
-//!   正常轮(合法验证→Accepted+worktree 恢复+Coder dirty 保留)与违规轮
-//!   (主动 commit/写 `.git`/`.aria`→Invalidated+人工门+平台零推进),
-//!   外加窗口外 Coder 正常提交/推送对照。
-//! - `b45_live_review_crash_recovery`(Step 4):真实 `aria web` 服务进程
-//!   kill -9/重启的完整演练(停旧 writer/清登记容器/原 manifest 续恢复/
-//!   三域核对→再放行新材料;停等保持锁不误杀;静默 CHECK 跨 300s;
-//!   其余三家各一取消/资源收口格)。
+//! 四场景各自独立(各自证据根 + 各自 run.json + 各自 validator;一题红不
+//! 阻断其它题):
+//! - `b45_live_pi_replay_normal`(Step 3 正常轮):合法验证→Accepted+
+//!   worktree 恢复+Coder dirty 保留;证据根 `pi/b45-t24-replay-normal`。
+//! - `b45_live_pi_replay_violation`(Step 3 违规轮):主动 commit/写 `.git`/
+//!   `.aria`→Invalidated+人工门+平台零推进(HEAD/index/裸远端),窗口外
+//!   Coder 正常提交/推送对照;证据根 `pi/b45-t24-replay-violation`。
+//! - `b45_live_review_crash`(Step 4):真实 `aria web` 服务进程 kill -9/
+//!   重启的完整演练(停旧 writer/清登记容器/原 manifest 续恢复/三域核对
+//!   →再放行新材料;停等保持锁不误杀;静默 CHECK 跨 300s);证据根
+//!   `pi/b45-t24-crash`。**不含取消格**(cancel cell 的合并与统一 run.json
+//!   已删除;crash validator 本身不引用 cancel 面)。
+//! - `b45_live_review_cancel`(Step 4 取消格):按 `B45_T24_CANCEL_PROVIDERS`
+//!   指定子集(缺省 claude,codex,kimi)各一格真实取消与资源收口;证据根
+//!   `pi/b45-t24-cancel`。
 //!
-//! validator(红测合同,Step 1):缺恢复前 journal、任一三域结果、dirty
-//! 摘要、精确容器归属、人工门裁决或启动前零材料/零 provider 事实均 FAIL
-//! ——`validator_replay_*`/`validator_crash_*` 单测钉死(合成夹具,红先)。
+//! validator(红测合同,Step 1;缺项即 FAIL):replay 缺恢复前 journal、任一
+//! 三域结果、dirty 摘要、精确容器归属、人工门裁决即 FAIL;crash 缺 kill
+//! 事实、启动前零材料/零 provider 事实、停旧 writer、续恢复、静默
+//! CHECK≥310s、停等臂即 FAIL;cancel 的 provider 集合不精确(空集合/缺家/
+//! 多余)、未 aborted、进程/容器未终止、attempt 非终态、资源未收口、取消后
+//! 新 spawn 即 FAIL——`validator_replay_*`/`validator_crash_*`/
+//! `validator_cancel_*`/`cancel_providers_*` 单测钉死(合成夹具,红先)。
 //!
-//! 分批收证:`B45_T24_CANCEL_PROVIDERS`(逗号分隔 claude/codex/kimi 子集,
-//! 缺省三家全跑)。
+//! 现场命令(每题独占;replay 两轮共用 `/tmp/aria-bug45/t24/common`,必须
+//! 互斥串行;flock 仅包编译段,见计划 §2):
+//! ```text
+//! LC_GATEWAY_E2E=1 cargo test --locked --test it_web b45_live_pi_replay_normal    -- --ignored --nocapture --test-threads=1
+//! LC_GATEWAY_E2E=1 cargo test --locked --test it_web b45_live_pi_replay_violation -- --ignored --nocapture --test-threads=1
+//! LC_GATEWAY_E2E=1 cargo test --locked --test it_web b45_live_review_crash        -- --ignored --nocapture --test-threads=1
+//! LC_GATEWAY_E2E=1 B45_T24_CANCEL_PROVIDERS=claude,codex,kimi \
+//!   cargo test --locked --test it_web b45_live_review_cancel -- --ignored --nocapture --test-threads=1
+//! ```
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-use super::harness::{B45_T24_SILENT_CHECK_SECS, LiveLcGatewayHarness};
+use super::harness::{
+    B45_T24_SILENT_CHECK_SECS, B45T24Scenario, LiveLcGatewayHarness,
+    b45_t24_cancel_provider_label,
+};
 use super::live_matrix::require_lc_gateway_e2e_switch;
 
 /// T24 证据根(计划 Files:cadence/reports/lc-gateway-multi-provider/pi/)。
@@ -28,31 +50,67 @@ fn b45_t24_evidence_root(facet: &str) -> PathBuf {
     PathBuf::from("cadence/reports/lc-gateway-multi-provider/pi").join(facet)
 }
 
-/// 取消格三家清集(env 缺省=三家全跑)。
-fn b45_t24_cancel_providers_from_env() -> Vec<cadence_aria::product::models::ProviderName> {
+/// 取消格默认三家(env 未设即此集合)。
+fn b45_t24_cancel_default_providers() -> Vec<cadence_aria::product::models::ProviderName> {
     use cadence_aria::product::models::ProviderName;
-    let raw = std::env::var("B45_T24_CANCEL_PROVIDERS").unwrap_or_default();
+    vec![
+        ProviderName::ClaudeCode,
+        ProviderName::Codex,
+        ProviderName::KimiCode,
+    ]
+}
+
+/// `B45_T24_CANCEL_PROVIDERS` 解析(逗号分隔 claude/codex/kimi;大小写与
+/// 重复记号按集合收敛)。
+///
+/// 语义(集合精确口径的另一半):未设→默认三家;设了但**空集合**或未知
+/// 记号→Err(必须红,不静默回退三家)。
+fn b45_t24_parse_cancel_providers(
+    raw: Option<&str>,
+) -> Result<Vec<cadence_aria::product::models::ProviderName>, String> {
+    use cadence_aria::product::models::ProviderName;
+    let Some(raw) = raw else {
+        return Ok(b45_t24_cancel_default_providers());
+    };
     let mut providers = Vec::new();
     for token in raw.split(',') {
         let token = token.trim().to_lowercase();
+        if token.is_empty() {
+            continue;
+        }
         let provider = match token.as_str() {
-            "claude" => Some(ProviderName::ClaudeCode),
-            "codex" => Some(ProviderName::Codex),
-            "kimi" => Some(ProviderName::KimiCode),
-            _ => None,
+            "claude" => ProviderName::ClaudeCode,
+            "codex" => ProviderName::Codex,
+            "kimi" => ProviderName::KimiCode,
+            other => {
+                return Err(format!(
+                    "未知 provider 记号 {other:?}(只认 claude/codex/kimi)"
+                ));
+            }
         };
-        if let Some(provider) = provider {
+        if !providers.contains(&provider) {
             providers.push(provider);
         }
     }
     if providers.is_empty() {
-        providers = vec![
-            ProviderName::ClaudeCode,
-            ProviderName::Codex,
-            ProviderName::KimiCode,
-        ];
+        return Err(format!(
+            "空集合(B45_T24_CANCEL_PROVIDERS={raw:?});空集合必须红"
+        ));
     }
-    providers
+    Ok(providers)
+}
+
+/// env 解析入口(非法 env 直接 panic=红,不降级)。
+fn b45_t24_cancel_providers_from_env() -> Vec<cadence_aria::product::models::ProviderName> {
+    b45_t24_parse_cancel_providers(std::env::var("B45_T24_CANCEL_PROVIDERS").ok().as_deref())
+        .unwrap_or_else(|error| panic!("B45_T24_CANCEL_PROVIDERS 非法:{error}"))
+}
+
+/// env 集合 → 证据标签集合(validator 的期望集合口径)。
+fn b45_t24_cancel_labels(
+    providers: &[cadence_aria::product::models::ProviderName],
+) -> Vec<&'static str> {
+    providers.iter().map(b45_t24_cancel_provider_label).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -468,47 +526,255 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
 }
 
 // ---------------------------------------------------------------------------
-// 现场测试(#[ignore];LC_GATEWAY_E2E=1 + --ignored 命中)。
+// validator(cancel)。
 // ---------------------------------------------------------------------------
 
-/// Step 3 真实执行:Pi 事故副本重放(两独立场景)。
-#[tokio::test]
-#[ignore = "b45 真实现场:LC_GATEWAY_E2E=1 且 Step 3 命令执行(需要 pi 登录态/podman;两场景各一轮全链)"]
-async fn b45_live_pi_review_replay() {
-    require_lc_gateway_e2e_switch();
-    let harness = LiveLcGatewayHarness::new();
-    for scenario in [
-        super::harness::B45T24Scenario::ReplayNormal,
-        super::harness::B45T24Scenario::ReplayViolation,
+/// cancel validator:取消格断言组(集合精确 + 真实终止 + 资源收口;缺项即
+/// FAIL)。
+///
+/// `expected` = env 解析出的标签集合(`b45_t24_cancel_labels`)。
+///
+/// 必备(缺任一=FAIL):
+/// - 集合精确:`providers` 声明集合与 `cells` 键集合都必须**恰好等于**期望
+///   集合——空集合、缺家、多余任一即 FAIL;
+/// - per-provider aborted:`cancel_cell.abort_sent=true` 且
+///   `terminal_status="aborted"`(取消真发且真达取消终态);
+/// - 进程/容器收口:`provider_pid_still_alive=false` 且
+///   `lingering_fixture_containers` 为空;
+/// - attempt 终态:HTTP 200 + `attempt.status="aborted"` +
+///   `attempt.completed_at` 非空(终态回填时刻在场);
+/// - `resource_scopes_after` 收口:取消后该 env 的 provider 资源登记面为空
+///   (record 文件即登记事实,收口即无残留);
+/// - 取消后无新 spawn:`role_run_rows_after_cancel` 非空(取消前已有 role
+///   run 基线),且无任何 role run 的**首事件时刻**晚于 attempt 终态时刻
+///   (role run = 一次 provider 启动;取消后不得再起)。
+pub(crate) fn validate_b45_t24_cancel_evidence(
+    evidence: &Value,
+    expected: &[&str],
+) -> Result<(), Vec<String>> {
+    let mut failures = Vec::new();
+    let mut expected_labels: Vec<&str> = expected.to_vec();
+    expected_labels.sort_unstable();
+    expected_labels.dedup();
+    if expected_labels.is_empty() {
+        failures.push("取消格期望集合为空(空集合必须红)".to_string());
+        return Err(failures);
+    }
+    // 集合精确:声明集合与 cell 键集合都必须恰好等于期望集合。
+    let declared: Vec<&str> = evidence
+        .get("providers")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if declared.is_empty() {
+        failures.push("缺取消格集合声明(providers 缺失/非数组/空)".to_string());
+    }
+    let cells = evidence
+        .get("cells")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if cells.is_empty() {
+        failures.push("缺取消格 cells(空集合=红)".to_string());
+    }
+    for (facet, actual) in [
+        ("声明", declared),
+        (
+            "cells",
+            cells.keys().map(String::as_str).collect::<Vec<_>>(),
+        ),
     ] {
-        let evidence_root = b45_t24_evidence_root(&format!("b45-t24-{}", scenario.label()));
-        let run = harness
-            .run_b45_t24_replay(&evidence_root, scenario)
-            .await
-            .unwrap_or_else(|failure| {
-                panic!("b45 t24 replay({})现场执行失败:{:?}", scenario.label(), failure)
-            });
-        // 证据落盘(脱敏:不含认证材料)。
-        std::fs::create_dir_all(&evidence_root).expect("证据目录");
-        std::fs::write(
-            evidence_root.join("run.json"),
-            serde_json::to_vec_pretty(&run).expect("run json"),
-        )
-        .expect("run.json 落盘");
-        // validator 判绿(缺项=真实失败,不删格)。
-        if let Err(failures) = validate_b45_t24_replay_evidence(&run) {
-            panic!(
-                "b45 t24 replay({})证据 validator 拒绝:{failures:?}",
-                scenario.label()
-            );
+        let mut actual: Vec<&str> = actual;
+        actual.sort_unstable();
+        actual.dedup();
+        if !actual.is_empty() && actual != expected_labels {
+            failures.push(format!(
+                "取消格集合不精确({facet}){actual:?} ≠ 期望 {expected_labels:?}(缺家/多余)"
+            ));
         }
+    }
+    for label in &expected_labels {
+        if let Some(cell) = cells.get(*label) {
+            t24_cancel_cell_failures(label, cell, &mut failures);
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures)
     }
 }
 
-/// Step 4 真实执行:真崩溃恢复(Pi 完整演练 + 三家取消格)。
+/// 单 provider 取消格的断言(未取消/未收口/新 spawn 即 FAIL)。
+fn t24_cancel_cell_failures(label: &str, cell: &Value, failures: &mut Vec<String>) {
+    if let Some(error) = cell.get("error") {
+        failures.push(format!("取消格 {label} 未执行:{error}"));
+        return;
+    }
+    let cancel = &cell["cancel_cell"];
+    if cancel["abort_sent"].as_bool() != Some(true)
+        || cancel["terminal_status"].as_str() != Some("aborted")
+    {
+        failures.push(format!(
+            "取消格 {label} 未 aborted(abort_sent={:?},terminal_status={:?})",
+            cancel["abort_sent"], cancel["terminal_status"]
+        ));
+    }
+    if cancel["provider_pid_still_alive"].as_bool() != Some(false) {
+        failures.push(format!(
+            "取消格 {label} provider 进程未终止(provider_pid_still_alive={:?}/缺项)",
+            cancel["provider_pid_still_alive"]
+        ));
+    }
+    match cancel["lingering_fixture_containers"].as_array() {
+        Some(containers) if containers.is_empty() => {}
+        Some(containers) => {
+            failures.push(format!("取消格 {label} 取消后遗留 fixture 容器:{containers:?}"));
+        }
+        None => failures.push(format!(
+            "取消格 {label} 缺遗留容器对账(lingering_fixture_containers 缺失)"
+        )),
+    }
+    // attempt 终态(status + 终态回填时刻)。
+    let attempt = &cell["attempt_state"]["body"]["attempt"];
+    let completed_at = attempt["completed_at"]
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
+    if cell["attempt_state"]["status"].as_u64() != Some(200)
+        || attempt["status"].as_str() != Some("aborted")
+        || completed_at.is_none()
+    {
+        failures.push(format!(
+            "取消格 {label} attempt 未达终态(HTTP={:?},status={:?},completed_at={:?})",
+            cell["attempt_state"]["status"], attempt["status"], attempt["completed_at"]
+        ));
+    }
+    // 资源收口:取消后该 env 的 provider 资源登记面必须为空。
+    match cell["resource_scopes_after"].as_array() {
+        Some(scopes) if scopes.is_empty() => {}
+        Some(scopes) => {
+            let residue: Vec<&str> = scopes
+                .iter()
+                .map(|scope| {
+                    scope["record"]["resource_id"]
+                        .as_str()
+                        .unwrap_or("<缺 resource_id>")
+                })
+                .collect();
+            failures.push(format!("取消格 {label} 资源未收口:{residue:?}"));
+        }
+        None => failures.push(format!(
+            "取消格 {label} 缺 resource_scopes_after 对账(数组缺失)"
+        )),
+    }
+    // 取消后无新 spawn:role run 首事件时刻晚于 attempt 终态时刻即新 spawn。
+    let rows = match cell["role_run_rows_after_cancel"].as_array() {
+        Some(rows) if !rows.is_empty() => rows,
+        _ => {
+            failures.push(format!(
+                "取消格 {label} 缺取消前 role run 基线(无法证明取消后无新 spawn)"
+            ));
+            return;
+        }
+    };
+    let Some(completed_at) = completed_at else {
+        return; // attempt 终态已红,不再二次报。
+    };
+    let Some(terminal_at) = chrono::DateTime::parse_from_rfc3339(&completed_at).ok() else {
+        failures.push(format!(
+            "取消格 {label} attempt 终态时刻不可解析:{completed_at:?}"
+        ));
+        return;
+    };
+    let mut run_started_at: BTreeMap<&str, chrono::DateTime<chrono::FixedOffset>> = BTreeMap::new();
+    for row in rows {
+        let (Some(run_id), Some(created_at)) =
+            (row["role_run_id"].as_str(), row["created_at"].as_str())
+        else {
+            continue;
+        };
+        let Ok(created_at) = chrono::DateTime::parse_from_rfc3339(created_at) else {
+            continue;
+        };
+        run_started_at
+            .entry(run_id)
+            .and_modify(|earliest| {
+                if created_at < *earliest {
+                    *earliest = created_at;
+                }
+            })
+            .or_insert(created_at);
+    }
+    if run_started_at.is_empty() {
+        failures.push(format!(
+            "取消格 {label} 缺取消前 role run 基线(role run 行缺 role_run_id/created_at)"
+        ));
+        return;
+    }
+    let spawned_after: Vec<&str> = run_started_at
+        .iter()
+        .filter(|(_, started_at)| **started_at > terminal_at)
+        .map(|(run_id, _)| *run_id)
+        .collect();
+    if !spawned_after.is_empty() {
+        failures.push(format!("取消格 {label} 取消后出现新 spawn:{spawned_after:?}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 现场测试(#[ignore];LC_GATEWAY_E2E=1 + --ignored 命中)。
+// ---------------------------------------------------------------------------
+
+/// replay 两轮共同驱动(各自证据根/run.json/validator;两题共用
+/// `/tmp/aria-bug45/t24/common`,必须互斥串行)。
+async fn b45_t24_run_replay_scenario(scenario: B45T24Scenario) {
+    require_lc_gateway_e2e_switch();
+    let harness = LiveLcGatewayHarness::new();
+    let evidence_root = b45_t24_evidence_root(&format!("b45-t24-{}", scenario.label()));
+    let run = harness
+        .run_b45_t24_replay(&evidence_root, scenario)
+        .await
+        .unwrap_or_else(|failure| {
+            panic!(
+                "b45 t24 replay({})现场执行失败:{failure:?}",
+                scenario.label()
+            )
+        });
+    // 证据落盘(脱敏:不含认证材料)。
+    std::fs::create_dir_all(&evidence_root).expect("证据目录");
+    std::fs::write(
+        evidence_root.join("run.json"),
+        serde_json::to_vec_pretty(&run).expect("run json"),
+    )
+    .expect("run.json 落盘");
+    // validator 判绿(缺项=真实失败,不删格)。
+    if let Err(failures) = validate_b45_t24_replay_evidence(&run) {
+        panic!(
+            "b45 t24 replay({})证据 validator 拒绝:{failures:?}",
+            scenario.label()
+        );
+    }
+}
+
+/// Step 3 真实执行:重放·正常轮(合法验证→Accepted+dirty 保留)。
 #[tokio::test]
-#[ignore = "b45 真实现场:LC_GATEWAY_E2E=1 且 Step 4 命令执行(需要 pi 登录态/podman;真实服务进程 kill/重启×4+静默 310s)"]
-async fn b45_live_review_crash_recovery() {
+#[ignore = "b45 真实现场:LC_GATEWAY_E2E=1 且 Step 3 正常轮执行(需要 pi 登录态/podman;一轮全链)→ 证据根 pi/b45-t24-replay-normal"]
+async fn b45_live_pi_replay_normal() {
+    b45_t24_run_replay_scenario(B45T24Scenario::ReplayNormal).await;
+}
+
+/// Step 3 真实执行:重放·违规轮(自提交→Invalidated+人工门+平台零推进)。
+#[tokio::test]
+#[ignore = "b45 真实现场:LC_GATEWAY_E2E=1 且 Step 3 违规轮执行(需要 pi 登录态/podman;一轮全链+窗口外对照)→ 证据根 pi/b45-t24-replay-violation"]
+async fn b45_live_pi_replay_violation() {
+    b45_t24_run_replay_scenario(B45T24Scenario::ReplayViolation).await;
+}
+
+/// Step 4 真实执行:真崩溃恢复(Pi 完整演练;不含取消格)。
+#[tokio::test]
+#[ignore = "b45 真实现场:LC_GATEWAY_E2E=1 且 Step 4 执行(需要 pi 登录态/podman;真实服务进程 kill/重启×4+静默 310s)→ 证据根 pi/b45-t24-crash"]
+async fn b45_live_review_crash() {
     require_lc_gateway_e2e_switch();
     let harness = LiveLcGatewayHarness::new();
     let evidence_root = b45_t24_evidence_root("b45-t24-crash");
@@ -516,36 +782,38 @@ async fn b45_live_review_crash_recovery() {
         .run_b45_t24_crash(&evidence_root)
         .await
         .unwrap_or_else(|failure| panic!("b45 t24 crash 现场执行失败:{failure:?}"));
-    let cancel = harness
-        .run_b45_t24_cancel_cells(
-            &evidence_root,
-            &b45_t24_cancel_providers_from_env(),
-        )
-        .await
-        .unwrap_or_else(|failure| panic!("b45 t24 取消格现场执行失败:{failure:?}"));
-    let mut full = run;
-    full["cancel_cells"] = cancel;
     std::fs::create_dir_all(&evidence_root).expect("证据目录");
     std::fs::write(
         evidence_root.join("run.json"),
-        serde_json::to_vec_pretty(&full).expect("run json"),
+        serde_json::to_vec_pretty(&run).expect("run json"),
     )
     .expect("run.json 落盘");
-    if let Err(failures) = validate_b45_t24_crash_evidence(&full) {
+    if let Err(failures) = validate_b45_t24_crash_evidence(&run) {
         panic!("b45 t24 crash 证据 validator 拒绝:{failures:?}");
     }
-    // 取消格判绿:每家 aborted。
-    let cells = full
-        .pointer("/cancel_cells/cells")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    for (provider, cell) in cells {
-        let aborted = cell
-            .pointer("/cancel_cell/aborted")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        assert!(aborted, "{provider} 取消格未 aborted:{cell}");
+}
+
+/// Step 4 真实执行:取消格(`B45_T24_CANCEL_PROVIDERS` 子集;缺省三家)。
+#[tokio::test]
+#[ignore = "b45 真实现场:LC_GATEWAY_E2E=1 且 Step 4 取消格执行(需要各家 CLI 登录态;B45_T24_CANCEL_PROVIDERS 指定子集)→ 证据根 pi/b45-t24-cancel"]
+async fn b45_live_review_cancel() {
+    require_lc_gateway_e2e_switch();
+    let harness = LiveLcGatewayHarness::new();
+    let providers = b45_t24_cancel_providers_from_env();
+    let expected = b45_t24_cancel_labels(&providers);
+    let evidence_root = b45_t24_evidence_root("b45-t24-cancel");
+    let run = harness
+        .run_b45_t24_cancel_cells(&evidence_root, &providers)
+        .await
+        .unwrap_or_else(|failure| panic!("b45 t24 取消格现场执行失败:{failure:?}"));
+    std::fs::create_dir_all(&evidence_root).expect("证据目录");
+    std::fs::write(
+        evidence_root.join("run.json"),
+        serde_json::to_vec_pretty(&run).expect("run json"),
+    )
+    .expect("run.json 落盘");
+    if let Err(failures) = validate_b45_t24_cancel_evidence(&run, &expected) {
+        panic!("b45 t24 取消格证据 validator 拒绝:{failures:?}");
     }
 }
 
@@ -917,3 +1185,285 @@ mod validator_crash_tests {
         assert!(validate_b45_t24_crash_evidence(&crash_base()).is_ok());
     }
 }
+
+#[cfg(test)]
+mod cancel_providers_tests {
+    use super::*;
+
+    fn labels(raw: Option<&str>) -> Result<Vec<&'static str>, String> {
+        b45_t24_parse_cancel_providers(raw).map(|providers| b45_t24_cancel_labels(&providers))
+    }
+
+    #[test]
+    fn cancel_providers_default_to_three() {
+        assert_eq!(
+            labels(None).unwrap(),
+            vec!["claude", "codex", "kimi"],
+            "env 未设必须默认三家"
+        );
+    }
+
+    #[test]
+    fn cancel_providers_accept_subset() {
+        assert_eq!(labels(Some("claude,kimi")).unwrap(), vec!["claude", "kimi"]);
+    }
+
+    #[test]
+    fn cancel_providers_normalize_case_and_duplicates() {
+        assert_eq!(
+            labels(Some(" Kimi , claude ,kimi")).unwrap(),
+            vec!["kimi", "claude"]
+        );
+    }
+
+    #[test]
+    fn cancel_providers_reject_empty_set() {
+        let error = labels(Some("")).unwrap_err();
+        assert!(error.contains("空集合"), "{error}");
+        let error = labels(Some(" , ")).unwrap_err();
+        assert!(error.contains("空集合"), "{error}");
+    }
+
+    #[test]
+    fn cancel_providers_reject_unknown_token() {
+        let error = labels(Some("claude,gemini")).unwrap_err();
+        assert!(error.contains("gemini"), "{error}");
+        let error = labels(Some("pi")).unwrap_err();
+        assert!(error.contains("pi"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod validator_cancel_tests {
+    use super::*;
+
+    const THREE: [&str; 3] = ["claude", "codex", "kimi"];
+
+    fn cell(label: &str, aborted: bool) -> Value {
+        json!({
+            "attempt_id": format!("coding_attempt_{label}"),
+            "cancel_cell": {
+                "abort_sent": true,
+                "terminal_status": if aborted { "aborted" } else { "failed" },
+                "provider_pid": "4242",
+                "provider_pid_still_alive": !aborted,
+                "lingering_fixture_containers": [],
+            },
+            "attempt_state": {
+                "status": 200,
+                "body": {"attempt": {
+                    "status": if aborted { "aborted" } else { "running" },
+                    "completed_at": if aborted {
+                        json!("2026-10-19T01:00:00Z")
+                    } else {
+                        Value::Null
+                    },
+                }},
+            },
+            "resource_scopes_after": [],
+            "role_run_rows_after_cancel": [
+                {
+                    "role_run_id": format!("run_{label}"),
+                    "role": "coder",
+                    "sequence": 0,
+                    "created_at": "2026-10-19T00:59:00Z",
+                },
+                {
+                    "role_run_id": format!("run_{label}"),
+                    "role": "coder",
+                    "sequence": 1,
+                    "created_at": "2026-10-19T00:59:30Z",
+                },
+            ],
+        })
+    }
+
+    fn base() -> Value {
+        json!({
+            "providers": THREE,
+            "cells": {
+                "claude": cell("claude", true),
+                "codex": cell("codex", true),
+                "kimi": cell("kimi", true),
+            },
+        })
+    }
+
+    #[test]
+    fn cancel_validator_rejects_empty_expected_set() {
+        let failures = validate_b45_t24_cancel_evidence(&base(), &[]).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("空集合")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_rejects_missing_provider() {
+        let mut evidence = base();
+        evidence["cells"]
+            .as_object_mut()
+            .expect("cells object")
+            .remove("kimi");
+        let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("缺家")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_rejects_extra_provider() {
+        let mut evidence = base();
+        evidence["providers"] = json!(["claude", "codex", "kimi", "pi"]);
+        evidence["cells"]["pi"] = cell("pi", true);
+        let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("多余")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_rejects_empty_cells() {
+        // env 指定了集合(非空期望)但证据里没有任何 cell:空集合必须红。
+        let evidence = json!({"providers": [], "cells": {}});
+        let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("空集合") || f.contains("缺家")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_rejects_unaborted_provider() {
+        let mut evidence = base();
+        evidence["cells"]["codex"] = cell("codex", false);
+        let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未 aborted")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_rejects_live_provider_process() {
+        let mut evidence = base();
+        evidence["cells"]["claude"]["cancel_cell"]["provider_pid_still_alive"] = json!(true);
+        let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("进程未终止") || f.contains("遗留")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_rejects_non_terminal_attempt() {
+        let mut evidence = base();
+        evidence["cells"]["kimi"]["attempt_state"]["body"]["attempt"]["completed_at"] = Value::Null;
+        let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("attempt 未达终态")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_rejects_unclosed_resource_scope() {
+        let mut evidence = base();
+        evidence["cells"]["claude"]["resource_scopes_after"] = json!([
+            {"path": "/tmp/x/resources/res_0001.json", "record": {"resource_id": "res_0001", "cleanup_cursor": "confirmed"}},
+        ]);
+        let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("资源未收口")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_rejects_missing_resource_snapshot() {
+        let mut evidence = base();
+        evidence["cells"]["codex"]
+            .as_object_mut()
+            .expect("cell object")
+            .remove("resource_scopes_after");
+        let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("resource_scopes_after")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_rejects_spawn_after_cancel() {
+        let mut evidence = base();
+        evidence["cells"]["kimi"]["role_run_rows_after_cancel"]
+            .as_array_mut()
+            .expect("role rows array")
+            .push(json!({
+                "role_run_id": "run_kimi_restart",
+                "role": "coder",
+                "sequence": 0,
+                "created_at": "2026-10-19T01:00:30Z",
+            }));
+        let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("新 spawn")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_rejects_missing_spawn_baseline() {
+        let mut evidence = base();
+        evidence["cells"]["claude"]["role_run_rows_after_cancel"] = json!([]);
+        let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("基线")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_rejects_unparsable_spawn_rows() {
+        let mut evidence = base();
+        evidence["cells"]["claude"]["role_run_rows_after_cancel"] =
+            json!([{"role": "coder", "sequence": 0}]);
+        let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("基线")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_rejects_failed_cell_start() {
+        let mut evidence = base();
+        evidence["cells"]["claude"] = json!({"error": "规划未 Confirmed,取消格无法启动"});
+        let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未执行")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_validator_accepts_complete_evidence() {
+        assert!(validate_b45_t24_cancel_evidence(&base(), &THREE).is_ok());
+    }
+
+    #[test]
+    fn cancel_validator_accepts_single_provider_subset() {
+        let evidence = json!({
+            "providers": ["codex"],
+            "cells": {"codex": cell("codex", true)},
+        });
+        assert!(validate_b45_t24_cancel_evidence(&evidence, &["codex"]).is_ok());
+    }
+}
+
