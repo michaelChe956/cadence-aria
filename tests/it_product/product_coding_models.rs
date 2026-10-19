@@ -272,6 +272,8 @@ fn review_reports_preserve_backend_evidence() {
         role_run_id: None,
         run_no: None,
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     };
     let internal = InternalPrReview {
         id: "internal_review_0001".to_string(),
@@ -289,6 +291,8 @@ fn review_reports_preserve_backend_evidence() {
         raw_provider_output_ref: None,
         role_run_id: None,
         run_no: None,
+        acceptance: None,
+        review_window_id: None,
     };
 
     assert_eq!(
@@ -405,6 +409,8 @@ fn review_reports_round_trip_role_run_metadata() {
         role_run_id: Some("coding_role_run_0001".to_string()),
         run_no: Some(1),
         unit_run_id: None,
+        acceptance: None,
+        review_window_id: None,
     };
     let value = serde_json::to_value(&code_review).expect("serialize code review");
     assert_eq!(value["role_run_id"], "coding_role_run_0001");
@@ -430,6 +436,8 @@ fn review_reports_round_trip_role_run_metadata() {
         ),
         role_run_id: Some("coding_role_run_0002".to_string()),
         run_no: Some(1),
+        acceptance: None,
+        review_window_id: None,
     };
     let value = serde_json::to_value(&internal_review).expect("serialize internal review");
     assert_eq!(value["role_run_id"], "coding_role_run_0002");
