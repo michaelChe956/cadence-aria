@@ -12318,20 +12318,6 @@ fn b45_make_executable(path: &Path) -> Result<(), String> {
     std::fs::set_permissions(path, permissions).map_err(|error| error.to_string())
 }
 
-/// `/proc/<pid>/stat` 第 22 字段 starttime(ticks;PID 复用防护同产线口径)。
-fn b45_t24_process_start_ticks(pid: u32) -> u64 {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|text| {
-            // comm 字段可含空格/括号:以最后 ')' 为界切分。
-            let after_paren = text.rsplit(')').next()?.trim_start();
-            let fields: Vec<&str> = after_paren.split_whitespace().collect();
-            // fields[0]=state(第3字段)→starttime=第22字段=fields[19]。
-            fields.get(19).and_then(|value| value.parse().ok())
-        })
-        .unwrap_or(0)
-}
-
 /// tree_key(镜像产线 `tree_key_of`:canonical 路径字符串 sha256)。
 fn b45_t24_tree_key(worktree: &Path) -> String {
     let canonical = worktree.canonicalize().unwrap_or_else(|_| worktree.to_path_buf());
@@ -13458,9 +13444,15 @@ impl LiveLcGatewayHarness {
                 Some("review"),
             ));
         }
-        // 窗口 Running:登记旧 writer(真实 sleep 守护,独立进程组,确认
-        // 身份 pid+starttime;aria.worktree=attempt 树 tree_key)——崩溃
-        // 现场重建(fixture preset,证据如实标注)。
+        // 窗口 Running:定锚点事实并造崩溃现场。
+        // ① 正向臂改真实登记:不再预置合成 `old-writer-daemon`——直接
+        //    采集生产 adapter(B1 载体:reserve→spawn→PID/starttime 回填
+        //    →confirmed)写入的真实登记记录,以其窗口/attempt 业务归属 +
+        //    补偿后注销/`/proc` 消失作为“停旧 writer”证据。
+        // ② A7(a) mid-commit journal:平台评审提交“进行中”时崩溃——把
+        //    ReviewRequest journal 停在 commit_started(fixture 写 durable
+        //    崩溃现场,证据如实标注 fixture_preset);重启后由生产续驱
+        //    收敛,补偿不得抢跑(先后时刻由 durable 事实给出)。
         let worktree_one = b45_t24_attempt_worktree_by_paths(&app_root, &issue_id, &attempt_one)
             .ok_or_else(|| {
                 matrix_failure(
@@ -13470,43 +13462,44 @@ impl LiveLcGatewayHarness {
                 )
             })?;
         let tree_key_one = b45_t24_tree_key(&worktree_one);
-        let mut daemon = b45_t24_spawn_daemon(600).map_err(|message| {
-            matrix_failure("b45_t24_daemon_spawn_failed", message.to_string(), Some("crash"))
-        })?;
-        let daemon_pid = daemon.id();
-        let mut daemon_labels = BTreeMap::new();
-        daemon_labels.insert("aria.worktree".to_string(), tree_key_one.clone());
-        daemon_labels.insert("kind".to_string(), "b45-t24-old-writer".to_string());
-        let daemon_record_path = b45_t24_preset_resource_record(
+        let attempt_one_record = t24_attempt_state(&app_root, &issue_id, &attempt_one);
+        let journal_before_head = t24_git_head(&worktree_one);
+        let mid_commit_journal_at_kill = t24_preset_mid_commit_journal(
             &app_root,
-            "b45-t24-oldwriter",
-            &format!("run-{attempt_one}"),
-            &format!("b45-t24-fixture-{daemon_pid}"),
-            "old-writer-daemon",
-            "process",
-            &format!("sleep 600 (b45-t24 old writer; pid={daemon_pid})"),
-            daemon_labels,
-            Some(json!({"process": {"pid": daemon_pid, "start_time_ticks": b45_t24_process_start_ticks(daemon_pid)}})),
-            "confirmed",
+            &issue_id,
+            &attempt_one,
+            &attempt_one_record,
+            journal_before_head.as_deref(),
         )
         .map_err(|message| {
-            matrix_failure("b45_t24_preset_record_failed", message, Some("crash"))
+            matrix_failure(
+                "b45_t24_mid_commit_journal_preset_failed",
+                message,
+                Some("crash"),
+            )
         })?;
         // 静默 CHECK 在途(窗口 Running 后 60s,静默段内)再 kill。
         tokio::time::sleep(Duration::from_secs(60)).await;
+        // kill 时再独立观察 HEAD:与 journal 的 before_head 逐字相等才说明
+        // 崩溃前无提交越界(journal 基线=现场真值)。
+        let head_at_kill = t24_git_head(&worktree_one);
         let provider_pid_at_kill = t24_pi_provider_pid(&app_root, &issue_id, &attempt_one);
-        let scopes_at_kill = t24_read_resource_scopes(&app_root);
+        // 有界等待生产登记面出现(窗口 Running 后 reviewer spawn→回填
+        // PID/starttime→confirmed;等待不伪造,超时如实留空由 validator 红)。
+        let scopes_at_kill =
+            t24_wait_registered_writer(&app_root, &tree_key_one, Duration::from_secs(120)).await;
+        let real_registrations_at_kill = t24_real_registrations(&scopes_at_kill, &tree_key_one);
         let windows_at_kill = b45_t24_read_windows(&app_root);
         let role_runs_at_kill = t24_read_role_runs(&app_root, &issue_id, &attempt_one);
         server.kill_process_group();
         let server_dead = !server.alive();
-        let daemon_alive_after_kill = b45_t24_pid_alive(daemon_pid);
         let provider_alive_after_kill =
             provider_pid_at_kill.is_some_and(|pid| b45_t24_pid_alive(pid));
         fp(
             "t24_killed",
             format_args!(
-                "server_dead={server_dead} daemon_alive={daemon_alive_after_kill} provider_pid={provider_pid_at_kill:?} provider_alive={provider_alive_after_kill}"
+                "server_dead={server_dead} real_registrations={} provider_pid={provider_pid_at_kill:?} provider_alive={provider_alive_after_kill}",
+                real_registrations_at_kill.len()
             ),
         );
         let pump_a_result = pump_a.await.unwrap_or_else(|error| json!({"join_error": error.to_string()}));
@@ -13530,9 +13523,29 @@ impl LiveLcGatewayHarness {
             Duration::from_secs(300),
         )
         .await;
-        let daemon_alive_after_restart = b45_t24_pid_alive(daemon_pid);
         let scopes_after_restart = t24_read_resource_scopes(&app_root);
+        let real_registrations_after_restart =
+            t24_real_registrations(&scopes_after_restart, &tree_key_one);
+        // 正向臂补偿后观察:kill 时每条真实登记的 `/proc/<pid>` 是否消失
+        // (按登记 PID 观察;进程已被同组 kill 或经补偿收口,均须消失)。
+        let compensated_processes: Vec<Value> = real_registrations_at_kill
+            .iter()
+            .filter_map(|registration| {
+                let pid = registration["pid"].as_u64()? as u32;
+                let observed = t24_proc_stat(pid);
+                Some(json!({
+                    "pid": pid,
+                    "start_time_ticks": registration["start_time_ticks"],
+                    // 僵尸不再可能写文件(产线 observe_process 同口径:Gone)。
+                    "proc_alive": observed.is_some_and(|(state, _)| state != 'Z'),
+                    "proc_start_time_ticks": observed.map(|(_, ticks)| ticks),
+                }))
+            })
+            .collect();
         let windows_after_restart = window_one_terminal["windows"].clone();
+        // A7(a):窗口 #1 释放(恢复完成)时刻——补偿不得早于此刻收敛 journal。
+        let window_release = t24_window_release_fact(&windows_after_restart, &attempt_one);
+        let head_after_restart = t24_git_head(&worktree_one);
         let compensation_log = server_two.log_text();
 
         // ---- 6) 新材料:重启后 attach 续驱至终态(第二次评审完整跑,
@@ -13555,6 +13568,23 @@ impl LiveLcGatewayHarness {
         let windows_final_a = b45_t24_read_windows(&app_root);
         let reviewer_silent_gap_secs =
             b45_t24_max_silent_gap_secs(&b45_t24_role_event_rows(&app_root, &issue_id, &attempt_one));
+        // A7(a):journal 收敛观察——重启后续驱(评审放行→评审提交重入)把
+        // commit_started 的 journal 推进到终态;有界等待后如实记录收敛
+        // 时刻/终相位(未收敛=现场失败,不伪造)。
+        let journal_final = t24_wait_git_operation_terminal(
+            &app_root,
+            &issue_id,
+            &attempt_one,
+            Duration::from_secs(300),
+        )
+        .await;
+        let mid_commit_journal_convergence = t24_mid_commit_convergence(
+            &mid_commit_journal_at_kill,
+            journal_final.as_ref(),
+            &window_release,
+            head_at_kill.as_deref(),
+            head_after_restart.as_deref(),
+        );
 
         // ---- 7) drill B(停等不误杀臂):attempt #2 → 窗口 Running →
         //         预置未确认 writer + 登记容器 → kill → 重启(#3)→
@@ -13645,46 +13675,27 @@ impl LiveLcGatewayHarness {
                                     Some("crash"),
                                 )
                             })?;
-                            // 真实容器(podman run -d;确认身份 exact_id)。
+                            // A7(b):真实容器(podman run -d)——**不落登记
+                            // 记录**(无登记记录的未知容器:平台无从证明
+                            // 归属,只许停等、不得 kill/clean)。
                             let container = b45_t24_podman_run_park_container(&tree_key_two);
-                            let container_record_path = match &container {
-                                Ok((exact_id, _)) => {
-                                    let mut container_labels = labels.clone();
-                                    container_labels.insert(
-                                        "io.aria.b45.scene".to_string(),
-                                        "crash-park".to_string(),
-                                    );
-                                    b45_t24_preset_resource_record(
-                                        &app_root,
-                                        "b45-t24-park",
-                                        &format!("run-{attempt_two}"),
-                                        &format!("b45-t24-fixture-{daemon_two_pid}"),
-                                        "park-container",
-                                        "container",
-                                        &format!("podman run -d ... (exact_id={exact_id})"),
-                                        container_labels,
-                                        Some(json!({"container": {"exact_id": exact_id}})),
-                                        "confirmed",
-                                    )
-                                    .ok()
-                                }
-                                Err(_) => None,
-                            };
                             park["unconfirmed_record"] = json!(unconfirmed_path.display().to_string());
                             park["container"] = match &container {
                                 Ok((exact_id, name)) => json!({
                                     "exact_id": exact_id,
                                     "name": name,
+                                    "registered_record": false,
                                 }),
                                 Err(error) => json!({"error": error}),
                             };
-                            park["container_record"] =
-                                json!(container_record_path.clone().map(|path| path.display().to_string()));
                             park["daemon_pid"] = json!(daemon_two_pid);
                             // kill 服务 #2(窗口 Running + 停等前置在场)。
                             let provider_pid_b =
                                 t24_pi_provider_pid(&app_root, &issue_id, &attempt_two);
                             let windows_b_at_kill = b45_t24_read_windows(&app_root);
+                            // A7(b) 停等期 audits 基线(provider-resources
+                            // 登记面 path+摘要):park 期间必须逐字不变。
+                            let park_audits_before = t24_resource_audit_lines(&app_root, "b45-t24-park");
                             server_two.kill_process_group();
                             let daemon_two_alive_after_kill = b45_t24_pid_alive(daemon_two_pid);
                             let container_alive_after_kill = container
@@ -13721,6 +13732,11 @@ impl LiveLcGatewayHarness {
                                 .as_ref()
                                 .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
                                 .unwrap_or(false);
+                            // A7(b):park 后登记面 audits 对照(不 clean 证明)。
+                            let park_audits_after = t24_resource_audit_lines(&app_root, "b45-t24-park");
+                            let park_audits_unchanged =
+                                park_audits_before == park_audits_after && !park_audits_before.is_empty();
+                            let parked = park_state["matched"].as_bool() == Some(true);
                             let lease_after_park = t24_read_leases(&app_root);
                             // 新材料必须被拒(锁保持):attach 后无新窗口可开
                             // ——以「无新 Running 窗口/无新 role run」记录事实。
@@ -13733,18 +13749,17 @@ impl LiveLcGatewayHarness {
                                     json!({"decision": "require_new_review"}),
                                 )
                                 .await;
-                            // 人工处置:deregister + kill 守护 + 移除容器。
+                            // 人工处置:deregister 未知 writer + kill 守护 +
+                            // 移除未知容器(人工动作;平台 park 期间不得动)。
                             if let Err(error) = daemon_two.kill() {
                                 fp("t24_daemon_kill_failed", format_args!("{error}"));
                             }
                             let _ = daemon_two.wait();
-                            if let Ok((exact_id, _)) = &container {
-                                let _ = b45_t24_podman_remove(exact_id);
-                            }
+                            let container_removed_by_manual = match &container {
+                                Ok((exact_id, _)) => b45_t24_podman_remove(exact_id),
+                                Err(_) => false,
+                            };
                             t24_deregister_record(&app_root, &unconfirmed_path);
-                            if let Some(path) = &container_record_path {
-                                t24_deregister_record(&app_root, path);
-                            }
                             // 重启 #4:人工处置后续接 → 释放。
                             let port_four = t24_pick_port().await;
                             let mut server_four = b45_t24_spawn_server(
@@ -13785,9 +13800,32 @@ impl LiveLcGatewayHarness {
                                 "daemon_alive_after_kill": daemon_two_alive_after_kill,
                                 "container_alive_after_kill": container_alive_after_kill,
                                 "park_state": park_state,
+                                "parked": parked,
                                 "park_log_has_kept_locked": park_log.contains("kept locked"),
                                 "daemon_alive_after_restart": daemon_two_alive_after_restart,
                                 "container_alive_after_restart": container_alive_after_restart,
+                                "park_audits": {
+                                    "before": park_audits_before,
+                                    "after": park_audits_after,
+                                    "unchanged": park_audits_unchanged,
+                                },
+                                "unknown_container": match &container {
+                                    Ok((exact_id, name)) => json!({
+                                        "exact_id": exact_id,
+                                        "name": name,
+                                        "registered": false,
+                                        "alive_after_kill": container_alive_after_kill,
+                                        "alive_after_restart": container_alive_after_restart,
+                                        "removed_by_manual_disposition": container_removed_by_manual,
+                                    }),
+                                    Err(error) => json!({
+                                        "registered": false,
+                                        "alive_after_kill": false,
+                                        "alive_after_restart": false,
+                                        "removed_by_manual_disposition": false,
+                                        "error": error,
+                                    }),
+                                },
                                 "leases_after_park": lease_after_park,
                                 "new_material_probe": new_material_probe
                                     .map(|(status, body)| json!({"status": status, "body": body})),
@@ -13827,18 +13865,22 @@ impl LiveLcGatewayHarness {
                 "server_dead": server_dead,
                 "provider_pid_at_kill": provider_pid_at_kill,
                 "provider_alive_after_kill": provider_alive_after_kill,
-                "daemon_record": daemon_record_path.display().to_string(),
+                "worktree_tree_key": tree_key_one,
                 "windows_at_kill": windows_at_kill,
                 "scopes_at_kill": scopes_at_kill,
+                "real_registrations_at_kill": real_registrations_at_kill,
                 "role_runs_at_kill": role_runs_at_kill,
+                "mid_commit_journal": mid_commit_journal_at_kill,
                 "pump_before_kill": pump_a_result,
             },
             "restart": {
                 "port": port_two,
                 "restarted_observed_at": restarted_observed_at,
                 "window_one_terminal": windows_after_restart,
-                "daemon_alive_after_restart": daemon_alive_after_restart,
                 "scopes_after_restart": scopes_after_restart,
+                "real_registrations_after_restart": real_registrations_after_restart,
+                "compensated_processes": compensated_processes,
+                "mid_commit_journal": mid_commit_journal_convergence,
                 "compensation_log": compensation_log,
             },
             "new_material": {
@@ -14167,6 +14209,300 @@ fn b45_t24_podman_remove(exact_id: &str) -> bool {
 fn t24_deregister_record(app_root: &Path, record: &Path) {
     let _ = std::fs::remove_file(record);
     let _ = app_root;
+}
+
+/// `/proc/<pid>/stat` 观测(state + 第 22 字段 starttime;进程消失= None)。
+fn t24_proc_stat(pid: u32) -> Option<(char, u64)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, tail) = stat.rsplit_once(") ")?;
+    let state = tail.chars().next()?;
+    let start_time_ticks = tail.split_whitespace().nth(19)?.parse().ok()?;
+    Some((state, start_time_ticks))
+}
+
+/// worktree HEAD(git rev-parse;读失败/非仓= None)。
+fn t24_git_head(worktree: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// T24 正向臂:登记面 → 真实登记条目(B1 生产 adapter 形状:
+/// kind=process / cleanup_cursor=confirmed + 真实 PID/starttime +
+/// `aria.scope_id`/`aria.run_id`/`aria.window_id`/`aria.worktree` 归属)。
+/// 只取本演练 worktree(`aria.worktree`==tree_key)的 provider_process:
+/// 别的树/别的场景残留不参与本臂判定。fixture preset(无
+/// `kind=provider_process` 业务标签或无确认身份)不计入——正向臂不以
+/// 合成记录为前提。
+fn t24_real_registrations(scopes: &[Value], tree_key: &str) -> Vec<Value> {
+    let mut found = Vec::new();
+    for scope in scopes {
+        let record = &scope["record"];
+        let labels = &record["reserved_labels"];
+        if labels["kind"].as_str() != Some("provider_process") {
+            continue;
+        }
+        if !tree_key.is_empty() && labels["aria.worktree"].as_str() != Some(tree_key) {
+            continue;
+        }
+        let pid = record["started_identity"]["process"]["pid"].as_u64();
+        let start_time_ticks = record["started_identity"]["process"]["start_time_ticks"].as_u64();
+        let observed = pid.and_then(|pid| t24_proc_stat(pid as u32));
+        found.push(json!({
+            "path": scope["path"],
+            "scope_id": record["key"]["scope_id"],
+            "run_id": record["key"]["run_id"],
+            "boot_identity": record["key"]["boot_identity"],
+            "resource_id": record["resource_id"],
+            "kind": record["kind"],
+            "cleanup_cursor": record["cleanup_cursor"],
+            "labels": labels,
+            "pid": pid,
+            "start_time_ticks": start_time_ticks,
+            "proc_start_time_ticks": observed.map(|(_, ticks)| ticks),
+            "pid_starttime_matches_proc": match (observed, start_time_ticks) {
+                (Some((state, ticks)), Some(expected)) => state != 'Z' && ticks == expected,
+                _ => false,
+            },
+            "window_id": labels["aria.window_id"],
+            "worktree_label": labels["aria.worktree"],
+        }));
+    }
+    found
+}
+
+/// 有界等待生产登记面出现(窗口 Running 后 reviewer 进程 spawn→回填
+/// PID/starttime→confirmed;等待只提高现场稳健性,不伪造)。返回最后
+/// 观察的完整登记面。
+async fn t24_wait_registered_writer(
+    app_root: &Path,
+    tree_key: &str,
+    deadline: Duration,
+) -> Vec<Value> {
+    let start = std::time::Instant::now();
+    loop {
+        let scopes = t24_read_resource_scopes(app_root);
+        let present = t24_real_registrations(&scopes, tree_key).iter().any(|registration| {
+            registration["cleanup_cursor"].as_str() == Some("confirmed")
+                && registration["worktree_label"].as_str() == Some(tree_key)
+        });
+        if present || start.elapsed() >= deadline {
+            return scopes;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// T24 A7(a) 崩溃现场重建:评审提交“进行中”的 ReviewRequest journal
+/// (`phase=commit_started`)落 durable——重启后生产续驱(窗口恢复完成→
+/// 评审再次放行→重入 `execute_review_request`)把它收敛到终态。
+/// `commit_message`/`remote` 必须与 runner 重入实参逐字一致
+/// (`feat: implement work item` / `origin`),否则生产按身份不符拒绝。
+/// 证据如实标注 `fixture_preset: true`(不冒充产线写路径)。
+fn t24_preset_mid_commit_journal(
+    app_root: &Path,
+    issue_id: &str,
+    attempt_id: &str,
+    attempt: &Value,
+    head: Option<&str>,
+) -> Result<Value, String> {
+    let Some(before_head) = head.filter(|head| !head.trim().is_empty()) else {
+        return Err("attempt worktree HEAD 不可读(无法造 commit_started 现场)".to_string());
+    };
+    let branch_name = attempt["branch_name"]
+        .as_str()
+        .ok_or_else(|| "attempt 记录缺 branch_name".to_string())?;
+    let base_branch = attempt["base_branch"]
+        .as_str()
+        .ok_or_else(|| "attempt 记录缺 base_branch".to_string())?;
+    let worktree = attempt["worktree_path"]
+        .as_str()
+        .ok_or_else(|| "attempt 记录缺 worktree_path".to_string())?;
+    let canonical = Path::new(worktree)
+        .canonicalize()
+        .map_err(|error| format!("worktree 不可 canonicalize:{error}"))?;
+    let now = Utc::now().to_rfc3339();
+    let journal = json!({
+        "project_id": PROJECT_ID,
+        "issue_id": issue_id,
+        "attempt_id": attempt_id,
+        "kind": "review_request",
+        "repo_path": canonical.display().to_string(),
+        "worktree_path": canonical.display().to_string(),
+        "branch_name": branch_name,
+        "base_branch": base_branch,
+        "before_head": before_head,
+        "remote": "origin",
+        "commit_message": "feat: implement work item",
+        "phase": "commit_started",
+        "commit_sha": Value::Null,
+        "push_status": Value::Null,
+        "push_error": Value::Null,
+        "remote_kind": Value::Null,
+        "review_request_id": Value::Null,
+        "created_at": now,
+        "updated_at": now,
+    });
+    let path = app_root
+        .join("projects")
+        .join(PROJECT_ID)
+        .join("issues")
+        .join(issue_id)
+        .join("coding-attempts")
+        .join(attempt_id)
+        .join("git-operation.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let bytes = serde_json::to_vec_pretty(&journal).map_err(|error| error.to_string())?;
+    std::fs::write(&path, bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(json!({
+        "path": path.display().to_string(),
+        "fixture_preset": true,
+        "kind": "review_request",
+        "phase": "commit_started",
+        "attempt_id": attempt_id,
+        "worktree_path": canonical.display().to_string(),
+        "before_head": before_head,
+        "in_flight_at": journal["updated_at"],
+        "observed_at": Utc::now().to_rfc3339(),
+    }))
+}
+
+/// attempt 的 durable git-operation journal(直读磁盘;无= None)。
+fn t24_read_git_operation(app_root: &Path, issue_id: &str, attempt_id: &str) -> Option<Value> {
+    let path = app_root
+        .join("projects")
+        .join(PROJECT_ID)
+        .join("issues")
+        .join(issue_id)
+        .join("coding-attempts")
+        .join(attempt_id)
+        .join("git-operation.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// 有界等待 journal 到终态(compensated/completed);超时返回最后观察。
+async fn t24_wait_git_operation_terminal(
+    app_root: &Path,
+    issue_id: &str,
+    attempt_id: &str,
+    deadline: Duration,
+) -> Option<Value> {
+    let start = std::time::Instant::now();
+    loop {
+        let journal = t24_read_git_operation(app_root, issue_id, attempt_id);
+        if journal.as_ref().is_some_and(|journal| {
+            matches!(
+                journal["phase"].as_str(),
+                Some("compensated") | Some("completed")
+            )
+        }) {
+            return journal;
+        }
+        if start.elapsed() >= deadline {
+            return journal;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// 窗口 #1 释放(恢复完成)事实:最后一条到终态的 transition 时刻 +
+/// 终态标签(durable;无= None)。
+fn t24_window_release_fact(windows: &Value, attempt_id: &str) -> Value {
+    let Some(window) = windows
+        .as_array()
+        .and_then(|windows| {
+            windows
+                .iter()
+                .find(|window| window["attempt_id"].as_str() == Some(attempt_id))
+        })
+    else {
+        return json!({"released_at": Value::Null, "terminal_state": Value::Null});
+    };
+    let terminal_state = window["state"].as_str().unwrap_or_default().to_string();
+    let released_at = window["transitions"]
+        .as_array()
+        .and_then(|transitions| {
+            transitions
+                .iter()
+                .rev()
+                .find(|transition| transition["to"].as_str() == Some(terminal_state.as_str()))
+                .and_then(|transition| transition["at"].as_str())
+        })
+        .or_else(|| window["updated_at"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    json!({
+        "released_at": if released_at.is_empty() { Value::Null } else { json!(released_at) },
+        "terminal_state": terminal_state,
+        "window_id": window["window_id"],
+    })
+}
+
+/// A7(a) 收敛事实:journal 在途(kill 快照)↔ 终态(重启后)对照。
+/// `head_at_kill`/`head_after_restart` 是现场 git 观察(不是 journal 自述),
+/// 用于证明 journal 的 before_head 就是崩溃前真实基线。
+fn t24_mid_commit_convergence(
+    in_flight: &Value,
+    journal_final: Option<&Value>,
+    window_release: &Value,
+    head_at_kill: Option<&str>,
+    head_after_restart: Option<&str>,
+) -> Value {
+    let converged = journal_final.is_some_and(|journal| {
+        matches!(
+            journal["phase"].as_str(),
+            Some("compensated") | Some("completed")
+        )
+    });
+    json!({
+        "in_flight_at": in_flight["in_flight_at"],
+        "phase_at_kill": in_flight["phase"],
+        "attempt_id": in_flight["attempt_id"],
+        "before_head": in_flight["before_head"],
+        "worktree_path": in_flight["worktree_path"],
+        "fixture_preset": in_flight["fixture_preset"],
+        "converged": converged,
+        "converged_at": journal_final.and_then(|journal| journal["updated_at"].as_str()),
+        "phase_after": journal_final.and_then(|journal| journal["phase"].as_str()),
+        "commit_sha_after": journal_final.and_then(|journal| journal["commit_sha"].as_str()),
+        "window_one_released_at": window_release["released_at"],
+        "window_one_terminal_state": window_release["terminal_state"],
+        "head_at_kill": head_at_kill,
+        "head_after_restart": head_after_restart,
+    })
+}
+
+/// 停等期登记面 audits 行(指定 scope 下 `provider-resources` 记录的
+/// path + 内容摘要)。A7(b):无登记记录容器停等期间该 scope 必须逐字不变
+/// (不 clean/不 deregister 证据;其它树/其它 scope 的登记不参与对照)。
+fn t24_resource_audit_lines(app_root: &Path, scope_id: &str) -> Vec<String> {
+    let scope_fragment = format!("/scopes/{scope_id}/");
+    let mut lines: Vec<String> = t24_read_resource_scopes(app_root)
+        .into_iter()
+        .filter_map(|scope| {
+            let path = scope["path"].as_str().unwrap_or_default().to_string();
+            if !path.contains(&scope_fragment) {
+                return None;
+            }
+            let canonical = Path::new(&path).canonicalize().unwrap_or_else(|_| PathBuf::from(&path));
+            let digest = std::fs::read(&canonical)
+                .map(|bytes| hex::encode(Sha256::digest(bytes)))
+                .unwrap_or_default();
+            Some(format!("{path} sha256:{digest}"))
+        })
+        .collect();
+    lines.sort();
+    lines
 }
 
 

@@ -11,17 +11,26 @@
 //!   重启的完整演练(停旧 writer/清登记容器/原 manifest 续恢复/三域核对
 //!   →再放行新材料;停等保持锁不误杀;静默 CHECK 跨 300s);证据根
 //!   `pi/b45-t24-crash`。**不含取消格**(cancel cell 的合并与统一 run.json
-//!   已删除;crash validator 本身不引用 cancel 面)。
+//!   已删除;crash validator 本身不引用 cancel 面)。正向臂=生产 adapter
+//!   (B1)真实登记:kill 时采集 kind=process/confirmed + 真实 PID+`/proc`
+//!   starttime + 窗口/attempt 业务归属的登记记录,补偿后同一记录注销且
+//!   `/proc/<pid>` 消失(不再预置合成 `old-writer-daemon`)。另含 A7 两
+//!   场景断言:(a) mid-commit journal 不抢跑——kill 时 ReviewRequest
+//!   journal 停在 `commit_started`,重启后收敛到终态且收敛时刻不早于窗口
+//!   恢复完成;(b) 未知容器停等——无登记记录的容器被 park 保锁、不 kill
+//!   不 clean(parked 状态 + 停等期登记面 audits 不变),人工处置后才续。
 //! - `b45_live_review_cancel`(Step 4 取消格):按 `B45_T24_CANCEL_PROVIDERS`
 //!   指定子集(缺省 claude,codex,kimi)各一格真实取消与资源收口;证据根
 //!   `pi/b45-t24-cancel`。
 //!
 //! validator(红测合同,Step 1;缺项即 FAIL):replay 缺恢复前 journal、任一
 //! 三域结果、dirty 摘要、精确容器归属、人工门裁决即 FAIL;crash 缺 kill
-//! 事实、启动前零材料/零 provider 事实、停旧 writer、续恢复、静默
-//! CHECK≥310s、停等臂即 FAIL;cancel 的 provider 集合不精确(空集合/缺家/
-//! 多余)、未 aborted、进程/容器未终止、attempt 非终态、资源未收口、取消后
-//! 新 spawn 即 FAIL——`validator_replay_*`/`validator_crash_*`/
+//! 事实、启动前零材料/零 provider 事实、真实登记(PID+starttime 与
+//! 窗口/attempt 归属)、补偿后登记注销与 `/proc/<pid>` 消失、续恢复、静默
+//! CHECK≥310s、A7(a) journal 在途相位与收敛先后关系、A7(b) parked/停等期
+//! audits 不变/未知容器存活、停等臂即 FAIL;cancel 的 provider 集合不精确
+//! (空集合/缺家/多余)、未 aborted、进程/容器未终止、attempt 非终态、资源
+//! 未收口、取消后新 spawn 即 FAIL——`validator_replay_*`/`validator_crash_*`/
 //! `validator_cancel_*`/`cancel_providers_*` 单测钉死(合成夹具,红先)。
 //!
 //! 现场命令(每题独占;replay 两轮共用 `/tmp/aria-bug45/t24/common`,必须
@@ -369,16 +378,23 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
 /// - kill 事实:server_dead=true(kill -9 真实发生);
 /// - 启动前零材料/零 provider 事实:kill 时窗口/资源/role run 快照在场
 ///   (与重启后事实可比);
-/// - 停旧 writer:登记的旧 writer(确认身份 daemon)重启后不再存活;
-/// - 清登记容器/资源:重启后登记面不再含 kill 时在场的旧 writer 记录;
+/// - 正向臂=真实登记(B1 生产 adapter 写入,不是 fixture preset):kill 时
+///   登记面含 kind=process/cleanup_cursor=confirmed 的记录,携带真实
+///   PID+`/proc` starttime(与 `/proc` 逐字核对)与窗口/attempt/run/
+///   worktree 业务归属;补偿后同一登记项注销且 `/proc/<pid>` 消失;
 /// - 原 manifest 续恢复:窗口 #1 达终态且 restore 绑定在场
 ///   (outcome=restored),且窗口释放时刻早于重启观测时刻(补偿先行);
 /// - 三域核对:窗口 restore 的 git 域结构化事实在场;
 /// - 再放行新材料:attempt #1 终态 completed(重启后续驱完成);
 /// - 静默 CHECK:reviewer 静默跨度 ≥300s 且无 stalled(误杀)证据;
+/// - A7(a) mid-commit journal 不抢跑:kill 时 ReviewRequest journal 停在
+///   `commit_started`(提交进行中),重启后收敛到终态,且收敛时刻不早于
+///   窗口恢复完成时刻(journal 在途/post-restore 先后关系可证);
+/// - A7(b) 未知容器停等:无登记记录的容器被 park 保持锁、不 kill 不
+///   clean(kill 时存活 + 重启后存活 + 停等期登记面 audits 不变),人工
+///   处置后才续;
 /// - 停等不误杀臂(drill B):park 态 recovery_required + kept locked 日志
-///   + daemon/容器重启后存活 + 人工处置后释放;
-/// - 取消格:三家格在场且 aborted。
+///   + 未知 daemon 重启后存活。
 pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
     // kill 事实。
@@ -391,36 +407,157 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
             failures.push(format!("缺启动前零材料/零 provider 事实({facet} 快照缺失)"));
         }
     }
-    // 旧 writer 停止 + 登记清理。
-    let daemon_stopped =
-        evidence.pointer("/restart/daemon_alive_after_restart").and_then(Value::as_bool) == Some(false);
-    if !daemon_stopped {
-        failures.push("旧 writer 未停止(登记 daemon 重启后仍存活)".to_string());
-    }
-    let scopes_at_kill = evidence
-        .pointer("/kill/scopes_at_kill")
+    // 正向臂:真实登记(生产 adapter 写入;fixture preset/合成记录不满足
+    // 本形状——缺 PID/starttime/业务归属即红)。
+    let registrations = evidence
+        .pointer("/kill/real_registrations_at_kill")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let old_writer_record = scopes_at_kill
-        .iter()
-        .find(|scope| {
-            scope["record"]["resource_id"].as_str() == Some("old-writer-daemon")
-        });
-    if old_writer_record.is_none() {
-        failures.push("缺旧 writer 登记记录(kill 时无 old-writer-daemon)".to_string());
+    if registrations.is_empty() {
+        failures.push(
+            "缺真实登记(kill 时无生产 adapter 登记的 writer;合成记录不算正向前提)"
+                .to_string(),
+        );
     }
-    let scopes_after = evidence
-        .pointer("/restart/scopes_after_restart")
+    let windows_at_kill = evidence
+        .pointer("/kill/windows_at_kill")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if old_writer_record.is_some()
-        && scopes_after
+    let worktree_tree_key = evidence
+        .pointer("/kill/worktree_tree_key")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut attributed = 0usize;
+    let mut run_matched = 0usize;
+    for record in &registrations {
+        let resource_id = record["resource_id"].as_str().unwrap_or_default().to_string();
+        let labels = &record["labels"];
+        let pid = record["pid"].as_u64().unwrap_or(0);
+        let start_ticks = record["start_time_ticks"].as_u64().unwrap_or(0);
+        let identity_ok = record["kind"].as_str() == Some("process")
+            && labels["kind"].as_str() == Some("provider_process")
+            && labels["aria.scope_id"]
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty())
+            && labels["aria.run_id"]
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty())
+            && pid > 0
+            && start_ticks > 0
+            && record["pid_starttime_matches_proc"].as_bool() == Some(true)
+            && record["cleanup_cursor"].as_str() == Some("confirmed");
+        if !identity_ok {
+            failures.push(format!(
+                "真实登记缺真实 PID+starttime/confirmed 身份:{resource_id:?}(fixture preset 或未回填不算)"
+            ));
+            continue;
+        }
+        // 业务归属:窗口类登记(aria.window_id)必须是 kill 时真实窗口,
+        // 窗口→attempt 关联在位,run/worktree 归属逐字一致;非窗口登记
+        // (如同树 coder delivery)只要求 aria.worktree 同树归属。正向臂
+        // 至少要有一条窗口/attempt 归属的登记(不能只凭进程名/前缀)。
+        let window_id = record["window_id"]
+            .as_str()
+            .or_else(|| labels["aria.window_id"].as_str())
+            .unwrap_or_default();
+        let same_tree = worktree_tree_key.is_empty()
+            || labels["aria.worktree"].as_str() == Some(worktree_tree_key.as_str());
+        if window_id.trim().is_empty() {
+            if !same_tree {
+                failures.push(format!(
+                    "真实登记缺窗口/attempt 归属:{resource_id:?} 无 aria.window_id 且非本树归属"
+                ));
+            }
+            continue;
+        }
+        let Some(window) = windows_at_kill
             .iter()
-            .any(|scope| scope["record"]["resource_id"].as_str() == Some("old-writer-daemon"))
-    {
-        failures.push("登记容器/资源未清(旧 writer 记录重启后仍在)".to_string());
+            .find(|window| window["window_id"].as_str() == Some(window_id))
+        else {
+            failures.push(format!(
+                "真实登记缺窗口/attempt 归属:{resource_id:?} 的 window_id={window_id:?} 不在 kill 时窗口面"
+            ));
+            continue;
+        };
+        let attempt_attributed = window["attempt_id"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty());
+        // scope 内 run 一致性(登记自身身份)+ 至少一条 run 与窗口 run 同源
+        // (窗口开窗 run=reviewer role run,launch 归属同源)。
+        let run_consistent = labels["aria.run_id"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty())
+            && record["run_id"].as_str() == labels["aria.run_id"].as_str();
+        if !(attempt_attributed && run_consistent && same_tree) {
+            failures.push(format!(
+                "真实登记缺窗口/attempt 归属:{resource_id:?} 窗口={window_id:?} 的 attempt/run/worktree 归属不一致"
+            ));
+            continue;
+        }
+        if window["run_id"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty())
+            && record["run_id"].as_str() == window["run_id"].as_str()
+        {
+            run_matched += 1;
+        }
+        attributed += 1;
+    }
+    if !registrations.is_empty() && attributed == 0 {
+        failures.push("真实登记无一条带窗口/attempt 归属(业务归属不可证)".to_string());
+    } else if attributed > 0 && run_matched == 0 {
+        failures.push(
+            "真实登记 run 与 kill 时窗口 run 不同源(窗口/attempt 归属不可证)".to_string(),
+        );
+    }
+    // 补偿后:登记项注销(durable 记录消失)。
+    let registrations_after = evidence
+        .pointer("/restart/real_registrations_after_restart")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let registration_key = |record: &Value| {
+        (
+            record["scope_id"].as_str().unwrap_or_default().to_string(),
+            record["run_id"].as_str().unwrap_or_default().to_string(),
+            record["boot_identity"].as_str().unwrap_or_default().to_string(),
+            record["resource_id"].as_str().unwrap_or_default().to_string(),
+        )
+    };
+    let surviving: Vec<String> = registrations
+        .iter()
+        .map(registration_key)
+        .filter(|key| registrations_after.iter().map(registration_key).any(|other| &other == key))
+        .map(|(_, _, _, resource_id)| resource_id)
+        .collect();
+    if !surviving.is_empty() {
+        failures.push(format!(
+            "登记未清(重启后仍含 kill 时真实登记记录):{surviving:?}"
+        ));
+    }
+    // 补偿后 `/proc/<pid>` 消失(逐条按登记身份观察)。
+    let compensated = evidence
+        .pointer("/restart/compensated_processes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for record in &registrations {
+        let pid = record["pid"].as_u64().unwrap_or(0);
+        if pid == 0 {
+            continue;
+        }
+        let gone = compensated
+            .iter()
+            .find(|entry| entry["pid"].as_u64() == Some(pid))
+            .is_some_and(|entry| entry["proc_alive"].as_bool() == Some(false));
+        if !gone {
+            failures.push(format!(
+                "登记 PID 未消失(补偿后 /proc/{pid} 仍存活或未观察——旧 writer 未停)"
+            ));
+        }
     }
     // 原 manifest 续恢复 + 三域核对(窗口 #1)。
     let windows_one = evidence
@@ -452,6 +589,99 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
             }
         }
         _ => failures.push("补偿先行对照缺时刻(窗口 updated_at/重启观测时刻)".to_string()),
+    }
+    // A7(a):mid-commit journal 不抢跑。崩溃窗口内 ReviewRequest journal
+    // 停在 commit_started(提交进行中);重启补偿必须等窗口恢复完成后才
+    // 收敛 journal(才动 worktree)。先后时刻全部来自 durable 事实:
+    // journal 在途时刻 ≤ 窗口恢复完成时刻 ≤ journal 收敛终态时刻。
+    match evidence.get("kill").and_then(|kill| kill.get("mid_commit_journal")) {
+        None => failures.push(
+            "缺 mid-commit journal 在途事实(kill 时未造出提交进行中的 journal)"
+                .to_string(),
+        ),
+        Some(journal) => {
+            let phase_at_kill = journal["phase"].as_str().unwrap_or_default();
+            let in_flight_at = journal["in_flight_at"]
+                .as_str()
+                .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok());
+            let attempt_id = journal["attempt_id"].as_str().unwrap_or_default();
+            let before_head = journal["before_head"].as_str().unwrap_or_default();
+            if phase_at_kill != "commit_started" {
+                failures.push(format!(
+                    "缺 mid-commit journal 在途事实(kill 时相位={phase_at_kill:?},须 commit_started)"
+                ));
+            }
+            if in_flight_at.is_none()
+                || attempt_id.trim().is_empty()
+                || before_head.trim().is_empty()
+            {
+                failures.push(
+                    "mid-commit journal 在途事实缺时刻/归属(attempt/in_flight_at/before_head)"
+                        .to_string(),
+                );
+            }
+            match evidence
+                .get("restart")
+                .and_then(|restart| restart.get("mid_commit_journal"))
+            {
+                None => failures.push(
+                    "缺 mid-commit journal 收敛事实(重启后未观察 journal 终态)".to_string(),
+                ),
+                Some(restart_journal) => {
+                    let converged = restart_journal["converged"].as_bool() == Some(true);
+                    let phase_after =
+                        restart_journal["phase_after"].as_str().unwrap_or_default();
+                    let converged_at = restart_journal["converged_at"]
+                        .as_str()
+                        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok());
+                    if !converged
+                        || !matches!(phase_after, "compensated" | "completed")
+                        || converged_at.is_none()
+                    {
+                        failures.push(format!(
+                            "mid-commit journal 未收敛(重启后 converged={converged} phase={phase_after:?})"
+                        ));
+                    }
+                    let released_at = restart_journal["window_one_released_at"]
+                        .as_str()
+                        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok());
+                    match (in_flight_at, released_at, converged_at) {
+                        (Some(in_flight), Some(released), Some(converged_at)) => {
+                            if in_flight > released {
+                                failures.push(format!(
+                                    "mid-commit journal 在途时刻晚于窗口恢复完成(时序矛盾:{in_flight} > {released})"
+                                ));
+                            }
+                            if converged_at < released {
+                                failures.push(format!(
+                                    "补偿抢跑:journal 收敛({converged_at})先于窗口恢复完成({released})"
+                                ));
+                            }
+                        }
+                        _ => failures.push(
+                            "mid-commit journal 先后关系缺时刻(在途/恢复完成/收敛)".to_string(),
+                        ),
+                    }
+                    if restart_journal["attempt_id"].as_str() != Some(attempt_id) {
+                        failures.push(
+                            "mid-commit journal attempt 归属不一致(kill/重启)".to_string(),
+                        );
+                    }
+                    if restart_journal["before_head"].as_str() != Some(before_head) {
+                        failures.push(
+                            "mid-commit journal before_head 不一致(kill/重启)".to_string(),
+                        );
+                    }
+                    let head_at_kill =
+                        restart_journal["head_at_kill"].as_str().unwrap_or_default();
+                    if !before_head.trim().is_empty() && head_at_kill != before_head {
+                        failures.push(format!(
+                            "mid-commit journal 基线不一致:before_head={before_head:?} 现场 HEAD={head_at_kill:?}"
+                        ));
+                    }
+                }
+            }
+        }
     }
     // 再放行新材料:attempt #1 终态 completed。
     let attempt_status = evidence
@@ -507,8 +737,31 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
         if drill_b["daemon_alive_after_restart"].as_bool() != Some(true) {
             failures.push("未知 daemon 被误杀(重启后必须存活)".to_string());
         }
-        if drill_b["container_alive_after_restart"].as_bool() != Some(true) {
-            failures.push("共享/登记容器被误杀(重启后必须存活)".to_string());
+        // A7(b):无登记记录的容器停等——park + 保锁 + 不 kill 不 clean。
+        if drill_b["parked"].as_bool() != Some(true) {
+            failures.push("停等臂未 park(缺 parked 状态证据)".to_string());
+        }
+        let audits = &drill_b["park_audits"];
+        let audits_before = audits["before"].as_array().cloned().unwrap_or_default();
+        let audits_after = audits["after"].as_array().cloned().unwrap_or_default();
+        let audits_unchanged = audits["unchanged"].as_bool() == Some(true)
+            && audits_before == audits_after
+            && !audits_before.is_empty();
+        if !audits_unchanged {
+            failures.push(
+                "停等期 audits 发生变化(登记面被清理/改写——不 clean 被违反)".to_string(),
+            );
+        }
+        let container = &drill_b["unknown_container"];
+        let container_untouched = container["registered"].as_bool() == Some(false)
+            && container["alive_after_kill"].as_bool() == Some(true)
+            && container["alive_after_restart"].as_bool() == Some(true)
+            && container["removed_by_manual_disposition"].as_bool() == Some(true);
+        if !container_untouched {
+            failures.push(
+                "未知容器被清理(无登记记录容器必须存活到人工处置:不 kill 不 clean)"
+                    .to_string(),
+            );
         }
         let resolved = drill_b
             .pointer("/resolved_state/matched")
@@ -1040,24 +1293,91 @@ mod validator_replay_tests {
 mod validator_crash_tests {
     use super::*;
 
+    /// 真实登记记录(B1 生产 adapter 形状:process + PID/starttime + 业务
+    /// 归属标签;`pid_starttime_matches_proc` = 采集时与 `/proc` 逐字核对)。
+    fn real_registration(pid: u64, window_id: &str, run_id: &str) -> Value {
+        json!({
+            "path": format!(
+                "/tmp/x/provider-resources/scopes/reviewer-window-a1/{run_id}/aria-engine-1/resources/launch_1.json"
+            ),
+            "scope_id": "reviewer-window-a1",
+            "run_id": run_id,
+            "boot_identity": "aria-engine-1",
+            "resource_id": "launch_1",
+            "kind": "process",
+            "cleanup_cursor": "confirmed",
+            "labels": {
+                "aria.scope_id": "reviewer-window-a1",
+                "aria.run_id": run_id,
+                "aria.window_id": window_id,
+                "aria.worktree": "tree-key-1",
+                "kind": "provider_process",
+            },
+            "pid": pid,
+            "start_time_ticks": 123456,
+            "proc_start_time_ticks": 123456,
+            "pid_starttime_matches_proc": true,
+            "window_id": window_id,
+            "worktree_label": "tree-key-1",
+        })
+    }
+
     fn crash_base() -> Value {
         json!({
             "kill": {
                 "server_dead": true,
-                "windows_at_kill": [{"state": "running"}],
-                "scopes_at_kill": [
-                    {"record": {"resource_id": "old-writer-daemon", "kind": "process"}},
-                ],
+                "worktree_tree_key": "tree-key-1",
+                "windows_at_kill": [{
+                    "window_id": "w1",
+                    "attempt_id": "a1",
+                    "run_id": "role-run-reviewer-1",
+                    "state": "running",
+                }],
+                "scopes_at_kill": [],
                 "role_runs_at_kill": [],
+                "real_registrations_at_kill": [
+                    real_registration(4242, "w1", "role-run-reviewer-1"),
+                ],
+                "mid_commit_journal": {
+                    "path": "/tmp/x/coding-attempts/a1/git-operation.json",
+                    "fixture_preset": true,
+                    "kind": "review_request",
+                    "phase": "commit_started",
+                    "attempt_id": "a1",
+                    "worktree_path": "/tmp/x/worktree",
+                    "before_head": "sha-base",
+                    "in_flight_at": "2026-10-19T00:04:00Z",
+                    "observed_at": "2026-10-19T00:04:01Z",
+                },
             },
             "restart": {
                 "restarted_observed_at": "2026-10-19T00:10:00Z",
-                "daemon_alive_after_restart": false,
+                "real_registrations_after_restart": [],
                 "scopes_after_restart": [],
+                "compensated_processes": [{
+                    "pid": 4242,
+                    "start_time_ticks": 123456,
+                    "proc_alive": false,
+                    "proc_start_time_ticks": Value::Null,
+                }],
+                "mid_commit_journal": {
+                    "in_flight_at": "2026-10-19T00:04:00Z",
+                    "phase_at_kill": "commit_started",
+                    "attempt_id": "a1",
+                    "before_head": "sha-base",
+                    "converged": true,
+                    "converged_at": "2026-10-19T00:06:00Z",
+                    "phase_after": "completed",
+                    "window_one_released_at": "2026-10-19T00:05:00Z",
+                    "window_one_terminal_state": "new_review_required",
+                    "head_at_kill": "sha-base",
+                    "head_after_restart": "sha-base",
+                    "fixture_preset": true,
+                },
                 "window_one_terminal": [
                     {
                         "attempt_id": "a1",
-                        "state": "closed_invalidated",
+                        "state": "new_review_required",
                         "updated_at": "2026-10-19T00:05:00Z",
                         "restore": {
                             "outcome": "restored",
@@ -1073,9 +1393,26 @@ mod validator_crash_tests {
             },
             "drill_b": {
                 "park_state": {"matched": true},
+                "parked": true,
                 "park_log_has_kept_locked": true,
                 "daemon_alive_after_restart": true,
-                "container_alive_after_restart": true,
+                "park_audits": {
+                    "before": [
+                        "/tmp/x/provider-resources/scopes/park/run/boot/resources/unconfirmed.json sha256:aaa",
+                    ],
+                    "after": [
+                        "/tmp/x/provider-resources/scopes/park/run/boot/resources/unconfirmed.json sha256:aaa",
+                    ],
+                    "unchanged": true,
+                },
+                "unknown_container": {
+                    "exact_id": "ctr-1",
+                    "name": "b45-t24-park",
+                    "registered": false,
+                    "alive_after_kill": true,
+                    "alive_after_restart": true,
+                    "removed_by_manual_disposition": true,
+                },
                 "resolved_state": {"matched": true},
             },
         })
@@ -1103,26 +1440,218 @@ mod validator_crash_tests {
         );
     }
 
+    /// 合成 `old-writer-daemon` 前提必须红(kill 时只有合成记录、无生产
+    /// 登记 → 正向臂不得以 fixture preset 冒充真实登记)。
     #[test]
-    fn crash_validator_rejects_live_old_writer() {
+    fn crash_validator_rejects_synthetic_old_writer_premise() {
         let mut evidence = crash_base();
-        evidence["restart"]["daemon_alive_after_restart"] = json!(true);
-        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
-        assert!(
-            failures.iter().any(|f| f.contains("旧 writer")),
-            "{failures:?}"
-        );
-    }
-
-    #[test]
-    fn crash_validator_rejects_uncleaned_registration() {
-        let mut evidence = crash_base();
-        evidence["restart"]["scopes_after_restart"] = json!([
+        evidence["kill"]["real_registrations_at_kill"] = json!([]);
+        evidence["kill"]["scopes_at_kill"] = json!([
             {"record": {"resource_id": "old-writer-daemon", "kind": "process"}},
         ]);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
+            failures.iter().any(|f| f.contains("真实登记")),
+            "{failures:?}"
+        );
+    }
+
+    /// 登记无真实 PID+`/proc` starttime(未回填/身份不可证)→ 红。
+    #[test]
+    fn crash_validator_rejects_registration_without_proc_identity() {
+        let mut evidence = crash_base();
+        evidence["kill"]["real_registrations_at_kill"][0]["pid_starttime_matches_proc"] = json!(false);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("PID+starttime")),
+            "{failures:?}"
+        );
+        let mut evidence = crash_base();
+        evidence["kill"]["real_registrations_at_kill"][0]["start_time_ticks"] = json!(0);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("PID+starttime")),
+            "{failures:?}"
+        );
+    }
+
+    /// 登记无窗口/attempt 业务归属(只有 scope/run 不够)→ 红。
+    #[test]
+    fn crash_validator_rejects_registration_without_window_attribution() {
+        let mut evidence = crash_base();
+        evidence["kill"]["real_registrations_at_kill"][0]["window_id"] = Value::Null;
+        evidence["kill"]["real_registrations_at_kill"][0]["labels"]
+            .as_object_mut()
+            .expect("labels")
+            .remove("aria.window_id");
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("窗口/attempt 归属")),
+            "{failures:?}"
+        );
+        // 窗口 id 不在 kill 时窗口面(伪造归属)→ 红。
+        let mut evidence = crash_base();
+        evidence["kill"]["real_registrations_at_kill"][0]["window_id"] = json!("w-unknown");
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("窗口/attempt 归属")),
+            "{failures:?}"
+        );
+    }
+
+    /// 补偿后登记 PID 仍存活(未停旧 writer)→ 红。
+    #[test]
+    fn crash_validator_rejects_surviving_registered_process() {
+        let mut evidence = crash_base();
+        evidence["restart"]["compensated_processes"][0]["proc_alive"] = json!(true);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("PID 未消失")),
+            "{failures:?}"
+        );
+    }
+
+    /// 补偿后登记项未清(/proc 已消失但 durable 记录仍在)→ 红。
+    #[test]
+    fn crash_validator_rejects_uncleaned_registration() {
+        let mut evidence = crash_base();
+        let record = evidence["kill"]["real_registrations_at_kill"][0].clone();
+        evidence["restart"]["real_registrations_after_restart"] = json!([record]);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
             failures.iter().any(|f| f.contains("未清")),
+            "{failures:?}"
+        );
+    }
+
+    /// A7(a):缺 journal 在途事实(未造出“提交进行中”状态)→ 红。
+    #[test]
+    fn crash_validator_rejects_missing_mid_commit_journal() {
+        let mut evidence = crash_base();
+        evidence["kill"]
+            .as_object_mut()
+            .expect("kill")
+            .remove("mid_commit_journal");
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("journal 在途")),
+            "{failures:?}"
+        );
+        // kill 时相位不是 commit_started(不是“提交进行中”)→ 红。
+        let mut evidence = crash_base();
+        evidence["kill"]["mid_commit_journal"]["phase"] = json!("before");
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("journal 在途")),
+            "{failures:?}"
+        );
+    }
+
+    /// A7(a):journal 未收敛(重启后仍非终态)→ 红。
+    #[test]
+    fn crash_validator_rejects_unconverged_mid_commit_journal() {
+        let mut evidence = crash_base();
+        evidence["restart"]["mid_commit_journal"]["converged"] = json!(false);
+        evidence["restart"]["mid_commit_journal"]["converged_at"] = Value::Null;
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未收敛")),
+            "{failures:?}"
+        );
+        let mut evidence = crash_base();
+        evidence["restart"]["mid_commit_journal"]["converged"] = json!(true);
+        evidence["restart"]["mid_commit_journal"]["converged_at"] =
+            json!("2026-10-19T00:06:00Z");
+        evidence["restart"]["mid_commit_journal"]["phase_after"] = json!("commit_started");
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未收敛")),
+            "{failures:?}"
+        );
+    }
+
+    /// A7(a) 逆序负测:补偿(journal 收敛)先于恢复完成 → 抢跑,红。
+    #[test]
+    fn crash_validator_rejects_compensation_before_restore() {
+        let mut evidence = crash_base();
+        evidence["restart"]["mid_commit_journal"]["converged_at"] =
+            json!("2026-10-19T00:04:30Z");
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("抢跑")),
+            "{failures:?}"
+        );
+    }
+
+    /// A7(a) 缺失负测:恢复完成时刻缺失(先后关系不可证)→ 红。
+    #[test]
+    fn crash_validator_rejects_missing_restore_timestamp() {
+        let mut evidence = crash_base();
+        evidence["restart"]["mid_commit_journal"]["window_one_released_at"] = Value::Null;
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("时刻")),
+            "{failures:?}"
+        );
+    }
+
+    /// A7(b):缺 parked 证据(停等臂未 park)→ 红。
+    #[test]
+    fn crash_validator_rejects_missing_parked_evidence() {
+        let mut evidence = crash_base();
+        evidence["drill_b"]["parked"] = json!(false);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未 park")),
+            "{failures:?}"
+        );
+        let mut evidence = crash_base();
+        evidence["drill_b"]
+            .as_object_mut()
+            .expect("drill_b")
+            .remove("parked");
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未 park")),
+            "{failures:?}"
+        );
+    }
+
+    /// A7(b):未知容器被直接清理(kill/clean)→ 红。
+    #[test]
+    fn crash_validator_rejects_cleaned_unknown_container() {
+        let mut evidence = crash_base();
+        evidence["drill_b"]["unknown_container"]["alive_after_restart"] = json!(false);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未知容器被清理")),
+            "{failures:?}"
+        );
+        let mut evidence = crash_base();
+        evidence["drill_b"]["unknown_container"]["registered"] = json!(true);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未知容器被清理")),
+            "{failures:?}"
+        );
+    }
+
+    /// A7(b):停等期 audits 变化(登记面被改/被清)→ 红。
+    #[test]
+    fn crash_validator_rejects_changed_park_audits() {
+        let mut evidence = crash_base();
+        evidence["drill_b"]["park_audits"]["after"] = json!([]);
+        evidence["drill_b"]["park_audits"]["unchanged"] = json!(false);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("audits")),
+            "{failures:?}"
+        );
+        let mut evidence = crash_base();
+        evidence["drill_b"]["park_audits"]["before"] = json!([]);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("audits")),
             "{failures:?}"
         );
     }
