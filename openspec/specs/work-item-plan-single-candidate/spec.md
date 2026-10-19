@@ -115,7 +115,7 @@ SC 交付（author 与人工修订两条路径）进入编译前，系统 SHALL 
 #### Scenario: AC 引用基线外路径被拦
 
 - **WHEN** 候选的验收标准或验证计划引用仓库内文件路径（如某分支才存在的文件），而该路径不存在于 plan 基线树
-- **THEN** generate/evaluate 期产出 Error（附路径清单与三种修复建议：删除该 AC / 改用基线内路径 / 显式声明基线恢复依赖并纳入写范围）；SHALL NOT 让 coder 在执行期发现并被迫越界恢复基线
+- **THEN** generate/evaluate 期产出 Error（附路径清单与三种修复建议：删除该 AC / 改用基线内路径 / 将新建文件先提交入基线或改引基线内既有脚本，不以写范围声明豁免）；SHALL NOT 让 coder 在执行期发现并被迫越界恢复基线
 
 ### Requirement: 中央策略层与 typed outcome（REQ-WSC-03）
 

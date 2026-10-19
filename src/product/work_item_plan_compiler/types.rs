@@ -95,10 +95,10 @@ pub const PREFLIGHT_FINDING_CODES: &[&str] = &[
 ];
 
 /// AC 路径×基线树核对（REQ-WSC-02 场景 13，F-56）的三条修复建议共享文案：
-/// 删除该 AC / 改用基线内路径 / 显式声明基线恢复依赖并纳入写范围
-/// （exclusive_scopes）。与 finding 消息、SC author prompt 教学
+/// 删除该 AC / 改用基线内路径 / 将新建文件先提交入基线或改引基线内既有
+/// 脚本（不以写范围声明豁免）。与 finding 消息、SC author prompt 教学
 /// （REQ-WSC-06）逐字同源。
-pub const ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION: &str = "删除引用基线外路径的验收标准（AC），或改用 plan 基线树内存在的既有路径，或显式声明基线恢复依赖并将该路径纳入写范围（exclusive_scopes）";
+pub const ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION: &str = "删除引用基线外路径的验收标准（AC），或改用 plan 基线树内存在的既有路径；若验收依赖本次交付新建的文件，先将其作为独立提交纳入基线，或改为引用基线内已有的验证脚本/既有文件（不得引用尚未提交的路径）";
 
 /// 将编译后的 IR 投影为既有机械 validator 输入时由外层注入的已确认上下文。
 #[derive(Debug, Clone, PartialEq, Eq)]

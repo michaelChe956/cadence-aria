@@ -12,7 +12,8 @@
 use super::*;
 use crate::product::models::{IssueWorkItemPlanOptions, WorkItemSplitFindingSeverity};
 use crate::product::work_item_plan_compiler::{
-    PlanCandidateValidationContext, validate_plan_candidate_ir,
+    ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION, PlanCandidateValidationContext,
+    validate_plan_candidate_ir,
 };
 use std::collections::BTreeSet;
 
@@ -143,8 +144,25 @@ fn f56_route_reference_outside_baseline_is_blocked_with_repair_advice() {
         finding.message
     );
     assert!(
-        finding.message.contains("exclusive_scopes"),
-        "修复建议三（声明基线恢复依赖并纳入写范围）：{}",
+        !finding.message.contains("exclusive_scopes"),
+        "写范围声明（exclusive_scopes）不是可满足的修复路径，文案不得再承诺豁免：{}",
+        finding.message
+    );
+    assert!(
+        finding.message.contains("独立提交纳入基线"),
+        "修复建议三（新建文件先提交入基线）：{}",
+        finding.message
+    );
+    assert!(
+        finding.message.contains("既有路径"),
+        "修复建议三须指向基线内既有路径/脚本：{}",
+        finding.message
+    );
+    assert!(
+        finding
+            .message
+            .ends_with(ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION),
+        "finding 消息与共享常量逐字同源（REQ-WSC-06 口径一致）：{}",
         finding.message
     );
 }
