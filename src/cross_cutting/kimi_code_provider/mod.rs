@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -11,6 +12,7 @@ use crate::cross_cutting::process_manager::{
     provider_child_exit_error, run_session_tail_with_exit_watch,
 };
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::provider_resources::{ResourceReservation, TrustedLaunchOwnership};
 use crate::cross_cutting::streaming_provider::{
     LcVersionCache, LcVersionObservation, LcVersionProbe, LcVersionProbeKey, ProviderEvent,
     ProviderSession, ProviderStatus, StreamingProviderAdapter, StreamingProviderInput,
@@ -115,9 +117,9 @@ pub async fn probe_kimi_version(command: &std::path::Path) -> KimiVersion {
         working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         timeout: KIMI_VERSION_PROBE_TIMEOUT,
         cancellation: CancellationToken::new(),
-    // A1-b2(Bug45 批2 环境回退):探测环境不注入——空 env map,子进程
-    // 经底座继承宿主 PATH,裸名 CLI 照常解析。
-    environment: std::collections::BTreeMap::new(),
+        // A1-b2(Bug45 批2 环境回退):探测环境不注入——空 env map,子进程
+        // 经底座继承宿主 PATH,裸名 CLI 照常解析。
+        environment: std::collections::BTreeMap::new(),
         stdout_limit: 64 * 1024,
         stderr_limit: 64 * 1024,
     };
@@ -353,15 +355,66 @@ fn sanitize_kimi_failure(message: String) -> String {
         .join("\n")
 }
 
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for KimiCodeProvider {
-    fn supports_tool_calls(&self) -> bool {
-        true
+/// B1-1(波 2):direct 路径的资源登记启动体。engine 已用真实 scope 铸造
+/// `TrustedLaunchOwnership` 并经 `start_owned` 传入;本 impl 只负责在
+/// spawn 点回填真实 PID+starttime,并让登记句柄活到会话真实收口。
+impl KimiCodeProvider {
+    /// spawn 点统一登记片:预留已在调用方完成;spawn 成功后立即回填真实
+    /// PID+`/proc` starttime(PID 复用防护)。回填失败(身份不可读/确认写
+    /// 失败)整组停止子进程并返回 Err——登记由调用方按无身份/已确认身份
+    /// 收口,不在此提前注销。
+    async fn spawn_registered(
+        &self,
+        args: &[&str],
+        working_dir: &Path,
+        env_vars: &BTreeMap<String, String>,
+        cancel: CancellationToken,
+        registration: Option<&(TrustedLaunchOwnership, ResourceReservation)>,
+    ) -> Result<crate::cross_cutting::process_manager::ManagedProcess, ProviderAdapterError> {
+        let command = self.command.to_string_lossy().to_string();
+        let mut process =
+            ProcessManager::spawn(&command, args, working_dir, env_vars, cancel).await?;
+        if let Some((ownership, reservation)) = registration {
+            let Some(pid) = process.child.spawn_leader_pid() else {
+                process.child.terminate().await;
+                return Err(ProviderAdapterError::provider_unavailable(
+                    "kimi provider launch identity unavailable: spawn 未暴露组长 PID",
+                ));
+            };
+            if let Err(error) = ownership.backfill_spawned_identity(reservation, pid) {
+                process.child.terminate().await;
+                return Err(error);
+            }
+        }
+        Ok(process)
     }
 
-    async fn start(
+    /// direct 启动体:`registration = None` 为既有裸 start 语义(零登记);
+    /// `Some` 为受信载体已预留的 launch。spawn 之前的失败(角色/策略/版本
+    /// 门)发生在预留之后、零 spawn,按无身份注销;会话真实尾部(子进程
+    /// 回收、事件通道关闭)后按登记身份收口注销——不在协议 Completed。
+    async fn start_session(
         &self,
         input: StreamingProviderInput,
+        registration: Option<(TrustedLaunchOwnership, ResourceReservation)>,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let mut registration = registration;
+        let result = self
+            .start_session_inner(input, &mut registration, cancel)
+            .await;
+        if result.is_err()
+            && let Some((ownership, _reservation)) = registration.take()
+        {
+            ownership.release_after_session_tail().await;
+        }
+        result
+    }
+
+    async fn start_session_inner(
+        &self,
+        input: StreamingProviderInput,
+        registration: &mut Option<(TrustedLaunchOwnership, ResourceReservation)>,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         // 批2 Task 20a-fix(F2):四家同源启动检查首步——非法角色×策略
@@ -381,20 +434,26 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         ensure_kimi_version_compatible(&version)?;
         let args = self.build_args();
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-        let process = ProcessManager::spawn(
-            &self.command.to_string_lossy(),
-            &arg_refs,
-            &input.working_dir,
-            &input.env_vars,
-            cancel.clone(),
-        )
-        .await?;
+        let process = self
+            .spawn_registered(
+                &arg_refs,
+                &input.working_dir,
+                &input.env_vars,
+                cancel.clone(),
+                registration.as_ref(),
+            )
+            .await?;
         let peer = JsonRpcPeer::new(process.stdout, process.stdin);
         let stderr = process.stderr;
         let mut child = process.child;
         let mcp_injection = self.mcp_injection.clone();
         let (event_tx, event_rx) = mpsc::channel(32);
         let (command_tx, command_rx) = mpsc::channel(8);
+        // B1-1:登记句柄随会话尾部任务存活——错误路径与正常后台尾部都在
+        // 子进程回收、事件通道关闭后才注销。
+        let tail_ownership = registration
+            .take()
+            .map(|(ownership, _reservation)| ownership);
         let _ = event_tx
             .send(ProviderEvent::StatusChanged(ProviderStatus::Starting))
             .await;
@@ -481,12 +540,56 @@ impl StreamingProviderAdapter for KimiCodeProvider {
                     .await;
                 let _ = event_tx.send(ProviderEvent::Failed { message }).await;
             }
+            // 先关事件通道(消费方 recv 终结不被注销等待推迟),再按登记
+            // 身份 killpg+有界观察收口;静止不可证时保留 durable 记录。
+            drop(event_tx);
+            if let Some(ownership) = tail_ownership {
+                ownership.release_after_session_tail().await;
+            }
         });
         Ok(ProviderSession {
             native_session_id: None,
             events: event_rx,
             commands: command_tx,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for KimiCodeProvider {
+    fn supports_tool_calls(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.start_session(input, None, cancel).await
+    }
+
+    /// B1-1(波 2):direct 路径的受信资源登记接线。载体由 engine 三处真实
+    /// scope 铸造(本次 launch 唯一资源 ID):预留(durable,失败零 spawn)
+    /// → spawn → 回填真实 PID+starttime → 会话真实收口(进程组静止)后
+    /// 注销。未携带载体 = 无归属请求(legacy/测试面),走 trait 默认——
+    /// 既有裸 start 语义,不在此伪造登记、也不绕过默认方法。
+    async fn start_owned(
+        &self,
+        input: StreamingProviderInput,
+        ownership: Option<TrustedLaunchOwnership>,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let Some(ownership) = ownership else {
+            return crate::cross_cutting::streaming_provider::start_owned_default(
+                self, input, None, cancel,
+            )
+            .await;
+        };
+        // 预留先于一切 spawn 副作用(含 --version 探测):失败即零 spawn。
+        let reservation = ownership.reserve()?;
+        self.start_session(input, Some((ownership, reservation)), cancel)
+            .await
     }
 
     /// LC validated 启动(Task 4c):只接受 gateway 产出的 validated input。
@@ -497,12 +600,24 @@ impl StreamingProviderAdapter for KimiCodeProvider {
     /// 都保持 canonical LC root;target 写面由宿主 fs/terminal handler
     /// 消费不可伪造 boundary plan(不进协议 cwd)。`mcp_bundle_digest`
     /// 只对应 Aria 注入,无注入时标记 native 项目配置来源。direct
-    /// `start` 保持逐字节不变。
+    /// `start` 的 wire 行为不变(无载体 = 零登记)。
     async fn start_validated(
         &self,
         validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        // B1-1:validated 载体的受信归属与 direct 同一生命周期——预留先于
+        // 版本探测与子进程(失败零 spawn);spawn 后回填真实 PID+starttime;
+        // 登记句柄活到会话真实尾部。未携带载体 = 无归属请求(存量构造)。
+        let mut registration = match validated.launch_ownership() {
+            Some(ownership) => {
+                let ownership = ownership.clone();
+                let reservation = ownership.reserve()?;
+                Some((ownership, reservation))
+            }
+            None => None,
+        };
+        let result = async {
         let (mut input, launch) = validated.into_parts();
         let envelope = launch.envelope().clone();
 
@@ -667,16 +782,16 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         //    plan 由宿主 handler 消费,不进协议 cwd)。
         let args = self.build_args();
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-        let command = self.command.to_string_lossy().to_string();
         let process_cwd = envelope.working_directory.clone();
-        let process = ProcessManager::spawn(
-            &command,
-            &arg_refs,
-            &process_cwd,
-            &input.env_vars,
-            cancel.clone(),
-        )
-        .await?;
+        let process = self
+            .spawn_registered(
+                &arg_refs,
+                &process_cwd,
+                &input.env_vars,
+                cancel.clone(),
+                registration.as_ref(),
+            )
+            .await?;
         input.working_dir = envelope.working_directory.clone();
 
         let peer = JsonRpcPeer::new(process.stdout, process.stdin);
@@ -730,6 +845,11 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         // 会话任务持有独立的 cancel 克隆,start 侧继续等待/响应当前 token。
         let handshake_bound = Duration::from_secs(input.timeout_secs.max(1));
         let session_cancel = cancel.clone();
+        // B1-1:登记句柄随会话尾部任务存活——握手失败/取消/审计失败与正常
+        // 后台尾部都在子进程回收、事件通道关闭后才注销。
+        let tail_ownership = registration
+            .take()
+            .map(|(ownership, _reservation)| ownership);
 
         // 8) 会话任务(与 direct `start` 同构:stderr 收集 + MCP 注入决策
         //    + 失败 kill 链);差异:携带 LC boundary plan 与统一 audit
@@ -817,6 +937,12 @@ impl StreamingProviderAdapter for KimiCodeProvider {
                     .await;
                 let _ = event_tx.send(ProviderEvent::Failed { message }).await;
             }
+            // 先关事件通道(消费方 recv 终结不被注销等待推迟),再按登记
+            // 身份 killpg+有界观察收口;静止不可证时保留 durable 记录停等。
+            drop(event_tx);
+            if let Some(ownership) = tail_ownership {
+                ownership.release_after_session_tail().await;
+            }
         });
 
         // 9) 有界等待 native session/handshake 结果(握手 id 落盘成功后
@@ -862,6 +988,17 @@ impl StreamingProviderAdapter for KimiCodeProvider {
             events: event_rx,
             commands: command_tx,
         })
+        }
+        .await;
+        // spawn 之前的失败(策略/版本/投影门):预留已落盘但零 spawn,
+        // 无身份 → 直接注销;spawn 后回填失败的子进程已整组停止。
+        // 会话尾部路径(握手失败/取消/正常完成)已把句柄交给尾部任务。
+        if result.is_err()
+            && let Some((ownership, _reservation)) = registration.take()
+        {
+            ownership.release_after_session_tail().await;
+        }
+        result
     }
 
     /// Task 3.6(B0e):LC 只读 prepare facts——把 `start_validated` 的

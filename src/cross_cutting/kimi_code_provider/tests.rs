@@ -25,3 +25,7 @@ mod local_usage_tests;
 #[cfg(unix)]
 #[path = "tests/tool_policy_zero_change.rs"]
 mod tool_policy_zero_change;
+
+#[cfg(unix)]
+#[path = "tests/b1_resources_tests.rs"]
+mod b1_resources_tests;
