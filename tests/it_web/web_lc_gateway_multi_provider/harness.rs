@@ -939,6 +939,14 @@ impl Default for LiveLcGatewayHarness {
 /// 失败段场景清单:直接消费冻结测试面 `failure_matrix::FIXED_FAILURE_
 /// SCENARIOS`(boundary_matrix 现场覆盖断言同源,harness 不另立第二清单)。
 use super::failure_matrix::FIXED_FAILURE_SCENARIOS as TASK11_FAILURE_SCENARIOS;
+/// A7(b) 停等双臂契约(与 validator 同源常量;见
+/// `live_b45_t24` 顶部说明)。
+use super::live_b45_t24::{
+    B45_T24_CONTAINER_OBSERVABILITY, B45_T24_CONTAINER_OBSERVABILITY_NOTE,
+    B45_T24_CONTAINER_RESOURCE_ID, B45_T24_CONTAINER_SCOPE_ID,
+    B45_T24_OBSERVER_MISSING_QUIESCE_REASON, B45_T24_UNCONFIRMED_WRITER_QUIESCE_REASON,
+    B45_T24_WRITER_RESOURCE_ID, B45_T24_WRITER_SCOPE_ID,
+};
 
 /// Task 11 现场证据根(计划 Files 冻结):`<provider>/{boundary,failures}/`。
 fn task11_evidence_roots(provider: &ProviderName) -> (PathBuf, PathBuf) {
@@ -12856,6 +12864,45 @@ async fn b45_t24_wait_window_state(
     }
 }
 
+/// T24:等待指定 attempt 窗口的 `recovery.detail` 含 `needle`。停等原因
+/// 必须由**当次重启**的补偿逐字落账:只等 `state=recovery_required` 在
+/// 已停等的窗口上会立即命中,证明不了本次重启的停等触发者(A7(b) 双臂
+/// 各自重启一次,必须按 detail 定点等待)。
+async fn b45_t24_wait_window_recovery_detail(
+    app_root: &Path,
+    attempt_id: &str,
+    needle: &str,
+    timeout: Duration,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let found = b45_t24_read_windows(app_root);
+        let matched = found.iter().any(|window| {
+            window["attempt_id"].as_str() == Some(attempt_id)
+                && window
+                    .pointer("/recovery/detail")
+                    .and_then(Value::as_str)
+                    .is_some_and(|detail| detail.contains(needle))
+        });
+        if matched {
+            return json!({"matched": true, "needle": needle, "windows": found});
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return json!({"matched": false, "needle": needle, "windows": found});
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// T24:窗口 durable recovery 落账(停等原因/细节;缺失= Null)。
+fn t24_window_recovery(windows: &[Value], attempt_id: &str) -> Value {
+    windows
+        .iter()
+        .find(|window| window["attempt_id"].as_str() == Some(attempt_id))
+        .map(|window| window["recovery"].clone())
+        .unwrap_or(Value::Null)
+}
+
 /// T24:role run 事件的最大静默跨度(秒;≥300s 静默 CHECK 不误杀证据)。
 fn b45_t24_max_silent_gap_secs(role_rows: &[Value]) -> u64 {
     let mut times: Vec<chrono::DateTime<chrono::Utc>> = role_rows
@@ -13801,11 +13848,13 @@ impl LiveLcGatewayHarness {
                     )
                     .await;
                     let park_setup = if window_b_running["matched"].as_bool() == Some(true) {
-                        // 未确认 writer(真实运行守护,身份未确认——崩溃窗口
-                        // 形态)+ 登记容器(真实 podman 容器,精确 ID+标签)。
+                        // A7(b) 双臂前置:臂 a 预置未确认 writer(真实运行
+                        // 守护、身份未确认——崩溃窗口形态)与无登记容器;
+                        // 臂 b 的已登记容器在臂 a 人工处置后才建(独立
+                        // scope,避免两臂同 scope 互相抢占停等触发者)。
                         let worktree_two =
                             b45_t24_attempt_worktree_by_paths(&app_root, &issue_id, &attempt_two);
-                        let mut park = json!({
+                        let park = json!({
                             "window_running": true,
                             "worktree": worktree_two.clone().map(|w| w.display().to_string()),
                         });
@@ -13819,23 +13868,30 @@ impl LiveLcGatewayHarness {
                                 )
                             })?;
                             let daemon_two_pid = daemon_two.id();
-                            let mut labels = BTreeMap::new();
-                            labels.insert("aria.worktree".to_string(), tree_key_two.clone());
-                            labels.insert(
+                            let run_id_two = format!("run-{attempt_two}");
+                            // A7(b) 双臂(修复轮 3):每臂一个**独立 scope**。
+                            // 同 scope 混排时 quiesce 的 list_scope 按
+                            // resource_id 排序,先命中的记录会抢占停等原因
+                            // (F1:writer 停等曾被已登记容器的
+                            // observer_missing 抢占而不再被演练)。两臂各在
+                            // 一次重启中成为当次恢复的唯一停等触发者。
+                            let mut writer_labels = BTreeMap::new();
+                            writer_labels.insert("aria.worktree".to_string(), tree_key_two.clone());
+                            writer_labels.insert(
                                 "kind".to_string(),
                                 "b45-t24-unconfirmed-writer".to_string(),
                             );
                             let unconfirmed_path = b45_t24_preset_resource_record(
                                 &app_root,
-                                "b45-t24-park",
-                                &format!("run-{attempt_two}"),
+                                B45_T24_WRITER_SCOPE_ID,
+                                &run_id_two,
                                 &format!("b45-t24-fixture-{daemon_two_pid}"),
-                                "unconfirmed-writer",
+                                B45_T24_WRITER_RESOURCE_ID,
                                 "process",
                                 &format!(
                                     "bash -c 'sleep 1800' (b45-t24 unconfirmed writer; pid={daemon_two_pid})"
  ),
-                                labels.clone(),
+                                writer_labels,
                                 None,
                                 "reserved",
                             )
@@ -13846,21 +13902,96 @@ impl LiveLcGatewayHarness {
                                     Some("crash"),
                                 )
                             })?;
-                            // A7(b) 双半边(修复轮重设):
-                            // - 已登记容器:真实 podman 容器 + 确认身份登记
-                            //   (kind=container、exact_id 真实、aria.worktree
-                            //   归属标签)——平台 quiesce 可枚举的登记面,
-                            //   「锁定期不被清理」是可观测断言(记录与
-                            //   实例都不得被动,park 而非 remove);
-                            // - 未知容器:**不落登记**——平台只消费登记面
-                            //   (provider_resources::quiesce_scope 入口
-                            //   list_scope),无登记容器对平台不可见,
-                            //   存活性不构成清理证据:如实标注不可观测,
-                            //   存活字段只记录不断言。
+                            // A7(b) 不可观测半边(无登记记录的真实容器)——
+                            // 平台只消费登记面(quiesce_scope 入口
+                            // list_scope),对平台不可见;存活字段只记录。
                             let unknown_container =
                                 b45_t24_podman_run_park_container(&tree_key_two, "unknown");
+                            // kill 服务 #2(窗口 Running + 停等前置在场)。
+                            let provider_pid_b =
+                                t24_pi_provider_pid(&app_root, &issue_id, &attempt_two);
+                            let windows_b_at_kill = b45_t24_read_windows(&app_root);
+                            // A7(b) writer 臂停等期 audits 基线(writer scope
+                            // 登记面 path+摘要):park 期间必须逐字不变。
+                            let writer_audits_before =
+                                t24_resource_audit_lines(&app_root, B45_T24_WRITER_SCOPE_ID);
+                            server_two.kill_process_group();
+                            let daemon_two_alive_after_kill = b45_t24_pid_alive(daemon_two_pid);
+                            let unknown_container_alive_after_kill = unknown_container
+                                .as_ref()
+                                .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
+                                .unwrap_or(false);
+                            // 重启 #3(writer 臂是本次恢复的唯一停等触发者,
+                            // 该 scope 无容器记录):未确认 writer 必须触发
+                            // 未知 writer 类 RecoveryRequired——保持锁,
+                            // 不清理、不动 durable、不误杀 daemon。
+                            let port_three = t24_pick_port().await;
+                            let mut server_three =
+                                b45_t24_spawn_server(&workspace, port_three, "drill-b-writer-arm")
+                                    .await
+                                    .map_err(|message| {
+                                        matrix_failure(
+                                            "b45_t24_server_spawn_failed",
+                                            message,
+                                            Some("crash"),
+                                        )
+                                    })?;
+                            let writer_park_state = b45_t24_wait_window_recovery_detail(
+                                &app_root,
+                                &attempt_two,
+                                B45_T24_UNCONFIRMED_WRITER_QUIESCE_REASON,
+                                Duration::from_secs(300),
+                            )
+                            .await;
+                            let writer_park_log = server_three.log_text();
+                            let daemon_two_alive_after_restart = b45_t24_pid_alive(daemon_two_pid);
+                            let writer_record_present_after_restart = unconfirmed_path.exists();
+                            let writer_audits_after =
+                                t24_resource_audit_lines(&app_root, B45_T24_WRITER_SCOPE_ID);
+                            let writer_recovery = t24_window_recovery(
+                                &writer_park_state["windows"]
+                                    .as_array()
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                &attempt_two,
+                            );
+                            let writer_parked =
+                                writer_park_state["matched"].as_bool() == Some(true);
+                            let lease_after_park = t24_read_leases(&app_root);
+                            // 新材料必须被拒(锁保持):attach 后无新窗口可开
+                            // ——以「无新 Running 窗口/无新 role run」记录事实。
+                            let new_material_probe = server_three
+                                .request_json(
+                                    reqwest::Method::POST,
+                                    &format!(
+                                        "/api/coding-attempts/{attempt_two}/reviewer-window:resolve"
+                                    ),
+                                    json!({"decision": "require_new_review"}),
+                                )
+                                .await;
+                            // 臂间边界:启动补偿会把树租约 owner 换成恢复者
+                            // pid;下一臂重启前必须结束本进程,否则新一轮补偿
+                            // 会被 lease_owner_alive 整体跳过(容器臂不会被
+                            // 演练)。
+                            server_three.kill_process_group();
+                            // 人工处置 writer 臂:kill 守护 + 注销记录(平台
+                            // park 期间不得动;此处为 test 侧人工动作)。
+                            if let Err(error) = daemon_two.kill() {
+                                fp("t24_daemon_kill_failed", format_args!("{error}"));
+                            }
+                            let _ = daemon_two.wait();
+                            t24_deregister_record(&app_root, &unconfirmed_path);
+                            let writer_removed_by_manual = !unconfirmed_path.exists();
+                            // 臂 b(独立 scope;A7(b) 可观测半边=登记面:记录/
+                            // audits/停等原因可断言,实例存活不可观测):已登记
+                            // 容器。真实 podman 容器 + 确认身份登记;容器实例
+                            // 标签与登记 reserved_labels 逐字一致(未来接入
+                            // observer 时 stop_exact 的「精确 ID+标签全匹配」
+                            // 合同才成立)。
                             let registered_container =
                                 b45_t24_podman_run_park_container(&tree_key_two, "registered");
+                            let container_boot =
+                                format!("b45-t24-fixture-container-{daemon_two_pid}");
                             let registered_container_record = match &registered_container {
                                 Ok((exact_id, _)) => {
                                     let mut container_labels = BTreeMap::new();
@@ -13876,10 +14007,10 @@ impl LiveLcGatewayHarness {
                                     );
                                     b45_t24_preset_resource_record(
                                         &app_root,
-                                        "b45-t24-park",
-                                        &format!("run-{attempt_two}"),
-                                        &format!("b45-t24-fixture-{daemon_two_pid}"),
-                                        "park-container",
+                                        B45_T24_CONTAINER_SCOPE_ID,
+                                        &run_id_two,
+                                        &container_boot,
+                                        B45_T24_CONTAINER_RESOURCE_ID,
                                         "container",
                                         &format!("podman run -d ... (exact_id={exact_id})"),
                                         container_labels,
@@ -13890,123 +14021,81 @@ impl LiveLcGatewayHarness {
                                 }
                                 Err(_) => None,
                             };
-                            park["unconfirmed_record"] =
-                                json!(unconfirmed_path.display().to_string());
-                            park["unknown_container"] = match &unknown_container {
-                                Ok((exact_id, name)) => json!({
-                                    "exact_id": exact_id,
-                                    "name": name,
-                                }),
-                                Err(error) => json!({"error": error}),
-                            };
-                            park["registered_container"] =
-                                match (&registered_container, &registered_container_record) {
-                                    (Ok((exact_id, name)), Some(record)) => json!({
-                                        "exact_id": exact_id,
-                                        "name": name,
-                                        "record": record.display().to_string(),
-                                    }),
-                                    (Ok((exact_id, name)), None) => json!({
-                                        "exact_id": exact_id,
-                                        "name": name,
-                                        "record_error": "登记记录落盘失败(fixture preset 失败)",
-                                    }),
-                                    (Err(error), _) => json!({"error": error}),
-                                };
-                            park["daemon_pid"] = json!(daemon_two_pid);
-                            // kill 服务 #2(窗口 Running + 停等前置在场)。
-                            let provider_pid_b =
-                                t24_pi_provider_pid(&app_root, &issue_id, &attempt_two);
-                            let windows_b_at_kill = b45_t24_read_windows(&app_root);
-                            // A7(b) 停等期 audits 基线(provider-resources
-                            // 登记面 path+摘要):park 期间必须逐字不变。
-                            let park_audits_before =
-                                t24_resource_audit_lines(&app_root, "b45-t24-park");
-                            server_two.kill_process_group();
-                            let daemon_two_alive_after_kill = b45_t24_pid_alive(daemon_two_pid);
-                            let unknown_container_alive_after_kill = unknown_container
+                            // A7(b) 容器臂停等期 audits 基线(独立 scope)。
+                            let container_audits_before =
+                                t24_resource_audit_lines(&app_root, B45_T24_CONTAINER_SCOPE_ID);
+                            let registered_container_alive_before_restart = registered_container
                                 .as_ref()
                                 .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
                                 .unwrap_or(false);
-                            let registered_container_alive_after_kill = registered_container
-                                .as_ref()
-                                .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
-                                .unwrap_or(false);
-                            // 重启 #3:补偿必须停等(未确认 writer/容器观察
-                            // 通道缺失)——保持锁,不误杀。
-                            let port_three = t24_pick_port().await;
-                            let mut server_three =
-                                b45_t24_spawn_server(&workspace, port_three, "drill-b-restart")
-                                    .await
-                                    .map_err(|message| {
-                                        matrix_failure(
-                                            "b45_t24_server_spawn_failed",
-                                            message,
-                                            Some("crash"),
-                                        )
-                                    })?;
-                            let park_state = b45_t24_wait_window_state(
+                            // 重启 #3b(容器臂是本次恢复的唯一停等触发者):
+                            // 生产恢复路径无 engine observer → 必然
+                            // observer_missing 停等;登记记录不得被清理/注销。
+                            let port_three_b = t24_pick_port().await;
+                            let mut server_three_b = b45_t24_spawn_server(
+                                &workspace,
+                                port_three_b,
+                                "drill-b-container-arm",
+                            )
+                            .await
+                            .map_err(|message| {
+                                matrix_failure(
+                                    "b45_t24_server_spawn_failed",
+                                    message,
+                                    Some("crash"),
+                                )
+                            })?;
+                            let container_park_state = b45_t24_wait_window_recovery_detail(
                                 &app_root,
                                 &attempt_two,
-                                &["recovery_required"],
+                                B45_T24_OBSERVER_MISSING_QUIESCE_REASON,
                                 Duration::from_secs(300),
                             )
                             .await;
-                            let park_log = server_three.log_text();
-                            let daemon_two_alive_after_restart = b45_t24_pid_alive(daemon_two_pid);
-                            let unknown_container_alive_after_restart = unknown_container
-                                .as_ref()
-                                .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
-                                .unwrap_or(false);
+                            let container_park_log = server_three_b.log_text();
+                            let container_audits_after =
+                                t24_resource_audit_lines(&app_root, B45_T24_CONTAINER_SCOPE_ID);
+                            let container_record_present_after_restart =
+                                registered_container_record
+                                    .as_ref()
+                                    .is_some_and(|record| record.exists());
                             let registered_container_alive_after_restart = registered_container
                                 .as_ref()
                                 .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
                                 .unwrap_or(false);
-                            // A7(b) 可观测半边:已登记容器的 durable 记录在
-                            // park 后必须仍在(平台不得 remove/deregister)。
-                            let registered_container_record_present_after_restart =
-                                registered_container_record
-                                    .as_ref()
-                                    .is_some_and(|record| record.exists());
-                            // A7(b):park 后登记面 audits 对照(不 clean 证明)。
-                            let park_audits_after =
-                                t24_resource_audit_lines(&app_root, "b45-t24-park");
-                            let park_audits_unchanged = park_audits_before == park_audits_after
-                                && !park_audits_before.is_empty();
-                            let parked = park_state["matched"].as_bool() == Some(true);
-                            let lease_after_park = t24_read_leases(&app_root);
-                            // 新材料必须被拒(锁保持):attach 后无新窗口可开
-                            // ——以「无新 Running 窗口/无新 role run」记录事实。
-                            let new_material_probe = server_three
-                                .request_json(
-                                    reqwest::Method::POST,
-                                    &format!(
-                                        "/api/coding-attempts/{attempt_two}/reviewer-window:resolve"
-                                    ),
-                                    json!({"decision": "require_new_review"}),
-                                )
-                                .await;
-                            // 人工处置:deregister 未知 writer/已登记容器记录 +
-                            // kill 守护 + 移除两容器(人工动作;平台 park
-                            // 期间不得动)。
-                            if let Err(error) = daemon_two.kill() {
-                                fp("t24_daemon_kill_failed", format_args!("{error}"));
-                            }
-                            let _ = daemon_two.wait();
-                            let unknown_container_removed_by_manual = match &unknown_container {
-                                Ok((exact_id, _)) => b45_t24_podman_remove(exact_id),
-                                Err(_) => false,
-                            };
+                            let unknown_container_alive_after_restart = unknown_container
+                                .as_ref()
+                                .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
+                                .unwrap_or(false);
+                            let container_recovery = t24_window_recovery(
+                                &container_park_state["windows"]
+                                    .as_array()
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                &attempt_two,
+                            );
+                            let container_parked =
+                                container_park_state["matched"].as_bool() == Some(true);
+                            server_three_b.kill_process_group();
+                            // 人工处置容器臂:移除容器 + 注销登记(平台
+                            // park 期间未动,此刻才可移除)。
                             let registered_container_removed_by_manual = match &registered_container
                             {
                                 Ok((exact_id, _)) => b45_t24_podman_remove(exact_id),
                                 Err(_) => false,
                             };
-                            t24_deregister_record(&app_root, &unconfirmed_path);
                             if let Some(record) = &registered_container_record {
                                 t24_deregister_record(&app_root, record);
                             }
-                            // 重启 #4:人工处置后续接 → 释放。
+                            let registered_container_record_removed_by_manual =
+                                registered_container_record
+                                    .as_ref()
+                                    .is_some_and(|record| !record.exists());
+                            let unknown_container_removed_by_manual = match &unknown_container {
+                                Ok((exact_id, _)) => b45_t24_podman_remove(exact_id),
+                                Err(_) => false,
+                            };
+                            // 重启 #4:双臂人工处置后续接 → 释放。
                             let port_four = t24_pick_port().await;
                             let mut server_four =
                                 b45_t24_spawn_server(&workspace, port_four, "drill-b-resolved")
@@ -14041,61 +14130,83 @@ impl LiveLcGatewayHarness {
                             server_four.kill_process_group();
                             drill_b = json!({
                                 "attempt_id": attempt_two,
-                                "park_setup": park,
+                                "window_b_running": true,
+                                "worktree": park["worktree"],
                                 "provider_pid_at_kill": provider_pid_b,
                                 "windows_at_kill": windows_b_at_kill,
-                                "daemon_alive_after_kill": daemon_two_alive_after_kill,
-                                "park_state": park_state,
-                                "parked": parked,
-                                "park_log_has_kept_locked": park_log.contains("kept locked"),
-                                "daemon_alive_after_restart": daemon_two_alive_after_restart,
-                                "park_audits": {
-                                    "before": park_audits_before,
-                                    "after": park_audits_after,
-                                    "unchanged": park_audits_unchanged,
+                                // A7(b) 臂 a:未确认 writer(独立 scope,无
+                                // 容器记录)——停等原因必须逐字来自 writer。
+                                "writer_arm": {
+                                    "scope_id": B45_T24_WRITER_SCOPE_ID,
+                                    "run_id": run_id_two,
+                                    "boot_identity": format!("b45-t24-fixture-{daemon_two_pid}"),
+                                    "resource_id": B45_T24_WRITER_RESOURCE_ID,
+                                    "record": unconfirmed_path.display().to_string(),
+                                    "record_present_after_restart":
+                                        writer_record_present_after_restart,
+                                    "daemon_pid": daemon_two_pid,
+                                    "daemon_alive_after_kill": daemon_two_alive_after_kill,
+                                    "daemon_alive_after_restart": daemon_two_alive_after_restart,
+                                    "park_state": writer_park_state,
+                                    "parked": writer_parked,
+                                    "park_log_has_kept_locked":
+                                        writer_park_log.contains("kept locked"),
+                                    "recovery": writer_recovery,
+                                    "audits": {
+                                        "before": writer_audits_before,
+                                        "after": writer_audits_after,
+                                        "unchanged": writer_audits_before == writer_audits_after
+                                            && !writer_audits_before.is_empty(),
+                                    },
+                                    "removed_by_manual_disposition": writer_removed_by_manual,
                                 },
-                                // A7(b) 可观测半边:已登记容器锁定期不被清理
-                                //(登记记录在场 + 实例存活,park 而非 remove)。
-                                "registered_container": match (
-                                    &registered_container,
-                                    &registered_container_record,
-                                ) {
-                                    (Ok((exact_id, name)), Some(record)) => json!({
-                                        "exact_id": exact_id,
-                                        "name": name,
-                                        "registered": true,
-                                        "record": record.display().to_string(),
-                                        "record_present_after_restart":
-                                            registered_container_record_present_after_restart,
-                                        "alive_after_kill": registered_container_alive_after_kill,
-                                        "alive_after_restart":
-                                            registered_container_alive_after_restart,
-                                        "removed_by_manual_disposition":
-                                            registered_container_removed_by_manual,
-                                    }),
-                                    (Ok((exact_id, name)), None) => json!({
-                                        "exact_id": exact_id,
-                                        "name": name,
-                                        "registered": true,
-                                        "record_present_after_restart": false,
-                                        "alive_after_kill": registered_container_alive_after_kill,
-                                        "alive_after_restart":
-                                            registered_container_alive_after_restart,
-                                        "removed_by_manual_disposition":
-                                            registered_container_removed_by_manual,
-                                        "record_error": "登记记录落盘失败(fixture preset 失败)",
-                                    }),
-                                    (Err(error), _) => json!({
-                                        "registered": true,
-                                        "record_present_after_restart": false,
-                                        "alive_after_kill": false,
-                                        "alive_after_restart": false,
-                                        "removed_by_manual_disposition": false,
-                                        "error": error,
-                                    }),
+                                // A7(b) 臂 b:已登记容器(独立 scope)。生产
+                                // 恢复路径无 engine observer ⇒ 平台永不
+                                // stop_exact,容器实例存活只记录不断言。
+                                "container_arm": {
+                                    "scope_id": B45_T24_CONTAINER_SCOPE_ID,
+                                    "run_id": run_id_two,
+                                    "boot_identity": container_boot,
+                                    "resource_id": B45_T24_CONTAINER_RESOURCE_ID,
+                                    "exact_id": registered_container
+                                        .as_ref()
+                                        .ok()
+                                        .map(|(exact_id, _)| exact_id.clone()),
+                                    "name": registered_container
+                                        .as_ref()
+                                        .ok()
+                                        .map(|(_, name)| name.clone()),
+                                    "registered": true,
+                                    "record": registered_container_record
+                                        .as_ref()
+                                        .map(|record| record.display().to_string()),
+                                    "record_present_after_restart":
+                                        container_record_present_after_restart,
+                                    "park_state": container_park_state,
+                                    "parked": container_parked,
+                                    "park_log_has_kept_locked":
+                                        container_park_log.contains("kept locked"),
+                                    "recovery": container_recovery,
+                                    "audits": {
+                                        "before": container_audits_before,
+                                        "after": container_audits_after,
+                                        "unchanged": container_audits_before == container_audits_after
+                                            && !container_audits_before.is_empty(),
+                                    },
+                                    "removed_by_manual_disposition":
+                                        registered_container_removed_by_manual,
+                                    "record_removed_by_manual_disposition":
+                                        registered_container_record_removed_by_manual,
+                                    "observability": B45_T24_CONTAINER_OBSERVABILITY,
+                                    "observability_note": B45_T24_CONTAINER_OBSERVABILITY_NOTE,
+                                    // 存活字段只记录不断言(生产无 observer)。
+                                    "alive_before_restart":
+                                        registered_container_alive_before_restart,
+                                    "alive_after_restart":
+                                        registered_container_alive_after_restart,
                                 },
-                                // A7(b) 不可观测半边:无登记容器——平台无枚举
-                                // 通道,如实标注;存活字段只记录不断言。
+                                // A7(b) 臂 c:不可观测半边:无登记容器——平台无
+                                // 枚举通道,如实标注;存活字段只记录不断言。
                                 "unknown_container": match &unknown_container {
                                     Ok((exact_id, name)) => json!({
                                         "exact_id": exact_id,
@@ -14457,6 +14568,11 @@ fn b45_t24_spawn_daemon(secs: u64) -> std::io::Result<std::process::Child> {
 
 /// 真实 park 容器(podman run -d;返回(exact_id, name);role 区分
 /// 已登记/未知两半边的容器命名,避免同名冲突)。
+///
+/// 实例标签与登记记录的 `reserved_labels` 对齐(`aria.worktree` 归属 +
+/// `kind` + `io.aria.b45.scene`):已登记容器臂的平台侧停止/移除合同是
+/// 「精确 ID+标签全匹配」,fixture 不能靠"标签不匹配所以从未被处理"来
+/// 冒充"未被清理"。
 fn b45_t24_podman_run_park_container(
     tree_key: &str,
     role: &str,
@@ -14475,6 +14591,10 @@ fn b45_t24_podman_run_park_container(
             "io.aria.b45.scene=crash-park",
             "--label",
             &format!("io.aria.b45.worktree={tree_key}"),
+            "--label",
+            &format!("aria.worktree={tree_key}"),
+            "--label",
+            "kind=b45-t24-park-container",
             "docker.io/library/ubuntu:24.04",
             "sleep",
             "1200",
@@ -14791,9 +14911,11 @@ fn t24_mid_commit_convergence(
 }
 
 /// 停等期登记面 audits 行(指定 scope 下 `provider-resources` 记录的
-/// path + 内容摘要)。A7(b):停等期间该 scope(含已登记容器记录)必须
-/// 逐字不变(不 clean/不 deregister/不推游标证据——已登记容器「锁定期
-/// 不被清理」的登记面半边;其它树/其它 scope 的登记不参与对照)。
+/// path + 内容摘要)。A7(b) 停等双臂各占独立 scope,按臂取本 scope 的
+/// 审计行:停等期间必须逐字不变(不 clean/不 deregister/不推游标证据)
+/// ——臂 a(writer)的未知 writer 停等与臂 b(已登记容器)的「锁定期不被
+/// 清理」各自以本 scope 的 audits 对照证明;其它树/其它 scope 的登记不
+/// 参与对照。
 fn t24_resource_audit_lines(app_root: &Path, scope_id: &str) -> Vec<String> {
     let scope_fragment = format!("/scopes/{scope_id}/");
     let mut lines: Vec<String> = t24_read_resource_scopes(app_root)

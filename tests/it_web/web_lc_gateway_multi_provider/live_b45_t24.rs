@@ -17,8 +17,15 @@
 //!   `/proc/<pid>` 消失(不再预置合成 `old-writer-daemon`)。另含 A7 两
 //!   场景断言:(a) mid-commit journal 不抢跑——kill 时 ReviewRequest
 //!   journal 停在 `commit_started`,重启后收敛到终态且收敛时刻不早于窗口
-//!   恢复完成;(b) 未知容器停等——无登记记录的容器被 park 保锁、不 kill
-//!   不 clean(parked 状态 + 停等期登记面 audits 不变),人工处置后才续。
+//!   恢复完成;(b) 停等双臂(各占**独立 scope**,不混排)——writer 臂:
+//!   预置未确认 writer(无容器记录)由 quiesce 未知 writer 分支触发
+//!   RecoveryRequired,park 保锁、登记记录不注销、daemon 不误杀、停等期
+//!   登记面 audits 逐字不变;容器臂:已登记容器在独立 scope 内不被清理/
+//!   不 deregister(登记记录在场 + audits 不变 + 人工处置后才移除),但
+//!   生产恢复路径无 engine observer(call site 传 None),容器实例存活
+//!   只记录不断言(`observability="no_production_observer"`);无登记记录
+//!   的未知容器对平台不可观测(quiesce 只消费登记面)——如实标注
+//!   `unobservable_by_platform`,存活字段只记录不断言。
 //! - `b45_live_review_cancel`(Step 4 取消格):按 `B45_T24_CANCEL_PROVIDERS`
 //!   指定子集(缺省 claude,codex,kimi)各一格真实取消与资源收口;证据根
 //!   `pi/b45-t24-cancel`。
@@ -27,8 +34,9 @@
 //! 三域结果、dirty 摘要、精确容器归属、人工门裁决即 FAIL;crash 缺 kill
 //! 事实、启动前零材料/零 provider 事实、真实登记(PID+starttime 与
 //! 窗口/attempt 归属)、补偿后登记注销与 `/proc/<pid>` 消失、续恢复、静默
-//! CHECK≥310s、A7(a) journal 在途相位与收敛先后关系、A7(b) parked/停等期
-//! audits 不变/未知容器存活、停等臂即 FAIL;cancel 的 provider 集合不精确
+//! CHECK≥310s、A7(a) journal 在途相位与收敛先后关系、A7(b) 双臂独立
+//! scope/writer 停等原因归属/停等期 audits 不变/已登记容器不被清理、
+//! 停等臂即 FAIL;cancel 的 provider 集合不精确
 //! (空集合/缺家/多余)、未 aborted、进程/容器未终止、attempt 非终态、资源
 //! 未收口、取消后新 spawn 即 FAIL——`validator_replay_*`/`validator_crash_*`/
 //! `validator_cancel_*`/`cancel_providers_*` 单测钉死(合成夹具,红先)。
@@ -52,6 +60,34 @@ use super::harness::{
     B45_T24_SILENT_CHECK_SECS, B45T24Scenario, LiveLcGatewayHarness, b45_t24_cancel_provider_label,
 };
 use super::live_matrix::require_lc_gateway_e2e_switch;
+
+/// A7(b) 停等双臂契约(harness 落证据与 validator 断言共用同一组常量,
+/// 防两侧字面量漂移):
+/// - 两臂各占**独立 scope**:同 scope 混排时 `list_scope` 按 resource_id
+///   排序,先命中的记录会抢占 quiesce 停等原因,另一臂的触发者不会被
+///   演练(F1——drill B 曾因此"通过但证明错对象");
+/// - writer 臂的停等原因必须是未确认 writer 类;
+/// - 容器臂在**生产恢复路径**必然 observer_missing:所有
+///   `open_for_recovery` call site 传 `engine_observer=None`,生产无
+///   `OwnedEngineObserver` 实现——容器实例存活不是平台行为证据(只记录
+///   不断言,见 `B45_T24_CONTAINER_OBSERVABILITY`)。
+pub(crate) const B45_T24_WRITER_SCOPE_ID: &str = "b45-t24-park-writer";
+pub(crate) const B45_T24_CONTAINER_SCOPE_ID: &str = "b45-t24-park-container";
+pub(crate) const B45_T24_WRITER_RESOURCE_ID: &str = "unconfirmed-writer";
+pub(crate) const B45_T24_CONTAINER_RESOURCE_ID: &str = "park-container";
+/// 补偿驱动停等落账的稳定原因码(`park_window_recovery` 调用点)。
+pub(crate) const B45_T24_PARK_QUIESCE_REASON: &str = "startup_compensation_quiesce_not_proven";
+/// quiesce 未知 writer 停等码(`quiesce_scope` Process 未确认分支)。
+pub(crate) const B45_T24_UNCONFIRMED_WRITER_QUIESCE_REASON: &str =
+    "provider_resources_quiesce_unconfirmed_process_unknown";
+/// quiesce 引擎观察通道缺失停等码(`quiesce_scope` Container/Network
+/// 分支 observer=None)。
+pub(crate) const B45_T24_OBSERVER_MISSING_QUIESCE_REASON: &str =
+    "provider_resources_quiesce_observer_missing";
+/// 已登记容器臂的可观测口径:生产恢复路径无 observer,容器实例存活
+/// 只记录不断言。
+pub(crate) const B45_T24_CONTAINER_OBSERVABILITY: &str = "no_production_observer";
+pub(crate) const B45_T24_CONTAINER_OBSERVABILITY_NOTE: &str = "生产恢复路径 open_for_recovery 全部 call site 传 engine_observer=None(code_review.rs/provider_stream.rs),全仓无生产 OwnedEngineObserver 实现——平台永不 stop_exact,容器实例存活只记录不断言;可红面=登记记录在场+登记面 audits 逐字不变+人工处置后才移除";
 
 /// T24 证据根(计划 Files:cadence/reports/lc-gateway-multi-provider/pi/)。
 fn b45_t24_evidence_root(facet: &str) -> PathBuf {
@@ -417,13 +453,26 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
 /// - A7(a) mid-commit journal 不抢跑:kill 时 ReviewRequest journal 停在
 ///   `commit_started`(提交进行中),重启后收敛到终态,且收敛时刻不早于
 ///   窗口恢复完成时刻(journal 在途/post-restore 先后关系可证);
-/// - A7(b) 容器停等双半边:已登记容器(确认身份登记,平台可枚举)
-///   锁定期不被清理(登记记录在场 + 实例存活 + 人工处置后才移除;
-///   登记面 audits 停等期逐字不变);无登记记录的未知容器对平台不可
-///   观测(quiesce 只消费登记面)——如实标注 unobservable_by_platform,
-///   存活字段只记录不断言,人工处置完成仍须可证;
+/// - A7(b) 停等双臂(各占独立 scope,禁止同 scope 混排——同 scope 时
+///   `list_scope` 按 resource_id 排序会抢占停等触发者):
+///   · writer 臂:未确认 writer(无容器记录)必须由 quiesce 未知 writer
+///     分支触发 RecoveryRequired——窗口 recovery.detail 须含
+///     `provider_resources_quiesce_unconfirmed_process_unknown` 且
+///     `resource=unconfirmed-writer`(若 detail 来自容器 observer_missing,
+///     说明"通过但证明错对象"→ FAIL);登记记录与 daemon 原样保留到人工
+///     处置;
+///   · 已登记容器臂(**可观测半边=登记面**;实例存活不可观测):独立
+///     scope 内登记记录不得被清理/注销
+///     (record_present_after_restart + 停等期 audits 逐字不变 + 人工
+///     处置后才移除),停等原因须为本 scope 的
+///     `provider_resources_quiesce_observer_missing`;生产恢复路径无
+///     engine observer,容器实例存活只记录不断言(证据须标注
+///     `observability="no_production_observer"`);
+///   · 未知容器臂(**不可观测半边**):无登记记录 → 平台不可观测(quiesce
+///     只消费登记面),如实标注 `unobservable_by_platform`,存活字段只
+///     记录不断言,人工处置完成仍须可证;
 /// - 停等不误杀臂(drill B):park 态 recovery_required + kept locked 日志
-///   + 未知 daemon 重启后存活。
+///   (每臂各自的重启)。
 pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
     // kill 事实。
@@ -763,7 +812,8 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
     if stalled {
         failures.push("静默 CHECK 被误杀(stalled 证据在场)".to_string());
     }
-    // 停等不误杀臂。
+    // 停等不误杀臂(drill B)。A7(b) 双臂各占独立 scope;停等原因必须
+    // 逐字来自本臂资源——否则是"通过但证明错对象"。
     let drill_b = &evidence["drill_b"];
     if drill_b.get("skipped").is_some() {
         failures.push(format!(
@@ -771,53 +821,86 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
             drill_b["skipped"].as_str().unwrap_or("未知")
         ));
     } else {
-        let park_state = drill_b
-            .pointer("/park_state/matched")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if !park_state {
-            failures.push("停等臂未 park(窗口未达 recovery_required)".to_string());
+        // 登记面 audits(provider-resources 记录 path+摘要)在停等前后
+        // 必须逐字不变且基线非空(空基线不得冒充"未变")。
+        let audits_unchanged = |arm: &Value| -> bool {
+            let audits = &arm["audits"];
+            let before = audits["before"].as_array().cloned().unwrap_or_default();
+            let after = audits["after"].as_array().cloned().unwrap_or_default();
+            audits["unchanged"].as_bool() == Some(true) && before == after && !before.is_empty()
+        };
+        let writer_arm = &drill_b["writer_arm"];
+        let container_arm = &drill_b["container_arm"];
+        let writer_scope = writer_arm["scope_id"].as_str().unwrap_or_default();
+        let container_scope = container_arm["scope_id"].as_str().unwrap_or_default();
+        if writer_scope.trim().is_empty()
+            || container_scope.trim().is_empty()
+            || writer_scope == container_scope
+        {
+            failures.push(format!(
+                "A7(b) 停等双臂必须各占独立 scope(writer={writer_scope:?} container={container_scope:?}:\
+                 同 scope 时 list_scope 按 resource_id 排序会抢占停等触发者,另一臂不会被演练)"
+            ));
         }
-        if drill_b["park_log_has_kept_locked"].as_bool() != Some(true) {
-            failures.push("停等臂无 kept locked 日志(补偿未停等)".to_string());
+        // 臂 a:未确认 writer(该 scope 无容器记录)——quiesce 未知 writer
+        // 分支触发 RecoveryRequired;park + 保锁 + audits 不变;登记记录
+        // 不注销,daemon 不误杀。
+        let writer_recovery = &writer_arm["recovery"];
+        let writer_detail = writer_recovery["detail"].as_str().unwrap_or_default();
+        let writer_arm_ok = writer_arm["record_present_after_restart"].as_bool() == Some(true)
+            && writer_arm["daemon_alive_after_kill"].as_bool() == Some(true)
+            && writer_arm["daemon_alive_after_restart"].as_bool() == Some(true)
+            && writer_recovery["reason"].as_str() == Some(B45_T24_PARK_QUIESCE_REASON)
+            && writer_detail.contains(B45_T24_UNCONFIRMED_WRITER_QUIESCE_REASON)
+            && writer_detail.contains(&format!("resource={B45_T24_WRITER_RESOURCE_ID}"))
+            && !writer_detail.contains(&format!("resource={B45_T24_CONTAINER_RESOURCE_ID}"))
+            && writer_arm["parked"].as_bool() == Some(true)
+            && writer_arm["park_log_has_kept_locked"].as_bool() == Some(true)
+            && audits_unchanged(writer_arm)
+            && writer_arm["removed_by_manual_disposition"].as_bool() == Some(true);
+        if !writer_arm_ok {
+            failures.push(format!(
+                "未确认 writer 臂不成立(须由 writer 资源触发未知 writer 类 RecoveryRequired:\
+                 recovery.detail 含 {B45_T24_UNCONFIRMED_WRITER_QUIESCE_REASON} 与 \
+                 resource={B45_T24_WRITER_RESOURCE_ID};park+kept locked;登记记录与 daemon 原样保留\
+                 到人工处置;停等期 audits 逐字不变)"
+            ));
         }
-        if drill_b["daemon_alive_after_restart"].as_bool() != Some(true) {
-            failures.push("未知 daemon 被误杀(重启后必须存活)".to_string());
+        // 臂 b:已登记容器(独立 scope)——锁定期不得被清理/注销:登记
+        // 记录在场 + audits 逐字不变 + 停等原因属本 scope(生产恢复路径
+        // 无 observer ⇒ observer_missing)+ 人工处置后才移除。容器实例
+        // 存活只记录不断言(见 observability 口径)。
+        let container_recovery = &container_arm["recovery"];
+        let container_detail = container_recovery["detail"].as_str().unwrap_or_default();
+        let container_arm_ok = container_arm["registered"].as_bool() == Some(true)
+            && container_arm["record_present_after_restart"].as_bool() == Some(true)
+            && container_recovery["reason"].as_str() == Some(B45_T24_PARK_QUIESCE_REASON)
+            && container_detail.contains(B45_T24_OBSERVER_MISSING_QUIESCE_REASON)
+            && container_detail.contains(&format!("resource={B45_T24_CONTAINER_RESOURCE_ID}"))
+            && !container_detail.contains(&format!("resource={B45_T24_WRITER_RESOURCE_ID}"))
+            && container_arm["parked"].as_bool() == Some(true)
+            && container_arm["park_log_has_kept_locked"].as_bool() == Some(true)
+            && audits_unchanged(container_arm)
+            && container_arm["removed_by_manual_disposition"].as_bool() == Some(true)
+            && container_arm["observability"].as_str() == Some(B45_T24_CONTAINER_OBSERVABILITY)
+            && !container_arm["observability_note"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .is_empty();
+        if !container_arm_ok {
+            failures.push(format!(
+                "已登记容器臂不成立(独立 scope 内不得被清理/注销:登记记录在场、停等期 audits 逐字\
+                 不变、停等原因为本 scope 的 {B45_T24_OBSERVER_MISSING_QUIESCE_REASON}、人工处置后\
+                 才移除;生产无 engine observer ⇒ 容器实例存活只记录不断言,\
+                 observability 须为 {B45_T24_CONTAINER_OBSERVABILITY} 且带非空说明)"
+            ));
         }
-        // A7(b):无登记记录的容器停等——park + 保锁 + 不 kill 不 clean。
-        if drill_b["parked"].as_bool() != Some(true) {
-            failures.push("停等臂未 park(缺 parked 状态证据)".to_string());
-        }
-        let audits = &drill_b["park_audits"];
-        let audits_before = audits["before"].as_array().cloned().unwrap_or_default();
-        let audits_after = audits["after"].as_array().cloned().unwrap_or_default();
-        let audits_unchanged = audits["unchanged"].as_bool() == Some(true)
-            && audits_before == audits_after
-            && !audits_before.is_empty();
-        if !audits_unchanged {
-            failures.push("停等期 audits 发生变化(登记面被清理/改写——不 clean 被违反)".to_string());
-        }
-        // A7(b) 可观测半边(修复轮重设):已登记容器(确认身份登记,
-        // 平台 quiesce 可枚举)锁定期不被清理——登记记录仍在 + 容器
-        // 实例仍存活 + 人工处置完成。平台若 remove/deregister/停掉已
-        // 登记容器(而非 park),此处可红。
-        let registered_container = &drill_b["registered_container"];
-        let registered_untouched = registered_container["registered"].as_bool() == Some(true)
-            && registered_container["record_present_after_restart"].as_bool() == Some(true)
-            && registered_container["alive_after_kill"].as_bool() == Some(true)
-            && registered_container["alive_after_restart"].as_bool() == Some(true)
-            && registered_container["removed_by_manual_disposition"].as_bool() == Some(true);
-        if !registered_untouched {
-            failures.push(
-                "已登记容器在锁定期被清理(登记记录/容器实例必须原样保留到人工处置:park 而非 remove)"
-                    .to_string(),
-            );
-        }
-        // A7(b) 不可观测半边:无登记容器——平台 quiesce 只消费登记面
-        //(quiesce_scope 入口 list_scope),无枚举通道,容器存活性与平台
-        // 行为无因果:不再伪造恒真 alive 断言,改为如实标注口径
-        //(registered=false + unobservable_by_platform + 非空说明 +
-        // 人工处置完成);存活字段只记录不断言。
+        // 臂 c:不可观测半边——无登记容器。平台 quiesce 只消费登记面
+        // (quiesce_scope 入口 list_scope),无枚举通道,容器存活性与平台
+        // 行为无因果:如实标注口径(registered=false +
+        // unobservable_by_platform + 非空说明 + 人工处置完成);存活字段
+        // 只记录不断言。
         let unknown_container = &drill_b["unknown_container"];
         let unknown_annotated = unknown_container["registered"].as_bool() == Some(false)
             && unknown_container["observability"].as_str() == Some("unobservable_by_platform")
@@ -1467,30 +1550,66 @@ mod validator_crash_tests {
                 "pump_resume": {"events": []},
             },
             "drill_b": {
-                "park_state": {"matched": true},
-                "parked": true,
-                "park_log_has_kept_locked": true,
-                "daemon_alive_after_restart": true,
-                "park_audits": {
-                    "before": [
-                        "/tmp/x/provider-resources/scopes/park/run/boot/resources/park-container.json sha256:bbb",
-                        "/tmp/x/provider-resources/scopes/park/run/boot/resources/unconfirmed.json sha256:aaa",
-                    ],
-                    "after": [
-                        "/tmp/x/provider-resources/scopes/park/run/boot/resources/park-container.json sha256:bbb",
-                        "/tmp/x/provider-resources/scopes/park/run/boot/resources/unconfirmed.json sha256:aaa",
-                    ],
-                    "unchanged": true,
+                // A7(b) 停等双臂:各自独立 scope(同 scope 混排会被
+                // resource_id 排序抢占停等触发者)。
+                "writer_arm": {
+                    "scope_id": B45_T24_WRITER_SCOPE_ID,
+                    "run_id": "run-a2",
+                    "boot_identity": "b45-t24-fixture-77",
+                    "record": "/tmp/x/provider-resources/scopes/b45-t24-park-writer/run-a2/boot/resources/unconfirmed-writer.json",
+                    "record_present_after_restart": true,
+                    "daemon_pid": 77,
+                    "daemon_alive_after_kill": true,
+                    "daemon_alive_after_restart": true,
+                    "park_state": {"matched": true},
+                    "parked": true,
+                    "park_log_has_kept_locked": true,
+                    "recovery": {
+                        "reason": B45_T24_PARK_QUIESCE_REASON,
+                        "detail": "provider_resources_quiesce_unconfirmed_process_unknown: resource=unconfirmed-writer launch=bash -c 'sleep 1800' (b45-t24 unconfirmed writer; pid=77): 预留未确认(崩溃窗口),是否已 spawn 不可证——可识别未知 writer 停等",
+                    },
+                    "audits": {
+                        "before": [
+                            "/tmp/x/provider-resources/scopes/b45-t24-park-writer/run-a2/boot/resources/unconfirmed-writer.json sha256:aaa",
+                        ],
+                        "after": [
+                            "/tmp/x/provider-resources/scopes/b45-t24-park-writer/run-a2/boot/resources/unconfirmed-writer.json sha256:aaa",
+                        ],
+                        "unchanged": true,
+                    },
+                    "removed_by_manual_disposition": true,
                 },
-                "registered_container": {
+                "container_arm": {
+                    "scope_id": B45_T24_CONTAINER_SCOPE_ID,
+                    "run_id": "run-a2",
+                    "boot_identity": "b45-t24-fixture-container-77",
                     "exact_id": "ctr-registered",
                     "name": "b45-t24-park-registered",
                     "registered": true,
-                    "record": "/tmp/x/provider-resources/scopes/park/run/boot/resources/park-container.json",
+                    "record": "/tmp/x/provider-resources/scopes/b45-t24-park-container/run-a2/boot/resources/park-container.json",
                     "record_present_after_restart": true,
-                    "alive_after_kill": true,
-                    "alive_after_restart": true,
+                    "park_state": {"matched": true},
+                    "parked": true,
+                    "park_log_has_kept_locked": true,
+                    "recovery": {
+                        "reason": B45_T24_PARK_QUIESCE_REASON,
+                        "detail": "provider_resources_quiesce_observer_missing: resource=park-container: 无引擎可观察通道,无法证明静止",
+                    },
+                    "audits": {
+                        "before": [
+                            "/tmp/x/provider-resources/scopes/b45-t24-park-container/run-a2/boot/resources/park-container.json sha256:bbb",
+                        ],
+                        "after": [
+                            "/tmp/x/provider-resources/scopes/b45-t24-park-container/run-a2/boot/resources/park-container.json sha256:bbb",
+                        ],
+                        "unchanged": true,
+                    },
                     "removed_by_manual_disposition": true,
+                    "observability": B45_T24_CONTAINER_OBSERVABILITY,
+                    "observability_note": B45_T24_CONTAINER_OBSERVABILITY_NOTE,
+                    // 存活字段只记录不断言(生产无 observer)。
+                    "alive_before_restart": true,
+                    "alive_after_restart": true,
                 },
                 "unknown_container": {
                     "exact_id": "ctr-1",
@@ -1674,53 +1793,141 @@ mod validator_crash_tests {
         assert!(failures.iter().any(|f| f.contains("时刻")), "{failures:?}");
     }
 
-    /// A7(b):缺 parked 证据(停等臂未 park)→ 红。
+    /// A7(b):缺 parked 证据(任一臂未 park)→ 红。
     #[test]
     fn crash_validator_rejects_missing_parked_evidence() {
         let mut evidence = crash_base();
-        evidence["drill_b"]["parked"] = json!(false);
+        evidence["drill_b"]["writer_arm"]["parked"] = json!(false);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
-            failures.iter().any(|f| f.contains("未 park")),
+            failures.iter().any(|f| f.contains("未确认 writer 臂")),
             "{failures:?}"
         );
         let mut evidence = crash_base();
-        evidence["drill_b"]
+        evidence["drill_b"]["container_arm"]
             .as_object_mut()
-            .expect("drill_b")
+            .expect("container_arm")
             .remove("parked");
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
-            failures.iter().any(|f| f.contains("未 park")),
+            failures.iter().any(|f| f.contains("已登记容器臂")),
             "{failures:?}"
         );
     }
 
-    /// A7(b):已登记容器在锁定期被清理(登记记录被移除/实例被停)→ 红
-    ///——可观测半边的真实断言(平台可枚举登记面,park 而非 remove)。
+    /// A7(b) 容器臂:登记记录在锁定期被清理/注销 → 红(可观测半边的
+    /// 真实断言:平台可枚举登记面,park 而非 remove)。容器实例存活
+    /// 不在此列——生产恢复路径无 observer,存活只记录(见下一用例)。
     #[test]
     fn crash_validator_rejects_cleaned_registered_container() {
         let mut evidence = crash_base();
-        evidence["drill_b"]["registered_container"]["alive_after_restart"] = json!(false);
+        evidence["drill_b"]["container_arm"]["record_present_after_restart"] = json!(false);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
-            failures.iter().any(|f| f.contains("已登记容器")),
+            failures.iter().any(|f| f.contains("已登记容器臂")),
+            "{failures:?}"
+        );
+
+        // 登记面 audits 被改写(清理游标推进/记录删除)→ 红。
+        let mut evidence = crash_base();
+        evidence["drill_b"]["container_arm"]["audits"]["after"] =
+            json!([".../park-container.json sha256:ccc"]);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("已登记容器臂")),
+            "{failures:?}"
+        );
+
+        // 停等原因不是本 scope 的 observer_missing(例如被同 scope 抢占成
+        // writer 停等)→ 红:该臂没有被真正演练。
+        let mut evidence = crash_base();
+        evidence["drill_b"]["container_arm"]["recovery"]["detail"] = json!(
+            "provider_resources_quiesce_unconfirmed_process_unknown: resource=unconfirmed-writer launch=x: 预留未确认(崩溃窗口)"
+        );
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("已登记容器臂")),
+            "{failures:?}"
+        );
+    }
+
+    /// A7(b) 容器臂:生产恢复路径无 engine observer(call site 传 None),
+    /// 容器实例存活与平台行为无因果——存活字段只记录不断言;口径标注
+    /// `observability="no_production_observer"` 缺失 → 红。
+    #[test]
+    fn crash_validator_records_but_never_asserts_registered_container_aliveness() {
+        let mut evidence = crash_base();
+        evidence["drill_b"]["container_arm"]["alive_before_restart"] = json!(false);
+        evidence["drill_b"]["container_arm"]["alive_after_restart"] = json!(false);
+        assert!(
+            validate_b45_t24_crash_evidence(&evidence).is_ok(),
+            "容器存活字段不是断言面,改写不得红"
+        );
+
+        let mut evidence = crash_base();
+        evidence["drill_b"]["container_arm"]
+            .as_object_mut()
+            .expect("container_arm")
+            .remove("observability");
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("已登记容器臂")),
             "{failures:?}"
         );
 
         let mut evidence = crash_base();
-        evidence["drill_b"]["registered_container"]["record_present_after_restart"] = json!(false);
+        evidence["drill_b"]["container_arm"]["observability_note"] = json!("");
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
-            failures.iter().any(|f| f.contains("已登记容器")),
+            failures.iter().any(|f| f.contains("已登记容器臂")),
+            "{failures:?}"
+        );
+    }
+
+    /// F1:A7(b) writer 臂缺失(未确认 writer 记录被去掉/记录被注销)→
+    /// 红——writer 停等必须由真实记录触发,不能空白通过。
+    #[test]
+    fn crash_validator_rejects_missing_or_deregistered_writer_arm() {
+        let mut evidence = crash_base();
+        evidence["drill_b"]
+            .as_object_mut()
+            .expect("drill_b")
+            .remove("writer_arm");
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未确认 writer 臂")),
             "{failures:?}"
         );
 
         let mut evidence = crash_base();
-        evidence["drill_b"]["registered_container"]["alive_after_kill"] = json!(false);
+        evidence["drill_b"]["writer_arm"]["record_present_after_restart"] = json!(false);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
-            failures.iter().any(|f| f.contains("已登记容器")),
+            failures.iter().any(|f| f.contains("未确认 writer 臂")),
+            "{failures:?}"
+        );
+    }
+
+    /// F1:writer 臂的停等原因必须逐字来自 writer——若 detail 是容器
+    /// observer_missing(即停在错对象上),必须红。
+    #[test]
+    fn crash_validator_rejects_writer_park_attributed_to_container() {
+        let mut evidence = crash_base();
+        evidence["drill_b"]["writer_arm"]["recovery"]["detail"] = json!(
+            "provider_resources_quiesce_observer_missing: resource=park-container: 无引擎可观察通道"
+        );
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未确认 writer 臂")),
+            "{failures:?}"
+        );
+
+        // 两臂同 scope(修复轮回归:同 scope 混排)→ 红。
+        let mut evidence = crash_base();
+        evidence["drill_b"]["container_arm"]["scope_id"] = json!(B45_T24_WRITER_SCOPE_ID);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("独立 scope")),
             "{failures:?}"
         );
     }
@@ -1789,22 +1996,22 @@ mod validator_crash_tests {
         );
     }
 
-    /// A7(b):停等期 audits 变化(登记面被改/被清)→ 红。
+    /// A7(b):停等期 audits 变化(任一臂登记面被改/被清)→ 红,且空基线
+    /// 不得冒充"未变"。
     #[test]
     fn crash_validator_rejects_changed_park_audits() {
         let mut evidence = crash_base();
-        evidence["drill_b"]["park_audits"]["after"] = json!([]);
-        evidence["drill_b"]["park_audits"]["unchanged"] = json!(false);
+        evidence["drill_b"]["writer_arm"]["audits"]["after"] = json!([]);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
-            failures.iter().any(|f| f.contains("audits")),
+            failures.iter().any(|f| f.contains("未确认 writer 臂")),
             "{failures:?}"
         );
         let mut evidence = crash_base();
-        evidence["drill_b"]["park_audits"]["before"] = json!([]);
+        evidence["drill_b"]["container_arm"]["audits"]["before"] = json!([]);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
-            failures.iter().any(|f| f.contains("audits")),
+            failures.iter().any(|f| f.contains("已登记容器臂")),
             "{failures:?}"
         );
     }
@@ -1847,9 +2054,19 @@ mod validator_crash_tests {
     #[test]
     fn crash_validator_rejects_killed_unknown_daemon() {
         let mut evidence = crash_base();
-        evidence["drill_b"]["daemon_alive_after_restart"] = json!(false);
+        evidence["drill_b"]["writer_arm"]["daemon_alive_after_restart"] = json!(false);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
-        assert!(failures.iter().any(|f| f.contains("误杀")), "{failures:?}");
+        assert!(
+            failures.iter().any(|f| f.contains("未确认 writer 臂")),
+            "{failures:?}"
+        );
+        let mut evidence = crash_base();
+        evidence["drill_b"]["writer_arm"]["daemon_alive_after_kill"] = json!(false);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未确认 writer 臂")),
+            "{failures:?}"
+        );
     }
 
     #[test]
