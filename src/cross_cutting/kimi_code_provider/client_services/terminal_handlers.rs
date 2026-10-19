@@ -413,7 +413,8 @@ mod tests {
         let _dir = tempfile::tempdir().expect("dir");
         // test_state 的 root=系统临时目录已可作 cwd（argv 形态不经 SHELL）。
         let (state, mut events) = test_state(AdapterRole::Executor);
-        // 并发上限 4：Finished（未 release）仍占并发名额，用满额并发。
+        // 并发上限 4(F7):名额按 Created|Running 计数,4 个并发 create
+        // 在完成前各自占额。
         let creates: Vec<_> = (0..4)
             .map(|_| {
                 let state = Arc::clone(&state);

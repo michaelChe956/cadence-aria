@@ -30,6 +30,10 @@ use super::sandbox::open_dir_no_follow_inherit;
 
 pub const MAX_TERMINALS: usize = 4;
 pub const MAX_TERMINAL_OUTPUT_BYTES: usize = 1_048_576;
+/// F7:Finished|Released(已完成)登记的有界保留窗口——完成项保留最近
+/// 这么多条供协议「先 wait 后 output」追查,更旧的按最老先走淘汰为
+/// UnknownTerminal;Created|Running(在途)永不淘汰。
+pub const MAX_RETAINED_FINISHED_TERMINALS: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct TerminalCommand {
@@ -127,6 +131,36 @@ struct ManagerInner {
     next_id: u64,
 }
 
+/// F7:Finished|Released 登记的有界淘汰——完成项(含 spawn 失败与
+/// double-start 收口的 Released)只保留最近 `MAX_RETAINED_FINISHED_
+/// TERMINALS` 条供协议「先 wait 后 output」追查,更旧的按 id 序(最老
+/// 先走)移出 registry,之后的 wait/output/kill/release 对其返回
+/// UnknownTerminal。在途(Created|Running)永不淘汰;刚完成的项是最新
+/// 项,永不因本函数被立即删除。每条完成登记最多携带 1MiB 输出,有界
+/// 保留关闭「完成登记永不删除」的无界增长。只在 create 持有 manager
+/// 锁时调用:锁序 inner→state 与 create 的名额过滤一致。
+fn prune_finished_entries(inner: &mut ManagerInner) {
+    let mut finished: Vec<u64> = inner
+        .terminals
+        .iter()
+        .filter(|(_, entry)| {
+            matches!(
+                *entry.state.lock().expect("terminal state lock"),
+                TerminalState::Finished | TerminalState::Released
+            )
+        })
+        .filter_map(|(id, _)| id.strip_prefix("term-").and_then(|n| n.parse::<u64>().ok()))
+        .collect();
+    if finished.len() <= MAX_RETAINED_FINISHED_TERMINALS {
+        return;
+    }
+    finished.sort_unstable();
+    let evict = finished.len() - MAX_RETAINED_FINISHED_TERMINALS;
+    for number in &finished[..evict] {
+        inner.terminals.remove(&format!("term-{number}"));
+    }
+}
+
 /// The shared terminal manager. Cheap to clone; every clone shares state.
 ///
 /// 批2 Task 7（Bug45）：不再有 `TERMINAL_COMMAND_TIMEOUT_SECS=120` 独立
@@ -164,13 +198,20 @@ impl TerminalManager {
     /// limit permits it. The process is not started until [`Self::start`] so
     /// the caller can send the `terminal/create` response first and no output
     /// notification can precede it.
+    ///
+    /// F7:并发名额只按 Created|Running 计数(与 `has_active_terminals`
+    /// 同一状态源)——Finished/Released 不占额,完成未 release 不得顶死
+    /// 后续 create;完成登记经 `prune_finished_entries` 有界保留。
     pub async fn create(&self, command: TerminalCommand) -> Result<String, TerminalError> {
         let mut inner = self.inner.lock().expect("terminal manager lock");
         let active = inner
             .terminals
             .values()
             .filter(|entry| {
-                *entry.state.lock().expect("terminal state lock") != TerminalState::Released
+                matches!(
+                    *entry.state.lock().expect("terminal state lock"),
+                    TerminalState::Created | TerminalState::Running
+                )
             })
             .count();
         if active >= MAX_TERMINALS {
@@ -182,7 +223,15 @@ impl TerminalManager {
             id.clone(),
             Arc::new(TerminalEntry::new(command, self.cleanup.child_token())),
         );
+        prune_finished_entries(&mut inner);
         Ok(id)
+    }
+
+    /// F7:淘汰越界完成登记(create/完成/spawn 失败/release 共用的收口)。
+    /// 调用点不得持有任何 entry state 锁(锁序 inner→state)。
+    fn prune_finished(&self) {
+        let mut inner = self.inner.lock().expect("terminal manager lock");
+        prune_finished_entries(&mut inner);
     }
 
     /// Start the process for a previously created terminal.
@@ -205,7 +254,7 @@ impl TerminalManager {
             }
             command.take().expect("command checked above")
         };
-        tokio::spawn(run_terminal(entry, command));
+        tokio::spawn(run_terminal(self.clone(), entry, command));
         Ok(())
     }
 
@@ -287,6 +336,8 @@ impl TerminalManager {
             *state = TerminalState::Released;
         }
         entry.kill.cancel();
+        // F7:释放即参与有界保留(state 块已结束,锁序 inner→state 无倒置)。
+        self.prune_finished();
         Ok(())
     }
 
@@ -371,7 +422,11 @@ impl Drop for TerminalChild {
 // 环境(TerminalCommand::env,与 provider 进程同一 env map)仅作显式
 // 覆盖层注入,不再按授权根另行构造。
 
-async fn run_terminal(entry: Arc<TerminalEntry>, command: TerminalCommand) {
+async fn run_terminal(
+    manager: TerminalManager,
+    entry: Arc<TerminalEntry>,
+    command: TerminalCommand,
+) {
     let started = Instant::now();
     {
         let mut state = entry.state.lock().expect("terminal state lock");
@@ -427,6 +482,10 @@ async fn run_terminal(entry: Arc<TerminalEntry>, command: TerminalCommand) {
                 // 批2 Task 6:spawn 失败释放并发名额——失败终端不得占住
                 // 1/4 配额(登记已先行,失败即回收;结果/output 仍可查询)。
                 *state = TerminalState::Released;
+                drop(state);
+                // F7:失败收口即参与有界保留(锁序:state 已释放再取 inner,
+                // 与 create 的 inner→state 无倒置)。
+                manager.prune_finished();
                 return;
             }
         }
@@ -498,6 +557,9 @@ async fn run_terminal(entry: Arc<TerminalEntry>, command: TerminalCommand) {
             *state = TerminalState::Finished;
         }
     }
+    // F7:完成即参与有界保留(锁序:state 块已结束再取 inner,与 create
+    // 的 inner→state 无倒置)。
+    manager.prune_finished();
 }
 
 fn build_terminal_command(command: &TerminalCommand, anchor: Option<&OwnedFd>) -> Command {
@@ -678,6 +740,150 @@ mod tests {
             .create(command(&bin, dir.path(), &[]))
             .await
             .expect("create after release");
+    }
+
+    /// F7 红测①:并发名额只按 Created|Running 计数——Finished(未
+    /// release)不占额。4 个已完成未 release 的 terminal 之后,满额
+    /// create 必须继续可用(现状:Finished 计入 active,后续 create 被
+    /// 顶死,Finished 永久占额)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn finished_without_release_still_permits_full_concurrency() {
+        let dir = tempfile::tempdir().expect("dir");
+        let fast = write_executable(dir.path(), "fast", "exit 0");
+        let manager = manager();
+        for _ in 0..MAX_TERMINALS {
+            let id = manager
+                .create(command(&fast, dir.path(), &[]))
+                .await
+                .expect("create within limit");
+            manager.start(&id).expect("start");
+            manager.wait_for_exit(&id).await.expect("wait");
+            // 不 release:停在 Finished。
+        }
+        // Finished 不占并发名额:第 5 个 create 照常成功并可跑完。
+        let extra = manager
+            .create(command(&fast, dir.path(), &[]))
+            .await
+            .expect("finished terminals must not occupy concurrency slots");
+        manager.start(&extra).expect("start extra");
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), manager.wait_for_exit(&extra))
+                .await
+                .expect("wait extra bounded")
+                .expect("wait extra");
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(manager.output(&extra).expect("output"), "");
+    }
+
+    /// F7 红测②:Finished/Released 登记有界保留——只留最近
+    /// MAX_RETAINED_FINISHED_TERMINALS 条供 wait→output 追查,更旧的按
+    /// id 序(最老先走)淘汰为 UnknownTerminal;create 仍可用(现状:
+    /// 登记永不删除,每条最多 1MiB 输出,registry 无界增长)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn finished_entries_beyond_retention_are_evicted_oldest_first() {
+        let dir = tempfile::tempdir().expect("dir");
+        let manager = manager();
+        let total = MAX_RETAINED_FINISHED_TERMINALS + 3;
+        let mut ids = Vec::new();
+        for index in 0..total {
+            let bin = write_executable(
+                dir.path(),
+                &format!("mark-{index}"),
+                &format!("printf 'mark-{index}'"),
+            );
+            let id = manager
+                .create(command(&bin, dir.path(), &[]))
+                .await
+                .expect("create sequential finished terminal");
+            manager.start(&id).expect("start");
+            let result = manager.wait_for_exit(&id).await.expect("wait");
+            assert_eq!(result.exit_code, Some(0));
+            ids.push(id);
+        }
+        // 最近的保留窗口:输出仍可查(协议先 wait 后 output)。
+        for (index, id) in ids.iter().enumerate().skip(3) {
+            assert_eq!(
+                manager.output(id).unwrap_or_else(|_| panic!("retained output for {id}")),
+                format!("mark-{index}"),
+                "最近完成项的输出必须可查"
+            );
+        }
+        // 最老 3 条越过保留窗口:按 id 淘汰为 UnknownTerminal。
+        for id in &ids[..3] {
+            assert!(
+                matches!(manager.output(id), Err(TerminalError::UnknownTerminal(_))),
+                "最老完成项必须被有界淘汰: {id}"
+            );
+        }
+        // 淘汰后 create 照常,且不在途。
+        assert!(!manager.has_active_terminals());
+        let extra = write_executable(dir.path(), "post-eviction", "exit 0");
+        let id = manager
+            .create(command(&extra, dir.path(), &[]))
+            .await
+            .expect("create after eviction");
+        manager.start(&id).expect("start");
+        manager.wait_for_exit(&id).await.expect("wait");
+    }
+
+    /// F7 红测③:淘汰与并发 wait/release 交错不挂——完成项上的 wait→
+    /// release 任务与制造淘汰压力的 create 流并发,全部有界完成;对已
+    /// 淘汰 id 的 release 立即返回可区分错误(UnknownTerminal),不挂起。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn eviction_racing_wait_and_release_does_not_hang() {
+        let dir = tempfile::tempdir().expect("dir");
+        let manager = manager();
+        let first = write_executable(dir.path(), "race-first", "printf 'race-first'");
+        let first_id = manager
+            .create(command(&first, dir.path(), &[]))
+            .await
+            .expect("create first");
+        manager.start(&first_id).expect("start first");
+        manager.wait_for_exit(&first_id).await.expect("wait first");
+
+        // 后台任务:对已完成项做 wait(缓存终局)→ release。
+        let waiter = tokio::spawn({
+            let manager = manager.clone();
+            let id = first_id.clone();
+            async move {
+                let result = manager.wait_for_exit(&id).await.expect("wait on finished");
+                manager.release(&id).await.expect("release on finished");
+                result
+            }
+        });
+        // 让 waiter 先拿到 Arc 并完成 wait/release(终局已在槽内,快路径)。
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // 淘汰压力:再完成 MAX_RETAINED_FINISHED_TERMINALS+1 条,把最老
+        // 的 first 挤出保留窗口。
+        for index in 0..MAX_RETAINED_FINISHED_TERMINALS + 1 {
+            let bin = write_executable(dir.path(), &format!("race-{index}"), "exit 0");
+            let id = manager
+                .create(command(&bin, dir.path(), &[]))
+                .await
+                .expect("create pressure");
+            manager.start(&id).expect("start pressure");
+            manager.wait_for_exit(&id).await.expect("wait pressure");
+        }
+
+        // wait→release 任务必须有界完成,不因淘汰/并发挂起。
+        let result = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("wait/release task must not hang across eviction")
+            .expect("waiter task");
+        assert_eq!(result.exit_code, Some(0));
+        // 已淘汰 id 的后续 release 有界返回:幂等 Ok 或 UnknownTerminal。
+        let released =
+            tokio::time::timeout(Duration::from_secs(2), manager.release(&first_id)).await;
+        match released.expect("evicted release must be bounded") {
+            Ok(()) => {}
+            Err(TerminalError::UnknownTerminal(_)) => {}
+            Err(other) => panic!("evicted release error kind: {other:?}"),
+        }
+        assert!(!manager.has_active_terminals());
     }
 
     #[cfg(unix)]
