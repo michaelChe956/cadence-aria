@@ -1838,16 +1838,33 @@ impl WorkspaceEngine {
 
     /// 收口:干净恢复+释放(技术回收;规划面 verdict 无报告采信投影,
     /// 消费面采信由后续交付门承担——与 legacy group 面同口径披露)。
+    ///
+    /// F11(波3):一切「收口未完成」出口(store 失效/收口保锁/恢复
+    /// 人工门/弃置失败)在 tracing::warn 之外同步经既有 EngineEvent
+    /// 事件流发用户可见注意事件(带 window_id/原因/人工入口)。锁与
+    /// generation 语义不变——投影不解锁、不迁移状态、不丢窗口引用;
+    /// workspace plan 面以 session 为锚,不照搬 coding 专用
+    /// `project_window_manual_attention`(那依赖 coding attempt 状态机)。
     async fn close_plan_review_window(&mut self, reason: &str) {
         let Some(active) = self.active_review_window.take() else {
             return;
         };
         let window = active.handle;
+        let session_id = self.session.session_id.clone();
         let (Ok(window_store), Ok(snapshot_store)) = (
             self.plan_reviewer_window_store(),
             self.plan_reviewer_snapshot_store(),
         ) else {
             tracing::warn!("plan_review_window_close_store_unavailable");
+            Self::emit_plan_review_window_attention(
+                &self.event_tx,
+                &session_id,
+                &window.window_id,
+                "close_store_unavailable",
+                &format!("收口原因「{reason}」;持久 lifecycle store 不可用,窗口未收口"),
+                "恢复 lifecycle store 后重试收口;窗口记录 reviewer-windows/windows/<本窗>.json(<aria> 下),锁与 generation 保持",
+            )
+            .await;
             return;
         };
         let record = match crate::product::reviewer_window::begin_quiesce(
@@ -1859,6 +1876,15 @@ impl WorkspaceEngine {
             Ok(record) => record,
             Err(error) => {
                 tracing::warn!(%error, window = %window.window_id, "plan_review_window_close_kept_lock");
+                Self::emit_plan_review_window_attention(
+                    &self.event_tx,
+                    &session_id,
+                    &window.window_id,
+                    "close_kept_lock",
+                    &format!("begin_quiesce 失败: {error};窗口保持锁未收口"),
+                    "核对窗口记录后人工重试收口或弃置;记录 reviewer-windows/windows/<本窗>.json(<aria> 下)",
+                )
+                .await;
                 return;
             }
         };
@@ -1876,6 +1902,15 @@ impl WorkspaceEngine {
                         window = %window.window_id,
                         "plan_review_window_violation_manual_gate"
                     );
+                    Self::emit_plan_review_window_attention(
+                        &self.event_tx,
+                        &session_id,
+                        &window.window_id,
+                        "manual_gate",
+                        "恢复完整但违规事实已落 journal:整轮作废,需人工裁决后才能关闭窗口",
+                        "人工裁决 Invalidate(作废关闭)或 RequireNewReview(作废并开新一轮评审);违规 journal reviewer-windows/violations/<本窗>.json(<aria> 下);裁决前锁保持",
+                    )
+                    .await;
                     return;
                 }
                 if let Err(error) = crate::product::reviewer_window::abandon_window(
@@ -1885,12 +1920,65 @@ impl WorkspaceEngine {
                     reason,
                 ) {
                     tracing::warn!(%error, window = %window.window_id, "plan_review_window_abandon_failed");
+                    Self::emit_plan_review_window_attention(
+                        &self.event_tx,
+                        &session_id,
+                        &window.window_id,
+                        "abandon_failed",
+                        &format!("恢复已完成但弃置收口失败: {error};窗口保持非终态"),
+                        "重试收口或人工处置;窗口记录 reviewer-windows/windows/<本窗>.json(<aria> 下)",
+                    )
+                    .await;
                 }
             }
             Err(error) => {
                 tracing::warn!(%error, window = %window.window_id, "plan_review_window_close_kept_lock");
+                Self::emit_plan_review_window_attention(
+                    &self.event_tx,
+                    &session_id,
+                    &window.window_id,
+                    "close_kept_lock",
+                    &format!("恢复失败: {error};窗口保持锁未收口"),
+                    "处置后重入收口续接;窗口记录 reviewer-windows/windows/<本窗>.json(<aria> 下)",
+                )
+                .await;
             }
         }
+    }
+
+    /// F11(波3):规划评审窗口的用户可见注意事件——复用既有
+    /// EngineEvent::ExecutionEvent 事件流(与 emit_primary_member_anchor_note
+    /// 同款形态),status=Failed 表「需人工处理」。发送 best-effort
+    /// (`let _`,与既有事件发射一致),不影响窗口状态机。
+    async fn emit_plan_review_window_attention(
+        event_tx: &mpsc::Sender<EngineEvent>,
+        session_id: &str,
+        window_id: &str,
+        attention: &str,
+        reason: &str,
+        manual_entry: &str,
+    ) {
+        let _ = event_tx
+            .send(EngineEvent::ExecutionEvent {
+                event: crate::cross_cutting::streaming_provider::ProviderExecutionEvent {
+                    event_id: format!(
+                        "plan_review_window_attention_{attention}_{session_id}_{window_id}"
+                    ),
+                    kind: crate::cross_cutting::streaming_provider::ProviderExecutionEventKind::Provider,
+                    status: crate::cross_cutting::streaming_provider::ProviderExecutionEventStatus::Failed,
+                    title: format!("规划评审窗口需人工处理({attention})"),
+                    detail: Some(format!(
+                        "window_id: {window_id}\n原因: {reason}\n人工入口: {manual_entry}"
+                    )),
+                    command: None,
+                    cwd: None,
+                    output: None,
+                    exit_code: None,
+                },
+                node_id: None,
+                agent: None,
+            })
+            .await;
     }
 }
 
@@ -2024,5 +2112,206 @@ mod b1_plan_launch_ownership_tests {
         assert_ne!(ownership.resource_id(), again.resource_id());
 
         engine.close_plan_review_window("b1_plan_test_exit").await;
+    }
+}
+
+/// 波3 F11:close_plan_review_window 的用户可见人工注意投影。
+/// 红线:store 失效/恢复人工门时仅 tracing::warn 不可接受——必须经
+/// 既有 EngineEvent 事件流发用户可见事件(带 window_id/原因/人工入口),
+/// 且不改变锁与 generation 语义(不解锁、不丢窗口引用、状态机原样)。
+#[cfg(test)]
+mod f11_close_attention_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::reviewer_window_store::{
+        REVIEWER_WINDOW_STORE_DIR, ReviewerWindowState, ReviewerWindowStore,
+        ViolationJournalEntry, tree_key_of,
+    };
+
+    fn f11_git_init(dir: &std::path::Path) {
+        use std::process::Command;
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "f11@example.test"],
+            vec!["config", "user.name", "F11 Plan"],
+            vec!["commit", "-m", "init", "--quiet", "--allow-empty"],
+        ] {
+            let status = Command::new("git")
+                .current_dir(dir)
+                .args(&args)
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git fixture {args:?} must succeed");
+        }
+    }
+
+    fn f11_engine(
+        root: &std::path::Path,
+    ) -> (
+        WorkspaceEngine,
+        mpsc::Receiver<EngineEvent>,
+        ProductAppPaths,
+        std::path::PathBuf,
+    ) {
+        let paths = ProductAppPaths::new(root.join(".aria"));
+        let project = crate::product::project_store::ProjectStore::new(paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "F11-PLAN".to_string(),
+                description: None,
+            })
+            .expect("project");
+        let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: project.id.clone(),
+                repo_id: None,
+                logical_codebase_id: None,
+                base_branch: None,
+                title: "f11 plan".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .expect("issue");
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let record = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: project.id.clone(),
+                issue_id: issue.id.clone(),
+                entity_id: issue.id.clone(),
+                workspace_type: crate::product::models::WorkspaceType::Story,
+                author_provider: crate::product::models::ProviderName::ClaudeCode,
+                reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            })
+            .expect("workspace session");
+        let checkpoint = std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+            paths.issue_lifecycle_root(&project.id, &issue.id),
+        ));
+        let (tx, rx) = mpsc::channel(64);
+        let mut engine = WorkspaceEngine::new_persistent(
+            checkpoint,
+            LifecycleStore::new(paths.clone()),
+            tx,
+            crate::product::workspace_engine::types::WorkspaceSession::from_record(record),
+        );
+        let worktree = root.join("f11-worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        f11_git_init(&worktree);
+        engine.session.repository_path = Some(worktree.clone());
+        (engine, rx, paths, worktree)
+    }
+
+    async fn f11_next_attention(
+        rx: &mut mpsc::Receiver<EngineEvent>,
+        prefix: &str,
+    ) -> Option<crate::cross_cutting::streaming_provider::ProviderExecutionEvent> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while let Ok(Some(event)) =
+            tokio::time::timeout_at(deadline, rx.recv()).await
+        {
+            if let EngineEvent::ExecutionEvent { event, .. } = event
+                && event.event_id.starts_with(prefix)
+            {
+                return Some(event);
+            }
+        }
+        None
+    }
+
+    /// store 失效:仅 warn 不可接受——必须发用户可见注意事件,且窗口
+    /// 记录(锁与 generation)原样保持。
+    #[tokio::test]
+    async fn f11_store_unavailable_close_emits_attention_and_keeps_window() {
+        let root = tempfile::tempdir().expect("root");
+        let (mut engine, mut rx, paths, worktree) = f11_engine(root.path());
+        engine
+            .begin_plan_review_window(&crate::product::models::ProviderName::ClaudeCode, worktree)
+            .await
+            .expect("begin plan review window");
+        let active = engine.active_review_window.as_ref().expect("active window");
+        let window_id = active.handle.window_id.clone();
+        let generation = active.handle.generation;
+        let window_store =
+            ReviewerWindowStore::new(paths.root().join(REVIEWER_WINDOW_STORE_DIR));
+        let before = window_store.load_window(&window_id).expect("record before");
+
+        engine.lifecycle_store = None;
+        engine.close_plan_review_window("f11_store_gone").await;
+
+        let attention = f11_next_attention(
+            &mut rx,
+            "plan_review_window_attention_close_store_unavailable",
+        )
+        .await
+        .expect("F11 红:store 失效收口必须发用户可见注意事件");
+        let detail = attention.detail.as_deref().unwrap_or("");
+        assert!(detail.contains(&window_id), "注意事件必须带 window_id");
+        assert!(!detail.is_empty(), "注意事件必须带原因/人工入口");
+
+        let after = window_store.load_window(&window_id).expect("record after");
+        assert_eq!(after.state, before.state, "锁与状态保持");
+        assert_eq!(after.generation, before.generation, "generation 保持");
+        assert_eq!(after.generation, generation);
+    }
+
+    /// 恢复人工门:必须发用户可见注意事件(含人工裁决入口),锁保持
+    /// (ManualGate 非终态、租约不释放)。
+    #[tokio::test]
+    async fn f11_manual_gate_close_emits_attention_and_keeps_lock() {
+        let root = tempfile::tempdir().expect("root");
+        let (mut engine, mut rx, paths, worktree) = f11_engine(root.path());
+        engine
+            .begin_plan_review_window(&crate::product::models::ProviderName::ClaudeCode, worktree)
+            .await
+            .expect("begin plan review window");
+        let active = engine.active_review_window.as_ref().expect("active window");
+        let window_id = active.handle.window_id.clone();
+        let window_store =
+            ReviewerWindowStore::new(paths.root().join(REVIEWER_WINDOW_STORE_DIR));
+        let record = window_store.load_window(&window_id).expect("record");
+        window_store
+            .append_violation(
+                &window_id,
+                ViolationJournalEntry {
+                    seq: 0,
+                    entry_id: "f11-violation-entry-1".to_string(),
+                    at: chrono::Utc::now().to_rfc3339(),
+                    window_id: window_id.clone(),
+                    attempt_id: record.attempt_id.clone(),
+                    run_id: record.run_id.clone(),
+                    report_id: None,
+                    kind: "worktree_mutation".to_string(),
+                    path: "reviewer-edit.txt".to_string(),
+                    before_digest: None,
+                    after_digest: None,
+                    detail: "F11 夹具:预置违规 journal 触发人工门".to_string(),
+                    restore_cursor: "started+0".to_string(),
+                },
+            )
+            .expect("append violation");
+
+        engine.close_plan_review_window("f11_violation").await;
+
+        let attention =
+            f11_next_attention(&mut rx, "plan_review_window_attention_manual_gate")
+                .await
+                .expect("F11 红:人工门收口必须发用户可见注意事件");
+        let detail = attention.detail.as_deref().unwrap_or("");
+        assert!(detail.contains(&window_id), "注意事件必须带 window_id");
+        assert!(
+            detail.contains("Invalidate") && detail.contains("RequireNewReview"),
+            "注意事件必须披露人工裁决入口: {detail}"
+        );
+
+        let after = window_store.load_window(&window_id).expect("record after");
+        assert_eq!(after.state, ReviewerWindowState::ManualGate, "锁保持:人工门非终态");
+        let tree_key = tree_key_of(&after.identity.canonical_worktree);
+        let lease = window_store
+            .load_lease(&tree_key)
+            .expect("lease read")
+            .expect("锁保持:租约未释放");
+        assert_eq!(lease.window_id, window_id);
     }
 }
