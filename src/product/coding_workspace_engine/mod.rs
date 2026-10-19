@@ -55,7 +55,10 @@ use crate::web::workspace_ws_types::{
 
 mod amendment;
 mod code_review;
-pub(crate) use code_review::{AttemptWindowCloseMode, StartupWindowCompensation};
+pub(crate) use code_review::AttemptWindowCloseMode;
+// StartupWindowCompensation 仅由单测(窗口补偿)消费,库构建无引用。
+#[cfg(test)]
+pub(crate) use code_review::StartupWindowCompensation;
 mod coding;
 mod cross_attempt_handoff;
 mod cross_target_check;

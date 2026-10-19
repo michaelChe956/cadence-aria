@@ -710,6 +710,7 @@ impl WorkspaceEngine {
     ///   仅用于关联审计，非确认幂等键。
     /// - 全部 Ready 才放行原 CAS/定稿；失败返回 typed HomeWaiting
     ///   （retry_action=「修复后重新确认」，门不变、零推进副作用）。
+    #[allow(clippy::result_large_err)] // ConfirmationTrustWaiting 承载完整停等上下文。
     pub(crate) async fn ensure_confirmation_trust_ready(
         &mut self,
         author: ProviderName,
@@ -761,6 +762,7 @@ impl WorkspaceEngine {
     /// 调用）：非 LC 会话/无有效 trust provider → `Skip`；漂移重验全部
     /// 通过 → `Ensure`（owned 调用参数）。漂移任一不成立返回
     /// ContextWaiting（判据见上方法文档）。
+    #[allow(clippy::result_large_err)] // 同上:停等上下文按值返回。
     fn prepare_confirmation_trust_request(
         &self,
         author: ProviderName,

@@ -600,6 +600,8 @@ pub(crate) struct AutomationPlanTerminationIdentity {
     pub session_id: Option<String>,
     pub binding_version: Option<u64>,
     pub terminated_at: Option<String>,
+    /// 托管判定已由「绑定在场 + 精确 plan/版本」完成;enabled 保留供诊断扩展。
+    #[allow(dead_code)]
     pub enabled: bool,
 }
 

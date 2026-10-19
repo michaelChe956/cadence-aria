@@ -568,7 +568,7 @@ async fn start_work_item_plan_author_preserves_caller_env_without_injection() {
         "plan author 启动必须原样透传 caller 显式覆盖层"
     );
     assert!(
-        captured.env_vars.get("PATH").is_none() && captured.env_vars.get("HOME").is_none(),
+        !captured.env_vars.contains_key("PATH") && !captured.env_vars.contains_key("HOME"),
         "plan author 启动不得再注入白名单 PATH/HOME(宿主值由底座继承): {:?}",
         captured.env_vars
     );

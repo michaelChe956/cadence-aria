@@ -17,6 +17,13 @@ use crate::product::models::{
 };
 use crate::product::work_item_split_engine::WorkItemSplitProviderOutput;
 
+/// Plan 归属面读回:(Plan 记录 read-if-exists, WI 纯 ID 集, target repository 集)。
+type PlanOwnedWorkItemIds = (
+    Option<IssueWorkItemPlan>,
+    BTreeSet<String>,
+    BTreeSet<String>,
+);
+
 use super::{
     CreateIssueWorkItemPlanInput, CreateRepositoryProfileInput, CreateVerificationPlanInput,
     CreateWorkItemInput, IssueWorkItemPlanUpdate, LifecycleStore, WorkItemPlanCandidateSnapshot,
@@ -861,14 +868,7 @@ impl LifecycleStore {
     fn plan_owned_work_item_ids(
         &self,
         scope: &EntityScope,
-    ) -> Result<
-        (
-            Option<IssueWorkItemPlan>,
-            BTreeSet<String>,
-            BTreeSet<String>,
-        ),
-        ProductStoreError,
-    > {
+    ) -> Result<PlanOwnedWorkItemIds, ProductStoreError> {
         let plan: Option<IssueWorkItemPlan> = read_json_if_exists(
             &self
                 .issue_work_item_plans_root(&scope.project_id, &scope.issue_id)

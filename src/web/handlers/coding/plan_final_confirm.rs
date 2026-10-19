@@ -363,7 +363,7 @@ fn attempt_worktree_root(
     let shared = match attempt
         .target_snapshot
         .as_ref()
-        .map(|snapshot| snapshot.logical_repository_id.clone())
+        .map(|snapshot| snapshot.logical_repository_id)
     {
         Some(repository_id) => lifecycle
             .get_repo_shared_worktree(&attempt.project_id, &attempt.issue_id, repository_id)
@@ -502,13 +502,11 @@ pub async fn post_plan_coding_final_confirm(
         for (index, facts) in facts.iter().enumerate() {
             if let (PlanFinalConfirmTargetState::Ready, Some(attempt)) =
                 (&facts.state, facts.attempt.as_ref())
-            {
-                if let Err((error_code, message)) =
+                && let Err((error_code, message)) =
                     attempt_worktree_clean(&app_paths, attempt).await
-                {
-                    precheck_failures[index] = Some((error_code, message));
-                    break;
-                }
+            {
+                precheck_failures[index] = Some((error_code, message));
+                break;
             }
         }
     }

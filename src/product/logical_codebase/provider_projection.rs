@@ -28,6 +28,8 @@ use crate::protocol::contracts::AdapterRole;
 /// trust/boundary 输入;完整 capability action row 的桥接随 Task 2 形状
 /// 落地后由消费方扩展,1a 先冻结承载合同。
 #[derive(Debug, Clone)]
+// 1a 冻结承载合同:字段/getter 由 Task 4/5 projector 消费,当前尚无读取方。
+#[allow(dead_code)]
 pub struct ProviderProjectionInput {
     envelope: SessionPolicyEnvelope,
     provider: ProviderRef,
@@ -42,6 +44,8 @@ pub struct ProviderProjectionInput {
     boundary: Option<ProviderBoundaryPlan>,
 }
 
+// 冻结 getter 合同(同上),消费方接入前 read 面为 0。
+#[allow(dead_code, clippy::too_many_arguments)]
 impl ProviderProjectionInput {
     /// gateway 专用构造(同 crate;外部不可构造)。
     pub(crate) fn new(
@@ -141,6 +145,8 @@ pub trait ProviderPolicyProjector: Send + Sync {
 /// 计算(固定字段序+长度分隔+schema 前缀,禁止 Debug 文本或调用方摘要)
 /// 归 projector 实现与 gateway 校验(Task 4/5、1b)。
 #[derive(Debug, Clone)]
+// 1a 冻结承载合同:字段/getter 由 Task 4/5 projector 与 gateway 校验消费。
+#[allow(dead_code)]
 pub struct ProviderPolicyProjection {
     provider_type: ProviderRefType,
     provider_dialect: ProviderDialect,
@@ -170,6 +176,8 @@ pub struct ProviderPolicyProjection {
     execution_contract_digest: String,
 }
 
+// 冻结 getter 合同(同上);一次装配 21 个冻结字段是合同形状,不拆装配参数。
+#[allow(dead_code, clippy::too_many_arguments)]
 impl ProviderPolicyProjection {
     /// projector owner(crate 内)构造:一次装配全部冻结字段。
     pub(crate) fn new(
@@ -368,6 +376,8 @@ impl ProviderPolicyProjector for UnprovisionedProviderPolicyProjector {
 /// 调用方不能自造;`version_observed_at`/`version_probe_key` 供 spawn 前复验
 /// 消费同一 TTL 合同(prepare 与复验同 key 命中,不伪称每次实测二进制)。
 #[derive(Clone)]
+// spawn 前复验消费的冻结事实;读取方在 1b/2 接线前为 0。
+#[allow(dead_code)]
 pub struct ProviderLcPrepareFacts {
     provider_type: ProviderRefType,
     provider_dialect: ProviderDialect,
@@ -381,8 +391,9 @@ pub struct ProviderLcPrepareFacts {
     projector: Arc<dyn ProviderPolicyProjector>,
 }
 
+// 复验 getter 合同:读取方待 1b/2 接线。
+#[allow(dead_code)]
 impl ProviderLcPrepareFacts {
-    /// crate 内构造(adapter 实现方)。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         provider_type: ProviderRefType,

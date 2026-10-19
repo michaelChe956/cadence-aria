@@ -1927,7 +1927,7 @@ mod hygiene_tests {
         #[test]
         fn f12_cleanup_refuses_symlinked_window_dir() {
             let (keep, snap) = f12_root("link");
-            let target = make_residue(&keep.path().to_path_buf(), "real-target");
+            let target = make_residue(keep.path(), "real-target");
             std::fs::create_dir_all(snap.join("windows")).expect("windows dir");
             #[cfg(unix)]
             std::os::unix::fs::symlink(&target, snap.join("windows").join("w-link"))
@@ -1961,7 +1961,7 @@ mod hygiene_tests {
                 git_observation: GitObservationBaseline {
                     head_symref: None,
                     head_sha: "0".repeat(40),
-                    index_blob: "blobs/0".repeat(1),
+                    index_blob: "blobs/0".to_string(),
                     index_sha256: "0".repeat(64),
                     managed_refs: Vec::new(),
                     refs_digest: "0".repeat(64),

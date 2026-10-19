@@ -42,9 +42,7 @@ pub(crate) async fn enrolled_attempt_before_ready() -> EnrolledGateFixture {
         let state = fixture.state.clone();
         let request = input.clone();
         let origin = origin.clone();
-        let crashed = tokio::spawn(async move {
-            advance_plan(&state, request, origin).await
-        });
+        let crashed = tokio::spawn(async move { advance_plan(&state, request, origin).await });
         assert!(
             crashed.await.is_err(),
             "JournalPrepared crash must interrupt the first advance"
@@ -58,9 +56,7 @@ pub(crate) async fn enrolled_attempt_before_ready() -> EnrolledGateFixture {
         );
         let state = fixture.state.clone();
         let request = input.clone();
-        let crashed = tokio::spawn(async move {
-            advance_plan(&state, request, origin).await
-        });
+        let crashed = tokio::spawn(async move { advance_plan(&state, request, origin).await });
         assert!(
             crashed.await.is_err(),
             "UnitsMaterialized crash must interrupt the replay before Ready"
@@ -68,7 +64,6 @@ pub(crate) async fn enrolled_attempt_before_ready() -> EnrolledGateFixture {
     }
     fixture
 }
-
 
 fn paused_start_probe() -> (
     crate::web::coding_ws_handler::CodingRunnerStartProbe,
@@ -122,9 +117,8 @@ async fn manual_and_auto_claim_same_attempt_once_across_registries() {
         auto_probe,
     );
     let (manual, auto) = tokio::join!(manual, auto);
-    let started =
-        usize::from(matches!(manual, Ok(StartCodingOutcome::Started { .. })))
-            + usize::from(matches!(auto, Ok(StartCodingOutcome::Started { .. })));
+    let started = usize::from(matches!(manual, Ok(StartCodingOutcome::Started { .. })))
+        + usize::from(matches!(auto, Ok(StartCodingOutcome::Started { .. })));
     assert_eq!(
         started, 1,
         "exactly one first start across registries: manual={manual:?} auto={auto:?}"
@@ -133,7 +127,10 @@ async fn manual_and_auto_claim_same_attempt_once_across_registries() {
         .store()
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .unwrap();
-    let claim = saved.start_claim.as_ref().expect("durable single-flight claim");
+    let claim = saved
+        .start_claim
+        .as_ref()
+        .expect("durable single-flight claim");
     let (winner_state, loser_state, winner_command, loser) =
         if matches!(manual, Ok(StartCodingOutcome::Started { .. })) {
             (&state_a, &state_b, "manual-1", &auto)
@@ -206,7 +203,12 @@ async fn same_command_resumes_before_provider_barrier() {
     )
     .await
     .unwrap();
-    assert_eq!(resumed, StartCodingOutcome::Started { attempt_id: attempt.id.clone() });
+    assert_eq!(
+        resumed,
+        StartCodingOutcome::Started {
+            attempt_id: attempt.id.clone()
+        }
+    );
     assert_eq!(fixture.runner_count(&key), 1);
     let saved = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -236,7 +238,11 @@ async fn provider_may_have_started_window_routes_to_manual_triage() {
         panic!("seed claim must succeed");
     };
     store
-        .advance_coding_start_phase(&claimed, "wiga-start-z", CodingStartPhase::ProviderMayHaveStarted)
+        .advance_coding_start_phase(
+            &claimed,
+            "wiga-start-z",
+            CodingStartPhase::ProviderMayHaveStarted,
+        )
         .expect("seed provider-may-have-started window");
 
     let same = crate::web::coding_start::start_coding_once(
@@ -319,7 +325,12 @@ async fn runner_registered_window_resumes_same_command_only() {
     )
     .await
     .unwrap();
-    assert_eq!(resumed, StartCodingOutcome::Started { attempt_id: attempt.id.clone() });
+    assert_eq!(
+        resumed,
+        StartCodingOutcome::Started {
+            attempt_id: attempt.id.clone()
+        }
+    );
     assert_eq!(
         fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
         1
@@ -417,7 +428,10 @@ async fn enrolled_start_coding_fails_closed_when_enrollment_disabled() {
         },
     )
     .await;
-    assert_eq!(result.unwrap_err().code(), "coding_start_enrollment_disabled");
+    assert_eq!(
+        result.unwrap_err().code(),
+        "coding_start_enrollment_disabled"
+    );
     assert_eq!(
         fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
         0
@@ -483,9 +497,7 @@ async fn enrolled_start_coding_rejects_stale_identity_after_reopen() {
 async fn started_or_terminal_attempts_are_not_reclaimed() {
     let fixture = enrolled_attempt_before_ready().await;
     let store =
-        crate::product::coding_attempt_store::CodingAttemptStore::new(
-            fixture.inner.paths.clone(),
-        );
+        crate::product::coding_attempt_store::CodingAttemptStore::new(fixture.inner.paths.clone());
     let attempt = fixture.attempt();
 
     let mut running = attempt.clone();
@@ -551,9 +563,7 @@ async fn single_repository_start_coding_rejects_logical_snapshot_and_wrong_repos
         logical_repository_id: crate::product::logical_codebase::LogicalRepositoryId(
             uuid::Uuid::new_v4(),
         ),
-        checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(
-            uuid::Uuid::new_v4(),
-        ),
+        checkout_id: crate::product::logical_codebase::RepositoryCheckoutId(uuid::Uuid::new_v4()),
         physical_repository_id: "physical-polluted".to_string(),
         canonical_path: std::path::PathBuf::from("/tmp/polluted"),
         git_dir_identity: "sha256:polluted".to_string(),
@@ -576,7 +586,11 @@ async fn single_repository_start_coding_rejects_logical_snapshot_and_wrong_repos
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code(), "coding_start_enrollment_mismatch", "{error:?}");
+    assert_eq!(
+        error.code(),
+        "coding_start_enrollment_mismatch",
+        "{error:?}"
+    );
     assert!(
         error.message().contains("single physical repository")
             || error.message().contains("snapshot"),
@@ -585,7 +599,10 @@ async fn single_repository_start_coding_rejects_logical_snapshot_and_wrong_repos
     let saved = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .unwrap();
-    assert!(saved.start_claim.is_none(), "rejection must not consume a claim");
+    assert!(
+        saved.start_claim.is_none(),
+        "rejection must not consume a claim"
+    );
     assert_eq!(
         fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
         0
@@ -603,7 +620,11 @@ async fn single_repository_start_coding_rejects_logical_snapshot_and_wrong_repos
         .status()
         .unwrap();
     assert!(status.success(), "repo-2 must be a real git repo");
-    let repos_path = fixture.inner.paths.project_root(PROJECT_ID).join("repos.json");
+    let repos_path = fixture
+        .inner
+        .paths
+        .project_root(PROJECT_ID)
+        .join("repos.json");
     let mut repositories: Vec<crate::product::models::RepositoryRecord> =
         crate::product::json_store::read_json(&repos_path).unwrap();
     let repo_two = crate::product::models::RepositoryRecord {
@@ -621,8 +642,7 @@ async fn single_repository_start_coding_rejects_logical_snapshot_and_wrong_repos
         .paths
         .issue_root(PROJECT_ID, ISSUE_ID)
         .join("issue.json");
-    let mut issue: serde_json::Value =
-        crate::product::json_store::read_json(&issue_path).unwrap();
+    let mut issue: serde_json::Value = crate::product::json_store::read_json(&issue_path).unwrap();
     issue["repo_id"] = serde_json::json!("repo-2");
     crate::product::json_store::write_json(&issue_path, &issue).unwrap();
 
@@ -638,7 +658,11 @@ async fn single_repository_start_coding_rejects_logical_snapshot_and_wrong_repos
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code(), "coding_start_enrollment_mismatch", "{error:?}");
+    assert_eq!(
+        error.code(),
+        "coding_start_enrollment_mismatch",
+        "{error:?}"
+    );
     assert!(
         error.message().contains("carrier drift")
             || error.message().contains("re-bind")
@@ -694,9 +718,7 @@ async fn restart_after_abort_readmits_attempt_in_same_process() {
     use crate::product::coding_models::CodingAttemptStatus;
     use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
     use crate::product::models::automation::OperationState;
-    use crate::web::coding_start::{
-        RestartCodingAttemptRequest, restart_coding_attempt,
-    };
+    use crate::web::coding_start::{RestartCodingAttemptRequest, restart_coding_attempt};
 
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path().to_path_buf();
@@ -718,29 +740,27 @@ async fn restart_after_abort_readmits_attempt_in_same_process() {
         })
         .expect("issue");
     let attempt = store
-        .create_attempt(crate::product::coding_attempt_store::CreateCodingAttemptInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
-            base_branch: "main".to_string(),
-            branch_name: "aria/restart-attempt".to_string(),
-            worktree_path: None,
-            provider_config_snapshot: crate::web::workspace_ws_types::ProviderConfigSnapshot {
-                author: crate::product::models::ProviderName::Fake,
-                reviewer: None,
-                review_rounds: 0,
-                permission_modes: Default::default(),
+        .create_attempt(
+            crate::product::coding_attempt_store::CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/restart-attempt".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: crate::web::workspace_ws_types::ProviderConfigSnapshot {
+                    author: crate::product::models::ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 0,
             },
-            target_snapshot: None,
-            max_auto_rework: 0,
-        })
+        )
         .expect("attempt");
     let running = store
-        .seed_running_attempt_for_test(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-        )
+        .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("running attempt");
 
     // abort：registry retired ＋ durable 终态（Aborted）。
@@ -750,7 +770,9 @@ async fn restart_after_abort_readmits_attempt_in_same_process() {
     aborted.status = CodingAttemptStatus::Aborted;
     // 真实 abort 链（transition_to_terminal）清 admission ticket（admission.rs:223）。
     aborted.admission_ticket_consumed_at = None;
-    store.write_coding_attempt_for_test(&aborted).expect("aborted");
+    store
+        .write_coding_attempt_for_test(&aborted)
+        .expect("aborted");
 
     let request = RestartCodingAttemptRequest {
         command_id: "cmd-restart-1".to_string(),
@@ -781,14 +803,9 @@ async fn restart_after_abort_readmits_attempt_in_same_process() {
     );
 
     // 同 command 同 payload：重放首次 durable 结果，不改变状态。
-    let replay = restart_coding_attempt(
-        &state,
-        &attempt.project_id,
-        &attempt.issue_id,
-        request,
-    )
-    .await
-    .expect("replay");
+    let replay = restart_coding_attempt(&state, &attempt.project_id, &attempt.issue_id, request)
+        .await
+        .expect("replay");
     assert_eq!(replay.state, OperationState::Replayed);
 
     // 错版本（错对象）：Rejected，不改变当前 attempt。
@@ -818,9 +835,7 @@ async fn restart_after_abort_readmits_attempt_in_same_process() {
 async fn restart_multi_repo_attempt_passes_precheck_despite_sibling_prebound_lock() {
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::coding_attempt_store::CodingAttemptStore;
-    use crate::product::coding_models::{
-        AttemptTargetSnapshot, CodingAttemptStatus,
-    };
+    use crate::product::coding_models::{AttemptTargetSnapshot, CodingAttemptStatus};
     use crate::product::lifecycle_store::{LifecycleStore, UpsertRepoSharedWorktreeInput};
     use crate::product::logical_codebase::{
         IssueCodebaseSelection, IssueCodebaseSelectionStore, LogicalCodebaseManifest,
@@ -868,11 +883,12 @@ async fn restart_multi_repo_attempt_passes_precheck_despite_sibling_prebound_loc
     .enumerate()
     {
         let repository_path = root.join(physical);
-        let source_identity = crate::product::logical_codebase::RepositorySourceIdentity::from_git_parts(
-            &repository_path,
-            repository_path.join(".git"),
-            None,
-        );
+        let source_identity =
+            crate::product::logical_codebase::RepositorySourceIdentity::from_git_parts(
+                &repository_path,
+                repository_path.join(".git"),
+                None,
+            );
         let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
         authority
             .save_member(
@@ -955,9 +971,8 @@ async fn restart_multi_repo_attempt_passes_precheck_despite_sibling_prebound_loc
             None,
         ))
         .expect("selection");
-    let policy_store = crate::product::logical_codebase::AggregatePolicyArtifactStore::new(
-        paths.clone(),
-    );
+    let policy_store =
+        crate::product::logical_codebase::AggregatePolicyArtifactStore::new(paths.clone());
     policy_store
         .ensure_bootstrap(&manifest)
         .expect("policy bootstrap");
@@ -979,7 +994,10 @@ async fn restart_multi_repo_attempt_passes_precheck_despite_sibling_prebound_loc
         capture_source: "test".to_string(),
     };
     let lifecycle = LifecycleStore::new(paths.clone());
-    for (repo, name) in [(own_repo, "own-worktree"), (sibling_repo, "sibling-worktree")] {
+    for (repo, name) in [
+        (own_repo, "own-worktree"),
+        (sibling_repo, "sibling-worktree"),
+    ] {
         let worktree = root.join(name);
         std::fs::create_dir_all(&worktree).expect("worktree dir");
         lifecycle
@@ -1001,30 +1019,34 @@ async fn restart_multi_repo_attempt_passes_precheck_despite_sibling_prebound_loc
         permission_modes: Default::default(),
     };
     let own = store
-        .create_attempt(crate::product::coding_attempt_store::CreateCodingAttemptInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            work_item_id: "work_item_0001".to_string(),
-            base_branch: "main".to_string(),
-            branch_name: "aria/restart-multi-own".to_string(),
-            worktree_path: None,
-            provider_config_snapshot: provider.clone(),
-            target_snapshot: Some(snapshot(own_repo)),
-            max_auto_rework: 0,
-        })
+        .create_attempt(
+            crate::product::coding_attempt_store::CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/restart-multi-own".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: provider.clone(),
+                target_snapshot: Some(snapshot(own_repo)),
+                max_auto_rework: 0,
+            },
+        )
         .expect("own attempt");
     let sibling = store
-        .create_attempt(crate::product::coding_attempt_store::CreateCodingAttemptInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            work_item_id: "work_item_0002".to_string(),
-            base_branch: "main".to_string(),
-            branch_name: "aria/restart-multi-sibling".to_string(),
-            worktree_path: None,
-            provider_config_snapshot: provider,
-            target_snapshot: Some(snapshot(sibling_repo)),
-            max_auto_rework: 0,
-        })
+        .create_attempt(
+            crate::product::coding_attempt_store::CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0002".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/restart-multi-sibling".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: provider,
+                target_snapshot: Some(snapshot(sibling_repo)),
+                max_auto_rework: 0,
+            },
+        )
         .expect("sibling attempt");
     // 本仓自持（后随 abort 成为终态残留）；兄弟仓预绑定到未启动的
     // sibling attempt（Created 亦是活跃态）。
@@ -1154,7 +1176,10 @@ async fn lcg_t13_ready_plan_does_not_start_other_target_without_manual_command()
     )
     .await
     .expect("explicit manual start coding must be admitted at Ready");
-    assert!(matches!(outcome, StartCodingOutcome::Started { .. }), "{outcome:?}");
+    assert!(
+        matches!(outcome, StartCodingOutcome::Started { .. }),
+        "{outcome:?}"
+    );
     assert_eq!(
         fixture.runner_count(&CodingAttemptRunKey::from_attempt(&attempt)),
         1
@@ -1190,13 +1215,12 @@ fn set_enrollment_member_resolution_reads_legacy_root_fallback() {
     };
 
     // ① legacy 旧根现场：seed_fixture 播种 project 级旧根 manifest/成员/
-    ///checkout/repos.json；enrollment 冻结任意 manifest UUID 形态。
+    //checkout/repos.json；enrollment 冻结任意 manifest UUID 形态。
     let fixture = seed_fixture(2, true);
     let enrolled_lc = uuid::Uuid::new_v4().to_string();
     let member_one = LogicalRepositoryId(uuid::Uuid::from_u128(1));
-    let (member, checkout, repository) =
-        resolve(&fixture.paths, &enrolled_lc, member_one)
-            .expect("legacy root fallback must resolve set enrollment member");
+    let (member, checkout, repository) = resolve(&fixture.paths, &enrolled_lc, member_one)
+        .expect("legacy root fallback must resolve set enrollment member");
     assert_eq!(member.logical_repository_id, member_one);
     assert_eq!(checkout.kind, CheckoutKind::Main);
     assert_eq!(repository.logical_repository_id, Some(member_one));
@@ -1207,8 +1231,11 @@ fn set_enrollment_member_resolution_reads_legacy_root_fallback() {
         crate::product::app_paths::ProductAppPaths::new(subtree_root.path().join(".aria"));
     let lc_uuid = uuid::Uuid::new_v4().to_string();
     let authority = LogicalCodebaseStore::for_lc(subtree_paths.clone(), &lc_uuid);
-    let manifest =
-        LogicalCodebaseManifest::new(PROJECT_ID, subtree_root.path().to_path_buf(), vec![member_one]);
+    let manifest = LogicalCodebaseManifest::new(
+        PROJECT_ID,
+        subtree_root.path().to_path_buf(),
+        vec![member_one],
+    );
     authority.save_manifest(PROJECT_ID, &manifest).unwrap();
     let now = "2026-10-16T00:00:00Z".to_string();
     let checkout_path = subtree_root.path().join("checkout-f4");
@@ -1257,9 +1284,8 @@ fn set_enrollment_member_resolution_reads_legacy_root_fallback() {
             },
         )
         .unwrap();
-    let (subtree_member, _, subtree_repository) =
-        resolve(&subtree_paths, &lc_uuid, member_one)
-            .expect("uuid subtree site must resolve directly");
+    let (subtree_member, _, subtree_repository) = resolve(&subtree_paths, &lc_uuid, member_one)
+        .expect("uuid subtree site must resolve directly");
     assert_eq!(subtree_member.logical_repository_id, member_one);
     assert_eq!(subtree_repository.id, "physical-f4");
 
@@ -1269,7 +1295,5 @@ fn set_enrollment_member_resolution_reads_legacy_root_fallback() {
         resolve(&fixture.paths, &enrolled_lc, missing).is_err(),
         "nonexistent member must fail closed"
     );
-    assert!(
-        resolve(&subtree_paths, &lc_uuid, missing).is_err(),
-    );
+    assert!(resolve(&subtree_paths, &lc_uuid, missing).is_err(),);
 }

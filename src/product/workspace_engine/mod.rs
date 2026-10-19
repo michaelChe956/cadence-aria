@@ -200,8 +200,7 @@ pub(crate) use single_candidate::{
 };
 pub(crate) use types::WorkItemDraftAuthorOutcome;
 pub(crate) use types::{
-    ArtifactRetryContext, AuthorPromptMode, ExplicitTrustRegistrationContextWaiting,
-    ExplicitTrustRegistrationTarget, HttpConfirmDisposition, OutlineRevisionCrashPoint,
+    ArtifactRetryContext, AuthorPromptMode, HttpConfirmDisposition, OutlineRevisionCrashPoint,
     OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanAuthorOutputContract,
     PlanRepairCrashPoint, ProviderRunKind, ProviderSessionDriveInput, ReviewProviderRunResult,
     RevisionResumeFallbackContext, StructuredOutputDisplayFilter, TimelineNodeDraft,

@@ -1,7 +1,6 @@
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::{
     DesignSpecRecord, IssueRecord, IssueWorkItemPlan, RepositoryRecord, SpecVersionRecord,
     StorySpecRecord, WorkspaceSessionRecord, WorkspaceType,

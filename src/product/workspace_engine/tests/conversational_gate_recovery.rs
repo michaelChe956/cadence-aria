@@ -1180,8 +1180,8 @@ async fn sg_06a_1_recovery_lane_honors_structural_claim_without_resume() {
 
 /// Reviewing/BlockedByLcRecovery 分域的通用基座：真实 reserve（物化 hold）
 /// + Running turn + 注入指定 phase 的活动 grant + current refs 轮换到真实
-/// 落盘的「已交付 candidate」（合法中间/交付 hash ≠ 原授权 hash 的现场
-/// 形态）。返回 (turn_id, session_path, delivered_source_ref)。
+///   落盘的「已交付 candidate」（合法中间/交付 hash ≠ 原授权 hash 的现场
+///   形态）。返回 (turn_id, session_path, delivered_source_ref)。
 fn sg06b_structural_recovery_fixture(
     lifecycle: &crate::product::lifecycle_store::LifecycleStore,
     engine: &mut crate::product::workspace_engine::WorkspaceEngine,

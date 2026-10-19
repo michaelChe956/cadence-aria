@@ -944,10 +944,7 @@ async fn lcg_t04_no_generic_tool_policy_still_records_version_audit_and_native_s
 
 // ==== Task 9a:LC 显式 resume 的 child 前全 LC audit 比对 ====
 
-use crate::cross_cutting::tool_policy_audit::{
-    LcProjectionAudit, LcProviderStartAudit, ProviderStartAudit, ResumeDecision,
-    resume_with_lc_start_record,
-};
+use crate::cross_cutting::tool_policy_audit::{LcProjectionAudit, ProviderStartAudit};
 
 /// 以与 adapter 同源的材料(gateway validate 的 envelope + 相同投影输入)
 /// 预计算 LC 启动会得到的投影摘要,供存档记录构造。
@@ -1455,8 +1452,7 @@ fn lcg_t10_claude_root_recipe_marker_canonicalization_is_deterministic_and_phase
     let normal_projector = ClaudePolicyProjector::new("claude 2.0.4-lc-fixture");
     let rejected_projection = normal_projector
         .project(&marker_input)
-        .err()
-        .expect("normal phase projector must refuse the marker");
+        .expect_err("normal phase projector must refuse the marker");
     assert!(
         rejected_projection
             .to_string()

@@ -9,7 +9,6 @@
 use super::plan_start_tests::{
     ISSUE_ID, N3Fixture, PLAN_ID, PLAN_REVISION_ID, PROJECT_ID, get_progress, n3_fixture,
 };
-use super::*;
 use crate::product::advance_store::{AdvanceInput, AdvanceOutcome};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;

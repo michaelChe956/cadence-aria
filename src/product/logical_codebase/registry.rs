@@ -483,7 +483,11 @@ mod tests {
 
         // 释放：Active→Released，记 released_at；未命中 source / 缺席条目跳过。
         store
-            .release_sources("project_0001", &[source.clone()], "2026-10-16T00:00:00Z")
+            .release_sources(
+                "project_0001",
+                std::slice::from_ref(&source),
+                "2026-10-16T00:00:00Z",
+            )
             .unwrap();
         let released = store
             .find_by_source("project_0001", &source)
@@ -542,7 +546,11 @@ mod tests {
 
         // 再次释放后按原归属复活：Released→Active，released_at 清空。
         store
-            .release_sources("project_0001", &[source.clone()], "2026-10-16T00:02:00Z")
+            .release_sources(
+                "project_0001",
+                std::slice::from_ref(&source),
+                "2026-10-16T00:02:00Z",
+            )
             .unwrap();
         store
             .reclaim_released_sources(

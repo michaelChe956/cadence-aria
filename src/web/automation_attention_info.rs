@@ -79,10 +79,9 @@ fn automation_attention_item(
             plan_id: None,
             session_id: Some(session_id.to_string()),
         }
-    } else if let Some(plan_id) = fact.plan_id.as_deref() {
-        CodingAttentionTargetDto::coding_plan(plan_id)
     } else {
-        return None;
+        let plan_id = fact.plan_id.as_deref()?;
+        CodingAttentionTargetDto::coding_plan(plan_id)
     };
     let focus = match (fact.gate_id.as_deref(), fact.choice_id.as_deref()) {
         (None, None) => None,

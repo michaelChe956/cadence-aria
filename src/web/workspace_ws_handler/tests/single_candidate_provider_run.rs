@@ -249,8 +249,8 @@ impl ProviderRunFixture {
 
     /// 6.1 fix-loop（owner 验收回归）：多仓 WorkItemPlan（Legacy flow）
     /// + LogicalAlias 路由 + gateway 覆盖项，且保留 engine 事件接收端
-    /// （观察 outline author 经 gateway spawn 失败的 `EngineEvent::Error`
-    /// 上浮面）。调用方 MUST 持续 drain engine_rx。
+    ///   （观察 outline author 经 gateway spawn 失败的 `EngineEvent::Error`
+    ///   上浮面）。调用方 MUST 持续 drain engine_rx。
     pub(super) fn new_logical_legacy_with_gateway_extras_and_engine_rx(
         write_member_language_rules: bool,
         gateway_author: Arc<dyn StreamingProviderAdapter>,
@@ -377,8 +377,7 @@ impl ProviderRunFixture {
             super::init_ws_test_git_repo(member_root.path());
             extra_member_roots.push(member_root);
         }
-        if let (FixtureRoute::LogicalAlias(spec) | FixtureRoute::LogicalAliasStory(spec, _)) =
-            &route
+        if let FixtureRoute::LogicalAlias(spec) | FixtureRoute::LogicalAliasStory(spec, _) = &route
             && let Some(root_rules) = spec.root_rules.as_ref()
         {
             let aggregate_root = repository_root

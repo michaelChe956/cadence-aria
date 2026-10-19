@@ -9,7 +9,6 @@
 // include! 同模块纪律：WsOutMessage/CheckpointStore/CreateWorkspaceSessionInput/
 // WorkspaceSessionRecord/WorkspaceType/WorkspaceEngine/WorkspaceSession 沿用
 // part_07 既有导入，本文件不重复 use（E0252 去重）。
-use super::*;
 use crate::cross_cutting::provider_adapter::{ProviderAdapter, ProviderAdapterError};
 use crate::cross_cutting::streaming_provider::{
     ProviderEvent, ProviderSession, ProviderStatus, StreamingProviderAdapter,
@@ -196,10 +195,7 @@ async fn d21a_manager_fixture(tag: &str) -> D21aManagerFixture {
     let root = tempfile::tempdir().expect("d21a fixture root");
     let app_paths = ProductAppPaths::new(root.path().join(".aria"));
     let lifecycle = LifecycleStore::new(app_paths.clone());
-    let (project_id, entity_id) = (
-        format!("project_d21a_{tag}"),
-        format!("story_d21a_{tag}"),
-    );
+    let (project_id, entity_id) = (format!("project_d21a_{tag}"), format!("story_d21a_{tag}"));
     // W0-3 N5-2:repository_path 注入后,issue 基线解析(resolve_issue_
     // baseline_tree)从"无仓库路径跳过"变为真实读取——须补 issue 记录
     //(store 生成 id,session 与 issue 链一致),否则 product_store_
@@ -261,7 +257,7 @@ async fn d21a_manager_fixture(tag: &str) -> D21aManagerFixture {
             held: held.clone(),
         }),
     );
-    let (outbound_tx, outbound_rx) = mpsc::channel(64);
+    let (_outbound_tx, outbound_rx) = mpsc::channel(64);
     let run_context = ProviderRunContext::test_fixture(
         Arc::new(registry),
         engine,

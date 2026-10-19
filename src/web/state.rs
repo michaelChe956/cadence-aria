@@ -11,7 +11,6 @@ use crate::cross_cutting::claude_code_provider::ClaudeCodeProvider;
 use crate::cross_cutting::claude_code_provider::ClaudePolicyProjector;
 use crate::cross_cutting::codex_provider::CodexPolicyProjector;
 use crate::cross_cutting::codex_provider::CodexProvider;
-use crate::cross_cutting::gateway_sync_provider::GatewaySyncProvider;
 use crate::cross_cutting::image_client::ImageClient;
 use crate::cross_cutting::kimi_code_provider::KimiCodeProvider;
 use crate::cross_cutting::kimi_code_provider::KimiPolicyProjector;
@@ -27,7 +26,6 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::image_create::{
     ImageCreateEngine, ImageCreateRunRegistry, SessionStore, SettingsStore,
 };
-use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector;
 // 1c-factory:Unprovisioned 占位已由四家真实 projector 整体替换。
 use crate::product::models::ProviderName;
 use crate::web::events::EventHub;

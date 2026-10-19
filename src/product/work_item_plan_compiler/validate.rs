@@ -278,12 +278,11 @@ pub fn validate_work_item_intent_contract(
                 // 同 LC、成员 ∈ 授权集；IR 物理 ID 用成员归属映射核对；
                 // physical intent 反查唯一授权成员。映射缺失 fail-closed
                 // 出诊断，不以 None 吞错。
-                if let Some(bound) = context.enrollment_target {
-                    if let Some(message) =
+                if let Some(bound) = context.enrollment_target
+                    && let Some(message) =
                         intent_target_bound_violation(&intent.target, bound, context, item)
-                    {
-                        diagnostics.push(unexecutable(&work_item_id, message));
-                    }
+                {
+                    diagnostics.push(unexecutable(&work_item_id, message));
                 }
             }
         }

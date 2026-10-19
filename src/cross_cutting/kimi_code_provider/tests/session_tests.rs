@@ -567,13 +567,23 @@ async fn silent_terminal_across_resume_stall_boundary_completes() {
 ///
 /// resume 会话（stall 界 100ms 等效），总 deadline 2s；prompt 后发起
 /// 真实 `sleep 5` terminal 并保持静默。接线后：100ms 界被真实在途
-/// terminal 暂停，但 2s 总 deadline 仍收口（Aborted 不早于 ~1.5s）。
+/// terminal 暂停，但 2s 总 deadline 仍收口。
 /// 当前实现 100ms 即按无工作 stall 误杀（elapsed < 1s）→ 红。
 /// 资源回收由 dispatcher Drop→cleanup_all 沿既有 kill 链承担（迟到
 /// create 的 spawn 前拒绝见 terminal_handlers 测试）。
+///
+/// 计时口径（确定性）：总 deadline 在 `run_kimi_session_inner` 入口即起算
+/// （早于 initialize/load/prompt 握手），因此测点必须锚在会话任务启动之前
+/// 而不是 prompt 之后——后者会把「随负载浮动的握手耗时」从窗口里减掉，
+/// 使正确实现的机械仍可能测出 < 阈值（全量并行时曾出现 1.41s/1.49s）。
+/// 锚点早于或等于 deadline 原点，故下界 `>= 2s` 精确成立：更早的 Aborted
+/// 只可能来自 100ms stall 误杀；上界 `< 4s` 排除「terminal 活动延长了
+/// deadline」——那要等真实 sleep 5 退出（≥5s）才收口。
 #[tokio::test]
 async fn active_terminal_pause_does_not_extend_total_deadline() {
     let (peer, server) = test_peer();
+    // duration 起点：早于会话任务 spawn，因而早于会话内 deadline 原点。
+    let invocation_started = std::time::Instant::now();
     let (_commands, mut events, run) = direct_session_events(peer, input(Some("resume"), 2)).await;
     let (ready_tx, ready_rx) = oneshot::channel();
     let (finish_tx, finish_rx) = oneshot::channel();
@@ -617,7 +627,6 @@ async fn active_terminal_pause_does_not_extend_total_deadline() {
     });
 
     ready_rx.await.expect("resume path reached prompt");
-    let started = std::time::Instant::now();
     let mut saw_aborted = false;
     while !saw_aborted {
         let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
@@ -631,9 +640,9 @@ async fn active_terminal_pause_does_not_extend_total_deadline() {
             )
         );
     }
-    let elapsed = started.elapsed();
+    let elapsed = invocation_started.elapsed();
     assert!(
-        elapsed >= std::time::Duration::from_millis(1500),
+        elapsed >= std::time::Duration::from_secs(2),
         "活动 terminal 只暂停 stall 判定，不得提前于总 deadline 误杀: {elapsed:?}"
     );
     assert!(

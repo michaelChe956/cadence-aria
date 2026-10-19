@@ -1191,7 +1191,7 @@ fn sg_f2b_all_split_findings_carry_explicit_kind_with_stable_code_identity() {
     assert!(outline_report.has_errors());
 
     // draft 族：identity 缺口 + 写域缺失 + 未授权必需命令 + AC 引用缺口。
-    let mut draft_outline = valid_outline();
+    let draft_outline = valid_outline();
     let mut candidate = canonical_draft_candidate(&draft_outline.work_item_outlines[0]);
     candidate.canonical_contract_candidate.identity.title = "Other title".to_string();
     candidate

@@ -11,9 +11,7 @@ use crate::product::models::{AmendmentResumeMode, PlanAmendmentManifest};
 use std::collections::HashSet;
 
 use super::locking::with_exclusive_lock;
-use super::{
-    CreateBlockedGateInput, CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
-};
+use super::{CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput};
 
 impl super::CodingAttemptStore {
     pub fn set_resume_target_from_manifest(

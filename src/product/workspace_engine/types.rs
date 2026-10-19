@@ -572,6 +572,8 @@ pub(crate) struct ExplicitTrustRegistrationContextWaiting {
     pub(crate) message: String,
 }
 
+// 确认裁决按值上抛;TrustWaiting 携带完整停等上下文,Box 化会波及引擎/web 两侧。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceConfirmOutcome {
     WorkItemPlan {

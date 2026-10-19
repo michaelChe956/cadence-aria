@@ -1744,8 +1744,8 @@ mod tests {
         assert!(
             matches!(
                 error,
-                ProductStoreError::IdentityMismatch { ref kind, .. }
-                    if *kind == "coding_group_initialization_purge_scope"
+                ProductStoreError::IdentityMismatch { kind, .. }
+                    if kind == "coding_group_initialization_purge_scope"
             ),
             "unexpected error: {error}"
         );

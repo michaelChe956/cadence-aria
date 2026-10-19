@@ -1580,9 +1580,7 @@ use crate::cross_cutting::codex_provider::projection::{
     CodexPolicyProjector as T09aProjector, action_text as t09a_action_text,
     lc_boundary_plan as t09a_lc_boundary_plan, wire_dialect_text as t09a_wire_dialect_text,
 };
-use crate::cross_cutting::tool_policy_audit::{
-    LcProjectionAudit, ProviderStartAudit, ResumeDecision,
-};
+use crate::cross_cutting::tool_policy_audit::{LcProjectionAudit, ProviderStartAudit};
 use crate::product::logical_codebase::provider_projection::ProviderPolicyProjector as _;
 use crate::product::logical_codebase::provider_projection::ProviderProjectionInput;
 

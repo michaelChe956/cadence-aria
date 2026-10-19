@@ -1043,7 +1043,10 @@ mod tests {
         assert!(
             fixture_rules
                 .preflight()
-                .check(&fixture_rules.launch_request(), &ProviderAdmissionPhase::Normal)
+                .check(
+                    &fixture_rules.launch_request(),
+                    &ProviderAdmissionPhase::Normal
+                )
                 .expect("placeholder policy keeps legacy normal admission")
                 .ready
         );
@@ -1408,13 +1411,13 @@ mod tests {
     /// Task 1(fix-admission-member-rules-scope):真实有效根材料夹具——在
     /// `publish_root_policy_with_receipt` 的发布链(locator 正文 + AGENTS 原字节
     /// + 匹配最终 receipt)之上,补 canonical root 自身的
-    /// `.claude/rules/language.md`,构成「根规则 + 已发布政策 + 最终 receipt」
-    /// 齐备的有效根形态。路 A/路 B 的正向断言以本夹具为前提——豁免面靠真实
-    /// 根材料证明,不靠 placeholder 政策或补成员规则(REQ-REG-12 delta:
-    /// placeholder 不是「根材料有效」证明)。Task 2/3 消费;夹具矩阵区分:
-    /// 普通有效根 = 本函数;故意缺根 = `publish_root_policy_with_receipt`
-    /// (不建根 language);placeholder 兼容 = `admission_fixture` 默认形态;
-    /// fresh-bootstrap = 默认形态 + 有效凭据(根材料由 recipe 生成)。
+    ///   `.claude/rules/language.md`,构成「根规则 + 已发布政策 + 最终 receipt」
+    ///   齐备的有效根形态。路 A/路 B 的正向断言以本夹具为前提——豁免面靠真实
+    ///   根材料证明,不靠 placeholder 政策或补成员规则(REQ-REG-12 delta:
+    ///   placeholder 不是「根材料有效」证明)。Task 2/3 消费;夹具矩阵区分:
+    ///   普通有效根 = 本函数;故意缺根 = `publish_root_policy_with_receipt`
+    ///   (不建根 language);placeholder 兼容 = `admission_fixture` 默认形态;
+    ///   fresh-bootstrap = 默认形态 + 有效凭据(根材料由 recipe 生成)。
     fn publish_valid_root_materials(
         fixture: &AdmissionFixture,
         operation_id: &str,
@@ -1673,7 +1676,7 @@ mod tests {
 
         // attempt 尚未创建(无 worktree/target/D4 事实):early 判定只看
         // capability 证据,返回不携未来 target/worktree 或 D4 的两枚引用。
-        let aria_before = sorted_tree_files(&fixture.paths.root());
+        let aria_before = sorted_tree_files(fixture.paths.root());
         let trust_before = std::fs::read(&trust_artifact).unwrap();
         let early = gateway
             .action_admission_verdict(
@@ -1685,7 +1688,7 @@ mod tests {
             .expect("early eligibility must not require future D4 facts");
         assert_eq!(early.capability_snapshot_ref, "snapshot-admission-test");
         assert_eq!(early.projection_ref, "projection-digest-CodingTargetWrite");
-        let aria_after = sorted_tree_files(&fixture.paths.root());
+        let aria_after = sorted_tree_files(fixture.paths.root());
         assert_eq!(aria_before, aria_after);
         assert_eq!(std::fs::read(&trust_artifact).unwrap(), trust_before);
         assert_eq!(fixture.streaming_adapter.start_count(), 0);
@@ -1919,12 +1922,15 @@ mod tests {
         }])
         .unwrap();
         admission_record.supported_actions = Vec::new();
-        store.upsert(&fixture.project_id, &admission_record).unwrap();
-        let preflight = crate::product::logical_codebase::LogicalCodebaseProviderAdmissionPreflight::new(
-            fixture.paths.clone(),
-            fixture.lc_id.clone(),
-            std::sync::Arc::new(gateway),
-        );
+        store
+            .upsert(&fixture.project_id, &admission_record)
+            .unwrap();
+        let preflight =
+            crate::product::logical_codebase::LogicalCodebaseProviderAdmissionPreflight::new(
+                fixture.paths.clone(),
+                fixture.lc_id.clone(),
+                std::sync::Arc::new(gateway),
+            );
         // bootstrap 相位:凭据 + 已交付 recipe 证据 → ready(裸成员仓,
         // 根规则/receipt 由 recipe 生成)。请求 provider ref 与记录的
         // capability snapshot 一致(cap_managed_snapshot)。
@@ -1946,7 +1952,11 @@ mod tests {
                 &ProviderAdmissionPhase::AggregateBootstrap(credential),
             )
             .expect("bootstrap admission must ride the root-recipe gateway channel");
-        assert!(bootstrap_ready.ready, "missing: {:?}", bootstrap_ready.missing_materials);
+        assert!(
+            bootstrap_ready.ready,
+            "missing: {:?}",
+            bootstrap_ready.missing_materials
+        );
         // 普通会话:同一 gateway 仍按 Normal 矩阵拒绝(PlanningReadOnly
         // Unknown),不借 recipe 证据。
         assert_bootstrap_waiting(
@@ -2071,7 +2081,7 @@ mod tests {
         use crate::product::logical_codebase::policy::ProviderWireDialect;
         use crate::product::logical_codebase::production_policy_resolvers::StoreBackedProviderCapabilitySource;
         use crate::product::logical_codebase::provider_capability_store::{
-            ProviderCapabilityStore, PROVIDER_CAPABILITY_ACTION_UNKNOWN,
+            PROVIDER_CAPABILITY_ACTION_UNKNOWN, ProviderCapabilityStore,
         };
 
         let mut fixture = admission_fixture();
@@ -2123,12 +2133,13 @@ mod tests {
             .get(&fixture.project_id, ProviderRefType::ClaudeCode)
             .unwrap()
             .unwrap();
-        let legacy_launch_state = legacy.current_action_row(
-            ProviderWireDialect::ClaudeCodeStreamJson,
-            "0.0.0-managed",
-            SessionPolicyAction::PlanningReadOnly,
-        )
-        .launch;
+        let legacy_launch_state = legacy
+            .current_action_row(
+                ProviderWireDialect::ClaudeCodeStreamJson,
+                "0.0.0-managed",
+                SessionPolicyAction::PlanningReadOnly,
+            )
+            .launch;
         assert_eq!(legacy_launch_state, ProviderCapabilityEvidence::Unknown);
 
         // admission:既有 waiting 面保持冻结(reason + allowed actions),
@@ -2213,8 +2224,16 @@ mod tests {
                 .iter()
                 .any(|material| material.starts_with("trust evidence:"))
         );
-        assert!(waiting.allowed_actions.contains(&BootstrapActionKind::Revalidate));
-        assert!(waiting.allowed_actions.contains(&BootstrapActionKind::Retry));
+        assert!(
+            waiting
+                .allowed_actions
+                .contains(&BootstrapActionKind::Revalidate)
+        );
+        assert!(
+            waiting
+                .allowed_actions
+                .contains(&BootstrapActionKind::Retry)
+        );
         assert_eq!(
             waiting.allowed_actions.len(),
             2,

@@ -1069,6 +1069,8 @@ fn attest_attention_binding_locked(
 ///（仅含已废弃的 `logical_repository_id`、无 `target`）读入为
 /// `LegacyUnbound`（旧代无绑定，可诊断 fail-closed），不把 serde 缺字段
 /// 错误泄漏为普通 JSON 读取失败；新格式完整校验后返回。
+// 读侧两态同域(旧代诊断/新格式),变体互斥且一次只存活一个;Box 会加解引用噪声。
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum PreparedPlanIntentRead {
     Current(PreparedPlanIntent),
     /// 旧代意图：无 target。携带身份字段供诊断；绝不驱动自动链。

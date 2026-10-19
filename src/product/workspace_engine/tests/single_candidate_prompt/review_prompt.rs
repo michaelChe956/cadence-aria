@@ -624,7 +624,7 @@ mod sg3a1_structure_input {
     /// IR/canonical/原 review 合同仍在，builder 前后 review 状态零变化。
     #[test]
     fn sg_03a_1_reviewer_consumes_same_generation_structure_report() {
-        let (_tmp, _lifecycle, mut engine, report_ref) =
+        let (_tmp, _lifecycle, engine, report_ref) =
             sg3a1_sealed_session("same_generation", |_| {});
         let rounds_before = engine.session.review_rounds;
         let history_before = engine.session.run_history.clone();
@@ -753,7 +753,7 @@ mod sg3a1_structure_input {
     #[test]
     fn sg_03a_1_review_rejects_stale_missing_structure_context() {
         // —— 缺证：payload 无 context digest（missing）——
-        let (_tmp1, _lc1, mut engine1, _ref1) = sg3a1_sealed_session("missing_digest", |payload| {
+        let (_tmp1, _lc1, engine1, _ref1) = sg3a1_sealed_session("missing_digest", |payload| {
             payload.context_digest = String::new();
         });
         let error = engine1
@@ -765,7 +765,7 @@ mod sg3a1_structure_input {
         );
 
         // —— rule 漂移：payload 冻结在旧规则版本 ——
-        let (_tmp2, _lc2, mut engine2, _ref2) = sg3a1_sealed_session("stale_rule", |payload| {
+        let (_tmp2, _lc2, engine2, _ref2) = sg3a1_sealed_session("stale_rule", |payload| {
             payload.rule_version = "rule/planning-structure@0".to_string();
         });
         let error = engine2
@@ -777,8 +777,7 @@ mod sg3a1_structure_input {
         );
 
         // —— 旧 context：freeze 后 live plan options 漂移 ——
-        let (_tmp3, lifecycle3, mut engine3, stale_ref) =
-            sg3a1_sealed_session("stale_context", |_| {});
+        let (_tmp3, lifecycle3, engine3, stale_ref) = sg3a1_sealed_session("stale_context", |_| {});
         let rounds_before_drift = engine3.session.review_rounds;
         let scope_before_drift = engine3.session.review_invocation_scope.clone();
         // 另造一个「当前 context」的合法报告 B——session 指向 A 时不得被

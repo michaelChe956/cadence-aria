@@ -1,6 +1,9 @@
 // Task 2.1（lc-root-initialization，REQ-ENV-01/ENV-10）测试 doubles。
 // 物理拆分（1200 行守卫）：经 include! 挂载，模块域与 provider_run_events.rs 相同。
 
+/// 冻结执行合同事实:(duty, author_digest, profile, carrier)。
+type CapturedContract = (String, bool, String, String);
+
 /// 记录启动 input 并立即完成的 capture provider。gateway registry 与 run
 /// registry 各持独立实例，用启动计数区分「经 gateway」与「直连」经路。
 pub(super) struct RootCwdCaptureAuthorProvider {
@@ -8,8 +11,7 @@ pub(super) struct RootCwdCaptureAuthorProvider {
     pub(super) inputs: mpsc::UnboundedSender<StreamingProviderInput>,
     /// 批2 Task 11：capture validated launch 冻结的执行合同事实
     /// （None=合同显式缺失）。(duty, author_digest, profile, carrier)。
-    pub(super) contracts:
-        std::sync::Mutex<Vec<Option<(String, bool, String, String)>>>,
+    pub(super) contracts: std::sync::Mutex<Vec<Option<CapturedContract>>>,
 }
 
 #[async_trait::async_trait]
@@ -217,8 +219,7 @@ async fn logical_author_and_choice_followup_keep_root_cwd_and_target_separate() 
         "target 是 E native anchor（聚合根），非成员 checkout"
     );
     assert!(
-        envelope.target.logical_repository_id.is_empty()
-            && envelope.target.checkout_id.is_empty(),
+        envelope.target.logical_repository_id.is_empty() && envelope.target.checkout_id.is_empty(),
         "聚合根锚不携带成员/checkout 身份"
     );
     assert_eq!(

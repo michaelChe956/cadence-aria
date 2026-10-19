@@ -98,6 +98,7 @@ pub(crate) fn collect_design_context(
 ///
 /// DesignSpecRecord 本身只保存 spec 元数据，需求正文位于其 latest version markdown；
 /// 因此这里只接受 markdown 中显式出现的 REQ-/NFR- token，不为 prompt 生成任何 ID。
+#[cfg(test)] // 单测断言用薄包装;生产直接消费 extract_registered_requirement_ids。
 pub(crate) fn extract_design_requirement_ids(design_context: &[String]) -> Vec<String> {
     extract_registered_requirement_ids(design_context)
 }

@@ -1064,14 +1064,14 @@ impl ClaudeCodeProvider {
         };
         // B1-1:spawn 点回填真实 PID+starttime(PID 复用防护);身份不可证
         // 即整组停止,不留未登记子进程。
-        if let (Some(ownership), Some(reservation)) = (ownership.as_ref(), reservation.as_ref()) {
-            if let Err(error) = backfill_launch_identity(ownership, reservation, &process.child) {
-                let mut child = process.child;
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                ownership.release_after_session_tail().await;
-                return Err(error);
-            }
+        if let (Some(ownership), Some(reservation)) = (ownership.as_ref(), reservation.as_ref())
+            && let Err(error) = backfill_launch_identity(ownership, reservation, &process.child)
+        {
+            let mut child = process.child;
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            ownership.release_after_session_tail().await;
+            return Err(error);
         }
 
         let stdin = Arc::new(Mutex::new(process.stdin));
@@ -1610,14 +1610,14 @@ impl ClaudeCodeProvider {
         };
         // B1-1:spawn 点回填真实 PID+starttime;身份不可证即整组停止,
         // 不留未登记子进程。
-        if let (Some(ownership), Some(reservation)) = (ownership.as_ref(), reservation.as_ref()) {
-            if let Err(error) = backfill_launch_identity(ownership, reservation, &process.child) {
-                let mut child = process.child;
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                ownership.release_after_session_tail().await;
-                return Err(error);
-            }
+        if let (Some(ownership), Some(reservation)) = (ownership.as_ref(), reservation.as_ref())
+            && let Err(error) = backfill_launch_identity(ownership, reservation, &process.child)
+        {
+            let mut child = process.child;
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            ownership.release_after_session_tail().await;
+            return Err(error);
         }
 
         let stdin = Arc::new(Mutex::new(process.stdin));

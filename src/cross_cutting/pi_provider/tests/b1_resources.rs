@@ -375,7 +375,7 @@ async fn pi_b1_start_owned_registers_process_and_releases_after_real_tail() {
 #[cfg(unix)]
 #[tokio::test]
 async fn pi_b1_start_owned_reserve_failure_means_zero_spawn() {
-    let (base, scope) = b1_pi_broken_store_scope_env("raw-reserve-fail");
+    let (_base, scope) = b1_pi_broken_store_scope_env("raw-reserve-fail");
     let marker_dir = tempfile::tempdir().expect("reserve-fail marker dir");
     let spawn_marker = marker_dir.path().join("spawned");
     let provider = PiProvider::new(b1_pi_spawn_marker_fixture(

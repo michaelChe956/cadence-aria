@@ -76,6 +76,8 @@ pub(crate) enum HumanGateCommandOutcome {
     },
 }
 
+// 关门裁决的 typed 结果,按值返回给 WS/REST 投影;Box 会波及两处投影。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HumanGateCloseOutcome {
     Confirmed,
@@ -947,26 +949,26 @@ impl super::WorkspaceEngine {
         message.push_str(&captured.failure.failure_id);
         message.push('\n');
         message.push_str(&captured.failure.render());
-        if let Some(run_id) = captured.failure.compile_run_id.as_deref() {
-            if let Some(tx) = self.latest_failed_compile_tx_for_run(run_id) {
-                if let Some(reason) = tx.failure_reason.as_deref() {
-                    message.push_str("\nfailure_reason: ");
-                    message.push_str(reason);
-                }
-                if !tx.validator_findings.is_empty() {
-                    message.push_str("\nvalidator findings:");
-                    for finding in &tx.validator_findings {
-                        message.push_str(&format!(
-                            "\n[{}] {}: {} (work_items: {})",
-                            finding.severity.as_str(),
-                            finding.code,
-                            finding.message,
-                            finding.work_item_ids.join(", ")
-                        ));
-                    }
-                }
-                captured.validator_findings = tx.validator_findings.clone();
+        if let Some(run_id) = captured.failure.compile_run_id.as_deref()
+            && let Some(tx) = self.latest_failed_compile_tx_for_run(run_id)
+        {
+            if let Some(reason) = tx.failure_reason.as_deref() {
+                message.push_str("\nfailure_reason: ");
+                message.push_str(reason);
             }
+            if !tx.validator_findings.is_empty() {
+                message.push_str("\nvalidator findings:");
+                for finding in &tx.validator_findings {
+                    message.push_str(&format!(
+                        "\n[{}] {}: {} (work_items: {})",
+                        finding.severity.as_str(),
+                        finding.code,
+                        finding.message,
+                        finding.work_item_ids.join(", ")
+                    ));
+                }
+            }
+            captured.validator_findings = tx.validator_findings.clone();
         }
         self.last_gate_close_compile_failure = Some(captured);
         message

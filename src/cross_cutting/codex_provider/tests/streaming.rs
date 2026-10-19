@@ -614,14 +614,13 @@ async fn codex_child_death_after_initialize_write_terminates_session_promptly() 
 
     let failure = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            match session
+            if let ProviderEvent::Failed { message } = session
                 .events
                 .recv()
                 .await
                 .expect("event channel stays open until terminal event")
             {
-                ProviderEvent::Failed { message } => break message,
-                _ => {}
+                break message;
             }
         }
     })

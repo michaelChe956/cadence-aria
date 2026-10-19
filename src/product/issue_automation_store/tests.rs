@@ -1249,7 +1249,7 @@ fn issue_automation_store_reads_legacy_json_without_attention_fields() {
 #[test]
 fn issue_automation_store_attention_fact_corrupt_json_propagates() {
     let (tmp, store, binding, _revision) = bound_enrollment_with_binding();
-    std::fs::write(&enrollment_json_path(&tmp), "{ not json").unwrap();
+    std::fs::write(enrollment_json_path(&tmp), "{ not json").unwrap();
     assert!(matches!(
         store
             .upsert_automation_attention_fact(

@@ -502,6 +502,8 @@ use crate::web::workspace_session::WorkspaceSessionManager;
 /// 会话 + 漂移后的逻辑 codebase（重连判 StaleContext）。
 struct AnchorT13PlanFixture {
     base: PlanningResumeFixture,
+    /// 仅保活物理仓隔离目录(会话经 app_paths 访问)。
+    #[allow(dead_code)]
     repo_dir: tempfile::TempDir,
     app_paths: ProductAppPaths,
     lifecycle: LifecycleStore,
@@ -1880,7 +1882,7 @@ async fn anchor_t16_legacy_plan_revision_fresh_recomputes_matching_payload() {
         "checkpoints-t16-revision",
     );
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let mut outbound_rx =
+    let outbound_rx =
         anchor_t16_claim_and_dispatch(&fixture, &recovery, "op-t16-revision", engine_arc, input_tx)
             .await;
 

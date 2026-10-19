@@ -285,6 +285,7 @@ pub(super) struct AliasLcGatewayExtras {
 /// 在 legacy 别名位置登记逻辑代码库（record/manifest/member/checkout/
 /// selection/index/policy 权威记录）并组装 gateway。既有行为入口——
 /// 零覆盖项；细节见 `register_alias_logical_codebase_with_extras`。
+#[allow(dead_code)] // 既有行为入口(零覆盖项);矩阵已转用 _with_extras 变体。
 pub(super) fn register_alias_logical_codebase(
     app_paths: &ProductAppPaths,
     member_roots: &[std::path::PathBuf],
@@ -2630,7 +2631,7 @@ async fn story_generation_other_unavailable_emits_no_guidance_frame() {
     })
     .await;
     assert!(
-        matches!(guidance_leak, Err(_)),
+        guidance_leak.is_err(),
         "non-trust launch failure must not emit a guidance frame, got: {guidance_leak:?}"
     );
     forward.abort();

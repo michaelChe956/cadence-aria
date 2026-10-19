@@ -18,8 +18,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
 use crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore;
 use crate::product::logical_codebase::provider_gateway::{
-    CODEX_DANGER_FULL_ACCESS_UNSUPPORTED, PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED,
-    PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,
+    PROVIDER_CAPABILITY_LAUNCH_NOT_CONFIRMED, PROVIDER_CAPABILITY_WRITE_BOUNDARY_NOT_CONFIRMED,
     PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_DENIED,
     PROVIDER_ROOT_RECIPE_CREDENTIAL_RECHECK_UNAVAILABLE,
     PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT, PROVIDER_ROOT_RECIPE_REQUIRES_FIXED_CLAUDE,
@@ -383,14 +382,12 @@ impl ProviderCapabilitySource for StoreBackedProviderCapabilitySource {
         // 不跨 CLI 版本沿用,等待重新交付)。
         if let crate::product::logical_codebase::provider_capability_store::RootRecipeEvidence::Delivered { version, .. } =
             &record.root_recipe_evidence
-        {
-            if version != &record.version {
+            && version != &record.version {
                 return Err(ProviderGatewayError::UnsupportedCapability(format!(
                     "{PROVIDER_ROOT_RECIPE_EVIDENCE_VERSION_DRIFT}: evidence pins {version}, record has {}",
                     record.version
                 )));
             }
-        }
         // 凭据每次重验 durable Running:operation 终态/step 推进/digest 或
         // root 漂移 → 凭据失效,fail-closed(稳定码 + admission reason_code)。
         if let Err(denied) =

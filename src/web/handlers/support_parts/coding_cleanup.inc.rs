@@ -158,6 +158,7 @@ fn cleanup_repo_shared_worktree_if_no_active_attempts(
 /// `{repository_id}.json` 逐个清（含锁文件，经 `list_repo_shared_worktrees` +
 /// `delete_repo_shared_worktree`）；单仓（Legacy）走老逻辑清 `issue-shared-worktree.json`
 /// （不变，红线）。FailClosed 稳定码上抛，绝不静默回退物理仓库。
+#[cfg(test)] // 生产删除路径走 issue/group 专用清理;宽 helper 仅 T11 单测覆盖。
 pub(crate) fn cleanup_shared_worktree_by_routing(
     app_paths: &ProductAppPaths,
     project_id: &str,
@@ -373,9 +374,9 @@ fn shared_resource_cleanup_api_error(
 /// `coding_plan_workspace_members_present`）原样透出给调用方/前端；
 /// HTTP 409 映射归 H1 白名单（error.rs）。其余 store 错误归既有通用映射。
 fn workspace_reset_api_error(error: crate::product::json_store::ProductStoreError) -> ApiError {
-    if let crate::product::json_store::ProductStoreError::Conflict { ref kind, .. } = error
+    if let crate::product::json_store::ProductStoreError::Conflict { kind, .. } = error
         && matches!(
-            kind.as_ref(),
+            kind,
             "coding_plan_workspace_clearing"
                 | "coding_plan_run_retired"
                 | "coding_plan_workspace_generation_conflict"
@@ -383,7 +384,7 @@ fn workspace_reset_api_error(error: crate::product::json_store::ProductStoreErro
         )
     {
         return ApiError::runtime(
-            *kind,
+            kind,
             "coding workspace round reset rejected the request",
             json!({}),
         );
@@ -469,7 +470,11 @@ pub(crate) fn finalize_coding_attempt_deletion(
 #[derive(Debug)]
 pub(crate) enum PlanCodingWorkspaceResetOutcome {
     /// 完整重置完成（或同 command 幂等重放）；`generation` 为重置后的新轮次。
-    Reset { generation: u64 },
+    Reset {
+        /// 重置后轮次:供响应扩展预留,当前解码方只判变体。
+        #[allow(dead_code)]
+        generation: u64,
+    },
     /// 仅存在未越 AttemptPersisted 的初始化前缀——继续原协议，不重置
     /// （设计 A 节：不能仅因 Prepared.target_attempts 为空便重置）。
     InitializationPrefix,
@@ -1229,8 +1234,8 @@ mod h2a_workspace_reset_tests {
         assert!(
             matches!(
                 error,
-                crate::product::json_store::ProductStoreError::Conflict { ref kind, .. }
-                    if *kind == "coding_plan_run_retired"
+                crate::product::json_store::ProductStoreError::Conflict { kind, .. }
+                    if kind == "coding_plan_run_retired"
             ),
             "retired command must not re-prepare after full reset: {error}"
         );
@@ -1489,7 +1494,7 @@ mod h2a_workspace_reset_tests {
             )
             .unwrap();
         run_store.bind_ready(&run, &fixture.bindings, None).unwrap();
-        let coding_store = fixture.coding_store();
+        let _coding_store = fixture.coding_store();
 
         // 零成员半残（原事故形态）：attempt JSON 已亡、journal/advance 残留。
         for attempt in [fixture.api_attempt(), fixture.web_attempt()] {

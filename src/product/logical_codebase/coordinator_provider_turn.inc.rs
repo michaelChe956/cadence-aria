@@ -226,7 +226,6 @@ impl GatewayBackedAggregateProviderTurnDriver {
     /// 仍 Allowed,故按任务要求措辞而非伪称强制门;oracle 已知该 flavor
     /// 纪律线可能不治,如实标注残余方差)。
     fn scope_discipline_section(aggregate_root: &std::path::Path) -> String {
-
         format!(
             "\n[aggregate_scope_discipline]\n\
              - 你的工作区是且只是聚合根（provider context root 绝对路径）：{path}。上述 recipe 命令的全部文件写入都必须落在 {path} 下的允许面（{allowed}）内；聚合根里的成员目录（例如 alpha、beta）不属于允许面。\n\
@@ -240,7 +239,10 @@ impl GatewayBackedAggregateProviderTurnDriver {
 
     /// OracleAggInitScope：root recipe turn prompt 拼接纯函数——recipe
     /// 命令逐字前缀+scope 纪律线追加(不经 gateway 即可直接测试)。
-    fn recipe_prompt(step: AggregateInitializationStepKind, aggregate_root: &std::path::Path) -> String {
+    fn recipe_prompt(
+        step: AggregateInitializationStepKind,
+        aggregate_root: &std::path::Path,
+    ) -> String {
         format!(
             "{}{}",
             Self::recipe_commands(step).join("\n"),
@@ -1091,9 +1093,7 @@ mod provider_turn_lcg_tests {
             &fixture.operation_id,
             AggregateInitializationStepKind::PreCheck,
             &fixture.lc_id,
-            &std::path::PathBuf::from(
-                std::fs::canonicalize(fixture._temp.path().join("aggregate-root")).unwrap(),
-            ),
+            &std::fs::canonicalize(fixture._temp.path().join("aggregate-root")).unwrap(),
         )
         .expect("derive bootstrap credential from running operation");
         let snapshot = AggregatePreflightSnapshot {

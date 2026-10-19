@@ -54,6 +54,7 @@ use self::terminal_handlers::{
 /// Author 不广告代码编辑 fs 写)与本函数共用同一布尔方言形状;会话
 /// initialize 接线归 T10/T20,当前直连会话保持全集(广告≠授权,请求仍
 /// 逐条过 policy gate)。
+#[cfg(test)] // 仅本模块单测(布尔方言断言)消费;生产走 advertised_client_capabilities。
 pub fn kimi_client_capabilities() -> Value {
     json!({
         "fs": {"readTextFile": true, "writeTextFile": true},
@@ -155,6 +156,7 @@ where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     /// 批2 Task 8:直连形态构造(无受信授予,行为=承载角色映射职责矩阵)。
+    #[allow(dead_code)] // 生产路径统一走 new_with_trusted_duty;此直连入口供矩阵 harness。
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer: JsonRpcPeer<W>,

@@ -2425,7 +2425,7 @@ mod anchor_t09_prepare_contract {
                     "anchor t09 projector only projects Claude Code".to_string(),
                 ));
             }
-            let boundary = match input.boundary() {
+            let _boundary = match input.boundary() {
                 Some(plan) => plan.clone(),
                 None => ProviderBoundaryPlan::new(
                     ProviderBoundaryMode::ReadOnly,
@@ -2603,7 +2603,7 @@ mod anchor_t09_prepare_contract {
             .unwrap()
             .unwrap();
         let durable_before = (
-            policy_before.revision.clone(),
+            policy_before.revision,
             policy_before.digest.clone(),
             fixture.gateway_audit().supersede_count(),
             fixture.gateway_audit().stream_launches(),
@@ -4667,9 +4667,9 @@ mod b2t2_trusted_execution {
 
         let (input, _policy) = launch.into_parts();
         assert!(
-            input.env_vars.get("PATH").is_none()
-                && input.env_vars.get("HOME").is_none()
-                && input.env_vars.get("CODEX_HOME").is_none(),
+            !input.env_vars.contains_key("PATH")
+                && !input.env_vars.contains_key("HOME")
+                && !input.env_vars.contains_key("CODEX_HOME"),
             "受信装配不得再注入 PATH/HOME/CODEX_HOME 白名单: {:?}",
             input.env_vars.keys().collect::<Vec<_>>()
         );
@@ -4969,7 +4969,7 @@ mod b2t2_trusted_execution {
 
         let (input, _policy) = launch.into_parts();
         assert!(
-            input.env_vars.get("PATH").is_none() && input.env_vars.get("HOME").is_none(),
+            !input.env_vars.contains_key("PATH") && !input.env_vars.contains_key("HOME"),
             "同步受信装配不得再注入 PATH/HOME 白名单: {:?}",
             input.env_vars.keys().collect::<Vec<_>>()
         );

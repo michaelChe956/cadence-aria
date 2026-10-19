@@ -758,14 +758,13 @@ impl PiProvider {
         // B1-1 接线片:spawn 成功即回填真实 PID+starttime(/proc 观察,PID
         // 复用防护);确认失败整组停止——kill+wait 后上抛,收口注销由
         // 守卫/`start_owned` 错误路径承担(身份未确认按无身份注销)。
-        if let (Some(ownership), Some(reservation)) = (owned, reservation.as_ref()) {
-            if let Err(error) =
+        if let (Some(ownership), Some(reservation)) = (owned, reservation.as_ref())
+            && let Err(error) =
                 ownership.backfill_spawned_identity(reservation, child.id().unwrap_or(0))
-            {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                return Err(error);
-            }
+        {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(error);
         }
         let (event_tx, event_rx) = mpsc::channel(32);
         // Pi is Auto-only. Keep bridge construction consistent with the other streaming
@@ -1216,15 +1215,14 @@ impl StreamingProviderAdapter for PiProvider {
         // B1-1 接线片:spawn 成功即回填真实 PID+starttime(/proc 观察,PID
         // 复用防护);确认失败整组停止——kill+wait 后收口注销再上抛
         // (不伪称零 spawn)。
-        if let Some((ownership, reservation)) = owned.as_ref() {
-            if let Err(error) =
+        if let Some((ownership, reservation)) = owned.as_ref()
+            && let Err(error) =
                 ownership.backfill_spawned_identity(reservation, child.id().unwrap_or(0))
-            {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                ownership.release_after_session_tail().await;
-                return Err(error);
-            }
+        {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            ownership.release_after_session_tail().await;
+            return Err(error);
         }
         let (event_tx, event_rx) = mpsc::channel(32);
         // pi 是 Auto-only:与 direct 路径一致构造 bridge,但授权/命令转发
@@ -1240,19 +1238,17 @@ impl StreamingProviderAdapter for PiProvider {
             .as_deref()
             .map(str::trim)
             .filter(|id| !id.is_empty())
-        {
-            if let Err(error) =
+            && let Err(error) =
                 session::confirm_pi_native_resume_id(&peer, &cancel, requested_native_id).await
-            {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                // B1-1:握手失败(已 spawn)——kill+wait 后按登记身份收口
-                // 注销再上抛。
-                if let Some((ownership, _reservation)) = owned.as_ref() {
-                    ownership.release_after_session_tail().await;
-                }
-                return Err(error);
+        {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            // B1-1:握手失败(已 spawn)——kill+wait 后按登记身份收口
+            // 注销再上抛。
+            if let Some((ownership, _reservation)) = owned.as_ref() {
+                ownership.release_after_session_tail().await;
             }
+            return Err(error);
         }
         let (command_tx, command_rx) = mpsc::channel(8);
         let _ = event_tx
@@ -1589,9 +1585,11 @@ mod b1_launch_cancel_tests {
                 Instant::now() < deadline,
                 "fixture 的 --version 探测必须启动(probe marker 未出现)"
             );
-            match tokio::time::timeout(Duration::from_millis(10), &mut launch).await {
-                Ok(_) => panic!("launch 不得在版本探测完成前返回"),
-                Err(_) => {}
+            if tokio::time::timeout(Duration::from_millis(10), &mut launch)
+                .await
+                .is_ok()
+            {
+                panic!("launch 不得在版本探测完成前返回")
             }
         }
         // 引擎取消时序:provider_start 的 select 分支 cancel 后 drop launch future。

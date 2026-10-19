@@ -8,9 +8,7 @@ use crate::product::entity_deletion_store::{
     DeletionEntityKind, EntityDeletionManifest, EntityDeletionRecord, EntityDeletionStore,
     EntityScope, read_json_if_exists,
 };
-use crate::product::entity_operation_store::{
-    EntityOperationError, EntityOperationStore, SharedResourceKey, SharedResourceWriteLease,
-};
+use crate::product::entity_operation_store::{EntityOperationError, SharedResourceKey};
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::LogicalRepositoryId;
 use crate::product::models::{
@@ -1115,6 +1113,7 @@ impl LifecycleStore {
     ///   只取 live 准入；全部归属已墓碑（含 owned-index claim）→ 归属未知
     ///   fail-closed，禁止覆盖已 purging Plan 现资源或凭旧缓存 path 重建；
     /// - 无任何归属证据：纯 issue/repo 基础设施写，保持原行为（非授权放宽）。
+    #[allow(clippy::too_many_arguments)] // 准入键位(hint/legacy/等待策略)逐项显式,避免私有结构体泄漏语义。
     fn with_shared_worktree_write_admission<T>(
         &self,
         project_id: &str,
@@ -1233,20 +1232,17 @@ impl LifecycleStore {
                 id: record.id,
             });
         }
-        match repository_id {
-            Some(repository) => {
-                if record.target_repository_id != Some(repository) {
-                    return Err(ProductStoreError::IdentityMismatch {
-                        kind: "repo_shared_worktree",
-                        id: record.id,
-                    });
-                }
-            }
-            // issue 维键位由文件路径确定：第一方迁移 backfill 会原地在
-            // issue-shared-worktree.json 写 Some(target)（tagged 态，
-            // legacy_shared_worktree_migration 显式容忍），故不比对 target，
-            // 只保留上方 project/issue 身份核验；repo 维（Some 键）严格比对。
-            None => {}
+        // issue 维键位由文件路径确定：第一方迁移 backfill 会原地在
+        // issue-shared-worktree.json 写 Some(target)（tagged 态，
+        // legacy_shared_worktree_migration 显式容忍），故不比对 target，
+        // 只保留上方 project/issue 身份核验；repo 维（Some 键）严格比对。
+        if let Some(repository) = repository_id
+            && record.target_repository_id != Some(repository)
+        {
+            return Err(ProductStoreError::IdentityMismatch {
+                kind: "repo_shared_worktree",
+                id: record.id,
+            });
         }
         Ok(Some(record))
     }
@@ -1276,12 +1272,11 @@ impl LifecycleStore {
                 scopes.push(scope);
             }
         }
-        if let Some(owner_id) = record.current_lock_owner_id.as_deref() {
-            if let Some(scope) =
+        if let Some(owner_id) = record.current_lock_owner_id.as_deref()
+            && let Some(scope) =
                 self.shared_worktree_plan_for_owner(project_id, issue_id, owner_id, Some(record))?
-            {
-                scopes.push(scope);
-            }
+        {
+            scopes.push(scope);
         }
         sort_and_dedup_scopes(&mut scopes);
         Ok(scopes)

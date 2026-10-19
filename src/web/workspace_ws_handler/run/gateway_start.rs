@@ -377,11 +377,11 @@ impl PlanSplitRunContext {
                     entry.updated_at = now.clone();
                 }
             }
-            let mut recovery = record.lc_resume_recovery.as_mut().filter(|recovery| {
+            let recovery = record.lc_resume_recovery.as_mut().filter(|recovery| {
                 recovery.state == LcResumeRecoveryState::FreshRunning
                     && recovery.fresh_role_run_seq == Some(role_run_seq)
             });
-            if let Some(recovery) = recovery.as_deref_mut() {
+            if let Some(recovery) = recovery {
                 recovery.state = LcResumeRecoveryState::Resolved;
                 if recovery.fresh_native_session_id.is_none() {
                     recovery.fresh_native_session_id = native_session_id.clone();
@@ -1322,8 +1322,8 @@ fn verify_sc_manual_fresh_grant_join_core(
 /// - feedback：ReviewerRevision/AuthorFeedback 冻结 original_feedback 与原
 ///   修订节点 durable revision_feedback 一致（双侧均在场才比对；等待期反馈
 ///   被替换即漂移）。
-/// 漂移 → `lc_resume_recovery_stale` 拒收回等待；store 读取失败按 store
-/// unavailable 家族 typed 上浮。
+///   漂移 → `lc_resume_recovery_stale` 拒收回等待；store 读取失败按 store
+///   unavailable 家族 typed 上浮。
 fn verify_lc_fresh_author_family_payload(
     context: &crate::product::models::LcRecoveryRunContext,
     run_context: &ProviderRunContext,

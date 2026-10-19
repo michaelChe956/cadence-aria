@@ -464,6 +464,8 @@ pub fn execute_initial_plan_compile(
 }
 
 mod finalizer;
+// 单测(part_03)按 `compile::work_item_record_attribution` 路径引用该模块;库构建无消费方。
+#[cfg(test)]
 pub(crate) use finalizer::work_item_record_attribution;
 #[cfg(test)]
 mod ir_adapter_tests;

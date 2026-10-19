@@ -4,7 +4,6 @@
 // 架构概览/模块划分/技术选型/测试策略/关键路径 类标题，导致任何规范 design spec
 // 都被误判为 5 项上下文全缺失，并把误导性 gaps 注入 outline prompt。
 
-
 /// 精简自 .aria/projects/project_0001/issues/issue_0001/versions/design_spec_0001/
 /// version_0002.json 的规范 Design Spec 结构（保留 parser 强制的全部标题）。
 const CANONICAL_DESIGN_SPEC_MARKDOWN: &str = r#"# 设计 Spec：紧凑时长格式化库函数与演示页面（design_spec_0001）
@@ -341,10 +340,12 @@ fn design_context_extracts_only_explicit_requirement_ids_in_stable_order() {
 
 #[test]
 fn design_context_does_not_invent_requirement_ids_when_none_are_present() {
-    assert!(crate::product::work_item_split_engine::context::extract_design_requirement_ids(&[
-        "Design Spec: no explicit requirement references".to_string(),
-    ])
-    .is_empty());
+    assert!(
+        crate::product::work_item_split_engine::context::extract_design_requirement_ids(&[
+            "Design Spec: no explicit requirement references".to_string(),
+        ])
+        .is_empty()
+    );
 }
 
 #[test]
@@ -359,6 +360,7 @@ fn empty_design_spec_has_no_capabilities() {
 
     let merged = crate::product::work_item_split_engine::merge_design_context_capabilities(&[]);
     assert_eq!(design_context_gaps(&merged).len(), 5);
+}
 
 #[test]
 fn extract_registered_requirement_ids_merges_story_and_design_sources() {
@@ -384,9 +386,9 @@ fn extract_registered_requirement_ids_merges_story_and_design_sources() {
     // 单源退化(design-only)保持既有语义。
     let design_only = vec!["Design: REQ-A-1 x".to_string()];
     assert_eq!(
-        crate::product::work_item_split_engine::context::extract_design_requirement_ids(&design_only),
+        crate::product::work_item_split_engine::context::extract_design_requirement_ids(
+            &design_only
+        ),
         vec!["REQ-A-1".to_string()]
     );
-}
-
 }

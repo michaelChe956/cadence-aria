@@ -527,7 +527,7 @@ impl WorkItemSplitEngine {
     /// context_resolutions（durable outline context index 只读保留）+
     /// 上一版 outline 全文（session artifact 版本按 run_context 版本钉选）
     /// + durable 返修反馈 + review 记录；不依赖旧 provider 会话历史，调用方
-    /// 以全新会话启动（resume=None，旧 native id 不回捞）。
+    ///   以全新会话启动（resume=None，旧 native id 不回捞）。
     ///
     /// `source_context` 仅接受 legacy outline 三 tag
     /// （legacy_outline_author / legacy_outline_revision /
@@ -699,7 +699,7 @@ fn outline_fresh_revision_facts(
         LcRecoveryRunContext::LegacyOutlineRebuild {
             business, origin, ..
         } => match origin {
-            LcOutlineRebuildOrigin::LegacyAuthor(payload) => Ok(OutlineFreshRevisionFacts {
+            LcOutlineRebuildOrigin::LegacyAuthor(_payload) => Ok(OutlineFreshRevisionFacts {
                 plan_entity_id: business.entity_id.clone(),
                 feedback: None,
                 outline_version: None,

@@ -1255,13 +1255,15 @@ fn t5_presence_gateway(
 struct T5TrustWaitingFacts {
     session_id: String,
     lc_id: String,
+    /// 冻结根本身由 manifest 承载;此处保留供断言对照。
+    #[allow(dead_code)]
     canonical_root: std::path::PathBuf,
 }
 
 /// T5.1 LC 会话 SC/非 SC 共用夹具：真实 issue（原始 LC 归属）+ LC scope
 /// manifest（root=冻结根）+ 开态门 durable 记录（SC 带相位/快照静态资格）
 /// + presence gateway；`trust=None` 时不注入确认上下文（缺上下文
-/// ContextWaiting，与生产 manager 缺 trust 依赖形态同构）。
+///   ContextWaiting，与生产 manager 缺 trust 依赖形态同构）。
 #[allow(clippy::type_complexity)]
 fn t5_trust_waiting_ws_fixture(
     single_candidate: bool,
@@ -1323,7 +1325,7 @@ fn t5_trust_waiting_ws_fixture(
             review_rounds: 0,
             superpowers_enabled: false,
             openspec_enabled: false,
-            work_item_plan_options: single_candidate.then(|| WorkItemPlanSessionOptions {
+            work_item_plan_options: single_candidate.then_some(WorkItemPlanSessionOptions {
                 flow_kind: WorkItemPlanFlowKind::SingleCandidate,
                 run_policy: RunPolicy::Interactive,
                 rollout_snapshot: true,

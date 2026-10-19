@@ -40,7 +40,10 @@ mod r4_e1_four_repository_campaign {
 
         // enrollment 冻结：集合 target（4 成员升序）＋auto 批准策略。
         let enrollment = fixture.enrollment();
-        let target = enrollment.target.as_ref().expect("frozen collection target");
+        let target = enrollment
+            .target
+            .as_ref()
+            .expect("frozen collection target");
         match target {
             EnrollmentTarget::LogicalCodebaseMembers {
                 logical_repository_ids,
@@ -79,7 +82,10 @@ mod r4_e1_four_repository_campaign {
         let child_bindings = fixture.child_collection_binding_targets();
         assert_eq!(child_bindings.len(), 3, "three attributed work items");
         for binding_target in &child_bindings {
-            assert_eq!(binding_target, target, "child copies the full collection authorization");
+            assert_eq!(
+                binding_target, target,
+                "child copies the full collection authorization"
+            );
         }
 
         // reconcile 循环阶段一：advance 集合准入→3 实际桶（member-d 选中但
@@ -91,7 +97,8 @@ mod r4_e1_four_repository_campaign {
                     && attempts
                         .iter()
                         .filter(|attempt| attempt.start_claim.is_some())
-                        .count() >= 2
+                        .count()
+                        >= 2
             })
             .await;
         let attempts = fixture.coding_attempts();
@@ -133,13 +140,13 @@ mod r4_e1_four_repository_campaign {
         // 期间单桶完成≠全 plan 完成，链路继续推进其余桶。
         fixture
             .reconcile_until(|attempts| {
-                attempts
-                    .iter()
-                    .any(|attempt| attempt.start_claim.is_some()
+                attempts.iter().any(|attempt| {
+                    attempt.start_claim.is_some()
                         && attempt
                             .target_snapshot
                             .as_ref()
-                            .is_some_and(|snapshot| snapshot.logical_repository_id == member(2)))
+                            .is_some_and(|snapshot| snapshot.logical_repository_id == member(2))
+                })
             })
             .await;
 
@@ -170,22 +177,20 @@ mod r4_e1_four_repository_campaign {
         let mut window_ids = std::collections::BTreeSet::new();
         let mut reviewer_run_count = 0usize;
         for attempt in fixture.coding_attempts() {
-            let reviewer_runs =
-                crate::product::coding_attempt_store::CodingAttemptStore::new(
-                    fixture.inner.paths.clone(),
-                )
-                .list_role_runs(PROJECT_ID, ISSUE_ID, &attempt.id)
-                .expect("list role runs")
-                .into_iter()
-                .filter(|run| {
-                    run.role == crate::product::coding_models::CodingProviderRole::CodeReviewer
-                })
-                .collect::<Vec<_>>();
+            let reviewer_runs = crate::product::coding_attempt_store::CodingAttemptStore::new(
+                fixture.inner.paths.clone(),
+            )
+            .list_role_runs(PROJECT_ID, ISSUE_ID, &attempt.id)
+            .expect("list role runs")
+            .into_iter()
+            .filter(|run| {
+                run.role == crate::product::coding_models::CodingProviderRole::CodeReviewer
+            })
+            .collect::<Vec<_>>();
             for run in reviewer_runs {
                 reviewer_run_count += 1;
-                let window_id = crate::product::reviewer_window_store::role_run_window_id(
-                    &attempt.id, &run.id,
-                );
+                let window_id =
+                    crate::product::reviewer_window_store::role_run_window_id(&attempt.id, &run.id);
                 assert!(
                     window_ids.insert(window_id.clone()),
                     "review window id must be unique across attempts: {window_id}"
@@ -208,7 +213,10 @@ mod r4_e1_four_repository_campaign {
         );
         let worker = AutopilotOrchestrator::new(fixture.state.clone(), Default::default());
         assert_eq!(
-            worker.reconcile(&fixture.state, PROJECT_ID, ISSUE_ID).await.unwrap(),
+            worker
+                .reconcile(&fixture.state, PROJECT_ID, ISSUE_ID)
+                .await
+                .unwrap(),
             ReconcileOutcome::AwaitingHuman,
             "orchestrator must observe the human final-confirm stop without clicking it"
         );
@@ -230,7 +238,10 @@ mod r4_e1_four_repository_campaign {
             assert_eq!(item.status, "confirmed", "{item:?}");
         }
         for expected in [member(1), member(2), member(3)] {
-            assert_eq!(attempt_status_for(&fixture, &expected), CodingAttemptStatus::Completed);
+            assert_eq!(
+                attempt_status_for(&fixture, &expected),
+                CodingAttemptStatus::Completed
+            );
         }
     }
 
@@ -251,13 +262,14 @@ mod r4_e1_four_repository_campaign {
                 attempts
                     .iter()
                     .filter(|attempt| attempt.start_claim.is_some())
-                    .count() >= 2
+                    .count()
+                    >= 2
             })
             .await;
         let app = crate::web::app::build_web_router(fixture.state.clone());
 
         // 播种当前绑定 plan 的旧事实（plan_question）：终止后必须清理，
-        /// 不留幽灵通知。
+        // 不留幽灵通知。
         let store = crate::product::issue_automation_store::IssueAutomationStore::new(
             fixture.inner.paths.clone(),
         );
@@ -315,11 +327,13 @@ mod r4_e1_four_repository_campaign {
             }),
         )
         .await;
-        assert_eq!(unconfirmed.status(), axum::http::StatusCode::PRECONDITION_REQUIRED);
-        let payload = crate::web::handlers::automation_enrollment_test_support::response_json(
-            unconfirmed,
-        )
-        .await;
+        assert_eq!(
+            unconfirmed.status(),
+            axum::http::StatusCode::PRECONDITION_REQUIRED
+        );
+        let payload =
+            crate::web::handlers::automation_enrollment_test_support::response_json(unconfirmed)
+                .await;
         assert_eq!(payload["code"], "automation_plan_termination_required");
         assert_eq!(payload["details"]["confirm_required"], true);
         assert_eq!(payload["details"]["plan_id"], plan_id.as_str());
@@ -331,7 +345,10 @@ mod r4_e1_four_repository_campaign {
             .iter()
             .map(|attempt| (attempt.id.clone(), attempt.status.clone()))
             .collect();
-        assert_eq!(before, after, "unconfirmed termination has zero side effects");
+        assert_eq!(
+            before, after,
+            "unconfirmed termination has zero side effects"
+        );
 
         // 阶段二：确认后整 plan 终止——group scope 专用收口（全部 group
         // attempt 干净退出、未完成桶 Aborted、文件留存）、run 失效、旧事实
@@ -355,12 +372,11 @@ mod r4_e1_four_repository_campaign {
         let terminated = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
         assert!(!terminated.enabled);
         assert!(terminated.terminated_at.is_some());
-        let run = crate::product::coding_plan_run::CodingPlanRunStore::new(
-            fixture.inner.paths.clone(),
-        )
-        .get(PROJECT_ID, ISSUE_ID, &plan_id)
-        .unwrap()
-        .expect("durable run");
+        let run =
+            crate::product::coding_plan_run::CodingPlanRunStore::new(fixture.inner.paths.clone())
+                .get(PROJECT_ID, ISSUE_ID, &plan_id)
+                .unwrap()
+                .expect("durable run");
         assert_eq!(
             run.phase,
             crate::product::coding_plan_run::CodingPlanRunPhase::Invalidated
@@ -402,7 +418,10 @@ mod r4_e1_four_repository_campaign {
         let worker = AutopilotOrchestrator::new(fixture.state.clone(), Default::default());
         for _ in 0..3 {
             assert_eq!(
-                worker.reconcile(&fixture.state, PROJECT_ID, ISSUE_ID).await.unwrap(),
+                worker
+                    .reconcile(&fixture.state, PROJECT_ID, ISSUE_ID)
+                    .await
+                    .unwrap(),
                 ReconcileOutcome::NoEnrollment,
                 "terminated enrollment must never restart the chain"
             );

@@ -1129,18 +1129,14 @@ async fn cross_bucket_coder_rework_prompt_carries_upstream_section() {
     let engine = lc_prompt_capture_engine(&f.store, &consumer, &provider);
     // review report 需要 unit run 事实：与 rework 装配同一 provider 口径
     //（ClaudeCode）先行物化，避免跨 renderer 版本的执行上下文失配。
-    let run = f
-        .store
-        .get_active_unit_run(&consumer)
-        .map(|run| run)
-        .unwrap_or_else(|_| {
-            engine
-                .render_coder_unit_run_context(&consumer, &ProviderName::ClaudeCode)
-                .expect("render materializes unit run");
-            f.store
-                .get_active_unit_run(&consumer)
-                .expect("unit run after render")
-        });
+    let run = f.store.get_active_unit_run(&consumer).unwrap_or_else(|_| {
+        engine
+            .render_coder_unit_run_context(&consumer, &ProviderName::ClaudeCode)
+            .expect("render materializes unit run");
+        f.store
+            .get_active_unit_run(&consumer)
+            .expect("unit run after render")
+    });
     let report = group_final_readiness_support::review_report(
         &consumer,
         "code_review_report_rework",

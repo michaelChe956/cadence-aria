@@ -7,11 +7,14 @@ const REVIEWER_COVERAGE_TITLE: &str = "Reviewer Capability Coverage Projection";
 const BOUNDARY_EXAMPLES_FINAL_LINE: &str = "命中才可 must_fix，未命中最高 suggestion。";
 
 fn design_candidate_with_abstract_traceability() -> String {
-    complete_design_artifact("删除采用软删除并保留审计字段。", "删除后查询不再返回该记录。")
-        .replace(
-            "- [DEC-001] -> [REQ-001]",
-            "- [DEC-001] -> [REQ-003] / [AC-003]（验收口径：删除后查询不再返回该记录）",
-        )
+    complete_design_artifact(
+        "删除采用软删除并保留审计字段。",
+        "删除后查询不再返回该记录。",
+    )
+    .replace(
+        "- [DEC-001] -> [REQ-001]",
+        "- [DEC-001] -> [REQ-003] / [AC-003]（验收口径：删除后查询不再返回该记录）",
+    )
 }
 
 fn design_candidate_with_executable_test_plan() -> String {
@@ -89,7 +92,8 @@ fn review_completion_for(
 }
 
 #[test]
-fn design_reviewer_boundary_prompt_injects_examples_once_before_actual_template_and_examples_stay_unframed() {
+fn design_reviewer_boundary_prompt_injects_examples_once_before_actual_template_and_examples_stay_unframed()
+ {
     let engine = design_review_engine(
         "sess_design_reviewer_boundary_prompt",
         &design_candidate_with_abstract_traceability(),
@@ -129,10 +133,19 @@ fn design_reviewer_boundary_prompt_injects_examples_once_before_actual_template_
         input.prompt
     );
     assert_eq!(
-        input.prompt.matches("[artifact_boundary_must_fix_rules]").count(),
+        input
+            .prompt
+            .matches("[artifact_boundary_must_fix_rules]")
+            .count(),
         1
     );
-    assert_eq!(input.prompt.matches("[artifact_schema_review_gate]").count(), 1);
+    assert_eq!(
+        input
+            .prompt
+            .matches("[artifact_schema_review_gate]")
+            .count(),
+        1
+    );
     assert!(!input.prompt.contains("</ARIA_STRUCTURED_OUTPUT nonce="));
 
     let examples = boundary_examples_from_prompt(&input.prompt);
@@ -140,7 +153,10 @@ fn design_reviewer_boundary_prompt_injects_examples_once_before_actual_template_
     assert!(!examples.contains("nonce="));
     assert!(!examples.contains("EXAMPLE_NONCE"));
     for id in ["DEC-001", "CMP-002", "API-002", "REQ-003"] {
-        assert!(examples.contains(id), "missing fixed example fingerprint ID {id}");
+        assert!(
+            examples.contains(id),
+            "missing fixed example fingerprint ID {id}"
+        );
     }
 }
 
@@ -153,7 +169,9 @@ fn design_reviewer_boundary_non_design_prompts_exclude_examples() {
         session.workspace_type = workspace_type.clone();
         session.artifact = Some(artifact_payload("# Existing artifact"));
         let engine = WorkspaceEngine::new(store, tx, session);
-        let input = engine.build_review_input().expect("non-design review input");
+        let input = engine
+            .build_review_input()
+            .expect("non-design review input");
 
         assert_eq!(
             input.prompt.matches(BOUNDARY_EXAMPLES_MARKER).count(),
@@ -198,7 +216,8 @@ fn design_reviewer_boundary_non_design_prompts_exclude_examples() {
 #[test]
 fn design_reviewer_boundary_case_verdicts_map_to_expected_gates_through_structured_output() {
     let abstract_candidate = design_candidate_with_abstract_traceability();
-    let abstract_engine = design_review_engine("sess_design_boundary_abstract", &abstract_candidate);
+    let abstract_engine =
+        design_review_engine("sess_design_boundary_abstract", &abstract_candidate);
     let abstract_input = abstract_engine
         .build_review_input()
         .expect("abstract traceability review input");
@@ -220,10 +239,12 @@ fn design_reviewer_boundary_case_verdicts_map_to_expected_gates_through_structur
         .expect("abstract traceability completion must parse");
     assert_eq!(abstract_verdict.verdict, ReviewVerdictType::Pass);
     assert_eq!(abstract_verdict.review_gate, ReviewGate::UserConfirmAllowed);
-    assert!(abstract_verdict
-        .findings
-        .iter()
-        .all(|finding| finding.severity == ReviewFindingSeverity::Suggestion));
+    assert!(
+        abstract_verdict
+            .findings
+            .iter()
+            .all(|finding| finding.severity == ReviewFindingSeverity::Suggestion)
+    );
     assert!(!abstract_verdict.findings.iter().any(|finding| {
         matches!(
             finding.severity,
@@ -262,10 +283,7 @@ fn design_reviewer_boundary_case_verdicts_map_to_expected_gates_through_structur
         .parse_review_completion_for_active_node(&executable_completion)
         .expect("executable test plan completion must parse");
     assert_eq!(executable_verdict.verdict, ReviewVerdictType::Revise);
-    assert_eq!(
-        executable_verdict.review_gate,
-        ReviewGate::RequiresRevision
-    );
+    assert_eq!(executable_verdict.review_gate, ReviewGate::RequiresRevision);
     assert_eq!(
         executable_verdict
             .findings
@@ -274,10 +292,12 @@ fn design_reviewer_boundary_case_verdicts_map_to_expected_gates_through_structur
             .count(),
         2
     );
-    assert!(executable_verdict
-        .findings
-        .iter()
-        .all(|finding| !finding.evidence.is_empty()));
+    assert!(
+        executable_verdict
+            .findings
+            .iter()
+            .all(|finding| !finding.evidence.is_empty())
+    );
 
     let risk_candidate = design_candidate_with_risk_mentioning_verification();
     let risk_engine = design_review_engine("sess_design_boundary_risk", &risk_candidate);
@@ -407,8 +427,6 @@ fn assert_logical_plan_review_input(
     authority_root: &std::path::Path,
     member_root: &std::path::Path,
 ) {
-    use crate::cross_cutting::streaming_provider::ProviderToolPolicy;
-
     assert_eq!(input.role, AdapterRole::Reviewer, "{case}: reviewer role");
     // 批2 Task 11（T20 前中间态）：Reviewer wire 面全开（无 deny）——
     // 纪律=ReviewerVerify+窗口合同，真窗归 T20。

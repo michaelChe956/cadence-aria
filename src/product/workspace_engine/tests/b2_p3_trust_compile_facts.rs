@@ -109,7 +109,7 @@ struct B2P3TrustFixture {
 
 /// LC 会话 + 可编排 trust precondition + Codex author（requires_workspace_trust）
 /// + 目标 run policy 的 compile 就绪引擎。legacy scope manifest 与冻结根同源，
-/// Context 漂移重验全部通过，trust 判定完全由 scripted precondition 决定。
+///   Context 漂移重验全部通过，trust 判定完全由 scripted precondition 决定。
 fn b2_p3_trust_engine(policy: RunPolicy) -> B2P3TrustFixture {
     let (root, lifecycle, _plan_id, base) =
         make_work_item_plan_engine_with_accepted_contract_drafts();

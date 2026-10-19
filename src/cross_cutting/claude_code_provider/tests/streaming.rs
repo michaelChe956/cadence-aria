@@ -425,14 +425,13 @@ async fn claude_child_death_terminates_stream_when_pipe_held_by_group_member() {
 
     let failure = tokio::time::timeout(TEST_TIMEOUT, async {
         loop {
-            match session
+            if let ProviderEvent::Failed { message } = session
                 .events
                 .recv()
                 .await
                 .expect("event channel stays open until terminal event")
             {
-                ProviderEvent::Failed { message } => break message,
-                _ => {}
+                break message;
             }
         }
     })

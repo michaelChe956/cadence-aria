@@ -260,6 +260,8 @@ pub(crate) async fn apply_human_gate_feedback(
 /// P0 1.3（REQ-WIGA-05）Task 10：SC 人工门关门（approve/abandon）的引擎裁决
 /// ——同上共用；confirm 后 compile 失败的结构化 findings 一并返回（WS 帧
 /// context 与 REST 422 details 同源）。
+// 关门效果按值返回 WS/REST 投影;findings 臂携带结构化上下文,Box 会波及两处消费。
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum HumanGateTerminationEffect {
     Confirmed,
     Abandoned,
@@ -328,7 +330,7 @@ pub(crate) async fn apply_human_gate_termination(
                 HumanGateTerminationEffect::CompileFailed {
                     message,
                     findings_context: Some(
-                        serde_json::to_value(&failure.wire_presentation()).unwrap_or_default(),
+                        serde_json::to_value(failure.wire_presentation()).unwrap_or_default(),
                     ),
                 }
             } else {

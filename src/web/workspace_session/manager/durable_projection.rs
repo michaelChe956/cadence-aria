@@ -63,6 +63,7 @@ pub(crate) struct DurableWorkspaceProjection {
 impl DurableWorkspaceProjection {
     /// 最新 durable record 的当前 LC 恢复 ID（无恢复为 None）——核对
     /// 「最新 record 而非出生 record」是投影正文。
+    #[cfg(test)] // part_07 typed 断言专用读取面。
     pub(crate) fn recovery_id(&self) -> Option<&str> {
         match &self.session_state {
             WsOutMessage::SessionState {
@@ -140,7 +141,7 @@ pub(crate) fn load_durable_workspace_projection(
     ));
     let (projection_tx, _projection_rx) = mpsc::channel::<EngineEvent>(1);
     let mut session = WorkspaceSession::from_record(latest_record.clone());
-    if let Ok(repository) = workspace_repository_for_session(&app_paths, &lifecycle, &latest_record)
+    if let Ok(repository) = workspace_repository_for_session(app_paths, &lifecycle, &latest_record)
     {
         session.repository_path = Some(repository.path);
     }

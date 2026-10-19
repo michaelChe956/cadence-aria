@@ -934,7 +934,7 @@ fn lcg_t06_revalidate_blocks_missing_baseline_file() {
 #[tokio::test]
 async fn lcg_t06_revalidate_resamples_full_active_main_window() {
     let (root, store, attempt) = running_attempt_with_worktree();
-    let members = seed_d4_member_codebase(&store, &attempt, root.path(), false);
+    let _members = seed_d4_member_codebase(&store, &attempt, root.path(), false);
     let logical_attempt = with_target_snapshot(&store, &attempt);
     let role_run = new_coder_role_run(&store, &logical_attempt);
     freeze_d4_baseline_for_role_run(&store, &logical_attempt, &role_run);

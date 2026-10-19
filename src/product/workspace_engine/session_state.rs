@@ -793,7 +793,7 @@ mod anchor_t03_tests {
     }
 
     /// 防止 TempDir 过早 drop 删除引擎仍要读取的隔离目录。
-    struct TempDirGuard(TempDir);
+    struct TempDirGuard(#[allow(dead_code)] TempDir); // 字段仅保活,永不读取。
 
     #[test]
     fn anchor_t03_build_session_state_projects_durable_recovery() {
@@ -1206,7 +1206,7 @@ mod sg_07a_tests {
     fn sg_07a_from_record_snapshot_five_states() {
         // 态①：session Running + 活动 hold + grant attempt1（AuthorRunning）。
         let fixture = sg_07a_sc_fixture("project_sg07a_five");
-        let reserved = sg_07a_reserve(
+        let _reserved = sg_07a_reserve(
             &fixture,
             &fixture.birth,
             "turn_sg07a_1",
@@ -1350,7 +1350,7 @@ mod sg_07a_tests {
         // 态⑤：grant 终态（Resolved）+ 无活动授权 + 同 scope checkpoint
         // 历史/已解决事实仍在 + actual start 证据在 ledger。
         let fixture5 = sg_07a_sc_fixture("project_sg07a_terminal");
-        let reserved5 = sg_07a_reserve(
+        let _reserved5 = sg_07a_reserve(
             &fixture5,
             &fixture5.birth,
             "turn_sg07a_t",

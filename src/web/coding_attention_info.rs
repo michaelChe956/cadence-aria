@@ -138,6 +138,7 @@ fn truncate_attention_text(text: &str) -> String {
         .collect::<String>()
 }
 
+#[allow(clippy::too_many_arguments)] // 行装配函数:字段逐项映射 DTO,不外泄中间结构。
 fn attempt_item(
     kind: &str,
     attempt: &crate::product::coding_models::CodingExecutionAttempt,
@@ -339,10 +340,11 @@ pub fn issue_coding_attention_items(
 
         // AMR 且无更具体的 open 门事实时才投 manual_recovery（有门时门
         // 事项已覆盖提醒，不重复）。
-        if attempt.status == CodingAttemptStatus::AwaitingManualRecovery && !has_open_gate_facts {
-            if let Some(item) = manual_recovery_item(attempt, &store)? {
-                items.push(item);
-            }
+        if attempt.status == CodingAttemptStatus::AwaitingManualRecovery
+            && !has_open_gate_facts
+            && let Some(item) = manual_recovery_item(attempt, &store)?
+        {
+            items.push(item);
         }
 
         // FinalConfirm 等待：WaitingForHuman ∧ 同 attempt FinalConfirm 节点

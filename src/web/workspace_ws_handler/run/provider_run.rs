@@ -603,17 +603,15 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             != Some(
                                 crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun,
                             )
-                    {
-                        if let Err(message) = engine
+                        && let Err(message) = engine
                             .start_serial_work_item_draft_run_for(fresh_outline_id)
                             .await
-                        {
-                            engine.mark_active_run_finished(&run_label);
-                            drop(engine);
-                            let err = WsOutMessage::Error { message };
-                            let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
-                            return;
-                        }
+                    {
+                        engine.mark_active_run_finished(&run_label);
+                        drop(engine);
+                        let err = WsOutMessage::Error { message };
+                        let _ = send_json_outbound(&outbound_tx_for_task, &err).await;
+                        return;
                     }
                     while engine.active_node_type()
                         == Some(crate::web::workspace_ws_types::TimelineNodeType::WorkItemDraftRun)

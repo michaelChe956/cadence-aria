@@ -1466,11 +1466,10 @@ async fn coder_delivery_scope_binds_real_run_and_worktree_coordination_label() {
         "scope 绑定真实 role_run/run_id 并持久化(T5 store 三元组)"
     );
     // durable 归属事实(Preparing→Running):
-    let records = crate::product::provider_resource_store::ProviderResourceStore::new(
-        &t14_store_root(&store),
-    )
-    .list_scope(&key)
-    .expect("delivery records");
+    let records =
+        crate::product::provider_resource_store::ProviderResourceStore::new(t14_store_root(&store))
+            .list_scope(&key)
+            .expect("delivery records");
     assert_eq!(records.len(), 1);
     let labels = &records[0].reserved_labels;
     let tree_key = crate::product::reviewer_window_store::tree_key_of(

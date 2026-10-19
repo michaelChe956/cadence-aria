@@ -63,10 +63,6 @@ const LC_TOOL_POLICY_DIGEST_SCHEMA: &str = "lc-codex-tool-policy-v1";
 /// 纪律的物理投影,仅 Author 可承载角色合法;Reviewer/Coder/Handoff 全开)。
 const CODEX_LC_ROLE_POLICY_MAP: &str = "author_duty=deny_file_write_builtins;author_carriers=orchestrator+work_item_splitter;reviewer=none;coder=none;handoff=none";
 
-/// approval 映射的冻结快照(T12:按权限模式独立映射,Author 恒 on-request,
-/// action 不参与)。
-const CODEX_LC_APPROVAL_MAP: &str = "author=on-request;auto=never;supervised=on-request";
-
 /// LC 全相位 danger 基线的独立 canonical 冻结片段(T12):LC capability
 /// profile 摘要专用——绝不复用 direct `deny_file_write_builtins_tokens` 的
 /// 只读冻结序列(sandbox/approval 控制面的 LC 自有快照)。

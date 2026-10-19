@@ -39,6 +39,8 @@ static NEXT_SINGLE_CANDIDATE_COMPILE_FAILPOINT_ID: std::sync::atomic::AtomicU64 
 /// context_digest 漂移均为 typed Operational 拒绝（拒不重 lower 最新
 /// artifact 偷换发布物）；None（旧记录参考形态）不做冻结 digest 要求，
 /// 同源纯评估（assess）另在调用侧执行。
+// PlanningCompileFailure 承载完整 typed 失败上下文(诊断/seal),按值返回是契约。
+#[allow(clippy::result_large_err)]
 pub(super) fn verify_frozen_structure_context(
     frozen: Option<&crate::product::planning_failure::PersistedPlanningStructureReport>,
     current: &draft_batch::compile_support::PlanningStructureContext,
@@ -139,6 +141,7 @@ impl WorkspaceEngine {
     /// WS/REST 投影消费（`close_human_gate` 开始时清空，无跨 close 陈旧）。
     /// 未达 seal 的失败（plain `?` 站点）在此兜底 seal；diagnostic 落点
     /// 沿 `sg3b_failure` 站点原语义（非 closure 站点原本不落诊断，保持）。
+    #[allow(clippy::result_large_err)] // 同上:typed 失败上下文按值上抛。
     pub(super) async fn run_single_candidate_initial_plan_compile(
         &mut self,
     ) -> Result<
@@ -237,9 +240,10 @@ impl WorkspaceEngine {
     /// SG1 纯评估 + 冻结 payload rule/context digest 同代检查）。返回 live
     /// context digest；非 Accepted 返回 typed 失败（未 seal——由调用边界统
     /// 一 seal/落诊断）。None 冻结 payload（旧记录参考形态）只做纯评估。
+    #[allow(clippy::result_large_err)] // 同上:typed 失败上下文按值上抛。
     fn sg3b_final_compile_structure_gate(
         &self,
-        lifecycle: &LifecycleStore,
+        _lifecycle: &LifecycleStore,
         ir: &crate::product::work_item_plan_compiler::PlanCandidateIr,
         source_markdown: &str,
         source_ref: &str,
@@ -288,6 +292,7 @@ impl WorkspaceEngine {
         }
     }
 
+    #[allow(clippy::result_large_err)] // 同上:typed 失败上下文按值上抛。
     async fn run_single_candidate_initial_plan_compile_inner(
         &mut self,
     ) -> Result<
@@ -303,8 +308,6 @@ impl WorkspaceEngine {
         })?;
         // SG3b：本运行的 compile 身份与结构门 digest（结构门通过后填充，
         // 供 post-reservation 失败站点随失败上行）。
-        let mut compile_run_id: Option<String> = None;
-        let mut gate_context_digest: Option<String> = None;
         let record = lifecycle
             .get_workspace_session(&self.session.session_id)
             .map_err(|error| {
@@ -467,7 +470,7 @@ impl WorkspaceEngine {
         // 门同一 context 装载 + SG1 纯评估 + 冻结 payload 同代检查；非
         // Accepted 一律 typed 停点（seal + durable diagnostic），零
         // reservation、零 transaction、零发布，拒不重 lower。
-        gate_context_digest = Some(
+        let gate_context_digest = Some(
             self.sg3b_final_compile_structure_gate(
                 &lifecycle,
                 &ir.ir,
@@ -494,7 +497,7 @@ impl WorkspaceEngine {
             "project/{}/issue/{}/plan/{}/publication_provenance/{}",
             approved.project_id, approved.issue_id, approved.entity_id, reservation.compile_id
         );
-        compile_run_id = Some(reservation.compile_id.clone());
+        let compile_run_id = Some(reservation.compile_id.clone());
         let reserved = lifecycle
             .put_compile_reservation_cas(
                 &approved.project_id,

@@ -38,6 +38,8 @@ struct CapturingValidatedAdapter {
 
 enum CapturedOutput {
     Plain(String),
+    /// 结构化契约 nonce 包装形态:夹具预置位,当前路由矩阵只发 Plain。
+    #[allow(dead_code)]
     Sentinel(String),
 }
 
@@ -127,6 +129,8 @@ impl StreamingProviderAdapter for CapturingValidatedAdapter {
 }
 
 struct LcGroupFixture {
+    /// 仅保活隔离目录(路径经 worktree 字段使用)。
+    #[allow(dead_code)]
     root: tempfile::TempDir,
     worktree: std::path::PathBuf,
     head: String,
@@ -136,8 +140,8 @@ struct LcGroupFixture {
 
 /// LC 组 attempt 装置:组单元运行 fixture + target_snapshot 在场(LC 口径)
 /// + LogicalCodebaseStore 成员主 checkout 播种(cross_target baseline 采集
-/// 可过)+ bootstrap 政策 gateway。coder/reviewer provider 均为 ClaudeCode
-/// (避开 Codex danger-full-access 路由级硬门)。
+///   可过)+ bootstrap 政策 gateway。coder/reviewer provider 均为 ClaudeCode
+///   (避开 Codex danger-full-access 路由级硬门)。
 fn lc_group_running_attempt() -> LcGroupFixture {
     let root = tempdir().unwrap();
     let worktree = root.path().join("worktree");

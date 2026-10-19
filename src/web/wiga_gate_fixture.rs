@@ -724,10 +724,9 @@ impl EnrolledGateFixture {
                     .intent_contract
                     .as_ref()
                     .map(|intent| &intent.target)
+                    && let Some(physical) = member_physical.get(logical_repository_id)
                 {
-                    if let Some(physical) = member_physical.get(logical_repository_id) {
-                        item.target_repository_id = physical.clone();
-                    }
+                    item.target_repository_id = physical.clone();
                 }
             }
             ir_record.content_hash = String::new();

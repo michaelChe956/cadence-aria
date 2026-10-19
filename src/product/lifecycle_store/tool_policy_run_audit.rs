@@ -247,7 +247,10 @@ impl LifecycleStore {
         {
             Ok(scope) => Some(scope),
             Err(ProductStoreError::NotFound { .. }) => None,
-            Err(ProductStoreError::Conflict { kind, .. }) if kind == "entity_deleted" => {
+            Err(ProductStoreError::Conflict {
+                kind: "entity_deleted",
+                ..
+            }) => {
                 // 身份索引命中且墓碑在位（purging/deleted）：迟到写按删除事实拒。
                 return Err(ProductStoreError::Conflict {
                     kind: "entity_deleting",
@@ -312,7 +315,7 @@ impl ToolPolicyAuditSink for LifecycleStore {
         &self,
         workspace_session_id: &str,
         role_run_seq: u64,
-        mut event: DurableToolPolicyEvent,
+        event: DurableToolPolicyEvent,
     ) -> Result<(), ToolPolicyAuditError> {
         // D1.3b（plan §0.4）：迟到写防御——scope 准入在进程内日志 Mutex 之前
         // 取得；purging/deleted 会话拒绝追加且分区目录不复活。原 P1-5 互斥与

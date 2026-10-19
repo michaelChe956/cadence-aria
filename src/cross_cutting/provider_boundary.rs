@@ -113,6 +113,7 @@ impl ProviderBoundaryEvidence {
     /// crate 内构造(6c probe 产出;调用方不能自造)。批2 Task 9 增补
     /// 执行语义/岗位/窗口三参数(缺语义/缺岗位由 probe 侧拒签,构造器
     /// 只承载字段)。
+    #[allow(clippy::too_many_arguments)] // 冻结证据字段逐项对应设计清单,合并成结构体无信息增量。
     pub(crate) fn new(
         provider: ProviderName,
         exact_version: String,

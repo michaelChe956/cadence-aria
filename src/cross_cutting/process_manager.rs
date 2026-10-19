@@ -558,7 +558,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn spawn_inherits_host_environment_when_env_map_is_empty() {
-        use tokio::io::{AsyncRead, AsyncReadExt};
+        use tokio::io::AsyncReadExt;
 
         let host_home = std::env::var("HOME").expect("host HOME");
         let host_path = std::env::var("PATH").expect("host PATH");
@@ -615,7 +615,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn spawn_env_map_overrides_host_without_replacing_it() {
-        use tokio::io::{AsyncRead, AsyncReadExt};
+        use tokio::io::AsyncReadExt;
 
         let host_home = std::env::var("HOME").expect("host HOME");
         let mut process = ProcessManager::spawn(

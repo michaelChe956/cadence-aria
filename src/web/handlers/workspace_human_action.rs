@@ -455,9 +455,12 @@ mod confirmation_trust_waiting {
         _root: tempfile::TempDir,
         lifecycle: LifecycleStore,
         router: axum::Router,
+        /// manager/trust 为 fixture 保活持有(router 内部已 clone),无直接读取点。
+        #[allow(dead_code)]
         manager: std::sync::Arc<WorkspaceSessionManager>,
         session_id: String,
         gate_id: String,
+        #[allow(dead_code)]
         trust: std::sync::Arc<ScriptedTrustPrecondition>,
     }
 

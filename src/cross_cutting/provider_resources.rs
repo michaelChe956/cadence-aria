@@ -1408,9 +1408,9 @@ impl TrustedLaunchOwnership {
 
     /// 会话尾部/错误路径的收口注销:有登记身份 → killpg(仅身份核对通过)
     /// + 有界观察组长真实消失 + 组残留检查,证明静止后游标推进并注销;
-    /// 未回填身份(默认面错误路径,adapter 自身已 kill+wait)直接注销。
-    /// 静止不可证时保留 durable 记录停等(scope 级 quiesce/恢复驱动
-    /// 接管),不注销。幂等:登记项不存在即成功。
+    ///   未回填身份(默认面错误路径,adapter 自身已 kill+wait)直接注销。
+    ///   静止不可证时保留 durable 记录停等(scope 级 quiesce/恢复驱动
+    ///   接管),不注销。幂等:登记项不存在即成功。
     pub(crate) async fn release_after_session_tail(&self) {
         if let Err(error) = self
             .scope

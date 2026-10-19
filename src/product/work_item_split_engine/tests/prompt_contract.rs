@@ -1222,6 +1222,8 @@ struct OutlineFreshContractFixture {
     issue: IssueRecord,
     repository: RepositoryRecord,
     request: GenerateWorkItemsRequest,
+    /// 会话标识:断言只读 record,字段保留供排障定位。
+    #[allow(dead_code)]
     session_id: String,
 }
 

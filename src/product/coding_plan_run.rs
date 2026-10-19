@@ -1227,7 +1227,6 @@ impl CodingPlanRunStore {
     /// 生命周期元数据目录（冻结地址）：
     /// `{issue_root}/coding-plan-workspace-lifecycles/`（模块级
     /// [`CODING_PLAN_WORKSPACE_LIFECYCLES_DIR`]）。
-
     fn lifecycles_root(
         &self,
         project_id: &str,
@@ -1858,7 +1857,7 @@ pub(crate) mod workspace_reset_fixtures {
 mod tests {
     use super::workspace_reset_fixtures::{ISSUE_ID, PLAN_ID, PROJECT_ID, n2_fixture};
     use super::*;
-    use crate::product::coding_models::{CodingExecutionStage, CodingUnitRun, CodingUnitRunStatus};
+    use crate::product::coding_models::{CodingUnitRun, CodingUnitRunStatus};
     use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
     use crate::product::entity_operation_store::EntityOperationStore;
 
@@ -1916,7 +1915,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::IdentityMismatch { ref kind, .. } if *kind == "coding_plan_run_revision"),
+            matches!(error, ProductStoreError::IdentityMismatch { kind, .. } if kind == "coding_plan_run_revision"),
             "unexpected error: {error}"
         );
         assert_eq!(
@@ -1942,7 +1941,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::IdentityMismatch { ref kind, .. } if *kind == "coding_plan_run_graph"),
+            matches!(error, ProductStoreError::IdentityMismatch { kind, .. } if kind == "coding_plan_run_graph"),
             "unexpected error: {error}"
         );
         let persisted: CodingPlanRun = read_json(&fixture.run_file()).unwrap();
@@ -2056,7 +2055,7 @@ mod tests {
             .bind_ready(&run, &fixture.bindings, None)
             .unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "coding_plan_run_set_not_first_start"),
+            matches!(error, ProductStoreError::Conflict { kind, .. } if kind == "coding_plan_run_set_not_first_start"),
             "unexpected error: {error}"
         );
         assert!(
@@ -2091,7 +2090,7 @@ mod tests {
             .collect();
         let error = run_store.bind_ready(&bound, &shrunk, None).unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::IdentityMismatch { ref kind, .. } if *kind == "coding_plan_run_target_attempts"),
+            matches!(error, ProductStoreError::IdentityMismatch { kind, .. } if kind == "coding_plan_run_target_attempts"),
             "unexpected error: {error}"
         );
         assert_eq!(
@@ -2133,7 +2132,7 @@ mod tests {
             .bind_ready(&frozen, &fixture.bindings, Some(other_selection))
             .unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::IdentityMismatch { ref kind, .. } if *kind == "coding_plan_run_selection"),
+            matches!(error, ProductStoreError::IdentityMismatch { kind, .. } if kind == "coding_plan_run_selection"),
             "unexpected error: {error}"
         );
         assert_eq!(
@@ -2172,7 +2171,7 @@ mod tests {
         // 空首启拒绝：mark_start_requested 必须有冻结 selection。
         let error = run_store.mark_start_requested(&waiting).unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "coding_plan_run_selection_missing"),
+            matches!(error, ProductStoreError::Conflict { kind, .. } if kind == "coding_plan_run_selection_missing"),
             "unexpected error: {error}"
         );
 
@@ -2355,7 +2354,7 @@ mod tests {
     async fn plan_coding_n2_late_write_and_deleted_member_invalidates() {
         let fixture = n2_fixture().await;
         let run_store = fixture.run_store();
-        let coding_store = fixture.coding_store();
+        let _coding_store = fixture.coding_store();
 
         let selection = fixture.core_selection("cmd_n2_delete");
         let run = run_store
@@ -2390,7 +2389,7 @@ mod tests {
         // 迟到写全部拒绝：不复活授权、不自动补建。
         let error = run_store.mark_start_requested(&requested).unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "coding_plan_run_invalidated"),
+            matches!(error, ProductStoreError::Conflict { kind, .. } if kind == "coding_plan_run_invalidated"),
             "unexpected error: {error}"
         );
         let error = run_store
@@ -2406,7 +2405,7 @@ mod tests {
             .bind_ready(&bound, &fixture.bindings, Some(selection.clone()))
             .unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "coding_plan_run_invalidated"),
+            matches!(error, ProductStoreError::Conflict { kind, .. } if kind == "coding_plan_run_invalidated"),
             "unexpected error: {error}"
         );
         let error = run_store
@@ -2419,7 +2418,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "coding_plan_run_not_active"),
+            matches!(error, ProductStoreError::Conflict { kind, .. } if kind == "coding_plan_run_not_active"),
             "no re-authorization over an invalidated run: {error}"
         );
         let error = run_store
@@ -2517,7 +2516,7 @@ mod tests {
             .bind_ready(&invalidated, &fixture.bindings, None)
             .unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::NotFound { ref kind, .. } if *kind == "coding_plan_run"),
+            matches!(error, ProductStoreError::NotFound { kind, .. } if kind == "coding_plan_run"),
             "missing run must surface NotFound, not None: {error}"
         );
         assert!(
@@ -2554,7 +2553,7 @@ mod tests {
         let wrong_lease = operations.try_acquire_delete(&wrong_scope).unwrap();
         let error = run_store.purge_plan_with_lease(&wrong_lease).unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::IdentityMismatch { ref kind, .. } if *kind == "coding_plan_run_purge_scope"),
+            matches!(error, ProductStoreError::IdentityMismatch { kind, .. } if kind == "coding_plan_run_purge_scope"),
             "unexpected error: {error}"
         );
     }
@@ -2730,7 +2729,7 @@ mod tests {
             };
             let error = result.unwrap_err();
             assert!(
-                matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "entity_deleting"),
+                matches!(error, ProductStoreError::Conflict { kind, .. } if kind == "entity_deleting"),
                 "{name}: unexpected error: {error}"
             );
         }
@@ -2743,7 +2742,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "entity_deleting"),
+            matches!(error, ProductStoreError::Conflict { kind, .. } if kind == "entity_deleting"),
             "record_start_outcome: unexpected error: {error}"
         );
 
@@ -2785,7 +2784,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "entity_deleting"),
+            matches!(error, ProductStoreError::Conflict { kind, .. } if kind == "entity_deleting"),
             "no orphan run may be rebuilt after purge: {error}"
         );
     }
@@ -2871,13 +2870,13 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "coding_plan_run_retired"),
+            matches!(error, ProductStoreError::Conflict { kind, .. } if kind == "coding_plan_run_retired"),
             "retired command must not re-prepare: {error}"
         );
         // 旧 run 快照的迟到 run 更新同样被拒。
         let error = run_store.mark_start_requested(&bound).unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "coding_plan_run_retired"),
+            matches!(error, ProductStoreError::Conflict { kind, .. } if kind == "coding_plan_run_retired"),
             "late run writes must hit the retirement fence: {error}"
         );
         // 新 command 在新 generation 上正常开轮。
@@ -2939,7 +2938,7 @@ mod tests {
             run_store.mark_paused(&run).unwrap_err(),
         ] {
             assert!(
-                matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "coding_plan_workspace_clearing"),
+                matches!(error, ProductStoreError::Conflict { kind, .. } if kind == "coding_plan_workspace_clearing"),
                 "clearing must fence run writes: {error}"
             );
         }
@@ -2961,15 +2960,15 @@ mod tests {
             run_store
                 .retire_workspace_round_with_lease(&lease, &h2a_checklist("cmd_h2a_c_other", None))
                 .unwrap_err(),
-            ProductStoreError::Conflict { ref kind, .. }
-                if *kind == "coding_plan_workspace_clearing"
+            ProductStoreError::Conflict { kind, .. }
+                if kind == "coding_plan_workspace_clearing"
         ));
         assert!(matches!(
             run_store
                 .complete_workspace_reset_with_lease(&lease, "cmd_h2a_c_other")
                 .unwrap_err(),
-            ProductStoreError::Conflict { ref kind, .. }
-                if *kind == "coding_plan_workspace_clearing"
+            ProductStoreError::Conflict { kind, .. }
+                if kind == "coding_plan_workspace_clearing"
         ));
         // 同 command 重入 retire 刷新同一 clearing（续清），complete 完成轮次切换。
         run_store
@@ -3024,7 +3023,7 @@ mod tests {
             .invalidate_for_deleted_attempt(&attempt)
             .unwrap_err();
         assert!(
-            matches!(error, ProductStoreError::Conflict { ref kind, .. } if *kind == "entity_deleting"),
+            matches!(error, ProductStoreError::Conflict { kind, .. } if kind == "entity_deleting"),
             "public path must self-reject under the exclusive lease: {error}"
         );
         // 持租约内部入口不二次取 scope：成员失效成功且幂等。
@@ -3058,8 +3057,8 @@ mod tests {
             run_store
                 .invalidate_run_for_reset_with_lease(&other_lease, &bound)
                 .unwrap_err(),
-            ProductStoreError::IdentityMismatch { ref kind, .. }
-                if *kind == "coding_plan_run_lease_scope"
+            ProductStoreError::IdentityMismatch { kind, .. }
+                if kind == "coding_plan_run_lease_scope"
         ));
     }
 

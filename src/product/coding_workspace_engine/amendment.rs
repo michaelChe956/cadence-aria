@@ -206,11 +206,12 @@ impl CodingWorkspaceEngine {
     /// amendment 应用完成后，把原 plan session 上重开的门关回 Confirmed。
     /// 处理重开门的两种等待签名且无 in-flight turn 的会话：
     /// - 重开原签名（WaitingForHuman + phase Completed + 保留快照）；
-    /// - SG6（REQ-CG-03:74 verdict 收口）后的收口重建签名（WaitingForHuman
-    ///   + phase Approval + 保留快照）——合法修订交付后 turn 由原
+    /// - SG6（REQ-CG-03:74 verdict 收口）后的收口重建签名（WaitingForHuman +
+    ///   phase Approval + 保留快照）——合法修订交付后 turn 由原
     ///   reviewer/synthetic Pass 收口，收口 verdict 经 Evaluate 路由重建
     ///   Approval 门（I-1「reviewer Pass 后必须路由回 Approval 门」），故
     ///   resume 时重开门以 Approval 相位等待关回。
+    ///
     /// 本守卫唯一生产调用点持有刚 Applied、经完整 lineage 校验的
     /// `PlanAmendmentContext`（其 plan_session_id 即本会话）；首次审批门
     /// （未经任何 amendment context 重开）不会到达此路径。

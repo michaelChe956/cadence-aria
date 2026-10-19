@@ -281,20 +281,19 @@ impl CodingWorkspaceEngine {
         // T14:全部退出路径单点收口——先 quiesce 再清;恢复停等在成功
         // 路径显式 Err,失败/取消路径 warn 不掩盖原始错误(durable 停等
         // 事实留给恢复驱动;下一轮开窗 sweep 亦会重试收口)。
-        if let Some(scope) = delivery.take() {
-            if let Err(recovery) = self
+        if let Some(scope) = delivery.take()
+            && let Err(recovery) = self
                 .recycle_coder_delivery_scope(&scope, "coder_cycle_exit")
                 .await
-            {
-                if result.is_ok() {
-                    return Err(recovery);
-                }
-                tracing::warn!(
-                    attempt_id = %attempt_id,
-                    error = %recovery,
-                    "coder_delivery_scope_close_deferred_to_recovery"
-                );
+        {
+            if result.is_ok() {
+                return Err(recovery);
             }
+            tracing::warn!(
+                attempt_id = %attempt_id,
+                error = %recovery,
+                "coder_delivery_scope_close_deferred_to_recovery"
+            );
         }
         result
     }

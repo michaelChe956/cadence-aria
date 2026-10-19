@@ -680,28 +680,27 @@ impl LifecycleStore {
                         id: expected.id.clone(),
                     });
                 }
-                match stored.mechanical_report_ref.as_deref() {
-                    Some(existing) if existing == mechanical_report_ref => return Ok(stored),
-                    Some(existing) => {
-                        // report_id 内容寻址化后，同内容重放会轮换 id（旧会话
-                        // 持旧格式 ref 或早前内容寻址 ref）。ref 不等时按两 ref
-                        // 各自加载 record，比对剔除 id/content_hash 后的全量
-                        // 内容摘要：等价内容接受 ref 轮换（Evaluate 重入幂等
-                        // 与内容寻址化前一致）；内容真变或任一 ref 悬空/不可
-                        // 解析（无法证明等价）维持 Conflict fail-closed。
-                        if !equivalent_mechanical_reports(
-                            self.app_paths(),
-                            &scope,
-                            existing,
-                            mechanical_report_ref,
-                        ) {
-                            return Err(ProductStoreError::Conflict {
-                                kind: "single_candidate_evaluation",
-                                id: stored.id.clone(),
-                            });
-                        }
+                if let Some(existing) = stored.mechanical_report_ref.as_deref() {
+                    if existing == mechanical_report_ref {
+                        return Ok(stored);
                     }
-                    None => {}
+                    // report_id 内容寻址化后，同内容重放会轮换 id（旧会话
+                    // 持旧格式 ref 或早前内容寻址 ref）。ref 不等时按两 ref
+                    // 各自加载 record，比对剔除 id/content_hash 后的全量
+                    // 内容摘要：等价内容接受 ref 轮换（Evaluate 重入幂等
+                    // 与内容寻址化前一致）；内容真变或任一 ref 悬空/不可
+                    // 解析（无法证明等价）维持 Conflict fail-closed。
+                    if !equivalent_mechanical_reports(
+                        self.app_paths(),
+                        &scope,
+                        existing,
+                        mechanical_report_ref,
+                    ) {
+                        return Err(ProductStoreError::Conflict {
+                            kind: "single_candidate_evaluation",
+                            id: stored.id.clone(),
+                        });
+                    }
                 }
                 stored.mechanical_report_ref = Some(mechanical_report_ref.to_string());
                 stored.updated_at = Utc::now().to_rfc3339();
@@ -882,7 +881,7 @@ impl LifecycleStore {
     /// SG4a 结算核心 settle 恰一次（REQ-CG-02：结构合法且同代 refs 提交
     /// 后同 turn settle 一次为 delivered_charge）。
     #[allow(clippy::too_many_arguments)]
-    pub fn commit_structurally_valid_revision(
+    pub(crate) fn commit_structurally_valid_revision(
         &self,
         expected: &WorkspaceSessionRecord,
         mut turn: HumanGateTurn,
@@ -1027,22 +1026,21 @@ impl LifecycleStore {
                         .structure_checkpoints
                         .iter()
                         .any(|checkpoint| checkpoint.checkpoint_id == expected_checkpoint_id);
-                if !replay {
-                    match grant.phase {
-                        // 评审/终态/业务门阶段无第二次交付（同代重放除外）。
+                if !replay
+                    && matches!(
+                        grant.phase,
                         Some(
                             StructuralGrantPhase::Reviewing
-                            | StructuralGrantPhase::Resolved
-                            | StructuralGrantPhase::SystemFault
-                            | StructuralGrantPhase::BusinessGate,
-                        ) => {
-                            return Err(ProductStoreError::Conflict {
-                                kind: "structural_revision_grant",
-                                id: grant.grant_id.clone(),
-                            });
-                        }
-                        _ => {}
-                    }
+                                | StructuralGrantPhase::Resolved
+                                | StructuralGrantPhase::SystemFault
+                                | StructuralGrantPhase::BusinessGate,
+                        )
+                    )
+                {
+                    return Err(ProductStoreError::Conflict {
+                        kind: "structural_revision_grant",
+                        id: grant.grant_id.clone(),
+                    });
                 }
 
                 let original_versions = self.list_artifact_versions(&stored.id)?;
@@ -1361,7 +1359,8 @@ impl LifecycleStore {
     /// checkpoint 三 refs 同源重验；缺 join/漂移/新反馈未满足一律拒绝
     /// 回退；回绑同 CAS 失效旧审批，不复活批准、不把旧 receipt 计本轮、
     /// 零 author 启动（ledger/attempt/prompt 不动）。
-    pub fn restore_structural_checkpoint(
+    #[allow(dead_code)] // 恢复面入口:生产接线未落地,当前由单测覆盖。
+    pub(crate) fn restore_structural_checkpoint(
         &self,
         expected: &WorkspaceSessionRecord,
         checkpoint: &StructuralCheckpoint,

@@ -1709,6 +1709,7 @@ mod tests {
 
         // 恢复可写：同一现场正常写事实并分诊停点（不冒充已通知）。
         let mut writable = std::fs::metadata(&enrollment_dir).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)] // 测试恢复可写:unix 下 false 即加回写位。
         writable.set_readonly(false);
         std::fs::set_permissions(&enrollment_dir, writable).unwrap();
         assert_eq!(

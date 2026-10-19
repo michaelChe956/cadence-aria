@@ -541,8 +541,8 @@ fn bounded_output_excerpt(output: &str) -> String {
 /// - cargo：`test result: ...`（每个 test binary 一条，取最后一条）；
 /// - jest：`Tests: ...`；vitest：`Tests  ...`；
 /// - pytest：`... N passed[, M failed] in Xs`（含 `====` 装饰行）。
-/// jest/vitest 的 `Test Files`／`Test Suites`／`Snapshots` 行是
-/// suite/file/snapshot 计数，显式忽略。
+///   jest/vitest 的 `Test Files`／`Test Suites`／`Snapshots` 行是
+///   suite/file/snapshot 计数，显式忽略。
 ///
 /// 无汇总行时回退 `running N tests`（如 cargo `running 0 tests`），仍取
 /// 最后一条；再无命中 → None（“未记录”，不推断补写）。

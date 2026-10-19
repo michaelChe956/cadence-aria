@@ -245,7 +245,7 @@ async fn drive_validated_session(
     timeout: std::time::Duration,
 ) -> Result<AdapterOutput, ProviderAdapterError> {
     use crate::cross_cutting::streaming_provider::{
-        ProviderCommand, ProviderCompletion, ProviderEvent, ProviderStatus,
+        ProviderCompletion, ProviderEvent, ProviderStatus,
     };
     use crate::cross_cutting::structured_output::parse_last_structured_output;
 
@@ -983,7 +983,7 @@ mod tests {
     /// sentinel parser 提取,timeout_status 非超时)。
     #[tokio::test]
     async fn lcg_t01_sync_bridge_uses_validated_start_and_preserves_output() {
-        let (root, canonical_root, member) = bridge_root_and_member();
+        let (_root, canonical_root, member) = bridge_root_and_member();
         let paths = ProductAppPaths::new(canonical_root.join(".aria"));
 
         let adapter = BridgeCountingStreamingAdapter::new(
@@ -1036,7 +1036,7 @@ mod tests {
     /// 调用不 panic/不死锁,且独立的更短计时器先于 provider 完成触达。
     #[tokio::test]
     async fn lcg_t01_bridge_does_not_block_tokio_current_thread() {
-        let (root, canonical_root, member) = bridge_root_and_member();
+        let (_root, canonical_root, member) = bridge_root_and_member();
         let paths = ProductAppPaths::new(canonical_root.join(".aria"));
 
         let adapter = BridgeCountingStreamingAdapter::new(
@@ -1153,7 +1153,7 @@ mod tests {
         use crate::product::lifecycle_store::LifecycleStore;
         use crate::product::logical_codebase::provider_gateway::ProviderLaunchAuditContext;
 
-        let (root, canonical_root, member) = bridge_root_and_member();
+        let (_root, canonical_root, member) = bridge_root_and_member();
         let paths = ProductAppPaths::new(canonical_root.join(".aria"));
 
         let adapter = BridgeCountingStreamingAdapter::new(

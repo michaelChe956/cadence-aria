@@ -367,6 +367,7 @@ fn authorized_member_ids(context: &WorkItemPlanSourceContext) -> Vec<String> {
 }
 
 /// 本地指令公共组装（producer 域内事实组装 + 摘要封口）。
+#[allow(clippy::too_many_arguments)] // 组装面:逐字段对应 StructuralRepairInstruction 的必填事实。
 fn build_local_instruction(
     identity: &InstructionIdentity,
     failure_binding: String,

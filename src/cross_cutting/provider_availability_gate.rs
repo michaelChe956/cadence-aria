@@ -684,7 +684,7 @@ mod tests {
             };
             self.saw_ownership.store(true, Ordering::SeqCst);
             let reservation = ownership.reserve()?;
-            let mut process = ProcessManager::spawn(
+            let process = ProcessManager::spawn(
                 "/bin/sleep",
                 &["30"],
                 &std::env::temp_dir(),

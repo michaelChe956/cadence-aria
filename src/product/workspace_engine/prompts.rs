@@ -1154,6 +1154,7 @@ mod routing_reference_prompt_tests {
     }
 }
 
+#[cfg(test)]
 mod reredrive_prompt_tests {
     use super::build_work_item_plan_compile_reredrive_prompt;
 

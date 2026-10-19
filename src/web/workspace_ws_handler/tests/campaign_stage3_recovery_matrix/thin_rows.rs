@@ -862,11 +862,10 @@ async fn anchor_t18_manual_turn_fresh_preserves_turn_gate_and_budget() {
         if let Ok(turn) = harness
             .lifecycle
             .get_human_gate_turn(&session_id, &turn_before.turn_id)
+            && matches!(turn.status, HumanGateTurnStatus::Completed)
         {
-            if matches!(turn.status, HumanGateTurnStatus::Completed) {
-                turn_after = Some(turn);
-                break;
-            }
+            turn_after = Some(turn);
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }

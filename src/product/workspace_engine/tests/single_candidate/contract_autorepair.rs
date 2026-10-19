@@ -31,8 +31,8 @@ mod contract_autorepair {
             )
     }
 
-    /// 非机械可修缺口（required_contract_missing）见 contract_prerevision::
-    /// missing_contract_candidate——provider 未承诺被消费契约，补齐器边界外。
+    // 非机械可修缺口（required_contract_missing）见 contract_prerevision::
+    // missing_contract_candidate——provider 未承诺被消费契约，补齐器边界外。
 
     /// 混合缺口：机械可修（capability）+ 非机械（required_contract_missing）并存。
     fn mixed_gap_candidate(round: usize) -> String {

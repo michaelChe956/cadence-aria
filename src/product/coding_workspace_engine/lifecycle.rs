@@ -76,7 +76,7 @@ impl CodingWorkspaceEngine {
         attempt: &CodingExecutionAttempt,
         role: CodingProviderRole,
         working_dir: &Path,
-        mut input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+        input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
     ) -> Result<
         Option<crate::cross_cutting::session_launch::ValidatedStreamingProviderInput>,
         ProviderGatewayError,

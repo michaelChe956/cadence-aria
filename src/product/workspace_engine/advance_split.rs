@@ -40,6 +40,7 @@ impl WorkspaceEngine {
     /// 本函数只建组至 Ready，不发 coding provider；多 target 仍须人工逐 target
     /// 发显式 StartCoding。仅精确绑定单 target 的 durable opt-in 可由独立服务端
     /// StartCoding 命令单发首启；不是 advance 的副作用（REQ-ADV-05/MTG-03/CG-04）。
+    #[allow(clippy::too_many_arguments)] // store/journalling 依赖逐项注入,拆包会遮掩所有权来源。
     pub(super) async fn initialize_advance_split(
         &mut self,
         input: AdvanceInput,

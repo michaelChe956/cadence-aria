@@ -1653,6 +1653,7 @@ pub(crate) fn probe_import_record(
 /// `scope` 携带受信岗位/窗口/资源身份,缺失即拒签)。返回 evidence/
 /// projection/record 材料包,record 经 2d `record_verified_probe` 导入
 /// durable;任何环节失败返回稳定码错误——调用方 BLOCKED 真实报告,不伪造。
+#[allow(clippy::too_many_arguments)] // crate 外矩阵 harness 的稳定入口,参数逐项对应探针输入契约。
 pub async fn run_cli_boundary_probe(
     provider: ProviderName,
     cli_program: &str,
@@ -1728,25 +1729,19 @@ mod tests {
         BoundaryFixture, HostOpenProbeScope, ProviderBoundaryProbe, ResumeChannelKind,
         ResumeProbeSpec,
     };
-    use crate::cross_cutting::claude_code_provider::ClaudePolicyProjector;
-    use crate::cross_cutting::codex_provider::CodexPolicyProjector;
-    use crate::cross_cutting::kimi_code_provider::KimiPolicyProjector;
-    use crate::cross_cutting::pi_provider::PiPolicyProjector;
+
     use crate::cross_cutting::provider_boundary::{
         PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN, ProviderBoundaryError, ProviderBoundaryMode,
-        ProviderBoundaryPlan,
     };
     use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
-    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
-    use crate::product::logical_codebase::policy::{
-        PolicyTarget, ProviderDialect, SessionPolicyAction, SessionPolicyEnvelope,
-    };
+
+    use crate::product::logical_codebase::policy::SessionPolicyAction;
     use crate::product::logical_codebase::provider_capability_probe::ProviderCapabilityProbeService;
     use crate::product::logical_codebase::provider_capability_store::{
         CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
         ProviderActionMatrix, ProviderCapabilityRecord,
     };
-    use crate::product::logical_codebase::provider_gateway::{ProviderRef, ResumeEvidenceState};
+    use crate::product::logical_codebase::provider_gateway::ResumeEvidenceState;
     use crate::product::logical_codebase::provider_projection::ProviderPolicyProjection;
     use crate::product::models::ProviderName;
     use crate::protocol::contracts::AdapterRole;
@@ -2274,10 +2269,10 @@ mod tests {
             .expect("2c shape validation accepts a resume-confirmed row");
     }
 
-    /// r25 接线回归:外部探针入口 `run_cli_boundary_probe`(harness seam)
-    /// 以原生参数执行完整 probe(含 resume 面)并返回 (evidence, projection),
-    /// 结果可经 2d `record_verified_probe` 导入 durable——矩阵 LC setup 段
-    /// capability 播种链端到端(probe→2c shape→2d import)。
+    // r25 接线回归:外部探针入口 `run_cli_boundary_probe`(harness seam)
+    // 以原生参数执行完整 probe(含 resume 面)并返回 (evidence, projection),
+    // 结果可经 2d `record_verified_probe` 导入 durable——矩阵 LC setup 段
+    // capability 播种链端到端(probe→2c shape→2d import)。
 
     /// r50(#1 残根,coding fresh 现场):BoundaryFixture::boundary_action
     /// 把 ReviewReadOnly 折叠为 PlanningReadOnly(无 target 即 Planning),

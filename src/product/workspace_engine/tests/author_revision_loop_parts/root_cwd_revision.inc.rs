@@ -435,8 +435,7 @@ fn logical_revision_fixture_with(
 
     // gateway：capture provider 注册为 ClaudeCode 真实 adapter（LC revision 经
     // gateway 启动）；capability/target resolver 复用 part_32 测试 doubles。
-    let contracts: std::sync::Arc<CapturedExecutionContracts> =
-        Default::default();
+    let contracts: std::sync::Arc<CapturedExecutionContracts> = Default::default();
     let (starts, inputs, capture) = {
         let starts = Arc::new(AtomicUsize::new(0));
         let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -677,12 +676,14 @@ async fn logical_revision_rebinds_root_cwd_and_preserves_revision_target() {
     assert_eq!(envelope.working_directory, fixture.manifest_root);
     assert_eq!(
         envelope.target.worktree,
-        fixture.manifest_root.canonicalize().expect("canonical root"),
+        fixture
+            .manifest_root
+            .canonicalize()
+            .expect("canonical root"),
         "target 是 E native anchor（聚合根），非成员 checkout"
     );
     assert!(
-        envelope.target.logical_repository_id.is_empty()
-            && envelope.target.checkout_id.is_empty(),
+        envelope.target.logical_repository_id.is_empty() && envelope.target.checkout_id.is_empty(),
         "聚合根锚不携带成员/checkout 身份"
     );
 }
@@ -1292,9 +1293,7 @@ fn logical_design_revision_fixture() -> LogicalDesignRevisionFixture {
             project_id: "project_0001".to_string(),
             repo_id: Some(repositories[0].id.clone()),
             logical_codebase_id: Some(
-                crate::product::logical_codebase::store::legacy_logical_codebase_id(
-                    "project_0001",
-                ),
+                crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001"),
             ),
             title: "logical design revision fixture issue".to_string(),
             description: Some("design revision anchor".to_string()),
@@ -1422,7 +1421,7 @@ fn logical_design_revision_fixture() -> LogicalDesignRevisionFixture {
             story_spec_ids: Vec::new(),
             title: "logical design revision design".to_string(),
             aggregate_codebase: Some(crate::product::lifecycle_store::AggregateDesignSpecScope {
-                logical_codebase_ref: manifest.logical_codebase_id.clone(),
+                logical_codebase_ref: manifest.logical_codebase_id,
                 effective_member_ids: member_ids.clone(),
                 involved_repository_ids: Vec::new(),
                 change_order: Vec::new(),
@@ -1547,7 +1546,7 @@ fn anchor_t12_design_revision_launch_fingerprint_stable_across_scope_writeback()
             "issue_0001",
             &fixture.record.entity_id,
             &crate::product::lifecycle_store::AggregateDesignSpecScope {
-                logical_codebase_ref: fixture.manifest.logical_codebase_id.clone(),
+                logical_codebase_ref: fixture.manifest.logical_codebase_id,
                 effective_member_ids: fixture.member_ids.clone(),
                 involved_repository_ids: fixture.member_ids.clone(),
                 change_order: fixture.member_ids.clone(),
@@ -1580,8 +1579,7 @@ fn anchor_t12_design_revision_launch_fingerprint_stable_across_scope_writeback()
         "生成轮 target 是 aggregate_root 锚"
     );
     assert!(
-        revision_target.logical_repository_id.is_empty()
-            && revision_target.checkout_id.is_empty(),
+        revision_target.logical_repository_id.is_empty() && revision_target.checkout_id.is_empty(),
         "修订轮 native launch target 必须是聚合根锚（成员 checkout 不入 target）"
     );
     assert_eq!(
@@ -1643,7 +1641,7 @@ fn anchor_t13_story_focus_writeback_launch_fingerprint_stays_aggregate() {
             "issue_0001",
             &fixture.record.entity_id,
             &crate::product::lifecycle_store::AggregateStorySpecScope {
-                logical_codebase_ref: fixture.manifest.logical_codebase_id.clone(),
+                logical_codebase_ref: fixture.manifest.logical_codebase_id,
                 effective_member_ids: vec![fixture.member_id],
                 involved_repository_ids: vec![fixture.member_id],
                 focus_repository_id: Some(fixture.member_id),
@@ -1671,8 +1669,7 @@ fn anchor_t13_story_focus_writeback_launch_fingerprint_stays_aggregate() {
         "Story focus 回写前后两轮 launch 指纹必须相等（native target 恒聚合根锚）"
     );
     assert!(
-        revision_target.logical_repository_id.is_empty()
-            && revision_target.checkout_id.is_empty(),
+        revision_target.logical_repository_id.is_empty() && revision_target.checkout_id.is_empty(),
         "回写后修订轮 native launch target 仍是聚合根锚（成员不入 target）"
     );
     assert_eq!(

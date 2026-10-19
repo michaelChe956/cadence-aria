@@ -7,7 +7,7 @@ use crate::product::coding_models::{
     CodingRoleRunTrigger,
 };
 
-use super::{StartupReconcileFixture, seed_startup_attempt};
+use super::seed_startup_attempt;
 
 // ---------------------------------------------------------------------------
 // Bug2-B(Task 4)：启动 gate-only 对账——每 attempt 分诊前收敛门的崩溃

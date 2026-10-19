@@ -16,7 +16,6 @@
 use crate::product::logical_codebase::ProviderGatewayError;
 use crate::product::work_item_split_engine::engine::provider_ref_for_name;
 
-
 /// Task 1a 四家显式映射:每个真实 provider 映射到自己的
 /// `ProviderRefType`(Pi/Kimi 不是 Claude 回退),snapshot 引用冻结为
 /// 托管引用。
@@ -49,8 +48,7 @@ fn provider_ref_for_name_maps_all_four_real_providers_explicitly() {
 #[test]
 fn provider_ref_for_name_fails_closed_for_fake_without_claude_fallback() {
     let error = provider_ref_for_name(&ProviderName::Fake)
-        .err()
-        .expect("Fake must not map to a gateway provider ref");
+        .expect_err("Fake must not map to a gateway provider ref");
     assert!(
         matches!(&error, ProviderGatewayError::UnsupportedCapability(reason)
             if reason.contains("provider_unsupported_for_gateway_launch")),

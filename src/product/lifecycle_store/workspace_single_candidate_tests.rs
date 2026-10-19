@@ -960,24 +960,26 @@ fn sg_04b_session(store: &LifecycleStore, entity_id: &str) -> WorkspaceSessionRe
 }
 
 fn sg_04b_seed_grant(session: &mut WorkspaceSessionRecord, turn_id: &str, command_id: &str) {
-    let mut state = StructuralGovernanceState::default();
-    state.current_grant = Some(StructuralRevisionGrant {
-        grant_id: format!("sgr_{turn_id}"),
-        authorization_hash: "f".repeat(64),
-        turn_id: Some(turn_id.to_string()),
-        command_id: Some(command_id.to_string()),
-        candidate_source_revision_ref: None,
-        plan_candidate_ir_ref: None,
-        mechanical_report_ref: None,
-        phase: Some(StructuralGrantPhase::AuthorRunning),
-        attempt_no: 1,
-        prompt_ref: Some(format!("prompt://{turn_id}/rev1")),
-        prompt_digest: Some("a".repeat(64)),
-        instruction_digest: Some("b".repeat(64)),
-        failing_source_hash: Some("c".repeat(64)),
-        review_identity: None,
-        granted_at: "2026-10-13T00:00:00Z".to_string(),
-    });
+    let state = StructuralGovernanceState {
+        current_grant: Some(StructuralRevisionGrant {
+            grant_id: format!("sgr_{turn_id}"),
+            authorization_hash: "f".repeat(64),
+            turn_id: Some(turn_id.to_string()),
+            command_id: Some(command_id.to_string()),
+            candidate_source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            phase: Some(StructuralGrantPhase::AuthorRunning),
+            attempt_no: 1,
+            prompt_ref: Some(format!("prompt://{turn_id}/rev1")),
+            prompt_digest: Some("a".repeat(64)),
+            instruction_digest: Some("b".repeat(64)),
+            failing_source_hash: Some("c".repeat(64)),
+            review_identity: None,
+            granted_at: "2026-10-13T00:00:00Z".to_string(),
+        }),
+        ..StructuralGovernanceState::default()
+    };
     session.structural_governance_state = Some(state);
 }
 

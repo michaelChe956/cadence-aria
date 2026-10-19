@@ -268,6 +268,7 @@ impl CodexProvider {
     /// (`resume_or_start_with_projection` Resume / prepared candidate)冻结的
     /// 候选投影——`Some` 时直接消费(spawn 前复验冻结版本,audit 与 prepared
     /// full 投影同源);`None`(裸 validate/既有测试)沿 adapter 侧自建投影。
+    #[allow(clippy::too_many_arguments)] // 相位/冻结投影/策略参数各自来源不同,拆结构体只会多一层转抄。
     async fn start_lc_validated_with_phase(
         &self,
         mut input: StreamingProviderInput,

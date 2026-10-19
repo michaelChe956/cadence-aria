@@ -281,11 +281,9 @@ impl LifecycleStore {
             // 会话身份绑定（D1.0 §0.2）：只 ID/scope；同身份幂等。显式 id 在
             // 创建时绑定（跨实体复用拒）；auto id 由耐久高水位保证不复用，
             // 旧 auto 会话的索引迁移按 §0.2「删除前迁移」归 D1.1 收集。
-            if explicit_identity {
-                if let Some(scope) = &closure_scope {
-                    self.entity_operation_store()
-                        .bind_workspace_session_identity(&id, scope)?;
-                }
+            if explicit_identity && let Some(scope) = &closure_scope {
+                self.entity_operation_store()
+                    .bind_workspace_session_identity(&id, scope)?;
             }
             let root = self.workspace_sessions_root(&input.project_id, &input.issue_id);
             let target_path = root.join(format!("{id}.json"));
@@ -1536,6 +1534,8 @@ impl LifecycleStore {
 /// 判定顺序）。Replay 为结构变体：同 ID 已受理一律回放原受理结果＋当前
 /// 操作状态（waiting/prepare 失败、reserved/running、resolved/completed
 /// 全覆盖），禁止 spawn，卡不复活。
+// 四态结果按值遍历/匹配;Claimed/Replayed 携带完整 record,Box 化会波及全调用链。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LcFreshClaimOutcome {
     /// 新 operation_id 在 recovery=Waiting 下原子 CAS 受理成功：

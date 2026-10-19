@@ -13,8 +13,6 @@
 //   （不 reserve 第二次；resume=None 全新 native；返修 prompt 自足携带原
 //   source/review）→ 原 compiler/确认门收口；recovery Resolved。
 
-use super::*;
-
 /// 记录 input 并立即完成一轮输出的 author provider（可携带 native id——
 /// fresh 链对账锚：完成事件的 provider_session_id 经 record_provider_session
 /// 落 conversation，再由成功收口绑定 recovery.fresh_native_session_id）。

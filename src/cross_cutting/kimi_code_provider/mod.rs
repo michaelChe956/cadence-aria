@@ -1246,9 +1246,11 @@ mod b1_launch_cancel_tests {
                 Instant::now() < deadline,
                 "fixture 的 --version 探测必须启动(probe marker 未出现)"
             );
-            match tokio::time::timeout(Duration::from_millis(10), &mut launch).await {
-                Ok(_) => panic!("launch 不得在版本探测完成前返回"),
-                Err(_) => {}
+            if tokio::time::timeout(Duration::from_millis(10), &mut launch)
+                .await
+                .is_ok()
+            {
+                panic!("launch 不得在版本探测完成前返回")
             }
         }
         // 引擎取消时序:provider_start 的 select 分支 cancel 后 drop launch future。

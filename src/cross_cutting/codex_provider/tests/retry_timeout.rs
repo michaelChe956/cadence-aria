@@ -35,8 +35,7 @@ async fn codex_provider_times_out_when_turn_stops_emitting_events() {
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
-            | ProviderEvent::ToolResult(_)
-            | ProviderEvent::TerminalActivity(_) => {}
+            | ProviderEvent::ToolResult(_) => {}
             ProviderEvent::Completed(completion) => {
                 let full_output = completion.full_output;
                 panic!("provider completed unexpectedly: {full_output}")
@@ -88,8 +87,7 @@ async fn codex_provider_reports_resume_stall_when_resumed_turn_emits_no_events()
             | ProviderEvent::PermissionRequest(_)
             | ProviderEvent::ChoiceRequest(_)
             | ProviderEvent::ToolCall(_)
-            | ProviderEvent::ToolResult(_)
-            | ProviderEvent::TerminalActivity(_) => {}
+            | ProviderEvent::ToolResult(_) => {}
             ProviderEvent::Completed(completion) => {
                 let full_output = completion.full_output;
                 panic!("provider completed unexpectedly: {full_output}")

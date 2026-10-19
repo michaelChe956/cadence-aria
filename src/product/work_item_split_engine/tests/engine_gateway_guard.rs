@@ -179,7 +179,10 @@ impl DirectRunCapture {
 
 impl ProviderAdapter for DirectRunCapture {
     fn run(&self, input: &AdapterInput) -> Result<AdapterOutput, ProviderAdapterError> {
-        self.raw_inputs.lock().expect("direct run capture").push(input.clone());
+        self.raw_inputs
+            .lock()
+            .expect("direct run capture")
+            .push(input.clone());
         Self::minimal_output()
     }
 
@@ -213,16 +216,26 @@ async fn lcg_t13_sync_direct_never_uses_lc_bridge() {
         //(minimal fixture 输出无 work items,generate 在 provider 成功
         // 之后的同一解析步失败——该边界即输出上浮的可观测面)。
         let first_code = engine
-            .generate(&request, &lifecycle, &issue, &repository, author_provider.clone())
+            .generate(
+                &request,
+                &lifecycle,
+                &issue,
+                &repository,
+                author_provider.clone(),
+            )
             .await
-            .err()
-            .expect("minimal output must fail at the deterministic parse boundary")
+            .expect_err("minimal output must fail at the deterministic parse boundary")
             .code;
         let second_code = engine
-            .generate(&request, &lifecycle, &issue, &repository, author_provider.clone())
+            .generate(
+                &request,
+                &lifecycle,
+                &issue,
+                &repository,
+                author_provider.clone(),
+            )
             .await
-            .err()
-            .expect("minimal output must fail at the deterministic parse boundary")
+            .expect_err("minimal output must fail at the deterministic parse boundary")
             .code;
         assert_eq!(
             first_code, second_code,
@@ -237,10 +250,19 @@ async fn lcg_t13_sync_direct_never_uses_lc_bridge() {
     // cwd/worktree 双字段、schema/timeout 冻结才是锁定面)。
     assert_same_topology(&inputs[0], &inputs[1], "claude");
     assert_same_topology(&inputs[2], &inputs[3], "codex");
-    assert_eq!(inputs[0].provider_type, crate::protocol::contracts::ProviderType::ClaudeCode);
-    assert_eq!(inputs[2].provider_type, crate::protocol::contracts::ProviderType::Codex);
+    assert_eq!(
+        inputs[0].provider_type,
+        crate::protocol::contracts::ProviderType::ClaudeCode
+    );
+    assert_eq!(
+        inputs[2].provider_type,
+        crate::protocol::contracts::ProviderType::Codex
+    );
     for input in inputs.iter() {
-        assert_eq!(input.role, crate::protocol::contracts::AdapterRole::WorkItemSplitter);
+        assert_eq!(
+            input.role,
+            crate::protocol::contracts::AdapterRole::WorkItemSplitter
+        );
         // 单仓直连:不注入独立 cwd(None → 沿用 worktree_path,两字段
         // 旧目录映射),worktree_path 即 repository.path。
         assert_eq!(input.working_directory, None);
@@ -262,7 +284,10 @@ async fn lcg_t13_sync_direct_never_uses_lc_bridge() {
 fn assert_same_topology(a: &AdapterInput, b: &AdapterInput, slot: &str) {
     assert_eq!(a.provider_type, b.provider_type, "{slot}: slot identity");
     assert_eq!(a.role, b.role, "{slot}: role unchanged");
-    assert_eq!(a.working_directory, b.working_directory, "{slot}: cwd field");
+    assert_eq!(
+        a.working_directory, b.working_directory,
+        "{slot}: cwd field"
+    );
     assert_eq!(a.worktree_path, b.worktree_path, "{slot}: worktree target");
     assert_eq!(a.output_schema, b.output_schema, "{slot}: schema frozen");
     assert_eq!(a.timeout, b.timeout, "{slot}: timeout frozen");
@@ -1016,8 +1041,8 @@ fn lcg_t01_parse_consumes_existing_split_run_handle() {
 async fn lcg_t09_split_sync_resume_unknown_is_not_streaming_fresh() {
     use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
     use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+    use crate::product::logical_codebase::policy::PolicyTarget;
     use crate::product::logical_codebase::policy::ProviderWireDialect;
-    use crate::product::logical_codebase::policy::{PolicyTarget, SessionPolicyAction};
     use crate::product::logical_codebase::provider_gateway::{
         ProviderRef, ResumeSessionLaunchRequest, SessionResumeFingerprint,
     };
@@ -1173,10 +1198,8 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
         &self,
         _validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
         _cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<
-        crate::cross_cutting::streaming_provider::ProviderSession,
-        ProviderAdapterError,
-    > {
+    ) -> Result<crate::cross_cutting::streaming_provider::ProviderSession, ProviderAdapterError>
+    {
         self.bridge_starts.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.delay).await;
         Err(ProviderAdapterError::execution_failed(
@@ -1221,9 +1244,7 @@ async fn sync_bridge_run_must_not_starve_caller_runtime() {
         Arc::new(SplitRootCwdCapabilitySource::default()),
         Arc::new(SplitRootCwdPassThroughResolver),
         registry.clone(),
-        Arc::new(crate::cross_cutting::gateway_sync_provider::GatewaySyncProvider::new(
-            registry,
-        )),
+        Arc::new(crate::cross_cutting::gateway_sync_provider::GatewaySyncProvider::new(registry)),
         split_root_cwd_availability_gate(),
         Arc::new(GatewayRunAudit::new()),
         manifest.provider_context_root.clone(),
@@ -1244,10 +1265,7 @@ async fn sync_bridge_run_must_not_starve_caller_runtime() {
     let started = std::time::Instant::now();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        probe.store(
-            started.elapsed().as_millis() as u64,
-            Ordering::SeqCst,
-        );
+        probe.store(started.elapsed().as_millis() as u64, Ordering::SeqCst);
     });
 
     let failure = tokio::time::timeout(
@@ -1287,7 +1305,9 @@ async fn sync_bridge_run_must_not_starve_caller_runtime() {
          {fired}ms 才 fire(应在 ~300ms,bridge 在途窗口 2s 内保持调度)"
     );
     assert!(
-        failure.message.contains("slow validated probe injected failure")
+        failure
+            .message
+            .contains("slow validated probe injected failure")
             || failure.message.contains("ProviderExecutionFailed"),
         "bridge failure must propagate with the adapter error kind, got {}",
         failure.message
@@ -1315,18 +1335,20 @@ fn cascade_d1_3b_split_run_begin_complete_fail_late_writes_rejected() {
         })
         .expect("story spec");
     let session = lifecycle
-        .create_workspace_session(crate::product::lifecycle_store::CreateWorkspaceSessionInput {
-            project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: story.id.clone(),
-            workspace_type: crate::product::models::WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: None,
-            review_rounds: 1,
-            superpowers_enabled: false,
-            openspec_enabled: false,
-            work_item_plan_options: None,
-        })
+        .create_workspace_session(
+            crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: story.id.clone(),
+                workspace_type: crate::product::models::WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: None,
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            },
+        )
         .expect("workspace session");
 
     // 存活实体：begin/complete 原路径零变化（read-back 断言收口状态）。
@@ -1372,11 +1394,10 @@ fn cascade_d1_3b_split_run_begin_complete_fail_late_writes_rejected() {
         crate::product::entity_deletion_store::DeletionEntityKind::Story,
         &story.id,
     );
-    let lease = crate::product::entity_operation_store::EntityOperationStore::new(
-        lifecycle.app_paths(),
-    )
-    .try_acquire_delete(&scope)
-    .expect("delete lease");
+    let lease =
+        crate::product::entity_operation_store::EntityOperationStore::new(lifecycle.app_paths())
+            .try_acquire_delete(&scope)
+            .expect("delete lease");
     crate::product::entity_deletion_store::EntityDeletionStore::new(lifecycle.app_paths())
         .begin(&lease)
         .expect("purging tombstone");

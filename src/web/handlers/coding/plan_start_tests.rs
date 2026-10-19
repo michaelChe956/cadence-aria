@@ -1792,9 +1792,7 @@ async fn plan_coding_n3_deleted_member_aggregates_invalidated_not_500() {
 // ─── H4（设计 2026-10-14 C/D 节）：组删端点与重启收敛 ───
 
 use crate::product::advance_store::AdvanceStore;
-use crate::product::coding_plan_run::{
-    CODING_PLAN_WORKSPACE_LIFECYCLES_DIR, CodingPlanWorkspaceResetChecklist,
-};
+use crate::product::coding_plan_run::CodingPlanWorkspaceResetChecklist;
 use crate::web::types::{PlanCodingWorkspaceDeletionQuery, PlanCodingWorkspaceDeletionResultDto};
 
 async fn delete_workspaces(

@@ -493,7 +493,7 @@ impl LifecycleStore {
     /// 登记。同 prompt 重复 claim → `Replayed`（恰一次，不加 attempt）；
     /// 上限耗尽 → `Exhausted`（零写零新授权）；无状态/无 grant/无 turn
     /// 绑定/BlockedByLcRecovery → `Waiting`（旧记录零回填）。
-    pub fn claim_structural_attempt(
+    pub(crate) fn claim_structural_attempt(
         &self,
         expected: &WorkspaceSessionRecord,
         turn_id: &str,

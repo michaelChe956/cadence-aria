@@ -578,7 +578,7 @@ impl SessionResumeFingerprint {
     ) -> Self {
         let mut hasher = Sha256::new();
         let mut domain = |part: &[u8]| {
-            hasher.update(&(part.len() as u64).to_be_bytes());
+            hasher.update((part.len() as u64).to_be_bytes());
             hasher.update(part);
         };
         domain(LC_RESUME_FINGERPRINT_SCHEMA.as_bytes());
@@ -1246,7 +1246,7 @@ impl LogicalCodebaseProviderGateway {
 
     /// Task 3b:注入 LC 只读事实源(#8 receipt store + 只读 trust source
     /// + LC 作用域)。factory 生产装配恒注入;未注入的裸 gateway 保持
-    /// 既有语义(既有测试/旧链零回归)。
+    ///   既有语义(既有测试/旧链零回归)。
     pub fn with_readonly_lc_facts(
         mut self,
         receipts: crate::product::logical_codebase::RootRecipeReceiptStore,
@@ -1441,7 +1441,7 @@ impl LogicalCodebaseProviderGateway {
 
     /// policy artifact 解析 + target 复验 + envelope 冻结 + cwd authority 早门
     /// + fingerprint 计算的共享装配(Normal/RootRecipe 两相位共用;分格门在
-    /// 各自入口先行施加)。
+    ///   各自入口先行施加)。
     fn assemble_validated(
         &self,
         request: SessionLaunchRequest,
@@ -1635,7 +1635,7 @@ impl LogicalCodebaseProviderGateway {
         request: ResumeSessionLaunchRequest,
         projection: crate::product::logical_codebase::provider_projection::ProviderPolicyProjection,
     ) -> Result<GatewaySessionDisposition, ProviderGatewayError> {
-        let mut validated = self.validate(request.launch)?;
+        let validated = self.validate(request.launch)?;
         // 显式 resume 能力分格(路由级/launch/write-boundary 门已在 validate
         // 内施加)。
         self.capabilities

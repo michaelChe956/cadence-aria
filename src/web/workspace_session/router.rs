@@ -607,11 +607,11 @@ impl WorkspaceSessionManager {
         }
     }
 
-    /// F-23：恢复链整流后向全部连接广播当前快照（manager 创建时无订阅者，
-    /// 广播仍入 journal 供后续 cursor 回放）。
-    /// A1b2（设计 §4.4）：快照读取失败广播 typed ProtocolError
-    ///（workspace_durable_projection_unavailable），不填 Open/null/ownership
-    /// 假态；event_seq 沿 journal，客户端经 cursor/重连恢复。
+    // F-23：恢复链整流后向全部连接广播当前快照（manager 创建时无订阅者，
+    // 广播仍入 journal 供后续 cursor 回放）。
+    // A1b2（设计 §4.4）：快照读取失败广播 typed ProtocolError
+    //（workspace_durable_projection_unavailable），不填 Open/null/ownership
+    // 假态；event_seq 沿 journal，客户端经 cursor/重连恢复。
 
     /// T22 r3 根因⑤:HumanGateOpened 的非阻塞广播面(与 F-27R2
     /// `broadcast_choice_pending_state` 同构)——try_lock 活引擎即时广播;

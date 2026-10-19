@@ -164,20 +164,19 @@ impl WorkspaceEngine {
         // SG6b（REQ-CG-03:74）：Reviewing grant 的 verdict 收口——路由
         // 完成后 turn Completed + grant 携 review 证据终态 Resolved（幂
         // 等；失败可观测上抛，grant 留待恢复对账，不假称成功）。
-        if let Some(turn_id) = sc_reviewing_closure {
-            if let Err(error) = self
+        if let Some(turn_id) = sc_reviewing_closure
+            && let Err(error) = self
                 .close_reviewing_structural_grant(&turn_id, &node_id)
                 .await
-            {
-                let _ = self
-                    .event_tx
-                    .send(EngineEvent::Error {
-                        message: format!(
-                            "structural verdict closure for turn {turn_id} failed: {error}"
-                        ),
-                    })
-                    .await;
-            }
+        {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::Error {
+                    message: format!(
+                        "structural verdict closure for turn {turn_id} failed: {error}"
+                    ),
+                })
+                .await;
         }
     }
 

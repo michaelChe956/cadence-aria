@@ -391,9 +391,9 @@ pub fn project_planning_failure_presentation(
 /// deny_unknown_fields 封闭性对 wire 同样成立。
 pub type UserBudgetReceiptDto = crate::product::models::UserBudgetReceipt;
 
-/// SG3b：engine typed 失败载体（本次 close 捕获）→ 本 DTO 的纯投影由
-/// `conversational_gate::HumanGateCloseCompileFailure::wire_presentation`
-/// 单源完成（engine 私有 types 不对 web 层开放），此处只承载 wire 合同。
+// SG3b：engine typed 失败载体（本次 close 捕获）→ 本 DTO 的纯投影由
+// `conversational_gate::HumanGateCloseCompileFailure::wire_presentation`
+// 单源完成（engine 私有 types 不对 web 层开放），此处只承载 wire 合同。
 
 /// run_context 的对外 kind 名与 durable serde tag（snake_case）严格一致，
 /// 不引入第二套字符串协议；未知 kind 拒收由 durable 反序列化承载。

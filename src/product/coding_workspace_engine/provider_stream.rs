@@ -2217,7 +2217,7 @@ mod lcg_t07_validated_dispatch_tests {
             "coder 角色启动必须原样透传 caller 显式覆盖层"
         );
         assert!(
-            captured.env_vars.get("PATH").is_none() && captured.env_vars.get("HOME").is_none(),
+            !captured.env_vars.contains_key("PATH") && !captured.env_vars.contains_key("HOME"),
             "coder 角色启动不得再注入白名单 PATH/HOME(宿主值由底座继承): {:?}",
             captured.env_vars
         );
@@ -2305,7 +2305,7 @@ mod b1_launch_ownership_tests {
             )
             .await
             .expect("spawn sleep");
-            let (event_tx, event_rx) = tokio::sync::mpsc::channel(8);
+            let (_event_tx, event_rx) = tokio::sync::mpsc::channel(8);
             let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
             tokio::spawn(async move {
                 cancel.cancelled().await;

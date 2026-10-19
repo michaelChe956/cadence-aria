@@ -1229,6 +1229,7 @@ fn attention_write_api_error(error: String) -> ApiError {
 /// record.updated_at / claim.claimed_at，无 checkpoint 由 N0 首次 upsert
 /// 冻结（禁 GET now 重置）；绑定失效（disabled/无版本化绑定）零写——事实
 /// 写者本身需当前代授权。写失败原样上抛（不冒充已通知）。
+#[allow(clippy::too_many_arguments)] // N0 事实写入面:键位逐项对应 durable command 合同。
 pub(crate) fn upsert_automation_drive_failure_fact(
     paths: &ProductAppPaths,
     enrollment: &IssueAutomationEnrollment,
@@ -1317,6 +1318,7 @@ fn advance_checkpoint_time(
 
 /// Enrolled 共享服务错误路径：先写 N0 失败事实（写失败优先上抛），再
 /// 返回原始业务错误。
+#[allow(clippy::too_many_arguments)] // 同上键位透传(N0 事实先写,再回原始错误)。
 fn enrolled_fact_error(
     paths: &ProductAppPaths,
     identity: &EnrolledPlanDriveIdentity,
@@ -1665,7 +1667,8 @@ pub(crate) async fn drive_ready_units_for_plan(
         }
     }
     if let Some((_rank, selection)) = rotated {
-        run = run_store
+        // 轮换是 durable 写;返回值仅回显新 record,本驱动后续不再读取。
+        run_store
             .rotate_selection(&run, selection)
             .map_err(product_store_api_error)?;
     }
@@ -1678,6 +1681,8 @@ pub(crate) async fn drive_ready_units_for_plan(
 /// 版本化绑定）通过则给 Enrolled origin（binding_version/target 取当前
 /// 代），任何一项失效 → `Revoked`（零 provider、禁降级 Manual）。
 /// enrollment 读取失败（IO/损坏）显式上抛，不当撤销吞掉。
+// 启动 origin 裁决:Enrolled 臂携带冻结快照,按值走单层 drive;Box 无收益。
+#[allow(clippy::large_enum_variant)]
 enum DriveStartOrigin {
     Start {
         origin: CodingStartOrigin,

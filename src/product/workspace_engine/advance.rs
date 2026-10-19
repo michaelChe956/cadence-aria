@@ -237,14 +237,14 @@ impl AdvancePlanAdmission {
             command_id,
         ) {
             return Err(match error {
-                ProductStoreError::Conflict { kind, .. }
-                    if kind == "coding_plan_workspace_clearing" =>
-                {
-                    AdvanceRoundGuardFailure::Round(AdvanceRoundRejection::WorkspaceClearing)
-                }
-                ProductStoreError::Conflict { kind, .. } if kind == "coding_plan_run_retired" => {
-                    AdvanceRoundGuardFailure::Round(AdvanceRoundRejection::CommandRetired)
-                }
+                ProductStoreError::Conflict {
+                    kind: "coding_plan_workspace_clearing",
+                    ..
+                } => AdvanceRoundGuardFailure::Round(AdvanceRoundRejection::WorkspaceClearing),
+                ProductStoreError::Conflict {
+                    kind: "coding_plan_run_retired",
+                    ..
+                } => AdvanceRoundGuardFailure::Round(AdvanceRoundRejection::CommandRetired),
                 other => AdvanceRoundGuardFailure::Store(other),
             });
         }

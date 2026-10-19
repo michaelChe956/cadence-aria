@@ -13,6 +13,7 @@ use crate::product::logical_codebase::{
 ///
 /// 这个函数刻意不使用 `PlanningContextSetResolver`：后者会在发现失效成员时写入
 /// invalidation，因此不能置于创建 SingleCandidate session 前的只读分流边界。
+#[cfg(test)] // 单仓 preflight 已被多仓口径取代;保留供历史判定对照单测。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SingleCandidatePreflightDecision {
     Eligible {
@@ -25,6 +26,7 @@ pub(crate) enum SingleCandidatePreflightDecision {
     },
 }
 
+#[cfg(test)] // 同上:仅单测消费。
 pub(crate) fn preflight_single_repository_candidate(
     repository_ids: &[String],
 ) -> SingleCandidatePreflightDecision {
@@ -123,6 +125,24 @@ pub(crate) fn logical_repository_upper_bound_for_plan(
     let bound = selection.resolved_upper_bound(&resolved);
     let manifest_ids = manifest.member_ids.iter().collect::<BTreeSet<_>>();
     bound
+        .into_iter()
+        .filter(|repository_id| manifest_ids.contains(repository_id))
+        .map(|repository_id| repository_id.0.to_string())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+pub(crate) fn logical_repository_ids_for_preflight(
+    manifest: &LogicalCodebaseManifest,
+    selection: &IssueCodebaseSelection,
+) -> Vec<String> {
+    let selected_ids = match selection.selection_policy {
+        SelectionPolicy::AllMembers => manifest.member_ids.clone(),
+        SelectionPolicy::Explicit => selection.resolve_effective_members(),
+    };
+    let manifest_ids = manifest.member_ids.iter().collect::<BTreeSet<_>>();
+    selected_ids
         .into_iter()
         .filter(|repository_id| manifest_ids.contains(repository_id))
         .map(|repository_id| repository_id.0.to_string())
@@ -349,22 +369,4 @@ mod multi_repo_preflight_tests {
             id_strings(&[3])
         );
     }
-}
-
-pub(crate) fn logical_repository_ids_for_preflight(
-    manifest: &LogicalCodebaseManifest,
-    selection: &IssueCodebaseSelection,
-) -> Vec<String> {
-    let selected_ids = match selection.selection_policy {
-        SelectionPolicy::AllMembers => manifest.member_ids.clone(),
-        SelectionPolicy::Explicit => selection.resolve_effective_members(),
-    };
-    let manifest_ids = manifest.member_ids.iter().collect::<BTreeSet<_>>();
-    selected_ids
-        .into_iter()
-        .filter(|repository_id| manifest_ids.contains(repository_id))
-        .map(|repository_id| repository_id.0.to_string())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }

@@ -218,6 +218,7 @@ impl WorkItemSplitEngine {
     /// 该方法在 Web 层为逻辑代码库 issue 选定 gateway 后接入;传统单仓/非逻辑 issue
     /// 仍走 `invoke_provider` 的直接 adapter 路径,防止本工作包扩大旧 API 行为。
     #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)] // 与 invoke_provider 对称的显式依赖注入面。
     pub(crate) async fn invoke_provider_via_gateway(
         &self,
         prompt: &str,
@@ -323,9 +324,8 @@ impl WorkItemSplitEngine {
         // parse.rs 的 complete 函数消费已有 handle,不再重新
         // `save_work_item_split_provider_run`。
         super::parse::complete_split_provider_run(lifecycle, &handle, prompt, &structured_output)
-            .map_err(|error| {
+            .inspect_err(|error| {
             let _ = lifecycle.fail_work_item_split_provider_run(&handle, &error.message);
-            error
         })?;
 
         Ok(ProviderInvocationResult {

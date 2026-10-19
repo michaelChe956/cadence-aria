@@ -20,9 +20,7 @@ pub(crate) use gateway_start::PlanAuthorLaunch;
 pub(crate) use gateway_start::begin_plan_split_run;
 pub(crate) use gateway_start::dispatch_lc_fresh_recovery_run;
 #[cfg(test)]
-pub(crate) use gateway_start::{
-    LcFreshDispatchRejection, LcFreshRunKind, lc_fresh_run_kind_for_recovery_context,
-};
+pub(crate) use gateway_start::{LcFreshRunKind, lc_fresh_run_kind_for_recovery_context};
 pub(crate) use gateway_start::{
     PlanSplitRunContext, begin_plan_split_run_if_logical, close_plan_split_run,
     close_plan_split_run_with_markdown, fail_plan_split_run, resolve_plan_author_launch,
@@ -33,9 +31,13 @@ mod provider_run;
 #[path = "run/single_candidate.rs"]
 mod single_candidate;
 pub(crate) use provider_run::{
-    deliver_attempt2_frozen_prompt, fail_cancelled_human_gate_revision_turn,
     spawn_provider_run_claiming_idle, spawn_provider_run_from_event,
     spawn_provider_run_from_handler,
+};
+// 转述门/取消修订单测的调用入口;库构建不经此处再导出。
+#[cfg(test)]
+pub(crate) use provider_run::{
+    deliver_attempt2_frozen_prompt, fail_cancelled_human_gate_revision_turn,
 };
 
 pub(crate) static NEXT_ACTIVE_RUN_TOKEN: AtomicU64 = AtomicU64::new(1);

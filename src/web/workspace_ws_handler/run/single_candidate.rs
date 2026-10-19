@@ -6,6 +6,8 @@ pub(crate) enum SingleCandidateProviderRunOutcome {
     Completed,
 }
 
+// 停等臂携带完整预检/信任材料;按值传递避免全链路 Box 化。
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum SingleCandidateProviderRunError {
     AlreadyFinished,
     /// 败者让位（k3 P2 / RCA 修法 3）：本次启动的 ledger 键已被健康持有者
@@ -480,6 +482,7 @@ fn build_work_item_plan_ir_reredrive_prompt(
 /// markdown source。驱动中断（会话失败/取消）时已按既有终态形态持久化 Failed
 /// 并返回 AlreadyFinished，与首轮驱动失败处理一致。
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::result_large_err)] // 上述枚举是运行收尾的唯一 typed 出口。
 async fn drive_single_candidate_reredrive(
     engine: &mut WorkspaceEngine,
     launch: &crate::web::workspace_ws_handler::run::gateway_start::PlanAuthorLaunch,
@@ -589,6 +592,7 @@ const PROVIDER_TRUST_MISSING_WAITING_REASON: &str = "provider_trust_missing";
 ///   状态不一致，fail-closed `Message`，绝不静默跳过预检回落 legacy 行为。
 ///
 /// 预检通过返回 `Ok(())`：后续仍由调用方读取同一实际文件（无 fallback）。
+#[allow(clippy::result_large_err)] // 同上:运行收尾 typed 出口。
 fn preflight_lc_member_rules_before_author_run(
     engine: &mut WorkspaceEngine,
     run_context: &ProviderRunContext,
@@ -687,6 +691,7 @@ fn preflight_lc_member_rules_before_author_run(
     }
 }
 
+#[allow(clippy::result_large_err)] // 同上:运行收尾 typed 出口。
 pub(crate) async fn run_single_candidate_author(
     engine: &mut WorkspaceEngine,
     provider_for_run: Arc<dyn StreamingProviderAdapter>,
