@@ -1428,10 +1428,13 @@ pub trait StreamingProviderAdapter: Send + Sync {
     ///
     /// - `ownership = None`:无归属请求(legacy/单仓 direct/测试面),保持
     ///   既有裸 `start` 语义,零行为变化;
-    /// - `ownership = Some`:默认生命周期 = 预留(durable;失败零 spawn)
-    ///   → `self.start` → 失败路径收口后注销;成功路径包装事件通道,
-    ///   **会话真实终止**(源通道关闭=子进程退出后有界排深,终结保证
-    ///   契约)后按登记身份收口注销——不在协议 `Completed` 事件点注销。
+    /// - `ownership = Some`:默认生命周期 = 预留(durable;失败零 spawn,
+    ///   预留后常驻 `LaunchReservationGuard`——launch future 被引擎在返回
+    ///   前 drop 时由 Drop 兜底收口注销)→ `self.start` → 失败路径收口后
+    ///   注销;成功路径包装事件通道,尾任务对**源通道关闭**(子进程退出后
+    ///   有界排深,终结保证契约)、**引擎取消**(`cancel.cancelled()`)与
+    ///   **消费方丢弃包装会话**(`closed()`)三信号敏感,任一触发都按登记
+    ///   身份真实收口注销——不在协议 `Completed` 事件点注销。
     ///
     /// 返回的会话满足 [ProviderSession 终结保证契约](上方契约块与红线
     /// a/b):包装通道只转发事件,不引入新的无界等待(尾部收口在通道
@@ -1550,14 +1553,18 @@ impl Drop for LaunchReservationGuard {
     }
 }
 
-/// `StreamingProviderAdapter::start_owned` 的默认生命周期实现(B1-1)。
+/// `StreamingProviderAdapter::start_owned` 的默认生命周期实现(B1-1/N1)。
 ///
-/// 预留(durable,失败零 spawn)→ adapter `start` → 失败路径收口后注销;
-/// 成功路径包装事件通道,源通道终结(子进程退出后有界排空——终结保证
-/// 契约,不是协议 `Completed` 事件)后按登记身份收口注销。真实 adapter
-/// 的 B1 接线片在 spawn 点回填 PID+starttime 后,尾部即走身份核对的
-/// killpg+观察路径;未回填的默认面按无身份收口(错误路径 adapter 自身
-/// 已 kill+wait 子进程)。
+/// 预留(durable,失败零 spawn;预留后常驻 `LaunchReservationGuard`,
+/// launch future 被引擎在返回前 drop 时由 Drop 兜底收口注销)→ adapter
+/// `start` → 失败路径收口后注销;成功路径包装事件通道,尾任务对源通道
+/// 终结(子进程退出后有界排空——终结保证契约,不是协议 `Completed`
+/// 事件)、引擎取消(`cancel.cancelled()`)与消费方丢弃包装会话
+/// (`tail_tx.closed()`)三信号敏感,任一触发都按登记身份真实收口注销
+/// (未确认→解除;已确认→killpg+有界观察)。真实 adapter 的 B1 接线片
+/// 在 spawn 点回填 PID+starttime 后,尾部即走身份核对的 killpg+观察
+/// 路径;未回填的默认面按无身份收口(错误路径 adapter 自身已 kill+wait
+/// 子进程)。
 pub(crate) async fn start_owned_default<A: StreamingProviderAdapter + ?Sized>(
     adapter: &A,
     input: StreamingProviderInput,
@@ -1571,17 +1578,24 @@ pub(crate) async fn start_owned_default<A: StreamingProviderAdapter + ?Sized>(
     // ① 持久预留先于一切 spawn 副作用:登记写失败必须发生在 adapter
     //    任何 spawn 之前(预留失败零 spawn)。
     ownership.reserve()?;
-    match adapter.start(input, cancel).await {
+    // ② F2/N1:reserve 后常驻守卫——launch future 被引擎在返回前 drop
+    //    (provider_start 取消/idle 停等臂)时,由 Drop 兜底收口注销;
+    //    错误路径显式收口与尾任务接管后 disarm(此后 Drop 不触碰登记)。
+    let mut launch_guard = LaunchReservationGuard::new(ownership.clone());
+    match adapter.start(input, cancel.clone()).await {
         Err(error) => {
             // 错误路径(握手失败/审计失败等):adapter 自身错误链已 kill+wait
             // 子进程;有登记身份则按身份 killpg+有界观察真实收口后注销。
+            launch_guard.disarm();
             ownership.release_after_session_tail().await;
             Err(error)
         }
         Ok(session) => {
-            // 成功路径:包装事件通道;消费方看到的事件流与源完全一致,
-            // 源通道终结后先收口注销再关闭包装通道(注销不推迟消费方
-            // `recv` 终结——包装通道在源终结点之后才关闭)。
+            // 成功路径:包装事件通道;消费方看到的事件流与源完全一致。
+            // 尾任务对三个终结信号敏感(N1):源通道关闭(子进程退出后有
+            // 界排空)、引擎取消(cancel.cancelled)、消费方丢弃包装会话
+            // (tail_rx drop → tail_tx.closed())——任一触发都走真实收口
+            // 注销,源通道永不关闭的会话不再永久阻塞在 source.recv()。
             let ProviderSession {
                 native_session_id,
                 events,
@@ -1589,18 +1603,32 @@ pub(crate) async fn start_owned_default<A: StreamingProviderAdapter + ?Sized>(
             } = session;
             let (tail_tx, tail_rx) = mpsc::channel(32);
             let release = ownership.clone();
+            let tail_cancel = cancel;
             tokio::spawn(async move {
                 let mut source = events;
-                while let Some(event) = source.recv().await {
-                    if tail_tx.send(event).await.is_err() {
-                        // 消费方提前丢弃会话(中止路径):同样先收口注销。
-                        break;
+                let closed = tail_tx.clone();
+                loop {
+                    tokio::select! {
+                        // 引擎取消:会话被中止,同样先收口注销。
+                        _ = tail_cancel.cancelled() => break,
+                        // 消费方提前丢弃包装会话(中止路径 drop tail_rx)。
+                        _ = closed.closed() => break,
+                        event = source.recv() => match event {
+                            Some(event) => {
+                                if tail_tx.send(event).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        },
                     }
                 }
-                // 会话真实终止(源通道关闭/消费方丢弃)→ 进程组真实收口
-                // 后注销;静止不可证时保留 durable 记录停等恢复。
+                // 会话真实终止(源通道关闭/取消/消费方丢弃)→ 进程组真实
+                // 收口后注销;静止不可证时保留 durable 记录停等恢复。
                 release.release_after_session_tail().await;
             });
+            // 尾任务已接管注销:守卫退出舞台(此后 Drop 不触碰登记)。
+            launch_guard.disarm();
             Ok(ProviderSession {
                 native_session_id,
                 events: tail_rx,
@@ -1834,5 +1862,201 @@ mod launch_reservation_guard_tests {
         );
         ownership.release_after_session_tail().await;
         assert!(records(&store_root, &key).is_empty());
+    }
+}
+
+/// N1 回归:`start_owned` 默认生命周期的取消/丢弃敏感尾任务——源事件
+/// 通道永不关闭、永不产事件的 provider(引擎取消路径 fake 的确定形态),
+/// 在引擎 cancel 或消费方丢弃包装会话后必须真实收口注销,不留
+/// `started_identity=None` 的未确认 durable 残留(后续 quiesce 命中
+/// `provider_resources_quiesce_unconfirmed_process_unknown` 停等)。
+#[cfg(all(test, unix))]
+mod start_owned_default_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::{StreamingProviderAdapter, StreamingProviderInput};
+    use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+    use crate::cross_cutting::provider_resources::{
+        OwnedResourceKind, ProviderResourceRecord, ProviderRunResourceScope, ResourceScopeKey,
+        TrustedLaunchOwnership,
+    };
+    use crate::product::provider_resource_store::ProviderResourceStore;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    /// 源事件通道永不关闭、永不产事件的 fake(与引擎取消路径的
+    /// `CancelledProvider` 同形态):成功返回会话,事件通道被后台任务
+    /// 永久持有。
+    struct NeverClosingSourceProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for NeverClosingSourceProvider {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<super::ProviderSession, ProviderAdapterError> {
+            let (event_tx, event_rx) = mpsc::channel(1);
+            let (command_tx, _command_rx) = mpsc::channel(1);
+            tokio::spawn(async move {
+                let _keep_stream_open = event_tx;
+                std::future::pending::<()>().await;
+            });
+            Ok(super::ProviderSession {
+                native_session_id: None,
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+    }
+
+    fn records(
+        store_root: &std::path::Path,
+        key: &ResourceScopeKey,
+    ) -> Vec<ProviderResourceRecord> {
+        ProviderResourceStore::new(store_root)
+            .list_scope(key)
+            .expect("list start_owned scope")
+            .into_iter()
+            .filter(|record| matches!(record.kind, OwnedResourceKind::Process))
+            .collect()
+    }
+
+    struct OwnedScope {
+        _base: tempfile::TempDir,
+        store_root: std::path::PathBuf,
+        key: ResourceScopeKey,
+        ownership: TrustedLaunchOwnership,
+    }
+
+    fn owned_scope(label: &str) -> OwnedScope {
+        let base = tempfile::tempdir().expect("start_owned base");
+        let private_root = base.path().join("private-root");
+        std::fs::create_dir_all(&private_root).expect("private root");
+        let store_root = base.path().join("resource-store");
+        std::fs::create_dir_all(&store_root).expect("store root");
+        let key = ResourceScopeKey {
+            scope_id: format!("code-delivery-attempt-{label}"),
+            run_id: format!("role-run-{label}"),
+            boot_identity: format!("aria-engine-{}-{label}", std::process::id()),
+        };
+        let scope = ProviderRunResourceScope::open_for_recovery(
+            &key,
+            None,
+            &private_root,
+            &store_root,
+            None,
+        )
+        .expect("open start_owned scope");
+        let ownership = TrustedLaunchOwnership::mint(
+            Arc::new(scope),
+            "code_delivery provider process: start-owned-default-test",
+        );
+        OwnedScope {
+            _base: base,
+            store_root,
+            key,
+            ownership,
+        }
+    }
+
+    async fn wait_scope_released(scope: &OwnedScope) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !records(&scope.store_root, &scope.key).is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "尾任务必须在 cancel/消费方丢弃后真实收口注销未确认预留"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn start_owned_cancel_releases_reservation_when_source_never_closes() {
+        let scope = owned_scope("cancel");
+        let cancel = CancellationToken::new();
+        let session = NeverClosingSourceProvider
+            .start_owned(
+                StreamingProviderInput::fake_for_test("never-closing source + cancel"),
+                Some(scope.ownership.clone()),
+                cancel.clone(),
+            )
+            .await
+            .expect("start_owned ok");
+        assert_eq!(
+            records(&scope.store_root, &scope.key).len(),
+            1,
+            "预留已落盘且未确认"
+        );
+        // 引擎取消路径:cancel.cancel() 后丢弃包装会话(tail_rx)。
+        cancel.cancel();
+        drop(session);
+        wait_scope_released(&scope).await;
+        // 重复 recycle 幂等:注销后的再次收口不失败、不复活登记。
+        scope.ownership.release_after_session_tail().await;
+        assert!(records(&scope.store_root, &scope.key).is_empty());
+    }
+
+    #[tokio::test]
+    async fn start_owned_consumer_drop_releases_reservation_when_source_never_closes() {
+        let scope = owned_scope("consumer-drop");
+        let session = NeverClosingSourceProvider
+            .start_owned(
+                StreamingProviderInput::fake_for_test("never-closing source + drop"),
+                Some(scope.ownership.clone()),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("start_owned ok");
+        // 仅消费方丢弃(不 cancel):closed() 臂同样真实收口注销。
+        drop(session);
+        wait_scope_released(&scope).await;
+        assert!(records(&scope.store_root, &scope.key).is_empty());
+    }
+
+    /// start 永不返回的 fake:驱动 reserve 后停在可取消 await 点。
+    struct PendingStartProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for PendingStartProvider {
+        async fn start(
+            &self,
+            _input: StreamingProviderInput,
+            _cancel: CancellationToken,
+        ) -> Result<super::ProviderSession, ProviderAdapterError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn start_owned_launch_future_drop_releases_reservation() {
+        // F2 兜底:reserve 之后、start 返回之前,launch future 被外层
+        // drop(引擎 provider_start 取消/idle 臂)——守卫 Drop 必须收口
+        // 注销未确认预留,不留 durable 残留。
+        let scope = owned_scope("future-drop");
+        let mut launched = Box::pin(PendingStartProvider.start_owned(
+            StreamingProviderInput::fake_for_test("launch future dropped"),
+            Some(scope.ownership.clone()),
+            CancellationToken::new(),
+        ));
+        // 有界驱动:首个 poll 完成预留后停在 fake start 的 pending;
+        // 预留未落盘说明生命周期没执行到 reserve,测试自身失效。
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let elapsed = tokio::time::timeout(Duration::from_millis(20), launched.as_mut()).await;
+            assert!(elapsed.is_err(), "pending start 不应在驱动窗口内返回");
+            if !records(&scope.store_root, &scope.key).is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "首个 poll 后预留必须落盘"
+            );
+        }
+        // 引擎 drop launch future:守卫 Drop 兜底收口注销。
+        drop(launched);
+        wait_scope_released(&scope).await;
+        assert!(records(&scope.store_root, &scope.key).is_empty());
     }
 }

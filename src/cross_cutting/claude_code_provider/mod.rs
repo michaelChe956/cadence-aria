@@ -1038,6 +1038,12 @@ impl ClaudeCodeProvider {
             Some(ownership) => Some(ownership.reserve()?),
             None => None,
         };
+        // B1-1 F2/N1:reserve 后常驻守卫——launch future 被引擎在返回前
+        // drop(provider_start 取消/idle 停等臂)时,由 Drop 兜底收口注销;
+        // 错误路径显式收口后的 Drop 为幂等空操作,尾任务接管后 disarm。
+        let mut launch_guard = ownership
+            .clone()
+            .map(crate::cross_cutting::streaming_provider::LaunchReservationGuard::new);
         let process = match ProcessManager::spawn(
             &command,
             &arg_refs,
@@ -1294,6 +1300,10 @@ impl ClaudeCodeProvider {
                 )
                 .await;
             });
+            // 尾任务已接管注销:守卫退出舞台(此后 Drop 不触碰登记)。
+            if let Some(guard) = launch_guard.as_mut() {
+                guard.disarm();
+            }
             return Ok(ProviderSession {
                 native_session_id: Some(native_id),
                 events: event_rx,
@@ -1386,6 +1396,10 @@ impl ClaudeCodeProvider {
             )
             .await;
         });
+        // 尾任务已接管注销:守卫退出舞台(此后 Drop 不触碰登记)。
+        if let Some(guard) = launch_guard.as_mut() {
+            guard.disarm();
+        }
 
         Ok(ProviderSession {
             native_session_id: None,
@@ -1570,6 +1584,12 @@ impl ClaudeCodeProvider {
             Some(ownership) => Some(ownership.reserve()?),
             None => None,
         };
+        // B1-1 F2/N1:reserve 后常驻守卫——launch future 被引擎在返回前
+        // drop 时由 Drop 兜底收口注销;错误路径显式收口后的 Drop 为幂等
+        // 空操作,尾任务接管后 disarm。
+        let mut launch_guard = ownership
+            .clone()
+            .map(crate::cross_cutting::streaming_provider::LaunchReservationGuard::new);
         let process = match ProcessManager::spawn(
             &command,
             &arg_refs,
@@ -1852,6 +1872,10 @@ impl ClaudeCodeProvider {
             )
             .await;
         });
+        // 尾任务已接管注销:守卫退出舞台(此后 Drop 不触碰登记)。
+        if let Some(guard) = launch_guard.as_mut() {
+            guard.disarm();
+        }
         Ok(ProviderSession {
             native_session_id: Some(native_id),
             events: event_rx,

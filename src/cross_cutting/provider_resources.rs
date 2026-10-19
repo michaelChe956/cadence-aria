@@ -768,10 +768,41 @@ impl ProviderRunResourceScope {
             .map_err(store_error)
     }
 
+    /// quiesce 让位交接轮数:每轮一次 `yield_now` + 重读,供在途收口注销
+    /// 任务(未确认预留的解除是纯同步 store 写)完成调度。真实崩溃窗口
+    /// 的未确认预留不会因让位变绿,窗口耗尽后仍停等。
+    const QUIESCE_INFLIGHT_RELEASE_HANDOFF_ROUNDS: usize = 4;
+
+    fn has_inflight_unconfirmed_process_record(records: &[ProviderResourceRecord]) -> bool {
+        records.iter().any(|record| {
+            record.cleanup_cursor < CleanupStep::Removed
+                && matches!(record.kind, OwnedResourceKind::Process)
+                && !matches!(
+                    record.started_identity.as_ref(),
+                    Some(StartedIdentity::Process { .. })
+                )
+        })
+    }
+
     /// 静止证明:killpg/stop 只是其中一步,之后必须以真实身份观察确认;
     /// 未知 writer/未静止 → RecoveryRequired(停等,durable 状态不动)。
     pub(crate) async fn quiesce_scope(&self) -> Result<QuiesceOutcome, ProviderAdapterError> {
-        let records = self.store.list_scope(&self.key).map_err(store_error)?;
+        let mut records = self.store.list_scope(&self.key).map_err(store_error)?;
+        // N1:未确认 Process 预留可能是「收口注销任务已在途」——会话尾部
+        // 对引擎 cancel/消费方丢弃的响应经 tokio::spawn 异步释放,而引擎
+        // 错误链(技术重试旋转/中止)可能全程无 await 点同步回传,注销
+        // 任务尚未被调度。判定未知 writer 停等前先做有界让位交接:yield
+        // 后重读,在途注销完成即正常推进;窗口耗尽仍未确认才维持
+        // fail-closed 停等(真实崩溃窗口语义不变,不清理、不动 durable)。
+        if Self::has_inflight_unconfirmed_process_record(&records) {
+            for _ in 0..Self::QUIESCE_INFLIGHT_RELEASE_HANDOFF_ROUNDS {
+                tokio::task::yield_now().await;
+                records = self.store.list_scope(&self.key).map_err(store_error)?;
+                if !Self::has_inflight_unconfirmed_process_record(&records) {
+                    break;
+                }
+            }
+        }
         if records.is_empty() {
             return Ok(QuiesceOutcome::Quiescent(QuiescentScope {
                 key: self.key.clone(),

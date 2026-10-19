@@ -908,14 +908,17 @@ impl PiProvider {
 }
 
 /// B1-1(波 2):成功路径的会话包装——源事件通道真实终结(子进程退出后
-/// 有界排深,终结保证契约;**非**协议 `Completed` 事件点)或消费方提前
-/// 丢弃会话后,按登记身份真实收口(killpg+有界观察)再注销。包装通道
-/// 只转发事件,不引入新的无界等待;注销不推迟消费方 `recv` 终结(包装
-/// 通道在源终结点之后才关闭)。与 `streaming_provider::start_owned_default`
-/// 的成功路径生命周期同构,供 direct/raw 与 LC validated 两个 spawn 面复用。
+/// 有界排深,终结保证契约;**非**协议 `Completed` 事件点)、引擎取消
+/// (`cancel.cancelled()`)或消费方提前丢弃包装会话(`closed()`)后,按
+/// 登记身份真实收口(killpg+有界观察)再注销(N1:三信号任一触发,源
+/// 通道永不关闭的会话不阻塞注销)。包装通道只转发事件,不引入新的无界
+/// 等待;注销不推迟消费方 `recv` 终结(包装通道在源终结点之后才关闭)。
+/// 与 `streaming_provider::start_owned_default` 的成功路径生命周期同构,
+/// 供 direct/raw 与 LC validated 两个 spawn 面复用。
 fn release_session_after_tail(
     session: ProviderSession,
     ownership: TrustedLaunchOwnership,
+    cancel: CancellationToken,
 ) -> ProviderSession {
     let ProviderSession {
         native_session_id,
@@ -926,14 +929,25 @@ fn release_session_after_tail(
     let release = ownership.clone();
     tokio::spawn(async move {
         let mut source = events;
-        while let Some(event) = source.recv().await {
-            if tail_tx.send(event).await.is_err() {
-                // 消费方提前丢弃会话(中止路径):同样先收口注销。
-                break;
+        let closed = tail_tx.clone();
+        loop {
+            tokio::select! {
+                // 引擎取消:会话被中止,同样先收口注销。
+                _ = cancel.cancelled() => break,
+                // 消费方提前丢弃包装会话(中止路径 drop tail_rx)。
+                _ = closed.closed() => break,
+                event = source.recv() => match event {
+                    Some(event) => {
+                        if tail_tx.send(event).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
             }
         }
         // 会话真实终止 → 进程组真实收口后注销;静止不可证时保留 durable
-        // 记录停等(scope 级 quiesce/恢复驱动接管)。
+        // 记录(scope 级 quiesce/恢复驱动接管)。
         release.release_after_session_tail().await;
     });
     ProviderSession {
@@ -973,8 +987,11 @@ impl StreamingProviderAdapter for PiProvider {
             // 无归属请求(legacy/单仓 direct/测试面):既有裸 start 语义。
             return self.start(input, cancel).await;
         };
-        match self.start_direct(input, cancel, Some(&ownership)).await {
-            Ok(session) => Ok(release_session_after_tail(session, ownership)),
+        match self
+            .start_direct(input, cancel.clone(), Some(&ownership))
+            .await
+        {
+            Ok(session) => Ok(release_session_after_tail(session, ownership, cancel)),
             Err(error) => {
                 // 错误路径:adapter 错误链已 kill+wait;有登记身份则
                 // killpg+有界观察真实收口后注销(未回填身份按无身份注销)。
@@ -1313,7 +1330,8 @@ impl StreamingProviderAdapter for PiProvider {
         }
 
         // 会话收尾任务(与 direct `start` 同构:stderr 收集 + run_pi_session +
-        // 失败 kill 链)。
+        // 失败 kill 链)。cancel 先克隆:外层还要交给尾部包装监听取消。
+        let session_cancel = cancel.clone();
         tokio::spawn(async move {
             let stderr_output = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
             let stderr_output_for_task = std::sync::Arc::clone(&stderr_output);
@@ -1331,7 +1349,7 @@ impl StreamingProviderAdapter for PiProvider {
             // r19 续修(fix 轮 2):同 direct 路径——exit-watch 竞速 + 截断时
             // wrapper 补发终态 Failed + 终态 join 有界(红线 a)。
             let result = match run_session_tail_with_exit_watch(
-                session::run_pi_session(peer, command_rx, event_tx.clone(), input, cancel),
+                session::run_pi_session(peer, command_rx, event_tx.clone(), input, session_cancel),
                 &mut child,
                 PROVIDER_CHILD_EXIT_STREAM_DRAIN,
                 provider_child_exit_error,
@@ -1392,7 +1410,7 @@ impl StreamingProviderAdapter for PiProvider {
             guard.disarm();
         }
         Ok(match launch_ownership {
-            Some(ownership) => release_session_after_tail(session, ownership),
+            Some(ownership) => release_session_after_tail(session, ownership, cancel),
             None => session,
         })
     }

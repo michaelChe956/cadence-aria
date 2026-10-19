@@ -433,7 +433,12 @@ impl CodexProvider {
         let command = self.command.to_string_lossy().to_string();
         let process_cwd = sandbox.process_cwd().to_path_buf();
         // B1-1:预留先于一切 spawn 副作用(失败=零 child;无归属=不登记)。
-        let registration = LaunchRegistration::reserve(launch_ownership)?;
+        let registration = LaunchRegistration::reserve(launch_ownership.clone())?;
+        // B1-1 F2/N1:reserve 后常驻守卫——launch future 被引擎在返回前
+        // drop 时由 Drop 兜底收口注销;错误路径显式收口后的 Drop 为幂等
+        // 空操作,尾任务接管后 disarm。
+        let mut launch_guard = launch_ownership
+            .map(crate::cross_cutting::streaming_provider::LaunchReservationGuard::new);
         let process = match ProcessManager::spawn(
             &command,
             &arg_refs,
@@ -655,6 +660,10 @@ impl CodexProvider {
             // 身份注销;静止不可证时保留 durable 记录交 scope 级停等。
             release_launch_registration(release_registration.as_ref()).await;
         });
+        // 尾任务已接管注销:守卫退出舞台(此后 Drop 不触碰登记)。
+        if let Some(guard) = launch_guard.as_mut() {
+            guard.disarm();
+        }
 
         Ok(ProviderSession {
             native_session_id: Some(thread_id),
@@ -944,7 +953,12 @@ impl StreamingProviderAdapter for CodexProvider {
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
         // B1-1:预留先于一切 spawn 副作用(失败=零 child;无归属=不登记)。
-        let registration = LaunchRegistration::reserve(launch_ownership)?;
+        let registration = LaunchRegistration::reserve(launch_ownership.clone())?;
+        // B1-1 F2/N1:reserve 后常驻守卫——launch future 被引擎在返回前
+        // drop 时由 Drop 兜底收口注销;错误路径显式收口后的 Drop 为幂等
+        // 空操作,尾任务接管后 disarm。
+        let mut launch_guard = launch_ownership
+            .map(crate::cross_cutting::streaming_provider::LaunchReservationGuard::new);
         let process = match ProcessManager::spawn(
             &command,
             &arg_refs,
@@ -1175,6 +1189,10 @@ impl StreamingProviderAdapter for CodexProvider {
             // 身份注销;静止不可证时保留 durable 记录交 scope 级停等。
             release_launch_registration(release_registration.as_ref()).await;
         });
+        // 尾任务已接管注销:守卫退出舞台(此后 Drop 不触碰登记)。
+        if let Some(guard) = launch_guard.as_mut() {
+            guard.disarm();
+        }
 
         Ok(ProviderSession {
             native_session_id,
