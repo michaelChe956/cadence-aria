@@ -28,6 +28,7 @@ Bug4 的 Reviewer 污染与自提交、Bug5 的 Coder CHECK 无法执行，需�
 - `kimi-acp-client-services`：三条真实沙箱合同及终端生命周期配套修订，保留 fs API 校验、并发与输出预算。
 - `kimi-code-provider-integration`：ACP 会话、Auto/Supervised 与逐工具审批三条集成合同明确采用全角色宿主执行，不再把审批当隔离或额外角色禁用。
 - `coding-provider-transport-retry`：Reviewer 技术重试改为新的完整 B 档审查窗口，不重建已退役的只读会话。
+- `repository-initialization-progress`：仅修订 `git_finalize` 命令环境一条，把已退役的 `env_clear`/其余变量隔离改述为宿主继承 + `LC_ALL`/`HOME`/`SSH_AUTH_SOCK` 显式覆盖层；初始化步骤与终态合同不动。
 
 ## Impact
 

@@ -59,7 +59,7 @@ RootRecipe 在所读代码中有独立能力凭据分支；保留该分支的 Ru
 
 采用 owner 决定的快照恢复、平台通道锁、对账违规整轮作废；没有独立 UID，不承诺防同 UID 恶意篡改。spec 要求锁/停止 writer 早于基线与材料、恢复前违规持久化、三域分开判定、恢复成功不洗白、违规轮只能新轮重审；具体状态与人工操作沿现行 B 档设计。
 
-平台 Git 操作统一禁止仓库 hooks/fsmonitor 桥，不能只改一个入口；资源登记先于执行，取消/崩溃须先静止再清理。清理仅限运行前创建且登记的私有目录，不能按 HOME/XDG 递归删除。替代的“只禁 reviewer edit/write”无法覆盖 terminal 自提交，不采用。
+平台 Git 操作统一禁止仓库 hooks/fsmonitor 桥，不能只改一个入口；资源登记先于执行，取消/崩溃须先静止再清理。清理仅限运行前创建且登记的私有目录，不能按 HOME/XDG 递归删除。替代的“只禁 reviewer edit/write”无法覆盖 terminal 自提交，不采用。同批删除 ProcessManager 的 `env_clear` 后，`git_finalize` 的进程环境契约同步改为宿主继承加 `LC_ALL`/`HOME`/`SSH_AUTH_SOCK` 显式覆盖层（`repository-initialization-progress` delta），不再声称其余变量隔离。
 
 ### 5. Kimi 三条合同以真实载体为准，集成面配套三条
 
