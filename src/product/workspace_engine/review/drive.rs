@@ -461,9 +461,7 @@ impl WorkspaceEngine {
             &reviewer,
             input.clone(),
             project_id.clone(),
-            self.active_review_window
-                .as_ref()
-                .map(|window| window.handle.window_id.as_str()),
+
             self.cancel.clone(),
         )
         .await;
@@ -530,9 +528,7 @@ impl WorkspaceEngine {
                     &reviewer,
                     repair_input,
                     project_id,
-                    self.active_review_window
-                        .as_ref()
-                        .map(|window| window.handle.window_id.as_str()),
+
                     self.cancel.clone(),
                 )
                 .await;
@@ -662,9 +658,7 @@ impl WorkspaceEngine {
                     &reviewer,
                     retry_input,
                     project_id,
-                    self.active_review_window
-                        .as_ref()
-                        .map(|window| window.handle.window_id.as_str()),
+
                     self.cancel.clone(),
                 )
                 .await;
@@ -1437,7 +1431,6 @@ async fn start_review_session_via_gateway(
     reviewer: &ProviderName,
     input: StreamingProviderInput,
     project_id: String,
-    review_window_id: Option<&str>,
     cancel: CancellationToken,
 ) -> (
     Result<ProviderSession, ProviderAdapterError>,
@@ -1466,17 +1459,10 @@ async fn start_review_session_via_gateway(
     };
     let mut input = input;
     input.working_directory = Some(validated.envelope().working_directory.clone());
-    // b45 现场根因 r4(T22):reviewer 首发/修复/重试三臂统一接受信环境——
-    // duty=Reviewer×ReviewerVerify×活动审查窗(T20b 规划面窗口,caller 传
-    // 入句柄 window_id),经单一接线源 `trusted_launch_environment` 产出
-    // 白名单 env(裸名 CLI 靠 PATH 可解析);构造失败 fail-closed。无窗
-    // reviewer 启动(T20b 前旧形态)保持原行为,不在此改判。
-    if let Some(window_id) = review_window_id.filter(|id| !id.trim().is_empty()) {
-        match reviewer_launch_environment(&input, window_id) {
-            Ok(environment) => input.env_vars = environment,
-            Err(error) => return (Err(ProviderAdapterError::provider_unavailable(error)), None),
-        }
-    }
+    // A1-b1(Bug45 批2 环境回退):reviewer 受信环境注入停止——子进程经底座
+    // (process_manager)继承宿主环境,caller input.env_vars 原样透传(仅作
+    // 显式覆盖层);窗口纪律仍由 assert_plan_review_window 与 start 漏斗
+    // 窗口守卫把关,与启动环境解耦。
     let validated_input = ValidatedStreamingProviderInput::new(input, validated);
     match gateway.start_streaming(validated_input, cancel).await {
         Ok(session) => (Ok(session), None),
@@ -1488,76 +1474,6 @@ async fn start_review_session_via_gateway(
     }
 }
 
-/// b45 现场根因 r4(T22):reviewer gateway 启动的受信环境构造——durable
-/// 事实构造 duty=Reviewer、承载 input.role 的受信身份,按权威装配矩阵
-/// 冻结 `ReviewerVerify` 执行合同(窗口=T20b 规划面活动审查窗的句柄
-/// window_id,caller 经 `active_review_window` 同源传入),再经单一接线源
-/// `trusted_launch_environment` 产出白名单 env。失败以稳定原因码字符串
-/// 上抛(fail-closed),绝不回退空 env(env_clear+空表=裸名 CLI 必然
-/// ProviderCommandMissing,r1 现场 plan SC 复评臂实拍)。
-fn reviewer_launch_environment(
-    input: &StreamingProviderInput,
-    review_window_id: &str,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
-    use crate::cross_cutting::provider_execution::{
-        ProviderExecutionProfile, TrustedProviderRole, TrustedRunIdentity,
-        freeze_provider_execution,
-    };
-    let workspace_session_id = input
-        .workspace_session_id
-        .clone()
-        .unwrap_or_else(|| "plan_review".to_string());
-    let run_record = crate::protocol::contracts::ProviderRunRecord {
-        provider_run_id: format!(
-            "plan_review_{}_{}",
-            workspace_session_id,
-            uuid::Uuid::new_v4().simple()
-        ),
-        node_id: "plan_reviewer_launch".to_string(),
-        provider_type: input.provider_type.clone(),
-        runtime_role: crate::protocol::contracts::RuntimeRole::Reviewer,
-        adapter_role: input.role.clone(),
-        provider_capability_ref: "cap_managed_snapshot".to_string(),
-        adapter_compatibility_ref: "compat_1".to_string(),
-        context_package_ref: format!("ctx_plan_review_{workspace_session_id}"),
-        adapter_input_ref: format!("ain_plan_review_{workspace_session_id}"),
-        adapter_output_ref: format!("aout_plan_review_{workspace_session_id}"),
-        raw_artifact_refs: Vec::new(),
-        exit_code: None,
-        error_code: None,
-        error_details: None,
-        stdout_ref: None,
-        stderr_ref: None,
-        structured_output_ref: None,
-        files_modified: Vec::new(),
-        status: crate::protocol::contracts::ProviderRunStatus::Running,
-        started_at: chrono::Utc::now().to_rfc3339(),
-        completed_at: None,
-        duration_ms: None,
-        timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
-        retry_count: 0,
-        approval_policy: crate::protocol::contracts::ApprovalPolicy::OnRequest,
-        sandbox_mode: crate::protocol::contracts::SandboxMode::FullAccess,
-        constraint_check_ref: None,
-        traceability_binding_refs: Vec::new(),
-    };
-    let identity = TrustedRunIdentity::from_durable_run(
-        &run_record,
-        &workspace_session_id,
-        TrustedProviderRole::Reviewer,
-    );
-    let contract = freeze_provider_execution(
-        &identity,
-        ProviderExecutionProfile::ReviewerVerify,
-        None,
-        format!("plan_review_{workspace_session_id}"),
-        Some(review_window_id.to_string()),
-    )
-    .map_err(|error| format!("plan reviewer contract freeze failed: {}", error.details))?;
-    crate::cross_cutting::provider_environment::trusted_launch_environment(&contract)
-        .map(|environment| environment.env().clone())
-        .map_err(|error| format!("plan reviewer launch environment build failed: {}", error.details))
-}
 
 /// T6 fix-loop r2：review/drive.rs 两个 gateway 启动口（author revision、
 /// reviewer 首发）共用的压平+分类——共享分类桥消费 typed 变体判据

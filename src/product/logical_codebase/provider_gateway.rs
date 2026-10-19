@@ -1977,15 +1977,10 @@ impl LogicalCodebaseProviderGateway {
                 review_window_id.as_deref(),
             )
             .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.to_string()))?;
-        // 批2 T3→T11 集成轮(b45 现场):受信启动构造链统一接环境——
-        // spawn env 唯一由 `build_provider_environment` 产出(env_clear +
-        // 白名单;裸名 CLI 靠最终 PATH 可解析),caller/env_vars 传入值被
-        // 覆盖,各构造点不复制白名单。owner_home 与 trust adapter 同源解析,
-        // 缺失 fail-closed(合同零副作用拒绝,先于 validate/spawn)。
-        let launch_environment =
-            crate::cross_cutting::provider_environment::trusted_launch_environment(&contract)
-                .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.details))?;
-        input.env_vars = launch_environment.env().clone();
+        // A1-b1(Bug45 批2 环境回退):受信装配停止注入环境——子进程经底座
+        // (process_manager/cli_adapter)继承宿主环境,caller 的 env_vars
+        // 原样透传(仅作显式覆盖层);冻结合同仍绑定 launch
+        // (with_frozen_execution),执行基线事实与 resume 指纹不变。
         self.prepare_streaming_launch(input, request, context)
             .map(|launch| launch.with_frozen_execution(contract))
     }
@@ -2020,18 +2015,9 @@ impl LogicalCodebaseProviderGateway {
             review_window_id,
         )
         .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.details))?;
-        // 批2 T3→T11 集成轮:同步栈同源接线——冻结白名单环境经
-        // `AdapterInput::env_vars` 既有 env map 传输,`GatewaySyncProvider`
-        // 桥透传到 streaming spawn(env_clear + 仅注入该表);caller 传入
-        // 值被覆盖,构造点不复制白名单。owner_home 缺失 fail-closed
-        // (先于 validate/spawn,零副作用)。
-        let launch_environment =
-            crate::cross_cutting::provider_environment::trusted_launch_environment(&contract)
-                .map_err(|error| ProviderGatewayError::UnsupportedCapability(error.details))?;
-        let input = crate::protocol::contracts::AdapterInput {
-            env_vars: launch_environment.env().clone(),
-            ..input
-        };
+        // A1-b1(Bug45 批2 环境回退):同步栈同源停止注入——caller 的
+        // `AdapterInput::env_vars` 原样透传(仅作显式覆盖层),子进程经底座
+        // (cli_adapter)继承宿主;冻结合同仍绑定 launch。
         self.prepare_sync_launch(input, request, context)
             .map(|launch| launch.with_frozen_execution(contract))
     }

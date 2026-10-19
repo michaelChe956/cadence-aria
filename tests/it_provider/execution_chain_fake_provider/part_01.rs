@@ -178,21 +178,17 @@ fn fake_provider_runs_n16_to_n18_happy_path_with_normalized_traceability() {
     assert_eq!(result.rework_counter, 0);
 }
 
-/// 批2 T3→T11 集成轮(b45 现场):runtime unit freeze 点统一接环境——
-/// 每个 provider.run 收到的 `AdapterInput::env_vars` 都携带冻结白名单
-/// PATH(裸名 CLI 靠最终 PATH 可解析;HOME=受信 owner home),不再是
-/// 显式空环境。
+/// A1-b1(Bug45 批2 环境回退):runtime unit freeze 点停止注入环境——
+/// 每个 provider.run 收到的 `AdapterInput::env_vars` 不再携带平台注入的
+/// PATH(空 map);宿主 PATH 由底座(cli_adapter)继承到达子进程。
 #[test]
-fn execution_chain_provider_inputs_carry_frozen_environment_with_path() {
+fn execution_chain_provider_inputs_carry_no_injected_path() {
     let workspace = tempfile::tempdir().expect("workspace");
     let provider = ScriptedExecutionProvider::happy();
 
     run_worktask_execution_chain(execution_worktask_input(workspace.path()), &provider)
         .expect("execution chain");
 
-    let host_path = std::env::var_os("PATH")
-        .map(|value| value.to_string_lossy().into_owned())
-        .expect("test host must provide PATH");
     let seen_env_paths = provider.seen_env_paths();
     assert_eq!(
         seen_env_paths.len(),
@@ -200,10 +196,9 @@ fn execution_chain_provider_inputs_carry_frozen_environment_with_path() {
         "coding + review nodes must both reach the provider"
     );
     for path in &seen_env_paths {
-        assert_eq!(
-            path.as_deref(),
-            Some(host_path.as_str()),
-            "every runtime unit provider input must carry the frozen whitelist PATH"
+        assert!(
+            path.is_none(),
+            "runtime unit provider input 不得再携带平台注入的 PATH(宿主值由底座继承)"
         );
     }
 }

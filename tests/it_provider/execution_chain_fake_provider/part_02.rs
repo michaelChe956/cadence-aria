@@ -58,9 +58,8 @@ fn execution_worktask_input(workspace_root: &std::path::Path) -> ExecutionWorkta
 struct ScriptedExecutionProvider {
     output_schemas: Mutex<Vec<String>>,
     seen_prompts: Mutex<Vec<(String, String)>>,
-    /// 批2 T3→T11 集成轮:捕获每次 provider.run 收到的冻结环境 PATH
-    /// (freeze 点注入 build_provider_environment 产物后经
-    /// `AdapterInput::env_vars` 传输到达)。
+    /// A1-b1(Bug45 批2 环境回退):捕获每次 provider.run 的 env_vars 是否
+    /// 携带平台注入的 PATH(None=平台不注入,宿主 PATH 由底座继承)。
     seen_env_paths: Mutex<Vec<Option<String>>>,
     review_decisions: Mutex<VecDeque<String>>,
     candidate_refs: Vec<String>,

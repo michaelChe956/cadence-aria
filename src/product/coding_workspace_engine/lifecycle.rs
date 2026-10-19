@@ -84,16 +84,10 @@ impl CodingWorkspaceEngine {
         let Some(gateway) = self.logical_provider_gateway.as_ref() else {
             return Ok(None);
         };
-        // b45 现场根因 r3(T22):coding 角色启动统一接受信环境——与 plan
-        // split/author root launch 同一接线源(`trusted_launch_environment`),
-        // 覆盖 coder root launch/retry/group review/internal PR 全部经本口的
-        // 生产启动。caller 传入 env_vars 被覆盖;Coder 构造失败 fail-closed;
-        // Reviewer 族无窗口合同属非法启动形态,保持既有 start 漏斗窗口守卫
-        // 拒绝(零行为变化),不在此处改判。先于 launch request 构造(role 随
-        // request 移动)执行,环境构造零副作用。
-        if let Some(environment) = Self::coding_role_trusted_environment(attempt, &role, &input)? {
-            input.env_vars = environment;
-        }
+        // A1-b1(Bug45 批2 环境回退):coding 角色受信环境注入停止——子进程
+        // 经底座(process_manager)继承宿主环境,caller 传入 env_vars 原样
+        // 透传(仅作显式覆盖层);Reviewer 族窗口/岗位纪律仍由 tool_policy
+        // 投影与 start 漏斗窗口守卫把关,与启动环境解耦。
         let Some(request) =
             self.coding_session_launch_request_for_role(attempt, role, working_dir)?
         else {
@@ -121,115 +115,6 @@ impl CodingWorkspaceEngine {
         Ok(Some(prepared))
     }
 
-    /// b45 现场根因 r3(T22):coding 角色(Coder/CodeReviewer/InternalReviewer)
-    /// 的受信环境构造——durable attempt 事实构造受信身份,按权威装配矩阵
-    /// 冻结执行合同(Coder×HostCoding;Reviewer 族×ReviewerVerify+tool_policy
-    /// 携带的窗口合同),经 `trusted_launch_environment` 产出白名单 env。
-    /// 返回 `Ok(None)` = Reviewer 族缺窗口合同(非法启动形态,交由
-    /// `start_streaming` 既有窗口守卫拒绝,行为不变);Coder 构造失败映射
-    /// `PolicyMissing` fail-closed——绝不回退空 env(env_clear+空表=裸名
-    /// CLI 必然 ProviderCommandMissing)。
-    fn coding_role_trusted_environment(
-        attempt: &CodingExecutionAttempt,
-        role: &CodingProviderRole,
-        input: &crate::cross_cutting::streaming_provider::StreamingProviderInput,
-    ) -> Result<Option<std::collections::BTreeMap<String, String>>, ProviderGatewayError> {
-        use crate::cross_cutting::provider_execution::{
-            ProviderExecutionProfile, TrustedProviderRole, TrustedRunIdentity,
-            freeze_provider_execution,
-        };
-        use crate::cross_cutting::streaming_provider::ToolPolicyIntent;
-
-        let workspace_session_id = input
-            .workspace_session_id
-            .clone()
-            .unwrap_or_else(|| format!("coding-{}", attempt.id));
-        let (duty, profile, review_window_id) = match role {
-            CodingProviderRole::Coder => {
-                (TrustedProviderRole::Coder, ProviderExecutionProfile::HostCoding, None)
-            }
-            CodingProviderRole::CodeReviewer | CodingProviderRole::InternalReviewer => {
-                let window_id = input.tool_policy.as_ref().and_then(|policy| {
-                    match &policy.intent {
-                        ToolPolicyIntent::ReviewerVerify { window_id } => {
-                            Some(window_id.clone())
-                        }
-                        _ => None,
-                    }
-                });
-                let Some(window_id) = window_id else {
-                    return Ok(None);
-                };
-                (
-                    TrustedProviderRole::Reviewer,
-                    ProviderExecutionProfile::ReviewerVerify,
-                    Some(window_id),
-                )
-            }
-        };
-        let run_record = crate::protocol::contracts::ProviderRunRecord {
-            provider_run_id: format!(
-                "coding_role_{}_{}_{}",
-                duty.as_str(),
-                attempt.id,
-                uuid::Uuid::new_v4().simple()
-            ),
-            node_id: format!("coding_role_launch_{}", duty.as_str()),
-            provider_type: input.provider_type.clone(),
-            runtime_role: crate::protocol::contracts::RuntimeRole::Executor,
-            adapter_role: input.role.clone(),
-            provider_capability_ref: "cap_managed_snapshot".to_string(),
-            adapter_compatibility_ref: "compat_1".to_string(),
-            context_package_ref: format!("ctx_coding_role_{}", attempt.id),
-            adapter_input_ref: format!("ain_coding_role_{}", attempt.id),
-            adapter_output_ref: format!("aout_coding_role_{}", attempt.id),
-            raw_artifact_refs: Vec::new(),
-            exit_code: None,
-            error_code: None,
-            error_details: None,
-            stdout_ref: None,
-            stderr_ref: None,
-            structured_output_ref: None,
-            files_modified: Vec::new(),
-            status: crate::protocol::contracts::ProviderRunStatus::Running,
-            started_at: chrono::Utc::now().to_rfc3339(),
-            completed_at: None,
-            duration_ms: None,
-            timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
-            retry_count: 0,
-            approval_policy: crate::protocol::contracts::ApprovalPolicy::OnRequest,
-            sandbox_mode: crate::protocol::contracts::SandboxMode::FullAccess,
-            constraint_check_ref: None,
-            traceability_binding_refs: Vec::new(),
-        };
-        let identity = TrustedRunIdentity::from_durable_run(
-            &run_record,
-            &workspace_session_id,
-            duty,
-        );
-        let contract = freeze_provider_execution(
-            &identity,
-            profile,
-            None,
-            format!("coding_attempt_{}", attempt.id),
-            review_window_id,
-        )
-        .map_err(|error| {
-            ProviderGatewayError::PolicyMissing(format!(
-                "coding role execution contract freeze failed: {}",
-                error.details
-            ))
-        })?;
-        crate::cross_cutting::provider_environment::trusted_launch_environment(&contract)
-            .map(|environment| Some(environment.env().clone()))
-            .map_err(|error| {
-                ProviderGatewayError::PolicyMissing(format!(
-                    "coding role launch environment build failed: {}",
-                    error.details
-                ))
-            })
-    }
-
     /// 逻辑 target + 已注入 gateway 时构造该角色的 launch request(不含
     /// validate);否则 `Ok(None)`(Legacy 直连)。Coder 角色映射
     /// `CodingTargetWrite`(writable_roots 为 worktree),其余角色映射
@@ -242,6 +127,7 @@ impl CodingWorkspaceEngine {
         role: CodingProviderRole,
         working_dir: &Path,
     ) -> Result<Option<SessionLaunchRequest>, ProviderGatewayError> {
+
         let Some(gateway) = self.logical_provider_gateway.as_ref() else {
             return Ok(None);
         };

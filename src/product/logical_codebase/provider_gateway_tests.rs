@@ -4625,13 +4625,12 @@ mod b2t2_trusted_execution {
             .expect("spawn-time revalidation mirrors the contract digest decoration");
     }
 
-    /// 批2 T3→T11 集成轮(b45 现场):受信启动构造链统一接环境——
-    /// `prepare_trusted_streaming_launch` 产出的 input.env_vars 必须是
-    /// `build_provider_environment` 冻结白名单产物:裸名 CLI 靠最终 PATH
-    /// 可解析、HOME=受信 owner home、CODEX_HOME 与 trust adapter 同源,
-    /// 表外宿主键零透传(approved 空,无受信配置源)。
+    /// A1-b1(Bug45 批2 环境回退):受信装配停止注入环境——
+    /// `prepare_trusted_streaming_launch` 不再构造白名单 env:caller 的
+    /// `env_vars`(显式覆盖层)原样透传,宿主 PATH/HOME 等由底座
+    /// (process_manager)继承到达子进程,裸名 CLI 解析不断链。
     #[test]
-    fn trusted_streaming_launch_wires_unified_frozen_environment() {
+    fn trusted_streaming_launch_preserves_caller_env_without_injection() {
         let fixture = gateway_fixture();
         fixture.install_bootstrap_policy();
         let worktree = fixture.real_worktree();
@@ -4647,10 +4646,15 @@ mod b2t2_trusted_execution {
             "ws-b2t2-0001",
             TrustedProviderRole::Coder,
         );
+        let mut caller_input = fixture.streaming_input(worktree, None);
+        caller_input.env_vars.insert(
+            "ARIA_A1B_SENTINEL".to_string(),
+            "caller-override".to_string(),
+        );
         let launch = fixture
             .gateway()
             .prepare_trusted_streaming_launch(
-                fixture.streaming_input(worktree, None),
+                caller_input,
                 request,
                 b2t2_audit_context(),
                 &identity,
@@ -4662,37 +4666,17 @@ mod b2t2_trusted_execution {
             .expect("trusted streaming prepare freezes the execution contract");
 
         let (input, _policy) = launch.into_parts();
-        let owner_home =
-            crate::cross_cutting::provider_environment::resolve_trusted_owner_home_from_env()
-                .expect("test host must provide an absolute HOME for the frozen environment");
-        // 裸名 CLI 可解析的充要条件:spawn env 携带宿主 PATH(精确继承表)。
-        assert_eq!(
-            input.env_vars.get("PATH"),
-            std::env::var_os("PATH").map(|value| value.to_string_lossy().into_owned()).as_ref(),
-            "trusted launch env must carry the inherited host PATH so bare-name CLIs resolve"
-        );
-        assert_eq!(
-            input.env_vars.get("HOME").map(String::as_str),
-            Some(owner_home.display().to_string().as_str()),
-            "HOME must be frozen to the trusted owner home"
-        );
-        assert_eq!(
-            input.env_vars.get("CODEX_HOME").map(String::as_str),
-            Some(owner_home.join(".codex").display().to_string().as_str()),
-            "CODEX_HOME must be frozen from the same trust-adapter discovery source"
-        );
-        // 表外键零透传:approved 空(生产无受信配置源),宿主表外键——
-        // 含 *_TOKEN/NODE_OPTIONS/工具链目录——一律不得混入。
-        let allowed: std::collections::BTreeSet<&str> =
-            crate::cross_cutting::provider_environment::PROVIDER_ENV_BASE_INHERIT_KEYS
-                .iter()
-                .copied()
-                .chain(["HOME", "CODEX_HOME"])
-                .collect();
         assert!(
-            input.env_vars.keys().all(|key| allowed.contains(key.as_str())),
-            "env keys must stay within the frozen whitelist: {:?}",
+            input.env_vars.get("PATH").is_none()
+                && input.env_vars.get("HOME").is_none()
+                && input.env_vars.get("CODEX_HOME").is_none(),
+            "受信装配不得再注入 PATH/HOME/CODEX_HOME 白名单: {:?}",
             input.env_vars.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            input.env_vars.get("ARIA_A1B_SENTINEL").map(String::as_str),
+            Some("caller-override"),
+            "caller 显式覆盖层必须原样透传(不被平台覆盖/清空)"
         );
     }
 
@@ -4932,12 +4916,12 @@ mod b2t2_trusted_execution {
         );
     }
 
-    /// 批2 T3→T11 集成轮:同步受信面同源接环境——`prepare_trusted_sync_
-    /// launch` 把冻结白名单环境写进 `AdapterInput::env_vars`,经
-    /// `GatewaySyncProvider` 桥透传到 streaming spawn(裸名 CLI 靠最终
-    /// PATH 可解析;表外宿主键零透传)。
+    /// A1-b1(Bug45 批2 环境回退):同步受信面同源停止注入——
+    /// `prepare_trusted_sync_launch` 不再构造白名单 env:caller 的
+    /// `AdapterInput::env_vars`(显式覆盖层)原样透传,宿主 PATH 等由
+    /// 底座(cli_adapter)继承到达子进程。
     #[test]
-    fn trusted_sync_launch_wires_unified_frozen_environment() {
+    fn trusted_sync_launch_preserves_caller_env_without_injection() {
         let fixture = gateway_fixture();
         fixture.install_bootstrap_policy();
         let worktree = fixture.real_worktree();
@@ -4952,14 +4936,17 @@ mod b2t2_trusted_execution {
             working_directory: None,
             provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
             role: AdapterRole::Executor,
-            worktree_path: Some(worktree.to_string_lossy().to_string()),
+            worktree_path: Some(worktree.to_string_lossy().into_owned()),
             provider_stream_log_dir: None,
             prompt: "probe".to_string(),
             context_files: Vec::new(),
             output_schema: String::new(),
             timeout: 1,
             max_retries: 0,
-            env_vars: Default::default(),
+            env_vars: std::collections::BTreeMap::from([(
+                "ARIA_A1B_SENTINEL".to_string(),
+                "caller-override".to_string(),
+            )]),
         };
         let identity = TrustedRunIdentity::from_durable_run(
             &durable_run_record("run_b2t2_env_0002", AdapterRole::Executor),
@@ -4981,31 +4968,15 @@ mod b2t2_trusted_execution {
             .expect("trusted sync prepare freezes the same contract");
 
         let (input, _policy) = launch.into_parts();
-        let owner_home =
-            crate::cross_cutting::provider_environment::resolve_trusted_owner_home_from_env()
-                .expect("test host must provide an absolute HOME for the frozen environment");
-        assert_eq!(
-            input.env_vars.get("PATH"),
-            std::env::var_os("PATH")
-                .map(|value| value.to_string_lossy().into_owned())
-                .as_ref(),
-            "trusted sync launch env must carry the inherited host PATH"
-        );
-        assert_eq!(
-            input.env_vars.get("HOME").map(String::as_str),
-            Some(owner_home.display().to_string().as_str()),
-            "HOME must be frozen to the trusted owner home"
-        );
-        let allowed: std::collections::BTreeSet<&str> =
-            crate::cross_cutting::provider_environment::PROVIDER_ENV_BASE_INHERIT_KEYS
-                .iter()
-                .copied()
-                .chain(["HOME", "CODEX_HOME"])
-                .collect();
         assert!(
-            input.env_vars.keys().all(|key| allowed.contains(key.as_str())),
-            "env keys must stay within the frozen whitelist: {:?}",
+            input.env_vars.get("PATH").is_none() && input.env_vars.get("HOME").is_none(),
+            "同步受信装配不得再注入 PATH/HOME 白名单: {:?}",
             input.env_vars.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            input.env_vars.get("ARIA_A1B_SENTINEL").map(String::as_str),
+            Some("caller-override"),
+            "caller 显式覆盖层必须原样透传(不被平台覆盖/清空)"
         );
     }
 

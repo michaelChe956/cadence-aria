@@ -2106,11 +2106,10 @@ mod lcg_t07_validated_dispatch_tests {
 
         assert!(audit_sink_allocated_when_tool_policy_is_none);
     }
-    /// T22 b45 现场(coder 段同形缺口):LC Coder 角色经
-    /// `prepare_streaming_launch_for_role` 的生产启动必须携带受信白名单环境
-    /// ——裸名 CLI(kimi)在 env_clear+空 env_vars 下 ProviderCommandMissing,
-    /// coding 主格无从起跑。与 plan split/author root launch 同一接线源断言:
-    /// PATH 精确继承、HOME 冻结受信 owner home。
+    /// A1-b1(Bug45 批2 环境回退):LC Coder 角色经
+    /// `prepare_streaming_launch_for_role` 的生产启动停止注入环境——
+    /// caller 的 env_vars(sentinel 覆盖层)原样透传,宿主 PATH 等由底座
+    /// (process_manager)继承到达子进程,裸名 CLI(kimi)解析不断链。
     struct T22EnvCaptureAdapter {
         captured:
             std::sync::Mutex<Option<crate::cross_cutting::streaming_provider::StreamingProviderInput>>,
@@ -2142,7 +2141,7 @@ mod lcg_t07_validated_dispatch_tests {
     }
 
     #[tokio::test]
-    async fn lcg_t22_coder_role_launch_carries_frozen_environment_with_path() {
+    async fn lcg_t22_coder_role_launch_preserves_caller_env_without_injection() {
         let root = tempfile::tempdir().expect("lcg t22 env root");
         let paths = ProductAppPaths::new(root.path().join(".aria"));
         let store = CodingAttemptStore::new(paths.clone());
@@ -2164,9 +2163,14 @@ mod lcg_t07_validated_dispatch_tests {
         ));
         let engine = t07_engine(&store, Some(gateway.clone()));
 
-        // 与生产 Coder 调用同源:input 显式携带 envelope 冻结的 canonical cwd。
+        // 与生产 Coder 调用同源:input 显式携带 envelope 冻结的 canonical cwd
+        // + caller 显式覆盖层 sentinel(平台不得覆盖/清空)。
         let mut coder_input = t07_coder_input(worktree.clone(), None);
         coder_input.working_directory = Some(authority_root.clone());
+        coder_input.env_vars.insert(
+            "ARIA_A1B_SENTINEL".to_string(),
+            "caller-override".to_string(),
+        );
         let prepared = engine
             .prepare_streaming_launch_for_role(
                 &attempt,
@@ -2187,20 +2191,15 @@ mod lcg_t07_validated_dispatch_tests {
             .expect("t22 capture lock")
             .clone()
             .expect("validated coder start captured");
-        let owner_home =
-            crate::cross_cutting::provider_environment::resolve_trusted_owner_home_from_env()
-                .expect("test host must provide an absolute HOME for the frozen environment");
         assert_eq!(
-            captured.env_vars.get("PATH"),
-            std::env::var_os("PATH")
-                .map(|value| value.to_string_lossy().into_owned())
-                .as_ref(),
-            "coder 角色启动必须携带精确继承的宿主 PATH(裸名 CLI 可解析的充要条件)"
+            captured.env_vars.get("ARIA_A1B_SENTINEL").map(String::as_str),
+            Some("caller-override"),
+            "coder 角色启动必须原样透传 caller 显式覆盖层"
         );
-        assert_eq!(
-            captured.env_vars.get("HOME").map(String::as_str),
-            Some(owner_home.display().to_string().as_str()),
-            "HOME 必须冻结受信 owner home"
+        assert!(
+            captured.env_vars.get("PATH").is_none() && captured.env_vars.get("HOME").is_none(),
+            "coder 角色启动不得再注入白名单 PATH/HOME(宿主值由底座继承): {:?}",
+            captured.env_vars
         );
     }
 }

@@ -161,18 +161,9 @@ pub(crate) fn run_final_provider_node(
         "execution_contract:{}",
         execution_contract.contract_digest()
     )];
-    // 批2 T3→T11 集成轮(b45 现场):受信启动构造链统一接环境——freeze
-    // 点产出统一白名单环境并经 `AdapterInput::env_vars` 传输到
-    // `CliProviderAdapter` spawn(env_clear + 仅注入该表;裸名 CLI 靠最终
-    // PATH 可解析),构造点不复制白名单。
-    let adapter_input = crate::protocol::contracts::AdapterInput {
-        env_vars: crate::cross_cutting::provider_environment::trusted_launch_environment(
-            &execution_contract,
-        )?
-        .env()
-        .clone(),
-        ..adapter_input
-    };
+    // A1-b1(Bug45 批2 环境回退):freeze 点停止注入环境——provider 子进程
+    // 经底座(cli_adapter)继承宿主环境,adapter_input 原样透传(env_vars
+    // 仅作 caller 显式覆盖层);冻结合同摘要仍落 traceability refs。
     let output = provider.run(&adapter_input)?;
     let record = provider_run_record_from_output(&request, &adapter_input, &output);
     let artifact = output
