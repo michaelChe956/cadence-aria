@@ -2,12 +2,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
 use super::ProcessManager;
+use super::process_start_time_ticks;
 
 /// 批2 Task 3:spawn 不再隐式继承宿主环境——进程树 fixture 内部以裸名
 /// 调用 sh/sleep,测试须显式携带 PATH(与 boundary 用例同款注入)。
@@ -20,6 +22,62 @@ struct ProcessTreeFixture {
     parent_pid: PathBuf,
     grandchild_pid: PathBuf,
     late_marker: PathBuf,
+    /// spawn 窗口内（pid 文件刚出现时）冻结的 (pid, starttime) 身份。
+    /// 退出后的 /proc 断言与安全网 SIGKILL 必须以此核对：只看 pid 会在
+    /// 高并发全量运行（大量短命子进程）下遇到 pid 复用——把无关进程
+    ///（例如别的测试的 terminal 子进程）判成「未退出」并误杀。
+    identities: Arc<Mutex<FixtureIdentities>>,
+}
+
+/// 进程真实身份：pid + `/proc/<pid>/stat` starttime（时钟 ticks）。
+/// starttime 不随回收变化，僵尸仍沿用同值——「未退出（含僵尸）」判定
+/// 不会因复用而失真。
+#[derive(Clone, Copy, Debug)]
+struct ProcessIdentity {
+    pid: i32,
+    start_time: u64,
+}
+
+#[derive(Default)]
+struct FixtureIdentities {
+    parent: Option<ProcessIdentity>,
+    grandchild: Option<ProcessIdentity>,
+}
+
+fn capture_identity(pid_file: &Path) -> Option<ProcessIdentity> {
+    let pid = fs::read_to_string(pid_file).ok()?.trim().parse::<i32>().ok()?;
+    if pid <= 0 {
+        return None;
+    }
+    let start_time = process_start_time_ticks(pid as u32)?;
+    Some(ProcessIdentity { pid, start_time })
+}
+
+fn identity_alive(identity: ProcessIdentity) -> bool {
+    process_start_time_ticks(identity.pid as u32) == Some(identity.start_time)
+}
+
+async fn identity_disappeared(identity: ProcessIdentity) -> bool {
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while identity_alive(identity) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// 安全网清理：身份核对通过才发组信号。pid 已被复用为无关进程组时
+/// killpg 会误杀他人——那是被本修复封住的真实事故（全量并行下曾打掉
+/// 并行测试的 terminal 子进程）。
+fn kill_verified(identity: ProcessIdentity) {
+    if !identity_alive(identity) {
+        return;
+    }
+    unsafe {
+        let _ = libc::killpg(identity.pid, libc::SIGKILL);
+        let _ = libc::kill(identity.pid, libc::SIGKILL);
+    }
 }
 
 fn process_tree_fixture(root: &Path) -> ProcessTreeFixture {
@@ -38,11 +96,44 @@ fn process_tree_fixture(root: &Path) -> ProcessTreeFixture {
     )
     .expect("write fake ssh");
     fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod fake ssh");
+    let identities = Arc::new(Mutex::new(FixtureIdentities::default()));
+    // 身份必须在进程存活时冻结：pid 文件由子进程自己写出（先写后 sleep 1s），
+    // 监视线程在文件出现的毫秒级窗口内即可读到 starttime。
+    {
+        let identities = Arc::clone(&identities);
+        let parent_path = parent_pid.clone();
+        let grandchild_path = grandchild_pid.clone();
+        std::thread::Builder::new()
+            .name("aria-process-tree-identity".to_string())
+            .spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    {
+                        let mut guard = identities.lock().expect("fixture identities lock");
+                        if guard.parent.is_none() {
+                            guard.parent = capture_identity(&parent_path);
+                        }
+                        if guard.grandchild.is_none() {
+                            guard.grandchild = capture_identity(&grandchild_path);
+                        }
+                        if guard.parent.is_some() && guard.grandchild.is_some() {
+                            return;
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            })
+            .expect("spawn fixture identity watcher");
+    }
     ProcessTreeFixture {
         command,
         parent_pid,
         grandchild_pid,
         late_marker,
+        identities,
     }
 }
 
@@ -56,43 +147,40 @@ async fn wait_for_path(path: &Path) {
     .expect("process fixture path");
 }
 
-fn read_pid(path: &Path) -> i32 {
-    fs::read_to_string(path)
-        .expect("read pid")
-        .trim()
-        .parse()
-        .expect("parse pid")
-}
-
 fn process_state(pid: i32) -> Option<char> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     stat.rsplit_once(") ")
         .and_then(|(_, tail)| tail.chars().next())
 }
 
-async fn process_disappeared(pid: i32) -> bool {
-    tokio::time::timeout(Duration::from_millis(500), async {
-        while process_state(pid).is_some() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+/// 等候监视线程冻结身份（pid 文件出现与下一轮 2ms 轮询之间可能有一个
+/// 极短窗口，直接 expect 会制造新的时序红）。
+async fn fixture_identities(fixture: &ProcessTreeFixture) -> (ProcessIdentity, ProcessIdentity) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        {
+            let guard = fixture.identities.lock().expect("fixture identities lock");
+            if let (Some(parent), Some(grandchild)) = (guard.parent, guard.grandchild) {
+                return (parent, grandchild);
+            }
         }
-    })
-    .await
-    .is_ok()
+        assert!(
+            Instant::now() < deadline,
+            "进程树 fixture 未在 5s 内冻结 (pid, starttime) 身份"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
 }
 
 async fn assert_process_tree_stopped(fixture: &ProcessTreeFixture) {
-    let parent_pid = read_pid(&fixture.parent_pid);
-    let grandchild_pid = read_pid(&fixture.grandchild_pid);
-    let parent_gone = process_disappeared(parent_pid).await;
-    let grandchild_gone = process_disappeared(grandchild_pid).await;
+    let (parent, grandchild) = fixture_identities(fixture).await;
+    let parent_gone = identity_disappeared(parent).await;
+    let grandchild_gone = identity_disappeared(grandchild).await;
     tokio::time::sleep(Duration::from_millis(700)).await;
     let late_marker = fixture.late_marker.exists();
     if !parent_gone || !grandchild_gone {
-        unsafe {
-            let _ = libc::killpg(parent_pid, libc::SIGKILL);
-            let _ = libc::kill(parent_pid, libc::SIGKILL);
-            let _ = libc::kill(grandchild_pid, libc::SIGKILL);
-        }
+        kill_verified(parent);
+        kill_verified(grandchild);
     }
     assert!(
         parent_gone,
@@ -238,6 +326,7 @@ async fn task_abort_drops_and_kills_managed_process_group() {
             parent_pid: fixture.parent_pid.clone(),
             grandchild_pid: fixture.grandchild_pid.clone(),
             late_marker: fixture.late_marker.clone(),
+            identities: Arc::clone(&fixture.identities),
         };
         async move { spawn_and_wait(&fixture).await }
     });
@@ -289,6 +378,7 @@ fn current_thread_runtime_drop_kills_managed_process_group() {
         .expect("runtime");
     runtime.block_on(async {
         let command = fixture.command.clone();
+        let identities = Arc::clone(&fixture.identities);
         tokio::spawn(async move {
             let fixture = ProcessTreeFixture {
                 command: command.clone(),
@@ -298,6 +388,7 @@ fn current_thread_runtime_drop_kills_managed_process_group() {
                     .expect("fixture root")
                     .join("grandchild.pid"),
                 late_marker: command.parent().expect("fixture root").join("late-marker"),
+                identities: Arc::clone(&identities),
             };
             spawn_and_wait(&fixture).await;
         });
