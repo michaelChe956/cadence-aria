@@ -16,10 +16,18 @@ export { AUTH_REQUIRED_EVENT };
 
 export type SessionStatus = "checking" | "unauthenticated" | "authenticated";
 
-/** 查询当前会话状态：204 → true；401 → false；其它错误抛 ApiRequestError。 */
+/**
+ * 会话检查超时（批2 Bug45 F19）：网络挂起时不能让 AuthGate 永远停在
+ * `checking`（渲染 null = 白屏）。超时后 fetch 以 AbortError 拒绝，
+ * AuthGate 的 catch 回到 `unauthenticated` 并显示 token 入口。
+ */
+export const SESSION_CHECK_TIMEOUT_MS = 8_000;
+
+/** 查询当前会话状态：204 → true；401 → false；超时/其它错误抛错（调用方回未认证）。 */
 export async function checkSession(): Promise<boolean> {
   const response = await fetch("/api/auth/session", {
     credentials: "same-origin",
+    signal: AbortSignal.timeout(SESSION_CHECK_TIMEOUT_MS),
   });
   if (response.status === 204) {
     return true;

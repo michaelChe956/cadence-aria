@@ -39,6 +39,7 @@ function stubFetchSequence(responses: Array<() => Response>): {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("api auth session client", () => {
@@ -63,6 +64,40 @@ describe("api auth session client", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].input).toBe("/api/auth/session");
     expect(calls[0].init?.method).toBeUndefined();
+  });
+
+  it("checkSession attaches a timeout AbortSignal to the session probe", async () => {
+    const { calls } = stubFetchSequence([() => jsonResponse(204)]);
+
+    await expect(checkSession()).resolves.toBe(true);
+
+    const signal = calls[0].init?.signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(false);
+  });
+
+  it("checkSession rejects a hanging probe on timeout without retrying", async () => {
+    const controller = new AbortController();
+    vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted due to timeout", "AbortError"));
+          });
+        });
+      }),
+    );
+
+    const pending = checkSession();
+    controller.abort();
+
+    await expect(pending).rejects.toThrow(/aborted|timeout/i);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].input).toBe("/api/auth/session");
   });
 
   it("exchangeBootstrapToken posts token in body only, never in URL", async () => {
@@ -111,6 +146,42 @@ describe("AuthGate", () => {
       expect(screen.getByLabelText(/一次性 Bootstrap Token/i)).toBeTruthy(),
     );
     expect(screen.queryByText("WORKBENCH-CHILDREN")).toBeNull();
+  });
+
+  it("falls back to auth entry instead of white-screening when session probe hangs", async () => {
+    const controller = new AbortController();
+    vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted due to timeout", "AbortError"));
+          });
+        });
+      }),
+    );
+
+    render(
+      <AuthGate>
+        <div>WORKBENCH-CHILDREN</div>
+      </AuthGate>,
+    );
+
+    // 探测已发出且仍挂起：门停在 checking（不渲染 children），尚未白屏兜底。
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(screen.queryByText("WORKBENCH-CHILDREN")).toBeNull();
+
+    // 超时中止后必须回到未认证入口，而不是永久空白。
+    controller.abort();
+    await waitFor(() =>
+      expect(screen.getByLabelText(/一次性 Bootstrap Token/i)).toBeTruthy(),
+    );
+    expect(screen.queryByText("WORKBENCH-CHILDREN")).toBeNull();
+    expect(calls).toHaveLength(1);
+    expect(calls.filter((call) => call.init?.method === "POST")).toHaveLength(0);
   });
 
   it("renders children directly when session already authenticated", async () => {
