@@ -13,6 +13,7 @@ use crate::cross_cutting::process_manager::{
     bounded_task_join, provider_child_exit_error, run_session_tail_with_exit_watch,
 };
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::provider_resources::{ResourceReservation, TrustedLaunchOwnership};
 use crate::cross_cutting::streaming_provider::{
     LcVersionCache, LcVersionObservation, LcVersionProbe, LcVersionProbeKey, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
@@ -255,6 +256,7 @@ impl CodexProvider {
             capability_snapshot_ref,
             false,
             None,
+            None,
             cancel,
         )
         .await
@@ -275,6 +277,7 @@ impl CodexProvider {
         frozen_lc_projection: Option<
             crate::product::logical_codebase::provider_projection::ProviderPolicyProjection,
         >,
+        launch_ownership: Option<TrustedLaunchOwnership>,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         let lc_error = |details: String| {
@@ -429,14 +432,34 @@ impl CodexProvider {
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
         let process_cwd = sandbox.process_cwd().to_path_buf();
-        let process = ProcessManager::spawn(
+        // B1-1:预留先于一切 spawn 副作用(失败=零 child;无归属=不登记)。
+        let registration = LaunchRegistration::reserve(launch_ownership)?;
+        let process = match ProcessManager::spawn(
             &command,
             &arg_refs,
             &process_cwd,
             &input.env_vars,
             cancel.clone(),
         )
-        .await?;
+        .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                // 未启动即失败:注销预留,不留无身份 durable 记录。
+                release_launch_registration(registration.as_ref()).await;
+                return Err(error);
+            }
+        };
+        if let Some(registration) = registration.as_ref()
+            && let Err(error) = registration.backfill(process.child.id())
+        {
+            // 身份不可回填:子进程已启动,必须终止后再注销。
+            let mut child = process.child;
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            registration.release().await;
+            return Err(error);
+        }
 
         // GC7:与 direct 路径同源的出站 request id typed namespace。
         let peer = JsonRpcPeer::new(process.stdout, process.stdin)
@@ -461,6 +484,8 @@ impl CodexProvider {
             Err(error) => {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                // B1-1:错误链完成 kill+wait 后按登记身份收口注销。
+                release_launch_registration(registration.as_ref()).await;
                 return Err(if lc_resume_requested {
                     ProviderAdapterError::parse_error(
                         format!(
@@ -478,6 +503,7 @@ impl CodexProvider {
         let Some(thread_id) = handshake.thread_id.clone() else {
             let _ = child.start_kill();
             let _ = child.wait().await;
+            release_launch_registration(registration.as_ref()).await;
             return Err(lc_error(
                 "codex lc validated start: thread/start response missing or blank thread id"
                     .to_string(),
@@ -516,6 +542,7 @@ impl CodexProvider {
         if let Err(error) = sink.append_bound(audit_event) {
             let _ = child.start_kill();
             let _ = child.wait().await;
+            release_launch_registration(registration.as_ref()).await;
             return Err(lc_error(format!(
                 "codex lc validated start: provider_start audit append failed: {error}"
             )));
@@ -546,6 +573,9 @@ impl CodexProvider {
             }))
             .await;
 
+        // B1-1:登记生命周期随会话尾部——协议 Completed 不注销,子进程
+        // 真实收口(有界 kill+wait、事件通道关闭前)后才注销。
+        let release_registration = registration;
         tokio::spawn(async move {
             let stderr_output = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
             let stderr_output_for_task = std::sync::Arc::clone(&stderr_output);
@@ -621,6 +651,9 @@ impl CodexProvider {
                     })
                     .await;
             }
+            // B1-1:会话真实终止(子进程 kill+wait、stderr 收口)后按登记
+            // 身份注销;静止不可证时保留 durable 记录交 scope 级停等。
+            release_launch_registration(release_registration.as_ref()).await;
         });
 
         Ok(ProviderSession {
@@ -628,6 +661,55 @@ impl CodexProvider {
             events: event_rx,
             commands,
         })
+    }
+}
+
+/// B1-1(波 2):Codex 两条真实 spawn 面共用的受信登记生命周期。
+///
+/// 预留(durable,失败零 spawn)→ spawn → 回填真实 PID+`/proc` starttime →
+/// 会话真实终止/错误收口后按登记身份注销。与 trait 默认方法同序,唯一
+/// 增强是默认包装面无法取得的子进程身份回填。
+struct LaunchRegistration {
+    ownership: TrustedLaunchOwnership,
+    reservation: ResourceReservation,
+}
+
+impl LaunchRegistration {
+    /// 预留先于一切 spawn 副作用;`None` = 无归属请求(不登记)。
+    fn reserve(
+        ownership: Option<TrustedLaunchOwnership>,
+    ) -> Result<Option<Self>, ProviderAdapterError> {
+        ownership
+            .map(|ownership| {
+                ownership.reserve().map(|reservation| Self {
+                    ownership,
+                    reservation,
+                })
+            })
+            .transpose()
+    }
+
+    /// spawn 成功后回填真实 PID+starttime(PID 复用防护)。
+    fn backfill(&self, pid: Option<u32>) -> Result<(), ProviderAdapterError> {
+        let pid = pid.ok_or_else(|| {
+            ProviderAdapterError::provider_unavailable(
+                "codex_launch_ownership_child_pid_unavailable: 子进程缺 PID,无法回填真实身份",
+            )
+        })?;
+        self.ownership
+            .backfill_spawned_identity(&self.reservation, pid)
+    }
+
+    /// 失败/尾部收口注销(幂等;静止不可证时保留 durable 记录停等)。
+    async fn release(&self) {
+        self.ownership.release_after_session_tail().await;
+    }
+}
+
+/// 登记生命周期收口:无归属请求为零操作。
+async fn release_launch_registration(registration: Option<&LaunchRegistration>) {
+    if let Some(registration) = registration {
+        registration.release().await;
     }
 }
 
@@ -666,7 +748,22 @@ fn lc_start_audit_literal(
 impl StreamingProviderAdapter for CodexProvider {
     async fn start(
         &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        // 无归属请求:与 `start_owned(None)` 同一执行体(零登记,既有裸
+        // start 语义不变)。
+        self.start_owned(input, None, cancel).await
+    }
+
+    /// B1-1(波 2):raw direct 面的受信归属启动入口。与 trait 默认方法的
+    /// 差异只在 spawn 点回填真实 PID+`/proc` starttime——默认包装面拿不到
+    /// 子进程身份。生命周期同源:预留(durable,失败零 spawn)→ spawn →
+    /// 回填 → 失败收口/会话真实终止后按登记身份注销(不在协议 Completed)。
+    async fn start_owned(
+        &self,
         mut input: StreamingProviderInput,
+        launch_ownership: Option<TrustedLaunchOwnership>,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         // 双向 spawn 前守卫（Task 3.1）：非法角色×策略组合在创建子进程之前拒绝
@@ -846,14 +943,34 @@ impl StreamingProviderAdapter for CodexProvider {
         let args = self.build_args();
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
-        let process = ProcessManager::spawn(
+        // B1-1:预留先于一切 spawn 副作用(失败=零 child;无归属=不登记)。
+        let registration = LaunchRegistration::reserve(launch_ownership)?;
+        let process = match ProcessManager::spawn(
             &command,
             &arg_refs,
             &input.working_dir,
             &input.env_vars,
             cancel.clone(),
         )
-        .await?;
+        .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                // 未启动即失败:注销预留,不留无身份 durable 记录。
+                release_launch_registration(registration.as_ref()).await;
+                return Err(error);
+            }
+        };
+        if let Some(registration) = registration.as_ref()
+            && let Err(error) = registration.backfill(process.child.id())
+        {
+            // 身份不可回填:子进程已启动,必须终止后再注销。
+            let mut child = process.child;
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            registration.release().await;
+            return Err(error);
+        }
 
         // GC7：codex peer 出站 request id 使用 typed namespace `aria-<seq>`，
         // 与 server→client 入站原生数字 id 值域隔离；pi/kimi peer 保持默认 Numeric。
@@ -874,12 +991,15 @@ impl StreamingProviderAdapter for CodexProvider {
                 Err(error) => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
+                    // B1-1:错误链完成 kill+wait 后按登记身份收口注销。
+                    release_launch_registration(registration.as_ref()).await;
                     return Err(error);
                 }
             };
             let Some(thread_id) = handshake.thread_id.clone() else {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                release_launch_registration(registration.as_ref()).await;
                 return Err(ProviderAdapterError::parse_error(
                     "codex audit contract session: thread/start response missing or blank thread id",
                     String::new(),
@@ -911,6 +1031,7 @@ impl StreamingProviderAdapter for CodexProvider {
             if let Err(error) = sink.append_bound(audit_event) {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                release_launch_registration(registration.as_ref()).await;
                 return Err(ProviderAdapterError::parse_error(
                     format!(
                         "codex audit contract session: provider_start audit append failed: {error}"
@@ -952,6 +1073,9 @@ impl StreamingProviderAdapter for CodexProvider {
                 .await;
         }
 
+        // B1-1:登记生命周期随会话尾部——协议 Completed 不注销,子进程
+        // 真实收口(有界 kill+wait、事件通道关闭前)后才注销。
+        let release_registration = registration;
         tokio::spawn(async move {
             let stderr_output = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
             let stderr_output_for_task = std::sync::Arc::clone(&stderr_output);
@@ -1047,6 +1171,9 @@ impl StreamingProviderAdapter for CodexProvider {
                     })
                     .await;
             }
+            // B1-1:会话真实终止(子进程 kill+wait、stderr 收口)后按登记
+            // 身份注销;静止不可证时保留 durable 记录交 scope 级停等。
+            release_launch_registration(release_registration.as_ref()).await;
         });
 
         Ok(ProviderSession {
@@ -1066,6 +1193,9 @@ impl StreamingProviderAdapter for CodexProvider {
         validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        // B1-1:受信归属载体由 launch 分流点绑定进 validated input,此处
+        // 在消费前取出并透传给 LC spawn 点(不静默降级为无登记)。
+        let launch_ownership = validated.launch_ownership().cloned();
         let (input, launch) = validated.into_parts();
         self.start_lc_validated_with_phase(
             input,
@@ -1073,6 +1203,7 @@ impl StreamingProviderAdapter for CodexProvider {
             launch.capability_snapshot_ref(),
             launch.is_root_recipe_phase(),
             launch.lc_projection().cloned(),
+            launch_ownership,
             cancel,
         )
         .await
