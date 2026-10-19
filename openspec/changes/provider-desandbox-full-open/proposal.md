@@ -10,7 +10,7 @@ Bug4 的 Reviewer 污染与自提交、Bug5 的 Coder CHECK 无法执行，需�
 - **BREAKING**：作者仅保留“不配编辑代码文件内建工具”的岗位规则；Codex danger 下无预防保证，以 `fileChange` 事件检测后中断 turn、失败关闭和 durable 审计实现检测型岗位纪律，必须真机探针验收。Reviewer 不继承作者 deny，采用快照恢复、平台通道锁、违规整轮作废的 B 档，无独立 UID。
 - **BREAKING**：LC gateway 保留真实能力证据、身份/配置/投影冻结及 spawn 复验，但撤销“宿主写成功即能力失败”的只读/target-only 证明门；旧隔离能力记录不能自动当作新基线证据。
 - Kimi 的终端 OS 隔离、封闭 grammar、角色与 fs 三条合同整体改为全角色宿主执行；fs API 的 no-follow/授权根校验与资源护栏保留，长 CHECK 不受独立 120 秒硬截断。
-- Coder 在白名单宿主环境自行执行 CHECK，环境能力声明不等于授权；A′ verification-triage 仅补充，不新增平台通用命令 runner。
+- Coder 在宿主环境自行执行 CHECK，环境能力声明不等于授权；A′ verification-triage 仅补充，不新增平台通用命令 runner。
 - 平台 API 鉴权（REST、WS、敏感 GET）及 Origin/Host 校验为无条件上线前置，不等风险触发、外网暴露或二期部署。
 
 ## Capabilities

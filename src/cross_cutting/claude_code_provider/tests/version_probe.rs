@@ -73,16 +73,16 @@ fn version_probe_is_fail_closed_for_success_empty_and_timeout() {
     );
 }
 
-/// 批2 Task 3 修复轮(F2):版本探测裸名形态回归——探测请求经
-/// `platform_observation_environment` 显式携带 PATH,裸名 executable 在
-/// env_clear 后仍可解析执行(生产 claude/codex 等裸名 CLI 同形态)。
+/// A1-b2(Bug45 批2 环境回退):版本探测裸名形态回归——探测请求的
+/// `environment` 显式覆盖层携带前置 PATH 时裸名 executable 可解析执行;
+/// 生产探测构造点现为空 env map(裸名靠底座回退宿主 PATH 解析,同语义
+/// 由 bounded_command_runner 继承测试钉住),本测试钉覆盖层注入仍生效。
 #[cfg(unix)]
 #[tokio::test]
-async fn bare_name_version_probe_resolves_via_explicit_path_environment() {
+async fn bare_name_version_probe_resolves_via_explicit_path_override() {
     use crate::cross_cutting::bounded_command_runner::{
         BoundedCommandRequest, TokioBoundedCommandRunner,
     };
-    use crate::cross_cutting::provider_environment::platform_observation_environment;
 
     let root = std::path::Path::new("/tmp/aria-bug45/t3");
     std::fs::create_dir_all(root).expect("t3 fixture root");
@@ -93,18 +93,16 @@ async fn bare_name_version_probe_resolves_via_explicit_path_environment() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
         .expect("chmod fixture");
 
-    // 探测形态=裸名 executable;环境显式携带 PATH(平台观察注入),
-    // fixture 目录前置保证确定性。
-    let mut environment = platform_observation_environment();
-    assert!(
-        environment.contains_key("PATH"),
-        "platform_observation_environment 必须显式携带 PATH"
-    );
-    let path = environment.get("PATH").cloned().unwrap_or_default();
-    environment.insert(
+    // 探测形态=裸名 executable;显式 PATH 覆盖层(fixture 目录前置)
+    // 保证确定性。
+    let host_path = std::env::var_os("PATH")
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let environment = std::collections::BTreeMap::from([(
         "PATH".to_string(),
-        format!("{}:{path}", dir.path().display()),
-    );
+        format!("{}:{host_path}", dir.path().display()),
+    )]);
+
 
     let request = BoundedCommandRequest {
         executable: "aria-t3-bare-version".to_string(),

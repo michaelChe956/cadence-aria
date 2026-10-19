@@ -113,10 +113,9 @@ pub async fn probe_codex_version(
         working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         timeout,
         cancellation: CancellationToken::new(),
-        // 批2 Task 3 修复轮(F2):探测环境显式携带宿主 PATH(平台观察
-        // 语义,provider_health::probe_provider 同款)——裸名 CLI 不因
-        // env_clear 后缺 PATH 而恒 Unavailable。
-        environment: crate::cross_cutting::provider_environment::platform_observation_environment(),
+        // A1-b2(Bug45 批2 环境回退):探测环境不注入——空 env map,子进程
+        // 经底座继承宿主 PATH,裸名 CLI 照常解析。
+        environment: std::collections::BTreeMap::new(),
         stdout_limit: 64 * 1024,
         stderr_limit: 64 * 1024,
     };

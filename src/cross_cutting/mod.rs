@@ -32,11 +32,10 @@ pub mod provider_availability_gate;
 pub mod provider_boundary;
 pub mod provider_capabilities;
 pub mod provider_context_builder;
-// 批2 Task 3(A1-a 环境回退底座):环境白名单构造器模块——provider 子
-// 进程已回退宿主继承语义(process_manager/cli_adapter/terminal 三路),
-// owner home 解析已迁 trust 侧(provider_trust_adapters);本模块待 A1-b
-// 随装配层注入点移除后删除,期间导出保持以避免中间态编译断裂。
-pub mod provider_environment;
+// A1-b2(Bug45 批2 环境回退收尾):白名单环境构造器模块已删除——provider
+// 子进程全路径(process_manager/cli_adapter/kimi terminal 三底座)宿主
+// 继承+显式覆盖层;owner home 解析在 trust 侧
+// (provider_trust_adapters::resolve_owner_home_from_env)。
 pub mod provider_execution;
 pub mod provider_health;
 pub mod provider_registry;

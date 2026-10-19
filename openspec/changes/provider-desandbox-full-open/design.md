@@ -67,7 +67,7 @@ RootRecipe 在所读代码中有独立能力凭据分支；保留该分支的 Ru
 
 ### 6. 鉴权先行，CHECK 是 Coder 主路径
 
-API 身份认证、Origin/Host、WS 与敏感 GET 覆盖是启用全开前的公共门，不等风险触发或二期。令牌不能进入 provider 环境、URL 或明文日志；同 UID 读取可读凭据后的取证调用不属于该边界承诺。Coder 在共同白名单 HostCoding 环境自行 CHECK；A′ 只补外部/人工/临时缺项，不新增 server runner，也不将环境声明变成权限授权。
+API 身份认证、Origin/Host、WS 与敏感 GET 覆盖是启用全开前的公共门，不等风险触发或二期。令牌不能进入 provider 环境、URL 或明文日志；同 UID 读取可读凭据后的取证调用不属于该边界承诺。Coder 在宿主 HostCoding 环境自行 CHECK；A′ 只补外部/人工/临时缺项，不新增 server runner，也不将环境声明变成权限授权。
 
 ### 7. 同 capability 冲突面与归档顺序
 
@@ -110,7 +110,7 @@ tasks 5.4 是本 change 的归档硬门：先交付 anchor 的依赖/权限最�
 
 ## Risks / Trade-offs
 
-- [同 UID 可读凭据、可写宿主] → owner 已接受；白名单只减意外注入，审计只检测不物理防写，不作超额保证。
+- [同 UID 可读凭据、可写宿主] → owner 已接受；子进程继承宿主环境、安全由用户自管，审计只检测不物理防写，不作超额保证。
 - [恶意依赖与外部副作用] → 明示 postinstall/mvn 插件、网络/容器副作用不可回滚，二期由 owner 安排。
 - [恢复抹去违规证据] → 违规事实在恢复前持久化；恢复状态和报告可采信独立。
 - [旧归档复活受限档] → 新语义、仅 Confirmed 与拆桥任务、真实主 spec MODIFIED、anchor 依赖修订硬门，不把旧记录强改 Confirmed。
@@ -120,7 +120,7 @@ tasks 5.4 是本 change 的归档硬门：先交付 anchor 的依赖/权限最�
 ## Migration Plan
 
 1. 本 change 先通过 strict，作为契约审阅输入；批准后由后续 writing-plans 展开高层工作包，不在本次执行实现。
-2. 平台鉴权公共前置先交付；受信装配、白名单环境、资源与 Git 护栏统一接线，再迁移 action 能力语义与 Direct/LC 两阶段门。共享文件单一集成人。
+2. 平台鉴权公共前置先交付；受信装配、宿主继承环境、资源与 Git 护栏统一接线，再迁移 action 能力语义与 Direct/LC 两阶段门。共享文件单一集成人。
 3. 四家全部角色采用统一宿主执行，author 工具机制与 Reviewer B 档窗口分别验收；Kimi 删除旧全角色沙箱/grammar/120 秒路径，不留双路径 fallback。
 4. 旧 capability/audit/native session 保留历史，失配进入明确核验或 fresh 等待；不沿用旧隔离指纹，不洗白未关闭 Reviewer 窗口。
 5. 真实验收覆盖四家×角色及 Direct/LC、fresh/resume/retry，Kimi Maven/npm/Podman、长静默 CHECK、Reviewer 自提交作废与崩溃恢复、鉴权拒绝及正常 Coder 交付。缺工具或登录态按真实前提缺失记录，不 skip 后宣称全通。

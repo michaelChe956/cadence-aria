@@ -474,8 +474,11 @@ fn default_git_environment_includes_allowed_keys_only_when_present() {
     assert_eq!(empty.get("LC_ALL").map(String::as_str), Some("C"));
 }
 
+/// A1-b2(Bug45 批2 环境回退):git_finalize 不注入 HOME——git_environment
+/// 只有 LC_ALL/GIT_CONFIG_NOSYSTEM 覆盖层时,子进程 git 继承宿主 HOME,
+/// commit 以宿主用户 identity 完成(平台不冒充、不隐藏宿主身份)。
 #[tokio::test]
-async fn git_finalize_commit_fails_without_injected_home_identity() {
+async fn git_finalize_commit_uses_inherited_host_identity() {
     let temp = TempDir::new().unwrap();
     let git_root = temp.path().join("repository");
     std::fs::create_dir_all(&git_root).unwrap();
@@ -488,6 +491,18 @@ async fn git_finalize_commit_fails_without_injected_home_identity() {
         assert!(status.success(), "git {argv:?} failed");
     }
     std::fs::write(git_root.join("AGENTS.md"), "# agents\n").unwrap();
+
+    let host_email = {
+        let output = std::process::Command::new("git")
+            .args(["config", "user.email"])
+            .output()
+            .expect("read host git identity");
+        assert!(
+            output.status.success(),
+            "test host must carry a git identity (user.email) for the host-inheritance contract"
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
 
     let calls = Arc::new(Mutex::new(Vec::new()));
     let coordinator = RepositoryRegistrationCoordinator::new_with_operations(
@@ -521,17 +536,20 @@ async fn git_finalize_commit_fails_without_injected_home_identity() {
         ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
     ]));
 
-    let error = coordinator
+    coordinator
         .git_finalize(&git_root, CancellationToken::new())
         .await
-        .expect_err("git_finalize without HOME must fail at commit identity resolution");
-    assert!(
-        error.contains("git_finalize_commit"),
-        "expected commit-stage failure, got: {error}"
-    );
-    assert!(
-        error.contains("unable to auto-detect email address")
-            || error.contains("Author identity unknown"),
-        "expected identity resolution failure, got: {error}"
+        .expect("git_finalize must succeed with the inherited host identity");
+
+    let output = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%ae"])
+        .current_dir(&git_root)
+        .output()
+        .expect("read committed author email");
+    assert!(output.status.success(), "git log failed");
+    let author_email = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(
+        author_email, host_email,
+        "commit 必须使用宿主继承的 git identity(平台不注入/不冒充)"
     );
 }

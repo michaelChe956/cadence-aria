@@ -92,7 +92,8 @@ envelope SHALL 区分规划、编码、评审 action 的业务职责，保留历
 
 #### Scenario: 启动与审批的 durable 审计
 - **WHEN** author 的 pi/claude/codex 岗位策略启动或作出审批决策
-- **THEN** 系统 SHALL 经 engine sink 向 LifecycleStore tool-policy-run-audit 分区串行追加 JSONL，key=(workspace_session_id, role_run_seq)，run seq 持久单调、行 seq 单调；首行恰为一条 provider_start，后续允许 approval_decision/protocol_warning/session_terminated
+- **THEN** 系统 SHALL 经 engine sink 向 LifecycleStore tool-policy-run-audit 分区串行追加 JSONL，key=(workspace_session_id, role_run_seq)，run seq 持久单调、行 seq 单调；首行恰为一条 provider_start，后续允许 approval_decision/file_change_detected/protocol_warning/session_terminated
+- **AND** file_change_detected（Author 检测型岗位，T13）为第五类 canonical 事件：只能出现在 provider_start 首行之后，携带 item_id、summary（path+changeType）、source_method（item wire method）、disposition（处置冻结文本：turn 中断、run Failed、本轮输出不可采信、已发生写入不回滚）与 policy_digest；检测事实与处置记录不得因后续事件、恢复或会话终结丢失
 - **AND** adapter SHALL 在 start 返回前完成握手并确认 native session ID（Pi 生成/传入，Claude fresh 等 init 有界确认、resume 已知，Codex 等 thread/start 应答），确认失败拒绝；启动审计包含最终参数、sandbox/approval、岗位规则与摘要、原生 ID、版本/dialect，写失败返回错误并终止子进程；后续审计失败沿既有 kill 链终止，读取坏行跳过并警告，不伪称 pre-spawn 审计
 - **AND** approval_decision SHALL 包含 category/server/tool/request/decision/reason/policy digest；Coder/非岗位策略与 Kimi 仍经 execution_event_audit，Reviewer 窗口与作废事实另按 B 档持久化，不能因退出旧策略分区丢失采信证据
 
@@ -112,7 +113,7 @@ envelope SHALL 区分规划、编码、评审 action 的业务职责，保留历
 
 ### Requirement: 统一宿主执行与受信环境（REQ-ENV-HOST-01）
 
-四家 provider 的全角色、Direct/LC、同步/流式及 ACP/MCP 子执行 SHALL 采用当前用户宿主执行与统一白名单环境，不施加应用层 bwrap/netns/no-new-privs。执行合同由平台受信装配并冻结，不能被自报 role、prompt 或环境升级；HOME 保留 owner HOME，白名单仅防意外注入，非凭据隔离。
+四家 provider 的全角色、Direct/LC、同步/流式及 ACP/MCP 子执行 SHALL 继承当前用户宿主环境执行，平台不构造、不覆盖子进程环境（调用方显式 env map 仅作覆盖层），不施加应用层 bwrap/netns/no-new-privs。执行合同由平台受信装配并冻结，不能被自报 role、prompt 或环境升级；HOME 为用户宿主 HOME，凭据随宿主环境可达，安全由用户自管，平台不作凭据隔离或物理防写承诺。
 
 #### Scenario: 无 bwrap 的全角色启动
 - **WHEN** 宿主没有 bwrap 而具备该 provider 的必要 CLI 与运行前提
@@ -120,7 +121,7 @@ envelope SHALL 区分规划、编码、评审 action 的业务职责，保留历
 
 #### Scenario: 运行环境与清理边界
 - **WHEN** 平台构造或清理 provider 运行环境
-- **THEN** 系统 SHALL 使用共同白名单与受信显式凭据/工具链注入，记录环境策略版本而不泄密；只能清理本轮运行前创建并登记的私有目录和资源，绝不依据 HOME/XDG 值递归清除 owner 目录、共享缓存或用户容器
+- **THEN** 系统 SHALL 记录环境策略版本而不泄密、不将环境具体值写入摘要或日志；子进程环境继承宿主，平台不注入；只能清理本轮运行前创建并登记的私有目录和资源，绝不依据 HOME/XDG 值递归清除 owner 目录、共享缓存或用户容器
 
 #### Scenario: 平台受信 Git 不执行仓库注入代码
 - **WHEN** 平台启动 Git 操作，包括快照、跨 target 检查、交付与补偿
@@ -144,7 +145,7 @@ envelope SHALL 区分规划、编码、评审 action 的业务职责，保留历
 
 #### Scenario: 三个对账域不得混同
 - **WHEN** 审查结束执行恢复与采信核对
-- **THEN** 系统 SHALL 分开判定 worktree 恢复域、Git 观察域与平台合法写入域；平台白名单内报告/journal 写入不误判 Reviewer 违规，Reviewer 写元数据不冒充平台合法写入；单一 .git/.aria 摘要相等不足以采信
+- **THEN** 系统 SHALL 分开判定 worktree 恢复域、Git 观察域与平台合法写入域；平台合法写入域内报告/journal 写入不误判 Reviewer 违规，Reviewer 写元数据不冒充平台合法写入；单一 .git/.aria 摘要相等不足以采信
 
 #### Scenario: 取消崩溃与人工恢复
 - **WHEN** 审查取消、超时、进程崩溃、恢复失败或 journal 不一致
@@ -152,7 +153,7 @@ envelope SHALL 区分规划、编码、评审 action 的业务职责，保留历
 
 ### Requirement: HostCoding 自行 CHECK 与补充验证边界（REQ-ENV-CHECK-01）
 
-Coder SHALL 在白名单 HostCoding 环境自行执行计划 CHECK（构建、测试、依赖与容器），平台不新增通用命令 runner。环境能力声明仅说明 JVM/Node/网络/容器等前提，不是授权或路由指令；A′ verification-triage SHALL 仅补充外部硬件、人工检查或临时缺项，不取代主路径、不自动改计划。
+Coder SHALL 在宿主 HostCoding 环境自行执行计划 CHECK（构建、测试、依赖与容器），平台不新增通用命令 runner。环境能力声明仅说明 JVM/Node/网络/容器等前提，不是授权或路由指令；A′ verification-triage SHALL 仅补充外部硬件、人工检查或临时缺项，不取代主路径、不自动改计划。
 
 #### Scenario: 工具链齐备的自跑 CHECK
 - **WHEN** 工具链、依赖网络、容器引擎与登录态符合已声明前提

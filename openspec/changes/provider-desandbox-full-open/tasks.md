@@ -5,7 +5,7 @@
 ## 1. 公共安全前置与受信执行合同
 
 - [ ] 1.1 完成 REST 状态变更及 alias、WS upgrade、敏感 GET 的认证与 Origin/Host 校验，并交付对应拒绝/正常调用测试及安全边界说明；验收无授权、非法来源/Host 均在副作用前 401/403，localhost 无豁免，入站令牌不进 URL、日志或 provider 环境（REQ-API-AUTH-01/02）。
-- [ ] 1.2 统一受信执行装配与白名单环境，覆盖各角色 Direct/LC、同步/流式及 ACP/MCP 子执行，交付跨入口装配测试及环境政策说明；验收自报 role/prompt/env 不可升级、HOME=owner HOME、无 bwrap 仍可启动、审计明确非隔离（REQ-ENV-HOST-01、REQ-ENV-01/02、网关 projection）。
+- [ ] 1.2 统一受信执行装配与宿主继承环境，覆盖各角色 Direct/LC、同步/流式及 ACP/MCP 子执行，交付跨入口装配测试及环境政策说明；验收自报 role/prompt/env 不可升级、HOME=用户宿主 HOME（子进程继承宿主环境，平台不构造不覆盖）、无 bwrap 仍可启动、审计明确非隔离（REQ-ENV-HOST-01、REQ-ENV-01/02、网关 projection）。
 - [ ] 1.3 完成运行资源登记、退出/启动补偿及平台受信 Git 启动点加固，交付资源归属与 hooks/fsmonitor 探针测试、清理说明；验收先登记后执行、未知 writer 停等、仅清本轮登记私有资源、不按 HOME/XDG 递归清理，平台不会执行仓库 hooks/fsmonitor，正常 Coder 提交保持可用（REQ-ENV-HOST-01、REQ-ENV-REVIEW-B）。
 
 ## 2. 全开能力记录、角色岗位与两阶段准入

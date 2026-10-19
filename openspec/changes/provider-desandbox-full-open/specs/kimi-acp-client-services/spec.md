@@ -46,7 +46,7 @@ terminal SHALL 保留 created→running→(exited|killed)→released、幂等 ki
 
 ### Requirement: 终端执行策略与每命令封闭 grammar（SHALL）
 
-Kimi terminal SHALL 在所有角色接受 ACP command+args 普通 argv 与已有 legacy shell 形式，不再以只读命令白名单、固定解释器或禁止管道/重定向限制执行。子进程 SHALL 使用统一白名单环境与受信显式注入，HOME 为 owner HOME、工具链 PATH 可用；权限模式只控制审批，不代替执行基线或 author 岗位工具规则。
+Kimi terminal SHALL 在所有角色接受 ACP command+args 普通 argv 与已有 legacy shell 形式，不再以只读命令白名单、固定解释器或禁止管道/重定向限制执行。子进程 SHALL 继承宿主环境（HOME 为用户宿主 HOME、工具链 PATH 等随宿主可达），平台不构造、不覆盖子进程环境；权限模式只控制审批，不代替执行基线或 author 岗位工具规则。
 
 #### Scenario: 白名单内只读命令
 - **WHEN** Auto 请求 git status 或 rg
@@ -66,7 +66,7 @@ Kimi terminal SHALL 在所有角色接受 ACP command+args 普通 argv 与已有
 
 #### Scenario: 宿主环境可用但不冒充隔离
 - **WHEN** 构造 terminal 环境
-- **THEN** 系统 SHALL 按白名单和受信 run 注入保留工具链、网络/容器与 owner 配置发现，不强制 HOME=worktree 或全局 Git 配置 /dev/null；不默认继承无关凭据，不泄露凭据值，不声称同 UID 不可读取 owner 文件
+- **THEN** 系统 SHALL 继承宿主环境保留工具链、网络/容器与 owner 配置发现，不强制 HOME=worktree 或全局 Git 配置 /dev/null；凭据随宿主可达、安全由用户自管，平台不泄露凭据值，不声称同 UID 不可读取 owner 文件
 
 ### Requirement: 终端 OS 级隔离（auto 模式）（SHALL）
 
