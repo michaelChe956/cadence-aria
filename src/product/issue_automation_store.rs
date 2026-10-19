@@ -1418,8 +1418,9 @@ mod tests;
 /// 事实补偿来验证。仅测试构建编译，非测试二进制零代码。
 #[cfg(test)]
 pub(crate) mod automation_crash_window {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
     use std::sync::{LazyLock, Mutex};
+    use std::thread::ThreadId;
 
     /// 自动化链持久写边界：intent 落盘后（创建回调之前）/ 绑定 plan 落盘
     /// 后（session 创建之前）/ 绑定 session 落盘后（enrollment 绑定写回
@@ -1435,39 +1436,54 @@ pub(crate) mod automation_crash_window {
         AfterEngineStarted,
     }
 
-    static WINDOWS: LazyLock<Mutex<BTreeSet<CrashWindow>>> =
-        LazyLock::new(|| Mutex::new(BTreeSet::new()));
+    /// 注册表按测试线程隔离：`cargo test` 并行跑多个驱动
+    /// `ensure_enrolled_plan`/reconcile 的用例（web:: 全量下大量并行），
+    /// 进程级单表会让无关线程的 `fire_once` 偷走本测试的窗口（本测试随后
+    /// 得到 Ok 而断言「must abort」失败）。tokio 测试默认 current_thread
+    /// 运行时，注册与触发都在测试线程上，按 `ThreadId` 分桶即恢复
+    /// 「测试内一次性」语义；`#[cfg(test)]` 支持面，非测试二进制零代码。
+    static WINDOWS: LazyLock<Mutex<HashMap<ThreadId, BTreeSet<CrashWindow>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
 
-    fn windows() -> &'static Mutex<BTreeSet<CrashWindow>> {
+    fn windows() -> &'static Mutex<HashMap<ThreadId, BTreeSet<CrashWindow>>> {
         &WINDOWS
     }
 
-    /// 注册守卫：drop（测试结束或「崩溃」）时清除未触发的注册，不跨测试泄漏。
-    pub(crate) struct CrashWindowGuard(CrashWindow);
+    /// 注册守卫：drop（测试结束或「崩溃」）时清除本线程未触发的注册，
+    /// 不跨测试/跨线程泄漏。
+    pub(crate) struct CrashWindowGuard(ThreadId, CrashWindow);
 
     impl Drop for CrashWindowGuard {
         fn drop(&mut self) {
-            windows()
+            if let Some(set) = windows()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&self.0);
+                .get_mut(&self.0)
+            {
+                set.remove(&self.1);
+            }
         }
     }
 
     pub(crate) fn register(window: CrashWindow) -> CrashWindowGuard {
+        let thread = std::thread::current().id();
         let inserted = windows()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(thread)
+            .or_default()
             .insert(window);
         assert!(inserted, "crash window already registered: {window:?}");
-        CrashWindowGuard(window)
+        CrashWindowGuard(thread, window)
     }
 
-    /// 触发点：已注册则消费并返回 true（模拟进程在该持久写之后立即崩溃）。
+    /// 触发点：本线程已注册则消费并返回 true（模拟进程在该持久写之后立即
+    /// 崩溃）；其它线程的注册不可见、不可消费。
     pub(crate) fn fire_once(window: CrashWindow) -> bool {
         windows()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&window)
+            .get_mut(&std::thread::current().id())
+            .is_some_and(|set| set.remove(&window))
     }
 }
