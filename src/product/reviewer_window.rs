@@ -1,4 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
 //! 批2 Task 17:Reviewer 窗口 durable 租约与「先停 writer 后采材料」
 //! 准入编排。
 //!
@@ -188,6 +187,7 @@ pub(crate) enum ManualGateDecision {
 
 /// 观测违规事实(T18 journal 输入;由观察方——T5 监视/通道闸门/平台
 /// 写监视——提供)。`kind` 用稳定码(见 `ViolationJournalEntry::kind`)。
+#[cfg_attr(not(test), allow(dead_code))] // 违规 journal 输入载体:生产观察方(T5 监视/通道闸门)接线前由恢复测试直接构造
 pub(crate) struct ViolationRecord<'a> {
     pub(crate) kind: &'a str,
     /// 违规涉及的路径(相对 worktree/gitdir 或绝对平台路径)。
@@ -900,7 +900,6 @@ pub(crate) fn assert_review_window_current(
 // ---------------------------------------------------------------------------
 
 /// 平台 git mutation(stage/commit/push/补偿)准入:窗口冻结期间拒绝
-#[allow(dead_code)] // T19 生产接线入口(--all-targets 下测试目标未引用)
 pub(crate) fn enter_platform_write(
     store: &ReviewerWindowStore,
     worktree: &Path,
@@ -913,7 +912,6 @@ pub(crate) fn enter_platform_write(
         .map_err(ReviewerWindowError::Channel)
 }
 
-#[allow(dead_code)] // 同上
 pub(crate) fn exit_platform_write(
     store: &ReviewerWindowStore,
     worktree: &Path,
@@ -1008,6 +1006,7 @@ pub(crate) fn begin_quiesce(
 /// `entry_id` 幂等续接。条目同时快照 T16 持久化恢复游标
 /// (`restore_cursor`):恢复开始前 journal 即含续接位置;恢复路径
 /// 只追加、不删除/覆盖 journal。
+#[cfg_attr(not(test), allow(dead_code))] // journal-first 违规落账:生产观察方接线位;合同先由收口/恢复测试钉住
 pub(crate) fn record_violation(
     store: &ReviewerWindowStore,
     snapshot: &ReviewerSnapshotStore,

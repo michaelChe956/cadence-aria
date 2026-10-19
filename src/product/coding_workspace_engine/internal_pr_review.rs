@@ -371,7 +371,7 @@ impl CodingWorkspaceEngine {
                 })
                 .await;
             // D2 锚点：经文件内具名生产构造函数构造（内部走共享工厂派生
-            // tool_policy：Reviewer → DenyFileWriteBuiltins）。
+            // tool_policy：Reviewer → ReviewerVerify 窗口合同；Author 才 deny）。
             let (input, provider_input) = internal_pr_review_streaming_input(
                 &reviewer,
                 prompt,

@@ -40,7 +40,6 @@
 // 生产消费链:T6/T7(ACP terminal/MCP 子进程)、T14(Coder 清理)、
 // T17/T21(Reviewer 窗口恢复)接线;接线完成前仅合同测试消费
 // (前瞻载体范式,同 `freeze_provider_execution`/`build_provider_environment`)。
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -219,10 +218,12 @@ impl ResourceReservation {
         &self.resource_id
     }
 
+#[allow(dead_code)] // 预留 kind 读取口:生产消费者随 F2 真实进程登记接线,暂无调用面不删契约
     pub(crate) fn kind(&self) -> OwnedResourceKind {
         self.kind
     }
 
+#[cfg_attr(not(test), allow(dead_code))] // 测试断言消费;生产消费者随 F2 接线
     pub(crate) fn reserved_labels(&self) -> &BTreeMap<String, String> {
         &self.reserved_labels
     }
@@ -244,6 +245,7 @@ impl StartedResourceIdentity {
         }
     }
 
+#[cfg_attr(not(test), allow(dead_code))] // 容器身份铸造口:测试消费,容器清理链接线位
     pub(crate) fn container(exact_id: &str) -> Self {
         Self {
             identity: StartedIdentity::Container {
@@ -252,6 +254,7 @@ impl StartedResourceIdentity {
         }
     }
 
+#[allow(dead_code)] // 网络身份铸造口:精确 ID 清理合同面,接线前无消费者
     pub(crate) fn network(exact_id: &str) -> Self {
         Self {
             identity: StartedIdentity::Network {
@@ -353,6 +356,7 @@ pub(crate) trait OwnedEngineObserver: Send + Sync {
 }
 
 /// 新平台 boot 身份(进程级唯一;恢复判定用)。
+#[cfg_attr(not(test), allow(dead_code))] // 生产入口 open 的 boot 身份铸造;恢复演练/测试先行(F2 接线位)
 pub(crate) fn new_boot_identity() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -504,6 +508,7 @@ pub(crate) struct ProviderRunResourceScope {
 
 impl ProviderRunResourceScope {
     /// 生产入口:以本平台 boot 身份打开 run 的资源 scope。
+#[cfg_attr(not(test), allow(dead_code))] // 生产入口(engine 开真实 scope);接线前测试经 open_scope 消费
     pub(crate) fn open(
         execution: &FrozenProviderExecution,
         boot_identity: &str,
@@ -1154,6 +1159,7 @@ impl ProviderRunResourceScope {
     /// 资源启动包装器(进程面):持久预留 → spawn → 真实 PID-start 身份
     /// 确认,闭合预留与真实身份间的崩溃口。预留失败不 spawn;spawn 失败
     /// 解除登记;确认写失败停止子进程(整组)并进入补偿。
+#[cfg_attr(not(test), allow(dead_code))] // F2 载体:预留→spawn→PID-start 确认的进程包装器;生产 adapter 接线前由 drop_tests 钉住合同
     pub(crate) async fn start_owned_process(
         &self,
         spec: OwnedResourceSpec,
@@ -1213,6 +1219,7 @@ impl ProviderRunResourceScope {
     }
 
     /// 由预留句柄还原登记事实(补偿解除用;与 reserve 写入的记录一致)。
+#[cfg_attr(not(test), allow(dead_code))] // start_owned_process 补偿解除用,随其接线转正
     fn reservation_record(&self, reservation: &ResourceReservation) -> ProviderResourceRecord {
         ProviderResourceRecord {
             key: reservation.key.clone(),
@@ -1239,6 +1246,7 @@ impl ProviderRunResourceScope {
 
     /// 仅测试:直接以构造事实登记记录(fake/恢复场景装配)。
     #[cfg(test)]
+#[allow(dead_code)] // 装配口暂无测试引用,保留 fake/恢复装配面
     pub(crate) fn insert_record_for_test(
         &self,
         record: ProviderResourceRecord,
@@ -1306,11 +1314,13 @@ impl TrustedLaunchOwnership {
     }
 
     /// 归属 scope 主键(与开窗/收口消费者同源的三元组)。
+#[cfg_attr(not(test), allow(dead_code))] // 测试断言消费;生产对账消费者随收口接线
     pub(crate) fn scope_key(&self) -> &ResourceScopeKey {
         self.scope.key()
     }
 
     /// 本次 launch 的唯一资源 ID。
+#[cfg_attr(not(test), allow(dead_code))] // 同上
     pub(crate) fn resource_id(&self) -> &str {
         &self.resource_id
     }

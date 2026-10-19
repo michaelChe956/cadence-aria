@@ -30,7 +30,6 @@
 //! 都能从原 manifest 续接(测试以故障注入逐边界验收)。
 // 生产消费链:T17(窗口)/T18(三域对账)/T21(恢复)接线;接线完成前仅
 // 合同测试消费(前瞻载体范式,同 provider_resource_store)。
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -139,6 +138,7 @@ pub(crate) struct SnapshotBudget {
 
 impl SnapshotBudget {
     /// 测试默认预算(生产默认由 T17 调用方给定)。
+#[cfg_attr(not(test), allow(dead_code))] // 测试默认预算,生产由调用方显式给定
     pub(crate) fn generous() -> Self {
         Self {
             max_entries: 100_000,
@@ -1953,6 +1953,7 @@ fn observe_platform_state(path: &Path) -> Result<PlatformWriteState, ReviewerSna
 // ---------------------------------------------------------------------------
 
 struct RestoreCtx<'a> {
+    #[cfg_attr(not(test), allow(dead_code))] // 仅恢复 failpoint 注入(测试)读取;生产恢复链不直接读该引用
     store: &'a ReviewerSnapshotStore,
     window_dir: PathBuf,
     manifest_path: PathBuf,

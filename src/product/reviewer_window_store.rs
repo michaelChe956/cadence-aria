@@ -1,4 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
 //! 批2 Task 17:Reviewer 窗口 durable 持久化基座(租约/窗口记录/平台写
 //! 通道闸门)。
 //!

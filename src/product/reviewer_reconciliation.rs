@@ -1,4 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
 //! 批2 Task 18:三域对账与人工门采信判定(纯判定面 + durable 事实装载)。
 //!
 //! 定位:恢复成功 ≠ 可采信。本模块消费 T16/T17 已固化的 durable 事实

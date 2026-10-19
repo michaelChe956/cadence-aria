@@ -173,7 +173,6 @@ impl AuthorToolPolicy {
     }
 
     /// 岗位摘要（Author 岗位冻结进 [`FrozenProviderExecution`] 的事实）。
-    #[cfg_attr(not(test), allow(dead_code))]
     fn digest(&self) -> String {
         hash_domains(
             "provider-author-tool-policy/1",
@@ -189,7 +188,6 @@ impl AuthorToolPolicy {
 
     /// 岗位规则合法性（freeze 内消费）：版本必须是受支持的当前版本且拒绝
     /// 集合非空（REQ-ENV-09 双向守卫的「非法」臂）。
-    #[cfg_attr(not(test), allow(dead_code))]
     fn validate(&self) -> Result<(), ProviderAdapterError> {
         if self.policy_version != AUTHOR_TOOL_POLICY_VERSION {
             return Err(ProviderAdapterError::provider_unavailable(format!(
@@ -227,11 +225,9 @@ impl TrustedRunIdentity {
     /// 现有 engine durable run/store 的 crate 内构造口：run 身份事实取自
     /// durable `ProviderRunRecord`（provider_run_id、adapter 承载角色、能力
     /// 画像引用），会话归属由 engine 会话存储给出，职责由受信装配声明。
-    /// 生产 caller（LC gateway 与 legacy Direct 的受信 engine builder,T10+）
+    /// 生产 caller（LC gateway 与 legacy Direct 的受信 engine builder）
     /// 都沿 durable run/store 取事实;不从 canonical_inputs 里的自报 role
-    /// 提升。engine 接线前仅合同测试消费(前瞻载体,同
-    /// `PreparedLcStreamingCandidate::into_validated_streaming_input` 范式)。
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// 提升。
     pub(crate) fn from_durable_run(
         record: &ProviderRunRecord,
         workspace_session_id: &str,
@@ -467,9 +463,8 @@ impl FrozenProviderExecution {
 /// 任何失配都在 spawn 之前拒绝（`ProviderAdapterError`，稳定原因码前缀
 /// `provider_execution_*`）；产物嵌入 private validated launch/Direct 受信
 /// 包装，不给普通 caller 凭 role 字符串铸能力。
-/// 生产消费链:`prepare_trusted_*_launch`(LC)与 T10+ 受信 engine builder
-/// (legacy Direct 等价合同);接线完成前仅合同测试消费(前瞻载体范式)。
-#[cfg_attr(not(test), allow(dead_code))]
+/// 生产消费链:`prepare_trusted_*_launch`(LC)与 legacy Direct 受信 engine
+/// builder(等价合同)均已接线消费。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn freeze_provider_execution(
     identity: &TrustedRunIdentity,
@@ -619,7 +614,6 @@ pub(crate) fn freeze_provider_execution(
 
 /// 长度前缀域哈希（与 `SessionResumeFingerprint::from_envelope` 同型：8 字节
 /// 大端长度前缀 + 域字节，schema 前置；无边界歧义）。
-#[cfg_attr(not(test), allow(dead_code))]
 fn hash_domains(schema: &str, domains: &[Vec<u8>]) -> String {
     let mut hasher = Sha256::new();
     let mut domain = |part: &[u8]| {

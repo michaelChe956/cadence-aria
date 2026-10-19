@@ -83,7 +83,6 @@ impl ValidatedStreamingProviderInput {
 
     /// B1-1:本次 launch 的受信资源归属(`None` = 无归属请求)。真实
     /// adapter 的 B1 接线片在 spawn 点消费(预留→spawn→回填 PID+starttime
-    #[allow(dead_code)] // B1 adapter 接线片(spawn 点)消费;共享契约先行冻结
     pub(crate) fn launch_ownership(
         &self,
     ) -> Option<&crate::cross_cutting::provider_resources::TrustedLaunchOwnership> {
@@ -131,7 +130,10 @@ impl ValidatedAdapterInput {
     }
 
     /// B1-1:同步载体的受信归属绑定(crate 内受信装配面;与 streaming 侧
-    #[allow(dead_code)] // 同步侧受信装配接线后消费;共享契约先行冻结
+    /// 同型)。当前同步桥接只读 [`Self::launch_ownership`] 透传,尚无可铸造
+    /// 归属的同步受信装配 caller;保留该安全绑定口并在接线时消费,不以删
+    /// 载体消 warning。
+    #[allow(dead_code)] // 同步受信装配接线后消费;安全契约载体不删
     pub(crate) fn with_launch_ownership(
         mut self,
         ownership: crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
