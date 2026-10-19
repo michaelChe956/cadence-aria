@@ -19,7 +19,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::web::state::WebAppState;
 
@@ -231,16 +231,28 @@ impl ApiAuthState {
         self.secure_cookie
     }
 
+    /// 取内部锁；持锁线程 panic 导致中毒时显式告警并原地恢复既有事实
+    /// （批2 Bug45 C4/F8）：bootstrap 消费状态与会话集合不重建、不重发，
+    /// 认证面不再因一次 panic 持续 500。
+    fn lock_inner(&self) -> MutexGuard<'_, AuthInner> {
+        self.inner.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                "api auth mutex was poisoned by a panicking holder; recovering existing bootstrap/session facts in place"
+            );
+            PoisonError::into_inner(poisoned)
+        })
+    }
+
     /// bootstrap token 十六进制形式。**仅**供 owner 受信终端交付与测试使用，
     /// 严禁进入结构化日志、文件、URL、env 或 provider 环境。
     pub(crate) fn bootstrap_token_hex(&self) -> String {
-        let inner = self.inner.lock().expect("api auth lock");
+        let inner = self.lock_inner();
         hex::encode(&inner.bootstrap_token)
     }
 
     pub fn exchange(&self, presented: &str) -> Option<String> {
         let presented_bytes = hex::decode(presented.trim()).ok()?;
-        let mut inner = self.inner.lock().expect("api auth lock");
+        let mut inner = self.lock_inner();
         // 先常时比较再判消费：任何失败路径耗时一致，不泄漏匹配前缀。
         let matched = constant_time_eq(&presented_bytes, &inner.bootstrap_token);
         if !matched || inner.consumed {
@@ -258,7 +270,7 @@ impl ApiAuthState {
         let Some(presented_bytes) = hex::decode(presented.trim()).ok() else {
             return false;
         };
-        let inner = self.inner.lock().expect("api auth lock");
+        let inner = self.lock_inner();
         inner
             .sessions
             .iter()
@@ -385,6 +397,54 @@ fn authority_host(authority: &str) -> &str {
         .unwrap_or(authority)
 }
 
+/// Host authority 来源错误：缺失、畸形（非 UTF-8）或 Host 与 URI authority 冲突。
+/// 三者都按拒绝处理，不做任何“另一来源合法即放行”的降级。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostAuthoritySourceError {
+    Missing,
+    Malformed,
+    Conflict,
+}
+
+/// 解析用于 Host 校验的 authority（批2 Bug45 F18）。
+///
+/// HTTP/2 的 `:authority` 由 hyper 映射到请求 URI，不一定落到 `host` 头；
+/// 因此仅在 `host` 头**缺失**时回退到 `req.uri().authority()`：
+/// - Host 头存在且与 URI authority 冲突 → [`HostAuthoritySourceError::Conflict`]
+///   （即使 authority 属于允许列表也拒绝）；
+/// - Host 头存在但畸形（非 UTF-8）→ [`HostAuthoritySourceError::Malformed`]
+///   （不回退、不因 authority 合法而放行）；
+/// - 两者都缺失 → [`HostAuthoritySourceError::Missing`]。
+///
+/// 两来源同时存在时必须大小写不敏感一致（host 本身大小写不敏感）。
+fn request_host_authority<'a>(
+    headers: &'a HeaderMap,
+    uri: &'a axum::http::Uri,
+) -> Result<&'a str, HostAuthoritySourceError> {
+    let header_host = match headers.get(header::HOST) {
+        Some(value) => Some(
+            value
+                .to_str()
+                .map_err(|_| HostAuthoritySourceError::Malformed)?
+                .trim(),
+        ),
+        None => None,
+    };
+    let uri_authority = uri.authority().map(|authority| authority.as_str());
+    match (header_host, uri_authority) {
+        (Some(host), Some(authority)) => {
+            if host.eq_ignore_ascii_case(authority) {
+                Ok(host)
+            } else {
+                Err(HostAuthoritySourceError::Conflict)
+            }
+        }
+        (Some(host), None) => Ok(host),
+        (None, Some(authority)) => Ok(authority),
+        (None, None) => Err(HostAuthoritySourceError::Missing),
+    }
+}
+
 async fn enforce(auth: Arc<ApiAuthState>, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     if !path_guarded_by_auth(&path) {
@@ -396,15 +456,13 @@ async fn enforce(auth: Arc<ApiAuthState>, req: Request, next: Next) -> Response 
         return next.run(req).await;
     }
     let headers = req.headers().clone();
-    // Host 先于 Origin/身份/交换（DNS rebinding 防线）。
-    let host_header = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim);
-    let host_ok = host_header
-        .map(|host| auth.host_allowed(host))
-        .unwrap_or(false);
-    if !host_ok {
+    // Host 先于 Origin/身份/交换（DNS rebinding 防线）。Host 头缺失时才以
+    // HTTP/2 `:authority`（URI authority）回退；冲突/畸形保持拒绝。
+    let host_authority = match request_host_authority(&headers, req.uri()) {
+        Ok(host) => host.to_string(),
+        Err(_) => return forbidden_response("forbidden_host", "request host not allowed"),
+    };
+    if !auth.host_allowed(&host_authority) {
         return forbidden_response("forbidden_host", "request host not allowed");
     }
     // mutation 与 WS upgrade 必须携带受信精确 Origin（CLI 显式带配置 Origin）；
@@ -432,7 +490,7 @@ async fn enforce(auth: Arc<ApiAuthState>, req: Request, next: Next) -> Response 
     // 上面的 Host/Origin 卫生照常生效，其余端点会话语义不变。
     if path == "/api/evidence-query"
         && method == axum::http::Method::POST
-        && host_header.is_some_and(|host| crate::web::app::is_loopback_host(authority_host(host)))
+        && crate::web::app::is_loopback_host(authority_host(&host_authority))
     {
         return next.run(req).await;
     }
@@ -728,5 +786,197 @@ mod tests {
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    /// C4/F8：持锁线程 panic 后 mutex 中毒不得重建空认证状态或重发 bootstrap；
+    /// 已消费事实与既有会话原地保留，重复交换仍拒绝。
+    #[test]
+    fn api_auth_poisoned_mutex_preserves_consumed_session_facts() {
+        let auth = ApiAuthState::for_bind(&loopback_bind(39721), &[]).expect("auth");
+        let token = auth.bootstrap_token_hex();
+        let session = auth.exchange(&token).expect("first exchange");
+
+        let joined = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = auth.inner.lock().expect("lock before poisoning");
+                    panic!("intentional panic while holding api auth lock");
+                })
+                .join()
+        });
+        assert!(joined.is_err(), "holder thread must have panicked");
+        assert!(
+            auth.inner.lock().is_err(),
+            "mutex must actually be poisoned for this test to be meaningful"
+        );
+
+        assert_eq!(
+            auth.bootstrap_token_hex(),
+            token,
+            "bootstrap token must be preserved, not re-issued after poison recovery"
+        );
+        assert!(
+            auth.exchange(&token).is_none(),
+            "consumed bootstrap must stay consumed (no re-bootstrap) after poison recovery"
+        );
+        assert!(
+            auth.session_valid(&session),
+            "existing session facts must survive poison recovery"
+        );
+    }
+
+    /// F18 四形态：Host-only / authority-only / 冲突 / 非法 Host＋合法 authority。
+    #[test]
+    fn api_auth_host_authority_source_selection_covers_four_forms() {
+        let auth = ApiAuthState::for_bind(&loopback_bind(39721), &[]).expect("auth");
+        let path_only: axum::http::Uri = "/api/auth/session".parse().expect("path uri");
+        let valid_authority: axum::http::Uri = "http://127.0.0.1:39721/api/auth/session"
+            .parse()
+            .expect("absolute uri");
+        let conflicting_authority: axum::http::Uri = "http://evil.example:39721/api/auth/session"
+            .parse()
+            .expect("absolute uri");
+
+        // 1) Host-only（无 URI authority）。
+        let mut host_only = HeaderMap::new();
+        host_only.insert(header::HOST, "127.0.0.1:39721".parse().expect("host"));
+        let resolved = request_host_authority(&host_only, &path_only).expect("host-only source");
+        assert_eq!(resolved, "127.0.0.1:39721");
+        assert!(auth.host_allowed(resolved));
+
+        // 2) authority-only（Host 头缺失 → 回退 URI authority）。
+        let no_headers = HeaderMap::new();
+        let resolved =
+            request_host_authority(&no_headers, &valid_authority).expect("authority-only source");
+        assert_eq!(resolved, "127.0.0.1:39721");
+        assert!(auth.host_allowed(resolved));
+
+        // 2b) 两来源一致（大小写不敏感）仍按 Host 源放行。
+        let mut mixed_case = HeaderMap::new();
+        mixed_case.insert(header::HOST, "LOCALHOST:39721".parse().expect("host"));
+        let lower_authority: axum::http::Uri = "http://localhost:39721/api/auth/session"
+            .parse()
+            .expect("absolute uri");
+        let resolved =
+            request_host_authority(&mixed_case, &lower_authority).expect("consistent sources");
+        assert_eq!(resolved, "LOCALHOST:39721");
+        assert!(auth.host_allowed(resolved));
+
+        // 3) 冲突：Host 与 authority 不同 → 拒绝，不因任一来源合法放行。
+        assert_eq!(
+            request_host_authority(&host_only, &conflicting_authority),
+            Err(HostAuthoritySourceError::Conflict)
+        );
+
+        // 4) 非法 Host ＋ 合法 authority → 仍拒绝（不回退）。
+        let mut invalid_host = HeaderMap::new();
+        invalid_host.insert(header::HOST, "evil.example:39721".parse().expect("host"));
+        assert_eq!(
+            request_host_authority(&invalid_host, &valid_authority),
+            Err(HostAuthoritySourceError::Conflict)
+        );
+
+        // 4b) 畸形（非 UTF-8）Host ＋ 合法 authority → 拒绝。
+        let mut malformed = HeaderMap::new();
+        malformed.insert(
+            header::HOST,
+            axum::http::HeaderValue::from_bytes(&[0xff, 0xfe]).expect("opaque header value"),
+        );
+        assert_eq!(
+            request_host_authority(&malformed, &valid_authority),
+            Err(HostAuthoritySourceError::Malformed)
+        );
+
+        // 5) 两来源都缺失 → 拒绝。
+        assert_eq!(
+            request_host_authority(&no_headers, &path_only),
+            Err(HostAuthoritySourceError::Missing)
+        );
+    }
+
+    /// F18 中间件级：Host-only 与 authority-only 均放行 Host 检查（落到 401），
+    /// 冲突/非法 Host/双缺失在 Host 阶段 403；Origin/身份顺序不变。
+    #[tokio::test]
+    async fn api_auth_middleware_accepts_uri_authority_only_when_host_header_missing() {
+        use tower::ServiceExt;
+
+        fn armed_state(root: &std::path::Path) -> WebAppState {
+            let auth = Arc::new(ApiAuthState::for_bind(&loopback_bind(39721), &[]).expect("auth"));
+            WebAppState::new(
+                root.to_path_buf(),
+                crate::web::runtime::WebRuntime::new_fake(root.to_path_buf()),
+            )
+            .with_api_auth(auth)
+        }
+
+        async fn status(app: &axum::Router, request: axum::extract::Request) -> StatusCode {
+            app.clone()
+                .oneshot(request)
+                .await
+                .expect("response")
+                .status()
+        }
+
+        let root = tempfile::tempdir().expect("root");
+        let state = armed_state(root.path());
+        let app = axum::Router::new()
+            .route("/api/auth/session", axum::routing::get(session_status))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                enforce_api_auth,
+            ))
+            .with_state(state);
+
+        let request = |uri: &str, host: Option<&str>| {
+            let mut builder = axum::extract::Request::builder().method("GET").uri(uri);
+            if let Some(host) = host {
+                builder = builder.header("host", host);
+            }
+            builder.body(axum::body::Body::empty()).expect("request")
+        };
+
+        // 1) Host-only → 通过 Host 校验（无会话 401）。
+        assert_eq!(
+            status(&app, request("/api/auth/session", Some("127.0.0.1:39721"))).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // 2) authority-only（HTTP/2 :authority）→ 通过 Host 校验（无会话 401）。
+        assert_eq!(
+            status(
+                &app,
+                request("http://127.0.0.1:39721/api/auth/session", None)
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // 3) 冲突 → 403。
+        assert_eq!(
+            status(
+                &app,
+                request(
+                    "http://evil.example:39721/api/auth/session",
+                    Some("127.0.0.1:39721")
+                )
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        // 4) 非法 Host ＋ 合法 authority → 403（不回退）。
+        assert_eq!(
+            status(
+                &app,
+                request(
+                    "http://127.0.0.1:39721/api/auth/session",
+                    Some("evil.example:39721")
+                )
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        // 5) 双缺失 → 403。
+        assert_eq!(
+            status(&app, request("/api/auth/session", None)).await,
+            StatusCode::FORBIDDEN
+        );
     }
 }
