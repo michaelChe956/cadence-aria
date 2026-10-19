@@ -89,16 +89,17 @@ impl CodingGitOperationJournal {
 // ---------------------------------------------------------------------------
 // T19:平台 git mutation 写通道守卫(stage/commit/push/补偿共用单一收口)
 //
-// 约定:窗口 store 根 = `<aria>/reviewer-windows`(与
-// coding_workspace_engine::code_review 的 `REVIEWER_WINDOW_STORE_DIR`
-// 字面量同源一致——两处 mod 均私有,常量各持一份并互相锚定,改动须同步)。
+// 约定:窗口 store 根 = `<aria>/reviewer-windows`(F13,波3:目录名统一
+// 引用 `reviewer_window_store::REVIEWER_WINDOW_STORE_DIR` 单一常量,与
+// coding_workspace_engine::code_review、workspace_engine::review::drive
+// 同源,不再各持字面量副本)。
 // 闸门按 common-dir 键控:窗口冻结(Frozen/Draining)期间一律拒绝新 writer;
 // enter 为非阻塞判定/登记,不在 attempt 仲裁锁内等待窗口释放(无死锁面)。
 // 残留 writer(崩溃于 enter/exit 之间)由窗口排空按 PID-start 收割或停等,
 // fail-closed。
 // ---------------------------------------------------------------------------
 
-const REVIEWER_WINDOW_STORE_DIR_NAME: &str = "reviewer-windows";
+use crate::product::reviewer_window_store::REVIEWER_WINDOW_STORE_DIR;
 
 fn enter_review_write_channel(
     paths: &crate::product::app_paths::ProductAppPaths,
@@ -107,7 +108,7 @@ fn enter_review_write_channel(
     attempt_id: &str,
 ) -> Result<(), ProductStoreError> {
     let store = crate::product::reviewer_window_store::ReviewerWindowStore::new(
-        paths.root().join(REVIEWER_WINDOW_STORE_DIR_NAME),
+        paths.root().join(REVIEWER_WINDOW_STORE_DIR),
     );
     // writer 身份与 engine 侧补偿守卫同方案(platform-git-{attempt_id} +
     // 本进程 PID-start),两侧 exit-all 自愈互认;改动须双侧同步。
@@ -138,7 +139,7 @@ fn exit_review_write_channels_best_effort(
     channels: &[crate::product::reviewer_window_store::WriteChannelKind],
 ) {
     let store = crate::product::reviewer_window_store::ReviewerWindowStore::new(
-        paths.root().join(REVIEWER_WINDOW_STORE_DIR_NAME),
+        paths.root().join(REVIEWER_WINDOW_STORE_DIR),
     );
     let writer_id = format!("platform-git-{attempt_id}");
     for channel in channels {

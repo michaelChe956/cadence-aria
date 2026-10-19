@@ -354,13 +354,15 @@ use crate::product::reviewer_window::{
     resolve_manual_gate, resolve_worktree_git_identity, restore_window,
 };
 use crate::product::reviewer_window_store::{
-    ChannelWriter, LeaseOwnerLiveness, ReportAcceptance, ReviewerWindowRecord, ReviewerWindowState,
-    ReviewerWindowStore, WriteChannelKind, lease_owner_liveness, tree_key_of, wire_acceptance,
+    ChannelWriter, LeaseOwnerLiveness, ReportAcceptance, REVIEWER_WINDOW_STORE_DIR,
+    ReviewerWindowRecord, ReviewerWindowState, ReviewerWindowStore, WriteChannelKind,
+    lease_owner_liveness, tree_key_of, wire_acceptance,
 };
 
-/// 窗口 store 生产根(`<aria>/reviewer-windows`;engine 与 coding_attempt_store
-/// 侧通道守卫共用同一约定,不得另立第二处根)。
-pub(crate) const REVIEWER_WINDOW_STORE_DIR: &str = "reviewer-windows";
+/// F13(波3):窗口 store 根目录名已上收为
+/// `reviewer_window_store::REVIEWER_WINDOW_STORE_DIR` 单一常量(本模块
+/// 经 use 引入;`review/drive.rs`/`coding_attempt_store/git_operation.rs`
+/// 同源引用,不再各持字面量副本)。
 /// 快照 store 生产根(`<aria>/reviewer-snapshots`)。
 pub(crate) const REVIEWER_SNAPSHOT_STORE_DIR: &str = "reviewer-snapshots";
 /// T5 资源登记生产根(`<aria>/provider-resources`;quiesce 协调 scope 枚举源)。
@@ -1740,5 +1742,21 @@ impl CodingWorkspaceEngine {
             self.resume_pending_review_compensation(&attempt.id).await;
         }
         Ok(closed)
+    }
+}
+#[cfg(test)]
+mod hygiene_tests {
+    use super::*;
+
+    /// F13(波3):`"reviewer-windows"` 目录名单一常量归 reviewer_window_store
+    /// 持有,三处消费(coding 引擎/coding_attempt_store 通道守卫/plan 窗口)
+    /// 同根同值;字面值保持不变,不留模块私有别名。
+    #[test]
+    fn f13_reviewer_windows_dir_is_single_shared_constant() {
+        assert_eq!(
+            crate::product::reviewer_window_store::REVIEWER_WINDOW_STORE_DIR,
+            "reviewer-windows",
+            "单一常量必须持原目录字面值"
+        );
     }
 }

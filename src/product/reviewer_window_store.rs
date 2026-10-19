@@ -35,6 +35,13 @@ use crate::product::reviewer_snapshot::{PlatformWritePath, ReviewWorktreeLockIde
 
 pub(crate) const REVIEWER_WINDOW_SCHEMA: &str = "reviewer_window/1";
 
+/// F13(波3):窗口 store 生产根目录名(`<aria>/reviewer-windows`)——
+/// 全仓单一事实源。coding 引擎(`code_review.rs`)、coding_attempt_store
+/// 通道守卫(`git_operation.rs`)与规划面窗口(`review/drive.rs`)一律
+/// 引用本常量,不得另持字面量副本(任一处漂移=「锁不生效/窗口丢失」
+/// 的静默分叉)。字面值不得变更(存量磁盘布局)。
+pub(crate) const REVIEWER_WINDOW_STORE_DIR: &str = "reviewer-windows";
+
 // ---------------------------------------------------------------------------
 // 状态与通道
 // ---------------------------------------------------------------------------

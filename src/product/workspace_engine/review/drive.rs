@@ -1571,11 +1571,11 @@ fn map_gateway_error_to_adapter(error: &ProviderGatewayError) -> ProviderAdapter
 }
 
 // ---- 批2 Task 20b(决策项⑦):规划面 reviewer 审查窗口 ----
-// 约定:窗口/快照/资源 store 根与 coding_workspace_engine::code_review 的
-// `REVIEWER_WINDOW_STORE_DIR`/`REVIEWER_SNAPSHOT_STORE_DIR`/
-// `PROVIDER_RESOURCE_STORE_DIR` 同名同根(跨模块字面量锚定,不跨模块引用
-// 私有常量——与 coding_attempt_store/git_operation.rs 同款约定)。
-const PLAN_REVIEWER_WINDOW_STORE_DIR: &str = "reviewer-windows";
+// 约定(F13,波3):窗口 store 根目录名统一引用
+// `reviewer_window_store::REVIEWER_WINDOW_STORE_DIR` 单一常量(与
+// `coding_workspace_engine::code_review`、`coding_attempt_store/
+// git_operation.rs` 同源;快照/资源 store 根仍为字面量锚定约定,
+// 与 git_operation.rs 同款——本项只上收 reviewer-windows 一处)。
 const PLAN_REVIEWER_SNAPSHOT_STORE_DIR: &str = "reviewer-snapshots";
 const PLAN_PROVIDER_RESOURCE_STORE_DIR: &str = "provider-resources";
 /// 修复轮 1(F1):聚合根规划评审窗口目标待 owner 裁定的专用错误码
@@ -1595,7 +1595,7 @@ impl WorkspaceEngine {
                 store
                     .app_paths()
                     .root()
-                    .join(PLAN_REVIEWER_WINDOW_STORE_DIR),
+                    .join(crate::product::reviewer_window_store::REVIEWER_WINDOW_STORE_DIR),
             ),
         )
     }
