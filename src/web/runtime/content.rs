@@ -83,7 +83,14 @@ impl WebRuntime {
         //   不前移,基准的选项注入在形态白名单与解析层双重封死。
         let diff = Command::new("git")
             .args(crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS)
-            .args(["diff", "--no-ext-diff", "--no-textconv", &resolved, "--", path])
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                &resolved,
+                "--",
+                path,
+            ])
             .current_dir(&self.workspace_root)
             .output()
             .map_err(|error| TaskRunError::new("git_command_failed", error.to_string()))?;
@@ -122,7 +129,10 @@ fn validate_base_checkpoint_shape(value: &str) -> Result<(), TaskRunError> {
     }
     let well_formed = value.bytes().all(|byte| {
         byte.is_ascii_alphanumeric()
-            || matches!(byte, b'.' | b'_' | b'/' | b'~' | b'^' | b'@' | b'{' | b'}' | b'-')
+            || matches!(
+                byte,
+                b'.' | b'_' | b'/' | b'~' | b'^' | b'@' | b'{' | b'}' | b'-'
+            )
     });
     if !well_formed {
         return Err(invalid());
@@ -144,7 +154,11 @@ fn resolve_base_checkpoint(
         .output()
         .map_err(|error| TaskRunError::new("git_command_failed", error.to_string()))?;
     if !output.status.success() {
-        return Err(git_failure("git_rev_parse_failed", "git rev-parse", &output));
+        return Err(git_failure(
+            "git_rev_parse_failed",
+            "git rev-parse",
+            &output,
+        ));
     }
     let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if !(resolved.len() == 40 || resolved.len() == 64)
@@ -263,7 +277,12 @@ mod bridge_tests {
         assert_eq!(error.code, "invalid_base_checkpoint");
         assert!(!probe.exists(), "Bug45:拒绝的 base_checkpoint 不得产生文件");
 
-        for injected in ["--ext-diff", "--no-index", "-O/tmp/aria-pwned", "HEAD;reboot"] {
+        for injected in [
+            "--ext-diff",
+            "--no-index",
+            "-O/tmp/aria-pwned",
+            "HEAD;reboot",
+        ] {
             let error = runtime
                 .file_diff(injected, "README.md")
                 .expect_err("选项/链式形态必须拒绝");
@@ -346,10 +365,7 @@ mod bridge_tests {
         let external_script = repo.join(".git/aria-external-diff.sh");
         std::fs::write(
             &external_script,
-            format!(
-                "#!/bin/sh\n: > {}\nexit 1\n",
-                external_marker.display()
-            ),
+            format!("#!/bin/sh\n: > {}\nexit 1\n", external_marker.display()),
         )
         .unwrap();
         std::fs::set_permissions(&external_script, std::fs::Permissions::from_mode(0o755)).unwrap();

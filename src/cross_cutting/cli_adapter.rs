@@ -718,10 +718,8 @@ mod host_inheritance_tests {
     #[test]
     fn sync_capture_env_map_overrides_host_without_replacing_it() {
         let host_home = std::env::var("HOME").expect("host HOME");
-        let environment = BTreeMap::from([(
-            "ARIA_A1A_TOKEN".to_string(),
-            "override-ok".to_string(),
-        )]);
+        let environment =
+            BTreeMap::from([("ARIA_A1A_TOKEN".to_string(), "override-ok".to_string())]);
 
         let output = run_command_capture_with_stream(
             &sh_spec("printf '%s|%s' \"$ARIA_A1A_TOKEN\" \"$HOME\""),

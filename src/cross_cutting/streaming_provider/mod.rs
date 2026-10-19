@@ -1439,9 +1439,7 @@ pub trait StreamingProviderAdapter: Send + Sync {
     async fn start_owned(
         &self,
         input: StreamingProviderInput,
-        ownership: Option<
-            crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
-        >,
+        ownership: Option<crate::cross_cutting::provider_resources::TrustedLaunchOwnership>,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         start_owned_default(self, input, ownership, cancel).await

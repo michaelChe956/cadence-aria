@@ -560,7 +560,10 @@ async fn start_work_item_plan_author_preserves_caller_env_without_injection() {
         .expect("capture adapter input")
         .expect("captured input");
     assert_eq!(
-        captured.env_vars.get("ARIA_A1B_SENTINEL").map(String::as_str),
+        captured
+            .env_vars
+            .get("ARIA_A1B_SENTINEL")
+            .map(String::as_str),
         Some("caller-override"),
         "plan author 启动必须原样透传 caller 显式覆盖层"
     );

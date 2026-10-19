@@ -79,9 +79,9 @@ fn b45_t23_providers_from_env() -> Vec<ProviderName> {
                 "codex" => Some(ProviderName::Codex),
                 "pi" => Some(ProviderName::Pi),
                 "kimi" => Some(ProviderName::KimiCode),
-                other => panic!(
-                    "B45_T23_PROVIDERS 未知 provider:{other:?}(合法:claude/codex/pi/kimi)"
-                ),
+                other => {
+                    panic!("B45_T23_PROVIDERS 未知 provider:{other:?}(合法:claude/codex/pi/kimi)")
+                }
             })
             .collect(),
         _ => all.to_vec(),
@@ -441,8 +441,7 @@ fn b45_t23_assert_role_coverage(
         .expect("LIVE_MATRIX_RUN_MODE 已在 run_provider_matrix 入口校验");
     let resume_round = matches!(run_mode, super::snapshot::RunMode::ResumeFromPlanSnapshot);
     let confirmed = matrix.confirmed_cells();
-    let stage_confirmed =
-        |stage: &str| confirmed.iter().filter(|cell| cell.stage == stage).count();
+    let stage_confirmed = |stage: &str| confirmed.iter().filter(|cell| cell.stage == stage).count();
 
     // 轮次覆盖(§1.1 ②术语修正):resume 轮=4 承继 + coding/review 各 1
     // executed-resume(native 同 ID);full_chain 轮=逐 stage(plan 两入口)
@@ -476,8 +475,7 @@ fn b45_t23_assert_role_coverage(
         assert!(
             cell.argv_or_wire_capture_exists,
             "confirmed 格缺 argv/wire 捕获({}/{})",
-            cell.stage,
-            cell.entrypoint
+            cell.stage, cell.entrypoint
         );
     }
 
@@ -687,8 +685,7 @@ fn b45_danger_fixture(label: &str) -> PathBuf {
     std::fs::create_dir_all(&root).expect("b45 danger fixture dir");
     let repo = root.join("repo");
     std::fs::create_dir_all(&repo).expect("b45 danger repo dir");
-    std::fs::write(repo.join("patch_target.md"), PATCH_TARGET_BEFORE)
-        .expect("patch target before");
+    std::fs::write(repo.join("patch_target.md"), PATCH_TARGET_BEFORE).expect("patch target before");
     for arguments in [
         vec![
             "init".to_string(),
@@ -725,9 +722,8 @@ fn b45_danger_fixture(label: &str) -> PathBuf {
 
 /// 解析 codex CLI 实际路径与 exact version(固定 CLI 版本记录)。
 fn b45_codex_cli() -> (PathBuf, String) {
-    let bin = PathBuf::from(
-        std::env::var("B45_T23_CODEX_BIN").unwrap_or_else(|_| "codex".to_string()),
-    );
+    let bin =
+        PathBuf::from(std::env::var("B45_T23_CODEX_BIN").unwrap_or_else(|_| "codex".to_string()));
     let output = std::process::Command::new(&bin)
         .arg("--version")
         .output()
@@ -1008,10 +1004,9 @@ async fn b45_live_codex_danger_apply_patch() {
     let onrequest_interrupted = onrequest_start_error
         .as_deref()
         .is_some_and(|message| message.contains(AUTHOR_FILE_CHANGE_DETECTED))
-        || onrequest
-            .event_log
-            .iter()
-            .any(|event| event.get("kind").and_then(Value::as_str) == Some("tool_policy_terminated"))
+        || onrequest.event_log.iter().any(|event| {
+            event.get("kind").and_then(Value::as_str) == Some("tool_policy_terminated")
+        })
         || onrequest
             .terminal
             .as_deref()
@@ -1020,8 +1015,7 @@ async fn b45_live_codex_danger_apply_patch() {
         onrequest_interrupted,
         "on-request 档未可靠中断(turn 未失败)——检测型纪律红线;start_error=\
          {:?}, terminal={:?}",
-        onrequest_start_error,
-        onrequest.terminal
+        onrequest_start_error, onrequest.terminal
     );
     // 场景 B(never):审批必须缺席(never 档无审批请求;出现即映射失真)。
     assert!(
@@ -1124,7 +1118,11 @@ mod t23_assertion_tests {
         }
     }
 
-    fn carried_test_cell(stage: &str, entrypoint: &str, manifest: &SnapshotManifest) -> EvidenceCell {
+    fn carried_test_cell(
+        stage: &str,
+        entrypoint: &str,
+        manifest: &SnapshotManifest,
+    ) -> EvidenceCell {
         carried_cell(stage, &ProviderName::ClaudeCode, manifest, "snap-1")
             .tap_entrypoint(entrypoint)
     }
@@ -1151,7 +1149,11 @@ mod t23_assertion_tests {
     fn resume_round_cells(manifest: &SnapshotManifest) -> Vec<EvidenceCell> {
         let mut cells = vec![
             carried_test_cell("story", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, manifest),
-            carried_test_cell("design", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, manifest),
+            carried_test_cell(
+                "design",
+                ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT,
+                manifest,
+            ),
             carried_test_cell("plan", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, manifest),
             carried_test_cell("split", ENTRYPOINT_SPLIT_SYNC, manifest),
         ];
@@ -1181,7 +1183,11 @@ mod t23_assertion_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let source_root = temp.path().join("evidence").join("matrix");
         std::fs::create_dir_all(&source_root).expect("source root");
-        let snapshot_directory = temp.path().join("evidence").join("snapshots").join("snap-1");
+        let snapshot_directory = temp
+            .path()
+            .join("evidence")
+            .join("snapshots")
+            .join("snap-1");
         std::fs::create_dir_all(&snapshot_directory).expect("snapshot dir");
         let manifest = test_manifest(&source_root.to_string_lossy());
         std::fs::write(
@@ -1252,7 +1258,8 @@ mod t23_assertion_tests {
 
         // 删必需承继格 → 红。
         let mut missing_carried = cells.clone();
-        missing_carried.retain(|cell| !(cell.stage == "split" && cell.capability_state == "carried"));
+        missing_carried
+            .retain(|cell| !(cell.stage == "split" && cell.capability_state == "carried"));
         assert!(
             verify_round_coverage(true, &missing_carried).is_err(),
             "删 split 承继格必须拒绝"
@@ -1339,11 +1346,7 @@ mod t23_assertion_tests {
     }
 
     fn zero_spawn_unknown_cell() -> EvidenceCell {
-        let mut cell = base_cell(
-            "coding",
-            ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT,
-            FRESH,
-        );
+        let mut cell = base_cell("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
         cell.capability_state = "unknown".to_string();
         cell.provider_pid = None;
         cell.pid_unavailable_reason = Some("零 spawn".to_string());
@@ -1371,11 +1374,7 @@ mod t23_assertion_tests {
     #[test]
     fn t23_spawn_instrumentation_requires_real_spawn_and_five_dim_accounting() {
         // fresh confirmed 有 spawn → 通过。
-        let fresh = base_cell(
-            "coding",
-            ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT,
-            FRESH,
-        );
+        let fresh = base_cell("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
         assert!(verify_spawn_instrumentation(&[fresh.clone()]).is_ok());
 
         // fresh 置 0 → 红(仪器缺失/真实未启动)。

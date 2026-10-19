@@ -127,7 +127,6 @@ impl CodingWorkspaceEngine {
         role: CodingProviderRole,
         working_dir: &Path,
     ) -> Result<Option<SessionLaunchRequest>, ProviderGatewayError> {
-
         let Some(gateway) = self.logical_provider_gateway.as_ref() else {
             return Ok(None);
         };

@@ -8,8 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
 use cadence_aria::product::models::ProviderName;
+use serde_json::{Value, json};
 
 use super::harness::{
     ENTRYPOINT_SPLIT_SYNC, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, EvidenceCell, FRESH,
@@ -882,8 +882,8 @@ pub(crate) fn validate_b45_host_check_evidence(
         if record.exit_code.is_none() {
             failures.push(format!("{label} 缺退出码"));
         }
-        let is_test_facet =
-            (record.tool == "maven" && record.facet == "test") || (record.tool == "npm" && record.facet == "test");
+        let is_test_facet = (record.tool == "maven" && record.facet == "test")
+            || (record.tool == "npm" && record.facet == "test");
         if is_test_facet && record.test_count.is_none() {
             failures.push(format!("{label} 缺测试数量"));
         }
@@ -896,7 +896,13 @@ pub(crate) fn validate_b45_host_check_evidence(
         match evidence.duties.iter().find(|record| record.duty == duty) {
             None => failures.push(format!("缺职责 {duty}")),
             Some(record) => {
-                if record.terminal_status.as_deref().unwrap_or("").trim().is_empty() {
+                if record
+                    .terminal_status
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+                {
                     failures.push(format!("职责 {duty} 缺合法终态"));
                 }
                 if record.native_activity.trim().is_empty() {
@@ -977,7 +983,11 @@ fn b45_complete_baseline_evidence() -> B45HostCheckEvidence {
         exit_code: Some(0),
         test_count,
         output_excerpt: "T22 excerpt".to_string(),
-        terminal_lifecycle: vec!["Started".to_string(), "Running".to_string(), "Completed".to_string()],
+        terminal_lifecycle: vec![
+            "Started".to_string(),
+            "Running".to_string(),
+            "Completed".to_string(),
+        ],
         resource_ids: vec!["terminal-1".to_string()],
     };
     B45HostCheckEvidence {
@@ -1087,7 +1097,11 @@ fn b45_tool_exit_pairs_within_coder_role_run() {
         .iter()
         .find(|record| record.tool == "maven" && record.facet == "test")
         .expect("coder 的 mvn 执行必须建格");
-    assert_eq!(maven.exit_code, Some(1), "退出码必须取 coder 同 role_run 的 1,不被 reviewer 同号 0 覆盖");
+    assert_eq!(
+        maven.exit_code,
+        Some(1),
+        "退出码必须取 coder 同 role_run 的 1,不被 reviewer 同号 0 覆盖"
+    );
     // reviewer 的探测命令(echo probe; npm --version)不产出 npm 工具格。
     assert!(
         !evidence.tools.iter().any(|record| record.tool == "npm"),
@@ -1116,7 +1130,11 @@ fn b45_npm_count_requires_passed_marker() {
         .iter()
         .find(|record| record.tool == "npm" && record.facet == "test")
         .expect("npm test 建格");
-    assert_eq!(npm_test.test_count, Some(2), "计数必须来自含 passed 的行(2),不得吞 TOTAL_LINES=144");
+    assert_eq!(
+        npm_test.test_count,
+        Some(2),
+        "计数必须来自含 passed 的行(2),不得吞 TOTAL_LINES=144"
+    );
 }
 
 /// r19(T22 r18/r19 现场回归):coder 以 `cmd='…'` / `run_check ID '…'` 转发
@@ -1154,9 +1172,21 @@ fn b45_evidence_recovers_subshell_and_mount_fixture_cwd() {
         );
     }
     for (tool, facet, expected) in [
-        ("maven", "test", "/tmp/outer/alpha/.worktrees/aria-issues/issue_0001/fixtures/maven-fixture"),
-        ("podman", "build", "/tmp/outer/alpha/.worktrees/aria-issues/issue_0001/fixtures/podman-fixture"),
-        ("podman", "run", "/tmp/outer/alpha/.worktrees/aria-issues/issue_0001/fixtures/podman-fixture"),
+        (
+            "maven",
+            "test",
+            "/tmp/outer/alpha/.worktrees/aria-issues/issue_0001/fixtures/maven-fixture",
+        ),
+        (
+            "podman",
+            "build",
+            "/tmp/outer/alpha/.worktrees/aria-issues/issue_0001/fixtures/podman-fixture",
+        ),
+        (
+            "podman",
+            "run",
+            "/tmp/outer/alpha/.worktrees/aria-issues/issue_0001/fixtures/podman-fixture",
+        ),
     ] {
         let record = evidence
             .tools
@@ -1166,9 +1196,16 @@ fn b45_evidence_recovers_subshell_and_mount_fixture_cwd() {
         assert_eq!(record.cwd, expected, "{tool}/{facet} cwd");
     }
     assert!(
-        !evidence.tools.iter().any(|record| record.facet.starts_with('-')),
+        !evidence
+            .tools
+            .iter()
+            .any(|record| record.facet.starts_with('-')),
         "版本探针不得建出 -v/--version 且: {:?}",
-        evidence.tools.iter().map(|record| format!("{}/{}", record.tool, record.facet)).collect::<Vec<_>>()
+        evidence
+            .tools
+            .iter()
+            .map(|record| format!("{}/{}", record.tool, record.facet))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1178,7 +1215,9 @@ fn b45_evidence_recovers_subshell_and_mount_fixture_cwd() {
 #[test]
 fn b45_command_cwd_takes_last_cd_segment() {
     assert_eq!(
-        b45_command_cwd("cd '/tmp/.tmpXXX' && cd '/tmp/.tmpXXX/alpha/fixtures/maven-fixture' && podman run --rm maven mvn -B test"),
+        b45_command_cwd(
+            "cd '/tmp/.tmpXXX' && cd '/tmp/.tmpXXX/alpha/fixtures/maven-fixture' && podman run --rm maven mvn -B test"
+        ),
         "/tmp/.tmpXXX/alpha/fixtures/maven-fixture",
         "取最后一个 cd 目标(内层 fixture),非外层聚合根"
     );
@@ -1187,7 +1226,11 @@ fn b45_command_cwd_takes_last_cd_segment() {
         "/workspace",
         "无引号 cd 形态"
     );
-    assert_eq!(b45_command_cwd("podman run --rm aria-t22-check"), "", "无 cd 为空");
+    assert_eq!(
+        b45_command_cwd("podman run --rm aria-t22-check"),
+        "",
+        "无 cd 为空"
+    );
 }
 
 /// r18 实证形态:npm 在子壳 `(cd fixtures/npm-fixture && npm ci)` 内执行,
@@ -1195,12 +1238,16 @@ fn b45_command_cwd_takes_last_cd_segment() {
 #[test]
 fn b45_command_facets_normalizes_subshell_suffix() {
     assert_eq!(
-        b45_command_facets("/bin/bash -c cd '/tmp/outer' && cd /tmp/outer/alpha/.worktrees/aria-issues/issue_0001 && { (cd fixtures/npm-fixture && npm ci); echo \"EXIT_CODE=$?\"; } 2>&1 | tee /tmp/aria-b45-evidence/CHECK-002.out"),
+        b45_command_facets(
+            "/bin/bash -c cd '/tmp/outer' && cd /tmp/outer/alpha/.worktrees/aria-issues/issue_0001 && { (cd fixtures/npm-fixture && npm ci); echo \"EXIT_CODE=$?\"; } 2>&1 | tee /tmp/aria-b45-evidence/CHECK-002.out"
+        ),
         vec![("npm".to_string(), "ci".to_string())],
         "子壳尾括号归一后必须识别 npm ci"
     );
     assert_eq!(
-        b45_command_facets("/bin/bash -c cd '/tmp/outer' && cd /tmp/outer/alpha/.worktrees/aria-issues/issue_0001 && { (cd fixtures/npm-fixture && npm run build); echo \"EXIT_CODE=$?\"; } 2>&1 | tee /tmp/x.out"),
+        b45_command_facets(
+            "/bin/bash -c cd '/tmp/outer' && cd /tmp/outer/alpha/.worktrees/aria-issues/issue_0001 && { (cd fixtures/npm-fixture && npm run build); echo \"EXIT_CODE=$?\"; } 2>&1 | tee /tmp/x.out"
+        ),
         vec![("npm".to_string(), "build".to_string())],
         "子壳内 npm run build"
     );
@@ -1213,22 +1260,30 @@ fn b45_command_facets_normalizes_subshell_suffix() {
 #[test]
 fn b45_command_cwd_recovers_fixture_from_mount_and_build_context() {
     assert_eq!(
-        b45_command_cwd("/bin/bash -c cd '/tmp/outer' && cd /tmp/outer/alpha/.worktrees/aria-issues/issue_0001 && podman run --rm -v /tmp/aria-bug45/t22/m2-repo:/root/.m2 -v fixtures/maven-fixture:/workspace -w /workspace maven:3.9-eclipse-temurin-17 mvn -B test"),
+        b45_command_cwd(
+            "/bin/bash -c cd '/tmp/outer' && cd /tmp/outer/alpha/.worktrees/aria-issues/issue_0001 && podman run --rm -v /tmp/aria-bug45/t22/m2-repo:/root/.m2 -v fixtures/maven-fixture:/workspace -w /workspace maven:3.9-eclipse-temurin-17 mvn -B test"
+        ),
         "fixtures/maven-fixture",
         "maven -v 夹具宿主源即生效工作目录"
     );
     assert_eq!(
-        b45_command_cwd("cd /tmp/x/issue_0001 && podman run --rm -v \"$(pwd)/fixtures/maven-fixture:/workspace\" -w /workspace maven:3.9 mvn -B test"),
+        b45_command_cwd(
+            "cd /tmp/x/issue_0001 && podman run --rm -v \"$(pwd)/fixtures/maven-fixture:/workspace\" -w /workspace maven:3.9 mvn -B test"
+        ),
         "fixtures/maven-fixture",
         "$(pwd)/ 前缀与引号归一"
     );
     assert_eq!(
-        b45_command_cwd("cd /tmp/x/issue_0001 && podman build -t aria-t22-check fixtures/podman-fixture"),
+        b45_command_cwd(
+            "cd /tmp/x/issue_0001 && podman build -t aria-t22-check fixtures/podman-fixture"
+        ),
         "fixtures/podman-fixture",
         "podman build 构建上下文即夹具目录"
     );
     assert_eq!(
-        b45_command_cwd("cd /tmp/x/issue_0001 && podman build -t aria-t22-check . && cat fixtures/podman-fixture/Containerfile"),
+        b45_command_cwd(
+            "cd /tmp/x/issue_0001 && podman build -t aria-t22-check . && cat fixtures/podman-fixture/Containerfile"
+        ),
         "/tmp/x/issue_0001",
         "fixtures/<名>/<文件> 不得冒充夹具目录"
     );
@@ -1238,7 +1293,10 @@ fn b45_command_cwd_recovers_fixture_from_mount_and_build_context() {
         "相对 cwd 按事件基线绝对化"
     );
     assert_eq!(
-        b45_resolve_cwd("cd /abs/fixtures/npm-fixture && npm ci", "/tmp/outer/issue_0001"),
+        b45_resolve_cwd(
+            "cd /abs/fixtures/npm-fixture && npm ci",
+            "/tmp/outer/issue_0001"
+        ),
         "/abs/fixtures/npm-fixture",
         "绝对 cwd 不重复拼接"
     );
@@ -1339,13 +1397,12 @@ fn b45_host_check_validator_rejects_incomplete_evidence() {
 
     // Podman 只有 version 无 build/run。
     let mut podman_version_only = complete.clone();
-    podman_version_only.tools.retain(|record| record.tool != "podman");
-    podman_version_only.tools.push(tool_record(
-        "podman",
-        "version",
-        "6.1.1",
-        None,
-    ));
+    podman_version_only
+        .tools
+        .retain(|record| record.tool != "podman");
+    podman_version_only
+        .tools
+        .push(tool_record("podman", "version", "6.1.1", None));
     expect_reject(podman_version_only, "无 build+run");
 
     // npm 缺 build。
@@ -1386,7 +1443,9 @@ fn b45_host_check_validator_rejects_incomplete_evidence() {
 
     // 缺职责。
     let mut missing_duty = complete.clone();
-    missing_duty.duties.retain(|record| record.duty != "reviewer");
+    missing_duty
+        .duties
+        .retain(|record| record.duty != "reviewer");
     expect_reject(missing_duty, "缺职责 reviewer");
 
     // 职责缺活动状态。
@@ -1433,7 +1492,11 @@ fn tool_record(tool: &str, facet: &str, version: &str, test_count: Option<u64>) 
         exit_code: Some(0),
         test_count,
         output_excerpt: "T22 excerpt".to_string(),
-        terminal_lifecycle: vec!["Started".to_string(), "Running".to_string(), "Completed".to_string()],
+        terminal_lifecycle: vec![
+            "Started".to_string(),
+            "Running".to_string(),
+            "Completed".to_string(),
+        ],
         resource_ids: vec!["terminal-1".to_string()],
     }
 }
@@ -1446,7 +1509,10 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
             .unwrap_or_default()
             .to_string()
     };
-    let versions = run.pointer("/fixtures/versions").cloned().unwrap_or(Value::Null);
+    let versions = run
+        .pointer("/fixtures/versions")
+        .cloned()
+        .unwrap_or(Value::Null);
     let version_of = |tool: &str| -> String {
         let key = match tool {
             "maven" => "maven_container",
@@ -1476,7 +1542,7 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
         .unwrap_or_default();
     for row in &evidence_rows {
         let Some(actual) = row.get("actual_command").and_then(Value::as_str) else {
- continue;
+            continue;
         };
         let (tool, facet) = b45_classify_command(actual);
         if tool.is_empty() {
@@ -1503,7 +1569,10 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            exit_code: row.get("exit_code").and_then(Value::as_i64).map(|code| code as i32),
+            exit_code: row
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .map(|code| code as i32),
             test_count: row.get("test_execution_count").and_then(Value::as_u64),
             output_excerpt: row
                 .get("raw_output_excerpt")
@@ -1559,7 +1628,9 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
         let mut exits: std::collections::BTreeMap<(String, String), Option<i64>> =
             std::collections::BTreeMap::new();
         for row in &coder_rows {
-            let Some(payload) = row.get("payload") else { continue };
+            let Some(payload) = row.get("payload") else {
+                continue;
+            };
             let Some(event_id) = payload.get("event_id").and_then(Value::as_str) else {
                 continue;
             };
@@ -1583,7 +1654,9 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
             }
         }
         for row in &coder_rows {
-            let Some(payload) = row.get("payload") else { continue };
+            let Some(payload) = row.get("payload") else {
+                continue;
+            };
             if payload.get("status").and_then(Value::as_str) != Some("Started") {
                 continue;
             }
@@ -1594,7 +1667,10 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                 continue;
             };
             // r19:事件自带 cwd 是命令执行基线,相对 cd/夹具路径据此绝对化。
-            let base_cwd = payload.get("cwd").and_then(Value::as_str).unwrap_or_default();
+            let base_cwd = payload
+                .get("cwd")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let command_facets = b45_command_facets_with_index(command);
             let (tool, facet, facet_index) = match command_facets.first().cloned() {
                 Some(classified) => classified,
@@ -1621,10 +1697,7 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                         {
                             let is_test_facet = (tool == "maven" && facet == "test")
                                 || (tool == "npm" && facet == "test");
-                            let lifecycle = b45_terminal_lifecycle_for(
-                                &lifecycle_rows,
-                                command,
-                            );
+                            let lifecycle = b45_terminal_lifecycle_for(&lifecycle_rows, command);
                             let test_count = if is_test_facet {
                                 if tool == "maven" {
                                     maven_count
@@ -1770,7 +1843,9 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
                 .iter()
                 .filter_map(|entry| {
                     let record = entry.get("record")?;
-                    let labels = record.get("labels").or_else(|| record.pointer("/reserved_labels"))?;
+                    let labels = record
+                        .get("labels")
+                        .or_else(|| record.pointer("/reserved_labels"))?;
                     let has_aria_label = labels
                         .as_object()
                         .is_some_and(|map| map.keys().any(|key| key.starts_with("aria.")));
@@ -1795,7 +1870,9 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
     let confirmed_cell = |cells: Option<&Value>| -> Option<String> {
         cells.and_then(Value::as_array).and_then(|rows| {
             rows.iter()
-                .find(|cell| cell.get("capability_state").and_then(Value::as_str) == Some("confirmed"))
+                .find(|cell| {
+                    cell.get("capability_state").and_then(Value::as_str) == Some("confirmed")
+                })
                 .and_then(|cell| cell.get("native_session_id").and_then(Value::as_str))
                 .map(str::to_string)
         })
@@ -1846,11 +1923,19 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
     }
     duties.push(B45DutyRecord {
         duty: "coder".to_string(),
-        terminal_status: if coder_terminal.is_empty() { None } else { Some(coder_terminal) },
+        terminal_status: if coder_terminal.is_empty() {
+            None
+        } else {
+            Some(coder_terminal)
+        },
         native_activity: format!(
             "execution_events={execution_rows} tool_events={} permission_events={}",
-            run.pointer("/coding_main/tool_events").and_then(Value::as_u64).unwrap_or(0),
-            run.pointer("/coding_main/permission_events").and_then(Value::as_u64).unwrap_or(0),
+            run.pointer("/coding_main/tool_events")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            run.pointer("/coding_main/permission_events")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
         ),
     });
     if let Some(native) = review_confirmed {
@@ -1859,8 +1944,7 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
             terminal_status: Some("confirmed".to_string()),
             native_activity: format!(
                 "native_session={native} windows={}",
-                run
-                    .pointer("/reviewer_windows")
+                run.pointer("/reviewer_windows")
                     .and_then(Value::as_array)
                     .map(Vec::len)
                     .unwrap_or(0)
@@ -1884,16 +1968,15 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
     let mut silent_gap_secs = 0u64;
     let mut previous: Option<chrono::DateTime<chrono::Utc>> = None;
     for row in &lifecycle_rows {
-        let Some(created_at) = row.get("created_at") else { continue };
+        let Some(created_at) = row.get("created_at") else {
+            continue;
+        };
         let Some(timestamp) = parse_ts(created_at) else {
             previous = None;
             continue;
         };
         if let Some(prior) = previous {
-            let gap = timestamp
-                .signed_duration_since(prior)
-                .num_seconds()
-                .max(0) as u64;
+            let gap = timestamp.signed_duration_since(prior).num_seconds().max(0) as u64;
             silent_gap_secs = silent_gap_secs.max(gap);
         }
         previous = Some(timestamp);
@@ -1907,9 +1990,7 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
     let stall_reason_codes = lifecycle_rows
         .iter()
         .filter_map(|row| row.pointer("/payload/reason_code").and_then(Value::as_str))
-        .filter(|code| {
-            code.contains("idle_stall") || code.contains("provider_stalled")
-        })
+        .filter(|code| code.contains("idle_stall") || code.contains("provider_stalled"))
         .map(str::to_string)
         .collect::<Vec<_>>();
     let long_silent = Some(B45LongSilentRecord {
@@ -1924,33 +2005,35 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
     });
 
     // ---- 终止单格 ----
-    let termination = run.pointer("/cancel_cell").map(|cell| B45TerminationRecord {
-        trigger: "user_cancel".to_string(),
-        attempt_id: cell
-            .get("attempt_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        terminal_status: cell
-            .get("terminal_status")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        provider_pid_gone: !cell
-            .get("provider_pid_still_alive")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        lingering_fixture_containers: cell
-            .get("lingering_fixture_containers")
-            .and_then(Value::as_array)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|entry| entry.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default(),
-    });
+    let termination = run
+        .pointer("/cancel_cell")
+        .map(|cell| B45TerminationRecord {
+            trigger: "user_cancel".to_string(),
+            attempt_id: cell
+                .get("attempt_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            terminal_status: cell
+                .get("terminal_status")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            provider_pid_gone: !cell
+                .get("provider_pid_still_alive")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            lingering_fixture_containers: cell
+                .get("lingering_fixture_containers")
+                .and_then(Value::as_array)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(|entry| entry.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
 
     // ---- 快照与工作保留 ----
     let head_before = text("/snapshot_before/head");
@@ -1962,12 +2045,14 @@ fn b45_evidence_from_run(run: &Value) -> B45HostCheckEvidence {
         duties,
         long_silent,
         termination,
-        snapshot_before: format!("head={head_before} porcelain={}", text("/snapshot_before/porcelain")),
+        snapshot_before: format!(
+            "head={head_before} porcelain={}",
+            text("/snapshot_before/porcelain")
+        ),
         snapshot_after: format!("head={head_after} porcelain={porcelain_after}"),
         coder_dirty_preserved: head_after != head_before || !porcelain_after.trim().is_empty(),
     }
 }
-
 
 /// r19:路径 token 归一——引号/尾随操作符剥离、`$(pwd)/`/`$PWD/`/`./`
 /// 前缀剥离、`:容器端` 尾段剥离(podman `-v 源:目标` 挂载、镜像标签)。
@@ -2072,10 +2157,7 @@ fn b45_tool_cwd(command: &str, index: usize) -> String {
         if let Some(path) = b45_fixture_path_token(token) {
             segment_fixture = path;
         }
-        if matches!(*token, "&&" | "||" | ";")
-            || token.ends_with(';')
-            || token.ends_with("&&")
-        {
+        if matches!(*token, "&&" | "||" | ";") || token.ends_with(';') || token.ends_with("&&") {
             break;
         }
     }
@@ -2114,7 +2196,8 @@ fn b45_classify_command(command: &str) -> (String, String) {
         .iter()
         .enumerate()
         .find(|(index, token)| {
-            matches!(**token, "podman" | "npm" | "mvn") && token_is_command_position(&tokens, *index)
+            matches!(**token, "podman" | "npm" | "mvn")
+                && token_is_command_position(&tokens, *index)
         })
         .map(|(index, _)| index)
         .unwrap_or(0);
@@ -2231,14 +2314,18 @@ fn b45_terminal_lifecycle_for(rows: &[Value], command: &str) -> Vec<String> {
             row.pointer("/payload/command")
                 .and_then(Value::as_str)
                 .map(matcher)
- .unwrap_or(false)
+                .unwrap_or(false)
                 || row
                     .pointer("/payload/detail")
                     .and_then(Value::as_str)
                     .map(|detail| detail.contains(&facet) && !facet.is_empty())
                     .unwrap_or(false)
         })
-        .filter_map(|row| row.pointer("/payload/status").and_then(Value::as_str).map(str::to_string))
+        .filter_map(|row| {
+            row.pointer("/payload/status")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .collect()
 }
 
@@ -2260,7 +2347,7 @@ fn b45_terminal_lifecycle_spans(rows: &[Value], keyword: &str) -> B45LifecycleSp
     let mut max_span_secs: u64 = 0;
     for row in rows {
         let Some(event_id) = row.pointer("/payload/event_id").and_then(Value::as_str) else {
- continue;
+            continue;
         };
         if !event_id.starts_with("kimi_terminal_") {
             continue;
@@ -2268,7 +2355,10 @@ fn b45_terminal_lifecycle_spans(rows: &[Value], keyword: &str) -> B45LifecycleSp
         let Some(timestamp) = parse_ts(row.get("created_at")) else {
             continue;
         };
-        let status = row.pointer("/payload/status").and_then(Value::as_str).unwrap_or_default();
+        let status = row
+            .pointer("/payload/status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if status == "Started" {
             // 关键字只在 Started 行判定(命令载荷在 Started);终态行无
             // command/detail——r19 实证:在终态行再做关键字过滤会把
@@ -2284,12 +2374,8 @@ fn b45_terminal_lifecycle_spans(rows: &[Value], keyword: &str) -> B45LifecycleSp
         } else if matches!(status, "Completed" | "Failed" | "Aborted")
             && let Some(start) = open_started.remove(event_id)
         {
-            max_span_secs = max_span_secs.max(
-                timestamp
-                    .signed_duration_since(start)
-                    .num_seconds()
-                    .max(0) as u64,
-            );
+            max_span_secs = max_span_secs
+                .max(timestamp.signed_duration_since(start).num_seconds().max(0) as u64);
         }
     }
     B45LifecycleSpans { max_span_secs }
@@ -2310,8 +2396,8 @@ async fn b45_live_kimi_host_check() {
     unsafe {
         std::env::set_var("ARIA_CODING_CODER_IDLE_SECS", "90");
     }
-    let evidence_root = PathBuf::from("cadence/reports/lc-gateway-multi-provider/kimi-code")
-        .join("host-check");
+    let evidence_root =
+        PathBuf::from("cadence/reports/lc-gateway-multi-provider/kimi-code").join("host-check");
     let harness = LiveLcGatewayHarness::new();
     let run = harness
         .run_b45_kimi_host_check(&evidence_root)

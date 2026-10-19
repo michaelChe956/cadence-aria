@@ -103,7 +103,6 @@ async fn bare_name_version_probe_resolves_via_explicit_path_override() {
         format!("{}:{host_path}", dir.path().display()),
     )]);
 
-
     let request = BoundedCommandRequest {
         executable: "aria-t3-bare-version".to_string(),
         argv: vec!["--version".to_string()],

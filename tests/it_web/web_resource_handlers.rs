@@ -32,7 +32,10 @@ async fn resource_handlers_cover_tasks_artifact_file_and_diff_contracts() {
     // B3:base_checkpoint 必须能解析为真实 commit——夹具改真仓真 SHA,
     // 不再是 `ckpt_0001` 伪引用(解析失败会走真实 git 错误,不再假空 diff)。
     git(workspace.path(), &["init", "--quiet", "-b", "main"]);
-    git(workspace.path(), &["config", "user.email", "aria-b3@example.invalid"]);
+    git(
+        workspace.path(),
+        &["config", "user.email", "aria-b3@example.invalid"],
+    );
     git(workspace.path(), &["config", "user.name", "Aria B3"]);
     git(workspace.path(), &["add", "."]);
     git(workspace.path(), &["commit", "--quiet", "-m", "init"]);
@@ -103,8 +106,11 @@ async fn resource_handlers_cover_tasks_artifact_file_and_diff_contracts() {
 async fn file_diff_rejects_option_injection_at_rest_boundary() {
     let workspace = tempdir().expect("workspace");
     fs::create_dir_all(workspace.path().join("src")).expect("src");
-    fs::write(workspace.path().join("src/app.js"), "export const ok = true;\n")
-        .expect("source");
+    fs::write(
+        workspace.path().join("src/app.js"),
+        "export const ok = true;\n",
+    )
+    .expect("source");
 
     let state = WebAppState::new(
         workspace.path().to_path_buf(),

@@ -619,10 +619,7 @@ mod tests {
                 other => panic!("unexpected event: {other:?}"),
             }
         }
-        assert_eq!(
-            lifecycle[0].status,
-            ProviderExecutionEventStatus::Started
-        );
+        assert_eq!(lifecycle[0].status, ProviderExecutionEventStatus::Started);
         assert_eq!(
             lifecycle[1].status,
             ProviderExecutionEventStatus::Completed,

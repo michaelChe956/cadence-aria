@@ -622,10 +622,7 @@ mod tests {
             "/bin/sh",
             &["-c", "printf '%s|%s' \"$ARIA_A1A_TOKEN\" \"$HOME\""],
             &std::env::current_dir().expect("cwd"),
-            &BTreeMap::from([(
-                "ARIA_A1A_TOKEN".to_string(),
-                "override-ok".to_string(),
-            )]),
+            &BTreeMap::from([("ARIA_A1A_TOKEN".to_string(), "override-ok".to_string())]),
             CancellationToken::new(),
         )
         .await

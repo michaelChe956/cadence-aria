@@ -354,7 +354,7 @@ use crate::product::reviewer_window::{
     resolve_manual_gate, resolve_worktree_git_identity, restore_window,
 };
 use crate::product::reviewer_window_store::{
-    ChannelWriter, LeaseOwnerLiveness, ReportAcceptance, REVIEWER_WINDOW_STORE_DIR,
+    ChannelWriter, LeaseOwnerLiveness, REVIEWER_WINDOW_STORE_DIR, ReportAcceptance,
     ReviewerWindowRecord, ReviewerWindowState, ReviewerWindowStore, WriteChannelKind,
     lease_owner_liveness, tree_key_of, wire_acceptance,
 };
@@ -1048,11 +1048,12 @@ fn crash_compensation_lease_gate(
             // 且存活)。
             let mut takeover = lease.clone();
             takeover.owner_pid = self_pid;
-            takeover.owner_start_ticks = crate::cross_cutting::process_manager::process_start_time_ticks(self_pid)
-                .unwrap_or(0);
-            window_store
-                .acquire_lease(&takeover)
-                .map_err(|error| format!("lease_takeover_lost(他恢复者已认领或租约冲突,停等): {error}"))
+            takeover.owner_start_ticks =
+                crate::cross_cutting::process_manager::process_start_time_ticks(self_pid)
+                    .unwrap_or(0);
+            window_store.acquire_lease(&takeover).map_err(|error| {
+                format!("lease_takeover_lost(他恢复者已认领或租约冲突,停等): {error}")
+            })
         }
     }
 }
@@ -1085,7 +1086,7 @@ fn cleanup_unpublished_snapshot_window_dir(
             return Err(format!(
                 "读取窗口目录 {} 失败: {error}",
                 window_dir.display()
-            ))
+            ));
         }
     };
     if metadata.file_type().is_symlink() {
@@ -1276,11 +1277,7 @@ impl CodingWorkspaceEngine {
             // F12(波3):弃置前清理未发布的本窗 snapshot 残留目录
             // (baseline=None ≠ manifest 未发布:已发布 manifest 保留);
             // 仅磁盘卫生,best-effort 不阻塞弃置收口(同窗重采自清)。
-            let snapshot_root = self
-                .store
-                .paths()
-                .root()
-                .join(REVIEWER_SNAPSHOT_STORE_DIR);
+            let snapshot_root = self.store.paths().root().join(REVIEWER_SNAPSHOT_STORE_DIR);
             match cleanup_unpublished_snapshot_window_dir(&snapshot_root, &window_id) {
                 Ok(true) => tracing::info!(
                     window = %window_id,
@@ -1832,14 +1829,13 @@ mod hygiene_tests {
         use super::super::*;
         use crate::product::app_paths::ProductAppPaths;
         use crate::product::reviewer_snapshot::{
-            GitObservationBaseline, RestoreCursor, ReviewerBaselineManifest,
-            ReviewerSnapshotStore, ReviewWorktreeLockIdentity, REVIEWER_BASELINE_SCHEMA,
+            GitObservationBaseline, REVIEWER_BASELINE_SCHEMA, RestoreCursor,
+            ReviewWorktreeLockIdentity, ReviewerBaselineManifest, ReviewerSnapshotStore,
         };
         use crate::product::reviewer_window_store::{
             REVIEWER_WINDOW_STORE_DIR, ReviewerWindowRecord, ReviewerWindowState,
             ReviewerWindowStore,
         };
-
 
         /// 每用例独立临时根(避免用例间残留互染)。
         fn f12_root(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -1903,7 +1899,10 @@ mod hygiene_tests {
                 Ok(true)
             );
             assert!(!own.exists());
-            assert!(neighbor.join("blobs/aa").exists(), "邻窗未发布目录也不得误删");
+            assert!(
+                neighbor.join("blobs/aa").exists(),
+                "邻窗未发布目录也不得误删"
+            );
         }
 
         /// 红线④:恶意 window_id(路径穿越/分隔符/空)拒绝清理,目标零副作用。
@@ -1941,7 +1940,7 @@ mod hygiene_tests {
         }
 
         /// 布局钉:本模块重建的 `windows/<window_id>` 布局必须与
-/// `ReviewerSnapshotStore` 真实布局一致(store 能读到我们写的 manifest)。
+        /// `ReviewerSnapshotStore` 真实布局一致(store 能读到我们写的 manifest)。
         #[test]
         fn f12_snapshot_layout_pin_matches_store() {
             let (_keep, snap) = f12_root("pin");
@@ -2045,7 +2044,10 @@ mod hygiene_tests {
                 .await;
 
             assert_eq!(outcomes.len(), 1);
-            assert!(outcomes[0].released, "无 baseline Preparing 窗仍必须弃置释放");
+            assert!(
+                outcomes[0].released,
+                "无 baseline Preparing 窗仍必须弃置释放"
+            );
             assert!(!own.exists(), "F12 红:未发布本窗残留必须在弃置前清理");
             assert!(neighbor.exists(), "邻窗残留不误删");
             let record = ReviewerWindowStore::new(

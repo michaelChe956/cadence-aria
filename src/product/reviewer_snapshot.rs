@@ -138,7 +138,7 @@ pub(crate) struct SnapshotBudget {
 
 impl SnapshotBudget {
     /// 测试默认预算(生产默认由 T17 调用方给定)。
-#[cfg_attr(not(test), allow(dead_code))] // 测试默认预算,生产由调用方显式给定
+    #[cfg_attr(not(test), allow(dead_code))] // 测试默认预算,生产由调用方显式给定
     pub(crate) fn generous() -> Self {
         Self {
             max_entries: 100_000,
@@ -1953,7 +1953,8 @@ fn observe_platform_state(path: &Path) -> Result<PlatformWriteState, ReviewerSna
 // ---------------------------------------------------------------------------
 
 struct RestoreCtx<'a> {
-    #[cfg_attr(not(test), allow(dead_code))] // 仅恢复 failpoint 注入(测试)读取;生产恢复链不直接读该引用
+    #[cfg_attr(not(test), allow(dead_code))]
+    // 仅恢复 failpoint 注入(测试)读取;生产恢复链不直接读该引用
     store: &'a ReviewerSnapshotStore,
     window_dir: PathBuf,
     manifest_path: PathBuf,

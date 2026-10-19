@@ -77,9 +77,7 @@ impl CodingWorkspaceEngine {
     pub(crate) async fn run_provider_stream_invocation_with_ownership(
         &self,
         mut run: CodingProviderStreamRun<'_>,
-        launch_ownership: Option<
-            crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
-        >,
+        launch_ownership: Option<crate::cross_cutting::provider_resources::TrustedLaunchOwnership>,
     ) -> ProviderInvocationOutcome {
         run.suppress_failure_side_effects = true;
         let attempt = run.attempt;
@@ -404,9 +402,7 @@ impl CodingWorkspaceEngine {
         &self,
         run: CodingProviderStreamRun<'_>,
         partial_output_observer: Option<Arc<Mutex<String>>>,
-        launch_ownership: Option<
-            crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
-        >,
+        launch_ownership: Option<crate::cross_cutting::provider_resources::TrustedLaunchOwnership>,
     ) -> Result<ProviderStreamOutcome, CodingWorkspaceEngineError> {
         let CodingProviderStreamRun {
             attempt,
@@ -2133,14 +2129,13 @@ mod lcg_t07_validated_dispatch_tests {
     /// caller 的 env_vars(sentinel 覆盖层)原样透传,宿主 PATH 等由底座
     /// (process_manager)继承到达子进程,裸名 CLI(kimi)解析不断链。
     struct T22EnvCaptureAdapter {
-        captured:
-            std::sync::Mutex<Option<crate::cross_cutting::streaming_provider::StreamingProviderInput>>,
+        captured: std::sync::Mutex<
+            Option<crate::cross_cutting::streaming_provider::StreamingProviderInput>,
+        >,
     }
 
     #[async_trait::async_trait]
-    impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
-        for T22EnvCaptureAdapter
-    {
+    impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter for T22EnvCaptureAdapter {
         async fn start(
             &self,
             input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
@@ -2214,7 +2209,10 @@ mod lcg_t07_validated_dispatch_tests {
             .clone()
             .expect("validated coder start captured");
         assert_eq!(
-            captured.env_vars.get("ARIA_A1B_SENTINEL").map(String::as_str),
+            captured
+                .env_vars
+                .get("ARIA_A1B_SENTINEL")
+                .map(String::as_str),
             Some("caller-override"),
             "coder 角色启动必须原样透传 caller 显式覆盖层"
         );
@@ -2234,9 +2232,7 @@ mod b1_launch_ownership_tests {
         OwnedResourceKind, OwnedResourceSpec, ProviderRunResourceScope, ResourceScopeKey,
         StartedResourceIdentity, TrustedLaunchOwnership,
     };
-    use crate::cross_cutting::streaming_provider::{
-        ProviderSession, StreamingProviderAdapter,
-    };
+    use crate::cross_cutting::streaming_provider::{ProviderSession, StreamingProviderAdapter};
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
     use crate::product::coding_models::CodingRoleRunTrigger;
@@ -2252,7 +2248,10 @@ mod b1_launch_ownership_tests {
 
     fn b1_attempt(
         store: &CodingAttemptStore,
-    ) -> (std::path::PathBuf, crate::product::coding_models::CodingExecutionAttempt) {
+    ) -> (
+        std::path::PathBuf,
+        crate::product::coding_models::CodingExecutionAttempt,
+    ) {
         let worktree = store.paths().root().join("b1-worktree");
         std::fs::create_dir_all(&worktree).expect("worktree");
         let created = store
@@ -2346,7 +2345,10 @@ mod b1_launch_ownership_tests {
         store: &CodingAttemptStore,
     ) -> crate::product::provider_resource_store::ProviderResourceStore {
         crate::product::provider_resource_store::ProviderResourceStore::new(
-            store.paths().root().join(super::super::code_review::PROVIDER_RESOURCE_STORE_DIR),
+            store
+                .paths()
+                .root()
+                .join(super::super::code_review::PROVIDER_RESOURCE_STORE_DIR),
         )
     }
 
@@ -2421,7 +2423,10 @@ mod b1_launch_ownership_tests {
             &worktree.canonicalize().expect("canonical worktree"),
         );
         assert_eq!(
-            record.reserved_labels.get("aria.worktree").map(String::as_str),
+            record
+                .reserved_labels
+                .get("aria.worktree")
+                .map(String::as_str),
             Some(tree_key.as_str()),
             "worktree 标签与引擎一致(兄弟枚举路径依据)"
         );
@@ -2467,7 +2472,10 @@ mod b1_launch_ownership_tests {
             &sibling_key,
             None,
             &sibling_private,
-            &store.paths().root().join(super::super::code_review::PROVIDER_RESOURCE_STORE_DIR),
+            &store
+                .paths()
+                .root()
+                .join(super::super::code_review::PROVIDER_RESOURCE_STORE_DIR),
             None,
         )
         .expect("open sibling scope")
@@ -2486,10 +2494,7 @@ mod b1_launch_ownership_tests {
             )
             .expect("sibling reserve");
         sibling_scope
-            .confirm_started_resource(
-                &reservation,
-                StartedResourceIdentity::directory(&canonical),
-            )
+            .confirm_started_resource(&reservation, StartedResourceIdentity::directory(&canonical))
             .expect("sibling confirm");
 
         // 路径 1:窗口主 scope(固定键)。

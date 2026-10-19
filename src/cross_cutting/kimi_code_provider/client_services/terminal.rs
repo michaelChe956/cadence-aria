@@ -779,11 +779,10 @@ mod tests {
             .await
             .expect("finished terminals must not occupy concurrency slots");
         manager.start(&extra).expect("start extra");
-        let result =
-            tokio::time::timeout(Duration::from_secs(5), manager.wait_for_exit(&extra))
-                .await
-                .expect("wait extra bounded")
-                .expect("wait extra");
+        let result = tokio::time::timeout(Duration::from_secs(5), manager.wait_for_exit(&extra))
+            .await
+            .expect("wait extra bounded")
+            .expect("wait extra");
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(manager.output(&extra).expect("output"), "");
     }
@@ -817,7 +816,9 @@ mod tests {
         // 最近的保留窗口:输出仍可查(协议先 wait 后 output)。
         for (index, id) in ids.iter().enumerate().skip(3) {
             assert_eq!(
-                manager.output(id).unwrap_or_else(|_| panic!("retained output for {id}")),
+                manager
+                    .output(id)
+                    .unwrap_or_else(|_| panic!("retained output for {id}")),
                 format!("mark-{index}"),
                 "最近完成项的输出必须可查"
             );
@@ -915,7 +916,12 @@ mod tests {
         manager.start(&id).expect("start");
         let result = manager.wait_for_exit(&id).await.expect("wait");
         assert_eq!(result.exit_code, Some(0));
-        assert!(manager.output(&id).expect("output").contains("poison-proof"));
+        assert!(
+            manager
+                .output(&id)
+                .expect("output")
+                .contains("poison-proof")
+        );
         // 事实登记的 entry Arc(随后 inner 将被毒化,测试代码经恢复读)。
         let entry = {
             let inner = manager.inner.lock().expect("fetch entry");
@@ -975,7 +981,10 @@ mod tests {
 
         // 三把 entry 锁恢复:release(state)/wait(result)/output(output)
         // 全部照常返回既有事实。
-        manager.release(&id).await.expect("release after state poisoning");
+        manager
+            .release(&id)
+            .await
+            .expect("release after state poisoning");
         let result = tokio::time::timeout(Duration::from_secs(2), manager.wait_for_exit(&id))
             .await
             .expect("wait after result poisoning bounded")
@@ -1003,16 +1012,20 @@ mod tests {
             panic!("poison command lock");
         });
         assert!(poison_command.join().is_err());
-        manager.start(&fresh).expect("start after command poisoning");
+        manager
+            .start(&fresh)
+            .expect("start after command poisoning");
         let result = tokio::time::timeout(Duration::from_secs(5), manager.wait_for_exit(&fresh))
             .await
             .expect("wait fresh bounded")
             .expect("wait fresh");
         assert_eq!(result.exit_code, Some(0));
-        assert!(manager
-            .output(&fresh)
-            .expect("fresh output")
-            .contains("poison-proof"));
+        assert!(
+            manager
+                .output(&fresh)
+                .expect("fresh output")
+                .contains("poison-proof")
+        );
         let _ = &extra_id;
     }
 

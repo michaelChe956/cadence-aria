@@ -136,7 +136,11 @@ impl WorkspaceEngine {
             reviewer.clone(),
         );
         let first_session = provider
-            .start_owned(input.clone(), self.plan_review_launch_ownership(), self.cancel.clone())
+            .start_owned(
+                input.clone(),
+                self.plan_review_launch_ownership(),
+                self.cancel.clone(),
+            )
             .await;
         let first_completion = match self
             .drive_reviewer_provider_session_once(first_session, &mut command_rx, &reviewer)
@@ -537,15 +541,16 @@ impl WorkspaceEngine {
                     self.finish_failed_run().await;
                     return;
                 }
-                let (repair_session, _repair_trust_waiting) = start_review_session_via_gateway_owned(
-                    &gateway,
-                    &reviewer,
-                    repair_input,
-                    project_id,
-                    self.plan_review_launch_ownership(),
-                    self.cancel.clone(),
-                )
-                .await;
+                let (repair_session, _repair_trust_waiting) =
+                    start_review_session_via_gateway_owned(
+                        &gateway,
+                        &reviewer,
+                        repair_input,
+                        project_id,
+                        self.plan_review_launch_ownership(),
+                        self.cancel.clone(),
+                    )
+                    .await;
                 let repair_result = self
                     .drive_reviewer_provider_session_once(
                         repair_session,
@@ -1520,7 +1525,6 @@ async fn start_review_session_via_gateway(
     start_review_session_via_gateway_owned(gateway, reviewer, input, project_id, None, cancel).await
 }
 
-
 /// T6 fix-loop r2：review/drive.rs 两个 gateway 启动口（author revision、
 /// reviewer 首发）共用的压平+分类——共享分类桥消费 typed 变体判据
 /// （压平前），Generation 场景；`provider` 是本次启动的真实角色
@@ -2018,9 +2022,7 @@ mod tests;
 #[cfg(test)]
 mod b1_plan_launch_ownership_tests {
     use super::*;
-    use crate::product::lifecycle_store::{
-        CreateWorkspaceSessionInput, LifecycleStore,
-    };
+    use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, LifecycleStore};
 
     fn b1_git_init(dir: &std::path::Path) {
         use std::process::Command;
@@ -2075,9 +2077,10 @@ mod b1_plan_launch_ownership_tests {
                 work_item_plan_options: None,
             })
             .expect("workspace session");
-        let checkpoint = std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
-            paths.issue_lifecycle_root(&project.id, &issue.id),
-        ));
+        let checkpoint =
+            std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                paths.issue_lifecycle_root(&project.id, &issue.id),
+            ));
         let (tx, _rx) = mpsc::channel(64);
         let mut engine = WorkspaceEngine::new_persistent(
             checkpoint,
@@ -2100,8 +2103,7 @@ mod b1_plan_launch_ownership_tests {
             .active_review_window
             .as_ref()
             .expect("活动窗持有主 scope");
-        let expected_scope_id =
-            format!("plan-review-{}", active.handle.window_id);
+        let expected_scope_id = format!("plan-review-{}", active.handle.window_id);
         assert_eq!(active.launch_scope.key().scope_id, expected_scope_id);
         // launch 归属从同一 scope 铸造(同 window/run/boot;资源 ID 唯一)。
         let ownership = engine
@@ -2124,8 +2126,8 @@ mod f11_close_attention_tests {
     use super::*;
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::reviewer_window_store::{
-        REVIEWER_WINDOW_STORE_DIR, ReviewerWindowState, ReviewerWindowStore,
-        ViolationJournalEntry, tree_key_of,
+        REVIEWER_WINDOW_STORE_DIR, ReviewerWindowState, ReviewerWindowStore, ViolationJournalEntry,
+        tree_key_of,
     };
 
     fn f11_git_init(dir: &std::path::Path) {
@@ -2186,9 +2188,10 @@ mod f11_close_attention_tests {
                 work_item_plan_options: None,
             })
             .expect("workspace session");
-        let checkpoint = std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
-            paths.issue_lifecycle_root(&project.id, &issue.id),
-        ));
+        let checkpoint =
+            std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                paths.issue_lifecycle_root(&project.id, &issue.id),
+            ));
         let (tx, rx) = mpsc::channel(64);
         let mut engine = WorkspaceEngine::new_persistent(
             checkpoint,
@@ -2208,9 +2211,7 @@ mod f11_close_attention_tests {
         prefix: &str,
     ) -> Option<crate::cross_cutting::streaming_provider::ProviderExecutionEvent> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while let Ok(Some(event)) =
-            tokio::time::timeout_at(deadline, rx.recv()).await
-        {
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
             if let EngineEvent::ExecutionEvent { event, .. } = event
                 && event.event_id.starts_with(prefix)
             {
@@ -2233,8 +2234,7 @@ mod f11_close_attention_tests {
         let active = engine.active_review_window.as_ref().expect("active window");
         let window_id = active.handle.window_id.clone();
         let generation = active.handle.generation;
-        let window_store =
-            ReviewerWindowStore::new(paths.root().join(REVIEWER_WINDOW_STORE_DIR));
+        let window_store = ReviewerWindowStore::new(paths.root().join(REVIEWER_WINDOW_STORE_DIR));
         let before = window_store.load_window(&window_id).expect("record before");
 
         engine.lifecycle_store = None;
@@ -2268,8 +2268,7 @@ mod f11_close_attention_tests {
             .expect("begin plan review window");
         let active = engine.active_review_window.as_ref().expect("active window");
         let window_id = active.handle.window_id.clone();
-        let window_store =
-            ReviewerWindowStore::new(paths.root().join(REVIEWER_WINDOW_STORE_DIR));
+        let window_store = ReviewerWindowStore::new(paths.root().join(REVIEWER_WINDOW_STORE_DIR));
         let record = window_store.load_window(&window_id).expect("record");
         window_store
             .append_violation(
@@ -2294,10 +2293,9 @@ mod f11_close_attention_tests {
 
         engine.close_plan_review_window("f11_violation").await;
 
-        let attention =
-            f11_next_attention(&mut rx, "plan_review_window_attention_manual_gate")
-                .await
-                .expect("F11 红:人工门收口必须发用户可见注意事件");
+        let attention = f11_next_attention(&mut rx, "plan_review_window_attention_manual_gate")
+            .await
+            .expect("F11 红:人工门收口必须发用户可见注意事件");
         let detail = attention.detail.as_deref().unwrap_or("");
         assert!(detail.contains(&window_id), "注意事件必须带 window_id");
         assert!(
@@ -2306,7 +2304,11 @@ mod f11_close_attention_tests {
         );
 
         let after = window_store.load_window(&window_id).expect("record after");
-        assert_eq!(after.state, ReviewerWindowState::ManualGate, "锁保持:人工门非终态");
+        assert_eq!(
+            after.state,
+            ReviewerWindowState::ManualGate,
+            "锁保持:人工门非终态"
+        );
         let tree_key = tree_key_of(&after.identity.canonical_worktree);
         let lease = window_store
             .load_lease(&tree_key)

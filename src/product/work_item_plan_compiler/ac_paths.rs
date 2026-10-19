@@ -265,7 +265,10 @@ mod tests {
         ] {
             let mut refs = Vec::new();
             collect_command_paths(command, &mut refs);
-            assert!(refs.is_empty(), "无法确认路径本体的 token 不得入列 {command}:{refs:?}");
+            assert!(
+                refs.is_empty(),
+                "无法确认路径本体的 token 不得入列 {command}:{refs:?}"
+            );
         }
     }
 

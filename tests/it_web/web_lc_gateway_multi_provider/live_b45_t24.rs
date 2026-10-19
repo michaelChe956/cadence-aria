@@ -49,8 +49,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 
 use super::harness::{
-    B45_T24_SILENT_CHECK_SECS, B45T24Scenario, LiveLcGatewayHarness,
-    b45_t24_cancel_provider_label,
+    B45_T24_SILENT_CHECK_SECS, B45T24Scenario, LiveLcGatewayHarness, b45_t24_cancel_provider_label,
 };
 use super::live_matrix::require_lc_gateway_e2e_switch;
 
@@ -119,7 +118,10 @@ fn b45_t24_cancel_providers_from_env() -> Vec<cadence_aria::product::models::Pro
 fn b45_t24_cancel_labels(
     providers: &[cadence_aria::product::models::ProviderName],
 ) -> Vec<&'static str> {
-    providers.iter().map(b45_t24_cancel_provider_label).collect()
+    providers
+        .iter()
+        .map(b45_t24_cancel_provider_label)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +142,8 @@ fn t24_violation_entries(evidence: &Value) -> Vec<&Value> {
     for journal in evidence
         .pointer("/windows_final/violation_journals")
         .and_then(Value::as_array)
-        .into_iter().flatten()
+        .into_iter()
+        .flatten()
     {
         if let Some(items) = journal["entries"].as_array() {
             entries.extend(items.iter());
@@ -165,7 +168,10 @@ fn t24_violation_entries(evidence: &Value) -> Vec<&Value> {
 ///   + 窗口外对照 commit/push exit=0。
 pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
-    let scenario = evidence["scenario"].as_str().unwrap_or_default().to_string();
+    let scenario = evidence["scenario"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let attempt_id = evidence
         .pointer("/coding_main/attempt_id")
         .and_then(Value::as_str)
@@ -181,20 +187,29 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
         .cloned()
         .unwrap_or_default();
     if t24_window_of(&windows, &attempt_id).is_empty() {
-        failures.push(format!("缺 attempt {attempt_id} 的 reviewer 窗口记录(开窗未发生=未达评审)"));
+        failures.push(format!(
+            "缺 attempt {attempt_id} 的 reviewer 窗口记录(开窗未发生=未达评审)"
+        ));
     }
     // 恢复事实(任一窗口必须携带 restore 绑定)。
-    let restored_any = t24_window_of(&windows, &attempt_id)
-        .iter()
-        .any(|window| window.get("restore").is_some_and(|restore| {
-            restore["outcome"].as_str().is_some_and(|outcome| outcome == "restored")
-        }));
+    let restored_any = t24_window_of(&windows, &attempt_id).iter().any(|window| {
+        window.get("restore").is_some_and(|restore| {
+            restore["outcome"]
+                .as_str()
+                .is_some_and(|outcome| outcome == "restored")
+        })
+    });
     if !restored_any {
-        failures.push("缺恢复前 journal/恢复绑定:窗口无 restore{outcome=restored}(恢复未完成=不可采信)".to_string());
+        failures.push(
+            "缺恢复前 journal/恢复绑定:窗口无 restore{outcome=restored}(恢复未完成=不可采信)"
+                .to_string(),
+        );
     }
     // 三域结果:git 域字段在场(restore 绑定含 git 域结构化事实)。
     let git_domain_any = t24_window_of(&windows, &attempt_id).iter().any(|window| {
-        window["restore"].get("git_restored_mutation_paths").is_some()
+        window["restore"]
+            .get("git_restored_mutation_paths")
+            .is_some()
             || window["restore"].get("git_extra_refs_observed").is_some()
     });
     if !git_domain_any {
@@ -221,7 +236,11 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
     {
         failures.push("缺 dirty 摘要(窗口开点 worktree 状态缺失)".to_string());
     }
-    if evidence.get("worktree_final").map(Value::is_null).unwrap_or(true) {
+    if evidence
+        .get("worktree_final")
+        .map(Value::is_null)
+        .unwrap_or(true)
+    {
         failures.push("缺 dirty 摘要(终局 worktree 状态缺失)".to_string());
     }
     // 精确容器归属(正常轮):role run 事件含 exact_id+标签。
@@ -241,7 +260,9 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
             }
             // 正常轮:报告采信 Accepted + 窗口 ClosedAccepted。
             let accepted = reports.iter().any(|report| {
-                report["acceptance"].as_str().is_some_and(|a| a.eq_ignore_ascii_case("accepted"))
+                report["acceptance"]
+                    .as_str()
+                    .is_some_and(|a| a.eq_ignore_ascii_case("accepted"))
             });
             if !accepted {
                 failures.push("正常轮报告未 Accepted(合法验证必须可采信)".to_string());
@@ -273,7 +294,9 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
                 .pointer("/manual_gate/resolve_status")
                 .and_then(Value::as_u64);
             if resolve_status != Some(200) {
-                failures.push(format!("缺人工门裁决(resolve 状态非 200:{resolve_status:?})"));
+                failures.push(format!(
+                    "缺人工门裁决(resolve 状态非 200:{resolve_status:?})"
+                ));
             }
             let after_has_closed = evidence
                 .pointer("/manual_gate/after/windows")
@@ -289,7 +312,9 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
                 })
                 .unwrap_or(false);
             if !after_has_closed {
-                failures.push("人工门裁决后窗口未释放(ClosedInvalidated/NewReviewRequired)".to_string());
+                failures.push(
+                    "人工门裁决后窗口未释放(ClosedInvalidated/NewReviewRequired)".to_string(),
+                );
             }
             // 平台零推进三面(F9):终局 HEAD=开点 HEAD(自提交被恢复)、
             // 裸远端 HEAD 前后一致(push 未推进)、index 摘要一致(stage 未推进)。
@@ -326,7 +351,9 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
                     // 在采样后)=零推进合法形态。缺键≠null:字段改名/漏发射
                     // 必须仍 FAIL(合成夹具缺项必须 FAIL 契约)。
                     (None, None) => {}
-                    _ => failures.push("平台零推进对照裸远端 HEAD 值形态非法(非串/空串)".to_string()),
+                    _ => {
+                        failures.push("平台零推进对照裸远端 HEAD 值形态非法(非串/空串)".to_string())
+                    }
                 },
                 _ => failures.push("平台零推进对照缺裸远端 HEAD(开点/终局键缺失)".to_string()),
             }
@@ -398,11 +425,19 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
 pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
     // kill 事实。
-    if evidence.pointer("/kill/server_dead").and_then(Value::as_bool) != Some(true) {
+    if evidence
+        .pointer("/kill/server_dead")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
         failures.push("缺 kill 事实(server 未死=真进程 kill 未发生)".to_string());
     }
     // 启动前零材料/零 provider 事实(kill 时快照三面在场)。
-    for facet in ["/kill/windows_at_kill", "/kill/scopes_at_kill", "/kill/role_runs_at_kill"] {
+    for facet in [
+        "/kill/windows_at_kill",
+        "/kill/scopes_at_kill",
+        "/kill/role_runs_at_kill",
+    ] {
         if evidence.pointer(facet).and_then(Value::as_array).is_none() {
             failures.push(format!("缺启动前零材料/零 provider 事实({facet} 快照缺失)"));
         }
@@ -416,8 +451,7 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
         .unwrap_or_default();
     if registrations.is_empty() {
         failures.push(
-            "缺真实登记(kill 时无生产 adapter 登记的 writer;合成记录不算正向前提)"
-                .to_string(),
+            "缺真实登记(kill 时无生产 adapter 登记的 writer;合成记录不算正向前提)".to_string(),
         );
     }
     let windows_at_kill = evidence
@@ -433,7 +467,10 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
     let mut attributed = 0usize;
     let mut run_matched = 0usize;
     for record in &registrations {
-        let resource_id = record["resource_id"].as_str().unwrap_or_default().to_string();
+        let resource_id = record["resource_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         let labels = &record["labels"];
         let pid = record["pid"].as_u64().unwrap_or(0);
         let start_ticks = record["start_time_ticks"].as_u64().unwrap_or(0);
@@ -509,9 +546,8 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
     if !registrations.is_empty() && attributed == 0 {
         failures.push("真实登记无一条带窗口/attempt 归属(业务归属不可证)".to_string());
     } else if attributed > 0 && run_matched == 0 {
-        failures.push(
-            "真实登记 run 与 kill 时窗口 run 不同源(窗口/attempt 归属不可证)".to_string(),
-        );
+        failures
+            .push("真实登记 run 与 kill 时窗口 run 不同源(窗口/attempt 归属不可证)".to_string());
     }
     // 补偿后:登记项注销(durable 记录消失)。
     let registrations_after = evidence
@@ -523,14 +559,25 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
         (
             record["scope_id"].as_str().unwrap_or_default().to_string(),
             record["run_id"].as_str().unwrap_or_default().to_string(),
-            record["boot_identity"].as_str().unwrap_or_default().to_string(),
-            record["resource_id"].as_str().unwrap_or_default().to_string(),
+            record["boot_identity"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            record["resource_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
         )
     };
     let surviving: Vec<String> = registrations
         .iter()
         .map(registration_key)
-        .filter(|key| registrations_after.iter().map(registration_key).any(|other| &other == key))
+        .filter(|key| {
+            registrations_after
+                .iter()
+                .map(registration_key)
+                .any(|other| &other == key)
+        })
         .map(|(_, _, _, resource_id)| resource_id)
         .collect();
     if !surviving.is_empty() {
@@ -572,7 +619,9 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
                 .is_some()
     });
     if restored_window.is_none() {
-        failures.push("缺原 manifest 续恢复/三域核对(窗口 #1 无 restore{restored}+git 域事实)".to_string());
+        failures.push(
+            "缺原 manifest 续恢复/三域核对(窗口 #1 无 restore{restored}+git 域事实)".to_string(),
+        );
     }
     // 补偿先行:窗口终态时刻早于重启观测时刻。
     let closed_at = restored_window
@@ -594,11 +643,12 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
     // 停在 commit_started(提交进行中);重启补偿必须等窗口恢复完成后才
     // 收敛 journal(才动 worktree)。先后时刻全部来自 durable 事实:
     // journal 在途时刻 ≤ 窗口恢复完成时刻 ≤ journal 收敛终态时刻。
-    match evidence.get("kill").and_then(|kill| kill.get("mid_commit_journal")) {
-        None => failures.push(
-            "缺 mid-commit journal 在途事实(kill 时未造出提交进行中的 journal)"
-                .to_string(),
-        ),
+    match evidence
+        .get("kill")
+        .and_then(|kill| kill.get("mid_commit_journal"))
+    {
+        None => failures
+            .push("缺 mid-commit journal 在途事实(kill 时未造出提交进行中的 journal)".to_string()),
         Some(journal) => {
             let phase_at_kill = journal["phase"].as_str().unwrap_or_default();
             let in_flight_at = journal["in_flight_at"]
@@ -624,13 +674,11 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
                 .get("restart")
                 .and_then(|restart| restart.get("mid_commit_journal"))
             {
-                None => failures.push(
-                    "缺 mid-commit journal 收敛事实(重启后未观察 journal 终态)".to_string(),
-                ),
+                None => failures
+                    .push("缺 mid-commit journal 收敛事实(重启后未观察 journal 终态)".to_string()),
                 Some(restart_journal) => {
                     let converged = restart_journal["converged"].as_bool() == Some(true);
-                    let phase_after =
-                        restart_journal["phase_after"].as_str().unwrap_or_default();
+                    let phase_after = restart_journal["phase_after"].as_str().unwrap_or_default();
                     let converged_at = restart_journal["converged_at"]
                         .as_str()
                         .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok());
@@ -663,17 +711,14 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
                         ),
                     }
                     if restart_journal["attempt_id"].as_str() != Some(attempt_id) {
-                        failures.push(
-                            "mid-commit journal attempt 归属不一致(kill/重启)".to_string(),
-                        );
+                        failures
+                            .push("mid-commit journal attempt 归属不一致(kill/重启)".to_string());
                     }
                     if restart_journal["before_head"].as_str() != Some(before_head) {
-                        failures.push(
-                            "mid-commit journal before_head 不一致(kill/重启)".to_string(),
-                        );
+                        failures
+                            .push("mid-commit journal before_head 不一致(kill/重启)".to_string());
                     }
-                    let head_at_kill =
-                        restart_journal["head_at_kill"].as_str().unwrap_or_default();
+                    let head_at_kill = restart_journal["head_at_kill"].as_str().unwrap_or_default();
                     if !before_head.trim().is_empty() && head_at_kill != before_head {
                         failures.push(format!(
                             "mid-commit journal 基线不一致:before_head={before_head:?} 现场 HEAD={head_at_kill:?}"
@@ -748,9 +793,7 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
             && audits_before == audits_after
             && !audits_before.is_empty();
         if !audits_unchanged {
-            failures.push(
-                "停等期 audits 发生变化(登记面被清理/改写——不 clean 被违反)".to_string(),
-            );
+            failures.push("停等期 audits 发生变化(登记面被清理/改写——不 clean 被违反)".to_string());
         }
         let container = &drill_b["unknown_container"];
         let container_untouched = container["registered"].as_bool() == Some(false)
@@ -759,8 +802,7 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
             && container["removed_by_manual_disposition"].as_bool() == Some(true);
         if !container_untouched {
             failures.push(
-                "未知容器被清理(无登记记录容器必须存活到人工处置:不 kill 不 clean)"
-                    .to_string(),
+                "未知容器被清理(无登记记录容器必须存活到人工处置:不 kill 不 clean)".to_string(),
             );
         }
         let resolved = drill_b
@@ -882,7 +924,9 @@ fn t24_cancel_cell_failures(label: &str, cell: &Value, failures: &mut Vec<String
     match cancel["lingering_fixture_containers"].as_array() {
         Some(containers) if containers.is_empty() => {}
         Some(containers) => {
-            failures.push(format!("取消格 {label} 取消后遗留 fixture 容器:{containers:?}"));
+            failures.push(format!(
+                "取消格 {label} 取消后遗留 fixture 容器:{containers:?}"
+            ));
         }
         None => failures.push(format!(
             "取消格 {label} 缺遗留容器对账(lingering_fixture_containers 缺失)"
@@ -971,7 +1015,9 @@ fn t24_cancel_cell_failures(label: &str, cell: &Value, failures: &mut Vec<String
         .map(|(run_id, _)| *run_id)
         .collect();
     if !spawned_after.is_empty() {
-        failures.push(format!("取消格 {label} 取消后出现新 spawn:{spawned_after:?}"));
+        failures.push(format!(
+            "取消格 {label} 取消后出现新 spawn:{spawned_after:?}"
+        ));
     }
 }
 
@@ -1460,7 +1506,8 @@ mod validator_crash_tests {
     #[test]
     fn crash_validator_rejects_registration_without_proc_identity() {
         let mut evidence = crash_base();
-        evidence["kill"]["real_registrations_at_kill"][0]["pid_starttime_matches_proc"] = json!(false);
+        evidence["kill"]["real_registrations_at_kill"][0]["pid_starttime_matches_proc"] =
+            json!(false);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
             failures.iter().any(|f| f.contains("PID+starttime")),
@@ -1518,10 +1565,7 @@ mod validator_crash_tests {
         let record = evidence["kill"]["real_registrations_at_kill"][0].clone();
         evidence["restart"]["real_registrations_after_restart"] = json!([record]);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
-        assert!(
-            failures.iter().any(|f| f.contains("未清")),
-            "{failures:?}"
-        );
+        assert!(failures.iter().any(|f| f.contains("未清")), "{failures:?}");
     }
 
     /// A7(a):缺 journal 在途事实(未造出“提交进行中”状态)→ 红。
@@ -1560,8 +1604,7 @@ mod validator_crash_tests {
         );
         let mut evidence = crash_base();
         evidence["restart"]["mid_commit_journal"]["converged"] = json!(true);
-        evidence["restart"]["mid_commit_journal"]["converged_at"] =
-            json!("2026-10-19T00:06:00Z");
+        evidence["restart"]["mid_commit_journal"]["converged_at"] = json!("2026-10-19T00:06:00Z");
         evidence["restart"]["mid_commit_journal"]["phase_after"] = json!("commit_started");
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
@@ -1574,13 +1617,9 @@ mod validator_crash_tests {
     #[test]
     fn crash_validator_rejects_compensation_before_restore() {
         let mut evidence = crash_base();
-        evidence["restart"]["mid_commit_journal"]["converged_at"] =
-            json!("2026-10-19T00:04:30Z");
+        evidence["restart"]["mid_commit_journal"]["converged_at"] = json!("2026-10-19T00:04:30Z");
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
-        assert!(
-            failures.iter().any(|f| f.contains("抢跑")),
-            "{failures:?}"
-        );
+        assert!(failures.iter().any(|f| f.contains("抢跑")), "{failures:?}");
     }
 
     /// A7(a) 缺失负测:恢复完成时刻缺失(先后关系不可证)→ 红。
@@ -1589,10 +1628,7 @@ mod validator_crash_tests {
         let mut evidence = crash_base();
         evidence["restart"]["mid_commit_journal"]["window_one_released_at"] = Value::Null;
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
-        assert!(
-            failures.iter().any(|f| f.contains("时刻")),
-            "{failures:?}"
-        );
+        assert!(failures.iter().any(|f| f.contains("时刻")), "{failures:?}");
     }
 
     /// A7(b):缺 parked 证据(停等臂未 park)→ 红。
@@ -1659,8 +1695,7 @@ mod validator_crash_tests {
     #[test]
     fn crash_validator_rejects_compensation_after_material() {
         let mut evidence = crash_base();
-        evidence["restart"]["window_one_terminal"][0]["updated_at"] =
-            json!("2026-10-19T00:20:00Z");
+        evidence["restart"]["window_one_terminal"][0]["updated_at"] = json!("2026-10-19T00:20:00Z");
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
             failures.iter().any(|f| f.contains("补偿未先行")),
@@ -1681,10 +1716,7 @@ mod validator_crash_tests {
         stalled["new_material"]["pump_resume"]["events"] =
             json!([{"type": "coding_execution_event", "detail": "provider_idle_stalled"}]);
         let failures = validate_b45_t24_crash_evidence(&stalled).unwrap_err();
-        assert!(
-            failures.iter().any(|f| f.contains("误杀")),
-            "{failures:?}"
-        );
+        assert!(failures.iter().any(|f| f.contains("误杀")), "{failures:?}");
     }
 
     #[test]
@@ -1692,10 +1724,7 @@ mod validator_crash_tests {
         let mut evidence = crash_base();
         evidence["drill_b"] = json!({"skipped": "attempt #2 未建"});
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
-        assert!(
-            failures.iter().any(|f| f.contains("停等")),
-            "{failures:?}"
-        );
+        assert!(failures.iter().any(|f| f.contains("停等")), "{failures:?}");
     }
 
     #[test]
@@ -1703,10 +1732,7 @@ mod validator_crash_tests {
         let mut evidence = crash_base();
         evidence["drill_b"]["daemon_alive_after_restart"] = json!(false);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
-        assert!(
-            failures.iter().any(|f| f.contains("误杀")),
-            "{failures:?}"
-        );
+        assert!(failures.iter().any(|f| f.contains("误杀")), "{failures:?}");
     }
 
     #[test]
@@ -1835,10 +1861,7 @@ mod validator_cancel_tests {
             .expect("cells object")
             .remove("kimi");
         let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
-        assert!(
-            failures.iter().any(|f| f.contains("缺家")),
-            "{failures:?}"
-        );
+        assert!(failures.iter().any(|f| f.contains("缺家")), "{failures:?}");
     }
 
     #[test]
@@ -1847,10 +1870,7 @@ mod validator_cancel_tests {
         evidence["providers"] = json!(["claude", "codex", "kimi", "pi"]);
         evidence["cells"]["pi"] = cell("pi", true);
         let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
-        assert!(
-            failures.iter().any(|f| f.contains("多余")),
-            "{failures:?}"
-        );
+        assert!(failures.iter().any(|f| f.contains("多余")), "{failures:?}");
     }
 
     #[test]
@@ -1952,10 +1972,7 @@ mod validator_cancel_tests {
         let mut evidence = base();
         evidence["cells"]["claude"]["role_run_rows_after_cancel"] = json!([]);
         let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
-        assert!(
-            failures.iter().any(|f| f.contains("基线")),
-            "{failures:?}"
-        );
+        assert!(failures.iter().any(|f| f.contains("基线")), "{failures:?}");
     }
 
     #[test]
@@ -1964,10 +1981,7 @@ mod validator_cancel_tests {
         evidence["cells"]["claude"]["role_run_rows_after_cancel"] =
             json!([{"role": "coder", "sequence": 0}]);
         let failures = validate_b45_t24_cancel_evidence(&evidence, &THREE).unwrap_err();
-        assert!(
-            failures.iter().any(|f| f.contains("基线")),
-            "{failures:?}"
-        );
+        assert!(failures.iter().any(|f| f.contains("基线")), "{failures:?}");
     }
 
     #[test]
@@ -1995,4 +2009,3 @@ mod validator_cancel_tests {
         assert!(validate_b45_t24_cancel_evidence(&evidence, &["codex"]).is_ok());
     }
 }
-

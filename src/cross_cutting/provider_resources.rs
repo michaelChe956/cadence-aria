@@ -218,12 +218,12 @@ impl ResourceReservation {
         &self.resource_id
     }
 
-#[allow(dead_code)] // 预留 kind 读取口:生产消费者随 F2 真实进程登记接线,暂无调用面不删契约
+    #[allow(dead_code)] // 预留 kind 读取口:生产消费者随 F2 真实进程登记接线,暂无调用面不删契约
     pub(crate) fn kind(&self) -> OwnedResourceKind {
         self.kind
     }
 
-#[cfg_attr(not(test), allow(dead_code))] // 测试断言消费;生产消费者随 F2 接线
+    #[cfg_attr(not(test), allow(dead_code))] // 测试断言消费;生产消费者随 F2 接线
     pub(crate) fn reserved_labels(&self) -> &BTreeMap<String, String> {
         &self.reserved_labels
     }
@@ -245,7 +245,7 @@ impl StartedResourceIdentity {
         }
     }
 
-#[cfg_attr(not(test), allow(dead_code))] // 容器身份铸造口:测试消费,容器清理链接线位
+    #[cfg_attr(not(test), allow(dead_code))] // 容器身份铸造口:测试消费,容器清理链接线位
     pub(crate) fn container(exact_id: &str) -> Self {
         Self {
             identity: StartedIdentity::Container {
@@ -254,7 +254,7 @@ impl StartedResourceIdentity {
         }
     }
 
-#[allow(dead_code)] // 网络身份铸造口:精确 ID 清理合同面,接线前无消费者
+    #[allow(dead_code)] // 网络身份铸造口:精确 ID 清理合同面,接线前无消费者
     pub(crate) fn network(exact_id: &str) -> Self {
         Self {
             identity: StartedIdentity::Network {
@@ -508,7 +508,7 @@ pub(crate) struct ProviderRunResourceScope {
 
 impl ProviderRunResourceScope {
     /// 生产入口:以本平台 boot 身份打开 run 的资源 scope。
-#[cfg_attr(not(test), allow(dead_code))] // 生产入口(engine 开真实 scope);接线前测试经 open_scope 消费
+    #[cfg_attr(not(test), allow(dead_code))] // 生产入口(engine 开真实 scope);接线前测试经 open_scope 消费
     pub(crate) fn open(
         execution: &FrozenProviderExecution,
         boot_identity: &str,
@@ -967,7 +967,10 @@ impl ProviderRunResourceScope {
         &self,
         resource_id: &str,
     ) -> Result<(), ProviderAdapterError> {
-        let Some(record) = self.store.load_record(&self.key, resource_id).map_err(store_error)?
+        let Some(record) = self
+            .store
+            .load_record(&self.key, resource_id)
+            .map_err(store_error)?
         else {
             return Ok(());
         };
@@ -1159,7 +1162,7 @@ impl ProviderRunResourceScope {
     /// 资源启动包装器(进程面):持久预留 → spawn → 真实 PID-start 身份
     /// 确认,闭合预留与真实身份间的崩溃口。预留失败不 spawn;spawn 失败
     /// 解除登记;确认写失败停止子进程(整组)并进入补偿。
-#[cfg_attr(not(test), allow(dead_code))] // F2 载体:预留→spawn→PID-start 确认的进程包装器;生产 adapter 接线前由 drop_tests 钉住合同
+    #[cfg_attr(not(test), allow(dead_code))] // F2 载体:预留→spawn→PID-start 确认的进程包装器;生产 adapter 接线前由 drop_tests 钉住合同
     pub(crate) async fn start_owned_process(
         &self,
         spec: OwnedResourceSpec,
@@ -1219,7 +1222,7 @@ impl ProviderRunResourceScope {
     }
 
     /// 由预留句柄还原登记事实(补偿解除用;与 reserve 写入的记录一致)。
-#[cfg_attr(not(test), allow(dead_code))] // start_owned_process 补偿解除用,随其接线转正
+    #[cfg_attr(not(test), allow(dead_code))] // start_owned_process 补偿解除用,随其接线转正
     fn reservation_record(&self, reservation: &ResourceReservation) -> ProviderResourceRecord {
         ProviderResourceRecord {
             key: reservation.key.clone(),
@@ -1246,7 +1249,7 @@ impl ProviderRunResourceScope {
 
     /// 仅测试:直接以构造事实登记记录(fake/恢复场景装配)。
     #[cfg(test)]
-#[allow(dead_code)] // 装配口暂无测试引用,保留 fake/恢复装配面
+    #[allow(dead_code)] // 装配口暂无测试引用,保留 fake/恢复装配面
     pub(crate) fn insert_record_for_test(
         &self,
         record: ProviderResourceRecord,
@@ -1314,13 +1317,13 @@ impl TrustedLaunchOwnership {
     }
 
     /// 归属 scope 主键(与开窗/收口消费者同源的三元组)。
-#[cfg_attr(not(test), allow(dead_code))] // 测试断言消费;生产对账消费者随收口接线
+    #[cfg_attr(not(test), allow(dead_code))] // 测试断言消费;生产对账消费者随收口接线
     pub(crate) fn scope_key(&self) -> &ResourceScopeKey {
         self.scope.key()
     }
 
     /// 本次 launch 的唯一资源 ID。
-#[cfg_attr(not(test), allow(dead_code))] // 同上
+    #[cfg_attr(not(test), allow(dead_code))] // 同上
     pub(crate) fn resource_id(&self) -> &str {
         &self.resource_id
     }
@@ -1363,8 +1366,10 @@ impl TrustedLaunchOwnership {
                 "provider_resources_backfill_identity_unavailable: pid={pid} starttime 不可读(进程已退出?)"
             )));
         };
-        self.scope
-            .confirm_started_resource(reservation, StartedResourceIdentity::process(pid, start_time_ticks))
+        self.scope.confirm_started_resource(
+            reservation,
+            StartedResourceIdentity::process(pid, start_time_ticks),
+        )
     }
 
     /// 会话尾部/错误路径的收口注销:有登记身份 → killpg(仅身份核对通过)
@@ -3100,11 +3105,17 @@ mod tests {
         let record = &records[0];
         assert_eq!(record.key, *ownership.scope_key());
         assert_eq!(
-            record.reserved_labels.get("aria.scope_id").map(String::as_str),
+            record
+                .reserved_labels
+                .get("aria.scope_id")
+                .map(String::as_str),
             Some("code-delivery-attempt-b1")
         );
         assert_eq!(
-            record.reserved_labels.get("aria.run_id").map(String::as_str),
+            record
+                .reserved_labels
+                .get("aria.run_id")
+                .map(String::as_str),
             Some("role-run-b1")
         );
         assert_eq!(
@@ -3254,10 +3265,7 @@ mod tests {
         // 3) 通道终结后注销。
         while session.events.recv().await.is_some() {}
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(
-            b1_process_records(&env, &key).is_empty(),
-            "真实终止后注销"
-        );
+        assert!(b1_process_records(&env, &key).is_empty(), "真实终止后注销");
     }
 
     /// 资源 ID 每次 launch 唯一:同 scope 两次 mint 不撞、两条登记共存;
@@ -3288,9 +3296,7 @@ mod tests {
         let tasks = std::fs::read_dir("/proc/self/task").ok()?;
         let mut children = Vec::new();
         for task in tasks.flatten() {
-            if let Ok(content) =
-                std::fs::read_to_string(task.path().join("children"))
-            {
+            if let Ok(content) = std::fs::read_to_string(task.path().join("children")) {
                 children.extend(
                     content
                         .split_whitespace()

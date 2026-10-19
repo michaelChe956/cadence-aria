@@ -434,8 +434,11 @@ fn rewrite_lease_owner(
         .join("reviewer-windows")
         .join("leases")
         .join(format!("{tree_key}.json"));
-    std::fs::write(&path, serde_json::to_string(&lease).expect("serialize lease"))
-        .expect("rewrite lease owner");
+    std::fs::write(
+        &path,
+        serde_json::to_string(&lease).expect("serialize lease"),
+    )
+    .expect("rewrite lease owner");
 }
 
 /// 读取本树当前租约(owner 保持/接管断言用)。
@@ -1607,14 +1610,10 @@ async fn same_port_bind_failure_has_zero_startup_side_effects() {
     // 占住端口 → serve_web 在 bind 处失败。
     let blocker = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("blocker listener");
     let port = blocker.local_addr().expect("blocker addr").port();
-    let error = crate::web::app::serve_web(
-        fx.root.clone(),
-        "127.0.0.1".to_string(),
-        Some(port),
-        false,
-    )
-    .await
-    .expect_err("同端口 bind 必须失败");
+    let error =
+        crate::web::app::serve_web(fx.root.clone(), "127.0.0.1".to_string(), Some(port), false)
+            .await
+            .expect_err("同端口 bind 必须失败");
     assert!(
         error.to_string().contains("Address already in use"),
         "失败必须是 bind 冲突:{error}"
@@ -1727,11 +1726,7 @@ async fn unknown_owner_lease_fails_closed_stop_and_wait() {
         "停等不动窗口"
     );
     assert!(lease_held(&fx), "租约保持(不释放、不改写)");
-    assert_eq!(
-        current_lease(&fx).owner_pid,
-        0,
-        "owner 字段未被洗白"
-    );
+    assert_eq!(current_lease(&fx).owner_pid, 0, "owner 字段未被洗白");
     assert_eq!(
         fx.reload_attempt().status,
         CodingAttemptStatus::Running,
@@ -1744,10 +1739,7 @@ async fn unknown_owner_lease_fails_closed_stop_and_wait() {
         .redrive_reviewer_window_recovery_for_attempt(&fx.reload_attempt())
         .await
         .expect_err("unknown owner: redrive must stop and wait");
-    assert!(
-        error.to_string().contains("recovery_unresolved"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("recovery_unresolved"), "{error}");
     assert_eq!(
         fx.window_record(&fx.window_id).state,
         ReviewerWindowState::Running,
@@ -1786,7 +1778,10 @@ async fn preparing_without_lease_prefix_still_abandons() {
 
     let outcomes = run_startup_compensation(&fx).await;
     assert_eq!(outcomes.len(), 1);
-    assert!(outcomes[0].released, "未获租约的 Preparing 前缀必须照常弃置释放");
+    assert!(
+        outcomes[0].released,
+        "未获租约的 Preparing 前缀必须照常弃置释放"
+    );
     assert!(!outcomes[0].skipped_live_owner);
     assert_eq!(
         fx.window_record(&fx.window_id).state,

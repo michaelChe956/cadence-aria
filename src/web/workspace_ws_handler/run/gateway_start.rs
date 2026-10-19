@@ -653,7 +653,6 @@ pub(crate) async fn start_work_item_plan_author(
         })
 }
 
-
 fn map_gateway_error_to_adapter(error: &ProviderGatewayError) -> ProviderAdapterError {
     // 诊断直通（claude×轻 握手谜团第 2 轮）:Adapter 变体不再丢弃 stderr 字段——
     // stderr 尾部（有界）并入 details（随驱动 Err → EngineEvent::Error → WS error

@@ -37,9 +37,7 @@ pub(super) fn launch_provider_session<'a>(
     gateway: Option<
         &std::sync::Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
     >,
-    launch_ownership: Option<
-        crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
-    >,
+    launch_ownership: Option<crate::cross_cutting::provider_resources::TrustedLaunchOwnership>,
 ) -> std::pin::Pin<
     Box<
         dyn Future<

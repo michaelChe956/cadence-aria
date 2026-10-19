@@ -555,12 +555,12 @@ fn cli_adapter_bare_name_command_without_env_is_command_missing() {
         "fixture-provider",
         support::successful_provider_script(),
     );
-    let mut compatibility =
-        fixture_compatibility_entry(ProviderType::Fake, command);
-    compatibility.run_command = cadence_aria::cross_cutting::adapter_compatibility::CommandSpec::new(
-        "fixture-provider".to_string(),
-        vec!["run".to_string()],
-    );
+    let mut compatibility = fixture_compatibility_entry(ProviderType::Fake, command);
+    compatibility.run_command =
+        cadence_aria::cross_cutting::adapter_compatibility::CommandSpec::new(
+            "fixture-provider".to_string(),
+            vec!["run".to_string()],
+        );
     let worktree = tempfile::tempdir().expect("worktree");
     let adapter = CliProviderAdapter::new(CliAdapterConfig {
         compatibility,
@@ -586,12 +586,12 @@ fn cli_adapter_bare_name_command_resolves_via_frozen_env_path() {
         "fixture-provider",
         support::successful_provider_script(),
     );
-    let mut compatibility =
-        fixture_compatibility_entry(ProviderType::Fake, command);
-    compatibility.run_command = cadence_aria::cross_cutting::adapter_compatibility::CommandSpec::new(
-        "fixture-provider".to_string(),
-        vec!["run".to_string()],
-    );
+    let mut compatibility = fixture_compatibility_entry(ProviderType::Fake, command);
+    compatibility.run_command =
+        cadence_aria::cross_cutting::adapter_compatibility::CommandSpec::new(
+            "fixture-provider".to_string(),
+            vec!["run".to_string()],
+        );
     let worktree = tempfile::tempdir().expect("worktree");
     let adapter = CliProviderAdapter::new(CliAdapterConfig {
         compatibility,

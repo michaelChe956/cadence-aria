@@ -254,7 +254,9 @@ pub(crate) fn validate_carried_source_chain(
         .strip_prefix("carried:")
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .ok_or_else(|| format!("承继格 origin 非法(需 carried:<snapshot_id>):{execution_origin:?}"))?;
+        .ok_or_else(|| {
+            format!("承继格 origin 非法(需 carried:<snapshot_id>):{execution_origin:?}")
+        })?;
     for (label, digest) in [
         ("workspace", workspace_digest),
         ("aggregate", aggregate_digest),
@@ -272,10 +274,7 @@ pub(crate) fn validate_carried_source_chain(
     }
     let source_root = resolve_repo_relative(Path::new(source_evidence_root));
     if !source_root.is_dir() {
-        return Err(format!(
-            "承继格来源证据根不存在:{}",
-            source_root.display()
-        ));
+        return Err(format!("承继格来源证据根不存在:{}", source_root.display()));
     }
     let snapshot_directory = super::snapshot::snapshots_root(&source_root).join(snapshot_id);
     let manifest = super::snapshot::read_manifest(&snapshot_directory).map_err(|error| {
@@ -285,9 +284,21 @@ pub(crate) fn validate_carried_source_chain(
         )
     })?;
     for (label, carried, actual) in [
-        ("workspace", workspace_digest, manifest.workspace_digest.as_str()),
-        ("aggregate", aggregate_digest, manifest.aggregate_digest.as_str()),
-        ("capability", capability_digest, manifest.capability_digest.as_str()),
+        (
+            "workspace",
+            workspace_digest,
+            manifest.workspace_digest.as_str(),
+        ),
+        (
+            "aggregate",
+            aggregate_digest,
+            manifest.aggregate_digest.as_str(),
+        ),
+        (
+            "capability",
+            capability_digest,
+            manifest.capability_digest.as_str(),
+        ),
         ("policy", policy_digest, manifest.policy_digest.as_str()),
     ] {
         if carried != actual {
@@ -335,7 +346,9 @@ impl EvidenceCell {
             }
             return validate_carried_source_chain(
                 &self.execution_origin,
-                self.carried_source_evidence_root.as_deref().unwrap_or_default(),
+                self.carried_source_evidence_root
+                    .as_deref()
+                    .unwrap_or_default(),
                 &self.carried_workspace_digest,
                 &self.carried_aggregate_digest,
                 &self.carried_capability_digest,
@@ -3671,12 +3684,19 @@ impl MatrixEnvironment {
             };
             let aggregate_root_fixed = fixed_aggregate_root.map(|fixed| {
                 std::fs::create_dir_all(&fixed).expect("fixed aggregate root create");
-                fixed.canonicalize().expect("fixed aggregate root canonicalize")
+                fixed
+                    .canonicalize()
+                    .expect("fixed aggregate root canonicalize")
             });
             if aggregate_root_fixed.is_none() {
                 aggregate_root = Some(TempDir::new().expect("aggregate root"));
             }
-            (root, aggregate_root, workspace_root_path, aggregate_root_fixed)
+            (
+                root,
+                aggregate_root,
+                workspace_root_path,
+                aggregate_root_fixed,
+            )
         } else {
             let root = TempDir::new().expect("workspace root");
             let aggregate_root = TempDir::new().expect("aggregate root");
@@ -4788,8 +4808,7 @@ impl MatrixEnvironment {
         }
         observation.workspace_session_id = session_id.clone();
         self.prior_entity_session_id = Some(session_id.clone());
-        observation.spawn_audits_before =
-            Some(self.count_session_provider_starts(&session_id));
+        observation.spawn_audits_before = Some(self.count_session_provider_starts(&session_id));
 
         // r21 C1 根修:实体 fresh 以零确认预算停在人工门(author_confirm)。
         // Completed 是终态(spec-design-dialog-revision:确认定稿不再经过
@@ -4801,9 +4820,9 @@ impl MatrixEnvironment {
         let (drive, ws) = self
             .drive_workspace_session_ws(&session_id, &mut observation, 0, self.entity_stage_timeout)
             .await;
-        observation.observed_spawn_count =
-            self.count_session_provider_starts(&session_id)
-                .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
+        observation.observed_spawn_count = self
+            .count_session_provider_starts(&session_id)
+            .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
         // 产物=author 轮已生成的实体 spec(generate 响应携带 spec id),
         // gate_reached 证明 author run 完整驱动到门。
         observation.completed_product_artifact_exists = spec_captured && drive.gate_reached;
@@ -4845,8 +4864,7 @@ impl MatrixEnvironment {
                 .denied_cell("fresh 轮未达人工门(无干净的同连接会话可供门上修订)".to_string());
         };
         observation.workspace_session_id = session_id.clone();
-        observation.spawn_audits_before =
-            Some(self.count_session_provider_starts(&session_id));
+        observation.spawn_audits_before = Some(self.count_session_provider_starts(&session_id));
         fp(
             "resume_audit_scan_begin",
             format_args!("session={session_id}"),
@@ -4880,16 +4898,15 @@ impl MatrixEnvironment {
         let revision = self
             .pump_workspace_session(&mut ws, &mut observation, 1, self.entity_stage_timeout)
             .await;
-        observation.observed_spawn_count =
-            self.count_session_provider_starts(&session_id)
-                .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
+        observation.observed_spawn_count = self
+            .count_session_provider_starts(&session_id)
+            .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
         observation.completed_product_artifact_exists = revision.artifact_confirmed;
         // 原生恢复确认:revision 轮审计的 provider_session_id == 请求 id。
         observation.native_confirmed_id =
             self.latest_audit_native_id(&session_id, &self.provider, None);
         observation.finish_cell(self)
     }
-
 
     /// 连接 workspace 会话 WS 并完成 hello。
     async fn connect_session_ws(&self, session_id: &str) -> Result<LiveWs, String> {
@@ -5293,8 +5310,7 @@ impl MatrixEnvironment {
         }
         observation.workspace_session_id = session_id.clone();
         self.prior_plan_session_id = Some(session_id.clone());
-        observation.spawn_audits_before =
-            Some(self.count_session_provider_starts(&session_id));
+        observation.spawn_audits_before = Some(self.count_session_provider_starts(&session_id));
         // 预检:work item 列表直接取 plan DTO 的 work_item_ids(形态已核对),
         // 不依赖列表端点探测。
         if let Some(ids) = body["work_item_plan"]["work_item_ids"].as_array() {
@@ -5326,9 +5342,9 @@ impl MatrixEnvironment {
                 Some(self.provider.clone()),
             )
             .await;
-        observation.observed_spawn_count =
-            self.count_session_provider_starts(&session_id)
-                .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
+        observation.observed_spawn_count = self
+            .count_session_provider_starts(&session_id)
+            .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
         // r27 问题1:产物判定按停门模型差异化——plan 的产物分两级:候选
         // plan markdown(author 轮产出,fresh 格)与 confirmed plan(resume
         // 格 typed confirm 后,work item 才落库)。fresh 判定=产物 markdown
@@ -5409,10 +5425,7 @@ impl MatrixEnvironment {
     /// F1′(Bug45):读本轮权威 gate snapshot 的 `manual_repairs_remaining`
     /// (产品 durable 事实)。`Ok(None)`=会话存在但门快照缺失;`Err`=读取
     /// 失败——两者都不得回落默认额度猜测,调用侧保留真实错误并停发。
-    fn plan_gate_manual_repairs_remaining(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<u32>, String> {
+    fn plan_gate_manual_repairs_remaining(&self, session_id: &str) -> Result<Option<u32>, String> {
         let record = self
             .lifecycle
             .get_workspace_session(session_id)
@@ -5432,16 +5445,12 @@ impl MatrixEnvironment {
         session_id: &str,
         observation: &StageObservation,
     ) -> Option<String> {
-        let report_ref = observation
-            .events
-            .iter()
-            .rev()
-            .find_map(|event| {
-                event
-                    .pointer("/event/context/mechanical_report_ref")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })?;
+        let report_ref = observation.events.iter().rev().find_map(|event| {
+            event
+                .pointer("/event/context/mechanical_report_ref")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })?;
         if self.plan_id.is_empty() {
             fp(
                 "plan_sc_mechanical_findings_unavailable",
@@ -5454,20 +5463,21 @@ impl MatrixEnvironment {
             issue_id: self.issue_id.clone(),
             plan_id: self.plan_id.clone(),
         };
-        let report = match cadence_aria::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
-            self.app_paths.clone(),
-        )
-        .get_mechanical_report(&scope, &report_ref)
-        {
-            Ok(record) => record.report,
-            Err(error) => {
-                fp(
-                    "plan_sc_mechanical_findings_unavailable",
-                    format_args!("session={session_id} report={report_ref} error={error:?}"),
-                );
-                return None;
-            }
-        };
+        let report =
+            match cadence_aria::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
+                self.app_paths.clone(),
+            )
+            .get_mechanical_report(&scope, &report_ref)
+            {
+                Ok(record) => record.report,
+                Err(error) => {
+                    fp(
+                        "plan_sc_mechanical_findings_unavailable",
+                        format_args!("session={session_id} report={report_ref} error={error:?}"),
+                    );
+                    return None;
+                }
+            };
         if report.findings.is_empty() {
             return None;
         }
@@ -5519,8 +5529,7 @@ impl MatrixEnvironment {
             );
         };
         observation.workspace_session_id = session_id.to_string();
-        observation.spawn_audits_before =
-            Some(self.count_session_provider_starts(session_id));
+        observation.spawn_audits_before = Some(self.count_session_provider_starts(session_id));
         // r52(#2 收口):请求基准必须与修订 turn 实际携带的 resume id 同源
         //——author 面(work_item_splitter)最新审计。role 不过滤会读到
         // fresh 轮 cross-review reviewer 的 id(r52 现场:请求 7d13=
@@ -5612,32 +5621,32 @@ impl MatrixEnvironment {
                     )
                 }
             };
-        // ---- 阶段 2(r58 根修):等 SC 门重开(stage_change human_confirm)
-        // 才发 confirm。修订回门 ≠ 门开:产品合法走复评/修复循环(r58 现场
-        // reviewer 判修订版仍有缺陷→repairs_used=1/1 自动返修→再复评,全程
-        // stage=cross_review),confirm 仅在 human_confirm 放行(protocol.rs
-        // SC 矩阵)。旧定时发送=赌复评恰好在 confirm 被处理前回门:r57b
-        // 赌赢(confirm 排队 3min13s 后门开才被处理),r58 赌输(INVALID_
-        // MESSAGE_FOR_STAGE: confirm not allowed in stage cross_review)。
-        // 门帧驱动:期间 choice 语义应答/心跳照常,确定终态秒收口,阶段
-        // 超时兜底(有界,不空转)。
+            // ---- 阶段 2(r58 根修):等 SC 门重开(stage_change human_confirm)
+            // 才发 confirm。修订回门 ≠ 门开:产品合法走复评/修复循环(r58 现场
+            // reviewer 判修订版仍有缺陷→repairs_used=1/1 自动返修→再复评,全程
+            // stage=cross_review),confirm 仅在 human_confirm 放行(protocol.rs
+            // SC 矩阵)。旧定时发送=赌复评恰好在 confirm 被处理前回门:r57b
+            // 赌赢(confirm 排队 3min13s 后门开才被处理),r58 赌输(INVALID_
+            // MESSAGE_FOR_STAGE: confirm not allowed in stage cross_review)。
+            // 门帧驱动:期间 choice 语义应答/心跳照常,确定终态秒收口,阶段
+            // 超时兜底(有界,不空转)。
             if !gate_open {
                 break;
             }
-        // ---- 阶段 3:typed confirm → 泵至终态(stage completed/confirmed)。
-        // r34:v1.1 缺陷 #12 同族——首拍 approve 可撞 Final Compile
-        // recovery_required(「single-candidate approval compile failed; human
-        // gate remains open」)。按 v1.1 §5.1 先例续跑:发 WS
-        // work_item_plan_compile_recovery_action: continue 步进编译游标,
-        // 直至终态或真失败(有界 2 次;非该族失败不重试)。
+            // ---- 阶段 3:typed confirm → 泵至终态(stage completed/confirmed)。
+            // r34:v1.1 缺陷 #12 同族——首拍 approve 可撞 Final Compile
+            // recovery_required(「single-candidate approval compile failed; human
+            // gate remains open」)。按 v1.1 §5.1 先例续跑:发 WS
+            // work_item_plan_compile_recovery_action: continue 步进编译游标,
+            // 直至终态或真失败(有界 2 次;非该族失败不重试)。
             let mut recovery_actions_left = 2usize;
             let mut confirm_command = json!({"type": "confirm"});
             loop {
-            if let Err(error) = ws.send_json(&confirm_command).await {
-                observation.push_event(json!({"type": "matrix_error", "message": error}));
-                observation.run_failure = Some(format!("typed confirm 发送失败:{error}"));
-                return observation.finish_cell(self);
-            }
+                if let Err(error) = ws.send_json(&confirm_command).await {
+                    observation.push_event(json!({"type": "matrix_error", "message": error}));
+                    observation.run_failure = Some(format!("typed confirm 发送失败:{error}"));
+                    return observation.finish_cell(self);
+                }
                 let round_confirmed = matches!(
                     self.pump_plan_sc_phase(
                         &mut ws,
@@ -5685,8 +5694,8 @@ impl MatrixEnvironment {
             if plan_confirm_failure_is_mechanical(&observation) {
                 // F1′:额度耗尽/快照不可读时不构造返修轮,保留本轮真实
                 // confirm 失败文本(不被下面的清空覆盖)。
-                if let Err(stop) = feedback_budget
-                    .authorize(self.plan_gate_manual_repairs_remaining(session_id))
+                if let Err(stop) =
+                    feedback_budget.authorize(self.plan_gate_manual_repairs_remaining(session_id))
                 {
                     fp("plan_sc_feedback_budget_stop", format_args!("{stop}"));
                     break;
@@ -6357,14 +6366,13 @@ impl MatrixEnvironment {
         }
         observation.workspace_session_id = attempt_id.clone();
         self.prior_coding_session_id = Some(attempt_id.clone());
-        observation.spawn_audits_before =
-            Some(self.count_session_provider_starts(&attempt_id));
+        observation.spawn_audits_before = Some(self.count_session_provider_starts(&attempt_id));
         let drive = self
             .drive_coding_attempt_ws(&attempt_id, &mut observation)
             .await;
-        observation.observed_spawn_count =
-            self.count_session_provider_starts(&attempt_id)
-                .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
+        observation.observed_spawn_count = self
+            .count_session_provider_starts(&attempt_id)
+            .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
         observation.completed_product_artifact_exists = drive.artifact_confirmed;
         // F3:PID 取自该 attempt 的 provider stream log 目录(生产路径)。
         observation.observed_pid = self.scan_attempt_stream_log_pid(&attempt_id);
@@ -6381,8 +6389,7 @@ impl MatrixEnvironment {
         resume.action = "coding_workspace_write".to_string();
         resume.force_resume = true;
         resume.workspace_session_id = attempt_id.clone();
-        resume.spawn_audits_before =
-            Some(self.count_session_provider_starts(&attempt_id));
+        resume.spawn_audits_before = Some(self.count_session_provider_starts(&attempt_id));
         // F5(r58 深掏审计):两次 native 断言扫描必须按 executor 角色过滤
         //(与观测格 role 对齐,r50/r52 已修 plan author 与 review reviewer,
         // coding 未跟进)——attempt 分区内 review round 的 reviewer
@@ -6793,13 +6800,10 @@ impl MatrixEnvironment {
         }
         // r63(T22 b45 现场):review 载体 spec id 捕获(generate 响应携带,
         // fresh 产物判据=spec 在场×门到,与实体阶段同口径)。
-        let spec_captured = body["design_specs"][0]["design_spec_id"]
-            .as_str()
-            .is_some();
+        let spec_captured = body["design_specs"][0]["design_spec_id"].as_str().is_some();
         observation.workspace_session_id = session_id.clone();
         self.prior_review_session_id = Some(session_id.clone());
-        observation.spawn_audits_before =
-            Some(self.count_session_provider_starts(&session_id));
+        observation.spawn_audits_before = Some(self.count_session_provider_starts(&session_id));
         // r63 根修(T22 b45 现场协议错):review 段对齐实体阶段 r21 C1 模型
         // ——fresh 以零确认预算停在人工门(reviewer 轮在 author 产物后、
         // 门 confirm 前已跑完,评审证据不丢),连接留给 resume 格同连接
@@ -6810,9 +6814,9 @@ impl MatrixEnvironment {
         let (drive, gate_ws) = self
             .drive_workspace_session_ws(&session_id, &mut observation, 0, self.entity_stage_timeout)
             .await;
-        observation.observed_spawn_count =
-            self.count_session_provider_starts(&session_id)
-                .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
+        observation.observed_spawn_count = self
+            .count_session_provider_starts(&session_id)
+            .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
         observation.completed_product_artifact_exists = spec_captured && drive.gate_reached;
         cells.push(observation.build_cell(self));
 
@@ -6827,8 +6831,7 @@ impl MatrixEnvironment {
         resume.action = "review_read_only".to_string();
         resume.force_resume = true;
         resume.workspace_session_id = session_id.clone();
-        resume.spawn_audits_before =
-            Some(self.count_session_provider_starts(&session_id));
+        resume.spawn_audits_before = Some(self.count_session_provider_starts(&session_id));
         // 请求基准=修订 turn 实际携带的 resume id 同源:reviewer 面最新审计
         // (与 drive_entity_session_resume 的 author 面同构,role 过滤防读到
         // author 轮 id 造成假阳/假阴)。
@@ -6866,7 +6869,10 @@ impl MatrixEnvironment {
                 Some("review fresh 未达人工门(无干净的同连接会话可供门上修订)".to_string());
             return DriveOutcome::default();
         };
-        fp("review_gate_resume_begin", format_args!("session={session_id}"));
+        fp(
+            "review_gate_resume_begin",
+            format_args!("session={session_id}"),
+        );
         let revision = json!({
             "type": "request_revision",
             "feedback": {
@@ -7592,9 +7598,8 @@ impl PlanGateFeedbackBudget {
         Self {
             // 直接取产品 RunBudgets 默认的 max_manual_repairs(=3),不另立
             // 常量避免与产品口径漂移。
-            local_remaining:
-                cadence_aria::product::work_item_plan_policy::RunBudgets::default()
-                    .max_manual_repairs,
+            local_remaining: cadence_aria::product::work_item_plan_policy::RunBudgets::default()
+                .max_manual_repairs,
             sent_rounds: 0,
         }
     }
@@ -7672,12 +7677,12 @@ fn plan_confirm_failure_is_recoverable(failure_text: &str) -> bool {
 /// Failed(不依赖 run_failure 文本:recovery 白轮的 INVALID 错误会覆盖它)。
 fn plan_confirm_failure_is_mechanical(observation: &StageObservation) -> bool {
     observation.events.iter().rev().any(|event| {
-            event.pointer("/event/code").and_then(Value::as_str)
-                == Some("SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED")
-                && event
-                    .pointer("/event/context/cause")
-                    .and_then(Value::as_str)
-                    .is_some_and(|cause| cause.contains("MechanicalValidationFailed"))
+        event.pointer("/event/code").and_then(Value::as_str)
+            == Some("SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED")
+            && event
+                .pointer("/event/context/cause")
+                .and_then(Value::as_str)
+                .is_some_and(|cause| cause.contains("MechanicalValidationFailed"))
     })
 }
 
@@ -10039,9 +10044,13 @@ mod pump_disposition_tests {
             budget.authorize(Ok(None)),
             Err(PlanGateFeedbackStop::SnapshotUnavailable(_))
         ));
-        assert!(budget.authorize(Ok(None)).unwrap_err().diagnostic().contains(
-            "不回落默认额度"
-        ));
+        assert!(
+            budget
+                .authorize(Ok(None))
+                .unwrap_err()
+                .diagnostic()
+                .contains("不回落默认额度")
+        );
     }
 
     /// 产品额度低于本地总账时按产品权威取 min(如旧会话已消耗 2 轮)。
@@ -11112,7 +11121,7 @@ fn b45_host_command_sync(
                 "argv": [program, args.join(" ")],
                 "cwd": cwd.map(|path| path.display().to_string()),
                 "spawn_error": error.to_string(),
-            })
+            });
         }
     };
     let started = std::time::Instant::now();
@@ -11405,10 +11414,20 @@ CMD ["sh", "-c", "cat /tmp/run-marker.txt && echo T22 podman run ok"]
                     String::from_utf8_lossy(&output.stderr)
                 ));
             }
-            Ok(json!(String::from_utf8_lossy(&output.stdout).trim().to_string()))
+            Ok(json!(
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            ))
         };
         git_run(&["add", "fixtures"])?;
-        git_run(&["-c", "user.name=b45-fixture", "-c", "user.email=b45@aria.local", "commit", "-m", "b45: host check fixtures (maven/npm/podman)"])?;
+        git_run(&[
+            "-c",
+            "user.name=b45-fixture",
+            "-c",
+            "user.email=b45@aria.local",
+            "commit",
+            "-m",
+            "b45: host check fixtures (maven/npm/podman)",
+        ])?;
 
         Ok(json!({
             "fixture_root": B45_FIXTURE_ROOT,
@@ -11579,7 +11598,10 @@ CMD ["sh", "-c", "cat /tmp/run-marker.txt && echo T22 podman run ok"]
         let mut execution_events = 0u64;
         let deadline = tokio::time::Instant::now() + self.stage_timeout;
         let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
-        fp("b45_cancel_pump_begin", format_args!("attempt={attempt_id}"));
+        fp(
+            "b45_cancel_pump_begin",
+            format_args!("attempt={attempt_id}"),
+        );
         loop {
             if tokio::time::Instant::now() >= deadline {
                 outcome = json!({"timeout": true});
@@ -11798,7 +11820,10 @@ impl LiveLcGatewayHarness {
             .lock()
             .expect("b45 override lock")
             .take();
-        fp("b45_env_built", format_args!("lc={} issue={}", env.lc_id, env.issue_id));
+        fp(
+            "b45_env_built",
+            format_args!("lc={} issue={}", env.lc_id, env.issue_id),
+        );
 
         // 1) fixture:源 /tmp/aria-bug45/t22 → 成员仓提交;工具版本/预热取证。
         let fixtures = env.b45_seed_fixtures().map_err(|message| {
@@ -11823,7 +11848,10 @@ impl LiveLcGatewayHarness {
                 "story_specs",
             )
             .await;
-        fp("b45_stage_end", format_args!("story cells={}", story_cells.len()));
+        fp(
+            "b45_stage_end",
+            format_args!("story cells={}", story_cells.len()),
+        );
         fp("b45_stage_begin", "design");
         let design_cells = env
             .run_workspace_entity_stage(
@@ -11841,12 +11869,18 @@ impl LiveLcGatewayHarness {
                 "design_specs",
             )
             .await;
-        fp("b45_stage_end", format_args!("design cells={}", design_cells.len()));
+        fp(
+            "b45_stage_end",
+            format_args!("design cells={}", design_cells.len()),
+        );
 
         // 3) 规划合法 terminal:plan streaming(SC 单候选→Confirmed)。
         fp("b45_stage_begin", "plan");
         let plan_cells = env.run_plan_streaming_stage().await;
-        fp("b45_stage_end", format_args!("plan cells={}", plan_cells.len()));
+        fp(
+            "b45_stage_end",
+            format_args!("plan cells={}", plan_cells.len()),
+        );
         env.resolve_first_work_item().await;
 
         // 4) Coder 自跑(Auto):组入口建 attempt→WS 驱动(CHECK 由 Kimi
@@ -11874,7 +11908,9 @@ impl LiveLcGatewayHarness {
                 fp_enter_phase("b45", "coding-main", FRESH);
                 observation.role = CODING_EXECUTOR_ROLE.to_string();
                 observation.workspace_session_id = attempt_id.clone();
-                let drive = env.drive_coding_attempt_ws(&attempt_id, &mut observation).await;
+                let drive = env
+                    .drive_coding_attempt_ws(&attempt_id, &mut observation)
+                    .await;
                 // r67(T22 r5 现场):b45 未回填产物判据——drive 已到终门
                 // (artifact_confirmed=true)而 cell 以缺产物误判 denied(coder
                 // 职责终态随之缺)。与五阶段矩阵 run_coding_stage 同口径回填。
@@ -11901,8 +11937,7 @@ impl LiveLcGatewayHarness {
                         .filter_map(Result::ok)
                         .map(|entry| entry.path())
                         .filter(|path| {
-                            path.extension()
-                                .is_some_and(|extension| extension == "log")
+                            path.extension().is_some_and(|extension| extension == "log")
                                 && path
                                     .file_name()
                                     .and_then(|name| name.to_str())
@@ -11945,7 +11980,10 @@ impl LiveLcGatewayHarness {
         // 5) Reviewer 有窗:design review round(真实现体评审)。
         fp("b45_stage_begin", "review");
         let review_cells = env.run_review_stage().await;
-        fp("b45_stage_end", format_args!("review cells={}", review_cells.len()));
+        fp(
+            "b45_stage_end",
+            format_args!("review cells={}", review_cells.len()),
+        );
 
         // 6) 取消格:同 plan 新 attempt,Supervised/拒绝/批准/AbortAttempt。
         fp("b45_stage_begin", "cancel-cell");
@@ -11996,7 +12034,8 @@ impl LiveLcGatewayHarness {
                 )
                 .await;
                 if !status.is_success() {
-                    cancel_cell = json!({"error": format!("取消格 attempt 创建失败({status}):{body}")});
+                    cancel_cell =
+                        json!({"error": format!("取消格 attempt 创建失败({status}):{body}")});
                 } else {
                     let attempt_id = body["attempt_id"].as_str().unwrap_or_default().to_string();
                     cancel_cell = env.drive_b45_cancel_cell(&attempt_id).await;
@@ -12320,7 +12359,9 @@ fn b45_make_executable(path: &Path) -> Result<(), String> {
 
 /// tree_key(镜像产线 `tree_key_of`:canonical 路径字符串 sha256)。
 fn b45_t24_tree_key(worktree: &Path) -> String {
-    let canonical = worktree.canonicalize().unwrap_or_else(|_| worktree.to_path_buf());
+    let canonical = worktree
+        .canonicalize()
+        .unwrap_or_else(|_| worktree.to_path_buf());
     let digest = Sha256::digest(canonical.display().to_string().as_bytes());
     hex::encode(digest)
 }
@@ -12368,8 +12409,11 @@ fn b45_t24_preset_resource_record(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap_or_default())
-        .map_err(|error| format!("{}: {error}", path.display()))?;
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&record).unwrap_or_default(),
+    )
+    .map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(path)
 }
 
@@ -12424,8 +12468,9 @@ impl B45T24Server {
 
     /// 完成认证交换(token→会话 cookie)。
     pub(crate) async fn authenticate(&mut self) -> Result<String, String> {
-        let token =
-            self.bootstrap_token().ok_or("bootstrap token 未交付(pty 日志无 token 行)")?;
+        let token = self
+            .bootstrap_token()
+            .ok_or("bootstrap token 未交付(pty 日志无 token 行)")?;
         let client = reqwest::Client::new();
         let response = client
             .post(format!("http://127.0.0.1:{}/api/auth/session", self.port))
@@ -12508,7 +12553,9 @@ async fn b45_t24_spawn_server(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let child = command.spawn().map_err(|error| format!("script 派生失败:{error}"))?;
+    let child = command
+        .spawn()
+        .map_err(|error| format!("script 派生失败:{error}"))?;
     let mut server = B45T24Server {
         child,
         port,
@@ -12527,9 +12574,14 @@ async fn b45_t24_spawn_server(
             ));
         }
         if server.bootstrap_token().is_some()
-            && tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok()
+            && tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
         {
-            fp("t24_server_ready", format_args!("label={label} port={port}"));
+            fp(
+                "t24_server_ready",
+                format_args!("label={label} port={port}"),
+            );
             return Ok(server);
         }
         if let Ok(Some(_)) = server.child.try_wait() {
@@ -12543,14 +12595,12 @@ async fn b45_t24_spawn_server(
 }
 
 /// 远程 WS 连接(真实服务;Origin+Cookie 认证头)。
-async fn b45_t24_connect_remote_ws(
-    port: u16,
-    cookie: &str,
-    path: &str,
-) -> Result<LiveWs, String> {
+async fn b45_t24_connect_remote_ws(port: u16, cookie: &str, path: &str) -> Result<LiveWs, String> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let url = format!("ws://127.0.0.1:{port}{path}");
-    let mut request = url.into_client_request().map_err(|error| error.to_string())?;
+    let mut request = url
+        .into_client_request()
+        .map_err(|error| error.to_string())?;
     let headers = request.headers_mut();
     headers.insert(
         "Origin",
@@ -12559,7 +12609,9 @@ async fn b45_t24_connect_remote_ws(
             .expect("origin header"),
     );
     headers.insert("Cookie", cookie.parse().expect("cookie header"));
-    let (stream, _) = connect_async(request).await.map_err(|error| error.to_string())?;
+    let (stream, _) = connect_async(request)
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(LiveWs { inner: stream })
 }
 
@@ -12575,16 +12627,13 @@ async fn b45_t24_remote_attempt_pump(
     stop_after: Option<Duration>,
     timeout: Duration,
 ) -> Value {
-    let mut ws = match b45_t24_connect_remote_ws(
-        port,
-        cookie,
-        &format!("/ws/coding-attempts/{attempt_id}"),
-    )
-    .await
-    {
-        Ok(ws) => ws,
-        Err(error) => return json!({"connect_error": error}),
-    };
+    let mut ws =
+        match b45_t24_connect_remote_ws(port, cookie, &format!("/ws/coding-attempts/{attempt_id}"))
+            .await
+        {
+            Ok(ws) => ws,
+            Err(error) => return json!({"connect_error": error}),
+        };
     if let Err(error) = ws
         .send_json(&json!({
             "type": "coding_hello",
@@ -12605,7 +12654,10 @@ async fn b45_t24_remote_attempt_pump(
     let started = tokio::time::Instant::now();
     let deadline = started + timeout;
     let mut idle_deadline = tokio::time::Instant::now() + IDLE_PING_SECS;
-    fp("t24_remote_pump_begin", format_args!("attempt={attempt_id} start={start}"));
+    fp(
+        "t24_remote_pump_begin",
+        format_args!("attempt={attempt_id} start={start}"),
+    );
     loop {
         if tokio::time::Instant::now() >= deadline {
             events.push(json!({"type": "t24_pump_timeout"}));
@@ -12797,7 +12849,13 @@ impl MatrixEnvironment {
         }
         let image_probe = b45_host_command_sync(
             "podman",
-            &["image", "inspect", "docker.io/library/ubuntu:24.04", "--format", "{{.Id}}"],
+            &[
+                "image",
+                "inspect",
+                "docker.io/library/ubuntu:24.04",
+                "--format",
+                "{{.Id}}",
+            ],
             None,
             60,
         );
@@ -12821,11 +12879,13 @@ impl MatrixEnvironment {
         let scenario_dir = PathBuf::from(B45_T24_FIXTURE_ROOT).join(scenario.label());
         let mut verify_normal = std::fs::read_to_string(scenario_dir.join("verify-normal.sh"))
             .map_err(|e| e.to_string())?;
-        let mut verify_violation = std::fs::read_to_string(scenario_dir.join("verify-violation.sh"))
-            .map_err(|e| e.to_string())?;
+        let mut verify_violation =
+            std::fs::read_to_string(scenario_dir.join("verify-violation.sh"))
+                .map_err(|e| e.to_string())?;
         let aria_root_text = aria_root.display().to_string();
         verify_normal = verify_normal.replace(aria_root_placeholder_marker(), &aria_root_text);
-        verify_violation = verify_violation.replace(aria_root_placeholder_marker(), &aria_root_text);
+        verify_violation =
+            verify_violation.replace(aria_root_placeholder_marker(), &aria_root_text);
 
         let target = self.member_worktree.join("fixtures/pi-incident");
         std::fs::create_dir_all(&target).map_err(|error| error.to_string())?;
@@ -12835,7 +12895,11 @@ impl MatrixEnvironment {
             .map_err(|e| e.to_string())?;
         std::fs::write(target.join("verify-violation.sh"), verify_violation)
             .map_err(|e| e.to_string())?;
-        for script in ["build-residue.sh", "verify-normal.sh", "verify-violation.sh"] {
+        for script in [
+            "build-residue.sh",
+            "verify-normal.sh",
+            "verify-violation.sh",
+        ] {
             b45_make_executable(&target.join(script))?;
         }
         // .gitignore:build-out/ 与 coder-ignored.log(ignored 文件跨平台
@@ -12967,7 +13031,11 @@ impl MatrixEnvironment {
                     .filter(|chunk| !chunk.is_empty())
                     .map(|chunk| {
                         let code = chunk.get(0..2).unwrap_or_default().to_string();
-                        let path = if chunk.len() > 3 { chunk[3..].to_string() } else { chunk.to_string() };
+                        let path = if chunk.len() > 3 {
+                            chunk[3..].to_string()
+                        } else {
+                            chunk.to_string()
+                        };
                         json!({"code": code, "path": path})
                     })
                     .collect();
@@ -13028,10 +13096,15 @@ impl LiveLcGatewayHarness {
             .lock()
             .expect("b45 override lock")
             .take();
-        fp("t24_env_built", format_args!("lc={} issue={}", env.lc_id, env.issue_id));
-        let fixtures = env.b45_t24_seed_fixture(scenario, &env.app_paths.root()).map_err(|message| {
-            matrix_failure("b45_t24_fixture_prerequisite_missing", message, Some("env"))
-        })?;
+        fp(
+            "t24_env_built",
+            format_args!("lc={} issue={}", env.lc_id, env.issue_id),
+        );
+        let fixtures = env
+            .b45_t24_seed_fixture(scenario, &env.app_paths.root())
+            .map_err(|message| {
+                matrix_failure("b45_t24_fixture_prerequisite_missing", message, Some("env"))
+            })?;
 
         // 实体/规划阶段(与 host_check 同构;plan 后解析首个 work item)。
         let story_cells = env
@@ -13152,7 +13225,10 @@ impl LiveLcGatewayHarness {
         // 终局观测:窗口面/资源面/worktree 终态/报告采信/裸远端头。
         let windows_final = env.b45_t24_reviewer_window_snapshot();
         let scopes_final = env.b45_t24_resource_scope_snapshot();
-        let attempt_id = coding_main["attempt_id"].as_str().unwrap_or_default().to_string();
+        let attempt_id = coding_main["attempt_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         let worktree_final = if attempt_id.is_empty() {
             json!(null)
         } else {
@@ -13212,8 +13288,9 @@ impl LiveLcGatewayHarness {
             });
             // 窗口外对照:成员仓(无开窗树)真实 commit+push。
             let control_file = env.member_worktree.join("coder-out-of-window.txt");
-            std::fs::write(&control_file, "b45-t24 out-of-window control\n")
-                .map_err(|error| matrix_failure("t24_control_write_failed", error.to_string(), None))?;
+            std::fs::write(&control_file, "b45-t24 out-of-window control\n").map_err(|error| {
+                matrix_failure("t24_control_write_failed", error.to_string(), None)
+            })?;
             let member = env.member_worktree.display().to_string();
             let git_output = |args: &[&str]| {
                 std::process::Command::new("git")
@@ -13233,15 +13310,14 @@ impl LiveLcGatewayHarness {
                 "b45-t24: out-of-window coder commit (control)",
             ]);
             let push = git_output(&["push", "origin", "HEAD:master"]);
-            let summarize_result =
-                |result: std::io::Result<std::process::Output>| match result {
-                    Ok(output) => json!({
-                        "exit": output.status.code(),
-                        "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
-                        "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
-                    }),
-                    Err(error) => json!({"launch_error": error.to_string()}),
-                };
+            let summarize_result = |result: std::io::Result<std::process::Output>| match result {
+                Ok(output) => json!({
+                    "exit": output.status.code(),
+                    "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+                    "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+                }),
+                Err(error) => json!({"launch_error": error.to_string()}),
+            };
             let add = summarize_result(add);
             let commit = summarize_result(commit);
             let push = summarize_result(push);
@@ -13393,13 +13469,18 @@ impl LiveLcGatewayHarness {
         let aggregate = env.aggregate_root_path().to_path_buf();
         let _bare_keepalive = env._bare_origin_root.take().expect("bare origin root");
         drop(env);
-        fp("t24_handover", format_args!("workspace={}", workspace.display()));
+        fp(
+            "t24_handover",
+            format_args!("workspace={}", workspace.display()),
+        );
 
         // ---- 3) 派生真实服务 #1 + 认证 ----
         let port = t24_pick_port().await;
-        let mut server = b45_t24_spawn_server(&workspace, port, "drill-a").await.map_err(|message| {
-            matrix_failure("b45_t24_server_spawn_failed", message, Some("crash"))
-        })?;
+        let mut server = b45_t24_spawn_server(&workspace, port, "drill-a")
+            .await
+            .map_err(|message| {
+                matrix_failure("b45_t24_server_spawn_failed", message, Some("crash"))
+            })?;
         server.authenticate().await.map_err(|message| {
             matrix_failure("b45_t24_server_auth_failed", message, Some("crash"))
         })?;
@@ -13502,13 +13583,16 @@ impl LiveLcGatewayHarness {
                 real_registrations_at_kill.len()
             ),
         );
-        let pump_a_result = pump_a.await.unwrap_or_else(|error| json!({"join_error": error.to_string()}));
+        let pump_a_result = pump_a
+            .await
+            .unwrap_or_else(|error| json!({"join_error": error.to_string()}));
 
         // ---- 5) 重启(#2):启动补偿先行(停旧 writer/清登记容器/原
         //         manifest 续恢复/三域核对)——端口/token 就绪即补偿已过 ----
         let port_two = t24_pick_port().await;
-        let mut server_two =
-            b45_t24_spawn_server(&workspace, port_two, "drill-a-restart").await.map_err(|message| {
+        let mut server_two = b45_t24_spawn_server(&workspace, port_two, "drill-a-restart")
+            .await
+            .map_err(|message| {
                 matrix_failure("b45_t24_server_spawn_failed", message, Some("crash"))
             })?;
         let restarted_observed_at = Utc::now().to_rfc3339();
@@ -13519,7 +13603,13 @@ impl LiveLcGatewayHarness {
         let window_one_terminal = b45_t24_wait_window_state(
             &app_root,
             &attempt_one,
-            &["closed_invalidated", "new_review_required", "closed_accepted", "manual_gate", "recovery_required"],
+            &[
+                "closed_invalidated",
+                "new_review_required",
+                "closed_accepted",
+                "manual_gate",
+                "recovery_required",
+            ],
             Duration::from_secs(300),
         )
         .await;
@@ -13566,8 +13656,11 @@ impl LiveLcGatewayHarness {
         let attempt_one_state = t24_attempt_state(&app_root, &issue_id, &attempt_one);
         let role_runs_final = t24_read_role_runs(&app_root, &issue_id, &attempt_one);
         let windows_final_a = b45_t24_read_windows(&app_root);
-        let reviewer_silent_gap_secs =
-            b45_t24_max_silent_gap_secs(&b45_t24_role_event_rows(&app_root, &issue_id, &attempt_one));
+        let reviewer_silent_gap_secs = b45_t24_max_silent_gap_secs(&b45_t24_role_event_rows(
+            &app_root,
+            &issue_id,
+            &attempt_one,
+        ));
         // A7(a):journal 收敛观察——重启后续驱(评审放行→评审提交重入)把
         // commit_started 的 journal 推进到终态;有界等待后如实记录收敛
         // 时刻/终相位(未收敛=现场失败,不伪造)。
@@ -13642,18 +13735,20 @@ impl LiveLcGatewayHarness {
                         });
                         if let Some(worktree_two) = worktree_two {
                             let tree_key_two = b45_t24_tree_key(&worktree_two);
-                            let mut daemon_two = b45_t24_spawn_daemon(1800)
-                                .map_err(|message| {
-                                    matrix_failure(
-                                        "b45_t24_daemon_spawn_failed",
-                                        message.to_string(),
-                                        Some("crash"),
-                                    )
-                                })?;
+                            let mut daemon_two = b45_t24_spawn_daemon(1800).map_err(|message| {
+                                matrix_failure(
+                                    "b45_t24_daemon_spawn_failed",
+                                    message.to_string(),
+                                    Some("crash"),
+                                )
+                            })?;
                             let daemon_two_pid = daemon_two.id();
                             let mut labels = BTreeMap::new();
                             labels.insert("aria.worktree".to_string(), tree_key_two.clone());
-                            labels.insert("kind".to_string(), "b45-t24-unconfirmed-writer".to_string());
+                            labels.insert(
+                                "kind".to_string(),
+                                "b45-t24-unconfirmed-writer".to_string(),
+                            );
                             let unconfirmed_path = b45_t24_preset_resource_record(
                                 &app_root,
                                 "b45-t24-park",
@@ -13679,7 +13774,8 @@ impl LiveLcGatewayHarness {
                             // 记录**(无登记记录的未知容器:平台无从证明
                             // 归属,只许停等、不得 kill/clean)。
                             let container = b45_t24_podman_run_park_container(&tree_key_two);
-                            park["unconfirmed_record"] = json!(unconfirmed_path.display().to_string());
+                            park["unconfirmed_record"] =
+                                json!(unconfirmed_path.display().to_string());
                             park["container"] = match &container {
                                 Ok((exact_id, name)) => json!({
                                     "exact_id": exact_id,
@@ -13695,7 +13791,8 @@ impl LiveLcGatewayHarness {
                             let windows_b_at_kill = b45_t24_read_windows(&app_root);
                             // A7(b) 停等期 audits 基线(provider-resources
                             // 登记面 path+摘要):park 期间必须逐字不变。
-                            let park_audits_before = t24_resource_audit_lines(&app_root, "b45-t24-park");
+                            let park_audits_before =
+                                t24_resource_audit_lines(&app_root, "b45-t24-park");
                             server_two.kill_process_group();
                             let daemon_two_alive_after_kill = b45_t24_pid_alive(daemon_two_pid);
                             let container_alive_after_kill = container
@@ -13705,19 +13802,16 @@ impl LiveLcGatewayHarness {
                             // 重启 #3:补偿必须停等(未确认 writer/容器观察
                             // 通道缺失)——保持锁,不误杀。
                             let port_three = t24_pick_port().await;
-                            let mut server_three = b45_t24_spawn_server(
-                                &workspace,
-                                port_three,
-                                "drill-b-restart",
-                            )
-                            .await
-                            .map_err(|message| {
-                                matrix_failure(
-                                    "b45_t24_server_spawn_failed",
-                                    message,
-                                    Some("crash"),
-                                )
-                            })?;
+                            let mut server_three =
+                                b45_t24_spawn_server(&workspace, port_three, "drill-b-restart")
+                                    .await
+                                    .map_err(|message| {
+                                        matrix_failure(
+                                            "b45_t24_server_spawn_failed",
+                                            message,
+                                            Some("crash"),
+                                        )
+                                    })?;
                             let park_state = b45_t24_wait_window_state(
                                 &app_root,
                                 &attempt_two,
@@ -13726,16 +13820,16 @@ impl LiveLcGatewayHarness {
                             )
                             .await;
                             let park_log = server_three.log_text();
-                            let daemon_two_alive_after_restart =
-                                b45_t24_pid_alive(daemon_two_pid);
+                            let daemon_two_alive_after_restart = b45_t24_pid_alive(daemon_two_pid);
                             let container_alive_after_restart = container
                                 .as_ref()
                                 .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
                                 .unwrap_or(false);
                             // A7(b):park 后登记面 audits 对照(不 clean 证明)。
-                            let park_audits_after = t24_resource_audit_lines(&app_root, "b45-t24-park");
-                            let park_audits_unchanged =
-                                park_audits_before == park_audits_after && !park_audits_before.is_empty();
+                            let park_audits_after =
+                                t24_resource_audit_lines(&app_root, "b45-t24-park");
+                            let park_audits_unchanged = park_audits_before == park_audits_after
+                                && !park_audits_before.is_empty();
                             let parked = park_state["matched"].as_bool() == Some(true);
                             let lease_after_park = t24_read_leases(&app_root);
                             // 新材料必须被拒(锁保持):attach 后无新窗口可开
@@ -13762,23 +13856,24 @@ impl LiveLcGatewayHarness {
                             t24_deregister_record(&app_root, &unconfirmed_path);
                             // 重启 #4:人工处置后续接 → 释放。
                             let port_four = t24_pick_port().await;
-                            let mut server_four = b45_t24_spawn_server(
-                                &workspace,
-                                port_four,
-                                "drill-b-resolved",
-                            )
-                            .await
-                            .map_err(|message| {
-                                matrix_failure(
-                                    "b45_t24_server_spawn_failed",
-                                    message,
-                                    Some("crash"),
-                                )
-                            })?;
+                            let mut server_four =
+                                b45_t24_spawn_server(&workspace, port_four, "drill-b-resolved")
+                                    .await
+                                    .map_err(|message| {
+                                        matrix_failure(
+                                            "b45_t24_server_spawn_failed",
+                                            message,
+                                            Some("crash"),
+                                        )
+                                    })?;
                             let resolved_state = b45_t24_wait_window_state(
                                 &app_root,
                                 &attempt_two,
-                                &["closed_invalidated", "new_review_required", "closed_accepted"],
+                                &[
+                                    "closed_invalidated",
+                                    "new_review_required",
+                                    "closed_accepted",
+                                ],
                                 Duration::from_secs(300),
                             )
                             .await;
@@ -13838,7 +13933,8 @@ impl LiveLcGatewayHarness {
                         json!({"window_running": false})
                     };
                     let _ = pump_b.await;
-                    if drill_b.get("skipped").is_none() && drill_b.get("windows_at_kill").is_none() {
+                    if drill_b.get("skipped").is_none() && drill_b.get("windows_at_kill").is_none()
+                    {
                         // 窗口未 Running:如实记录(park 臂未演练)。
                         drill_b = json!({
                             "skipped": "attempt #2 窗口未达 Running",
@@ -13906,8 +14002,8 @@ impl LiveLcGatewayHarness {
         for provider in providers {
             let label = b45_t24_cancel_provider_label(provider).to_string();
             fp_enter_phase("b45-t24", "cancel-cell", &label);
-            let env = MatrixEnvironment::build(provider.clone(), &evidence_root.join(&label))
-                .await?;
+            let env =
+                MatrixEnvironment::build(provider.clone(), &evidence_root.join(&label)).await?;
             if env.plan_id.is_empty() {
                 cells.insert(
                     label.clone(),
@@ -14147,7 +14243,10 @@ fn b45_t24_pid_alive(pid: u32) -> bool {
 /// 真实守护进程(sleep;独立进程组——服务组 kill 不波及)。
 fn b45_t24_spawn_daemon(secs: u64) -> std::io::Result<std::process::Child> {
     let mut command = std::process::Command::new("sleep");
-    command.arg(secs.to_string()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    command
+        .arg(secs.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
@@ -14181,7 +14280,10 @@ fn b45_t24_podman_run_park_container(tree_key: &str) -> Result<(String, String),
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok((String::from_utf8_lossy(&output.stdout).trim().to_string(), name))
+    Ok((
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        name,
+    ))
 }
 
 /// 容器运行中(podman inspect)。
@@ -14190,8 +14292,7 @@ fn b45_t24_podman_container_running(exact_id: &str) -> bool {
         .args(["inspect", "--format", "{{.State.Running}}", exact_id])
         .output()
         .map(|output| {
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout).trim() == "true"
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
         })
         .unwrap_or(false)
 }
@@ -14289,10 +14390,12 @@ async fn t24_wait_registered_writer(
     let start = std::time::Instant::now();
     loop {
         let scopes = t24_read_resource_scopes(app_root);
-        let present = t24_real_registrations(&scopes, tree_key).iter().any(|registration| {
-            registration["cleanup_cursor"].as_str() == Some("confirmed")
-                && registration["worktree_label"].as_str() == Some(tree_key)
-        });
+        let present = t24_real_registrations(&scopes, tree_key)
+            .iter()
+            .any(|registration| {
+                registration["cleanup_cursor"].as_str() == Some("confirmed")
+                    && registration["worktree_label"].as_str() == Some(tree_key)
+            });
         if present || start.elapsed() >= deadline {
             return scopes;
         }
@@ -14418,14 +14521,11 @@ async fn t24_wait_git_operation_terminal(
 /// 窗口 #1 释放(恢复完成)事实:最后一条到终态的 transition 时刻 +
 /// 终态标签(durable;无= None)。
 fn t24_window_release_fact(windows: &Value, attempt_id: &str) -> Value {
-    let Some(window) = windows
-        .as_array()
-        .and_then(|windows| {
-            windows
-                .iter()
-                .find(|window| window["attempt_id"].as_str() == Some(attempt_id))
-        })
-    else {
+    let Some(window) = windows.as_array().and_then(|windows| {
+        windows
+            .iter()
+            .find(|window| window["attempt_id"].as_str() == Some(attempt_id))
+    }) else {
         return json!({"released_at": Value::Null, "terminal_state": Value::Null});
     };
     let terminal_state = window["state"].as_str().unwrap_or_default().to_string();
@@ -14494,7 +14594,9 @@ fn t24_resource_audit_lines(app_root: &Path, scope_id: &str) -> Vec<String> {
             if !path.contains(&scope_fragment) {
                 return None;
             }
-            let canonical = Path::new(&path).canonicalize().unwrap_or_else(|_| PathBuf::from(&path));
+            let canonical = Path::new(&path)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(&path));
             let digest = std::fs::read(&canonical)
                 .map(|bytes| hex::encode(Sha256::digest(bytes)))
                 .unwrap_or_default();
@@ -14504,7 +14606,6 @@ fn t24_resource_audit_lines(app_root: &Path, scope_id: &str) -> Vec<String> {
     lines.sort();
     lines
 }
-
 
 /// role run 事件行(F3:读 `role-run-events/*.jsonl` 每行的 created_at——
 /// durable 事件事实是静默跨度的唯一时序源;pump 帧顶层无 ts,role run
@@ -14528,8 +14629,7 @@ fn b45_t24_role_event_rows(app_root: &Path, issue_id: &str, attempt_id: &str) ->
             if let Ok(text) = std::fs::read_to_string(&path) {
                 for line in text.lines() {
                     if let Ok(event) = serde_json::from_str::<Value>(line)
-                        && let Some(created_at) =
-                            event.get("created_at").and_then(Value::as_str)
+                        && let Some(created_at) = event.get("created_at").and_then(Value::as_str)
                     {
                         rows.push(json!({"created_at": created_at}));
                     }
