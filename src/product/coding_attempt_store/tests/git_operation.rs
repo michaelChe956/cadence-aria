@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::setup;
 use crate::product::coding_attempt_store::{
@@ -7,6 +7,49 @@ use crate::product::coding_attempt_store::{
 };
 use crate::product::coding_models::{PushStatus, RemoteKind};
 use crate::product::json_store::ProductStoreError;
+
+fn run_test_git(cwd: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|error| panic!("git {} failed to start: {error}", args.join(" ")));
+    assert!(
+        output.status.success(),
+        "git {} failed\nstdout:\n{}\nstderr:\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// ReviewRequest journal 进入 reviewer 写通道前要求 worktree 可 canonicalize
+/// 且 `.git` gitfile / commondir 可解析；测试必须使用真实 git repo + worktree，
+/// 且路径来自本用例 TempDir（不得硬编码共享 /tmp 路径，避免并行用例互踩）。
+fn init_review_repo_worktree(root: &Path, branch_name: &str) -> (PathBuf, PathBuf) {
+    let repo_path = root.join("repo");
+    std::fs::create_dir_all(&repo_path).expect("create repo dir");
+    run_test_git(&repo_path, &["init"]);
+    run_test_git(&repo_path, &["config", "user.email", "aria@example.com"]);
+    run_test_git(&repo_path, &["config", "user.name", "Aria Test"]);
+    std::fs::write(repo_path.join("README.md"), "initial\n").expect("seed file");
+    run_test_git(&repo_path, &["add", "."]);
+    run_test_git(&repo_path, &["commit", "-m", "initial"]);
+    let worktree_path = repo_path.join(".worktrees/aria-work-items/work_item_0001/attempt-1");
+    std::fs::create_dir_all(worktree_path.parent().expect("worktree parent"))
+        .expect("create worktree parent");
+    run_test_git(
+        &repo_path,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            branch_name,
+            worktree_path.to_str().expect("utf-8 worktree path"),
+        ],
+    );
+    (repo_path, worktree_path)
+}
 
 #[test]
 fn coding_git_operation_journal_is_identity_strict_and_phase_monotonic() {
@@ -74,8 +117,8 @@ fn coding_git_operation_journal_is_identity_strict_and_phase_monotonic() {
 #[test]
 fn review_git_operation_requires_commit_identity_and_durable_completion_outcome() {
     let (tmp, store, attempt) = setup();
-    let repo_path = tmp.path().join("repo");
-    let worktree_path = repo_path.join(".worktrees/aria-work-items/work_item_0001/attempt-1");
+    let (repo_path, worktree_path) =
+        init_review_repo_worktree(tmp.path(), &attempt.branch_name);
     let attempt = store
         .update_attempt_worktree_path(
             &attempt.project_id,
@@ -182,14 +225,15 @@ fn review_git_operation_requires_commit_identity_and_durable_completion_outcome(
 }
 
 fn completed_review_journal(
+    tmp: &tempfile::TempDir,
     store: &crate::product::coding_attempt_store::CodingAttemptStore,
     attempt: &crate::product::coding_models::CodingExecutionAttempt,
     push_status: PushStatus,
 ) -> crate::product::coding_attempt_store::CodingGitOperationJournal {
-    // repo/worktree 路径与 setup() 约定一致；review journal 只校验 identity 不校验 git 事实。
-    let repo_path = PathBuf::from("/tmp/review-retry-repo");
-    let worktree_path =
-        PathBuf::from("/tmp/review-retry-repo/.worktrees/aria-work-items/work_item_0001/attempt-1");
+    // ReviewRequest journal 只校验 identity、不校验 git 事实,但进入 reviewer
+    // 写通道前必须解析到真实 worktree 的 gitdir/common-dir。
+    let (repo_path, worktree_path) =
+        init_review_repo_worktree(tmp.path(), &attempt.branch_name);
     let attempt = store
         .update_attempt_worktree_path(
             &attempt.project_id,
@@ -254,8 +298,8 @@ fn completed_review_journal(
 
 #[test]
 fn reopen_failed_review_git_operation_reopens_completed_failed_to_push_started() {
-    let (_tmp, store, attempt) = setup();
-    let completed = completed_review_journal(&store, &attempt, PushStatus::Failed);
+    let (tmp, store, attempt) = setup();
+    let completed = completed_review_journal(&tmp, &store, &attempt, PushStatus::Failed);
     assert_eq!(completed.phase, CodingGitOperationPhase::Completed);
     assert_eq!(completed.push_status, Some(PushStatus::Failed));
 
@@ -275,8 +319,8 @@ fn reopen_failed_review_git_operation_reopens_completed_failed_to_push_started()
 
 #[test]
 fn reopen_failed_review_git_operation_rejects_completed_pushed() {
-    let (_tmp, store, attempt) = setup();
-    let completed = completed_review_journal(&store, &attempt, PushStatus::Pushed);
+    let (tmp, store, attempt) = setup();
+    let completed = completed_review_journal(&tmp, &store, &attempt, PushStatus::Pushed);
 
     let attempt = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
@@ -290,8 +334,8 @@ fn reopen_failed_review_git_operation_rejects_completed_pushed() {
 
 #[test]
 fn reopen_failed_review_git_operation_rejects_non_terminal_phase() {
-    let (_tmp, store, attempt) = setup();
-    let completed = completed_review_journal(&store, &attempt, PushStatus::Failed);
+    let (tmp, store, attempt) = setup();
+    let completed = completed_review_journal(&tmp, &store, &attempt, PushStatus::Failed);
     let attempt = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
         .expect("attempt");

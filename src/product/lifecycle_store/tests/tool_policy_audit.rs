@@ -1265,7 +1265,9 @@ mod anchor_t10_durable_convergence {
             .as_ref()
             .expect("durable provider_start carries lc projection");
         assert_eq!(first.provider, "codex");
-        assert_eq!(first.sandbox.as_deref(), Some("read-only"));
+        // f2070d83 + provider-desandbox-full-open 全开基线(owner 裁定):Codex LC
+        // 全相位(含 PlanningReadOnly)sandbox 固定 danger-full-access,approval 仍 on-request。
+        assert_eq!(first.sandbox.as_deref(), Some("danger-full-access"));
         assert_eq!(first.approval_policy.as_deref(), Some("on-request"));
         assert_eq!(first.adapter_dialect, "codex-app-server-rpc");
         assert_eq!(
