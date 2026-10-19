@@ -456,8 +456,10 @@ impl CodingWorkspaceEngine {
     /// 即合法静止证明);协调 scope = 资源 store 中登记了 `aria.worktree`
     /// == 本树 tree_key 的兄弟 scope(RevB2T17 ⚠1 硬前置;T14/T20 落地
     /// Coder/terminal 登记时打上该标签即自动纳入静止——当前生产无登记,
-    /// 集合恒为空,不误杀无关 scope)。
-    fn reviewer_quiesce_targets(
+    /// 集合恒为空,不误杀无关 scope)。B1-1:主 scope 同样挂 worktree
+    /// 标签——窗口主 scope 与兄弟 scope 的两类恢复路径都能枚举 reviewer
+    /// 进程登记(下一窗/恢复驱动的 quiesce_targets 均可收割)。
+    pub(crate) fn reviewer_quiesce_targets(
         &self,
         window_id: &str,
         attempt: &CodingExecutionAttempt,
@@ -467,9 +469,7 @@ impl CodingWorkspaceEngine {
         Vec<crate::cross_cutting::provider_resources::ProviderRunResourceScope>,
         CodingWorkspaceEngineError,
     > {
-        use crate::cross_cutting::provider_resources::{
-            ProviderRunResourceScope, ResourceScopeKey,
-        };
+        use crate::cross_cutting::provider_resources::ProviderRunResourceScope;
         let store_root = self.store.paths().root().join(PROVIDER_RESOURCE_STORE_DIR);
         let resource_store =
             crate::product::provider_resource_store::ProviderResourceStore::new(&store_root);
@@ -487,11 +487,17 @@ impl CodingWorkspaceEngine {
                 ),
             ))
         })?;
-        let key = ResourceScopeKey {
-            scope_id: format!("reviewer-window-{}", attempt.id),
-            run_id: run_id.to_string(),
-            boot_identity: format!("aria-engine-{}", std::process::id()),
-        };
+        // 协调归属 worktree 标签(主 scope 与兄弟枚举共用同一 tree_key)。
+        let tree_key = crate::product::reviewer_window_store::tree_key_of(
+            &worktree.canonicalize().map_err(|error| {
+                CodingWorkspaceEngineError::Store(
+                    crate::product::json_store::ProductStoreError::Io(format!(
+                        "worktree canonicalize 失败: {error}"
+                    )),
+                )
+            })?,
+        );
+        let key = Self::reviewer_main_scope_key(attempt, run_id);
         let main_scope = ProviderRunResourceScope::open_for_recovery(
             &key,
             Some(window_id),
@@ -503,20 +509,14 @@ impl CodingWorkspaceEngine {
             CodingWorkspaceEngineError::Store(crate::product::json_store::ProductStoreError::Io(
                 format!("reviewer_scope_open_failed: {error}"),
             ))
-        })?;
+        })?
+        // B1-1:主 scope 挂 worktree 标签(reserve 前挂,aria.worktree 由
+        // scope 注入)——本窗与后续窗口的兄弟枚举路径均可发现本窗进程。
+        .with_worktree_key(&tree_key);
         let mut targets = vec![main_scope];
 
         // 协调 scope:按 aria.worktree 归属标签过滤(未标注归属的不静止——
         // 归属注入是 T14/T20 的登记合同,本 Task 只消费)。
-        let tree_key = crate::product::reviewer_window_store::tree_key_of(
-            &worktree.canonicalize().map_err(|error| {
-                CodingWorkspaceEngineError::Store(
-                    crate::product::json_store::ProductStoreError::Io(format!(
-                        "worktree canonicalize 失败: {error}"
-                    )),
-                )
-            })?,
-        );
         for sibling in resource_store
             .scope_keys()
             .map_err(CodingWorkspaceEngineError::Store)?
@@ -554,6 +554,79 @@ impl CodingWorkspaceEngine {
             }
         }
         Ok(targets)
+    }
+
+    /// B1-1:编码 reviewer launch 的受信归属主键(与开窗 quiesce 主 scope
+    /// 同源——`reviewer-window-{attempt}` × 开窗 run_id × 本平台 boot)。
+    fn reviewer_main_scope_key(
+        attempt: &CodingExecutionAttempt,
+        run_id: &str,
+    ) -> crate::cross_cutting::provider_resources::ResourceScopeKey {
+        crate::cross_cutting::provider_resources::ResourceScopeKey {
+            scope_id: format!("reviewer-window-{}", attempt.id),
+            run_id: run_id.to_string(),
+            boot_identity: format!("aria-engine-{}", std::process::id()),
+        }
+    }
+
+    /// B1-1(波 2):编码 reviewer 本次 launch 的受信资源归属铸造——按
+    /// 开窗实际归属(同 key/run/boot,挂 worktree 标签)打开主 scope 并
+    /// 生成唯一资源 ID 的载体;调用点在窗口 assert 通过后(reviewer
+    /// retry cycle),与 `reviewer_quiesce_targets` 主 scope 完全同源。
+    pub(crate) fn reviewer_launch_ownership(
+        &self,
+        window_id: &str,
+        attempt: &CodingExecutionAttempt,
+        run_id: &str,
+        worktree: &Path,
+    ) -> Result<
+        crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
+        CodingWorkspaceEngineError,
+    > {
+        use crate::cross_cutting::provider_resources::{
+            ProviderRunResourceScope, TrustedLaunchOwnership,
+        };
+        let store_root = self.store.paths().root().join(PROVIDER_RESOURCE_STORE_DIR);
+        let private_root = self.store.provider_stream_log_root(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+        );
+        std::fs::create_dir_all(&private_root).map_err(|error| {
+            CodingWorkspaceEngineError::Store(crate::product::json_store::ProductStoreError::Io(
+                format!(
+                    "reviewer_launch_scope_private_root_create_failed: {}: {error}",
+                    private_root.display()
+                ),
+            ))
+        })?;
+        let tree_key = crate::product::reviewer_window_store::tree_key_of(
+            &worktree.canonicalize().map_err(|error| {
+                CodingWorkspaceEngineError::Store(
+                    crate::product::json_store::ProductStoreError::Io(format!(
+                        "reviewer_launch_worktree_canonicalize 失败: {error}"
+                    )),
+                )
+            })?,
+        );
+        let key = Self::reviewer_main_scope_key(attempt, run_id);
+        let scope = ProviderRunResourceScope::open_for_recovery(
+            &key,
+            Some(window_id),
+            &private_root,
+            &store_root,
+            None,
+        )
+        .map_err(|error| {
+            CodingWorkspaceEngineError::Store(crate::product::json_store::ProductStoreError::Io(
+                format!("reviewer_launch_scope_open_failed: {error}"),
+            ))
+        })?
+        .with_worktree_key(&tree_key);
+        Ok(TrustedLaunchOwnership::mint(
+            std::sync::Arc::new(scope),
+            &format!("code_review provider process: window={window_id}"),
+        ))
     }
 
     /// 开窗:必须在 reviewer_context/Git diff/material 采集之前调用

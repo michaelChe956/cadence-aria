@@ -69,6 +69,11 @@ impl ProviderAdapter for GatewaySyncProvider {
         &self,
         launch: ValidatedAdapterInput,
     ) -> Result<AdapterOutput, ProviderAdapterError> {
+        // B1-1:同步载体携带的受信 launch 归属先取出(into_parts 消费载体),
+        // 原样透传进 streaming validated input——engine 三处真实 scope 铸造,
+        // 桥接不解释、不丢弃(同步 adapter 的 spawn 点与 streaming 面同一
+        // 登记生命周期)。
+        let launch_ownership = launch.launch_ownership().cloned();
         let (input, policy) = launch.into_parts();
         let provider_name = provider_name_for_type(input.provider_type.clone())?;
         let adapter = self.registry.get(&provider_name).ok_or_else(|| {
@@ -83,6 +88,10 @@ impl ProviderAdapter for GatewaySyncProvider {
                 streaming_input,
                 policy,
             );
+        let validated_streaming = match launch_ownership {
+            Some(ownership) => validated_streaming.with_launch_ownership(ownership),
+            None => validated_streaming,
+        };
         let timeout = std::time::Duration::from_secs(input.timeout.max(1));
 
         // 专用 OS 线程 + 自有 current-thread runtime:与调用方 runtime 完全

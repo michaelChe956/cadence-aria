@@ -63,7 +63,23 @@ impl CodingWorkspaceEngine {
     #[allow(dead_code)]
     pub(crate) async fn run_provider_stream_invocation(
         &self,
+        run: CodingProviderStreamRun<'_>,
+    ) -> ProviderInvocationOutcome {
+        self.run_provider_stream_invocation_with_ownership(run, None)
+            .await
+    }
+
+    /// B1-1(波 2):带受信 launch 归属的单次调用入口——engine 三处真实
+    /// scope(coder delivery / 编码 reviewer 主 scope / 规划 reviewer 主
+    /// scope)铸造的 `TrustedLaunchOwnership` 经 launch 分流透传到 adapter
+    /// spawn 点(预留→spawn→回填 PID+starttime→尾部收口注销)。旧入口
+    /// 委托本入口传 `None`(无归属请求,既有测试/调用方零变化)。
+    pub(crate) async fn run_provider_stream_invocation_with_ownership(
+        &self,
         mut run: CodingProviderStreamRun<'_>,
+        launch_ownership: Option<
+            crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
+        >,
     ) -> ProviderInvocationOutcome {
         run.suppress_failure_side_effects = true;
         let attempt = run.attempt;
@@ -73,6 +89,7 @@ impl CodingWorkspaceEngine {
             .run_structured_provider_stream_to_completion_with_partial_output(
                 run,
                 Some(partial_output_observer.clone()),
+                launch_ownership,
             )
             .await;
         let partial_output = partial_output_observer
@@ -379,7 +396,7 @@ impl CodingWorkspaceEngine {
         &self,
         run: CodingProviderStreamRun<'_>,
     ) -> Result<ProviderStreamOutcome, CodingWorkspaceEngineError> {
-        self.run_structured_provider_stream_to_completion_with_partial_output(run, None)
+        self.run_structured_provider_stream_to_completion_with_partial_output(run, None, None)
             .await
     }
 
@@ -387,6 +404,9 @@ impl CodingWorkspaceEngine {
         &self,
         run: CodingProviderStreamRun<'_>,
         partial_output_observer: Option<Arc<Mutex<String>>>,
+        launch_ownership: Option<
+            crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
+        >,
     ) -> Result<ProviderStreamOutcome, CodingWorkspaceEngineError> {
         let CodingProviderStreamRun {
             attempt,
@@ -499,6 +519,7 @@ impl CodingWorkspaceEngine {
                         cancel.clone(),
                         validated_input.clone(),
                         gateway_ref.as_ref(),
+                        launch_ownership.clone(),
                     ) => result,
                     _ = tokio::time::sleep(duration) => {
                         cancel.cancel();
@@ -576,6 +597,7 @@ impl CodingWorkspaceEngine {
                         cancel.clone(),
                         validated_input.clone(),
                         gateway_ref.as_ref(),
+                        launch_ownership.clone(),
                     ) => result,
                     _ = self.cancellation.cancelled() => {
                         cancel.cancel();
@@ -2200,6 +2222,323 @@ mod lcg_t07_validated_dispatch_tests {
             captured.env_vars.get("PATH").is_none() && captured.env_vars.get("HOME").is_none(),
             "coder 角色启动不得再注入白名单 PATH/HOME(宿主值由底座继承): {:?}",
             captured.env_vars
+        );
+    }
+}
+
+/// B1-1(波 2):launch 分流透传与引擎真实归属的端到端断言。
+#[cfg(test)]
+mod b1_launch_ownership_tests {
+    use super::*;
+    use crate::cross_cutting::provider_resources::{
+        OwnedResourceKind, OwnedResourceSpec, ProviderRunResourceScope, ResourceScopeKey,
+        StartedResourceIdentity, TrustedLaunchOwnership,
+    };
+    use crate::cross_cutting::streaming_provider::{
+        ProviderSession, StreamingProviderAdapter,
+    };
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+    use crate::product::coding_models::CodingRoleRunTrigger;
+    use crate::product::git_workspace_service::GitWorkspaceService;
+    use crate::product::models::ProviderName;
+    use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+    fn b1_root() -> tempfile::TempDir {
+        let root = std::path::Path::new("/tmp/aria-bug45/t5");
+        std::fs::create_dir_all(root).expect("fixture base");
+        tempfile::tempdir_in(root).expect("b1 engine fixture dir")
+    }
+
+    fn b1_attempt(
+        store: &CodingAttemptStore,
+    ) -> (std::path::PathBuf, crate::product::coding_models::CodingExecutionAttempt) {
+        let worktree = store.paths().root().join("b1-worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let created = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/b1".to_string(),
+                worktree_path: Some(worktree.clone()),
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::ClaudeCode,
+                    reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+            })
+            .expect("create attempt");
+        (worktree, created)
+    }
+
+    fn b1_engine(store: &CodingAttemptStore) -> CodingWorkspaceEngine {
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx)
+    }
+
+    /// 真实子进程 probe:spawn `sleep 30`,cancel 后 kill+wait 再关通道
+    /// (会话终结保证契约的最小形态)。
+    struct B1EngineProbeAdapter {
+        raw_starts: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for B1EngineProbeAdapter {
+        async fn start(
+            &self,
+            input: crate::cross_cutting::streaming_provider::StreamingProviderInput,
+            cancel: CancellationToken,
+        ) -> Result<ProviderSession, crate::cross_cutting::provider_adapter::ProviderAdapterError>
+        {
+            use std::sync::atomic::Ordering;
+            self.raw_starts.fetch_add(1, Ordering::SeqCst);
+            let mut managed = crate::cross_cutting::process_manager::ProcessManager::spawn(
+                "sleep",
+                &["30"],
+                &input.working_dir,
+                &std::collections::BTreeMap::new(),
+                cancel.clone(),
+            )
+            .await
+            .expect("spawn sleep");
+            let (event_tx, event_rx) = tokio::sync::mpsc::channel(8);
+            let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                cancel.cancelled().await;
+                let _ = managed.child.start_kill();
+                let _ = managed.child.wait().await;
+            });
+            Ok(ProviderSession {
+                native_session_id: None,
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+    }
+
+    fn b1_stream_input(
+        worktree: &std::path::Path,
+    ) -> crate::cross_cutting::streaming_provider::StreamingProviderInput {
+        crate::cross_cutting::streaming_provider::StreamingProviderInput {
+            working_directory: None,
+            baseline_tree: None,
+            tool_policy: None,
+            audit_sink: None,
+            provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
+            role: crate::protocol::contracts::AdapterRole::Executor,
+            prompt: "b1 engine probe".to_string(),
+            working_dir: worktree.to_path_buf(),
+            workspace_session_id: None,
+            resume_provider_session_id: None,
+            permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: Default::default(),
+            timeout_secs: 60,
+        }
+    }
+
+    fn b1_resource_store(
+        store: &CodingAttemptStore,
+    ) -> crate::product::provider_resource_store::ProviderResourceStore {
+        crate::product::provider_resource_store::ProviderResourceStore::new(
+            store.paths().root().join(super::super::code_review::PROVIDER_RESOURCE_STORE_DIR),
+        )
+    }
+
+    /// 同源归属:引擎开 coder delivery scope → launch(非 LC direct 分流
+    /// 臂)→ 资源 store 出现 Process 记录,scope key/run_id/boot/worktree
+    /// 标签与引擎一致;会话收口后注销,cycle 级收口仍可干净通过。
+    #[tokio::test]
+    async fn b1_coder_scope_launch_registers_process_in_store() {
+        let root = b1_root();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store = CodingAttemptStore::new(paths.clone());
+        let (worktree, attempt) = b1_attempt(&store);
+        let engine = b1_engine(&store);
+        let role_run = store
+            .create_role_run(
+                &attempt,
+                crate::product::coding_models::CodingExecutionStage::Coding,
+                CodingProviderRole::Coder,
+                CodingRoleRunTrigger::Initial,
+                None,
+            )
+            .expect("role run");
+
+        let scope = std::sync::Arc::new(
+            engine
+                .begin_coder_delivery_scope(&attempt, &role_run, &worktree)
+                .await
+                .expect("begin coder delivery scope"),
+        );
+        let ownership = TrustedLaunchOwnership::mint(
+            std::sync::Arc::clone(&scope),
+            "code_delivery provider process: b1",
+        );
+        let cancel = CancellationToken::new();
+        let adapter = B1EngineProbeAdapter {
+            raw_starts: std::sync::atomic::AtomicUsize::new(0),
+        };
+        // 非 LC direct 分流臂:无 validated/gateway,归属经 start_owned 透传。
+        let mut session = launch_provider_session(
+            &adapter,
+            b1_stream_input(&worktree),
+            cancel.clone(),
+            None,
+            None,
+            Some(ownership.clone()),
+        )
+        .await
+        .expect("direct owned launch");
+        assert_eq!(
+            adapter.raw_starts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "direct 臂必须真实启动 adapter"
+        );
+
+        // 资源 store 出现 Process 记录,归属与引擎 scope 完全一致。
+        let records = b1_resource_store(&store)
+            .list_scope(ownership.scope_key())
+            .expect("list scope");
+        let process: Vec<_> = records
+            .iter()
+            .filter(|record| record.kind == OwnedResourceKind::Process)
+            .collect();
+        assert_eq!(process.len(), 1, "恰一条进程登记: {records:?}");
+        let record = process[0];
+        assert_eq!(record.key.scope_id, format!("code-delivery-{}", attempt.id));
+        assert_eq!(record.key.run_id, role_run.id);
+        assert_eq!(
+            record.key.boot_identity,
+            format!("aria-engine-{}", std::process::id())
+        );
+        let tree_key = crate::product::reviewer_window_store::tree_key_of(
+            &worktree.canonicalize().expect("canonical worktree"),
+        );
+        assert_eq!(
+            record.reserved_labels.get("aria.worktree").map(String::as_str),
+            Some(tree_key.as_str()),
+            "worktree 标签与引擎一致(兄弟枚举路径依据)"
+        );
+
+        // 会话收口(cancel→kill→通道终结)后注销;cycle 级收口可干净通过。
+        cancel.cancel();
+        while session.events.recv().await.is_some() {}
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let residue: Vec<_> = b1_resource_store(&store)
+            .list_scope(ownership.scope_key())
+            .expect("list after tail")
+            .into_iter()
+            .filter(|record| record.kind == OwnedResourceKind::Process)
+            .collect();
+        assert!(residue.is_empty(), "尾部收口后进程登记注销: {residue:?}");
+        engine
+            .recycle_coder_delivery_scope(&scope, "b1_coder_test_exit")
+            .await
+            .expect("cycle 级收口干净通过(scratch 清理+空静止证明)");
+    }
+
+    /// reviewer 两路径枚举:主 scope(窗口键)+ 兄弟 scope(aria.worktree
+    /// 标签)均可枚举;launch 归属与开窗主 scope 同源。
+    #[test]
+    fn b1_reviewer_main_and_sibling_scopes_both_enumerable() {
+        let root = b1_root();
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let store = CodingAttemptStore::new(paths.clone());
+        let (worktree, attempt) = b1_attempt(&store);
+        let engine = b1_engine(&store);
+        let worktree = worktree.canonicalize().expect("canonical worktree");
+        let tree_key = crate::product::reviewer_window_store::tree_key_of(&worktree);
+
+        // 兄弟路径材料:同树 coder 风格 scope(带 aria.worktree 的登记)。
+        let sibling_private = root.path().join("sibling-private");
+        std::fs::create_dir_all(&sibling_private).expect("sibling private");
+        let sibling_key = ResourceScopeKey {
+            scope_id: "code-delivery-sibling".to_string(),
+            run_id: "role-run-sibling".to_string(),
+            boot_identity: format!("aria-engine-{}", std::process::id()),
+        };
+        let sibling_scope = ProviderRunResourceScope::open_for_recovery(
+            &sibling_key,
+            None,
+            &sibling_private,
+            &store.paths().root().join(super::super::code_review::PROVIDER_RESOURCE_STORE_DIR),
+            None,
+        )
+        .expect("open sibling scope")
+        .with_worktree_key(&tree_key);
+        let scratch = sibling_private.join("scratch");
+        std::fs::create_dir_all(&scratch).expect("sibling scratch");
+        let canonical = scratch.canonicalize().expect("canonical scratch");
+        let reservation = sibling_scope
+            .reserve_owned_resource(
+                &OwnedResourceSpec::new(
+                    "sibling-scratch",
+                    OwnedResourceKind::Directory,
+                    "code_delivery run-owned scratch directory",
+                )
+                .with_private_path(canonical.clone()),
+            )
+            .expect("sibling reserve");
+        sibling_scope
+            .confirm_started_resource(
+                &reservation,
+                StartedResourceIdentity::directory(&canonical),
+            )
+            .expect("sibling confirm");
+
+        // 路径 1:窗口主 scope(固定键)。
+        let run_id = "role-run-reviewer";
+        let targets = engine
+            .reviewer_quiesce_targets("w-b1", &attempt, run_id, &worktree)
+            .expect("quiesce targets");
+        let main_key = ResourceScopeKey {
+            scope_id: format!("reviewer-window-{}", attempt.id),
+            run_id: run_id.to_string(),
+            boot_identity: format!("aria-engine-{}", std::process::id()),
+        };
+        assert!(
+            targets.iter().any(|scope| scope.key() == &main_key),
+            "主 scope 路径可枚举: {:?}",
+            targets.iter().map(|scope| scope.key()).collect::<Vec<_>>()
+        );
+        // 路径 2:兄弟 scope 按 aria.worktree 枚举。
+        assert!(
+            targets.iter().any(|scope| scope.key() == &sibling_key),
+            "兄弟 scope 路径可枚举: {:?}",
+            targets.iter().map(|scope| scope.key()).collect::<Vec<_>>()
+        );
+
+        // launch 归属与开窗主 scope 同源;reserve 后主 scope 记录带
+        // aria.worktree(下一窗兄弟枚举可发现本窗 reviewer 进程)。
+        let ownership = engine
+            .reviewer_launch_ownership("w-b1", &attempt, run_id, &worktree)
+            .expect("reviewer launch ownership");
+        assert_eq!(ownership.scope_key(), &main_key);
+        ownership.reserve().expect("reviewer launch reserve");
+        let main_records = b1_resource_store(&store)
+            .list_scope(&main_key)
+            .expect("main records");
+        assert_eq!(main_records.len(), 1, "{main_records:?}");
+        assert_eq!(
+            main_records[0]
+                .reserved_labels
+                .get("aria.worktree")
+                .map(String::as_str),
+            Some(tree_key.as_str()),
+            "主 scope 进程登记带 worktree 标签(两类恢复路径都能枚举)"
+        );
+        assert_eq!(
+            main_records[0]
+                .reserved_labels
+                .get("aria.window_id")
+                .map(String::as_str),
+            Some("w-b1")
         );
     }
 }

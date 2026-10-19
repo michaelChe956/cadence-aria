@@ -1420,6 +1420,33 @@ pub trait StreamingProviderAdapter: Send + Sync {
         ))
     }
 
+    /// B1-1(波 2):raw start 四点的受信资源归属启动入口(trait 默认
+    /// 方法——不改 `StreamingProviderInput` 结构体字面量,四家 adapter
+    /// 零签名迁移即可获得登记生命周期;接线片在其 spawn 点经
+    /// `TrustedLaunchOwnership::backfill_spawned_identity` 回填真实
+    /// PID+starttime)。
+    ///
+    /// - `ownership = None`:无归属请求(legacy/单仓 direct/测试面),保持
+    ///   既有裸 `start` 语义,零行为变化;
+    /// - `ownership = Some`:默认生命周期 = 预留(durable;失败零 spawn)
+    ///   → `self.start` → 失败路径收口后注销;成功路径包装事件通道,
+    ///   **会话真实终止**(源通道关闭=子进程退出后有界排深,终结保证
+    ///   契约)后按登记身份收口注销——不在协议 `Completed` 事件点注销。
+    ///
+    /// 返回的会话满足 [ProviderSession 终结保证契约](上方契约块与红线
+    /// a/b):包装通道只转发事件,不引入新的无界等待(尾部收口在通道
+    /// 关闭后进行,消费方 `recv` 返回 `None` 不被推迟)。
+    async fn start_owned(
+        &self,
+        input: StreamingProviderInput,
+        ownership: Option<
+            crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
+        >,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        start_owned_default(self, input, ownership, cancel).await
+    }
+
     /// Task 3.2(B0a2):LC 公共 prepare 合同——adapter 以只读方式观测本家
     /// facts(exact version 经 [`LcVersionCache`] 60 秒 TTL、provider 特定
     /// approval/MCP/boundary facts、与该版本同源的纯 projector),供 gateway
@@ -1466,6 +1493,66 @@ pub trait StreamingProviderAdapter: Send + Sync {
             cancel,
         )
         .await
+    }
+}
+
+/// `StreamingProviderAdapter::start_owned` 的默认生命周期实现(B1-1)。
+///
+/// 预留(durable,失败零 spawn)→ adapter `start` → 失败路径收口后注销;
+/// 成功路径包装事件通道,源通道终结(子进程退出后有界排空——终结保证
+/// 契约,不是协议 `Completed` 事件)后按登记身份收口注销。真实 adapter
+/// 的 B1 接线片在 spawn 点回填 PID+starttime 后,尾部即走身份核对的
+/// killpg+观察路径;未回填的默认面按无身份收口(错误路径 adapter 自身
+/// 已 kill+wait 子进程)。
+pub(crate) async fn start_owned_default<A: StreamingProviderAdapter + ?Sized>(
+    adapter: &A,
+    input: StreamingProviderInput,
+    ownership: Option<crate::cross_cutting::provider_resources::TrustedLaunchOwnership>,
+    cancel: CancellationToken,
+) -> Result<ProviderSession, ProviderAdapterError> {
+    let Some(ownership) = ownership else {
+        // 无归属请求:保持既有裸 start 语义(legacy/单仓 direct/测试面)。
+        return adapter.start(input, cancel).await;
+    };
+    // ① 持久预留先于一切 spawn 副作用:登记写失败必须发生在 adapter
+    //    任何 spawn 之前(预留失败零 spawn)。
+    ownership.reserve()?;
+    match adapter.start(input, cancel).await {
+        Err(error) => {
+            // 错误路径(握手失败/审计失败等):adapter 自身错误链已 kill+wait
+            // 子进程;有登记身份则按身份 killpg+有界观察真实收口后注销。
+            ownership.release_after_session_tail().await;
+            Err(error)
+        }
+        Ok(session) => {
+            // 成功路径:包装事件通道;消费方看到的事件流与源完全一致,
+            // 源通道终结后先收口注销再关闭包装通道(注销不推迟消费方
+            // `recv` 终结——包装通道在源终结点之后才关闭)。
+            let ProviderSession {
+                native_session_id,
+                events,
+                commands,
+            } = session;
+            let (tail_tx, tail_rx) = mpsc::channel(32);
+            let release = ownership.clone();
+            tokio::spawn(async move {
+                let mut source = events;
+                while let Some(event) = source.recv().await {
+                    if tail_tx.send(event).await.is_err() {
+                        // 消费方提前丢弃会话(中止路径):同样先收口注销。
+                        break;
+                    }
+                }
+                // 会话真实终止(源通道关闭/消费方丢弃)→ 进程组真实收口
+                // 后注销;静止不可证时保留 durable 记录停等恢复。
+                release.release_after_session_tail().await;
+            });
+            Ok(ProviderSession {
+                native_session_id,
+                events: tail_rx,
+                commands,
+            })
+        }
     }
 }
 

@@ -945,6 +945,68 @@ impl ProviderRunResourceScope {
         true
     }
 
+    /// B1-1:单个 Process 登记的收口注销(spawn 点生命周期尾部——会话
+    /// 真实终止/错误路径)。与 `quiesce_scope` 的进程面同一语义,只作用于
+    /// 本 launch 的 resource_id:
+    ///
+    /// - 身份已确认:killpg(仅 (pid,starttime) 核对通过)→ 有界观察组长
+    ///   真实消失 → 组残留检查(killpg 未送达但组内有存活进程=停等),
+    ///   全部通过才游标推进 Quiesced 并解除登记——**真实进程组收口后
+    ///   注销**,不是协议 Completed、也不是 killpg 返回成功;
+    /// - 身份未确认(默认面错误路径,adapter 自身已 kill+wait;或正常
+    ///   尾部——终结保证契约下源通道关闭即子进程退出后):直接注销,
+    ///   durable 残留风险交由 scope 级 quiesce 的未知 writer 停等边界;
+    /// - 静止不可证:Err 停等(记录保留,恢复驱动/下一轮开窗 sweep 接管);
+    /// - 幂等:登记项不存在即 Ok。
+    pub(crate) async fn release_process_registration(
+        &self,
+        resource_id: &str,
+    ) -> Result<(), ProviderAdapterError> {
+        let Some(record) = self.store.load_record(&self.key, resource_id).map_err(store_error)?
+        else {
+            return Ok(());
+        };
+        if record.cleanup_cursor >= CleanupStep::Removed {
+            return Ok(());
+        }
+        match record.kind {
+            OwnedResourceKind::Process => {}
+            other => {
+                return Err(ProviderAdapterError::provider_unavailable(format!(
+                    "provider_resources_release_kind_mismatch: {resource_id} 是 {:?},不是进程登记",
+                    other
+                )));
+            }
+        }
+        if let Some(StartedIdentity::Process {
+            pid,
+            start_time_ticks,
+        }) = record.started_identity.as_ref()
+        {
+            // killpg 仅其中一步:先发组信号,再以真实身份有界观察。
+            let group_killed = kill_process_group_if_ours(*pid, *start_time_ticks);
+            if !self.wait_process_gone(*pid, *start_time_ticks).await {
+                return Err(ProviderAdapterError::provider_unavailable(format!(
+                    "provider_resources_release_registered_resource_running: resource={resource_id} pid={pid}: killpg 已发但 (pid,starttime) 身份仍存活,静止未证明——保留登记停等"
+                )));
+            }
+            if !group_killed && process_group_has_members(*pid) {
+                return Err(ProviderAdapterError::provider_unavailable(format!(
+                    "provider_resources_release_process_group_residual: resource={resource_id} pgid={pid}: 组信号未送达(组长身份已失效)但组内仍有存活进程——无法安全组杀,保留登记停等"
+                )));
+            }
+        }
+        if record.cleanup_cursor < CleanupStep::Quiesced {
+            self.store
+                .advance_cleanup_cursor(&self.key, resource_id, CleanupStep::Quiesced)
+                .map_err(store_error)?;
+        }
+        self.store
+            .deregister(&self.key, resource_id)
+            .map_err(store_error)?;
+        Ok(())
+    }
+
     /// 仅消费 Quiescent 及匹配登记项:目录仅删私有根下 canonical 未漂移
     /// 路径;引擎资源仅移除精确 ID+标签均匹配项;共享资源与 owner HOME
     /// 永不清理;重复清理幂等。
@@ -1183,6 +1245,152 @@ impl ProviderRunResourceScope {
     ) -> Result<(), ProviderAdapterError> {
         self.store.reserve(&record).map_err(store_error)
     }
+}
+
+// ---------------------------------------------------------------------------
+// B1-1(波 2):受信 launch 归属载体——engine 已开真实 scope → raw start 点
+// ---------------------------------------------------------------------------
+
+/// 本次 launch 的受信资源归属载体(B1-1)。
+///
+/// **唯一铸造来源**:engine 三处真实 scope——Coder `begin_coder_delivery_
+/// scope`、编码 Reviewer `reviewer-window-{attempt}` 主 scope、规划 Reviewer
+/// `plan-review-{window}` 主 scope(均经 `ProviderRunResourceScope` 打开,
+/// 归属三元组 scope_id/run_id/boot 与开窗/收口消费者完全相同)。字段
+/// private、crate 内构造,caller/模型不可伪造第二套归属;不合成 UUID run
+/// 身份(F22 env-only 合成层已随 A1 消失,本载体不恢复)。
+///
+/// **生命周期**(B1 raw start 4 点的默认合同,见
+/// `StreamingProviderAdapter::start_owned`):预留(durable,失败零 spawn)
+/// → spawn → `backfill_spawned_identity` 回填 PID+starttime → 会话真实
+/// 收口(进程组静止)后注销——**注销不在协议 Completed**。
+///
+/// **资源 ID**:每次 launch 唯一(`provider-process-{pid}-{seq}-{nanos}`,
+/// 进程内单调+时钟),禁止恒定 `provider-process` 使同 run 多次调用/重试
+/// 共享预留;scope 的稳定归属仍由 aria.* 标签表达。
+///
+/// **worktree 标签**:`aria.worktree` 由 scope 在预留时注入(开 scope 后、
+/// reserve 前挂 `with_worktree_key`);Reviewer 窗口的兄弟枚举
+/// (`reviewer_quiesce_targets`)据此找到本 launch 的进程登记。
+///
+/// v1 登记范围:coder delivery + 编码/规划 Reviewer 的 streaming launch;
+/// 单仓同步路(`CliProviderAdapter`/`run_command_capture_with_stream`)与
+/// Kimi ACP terminal 直接 `Command::spawn` 面明确不在 v1(后续批次接线,
+/// 未登记面按既有未知 writer 停等边界承担)。
+#[derive(Clone)]
+pub struct TrustedLaunchOwnership {
+    scope: Arc<ProviderRunResourceScope>,
+    resource_id: String,
+    launch_intent: String,
+}
+
+impl std::fmt::Debug for TrustedLaunchOwnership {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrustedLaunchOwnership")
+            .field("key", self.scope.key())
+            .field("resource_id", &self.resource_id)
+            .field("launch_intent", &self.launch_intent)
+            .finish()
+    }
+}
+
+impl TrustedLaunchOwnership {
+    /// 从 engine 已开的真实 scope 铸造本次 launch 的归属载体。同一 scope
+    /// 可铸造多次(技术重试/修复轮),每次 `resource_id` 唯一。
+    pub(crate) fn mint(scope: Arc<ProviderRunResourceScope>, launch_intent: &str) -> Self {
+        Self {
+            scope,
+            resource_id: next_launch_resource_id(),
+            launch_intent: launch_intent.to_string(),
+        }
+    }
+
+    /// 归属 scope 主键(与开窗/收口消费者同源的三元组)。
+    pub(crate) fn scope_key(&self) -> &ResourceScopeKey {
+        self.scope.key()
+    }
+
+    /// 本次 launch 的唯一资源 ID。
+    pub(crate) fn resource_id(&self) -> &str {
+        &self.resource_id
+    }
+
+    /// 持久预留(先于一切 spawn 副作用;失败=调用方不得 spawn)。
+    /// 同 key 同登记幂等;kind=Process、业务标签 `kind=provider_process`,
+    /// aria.* 归属标签(scope/run/worktree/window)由 scope 注入。
+    pub(crate) fn reserve(&self) -> Result<ResourceReservation, ProviderAdapterError> {
+        self.scope.reserve_owned_resource(
+            &OwnedResourceSpec::new(
+                &self.resource_id,
+                OwnedResourceKind::Process,
+                &self.launch_intent,
+            )
+            .with_label("kind", "provider_process"),
+        )
+    }
+
+    /// spawn 点回填真实 PID+starttime(读 `/proc/<pid>/stat` starttime,
+    /// PID 复用防护)。预留事实必须属于本载体 scope。真实 adapter 的
+    /// B1 接线片在 `ProcessManager::spawn` 成功后调用;默认包装面
+    /// (未回填)按无身份收口。
+    pub(crate) fn backfill_spawned_identity(
+        &self,
+        reservation: &ResourceReservation,
+        pid: u32,
+    ) -> Result<(), ProviderAdapterError> {
+        if reservation.key() != self.scope.key() {
+            return Err(ProviderAdapterError::provider_unavailable(
+                "provider_resources_backfill_reservation_scope_mismatch: 预留不属于本载体 scope",
+            ));
+        }
+        if reservation.resource_id() != self.resource_id {
+            return Err(ProviderAdapterError::provider_unavailable(
+                "provider_resources_backfill_reservation_id_mismatch: 预留不是本 launch 的登记",
+            ));
+        }
+        let Some(start_time_ticks) = process_start_time_ticks(pid) else {
+            return Err(ProviderAdapterError::provider_unavailable(format!(
+                "provider_resources_backfill_identity_unavailable: pid={pid} starttime 不可读(进程已退出?)"
+            )));
+        };
+        self.scope
+            .confirm_started_resource(reservation, StartedResourceIdentity::process(pid, start_time_ticks))
+    }
+
+    /// 会话尾部/错误路径的收口注销:有登记身份 → killpg(仅身份核对通过)
+    /// + 有界观察组长真实消失 + 组残留检查,证明静止后游标推进并注销;
+    /// 未回填身份(默认面错误路径,adapter 自身已 kill+wait)直接注销。
+    /// 静止不可证时保留 durable 记录停等(scope 级 quiesce/恢复驱动
+    /// 接管),不注销。幂等:登记项不存在即成功。
+    pub(crate) async fn release_after_session_tail(&self) {
+        if let Err(error) = self
+            .scope
+            .release_process_registration(&self.resource_id)
+            .await
+        {
+            // 收口注销只做 best-effort:静止不可证/写失败时保留 durable
+            // 记录,scope 级 quiesce 与恢复驱动按停等接管(不掩盖、不吞错,
+            // 记录告警日志供排障)。
+            tracing::warn!(
+                resource = %self.resource_id,
+                key = ?self.scope.key(),
+                error = %error,
+                "provider_launch_ownership_release_deferred"
+            );
+        }
+    }
+}
+
+/// 进程内单调+时钟的 launch 唯一资源 ID(同 scope 多次 launch 不共享预留)。
+fn next_launch_resource_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LAUNCH_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    format!("provider-process-{}-{seq}-{nanos}", std::process::id())
 }
 
 #[cfg(test)]
@@ -2711,5 +2919,382 @@ mod tests {
             error.details
         );
         assert!(root_canonical.is_dir(), "私有根目录原样保留");
+    }
+
+    // -----------------------------------------------------------------
+    // B1-1(波 2):受信 launch 归属载体与 raw start 默认生命周期
+    // -----------------------------------------------------------------
+
+    use crate::cross_cutting::streaming_provider::{
+        ProviderCompletion, ProviderEvent, ProviderSession, StreamingProviderAdapter,
+        StreamingProviderInput, start_owned_default,
+    };
+
+    /// 以 engine 真实键型(coder delivery 同款)开 scope 的 B1 测试夹具。
+    fn b1_scope_env() -> (ScopeEnv, ProviderRunResourceScope, String) {
+        let env = scope_env();
+        let key = ResourceScopeKey {
+            scope_id: "code-delivery-attempt-b1".to_string(),
+            run_id: "role-run-b1".to_string(),
+            boot_identity: format!("aria-engine-{}", std::process::id()),
+        };
+        // tree_key 只按 canonical 路径哈希;私有根即可充当协调 worktree 锚。
+        let worktree = env.private_root.canonicalize().expect("canonical worktree");
+        let tree_key = crate::product::reviewer_window_store::tree_key_of(&worktree);
+        let scope = ProviderRunResourceScope::open_for_recovery(
+            &key,
+            None,
+            &env.private_root,
+            &env.store_root,
+            None,
+        )
+        .expect("open b1 scope")
+        .with_worktree_key(&tree_key);
+        (env, scope, tree_key)
+    }
+
+    /// 真实子进程 probe adapter:spawn `sleep 30` 后按 mode 行为
+    /// (handshake_fail=kill 后返回 Err;completed_early=先发 Completed、
+    /// 子进程真实退出后关闭通道;cancel_tail=cancel 后 kill+wait 再关闭)。
+    struct B1SpawningAdapter {
+        mode: &'static str,
+        starts: std::sync::atomic::AtomicUsize,
+    }
+
+    impl B1SpawningAdapter {
+        fn new(mode: &'static str) -> Self {
+            Self {
+                mode,
+                starts: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProviderAdapter for B1SpawningAdapter {
+        async fn start(
+            &self,
+            input: StreamingProviderInput,
+            cancel: CancellationToken,
+        ) -> Result<ProviderSession, ProviderAdapterError> {
+            use std::sync::atomic::Ordering;
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            let mut managed = ProcessManager::spawn(
+                "sleep",
+                &["30"],
+                &input.working_dir,
+                &BTreeMap::new(),
+                cancel.clone(),
+            )
+            .await
+            .expect("spawn sleep probe");
+            let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
+            let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+            match self.mode {
+                "handshake_fail" => {
+                    // adapter 错误路径契约:kill+wait 子进程后返回 Err。
+                    let _ = managed.child.start_kill();
+                    let _ = managed.child.wait().await;
+                    return Err(ProviderAdapterError::provider_unavailable(
+                        "b1 probe handshake failed",
+                    ));
+                }
+                "completed_early" => {
+                    let _ = event_tx
+                        .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                            "b1 probe done",
+                            None,
+                        )))
+                        .await;
+                    tokio::spawn(async move {
+                        // 子进程真实退出(测试向其发信号)后才关闭通道。
+                        let _ = managed.child.wait().await;
+                        drop(event_tx);
+                    });
+                }
+                "cancel_tail" => {
+                    tokio::spawn(async move {
+                        cancel.cancelled().await;
+                        let _ = managed.child.start_kill();
+                        let _ = managed.child.wait().await;
+                        drop(event_tx);
+                    });
+                }
+                _ => unreachable!("unknown probe mode"),
+            }
+            Ok(ProviderSession {
+                native_session_id: None,
+                events: event_rx,
+                commands: command_tx,
+            })
+        }
+    }
+
+    fn b1_probe_input(env: &ScopeEnv) -> StreamingProviderInput {
+        StreamingProviderInput {
+            working_directory: None,
+            baseline_tree: None,
+            tool_policy: None,
+            audit_sink: None,
+            provider_type: crate::protocol::contracts::ProviderType::ClaudeCode,
+            role: crate::protocol::contracts::AdapterRole::Executor,
+            prompt: "b1 probe".to_string(),
+            working_dir: env.private_root.clone(),
+            workspace_session_id: Some("ws-b1".to_string()),
+            resume_provider_session_id: None,
+            permission_mode: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: BTreeMap::new(),
+            timeout_secs: 60,
+        }
+    }
+
+    fn b1_store(env: &ScopeEnv) -> Store {
+        Store::new(&env.store_root)
+    }
+
+    fn b1_process_records(env: &ScopeEnv, key: &ResourceScopeKey) -> Vec<ProviderResourceRecord> {
+        b1_store(env)
+            .list_scope(key)
+            .expect("list scope")
+            .into_iter()
+            .filter(|record| matches!(record.kind, OwnedResourceKind::Process))
+            .collect()
+    }
+
+    /// 同源归属:engine 真实 scope 铸造载体 → 默认生命周期登记 Process
+    /// 记录(scope key/run_id/boot/worktree 标签与引擎一致),spawn 点
+    /// 回填真实 PID+starttime。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn b1_carrier_registers_process_with_engine_scope_identity() {
+        let (env, scope, tree_key) = b1_scope_env();
+        let adapter = B1SpawningAdapter::new("cancel_tail");
+        let ownership = TrustedLaunchOwnership::mint(
+            Arc::new(scope),
+            "code_delivery provider process: b1 probe",
+        );
+        let cancel = CancellationToken::new();
+        let session = start_owned_default(
+            &adapter,
+            b1_probe_input(&env),
+            Some(ownership.clone()),
+            cancel.clone(),
+        )
+        .await
+        .expect("owned start");
+
+        // Process 记录已出现,归属与引擎 scope 完全同源。
+        let records = b1_process_records(&env, ownership.scope_key());
+        assert_eq!(records.len(), 1, "恰一条 Process 登记: {records:?}");
+        let record = &records[0];
+        assert_eq!(record.key, *ownership.scope_key());
+        assert_eq!(
+            record.reserved_labels.get("aria.scope_id").map(String::as_str),
+            Some("code-delivery-attempt-b1")
+        );
+        assert_eq!(
+            record.reserved_labels.get("aria.run_id").map(String::as_str),
+            Some("role-run-b1")
+        );
+        assert_eq!(
+            record
+                .reserved_labels
+                .get("aria.worktree")
+                .map(String::as_str),
+            Some(tree_key.as_str())
+        );
+        assert!(
+            record.resource_id.starts_with("provider-process-"),
+            "资源 ID 唯一形态: {}",
+            record.resource_id
+        );
+        // 默认生命周期在会话终结(取消收口)后注销;等通道终结。
+        cancel.cancel();
+        let mut events = session.events;
+        while events.recv().await.is_some() {}
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            b1_process_records(&env, ownership.scope_key()).is_empty(),
+            "会话收口后注销"
+        );
+    }
+
+    /// 预留失败 → 零 spawn:store 根不可写时 `start_owned` 直接失败,
+    /// adapter.start 从未被调用。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn b1_reserve_failure_means_zero_spawn() {
+        let base = t5_dir();
+        // 私有根正常、store 根是一个文件 → reserve 落盘必败。
+        let private_root = base.path().join("private-root");
+        std::fs::create_dir_all(&private_root).expect("private root");
+        let store_root = base.path().join("resource-store-file");
+        std::fs::write(&store_root, b"not a dir").expect("store root file");
+        let key = ResourceScopeKey {
+            scope_id: "code-delivery-attempt-b1z".to_string(),
+            run_id: "role-run-b1z".to_string(),
+            boot_identity: format!("aria-engine-{}", std::process::id()),
+        };
+        let scope = ProviderRunResourceScope::open_for_recovery(
+            &key,
+            None,
+            &private_root,
+            &store_root,
+            None,
+        )
+        .expect("open scope (store root lazily used)");
+        let adapter = B1SpawningAdapter::new("cancel_tail");
+        let ownership =
+            TrustedLaunchOwnership::mint(Arc::new(scope), "code_delivery provider process");
+        let result = start_owned_default(
+            &adapter,
+            b1_probe_input(&ScopeEnv {
+                _base: base,
+                store_root: store_root.clone(),
+                private_root: private_root.clone(),
+            }),
+            Some(ownership),
+            CancellationToken::new(),
+        )
+        .await;
+        let error = match result {
+            Ok(_session) => panic!("reserve 失败必须上抛,不得启动"),
+            Err(error) => error,
+        };
+        assert!(
+            !error.details.contains("unimplemented"),
+            "失败来自预留而非桩: {}",
+            error.details
+        );
+        assert_eq!(
+            adapter.starts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "预留失败 → adapter.start 零调用(零 spawn)"
+        );
+    }
+
+    /// 握手失败(adapter 错误路径 kill+wait 子进程后返回 Err)→ 收口后
+    /// 注销:返回 Err 时登记已解除且子进程已死。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn b1_handshake_failure_releases_after_quiesce() {
+        let (env, scope, _tree_key) = b1_scope_env();
+        let adapter = B1SpawningAdapter::new("handshake_fail");
+        let ownership =
+            TrustedLaunchOwnership::mint(Arc::new(scope), "code_delivery provider process");
+        let key = ownership.scope_key().clone();
+        let error = match start_owned_default(
+            &adapter,
+            b1_probe_input(&env),
+            Some(ownership),
+            CancellationToken::new(),
+        )
+        .await
+        {
+            Ok(_session) => panic!("握手失败必须上抛"),
+            Err(error) => error,
+        };
+        assert!(error.details.contains("handshake failed"));
+        assert!(
+            b1_process_records(&env, &key).is_empty(),
+            "错误路径收口后注销"
+        );
+    }
+
+    /// 协议 Completed 不提前注销:Completed 事件后、子进程真实退出前
+    /// 登记仍在;通道终结(真实退出)后才注销。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn b1_completed_event_does_not_deregister_early() {
+        let (env, scope, _tree_key) = b1_scope_env();
+        let adapter = B1SpawningAdapter::new("completed_early");
+        let ownership =
+            TrustedLaunchOwnership::mint(Arc::new(scope), "code_delivery provider process");
+        let key = ownership.scope_key().clone();
+        let mut session = start_owned_default(
+            &adapter,
+            b1_probe_input(&env),
+            Some(ownership),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("owned start");
+
+        // 1) 收到协议 Completed 事件。
+        let mut saw_completed = false;
+        while let Some(event) = session.events.recv().await {
+            if let ProviderEvent::Completed(_) = event {
+                saw_completed = true;
+                break;
+            }
+        }
+        assert!(saw_completed, "probe 必须先发 Completed");
+        // 2) Completed 之后、子进程退出之前:登记仍在(未提前注销)。
+        assert!(
+            !b1_process_records(&env, &key).is_empty(),
+            "协议 Completed 不提前注销"
+        );
+        // 找到 sleep 子进程并让它退出(触发 adapter 关闭源通道)。
+        if let Some(pid) = b1_find_sleep_child() {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+        // 3) 通道终结后注销。
+        while session.events.recv().await.is_some() {}
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            b1_process_records(&env, &key).is_empty(),
+            "真实终止后注销"
+        );
+    }
+
+    /// 资源 ID 每次 launch 唯一:同 scope 两次 mint 不撞、两条登记共存;
+    /// 同 key 同登记幂等 reserve 不冲突。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn b1_resource_ids_unique_and_reserve_idempotent() {
+        let (env, scope, _tree_key) = b1_scope_env();
+        let scope = Arc::new(scope);
+        let first = TrustedLaunchOwnership::mint(Arc::clone(&scope), "launch one");
+        let second = TrustedLaunchOwnership::mint(Arc::clone(&scope), "launch two");
+        assert_ne!(first.resource_id(), second.resource_id());
+        assert_eq!(first.scope_key(), second.scope_key());
+
+        let reservation = first.reserve().expect("first reserve");
+        // 同一载体重复 reserve(同 key 同登记)幂等。
+        first.reserve().expect("idempotent reserve");
+        second.reserve().expect("second reserve");
+        let records = b1_process_records(&env, scope.key());
+        assert_eq!(records.len(), 2, "两次 launch 两条登记: {records:?}");
+        let ids: Vec<&str> = records.iter().map(|r| r.resource_id.as_str()).collect();
+        assert!(ids.contains(&reservation.resource_id()));
+    }
+
+    #[cfg(unix)]
+    fn b1_find_sleep_child() -> Option<u32> {
+        // 扫描本进程全部线程的 children 文件(glob 不展开,逐 task 读取)。
+        let tasks = std::fs::read_dir("/proc/self/task").ok()?;
+        let mut children = Vec::new();
+        for task in tasks.flatten() {
+            if let Ok(content) =
+                std::fs::read_to_string(task.path().join("children"))
+            {
+                children.extend(
+                    content
+                        .split_whitespace()
+                        .filter_map(|value| value.parse::<u32>().ok()),
+                );
+            }
+        }
+        for pid in children {
+            if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                && comm.trim().contains("sleep")
+            {
+                return Some(pid);
+            }
+        }
+        None
     }
 }

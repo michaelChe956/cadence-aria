@@ -267,14 +267,14 @@ impl CodingWorkspaceEngine {
         // role_run/run_id(技术重试旋转到新 run)。普通 CLI/MCP/ACP 三
         // 入口在 engine 收敛于同一 retry cycle,同归属。
         let attempt_id = input.attempt.id.clone();
-        let mut delivery = Some(
+        let mut delivery = Some(std::sync::Arc::new(
             self.begin_coder_delivery_scope(
                 input.attempt,
                 &input.initial_role_run,
                 input.worktree_path,
             )
             .await?,
-        );
+        ));
         let result = self
             .coder_retry_cycle_with_delivery(input, &mut delivery)
             .await;
@@ -304,7 +304,9 @@ impl CodingWorkspaceEngine {
     async fn coder_retry_cycle_with_delivery(
         &self,
         input: CoderRetryCycleInput<'_>,
-        delivery: &mut Option<crate::cross_cutting::provider_resources::ProviderRunResourceScope>,
+        delivery: &mut Option<
+            std::sync::Arc<crate::cross_cutting::provider_resources::ProviderRunResourceScope>,
+        >,
     ) -> Result<ProviderRetryCycleSuccess, CodingWorkspaceEngineError> {
         let CoderRetryCycleInput {
             attempt,
@@ -344,10 +346,10 @@ impl CodingWorkspaceEngine {
                 self.recycle_coder_delivery_scope(&prior, "coder_technical_retry_rotation")
                     .await?;
             }
-            *delivery = Some(
+            *delivery = Some(std::sync::Arc::new(
                 self.begin_coder_delivery_scope(attempt, &role_run, worktree_path)
                     .await?,
-            );
+            ));
 
             let (prompt, prompt_mode, resume_provider_session_id) = if attempt_no == 1 {
                 (
@@ -435,25 +437,39 @@ impl CodingWorkspaceEngine {
                 )
             }
             .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            // B1-1:本次 launch 的受信归属从本轮 code_delivery 资源窗真实
+            // scope 铸造(同 key/run/boot/worktree 标签;每次 invocation
+            // 唯一资源 ID),经 launch 分流透传到 adapter spawn 点登记。
+            let launch_ownership = delivery.as_ref().map(|scope| {
+                crate::cross_cutting::provider_resources::TrustedLaunchOwnership::mint(
+                    std::sync::Arc::clone(scope),
+                    &format!("code_delivery provider process: {provider_name:?}"),
+                )
+            });
             let outcome = self
-                .run_provider_stream_invocation(CodingProviderStreamRun {
-                    attempt: &invocation_attempt,
-                    node_id: &node.id,
-                    role_run: Some(&role_run),
-                    provider,
-                    legacy_input: &legacy_input,
-                    input: provider_input,
-                    provider_name,
-                    provider_role: CodingProviderRole::Coder,
-                    command_rx: &mut *command_rx,
-                    // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge;
-                    // 传统/非逻辑路径保留 `true` 以兼容未实现 `start` 的历史 adapter。
-                    allow_legacy_stream_fallback: invocation_attempt.target_snapshot.is_none(),
-                    timeout: None,
-                    timeout_reason_code: None,
-                    suppress_failure_side_effects: true,
-                    validated_input,
-                })
+                .run_provider_stream_invocation_with_ownership(
+                    CodingProviderStreamRun {
+                        attempt: &invocation_attempt,
+                        node_id: &node.id,
+                        role_run: Some(&role_run),
+                        provider,
+                        legacy_input: &legacy_input,
+                        input: provider_input,
+                        provider_name,
+                        provider_role: CodingProviderRole::Coder,
+                        command_rx: &mut *command_rx,
+                        // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge;
+                        // 传统/非逻辑路径保留 `true` 以兼容未实现 `start` 的历史 adapter。
+                        allow_legacy_stream_fallback: invocation_attempt
+                            .target_snapshot
+                            .is_none(),
+                        timeout: None,
+                        timeout_reason_code: None,
+                        suppress_failure_side_effects: true,
+                        validated_input,
+                    },
+                    launch_ownership,
+                )
                 .await;
             if let Some(outcome) = self
                 .resolve_provider_retry_cycle_outcome(
@@ -646,25 +662,42 @@ impl CodingWorkspaceEngine {
                     provider_input.clone(),
                 )
                 .map_err(|error| CodingWorkspaceEngineError::ProviderStream(error.to_string()))?;
+            // B1-1:编码 reviewer 本次 launch 的受信归属从开窗主 scope
+            // (reviewer-window-{attempt},同 run/boot,挂 worktree 标签)
+            // 铸造——与窗口开窗 quiesce 目标同源,兄弟 scope 枚举路径
+            // (aria.worktree)同样可发现。
+            let launch_ownership = self
+                .reviewer_launch_ownership(
+                    &review_window.window_id,
+                    &invocation_attempt,
+                    &role_run.id,
+                    worktree_path,
+                )
+                ?;
             let outcome = self
-                .run_provider_stream_invocation(CodingProviderStreamRun {
-                    attempt: &invocation_attempt,
-                    node_id: &node.id,
-                    role_run: Some(&role_run),
-                    provider,
-                    legacy_input: &legacy_input,
-                    input: provider_input,
-                    provider_name: reviewer,
-                    provider_role: CodingProviderRole::CodeReviewer,
-                    command_rx: &mut *command_rx,
-                    // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge;
-                    // 传统/非逻辑路径保留 `true`。
-                    allow_legacy_stream_fallback: invocation_attempt.target_snapshot.is_none(),
-                    timeout: None,
-                    timeout_reason_code: None,
-                    suppress_failure_side_effects: true,
-                    validated_input,
-                })
+                .run_provider_stream_invocation_with_ownership(
+                    CodingProviderStreamRun {
+                        attempt: &invocation_attempt,
+                        node_id: &node.id,
+                        role_run: Some(&role_run),
+                        provider,
+                        legacy_input: &legacy_input,
+                        input: provider_input,
+                        provider_name: reviewer,
+                        provider_role: CodingProviderRole::CodeReviewer,
+                        command_rx: &mut *command_rx,
+                        // Task 12:逻辑 target 不得回落到 legacy `run_streaming` bridge;
+                        // 传统/非逻辑路径保留 `true`。
+                        allow_legacy_stream_fallback: invocation_attempt
+                            .target_snapshot
+                            .is_none(),
+                        timeout: None,
+                        timeout_reason_code: None,
+                        suppress_failure_side_effects: true,
+                        validated_input,
+                    },
+                    Some(launch_ownership),
+                )
                 .await;
             if let Some(outcome) = self
                 .resolve_provider_retry_cycle_outcome(

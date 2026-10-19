@@ -135,7 +135,9 @@ impl WorkspaceEngine {
             ProviderConversationRole::Reviewer,
             reviewer.clone(),
         );
-        let first_session = provider.start(input.clone(), self.cancel.clone()).await;
+        let first_session = provider
+            .start_owned(input.clone(), self.plan_review_launch_ownership(), self.cancel.clone())
+            .await;
         let first_completion = match self
             .drive_reviewer_provider_session_once(first_session, &mut command_rx, &reviewer)
             .await
@@ -192,7 +194,13 @@ impl WorkspaceEngine {
                     self.finish_failed_run().await;
                     return;
                 }
-                let repair_session = provider.start(repair_input, self.cancel.clone()).await;
+                let repair_session = provider
+                    .start_owned(
+                        repair_input,
+                        self.plan_review_launch_ownership(),
+                        self.cancel.clone(),
+                    )
+                    .await;
                 let repair_result = self
                     .drive_reviewer_provider_session_once(
                         repair_session,
@@ -316,7 +324,13 @@ impl WorkspaceEngine {
                     self.finish_failed_run().await;
                     return;
                 }
-                let retry_session = provider.start(retry_input, self.cancel.clone()).await;
+                let retry_session = provider
+                    .start_owned(
+                        retry_input,
+                        self.plan_review_launch_ownership(),
+                        self.cancel.clone(),
+                    )
+                    .await;
                 self.complete_silent_output_retry(
                     &first_completion,
                     &first_error,
@@ -456,12 +470,12 @@ impl WorkspaceEngine {
             ProviderConversationRole::Reviewer,
             reviewer.clone(),
         );
-        let (first_session, first_trust_waiting) = start_review_session_via_gateway(
+        let (first_session, first_trust_waiting) = start_review_session_via_gateway_owned(
             &gateway,
             &reviewer,
             input.clone(),
             project_id.clone(),
-
+            self.plan_review_launch_ownership(),
             self.cancel.clone(),
         )
         .await;
@@ -523,12 +537,12 @@ impl WorkspaceEngine {
                     self.finish_failed_run().await;
                     return;
                 }
-                let (repair_session, _repair_trust_waiting) = start_review_session_via_gateway(
+                let (repair_session, _repair_trust_waiting) = start_review_session_via_gateway_owned(
                     &gateway,
                     &reviewer,
                     repair_input,
                     project_id,
-
+                    self.plan_review_launch_ownership(),
                     self.cancel.clone(),
                 )
                 .await;
@@ -653,12 +667,12 @@ impl WorkspaceEngine {
                     self.finish_failed_run().await;
                     return;
                 }
-                let (retry_session, _retry_trust_waiting) = start_review_session_via_gateway(
+                let (retry_session, _retry_trust_waiting) = start_review_session_via_gateway_owned(
                     &gateway,
                     &reviewer,
                     retry_input,
                     project_id,
-
+                    self.plan_review_launch_ownership(),
                     self.cancel.clone(),
                 )
                 .await;
@@ -1424,13 +1438,23 @@ pub(crate) struct ActivePlanReviewWindow {
     pub(crate) worktree: std::path::PathBuf,
     pub(crate) provider: String,
     pub(crate) run_id: String,
+    /// B1-1:开窗时打开的 plan-review 主 scope(`plan-review-{window}` ×
+    /// run × boot)——规划 reviewer 每次 launch 从此真实 scope 铸造受信
+    /// 归属(此前开窗后即丢弃);窗口生命周期内持有,收口由既有窗口流
+    /// 与 scope 级 quiesce 承担。
+    pub(crate) launch_scope:
+        std::sync::Arc<crate::cross_cutting::provider_resources::ProviderRunResourceScope>,
 }
 
-async fn start_review_session_via_gateway(
+async fn start_review_session_via_gateway_owned(
     gateway: &Arc<LogicalCodebaseProviderGateway>,
     reviewer: &ProviderName,
     input: StreamingProviderInput,
     project_id: String,
+    // B1-1:规划 reviewer 的受信资源归属(活动窗主 scope 铸造;direct/
+    // gateway 两形态同一来源)。绑定进 validated input 由 adapter
+    // `start_validated` 的 spawn 点消费。
+    launch_ownership: Option<crate::cross_cutting::provider_resources::TrustedLaunchOwnership>,
     cancel: CancellationToken,
 ) -> (
     Result<ProviderSession, ProviderAdapterError>,
@@ -1464,6 +1488,12 @@ async fn start_review_session_via_gateway(
     // 显式覆盖层);窗口纪律仍由 assert_plan_review_window 与 start 漏斗
     // 窗口守卫把关,与启动环境解耦。
     let validated_input = ValidatedStreamingProviderInput::new(input, validated);
+    // B1-1:受信 launch 归属绑定进 validated input(crate 私有 setter),
+    // adapter `start_validated` 的 spawn 点消费同一登记生命周期。
+    let validated_input = match launch_ownership {
+        Some(ownership) => validated_input.with_launch_ownership(ownership),
+        None => validated_input,
+    };
     match gateway.start_streaming(validated_input, cancel).await {
         Ok(session) => (Ok(session), None),
         Err(error) => {
@@ -1472,6 +1502,22 @@ async fn start_review_session_via_gateway(
             (Err(mapped), trust_waiting)
         }
     }
+}
+
+/// 既有 5 参签名(测试/trust 分类面消费):无归属委托 owned 变体。
+/// 生产规划 reviewer launch 一律经 `_owned` 传活动窗归属。
+#[cfg(test)]
+async fn start_review_session_via_gateway(
+    gateway: &Arc<LogicalCodebaseProviderGateway>,
+    reviewer: &ProviderName,
+    input: StreamingProviderInput,
+    project_id: String,
+    cancel: CancellationToken,
+) -> (
+    Result<ProviderSession, ProviderAdapterError>,
+    Option<crate::product::logical_codebase::provider_trust::ProviderTrustWaiting>,
+) {
+    start_review_session_via_gateway_owned(gateway, reviewer, input, project_id, None, cancel).await
 }
 
 
@@ -1572,12 +1618,12 @@ impl WorkspaceEngine {
 
     /// 规划面 quiesce 目标:主 scope=本次 review run(空登记 Quiescent 即
     /// 静止证明;与 coding 面同构,不含 aria.worktree 协调 scope——规划
-    /// 面无 Coder 并行窗登记)。
-    fn plan_review_quiesce_targets(
+    /// 面无 Coder 并行窗登记)。B1-1:同一 scope 亦是规划 reviewer launch
+    /// 的受信归属来源(`begin_plan_review_window` 持有,原开窗后即丢弃)。
+    fn plan_review_main_scope(
         &self,
         window_id: &str,
-    ) -> Result<Vec<crate::cross_cutting::provider_resources::ProviderRunResourceScope>, String>
-    {
+    ) -> Result<crate::cross_cutting::provider_resources::ProviderRunResourceScope, String> {
         use crate::cross_cutting::provider_resources::{
             ProviderRunResourceScope, ResourceScopeKey,
         };
@@ -1599,7 +1645,7 @@ impl WorkspaceEngine {
                 .unwrap_or_else(|| self.session.session_id.clone()),
             boot_identity: format!("aria-engine-{}", std::process::id()),
         };
-        let scope = ProviderRunResourceScope::open_for_recovery(
+        ProviderRunResourceScope::open_for_recovery(
             &key,
             Some(window_id),
             &private_root,
@@ -1609,8 +1655,23 @@ impl WorkspaceEngine {
                 .join(PLAN_PROVIDER_RESOURCE_STORE_DIR),
             None,
         )
-        .map_err(|error| format!("plan_review_scope_open_failed: {error}"))?;
-        Ok(vec![scope])
+        .map_err(|error| format!("plan_review_scope_open_failed: {error}"))
+    }
+
+    /// B1-1(波 2):规划 reviewer 本次 launch 的受信资源归属铸造——从
+    /// 活动窗持有的 plan-review 主 scope(开窗实际归属:同 window/run/
+    /// boot)生成唯一资源 ID 载体;首发/repair/静默重试与 gateway/direct
+    /// 两形态共用。无活动窗(测试 seam)= `None`(真实 adapter 由窗口
+    /// 守卫拒绝,不以无归属静默降级为生产语义)。
+    fn plan_review_launch_ownership(
+        &self,
+    ) -> Option<crate::cross_cutting::provider_resources::TrustedLaunchOwnership> {
+        self.active_review_window.as_ref().map(|active| {
+            crate::cross_cutting::provider_resources::TrustedLaunchOwnership::mint(
+                std::sync::Arc::clone(&active.launch_scope),
+                &format!("plan review provider process: {}", active.provider),
+            )
+        })
     }
 
     /// 修复轮 1(F1,Main 裁定):规划审查窗口目标解析——与
@@ -1699,9 +1760,11 @@ impl WorkspaceEngine {
         let provider = serde_json::to_string(reviewer)
             .map(|raw| raw.trim_matches('"').to_string())
             .unwrap_or_else(|_| format!("{reviewer:?}"));
-        let targets = self.plan_review_quiesce_targets(&window_id)?;
-        let target_refs: Vec<&crate::cross_cutting::provider_resources::ProviderRunResourceScope> =
-            targets.iter().collect();
+        // B1-1:开窗打开的主 scope 以 Arc 持有——quiesce 目标借引用消费,
+        // 窗口生命周期内保留给规划 reviewer launch 铸造受信归属(此前
+        // 开窗消费后即丢弃)。
+        let main_scope = std::sync::Arc::new(self.plan_review_main_scope(&window_id)?);
+        let target_refs = [&*main_scope];
         let request = crate::product::reviewer_window::ReviewerWindowBeginRequest {
             window_id: &window_id,
             attempt_id: &self.session.session_id,
@@ -1735,6 +1798,7 @@ impl WorkspaceEngine {
             worktree,
             provider,
             run_id,
+            launch_scope: main_scope,
         });
         Ok(())
     }
@@ -1861,3 +1925,104 @@ impl WorkspaceEngine {
 #[cfg(test)]
 #[path = "drive_tests.rs"]
 mod tests;
+
+/// B1-1(波 2):规划 reviewer 开窗保留主 scope 并铸造 launch 归属。
+#[cfg(test)]
+mod b1_plan_launch_ownership_tests {
+    use super::*;
+    use crate::product::lifecycle_store::{
+        CreateWorkspaceSessionInput, LifecycleStore,
+    };
+
+    fn b1_git_init(dir: &std::path::Path) {
+        use std::process::Command;
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "b1@example.test"],
+            vec!["config", "user.name", "B1 Plan"],
+            vec!["commit", "-m", "init", "--quiet", "--allow-empty"],
+        ] {
+            let status = Command::new("git")
+                .current_dir(dir)
+                .args(&args)
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git fixture {args:?} must succeed");
+        }
+    }
+
+    #[tokio::test]
+    async fn b1_plan_review_window_keeps_scope_and_mints_launch_ownership() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria"));
+        let project = crate::product::project_store::ProjectStore::new(paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "B1-PLAN".to_string(),
+                description: None,
+            })
+            .expect("project");
+        let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: project.id.clone(),
+                repo_id: None,
+                logical_codebase_id: None,
+                base_branch: None,
+                title: "b1 plan".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .expect("issue");
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let record = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: project.id.clone(),
+                issue_id: issue.id.clone(),
+                entity_id: issue.id.clone(),
+                workspace_type: crate::product::models::WorkspaceType::Story,
+                author_provider: crate::product::models::ProviderName::ClaudeCode,
+                reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            })
+            .expect("workspace session");
+        let checkpoint = std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+            paths.issue_lifecycle_root(&project.id, &issue.id),
+        ));
+        let (tx, _rx) = mpsc::channel(64);
+        let mut engine = WorkspaceEngine::new_persistent(
+            checkpoint,
+            LifecycleStore::new(paths.clone()),
+            tx,
+            crate::product::workspace_engine::types::WorkspaceSession::from_record(record),
+        );
+        // 直连形态:repository_path 即带 .git 的评审目标(跳过聚合根解析)。
+        let worktree = root.path().join("plan-worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        b1_git_init(&worktree);
+        engine.session.repository_path = Some(worktree.clone());
+
+        engine
+            .begin_plan_review_window(&crate::product::models::ProviderName::ClaudeCode, worktree)
+            .await
+            .expect("begin plan review window");
+
+        let active = engine
+            .active_review_window
+            .as_ref()
+            .expect("活动窗持有主 scope");
+        let expected_scope_id =
+            format!("plan-review-{}", active.handle.window_id);
+        assert_eq!(active.launch_scope.key().scope_id, expected_scope_id);
+        // launch 归属从同一 scope 铸造(同 window/run/boot;资源 ID 唯一)。
+        let ownership = engine
+            .plan_review_launch_ownership()
+            .expect("活动窗铸造 launch 归属");
+        assert_eq!(ownership.scope_key(), active.launch_scope.key());
+        let again = engine.plan_review_launch_ownership().expect("再次铸造");
+        assert_ne!(ownership.resource_id(), again.resource_id());
+
+        engine.close_plan_review_window("b1_plan_test_exit").await;
+    }
+}

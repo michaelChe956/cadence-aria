@@ -27,6 +27,10 @@ use crate::protocol::contracts::AdapterInput;
 pub struct ValidatedStreamingProviderInput {
     input: StreamingProviderInput,
     launch: ValidatedSessionLaunchPolicy,
+    /// B1-1:本次 launch 的受信资源归属(engine 三处真实 scope 铸造,
+    /// `provider_resources::TrustedLaunchOwnership`)。`None` = 无归属
+    /// 请求(存量构造/测试)。crate 内绑定/读取——外部不可伪造归属。
+    launch_ownership: Option<crate::cross_cutting::provider_resources::TrustedLaunchOwnership>,
 }
 
 impl ValidatedStreamingProviderInput {
@@ -34,7 +38,11 @@ impl ValidatedStreamingProviderInput {
     /// gateway `prepare_streaming_launch`(prepare 前 bind run-bound sink);
     /// crate 外不可再凭空组装 validated input(raw `start` 仅保留单仓 direct)。
     pub(crate) fn new(input: StreamingProviderInput, launch: ValidatedSessionLaunchPolicy) -> Self {
-        Self { input, launch }
+        Self {
+            input,
+            launch,
+            launch_ownership: None,
+        }
     }
 
     pub(crate) fn into_parts(self) -> (StreamingProviderInput, ValidatedSessionLaunchPolicy) {
@@ -61,6 +69,26 @@ impl ValidatedStreamingProviderInput {
     ) -> Option<&crate::cross_cutting::provider_execution::FrozenProviderExecution> {
         self.launch.frozen_execution()
     }
+
+    /// B1-1:绑定本次 launch 的受信资源归属(crate 内受信装配面——launch
+    /// 分流点 `launch_provider_session` 的 validated+gateway 臂与同步桥接
+    /// 透传消费)。字段 private、载体 crate 内铸造,caller/模型不可伪造。
+    pub(crate) fn with_launch_ownership(
+        mut self,
+        ownership: crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
+    ) -> Self {
+        self.launch_ownership = Some(ownership);
+        self
+    }
+
+    /// B1-1:本次 launch 的受信资源归属(`None` = 无归属请求)。真实
+    /// adapter 的 B1 接线片在 spawn 点消费(预留→spawn→回填 PID+starttime
+    #[allow(dead_code)] // B1 adapter 接线片(spawn 点)消费;共享契约先行冻结
+    pub(crate) fn launch_ownership(
+        &self,
+    ) -> Option<&crate::cross_cutting::provider_resources::TrustedLaunchOwnership> {
+        self.launch_ownership.as_ref()
+    }
 }
 
 /// 已绑定 validated policy 的同步 adapter input。spawn 前复验在
@@ -71,13 +99,21 @@ impl ValidatedStreamingProviderInput {
 pub struct ValidatedAdapterInput {
     input: AdapterInput,
     launch: ValidatedSessionLaunchPolicy,
+    /// B1-1:同步载体同样可携带受信 launch 归属(同步桥接
+    /// `GatewaySyncProvider::run_validated` 透传进 streaming validated
+    /// input;单仓同步路 cli_adapter 明确不在 v1)。
+    launch_ownership: Option<crate::cross_cutting::provider_resources::TrustedLaunchOwnership>,
 }
 
 impl ValidatedAdapterInput {
     /// Task 1b 段③(裁决 A):同 streaming 侧收紧——生产 caller 经 gateway
     /// `prepare_sync_launch`;crate 外无构造入口。
     pub(crate) fn new(input: AdapterInput, launch: ValidatedSessionLaunchPolicy) -> Self {
-        Self { input, launch }
+        Self {
+            input,
+            launch,
+            launch_ownership: None,
+        }
     }
 
     pub(crate) fn into_parts(self) -> (AdapterInput, ValidatedSessionLaunchPolicy) {
@@ -92,6 +128,23 @@ impl ValidatedAdapterInput {
     ) -> Self {
         self.launch = self.launch.with_frozen_execution(execution);
         self
+    }
+
+    /// B1-1:同步载体的受信归属绑定(crate 内受信装配面;与 streaming 侧
+    #[allow(dead_code)] // 同步侧受信装配接线后消费;共享契约先行冻结
+    pub(crate) fn with_launch_ownership(
+        mut self,
+        ownership: crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
+    ) -> Self {
+        self.launch_ownership = Some(ownership);
+        self
+    }
+
+    /// B1-1:本次同步 launch 的受信资源归属(`None` = 无归属请求)。
+    pub(crate) fn launch_ownership(
+        &self,
+    ) -> Option<&crate::cross_cutting::provider_resources::TrustedLaunchOwnership> {
+        self.launch_ownership.as_ref()
     }
 
     /// 批2 Task 2:冻结的执行合同;`None` = 显式缺失(不默认 HostCoding),

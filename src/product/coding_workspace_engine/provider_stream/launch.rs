@@ -16,9 +16,16 @@ use super::*;
 /// - validated 在场而 gateway 缺失(Task 7 分流收口):LC validated 输入必须
 ///   经 gateway 启动——返回稳定错误 `lc_validated_launch_requires_gateway`,
 ///   🔴 禁止回退裸 `provider.start`。
-/// - validated 缺失(传统/非逻辑 issue):直接 `provider.start`,保留既有
+/// - validated 缺失(传统/非逻辑 issue):直接 adapter start,保留既有
 ///   行为（单仓 cwd 仍取 `working_dir`，`working_directory` 为 None 的回填
 ///   语义不变）。
+///
+/// B1-1(波 2):三条分流透传**同一**受信资源归属载体 `ownership`(engine
+/// 三处真实 scope 铸造)——validated+gateway 臂绑定进 validated input 由
+/// adapter `start_validated` 消费;非 LC direct 臂经 trait 默认方法
+/// `provider.start_owned` 执行登记生命周期;缺 gateway 拒绝臂不变
+/// (fail-closed,不因归属在场/缺失改变)。归属在场时不静默降回裸
+/// spawn;`None` = 无归属请求(legacy/测试面),保持既有裸 start 语义。
 ///
 /// 返回 boxed future 以便外层 `tokio::select!` 统一内联。gateway 错误映射为
 /// `ProviderAdapterError`,使其与直接 adapter 错误在 stream 层等价处理。
@@ -30,9 +37,12 @@ pub(super) fn launch_provider_session<'a>(
     gateway: Option<
         &std::sync::Arc<crate::product::logical_codebase::LogicalCodebaseProviderGateway>,
     >,
+    launch_ownership: Option<
+        crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
+    >,
 ) -> std::pin::Pin<
     Box<
-        dyn std::future::Future<
+        dyn Future<
                 Output = Result<
                     crate::cross_cutting::streaming_provider::ProviderSession,
                     ProviderAdapterError,
@@ -45,6 +55,12 @@ pub(super) fn launch_provider_session<'a>(
         (Some(validated), Some(gateway)) => {
             let gateway = gateway.clone();
             Box::pin(async move {
+                // B1-1:归属绑定进 validated input(crate 私有 setter),
+                // adapter `start_validated` 的 spawn 点消费同一生命周期。
+                let validated = match launch_ownership {
+                    Some(ownership) => validated.with_launch_ownership(ownership),
+                    None => validated,
+                };
                 // T6 fix-loop r2：Coding 共享启动口（Coder/CodeReviewer/
                 // InternalReviewer）接产品层共享分类桥——trust 维度拒绝
                 // 提升 provider_trust_missing 分类+同源指导；恢复动作用
@@ -71,7 +87,8 @@ pub(super) fn launch_provider_session<'a>(
             })
         }
         // Task 7 分流收口:LC validated 输入缺 gateway 是装配错误,返回稳定
-        // 错误码 fail-closed,不回退裸 `provider.start`。
+        // 错误码 fail-closed,不回退裸 `provider.start`(B1-1:归属在场
+        // 亦不改变——缺 gateway 即拒绝,不降级)。
         (Some(_), None) => Box::pin(async move {
             Err(ProviderAdapterError::provider_unavailable(
                 "lc_validated_launch_requires_gateway: validated LC launches must start through LogicalCodebaseProviderGateway; raw provider start fallback is forbidden",
@@ -79,7 +96,11 @@ pub(super) fn launch_provider_session<'a>(
         }),
         // 非 gateway 路径(传统/非逻辑 issue):直接 adapter start。逻辑代码库 feature
         // 在入口处由 `validated_input` 的存在与否分流,使旧 API 行为不被本工作包扩大。
-        (None, _) => Box::pin(async move { provider.start(input, cancel).await }),
+        // B1-1:归属在场时经 trait 默认方法 `start_owned` 执行登记生命周期
+        // (预留→spawn→回填→尾部收口注销);`None` 保持裸 start。
+        (None, _) => {
+            Box::pin(async move { provider.start_owned(input, launch_ownership, cancel).await })
+        }
     }
 }
 
@@ -439,6 +460,8 @@ mod tests {
             CancellationToken::new(),
             Some(validated),
             Some(&gateway),
+            // B1-1:无归属请求(测试面)——分流透传 None。
+            None,
         )
         .await;
         let error = match result {
