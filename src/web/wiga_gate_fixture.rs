@@ -257,6 +257,16 @@ impl EnrolledGateFixture {
             )
             .ensure_bootstrap(PROJECT_ID)
             .expect("seed capability record");
+            // 迁移桥退役（4749a1fc）后 bootstrap 行恒为 Unknown：正向路径
+            // 必须在自举之后物化「已探测」Confirmed 行，Enable 预检与
+            // coding run 才能通过 capability 门（产品 fail-closed 语义不变，
+            // 需 Unknown 的负向场景不调用本播种）。
+            crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
+                &inner.paths,
+                PROJECT_ID,
+                Some(&runner_lc_id),
+                &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
+            );
         }
         let body = serde_json::json!({
             "expected_revision": null,
@@ -557,6 +567,16 @@ impl EnrolledGateFixture {
             )
             .ensure_bootstrap(PROJECT_ID)
             .expect("seed capability record");
+            // 迁移桥退役（4749a1fc）后 bootstrap 行恒为 Unknown：正向路径
+            // 必须在自举之后物化「已探测」Confirmed 行，Enable 预检与
+            // coding run 才能通过 capability 门（产品 fail-closed 语义不变，
+            // 需 Unknown 的负向场景不调用本播种）。
+            crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
+                &inner.paths,
+                PROJECT_ID,
+                Some(&runner_lc_id),
+                &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
+            );
         }
         let body = collection_enable_body(&story.id, &design.id, &logical_codebase_id);
         let app = crate::web::app::build_web_router(state.clone());

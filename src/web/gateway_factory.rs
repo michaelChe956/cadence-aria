@@ -510,12 +510,25 @@ mod tests {
             .expect("save manifest");
     }
 
+    /// 迁移桥退役(4749a1fc)后 `ensure_bootstrap` 写出的能力行恒为 Unknown,
+    /// 正向 validate 必须在自举之后显式物化「已探测」Confirmed 行;产品侧
+    /// fail-closed 语义不变(需 Unknown 的负向用例不调用本 helper)。
+    fn seed_confirmed_claude(paths: &ProductAppPaths, lc_id: Option<&str>) {
+        crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
+            paths,
+            "project_0001",
+            lc_id,
+            &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
+        );
+    }
+
     #[test]
     fn build_assembles_gateway_and_shares_audit_instance() {
         let (_root, paths, factory) = factory_fixture();
         register_manifest(&paths, "project_0001");
 
         let gateway = factory.build("project_0001").unwrap();
+        seed_confirmed_claude(&paths, None);
 
         let audit = factory.audit();
         assert!(Arc::ptr_eq(&audit, &gateway.audit()));
@@ -564,6 +577,7 @@ mod tests {
         let gateway = factory
             .build_for_lc("project_0001", Some(lc_id))
             .expect("build lc gateway");
+        seed_confirmed_claude(&paths, Some(lc_id));
 
         // legacy（None）路径无 manifest → PolicyMissing，证明未串扰到 project 级。
         let legacy = factory.build_for_lc("project_0001", None);
@@ -666,6 +680,7 @@ mod tests {
         );
         register_manifest(&paths, "project_0001");
         let gateway = factory.build("project_0001").expect("build gateway");
+        seed_confirmed_claude(&paths, None);
 
         let aggregate_root = paths.root().join("aggregate");
         std::fs::create_dir_all(&aggregate_root).expect("create aggregate root");

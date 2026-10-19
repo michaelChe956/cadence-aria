@@ -642,6 +642,96 @@ pub(crate) fn enrollment_file_exists(fixture: &Fixture) -> bool {
         .exists()
 }
 
+/// 测试侧「已确认能力」记录形状（与 `automation_gateway_preflight` 测试内
+/// `capability_record(provider, true)` 等价）：三个 canonical action 行的
+/// launch/resume/write_boundary 全 `Confirmed`，trust `Confirmed`，执行语义
+/// 为 host-open，snapshot ref 与 gateway `ProviderRef` 一致。
+pub(crate) fn confirmed_capability_record(
+    provider_type: crate::product::logical_codebase::provider_gateway::ProviderRefType,
+) -> crate::product::logical_codebase::provider_capability_store::ProviderCapabilityRecord {
+    use crate::cross_cutting::provider_boundary::PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN;
+    use crate::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
+    use crate::product::logical_codebase::policy::{
+        ProviderDialect, ProviderWireDialect, SessionPolicyAction,
+    };
+    use crate::product::logical_codebase::provider_capability_store::{
+        CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
+        ProviderActionMatrix, ProviderCapabilityRecord, RootRecipeEvidence,
+    };
+    use crate::product::logical_codebase::provider_gateway::{
+        ProviderRefType, ResumeEvidenceState,
+    };
+
+    let (adapter_dialect, wire_dialect) = match provider_type {
+        ProviderRefType::ClaudeCode => (
+            ProviderDialect::ClaudeCodeCliV1,
+            ProviderWireDialect::ClaudeCodeStreamJson,
+        ),
+        ProviderRefType::Codex => (
+            ProviderDialect::CodexCliV1,
+            ProviderWireDialect::CodexAppServerRpc,
+        ),
+        ProviderRefType::Pi => (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc),
+        ProviderRefType::KimiCode => (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp),
+    };
+    let row = |action: SessionPolicyAction| ProviderActionCapability {
+        action,
+        launch: ProviderCapabilityEvidence::Confirmed,
+        resume: ProviderCapabilityEvidence::Confirmed,
+        write_boundary: ProviderCapabilityEvidence::Confirmed,
+        projection_digest: format!("projection-digest-{action:?}"),
+        evidence_ref: format!("probe://{action:?}"),
+    };
+    ProviderCapabilityRecord {
+        provider_type,
+        schema_version: PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION,
+        version: "1.4.0".to_string(),
+        adapter_dialect,
+        wire_dialect,
+        capability_snapshot_ref: "cap_managed_snapshot".to_string(),
+        evidence: CapabilityEvidence::ProductionVerified,
+        resume_evidence: ResumeEvidenceState::Unsupported,
+        supported_actions: Vec::new(),
+        action_matrix: ProviderActionMatrix::from_rows(vec![
+            row(SessionPolicyAction::PlanningReadOnly),
+            row(SessionPolicyAction::CodingTargetWrite),
+            row(SessionPolicyAction::ReviewReadOnly),
+        ])
+        .expect("three canonical capability rows"),
+        trust: ProviderCapabilityEvidence::Confirmed,
+        probed_at: None,
+        probe_artifact_ref: None,
+        root_recipe_evidence: RootRecipeEvidence::None,
+        execution_semantics: PROVIDER_EXECUTION_SEMANTICS_HOST_OPEN.to_string(),
+    }
+}
+
+/// 测试侧正向 capability 播种：把指定 provider 覆盖写为 `Confirmed` 行。
+///
+/// 生产语义（`4749a1fc` 起）要求 bootstrap 行保持 Unknown、只有真实 probe
+/// 才能写入 Confirmed（Unknown+legacy allow 列表的迁移桥已退役）。正向路径
+/// 的 fixture 因此在 `ensure_bootstrap` 之后显式调用本 helper 物化「已探测」
+/// 事实；需要断言「能力未确认」的负向场景不得调用，保留 bootstrap Unknown
+/// 行即可。`lc_id = None` 写 project 级 legacy 子树，`Some` 写 LC 子树。
+pub(crate) fn seed_confirmed_capability_records(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    lc_id: Option<&str>,
+    providers: &[crate::product::logical_codebase::provider_gateway::ProviderRefType],
+) {
+    use crate::product::logical_codebase::provider_capability_store::ProviderCapabilityStore;
+
+    let store = match lc_id {
+        Some(lc_id) => ProviderCapabilityStore::for_lc(paths.clone(), lc_id),
+        None => ProviderCapabilityStore::new(paths.clone()),
+    };
+    for provider_type in providers {
+        store
+            .upsert(project_id, &confirmed_capability_record(*provider_type))
+            .expect("seed confirmed capability record");
+    }
+}
+
 /// 批 2 T3：store 级播种「已终止且绑定指定 plan」的 enrollment（不经
 /// HTTP 作用域校验；Enable→bind_plan→terminate_plan）。返回 enrollment_id。
 /// 供 runner/gates 干净退出等定向测试复用。

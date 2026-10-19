@@ -361,6 +361,16 @@ async fn aggregate_initialization_provider_turn_launches_through_gateway_factory
         .save_manifest("project_0001", &manifest)
         .unwrap();
 
+    // 迁移桥退役(4749a1fc)后 bootstrap 能力行恒为 Unknown:material prep
+    // 的 ensure_bootstrap 不会覆盖既有文件,这里先物化「已探测」Confirmed
+    // 行,provider turn 的三个 claude_code 启动才能过 capability 门。
+    crate::web::handlers::automation_enrollment_test_support::seed_confirmed_capability_records(
+        &paths,
+        "project_0001",
+        None,
+        &[crate::product::logical_codebase::provider_gateway::ProviderRefType::ClaudeCode],
+    );
+
     let factory = fake_registry_gateway_factory(paths);
     let dependencies = build_test_dependencies(root_path.clone(), Some(factory.clone()));
     let state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone()))
