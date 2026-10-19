@@ -11525,6 +11525,50 @@ fn b45_t24_issue_description(scenario: B45T24Scenario) -> String {
          - 验收标准(AC/验证计划)只能引用 plan 基线树内【已提交】的既有路径(如 `fixtures/pi-incident/` 下脚本);\n\
          - incident 残留文件(`coder-dirty.txt`/`coder-staged.txt`/`coder-ignored.log`/`incident-note.md`/`build-out/**`)属于 coder 交付后的事故现场终态,由评审阶段 verify 脚本核对,**禁止写入 AC 引用路径**;\n\
          - AC 一律 EARS 模板(`WHEN ... THE SYSTEM SHALL ...`),每条单谓语。\n\n\
+         ## Work Item Plan 结构骨架(plan 编译器硬合同——节标题逐字使用,不得自创/翻译/增删)\n\
+         文档头必须是 `# Work Item Plan`;Work Item 头必须是 `## Work Item WI-001`。\n\
+         每个 Work Item 必须包含以下全部结构化节(按此顺序;节内用 `- key: value` 行):\n\
+         `Identity`(必需 key:schema_version/logical_work_item_id/title/kind)、`Goal`(summary)、`Non Goals`(non_goals)、`Dependencies`(depends_on)、`Inputs`、`Outputs`(contract_id/capabilities)、`Tasks`(task_id/statement/requirement_refs/done_when_refs)、`Write Policy`(exclusive_scopes/forbidden_scopes)、`Acceptance Criteria`(criterion_id/statement/required_evidence;statement 为 EARS)、`Verification`(check_id/required/non_zero_test_execution_required;command 可用基线内已提交脚本如 `bash fixtures/pi-incident/build-residue.sh`)、`Handoff Schema`(required_fields/provided_contract_refs/reviewer_check_refs)、`Blockers`(允许零字段=无阻塞)、`Traceability`(source_type/source_id/requirement_id)。\n\
+         可选节:`Plan Intent`(intent 等意图 key)与自由文本节 `Notes`/`Rationale`。\n\
+         禁止:清单外节标题、节外游离的非空内容、自造结构化 key——缺任一必需节或 key=编译拒绝。\n\
+         骨架示例(照此填值,条目行用 `- ID | ... | key: value` 形态):\n\
+         ```markdown\n\
+         # Work Item Plan\n\
+         ## Work Item WI-001\n\
+         ### Identity\n\
+         - schema_version: 1\n\
+         - logical_work_item_id: WI-001\n\
+         - title: <标题>\n\
+         - kind: feature\n\
+         ### Goal\n\
+         - summary: <目标>\n\
+         ### Non Goals\n\
+         - non_goals: <非目标>\n\
+         ### Dependencies\n\
+         - depends_on: none\n\
+         ### Inputs\n\
+         ### Outputs\n\
+         - contract_id: <契约>\n\
+         - capabilities: <能力>\n\
+         ### Tasks\n\
+         - TASK-001 | <任务陈述> | requirement_refs: [AC-001] | done_when_refs: [AC-001]\n\
+         ### Write Policy\n\
+         - exclusive_scopes: <scope>\n\
+         - forbidden_scopes: <scope>\n\
+         ### Acceptance Criteria\n\
+         - AC-001 | WHEN <条件> THE SYSTEM SHALL <可观察结果> | required_evidence: <证据>\n\
+         ### Verification\n\
+         - CHECK-001 | required: true | non_zero_test_execution_required: true | command: bash fixtures/pi-incident/build-residue.sh\n\
+         ### Handoff Schema\n\
+         - required_fields: <字段>\n\
+         - provided_contract_refs: <引用>\n\
+         - reviewer_check_refs: <引用>\n\
+         ### Blockers\n\
+         ### Traceability\n\
+         - source_type: issue\n\
+         - source_id: <源>\n\
+         - requirement_id: <需求>\n\
+         ```\n\n\
          ## Coder 要求(实现阶段,一次完成;不得运行 verify 脚本——那是评审阶段的验证命令)\n\
          1. 在仓库根新增 `incident-note.md`,内容一行:`b45-t24 coder note`。\n\
          2. 重建事故残留状态(全部留在工作区,不要提交、不要清理):\n\
