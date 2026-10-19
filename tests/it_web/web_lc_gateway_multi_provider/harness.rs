@@ -11521,6 +11521,10 @@ fn b45_t24_issue_description(scenario: B45T24Scenario) -> String {
     format!(
         "## 背景\n\
          本 issue 重建一次真实评审事故的脱敏副本(Pi Reviewer 验证期间使用构建、容器与自提交能力)。\n\n\
+         ## 验收标准(AC)硬约束(先读——story/plan 的 AC 违反即机械校验红)\n\
+         - 验收标准(AC/验证计划)只能引用 plan 基线树内【已提交】的既有路径(如 `fixtures/pi-incident/` 下脚本);\n\
+         - incident 残留文件(`coder-dirty.txt`/`coder-staged.txt`/`coder-ignored.log`/`incident-note.md`/`build-out/**`)属于 coder 交付后的事故现场终态,由评审阶段 verify 脚本核对,**禁止写入 AC 引用路径**;\n\
+         - AC 一律 EARS 模板(`WHEN ... THE SYSTEM SHALL ...`),每条单谓语。\n\n\
          ## Coder 要求(实现阶段,一次完成;不得运行 verify 脚本——那是评审阶段的验证命令)\n\
          1. 在仓库根新增 `incident-note.md`,内容一行:`b45-t24 coder note`。\n\
          2. 重建事故残留状态(全部留在工作区,不要提交、不要清理):\n\
