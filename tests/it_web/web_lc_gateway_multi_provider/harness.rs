@@ -5285,6 +5285,23 @@ impl MatrixEnvironment {
         cells
     }
 
+    /// F1′(Bug45):读本轮权威 gate snapshot 的 `manual_repairs_remaining`
+    /// (产品 durable 事实)。`Ok(None)`=会话存在但门快照缺失;`Err`=读取
+    /// 失败——两者都不得回落默认额度猜测,调用侧保留真实错误并停发。
+    fn plan_gate_manual_repairs_remaining(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<u32>, String> {
+        let record = self
+            .lifecycle
+            .get_workspace_session(session_id)
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(record
+            .human_gate_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.manual_repairs_remaining))
+    }
+
     /// r66(T22 r4 现场):机械校验返修轮的反馈构造——从 observation 捕获的
     /// SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED 帧取 mechanical_report_ref,
     /// 经 WorkItemPlanSourceStore 读 findings 原文(取不到 ref/读取失败返回
@@ -5405,21 +5422,43 @@ impl MatrixEnvironment {
             )
         };
         let mut feedback_text = feedback_text;
-        // r66(T22 r4 现场):机械校验失败的有界返修轮——confirm 撞
+        // r66(T22 r4 现场):机械校验失败的门上返修轮——confirm 撞
         // SINGLE_CANDIDATE_APPROVAL_COMPILE_FAILED 且 cause 含
         // MechanicalValidationFailed 时,产品语义=门保持开(human_confirm),
-        // 期望人工再修订消除 Error 级 findings(manual_repairs 预算 3);
-        // compile_recovery_action 对该族不适用(r4 实拍 INVALID_COMPILE_
-        // RECOVERY_ACTION)。返修反馈携带 store 读取的机械 findings 原文,
-        // 有界 2 轮,失败如实落格。
-        let mut mechanical_rounds_left = 3usize;
+        // 期望人工再修订消除 Error 级 findings;compile_recovery_action 对
+        // 该族不适用(r4 实拍 INVALID_COMPILE_RECOVERY_ACTION)。返修反馈
+        // 携带 store 读取的机械 findings 原文,失败如实落格。
+        //
+        // F1′(Bug45):初始反馈(M1 plan resume)与机械返修共用同一产品
+        // `max_manual_repairs`(=3)总额度——初始轮占 1 槽,机械轮最多再 2
+        // 槽。每轮发送前读 durable gate snapshot 的
+        // `manual_repairs_remaining`(产品权威),与本地总账取 min:为 0
+        // 即停发(不再发注定被产品拒绝的第 4 次);snapshot 缺失/读取失败
+        // 保留真实错误并停,不回落默认 3 猜测。产品侧的扣减/重放/不退还/
+        // 耗尽拒绝保持不变(本段只做发送前对齐)。
+        let mut feedback_budget = PlanGateFeedbackBudget::new();
         let mut confirmed = false;
-        let mut feedback_command = json!({
-            "type": "human_gate_feedback",
-            "command_id": "lcg-matrix-plan-revision",
-            "feedback": feedback_text,
-        });
         loop {
+            // 发送前授权:初始反馈同样占槽(首轮 r1),机械轮 r2/r3。
+            let send_authorization =
+                feedback_budget.authorize(self.plan_gate_manual_repairs_remaining(session_id));
+            if let Err(stop) = send_authorization {
+                fp("plan_sc_feedback_budget_stop", format_args!("{stop}"));
+                // 保留真实错误;仅初始轮(尚无真实错误)落预算不可用诊断。
+                if observation.run_failure.is_none() {
+                    observation.run_failure = Some(stop.diagnostic());
+                }
+                break;
+            }
+            let feedback_round = feedback_budget.record_send();
+            // r73(T22 r15 现场):command_id 每轮唯一——固定 id 在第二轮被
+            // HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN 拒收(首 turn
+            // 已消费该 id,r15 实拍)。初始反馈从 r1 起与机械轮同序列。
+            let feedback_command = json!({
+                "type": "human_gate_feedback",
+                "command_id": format!("lcg-matrix-plan-revision-r{feedback_round}"),
+                "feedback": feedback_text,
+            });
             if let Err(error) = ws.send_json(&feedback_command).await {
                 observation.push_event(json!({"type": "matrix_error", "message": error}));
                 observation.run_failure = Some(format!("human_gate_feedback 发送失败:{error}"));
@@ -5520,11 +5559,18 @@ impl MatrixEnvironment {
             // r66:机械校验失败族→门上返修轮(feedback 携 findings 原文)。
             // r68:判定扫事件帧——run_failure 可能已被后续 INVALID 错误覆盖
             //(r6 实拍:recovery 白轮的 INVALID 文本覆盖机械文本致不触发)。
-            if mechanical_rounds_left > 0 && plan_confirm_failure_is_mechanical(&observation) {
+            if plan_confirm_failure_is_mechanical(&observation) {
+                // F1′:额度耗尽/快照不可读时不构造返修轮,保留本轮真实
+                // confirm 失败文本(不被下面的清空覆盖)。
+                if let Err(stop) = feedback_budget
+                    .authorize(self.plan_gate_manual_repairs_remaining(session_id))
+                {
+                    fp("plan_sc_feedback_budget_stop", format_args!("{stop}"));
+                    break;
+                }
                 if let Some(findings_feedback) =
                     self.plan_mechanical_findings_feedback(session_id, &observation)
                 {
-                    mechanical_rounds_left -= 1;
                     observation.run_failure = None;
                     // r70(T22 r9 现场):机械轮反馈必须同时携带有效需求编号
                     // 清单——r9 实拍候选引用编造的 NFR-002(r33 老病在机械
@@ -5541,18 +5587,17 @@ impl MatrixEnvironment {
                              下列编号):\n{requirement_digest}"
                         )
                     };
-                    // r73(T22 r15 现场):command_id 每轮唯一——固定 id 在
-                    // 第二轮被 HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN
-                    // 拒收(首 turn 已消费该 id,r15 实拍)。
-                    let revision_round = 4 - mechanical_rounds_left;
-                    feedback_command = json!({
-                        "type": "human_gate_feedback",
-                        "command_id": format!("lcg-matrix-plan-revision-r{revision_round}"),
-                        "feedback": feedback_text,
-                    });
+                    // F1′:本轮只装填反馈文本;发送与 command_id 序号由循环
+                    // 顶部统一授权/记账(初始轮 r1,机械轮 r2/r3 同序列,
+                    // 每轮唯一——r73 现场固定 id 会被
+                    // HUMAN_GATE_COMMAND_REPLAYED_AFTER_TERMINAL_TURN 拒收)。
                     fp(
                         "plan_sc_mechanical_revision_round",
-                        format_args!("left={}", mechanical_rounds_left + 1),
+                        format_args!(
+                            "next_round={} local_remaining={}",
+                            feedback_budget.sent_rounds + 1,
+                            feedback_budget.local_remaining
+                        ),
                     );
                     continue;
                 }
@@ -5562,25 +5607,34 @@ impl MatrixEnvironment {
         // r35:confirm 失败附 run 预算消耗账(超限族失败的产品正确限制需
         // 带实测数字落格——transitions_used/manual_repairs_used/repairs_
         // 计数 vs RunBudgets 默认 12/3/1 与初评复评各小于等于 1。
-        if !confirmed && observation.run_failure.is_some() {
-            if let Ok(record) = self.lifecycle.get_workspace_session(session_id) {
-                let history = &record.run_history;
-                let cycles = history
-                    .review_cycles
-                    .iter()
-                    .map(|(key, cycle)| {
-                        format!(
-                            "{}[initial={},verification={},repairs={}]",
-                            key, cycle.initial_count, cycle.verification_count, cycle.repairs_used
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(";");
-                let account = format!(
-                    "run 预算消耗账:transitions_used={}/12,manual_repairs_used={}/3,repairs_used={}/1,review_cycles=[{cycles}]",
-                    history.transitions_used, history.manual_repairs_used, history.repairs_used
-                );
-                fp("plan_sc_budget_account", format_args!("{account}"));
+        // F1′:成功/失败统一落账——gate-local 事实
+        // (manual_repairs_remaining / accepted_feedback_turns,旧记录 None
+        // 如实 unknown)与 policy RunHistory 计数分列,避免把两套口径混为
+        // 一谈;失败时才追加进 run_failure。
+        if let Ok(record) = self.lifecycle.get_workspace_session(session_id) {
+            let history = &record.run_history;
+            let cycles = history
+                .review_cycles
+                .iter()
+                .map(|(key, cycle)| {
+                    format!(
+                        "{}[initial={},verification={},repairs={}]",
+                        key, cycle.initial_count, cycle.verification_count, cycle.repairs_used
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            let gate = record.human_gate_snapshot.as_ref();
+            let account = plan_gate_budget_account(
+                gate.map(|snapshot| snapshot.manual_repairs_remaining),
+                gate.and_then(|snapshot| snapshot.accepted_feedback_turns),
+                history.transitions_used,
+                history.manual_repairs_used,
+                history.repairs_used,
+                &cycles,
+            );
+            fp("plan_sc_gate_budget_account", format_args!("{account}"));
+            if !confirmed && observation.run_failure.is_some() {
                 observation.run_failure = Some(format!(
                     "{}/{}",
                     observation.run_failure.clone().unwrap_or_default(),
@@ -7268,6 +7322,125 @@ fn find_requirement_token(text: &str) -> Option<(String, &str)> {
         }
     }
     None
+}
+
+/// F1′(Bug45):plan SC 门反馈预算总账。初始反馈(M1 plan resume)与机械
+/// 校验返修轮共用同一产品 `max_manual_repairs`(=3):初始轮占 1 槽,机械
+/// 轮最多再 2 槽。本地总账只提供发送前上限;每轮实际额度还要与 durable
+/// gate snapshot 的 `manual_repairs_remaining`(产品权威)取 min。本地账
+/// 不补额、不返还:反馈一经送入 WS(无论产品接受/拒收)即消耗一槽。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanGateFeedbackBudget {
+    local_remaining: u32,
+    sent_rounds: u32,
+}
+
+/// 反馈发送前停止原因(停止发送,不伪造预算)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanGateFeedbackStop {
+    /// durable gate snapshot 缺失(`Ok(None)`)或读取失败(`Err`):额度
+    /// 不可知,不得回落默认 3 猜测。
+    SnapshotUnavailable(String),
+    /// 本地总账或产品快照额度为 0:再发必被产品拒绝。
+    Exhausted {
+        local_remaining: u32,
+        gate_remaining: u32,
+    },
+}
+
+impl PlanGateFeedbackStop {
+    fn diagnostic(&self) -> String {
+        match self {
+            Self::SnapshotUnavailable(reason) => format!(
+                "plan SC 门反馈预算不可用:gate snapshot missing/unreadable({reason});停止发送,不回落默认额度"
+            ),
+            Self::Exhausted {
+                local_remaining,
+                gate_remaining,
+            } => format!(
+                "plan SC 门反馈预算耗尽:local_remaining={local_remaining},gate.manual_repairs_remaining={gate_remaining};停止发送"
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for PlanGateFeedbackStop {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.diagnostic())
+    }
+}
+
+impl PlanGateFeedbackBudget {
+    fn new() -> Self {
+        Self {
+            // 直接取产品 RunBudgets 默认的 max_manual_repairs(=3),不另立
+            // 常量避免与产品口径漂移。
+            local_remaining:
+                cadence_aria::product::work_item_plan_policy::RunBudgets::default()
+                    .max_manual_repairs,
+            sent_rounds: 0,
+        }
+    }
+
+    /// 发送前授权:min(本地剩余,gate snapshot 剩余)。额度为 0 或快照
+    /// 缺失/不可读一律拒绝发送。
+    fn authorize(
+        &self,
+        gate_snapshot: Result<Option<u32>, String>,
+    ) -> Result<u32, PlanGateFeedbackStop> {
+        let gate_remaining = match gate_snapshot {
+            Ok(Some(remaining)) => remaining,
+            Ok(None) => {
+                return Err(PlanGateFeedbackStop::SnapshotUnavailable(
+                    "human_gate_snapshot=None".to_string(),
+                ));
+            }
+            Err(reason) => return Err(PlanGateFeedbackStop::SnapshotUnavailable(reason)),
+        };
+        let authorized = self.local_remaining.min(gate_remaining);
+        if authorized == 0 {
+            return Err(PlanGateFeedbackStop::Exhausted {
+                local_remaining: self.local_remaining,
+                gate_remaining,
+            });
+        }
+        Ok(authorized)
+    }
+
+    /// 记录一次已送入 WS 的反馈(产品接受/拒收均消耗本地槽位),返回本轮
+    /// 序号(初始轮=1,机械轮 2/3)。
+    fn record_send(&mut self) -> u32 {
+        self.local_remaining = self.local_remaining.saturating_sub(1);
+        self.sent_rounds += 1;
+        self.sent_rounds
+    }
+}
+
+/// F1′:plan 门预算诊断账。gate-local 事实(`manual_repairs_remaining` /
+/// `accepted_feedback_turns`)与 policy `RunHistory` 计数分列——前者是门
+/// 快照上的本地剩余/已接受修订轮,后者是 policy 的自动/人工计数,口径
+/// 不同不可互相换算。旧记录缺 accepted turns 时如实 `unknown`。
+fn plan_gate_budget_account(
+    gate_remaining: Option<u32>,
+    gate_accepted_turns: Option<u32>,
+    transitions_used: u32,
+    manual_repairs_used: u32,
+    repairs_used: u32,
+    cycles: &str,
+) -> String {
+    let gate_remaining = gate_remaining
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let gate_accepted_turns = gate_accepted_turns
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "plan 门预算账(口径分列):gate.manual_repairs_remaining={gate_remaining},\
+         gate.accepted_feedback_turns={gate_accepted_turns}(None=旧记录 unknown),\
+         run_history.transitions_used={transitions_used}/12,\
+         run_history.manual_repairs_used={manual_repairs_used}/3(policy 计数,不含门本地接受轮次),\
+         run_history.repairs_used={repairs_used}/1,review_cycles=[{cycles}]"
+    )
 }
 
 /// r34:confirm 失败是否属于 Final Compile recovery_required 族(v1.1
@@ -9445,6 +9618,245 @@ mod pump_disposition_tests {
         let selected =
             semantic_option_selection("任意问题", all_declaring.as_array().unwrap(), false);
         assert_eq!(selected, vec!["opt_x".to_string()]);
+    }
+
+    // ---- F1′(Bug45):plan SC 门反馈预算合成门事件脚本 ----
+
+    /// 合成门事件:由脚本驱动「读 durable gate snapshot → 发送反馈 →
+    /// 产品接受/拒收」序列,断言 harness 侧总账与产品权威额度的 min 口径。
+    #[derive(Debug, Clone, Copy)]
+    enum SyntheticGateEvent {
+        /// 发送前读到的 gate snapshot(`manual_repairs_remaining`)。
+        Snapshot(Result<Option<u32>, &'static str>),
+        /// 产品接受上一轮反馈(额度-1)。
+        Accepted,
+        /// 产品拒收上一轮反馈(额度不变;harness 本地槽位已消耗)。
+        Rejected,
+        /// 同门快照重建(产品重建 durable 快照,不补本地额度)。
+        GateRebuilt(u32),
+    }
+
+    #[derive(Debug)]
+    struct SyntheticGateRun {
+        sends: Vec<String>,
+        local_remaining: u32,
+        gate_remaining: u32,
+        stopped: Option<PlanGateFeedbackStop>,
+    }
+
+    fn run_synthetic_gate_script(events: &[SyntheticGateEvent]) -> SyntheticGateRun {
+        let mut budget = PlanGateFeedbackBudget::new();
+        let mut gate_remaining = 0u32;
+        let mut sends = Vec::new();
+        let mut stopped = None;
+        for event in events {
+            match event {
+                SyntheticGateEvent::Snapshot(Ok(Some(value))) => {
+                    gate_remaining = *value;
+                    match budget.authorize(Ok(Some(*value))) {
+                        Ok(_) => {
+                            let round = budget.record_send();
+                            sends.push(format!("lcg-matrix-plan-revision-r{round}"));
+                        }
+                        Err(stop) => {
+                            stopped = Some(stop);
+                            break;
+                        }
+                    }
+                }
+                SyntheticGateEvent::Snapshot(Ok(None)) => {
+                    stopped = Some(
+                        budget
+                            .authorize(Ok(None))
+                            .expect_err("缺失 snapshot 必须停发"),
+                    );
+                    break;
+                }
+                SyntheticGateEvent::Snapshot(Err(reason)) => {
+                    stopped = Some(
+                        budget
+                            .authorize(Err((*reason).to_string()))
+                            .expect_err("不可读 snapshot 必须停发"),
+                    );
+                    break;
+                }
+                SyntheticGateEvent::Accepted => {
+                    gate_remaining = gate_remaining.saturating_sub(1);
+                }
+                SyntheticGateEvent::Rejected => {}
+                SyntheticGateEvent::GateRebuilt(value) => {
+                    gate_remaining = *value;
+                }
+            }
+        }
+        SyntheticGateRun {
+            sends,
+            local_remaining: budget.local_remaining,
+            gate_remaining,
+            stopped,
+        }
+    }
+
+    /// 总发送≤3;初始反馈占 r1 槽,机械轮只剩 r2/r3;耗尽后停发;每轮
+    /// command_id 唯一。
+    #[test]
+    fn lcg_plan_gate_feedback_script_caps_total_sends_at_three() {
+        let run = run_synthetic_gate_script(&[
+            SyntheticGateEvent::Snapshot(Ok(Some(3))),
+            SyntheticGateEvent::Accepted,
+            SyntheticGateEvent::Snapshot(Ok(Some(2))),
+            SyntheticGateEvent::Accepted,
+            SyntheticGateEvent::Snapshot(Ok(Some(1))),
+            SyntheticGateEvent::Accepted,
+            SyntheticGateEvent::Snapshot(Ok(Some(0))),
+        ]);
+        assert_eq!(
+            run.sends,
+            vec![
+                "lcg-matrix-plan-revision-r1".to_string(),
+                "lcg-matrix-plan-revision-r2".to_string(),
+                "lcg-matrix-plan-revision-r3".to_string(),
+            ],
+            "初始反馈占 r1,机械轮 r2/r3;额度为 0 时不再发第 4 次"
+        );
+        let unique = run.sends.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), run.sends.len(), "每轮 command_id 必须唯一");
+        assert_eq!(run.local_remaining, 0);
+        assert!(matches!(
+            run.stopped,
+            Some(PlanGateFeedbackStop::Exhausted { .. })
+        ));
+    }
+
+    /// 初始反馈占槽:发送后本地只剩机械轮的 2 槽;产品额度更高也不补。
+    #[test]
+    fn lcg_plan_gate_feedback_initial_round_consumes_shared_slot() {
+        let mut budget = PlanGateFeedbackBudget::new();
+        assert_eq!(budget.authorize(Ok(Some(3))), Ok(3));
+        assert_eq!(budget.record_send(), 1, "初始反馈占第 1 槽");
+        assert_eq!(budget.local_remaining, 2, "机械轮只剩 2 槽");
+        assert_eq!(budget.authorize(Ok(Some(3))), Ok(2));
+        assert_eq!(budget.record_send(), 2);
+        assert_eq!(budget.authorize(Ok(Some(3))), Ok(1));
+        assert_eq!(budget.record_send(), 3);
+        assert_eq!(
+            budget.authorize(Ok(Some(3))),
+            Err(PlanGateFeedbackStop::Exhausted {
+                local_remaining: 0,
+                gate_remaining: 3,
+            }),
+            "本地总额度耗尽后即使产品席位充足也不再发送"
+        );
+    }
+
+    /// 返修拒收仍消耗:产品不扣额度,但本地槽位不返还;4 次读取也仅
+    /// 发送 3 次。
+    #[test]
+    fn lcg_plan_gate_feedback_rejected_rounds_still_consume_local_slot() {
+        let run = run_synthetic_gate_script(&[
+            SyntheticGateEvent::Snapshot(Ok(Some(3))),
+            SyntheticGateEvent::Rejected,
+            SyntheticGateEvent::Snapshot(Ok(Some(3))),
+            SyntheticGateEvent::Rejected,
+            SyntheticGateEvent::Snapshot(Ok(Some(3))),
+            SyntheticGateEvent::Rejected,
+            SyntheticGateEvent::Snapshot(Ok(Some(3))),
+            SyntheticGateEvent::Rejected,
+        ]);
+        assert_eq!(run.sends.len(), 3, "拒收不退还本地槽位");
+        assert_eq!(run.gate_remaining, 3, "拒收不扣产品额度");
+        assert_eq!(run.local_remaining, 0);
+    }
+
+    /// 同门快照重建不补额:产品重建回 3 后,本地仍按已消耗的剩余取 min,
+    /// 总发送保持 ≤3。
+    #[test]
+    fn lcg_plan_gate_feedback_gate_rebuild_does_not_refill_budget() {
+        let run = run_synthetic_gate_script(&[
+            SyntheticGateEvent::Snapshot(Ok(Some(3))),
+            SyntheticGateEvent::Accepted,
+            SyntheticGateEvent::GateRebuilt(3),
+            SyntheticGateEvent::Snapshot(Ok(Some(3))),
+            SyntheticGateEvent::Accepted,
+            SyntheticGateEvent::Snapshot(Ok(Some(2))),
+            SyntheticGateEvent::Accepted,
+            SyntheticGateEvent::Snapshot(Ok(Some(1))),
+            SyntheticGateEvent::Snapshot(Ok(Some(1))),
+        ]);
+        assert_eq!(
+            run.sends.len(),
+            3,
+            "重建后的产品席位不得让本地账补出第 4 次发送"
+        );
+        assert_eq!(run.local_remaining, 0);
+    }
+
+    /// snapshot 缺失/读取失败:不发送、不消耗本地槽位、不回落默认 3。
+    #[test]
+    fn lcg_plan_gate_feedback_snapshot_unavailable_stops_without_guessing() {
+        for events in [
+            vec![
+                SyntheticGateEvent::Snapshot(Ok(None)),
+                SyntheticGateEvent::Snapshot(Ok(Some(3))),
+            ],
+            vec![
+                SyntheticGateEvent::Snapshot(Err("store io")),
+                SyntheticGateEvent::Snapshot(Ok(Some(3))),
+            ],
+        ] {
+            let run = run_synthetic_gate_script(&events);
+            assert!(run.sends.is_empty(), "快照不可读时不得发送");
+            assert_eq!(run.local_remaining, 3, "未发送不消耗槽位");
+            assert!(matches!(
+                run.stopped,
+                Some(PlanGateFeedbackStop::SnapshotUnavailable(_))
+            ));
+        }
+        let budget = PlanGateFeedbackBudget::new();
+        assert!(matches!(
+            budget.authorize(Ok(None)),
+            Err(PlanGateFeedbackStop::SnapshotUnavailable(_))
+        ));
+        assert!(budget.authorize(Ok(None)).unwrap_err().diagnostic().contains(
+            "不回落默认额度"
+        ));
+    }
+
+    /// 产品额度低于本地总账时按产品权威取 min(如旧会话已消耗 2 轮)。
+    #[test]
+    fn lcg_plan_gate_feedback_uses_lower_product_remaining() {
+        let run = run_synthetic_gate_script(&[
+            SyntheticGateEvent::Snapshot(Ok(Some(1))),
+            SyntheticGateEvent::Accepted,
+            SyntheticGateEvent::Snapshot(Ok(Some(0))),
+        ]);
+        assert_eq!(run.sends, vec!["lcg-matrix-plan-revision-r1".to_string()]);
+        assert_eq!(run.local_remaining, 2);
+    }
+
+    /// 诊断账:gate-local 事实(旧记录 None=unknown)与 policy RunHistory
+    /// 计数分列,成功/失败共用同一格式。
+    #[test]
+    fn lcg_plan_gate_budget_account_keeps_semantics_split() {
+        let unknown = plan_gate_budget_account(
+            None,
+            None,
+            2,
+            1,
+            0,
+            "plan[initial=1,verification=1,repairs=0]",
+        );
+        assert!(unknown.contains("gate.manual_repairs_remaining=unknown"));
+        assert!(unknown.contains("gate.accepted_feedback_turns=unknown"));
+        assert!(unknown.contains("None=旧记录 unknown"));
+        assert!(unknown.contains("run_history.manual_repairs_used=1/3"));
+        assert!(unknown.contains("policy 计数"));
+        assert!(unknown.contains("review_cycles=[plan[initial=1,verification=1,repairs=0]]"));
+
+        let known = plan_gate_budget_account(Some(1), Some(2), 4, 2, 1, "");
+        assert!(known.contains("gate.manual_repairs_remaining=1"));
+        assert!(known.contains("gate.accepted_feedback_turns=2"));
+        assert!(known.contains("run_history.transitions_used=4/12"));
     }
 }
 
