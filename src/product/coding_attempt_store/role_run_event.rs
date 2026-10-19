@@ -532,47 +532,125 @@ fn bounded_output_excerpt(output: &str) -> String {
     format!("…（前文截断）{}", &output[start..])
 }
 
-/// 从原始输出解析测试执行数量（审查修复轮1 F4：按行处理）：跳过 jest/
-/// vitest 的汇总标题行（trim 后小写前缀 `test files`／`test suites`／
-/// `snapshots`——suite/file/snapshot 计数不是测试数量，求和会重复计
-/// 数）；其余行 `<n> passed`＋`<n> failed` 求和（cargo/vitest/jest/
-/// pytest 口径）；无命中再回退 `<n> tests`（如 `running 0 tests`）。
-/// 仍无命中 → None（"未记录"，不推断补写）。
+/// 从原始输出解析测试执行数量（批2 Bug45 F21）：只取本调用原始输出中
+/// **最后一条**可识别的 runner 汇总行，而不是跨行全局累加——父子/嵌套
+/// runner 的多条摘要不得叠加成伪总数。每条汇总行内部先做
+/// `<n> passed` ＋ `<n> failed` 合计。
+///
+/// 识别口径（行首锚定，避免把日志里的 `3 passed` 误当测试数）：
+/// - cargo：`test result: ...`（每个 test binary 一条，取最后一条）；
+/// - jest：`Tests: ...`；vitest：`Tests  ...`；
+/// - pytest：`... N passed[, M failed] in Xs`（含 `====` 装饰行）。
+/// jest/vitest 的 `Test Files`／`Test Suites`／`Snapshots` 行是
+/// suite/file/snapshot 计数，显式忽略。
+///
+/// 无汇总行时回退 `running N tests`（如 cargo `running 0 tests`），仍取
+/// 最后一条；再无命中 → None（“未记录”，不推断补写）。
 fn parse_test_execution_count(output: &str) -> Option<u64> {
-    let mut total: Option<u64> = None;
+    let mut last_summary: Option<u64> = None;
     for line in output.lines() {
-        if is_runner_summary_header_line(line) {
-            continue;
-        }
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        for pair in tokens.windows(2) {
-            let count = pair[0].trim_matches(|c: char| !c.is_ascii_digit());
-            let Some(count) = count.parse::<u64>().ok() else {
-                continue;
-            };
-            let normalized = pair[1].trim_matches(|c: char| !c.is_alphanumeric());
-            if normalized == "passed" || normalized == "failed" {
-                total = Some(total.unwrap_or(0) + count);
-            }
+        if let Some(count) = runner_summary_line_count(line) {
+            last_summary = Some(count);
         }
     }
-    if total.is_some() {
-        return total;
+    if last_summary.is_some() {
+        return last_summary;
     }
+    let mut last_declared: Option<u64> = None;
     for line in output.lines() {
-        if is_runner_summary_header_line(line) {
-            continue;
+        if let Some(count) = declared_test_count(line) {
+            last_declared = Some(count);
         }
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        for pair in tokens.windows(2) {
-            let count = pair[0].trim_matches(|c: char| !c.is_ascii_digit());
-            let Some(count) = count.parse::<u64>().ok() else {
-                continue;
-            };
-            let normalized = pair[1].trim_matches(|c: char| !c.is_alphanumeric());
-            if normalized == "tests" || normalized == "test" {
-                return Some(count);
-            }
+    }
+    last_declared
+}
+
+/// 单行 runner 汇总的测试数（`passed`+`failed` 合计）；非汇总行 None。
+/// pytest 的 `no tests ran in ...` 呈现为 `Some(0)`（0 条执行是事实）。
+fn runner_summary_line_count(line: &str) -> Option<u64> {
+    if is_runner_summary_header_line(line) {
+        return None;
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    let is_cargo = lowered.starts_with("test result:");
+    let is_jest = lowered.starts_with("tests:");
+    let is_vitest = lowered.starts_with("tests ") || lowered.starts_with("tests\t");
+    let is_pytest = is_pytest_summary_line(trimmed);
+    if !(is_cargo || is_jest || is_vitest || is_pytest) {
+        return None;
+    }
+    if let Some(total) = passed_failed_total(trimmed) {
+        return Some(total);
+    }
+    if is_pytest && lowered.contains("no tests ran") {
+        return Some(0);
+    }
+    None
+}
+
+/// pytest 汇总行：去掉 `=`/`-`/空白装饰后以数字开头（或 `no tests ran`），
+/// 且携带 pytest 的 `in <duration>` 标记。
+fn is_pytest_summary_line(trimmed: &str) -> bool {
+    let stripped =
+        trimmed.trim_start_matches(|c: char| c == '=' || c == '-' || c == '_' || c.is_whitespace());
+    let lowered = stripped.to_ascii_lowercase();
+    let mentions_outcome = lowered.contains(" passed")
+        || lowered.contains(" failed")
+        || lowered.starts_with("no tests ran");
+    let starts_with_count = stripped
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_digit());
+    mentions_outcome
+        && lowered.contains(" in ")
+        && (starts_with_count || lowered.starts_with("no tests ran"))
+}
+
+/// 行内 `<n> passed` / `<n> failed` 求和；无命中 None。
+fn passed_failed_total(line: &str) -> Option<u64> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let mut total = 0u64;
+    let mut matched = false;
+    for pair in tokens.windows(2) {
+        let count = pair[0].trim_matches(|c: char| !c.is_ascii_digit());
+        let Ok(count) = count.parse::<u64>() else {
+            continue;
+        };
+        let normalized = pair[1]
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_ascii_lowercase();
+        if normalized == "passed" || normalized == "failed" {
+            total = total.saturating_add(count);
+            matched = true;
+        }
+    }
+    matched.then_some(total)
+}
+
+/// 回退口径：`running N tests`／`collected N tests`（如 cargo
+/// `running 0 tests`）；其它行（含普通日志数字）不误收。
+fn declared_test_count(line: &str) -> Option<u64> {
+    if is_runner_summary_header_line(line) {
+        return None;
+    }
+    let trimmed = line.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !(lowered.starts_with("running ") || lowered.starts_with("collected ")) {
+        return None;
+    }
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    for pair in tokens.windows(2) {
+        let count = pair[0].trim_matches(|c: char| !c.is_ascii_digit());
+        let Ok(count) = count.parse::<u64>() else {
+            continue;
+        };
+        let normalized = pair[1].trim_matches(|c: char| !c.is_alphanumeric());
+        if normalized == "tests" || normalized == "test" {
+            return Some(count);
         }
     }
     None
@@ -678,4 +756,79 @@ fn contains_digit_prefixed_word(output: &str, word: &str) -> bool {
 
 fn first_command_token(command: &str) -> &str {
     command.split_whitespace().next().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_test_execution_count;
+
+    #[test]
+    fn parse_test_execution_count_takes_last_runner_summary_per_runner() {
+        let cargo =
+            "running 12 tests\ntest result: ok. 12 passed; 0 failed; 2 ignored; finished in 0.5s";
+        assert_eq!(parse_test_execution_count(cargo), Some(12));
+
+        let vitest =
+            " Test Files  1 passed (1)\n      Tests  5 passed | 1 failed (6)\n   Duration  1.2s";
+        assert_eq!(parse_test_execution_count(vitest), Some(6));
+
+        let jest = "Test Suites: 2 passed, 2 total\nTests:       4 passed, 2 failed, 6 total\nSnapshots:   0 total";
+        assert_eq!(parse_test_execution_count(jest), Some(6));
+
+        let pytest = "============ 3 passed, 1 failed in 0.12s ============";
+        assert_eq!(parse_test_execution_count(pytest), Some(4));
+    }
+
+    #[test]
+    fn parse_test_execution_count_ignores_file_suite_and_snapshot_counts() {
+        let only_headers =
+            "Test Files  3 passed (3)\nTest Suites: 2 passed, 2 total\nSnapshots: 0 passed";
+        assert_eq!(
+            parse_test_execution_count(only_headers),
+            None,
+            "suite/file/snapshot 计数不是测试数量"
+        );
+    }
+
+    #[test]
+    fn parse_test_execution_count_uses_last_summary_for_nested_duplicates() {
+        let nested = "Tests  2 passed (2)\nTests  7 passed, 1 failed (8)";
+        assert_eq!(
+            parse_test_execution_count(nested),
+            Some(8),
+            "嵌套/重复摘要只取最后一条，不得累加成伪总数"
+        );
+        // jest 逐条 verbose 行不是汇总行。
+        let verbose = "PASS src/a.test.ts\n  ✓ adds (3 ms)\nTests: 2 passed, 2 total";
+        assert_eq!(parse_test_execution_count(verbose), Some(2));
+    }
+
+    #[test]
+    fn parse_test_execution_count_handles_zero_tests_and_avoids_non_test_numbers() {
+        let zero =
+            "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; finished in 0.00s";
+        assert_eq!(
+            parse_test_execution_count(zero),
+            Some(0),
+            "0 条执行呈现 Some(0)，不是未记录"
+        );
+
+        let pytest_zero = "no tests ran in 0.01s";
+        assert_eq!(parse_test_execution_count(pytest_zero), Some(0));
+
+        let unrelated = "deployed 5 passed checks\nworker 3 failed to connect";
+        assert_eq!(
+            parse_test_execution_count(unrelated),
+            None,
+            "普通日志里的数字不得误收为测试数"
+        );
+
+        assert_eq!(parse_test_execution_count(""), None);
+    }
+
+    #[test]
+    fn parse_test_execution_count_prefers_summary_over_declared_running_count() {
+        let mixed = "running 40 tests\ntest result: ok. 12 passed; 4 failed; finished in 0.5s";
+        assert_eq!(parse_test_execution_count(mixed), Some(16));
+    }
 }
