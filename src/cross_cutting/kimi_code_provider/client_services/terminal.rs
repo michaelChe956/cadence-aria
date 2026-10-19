@@ -131,6 +131,21 @@ struct ManagerInner {
     next_id: u64,
 }
 
+/// F8:terminal.rs 全部 std::sync::Mutex 消费点的统一中毒恢复——持锁
+/// panic 毒化锁后,`into_inner()` 取回锁内既有数据并告警:不 panic、
+/// 不置空,registry 已记录的状态/结果/输出事实保留,服务继续运转。
+/// (仅在位 guard 被打断才毒化;数据本身未被破坏,恢复是安全的。)
+fn lock_recovering<'a, T>(lock: &'a Mutex<T>, what: &'static str) -> std::sync::MutexGuard<'a, T> {
+    lock.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            target: "kimi_code_provider",
+            mutex = what,
+            "terminal mutex poisoned by a panicking holder; recovering retained state via into_inner"
+        );
+        poisoned.into_inner()
+    })
+}
+
 /// F7:Finished|Released 登记的有界淘汰——完成项(含 spawn 失败与
 /// double-start 收口的 Released)只保留最近 `MAX_RETAINED_FINISHED_
 /// TERMINALS` 条供协议「先 wait 后 output」追查,更旧的按 id 序(最老
@@ -145,7 +160,7 @@ fn prune_finished_entries(inner: &mut ManagerInner) {
         .iter()
         .filter(|(_, entry)| {
             matches!(
-                *entry.state.lock().expect("terminal state lock"),
+                *lock_recovering(&entry.state, "terminal state lock"),
                 TerminalState::Finished | TerminalState::Released
             )
         })
@@ -203,13 +218,13 @@ impl TerminalManager {
     /// 同一状态源)——Finished/Released 不占额,完成未 release 不得顶死
     /// 后续 create;完成登记经 `prune_finished_entries` 有界保留。
     pub async fn create(&self, command: TerminalCommand) -> Result<String, TerminalError> {
-        let mut inner = self.inner.lock().expect("terminal manager lock");
+        let mut inner = lock_recovering(&self.inner, "terminal manager lock");
         let active = inner
             .terminals
             .values()
             .filter(|entry| {
                 matches!(
-                    *entry.state.lock().expect("terminal state lock"),
+                    *lock_recovering(&entry.state, "terminal state lock"),
                     TerminalState::Created | TerminalState::Running
                 )
             })
@@ -230,14 +245,14 @@ impl TerminalManager {
     /// F7:淘汰越界完成登记(create/完成/spawn 失败/release 共用的收口)。
     /// 调用点不得持有任何 entry state 锁(锁序 inner→state)。
     fn prune_finished(&self) {
-        let mut inner = self.inner.lock().expect("terminal manager lock");
+        let mut inner = lock_recovering(&self.inner, "terminal manager lock");
         prune_finished_entries(&mut inner);
     }
 
     /// Start the process for a previously created terminal.
     pub fn start(&self, id: &str) -> Result<(), TerminalError> {
         let entry = {
-            let inner = self.inner.lock().expect("terminal manager lock");
+            let inner = lock_recovering(&self.inner, "terminal manager lock");
             inner
                 .terminals
                 .get(id)
@@ -245,11 +260,11 @@ impl TerminalManager {
                 .ok_or_else(|| TerminalError::UnknownTerminal(id.to_string()))?
         };
         let command = {
-            let mut command = entry.command.lock().expect("terminal command lock").take();
+            let mut command = lock_recovering(&entry.command, "terminal command lock").take();
             if command.is_none() {
                 // start cannot proceed (e.g. double start): release the slot
                 // so the concurrency quota is not leaked.
-                *entry.state.lock().expect("terminal state lock") = TerminalState::Released;
+                *lock_recovering(&entry.state, "terminal state lock") = TerminalState::Released;
                 return Err(TerminalError::UnknownTerminal(id.to_string()));
             }
             command.take().expect("command checked above")
@@ -266,7 +281,7 @@ impl TerminalManager {
     /// the result is present.
     pub async fn wait_for_exit(&self, id: &str) -> Result<TerminalResult, TerminalError> {
         let entry = {
-            let inner = self.inner.lock().expect("terminal manager lock");
+            let inner = lock_recovering(&self.inner, "terminal manager lock");
             inner
                 .terminals
                 .get(id)
@@ -275,7 +290,7 @@ impl TerminalManager {
         };
         loop {
             let notified = entry.done.notified();
-            match entry.result.lock().expect("terminal result lock").clone() {
+            match lock_recovering(&entry.result, "terminal result lock").clone() {
                 // F6:终局槽区分真实完成(Ok)与 spawn 终局失败(Err)——
                 // 后者经 wait_for_exit 以错误传播给调用方/ACP。
                 Some(Ok(result)) => return Ok(result),
@@ -293,18 +308,18 @@ impl TerminalManager {
     /// so a late `terminal/output` request after `terminal/release` still
     /// succeeds.
     pub fn output(&self, id: &str) -> Result<String, TerminalError> {
-        let inner = self.inner.lock().expect("terminal manager lock");
+        let inner = lock_recovering(&self.inner, "terminal manager lock");
         inner
             .terminals
             .get(id)
-            .map(|entry| entry.output.lock().expect("terminal output lock").clone())
+            .map(|entry| lock_recovering(&entry.output, "terminal output lock").clone())
             .ok_or_else(|| TerminalError::UnknownTerminal(id.to_string()))
     }
 
     /// Kill a terminal's process group. Idempotent; unknown ids are errors.
     pub async fn kill(&self, id: &str) -> Result<(), TerminalError> {
         let entry = {
-            let inner = self.inner.lock().expect("terminal manager lock");
+            let inner = lock_recovering(&self.inner, "terminal manager lock");
             inner
                 .terminals
                 .get(id)
@@ -321,7 +336,7 @@ impl TerminalManager {
     /// running and marks the terminal released so later kill/release succeed.
     pub async fn release(&self, id: &str) -> Result<(), TerminalError> {
         let entry = {
-            let inner = self.inner.lock().expect("terminal manager lock");
+            let inner = lock_recovering(&self.inner, "terminal manager lock");
             inner
                 .terminals
                 .get(id)
@@ -329,7 +344,7 @@ impl TerminalManager {
                 .ok_or_else(|| TerminalError::UnknownTerminal(id.to_string()))?
         };
         {
-            let mut state = entry.state.lock().expect("terminal state lock");
+            let mut state = lock_recovering(&entry.state, "terminal state lock");
             if *state == TerminalState::Released {
                 return Ok(());
             }
@@ -355,10 +370,10 @@ impl TerminalManager {
     /// `streaming_provider::TerminalActivitySnapshot`）消费同一真实
     /// 进程状态——不是伪造心跳或模型自述。
     pub fn has_active_terminals(&self) -> bool {
-        let inner = self.inner.lock().expect("terminal manager lock");
+        let inner = lock_recovering(&self.inner, "terminal manager lock");
         inner.terminals.values().any(|entry| {
             matches!(
-                *entry.state.lock().expect("terminal state lock"),
+                *lock_recovering(&entry.state, "terminal state lock"),
                 TerminalState::Created | TerminalState::Running
             )
         })
@@ -429,9 +444,9 @@ async fn run_terminal(
 ) {
     let started = Instant::now();
     {
-        let mut state = entry.state.lock().expect("terminal state lock");
+        let mut state = lock_recovering(&entry.state, "terminal state lock");
         if *state == TerminalState::Released {
-            let mut result = entry.result.lock().expect("terminal result lock");
+            let mut result = lock_recovering(&entry.result, "terminal result lock");
             *result = Some(Ok(TerminalResult {
                 exit_code: None,
                 timed_out: false,
@@ -475,10 +490,10 @@ async fn run_terminal(
                 // F6:非 ETXTBSY(或重试耗尽)的 spawn 失败是终局错误——
                 // 写入 Err 终局槽经 wait 传播,不伪造
                 // TerminalResult{exit_code:None,killed:false} 的「完成」。
-                let mut result = entry.result.lock().expect("terminal result lock");
+                let mut result = lock_recovering(&entry.result, "terminal result lock");
                 *result = Some(Err(format!("{error}")));
                 entry.done.notify_waiters();
-                let mut state = entry.state.lock().expect("terminal state lock");
+                let mut state = lock_recovering(&entry.state, "terminal state lock");
                 // 批2 Task 6:spawn 失败释放并发名额——失败终端不得占住
                 // 1/4 配额(登记已先行,失败即回收;结果/output 仍可查询)。
                 *state = TerminalState::Released;
@@ -541,7 +556,7 @@ async fn run_terminal(
     }
 
     {
-        let mut result = entry.result.lock().expect("terminal result lock");
+        let mut result = lock_recovering(&entry.result, "terminal result lock");
         *result = Some(Ok(TerminalResult {
             exit_code,
             timed_out,
@@ -552,7 +567,7 @@ async fn run_terminal(
         entry.done.notify_waiters();
     }
     {
-        let mut state = entry.state.lock().expect("terminal state lock");
+        let mut state = lock_recovering(&entry.state, "terminal state lock");
         if *state != TerminalState::Released {
             *state = TerminalState::Finished;
         }
@@ -624,10 +639,7 @@ async fn read_terminal_stream<R>(
         };
         if retained > 0 {
             let output = String::from_utf8_lossy(&chunk[..retained]).into_owned();
-            retained_output
-                .lock()
-                .expect("terminal output lock")
-                .push_str(&output);
+            lock_recovering(&retained_output, "terminal output lock").push_str(&output);
         }
     }
 }
@@ -884,6 +896,124 @@ mod tests {
             Err(other) => panic!("evicted release error kind: {other:?}"),
         }
         assert!(!manager.has_active_terminals());
+    }
+
+    /// F8 红测:terminal.rs 全部 Mutex 消费点统一中毒恢复——注入持锁
+    /// panic 毒化 manager inner 与 entry 级(state/result/output/command)
+    /// 锁后,服务不得持续 panic,且已有状态/结果/输出事实保留(不置空)。
+    /// 现状:消费点全部 `.lock().expect(...)`,一次中毒即永久 panic。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mutex_poisoning_keeps_service_alive_and_facts_retained() {
+        let dir = tempfile::tempdir().expect("dir");
+        let bin = write_executable(dir.path(), "poison-proof", "printf 'poison-proof'; exit 0");
+        let manager = manager();
+        let id = manager
+            .create(command(&bin, dir.path(), &[]))
+            .await
+            .expect("create");
+        manager.start(&id).expect("start");
+        let result = manager.wait_for_exit(&id).await.expect("wait");
+        assert_eq!(result.exit_code, Some(0));
+        assert!(manager.output(&id).expect("output").contains("poison-proof"));
+        // 事实登记的 entry Arc(随后 inner 将被毒化,测试代码经恢复读)。
+        let entry = {
+            let inner = manager.inner.lock().expect("fetch entry");
+            Arc::clone(inner.terminals.get(&id).expect("registered"))
+        };
+
+        // 注入①:持 manager inner 锁 panic → 毒化。
+        let inner_mutex = Arc::clone(&manager.inner);
+        let poison = std::thread::spawn(move || {
+            let _guard = inner_mutex.lock().expect("hold manager lock");
+            panic!("poison manager inner lock");
+        });
+        assert!(poison.join().is_err(), "注入线程必须 panic 才能毒化锁");
+
+        // 服务不持续 panic,且事实保留:create/output/wait/registry 全通。
+        let extra_id = manager
+            .create(command(&bin, dir.path(), &[]))
+            .await
+            .expect("create after poisoning");
+        manager.start(&extra_id).expect("start after poisoning");
+        let extra = tokio::time::timeout(Duration::from_secs(5), manager.wait_for_exit(&extra_id))
+            .await
+            .expect("wait extra bounded")
+            .expect("wait extra");
+        assert_eq!(extra.exit_code, Some(0));
+        assert_eq!(
+            manager.output(&id).expect("output after poisoning"),
+            "poison-proof",
+            "中毒后已有输出事实不得置空"
+        );
+        let result = tokio::time::timeout(Duration::from_secs(2), manager.wait_for_exit(&id))
+            .await
+            .expect("wait after poisoning bounded")
+            .expect("wait after poisoning");
+        assert_eq!(result.exit_code, Some(0), "中毒后已有结果事实保留");
+        assert!(!manager.has_active_terminals());
+
+        // 注入②:持 entry 级 state/result/output 锁 panic → 毒化。
+        let state_entry = Arc::clone(&entry);
+        let poison_state = std::thread::spawn(move || {
+            let _guard = state_entry.state.lock().expect("hold state lock");
+            panic!("poison state lock");
+        });
+        assert!(poison_state.join().is_err());
+        let result_entry = Arc::clone(&entry);
+        let poison_result = std::thread::spawn(move || {
+            let _guard = result_entry.result.lock().expect("hold result lock");
+            panic!("poison result lock");
+        });
+        assert!(poison_result.join().is_err());
+        let output_mutex = Arc::clone(&entry.output);
+        let poison_output = std::thread::spawn(move || {
+            let _guard = output_mutex.lock().expect("hold output lock");
+            panic!("poison output lock");
+        });
+        assert!(poison_output.join().is_err());
+
+        // 三把 entry 锁恢复:release(state)/wait(result)/output(output)
+        // 全部照常返回既有事实。
+        manager.release(&id).await.expect("release after state poisoning");
+        let result = tokio::time::timeout(Duration::from_secs(2), manager.wait_for_exit(&id))
+            .await
+            .expect("wait after result poisoning bounded")
+            .expect("wait after result poisoning");
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(
+            manager.output(&id).expect("output after output poisoning"),
+            "poison-proof"
+        );
+
+        // 注入③:新登记项的 command 锁毒化后 start 照常(spawn 全链路)。
+        let fresh = manager
+            .create(command(&bin, dir.path(), &[]))
+            .await
+            .expect("create fresh");
+        let fresh_entry = {
+            let inner = manager
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::clone(inner.terminals.get(&fresh).expect("fresh registered"))
+        };
+        let poison_command = std::thread::spawn(move || {
+            let _guard = fresh_entry.command.lock().expect("hold command lock");
+            panic!("poison command lock");
+        });
+        assert!(poison_command.join().is_err());
+        manager.start(&fresh).expect("start after command poisoning");
+        let result = tokio::time::timeout(Duration::from_secs(5), manager.wait_for_exit(&fresh))
+            .await
+            .expect("wait fresh bounded")
+            .expect("wait fresh");
+        assert_eq!(result.exit_code, Some(0));
+        assert!(manager
+            .output(&fresh)
+            .expect("fresh output")
+            .contains("poison-proof"));
+        let _ = &extra_id;
     }
 
     #[cfg(unix)]
