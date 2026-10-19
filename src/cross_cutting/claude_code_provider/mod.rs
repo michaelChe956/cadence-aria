@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cross_cutting::approval_bridge::{ApprovalBridge, ChoiceDecision};
 use crate::cross_cutting::process_manager::{ManagedProcessChild, ProcessManager};
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::provider_resources::{ResourceReservation, TrustedLaunchOwnership};
 use crate::cross_cutting::streaming_provider::{
     ChoiceAnswerData, ChoiceOptionData, ChoiceQuestionData, ChoiceRequestData, ChoiceRequestSource,
     LcVersionCache, LcVersionObservation, LcVersionProbe, LcVersionProbeKey, ProviderEvent,
@@ -673,6 +674,22 @@ pub(crate) fn lc_start_audit_literal(
     }
 }
 
+/// B1-1 接线片:spawn 点把真实组长 PID 回填到本次 launch 的登记
+/// (`backfill_spawned_identity` 读 `/proc/<pid>/stat` starttime 做 PID
+/// 复用防护)。组长身份取自 spawn 时冻结的 `process_group(0)` leader。
+fn backfill_launch_identity(
+    ownership: &TrustedLaunchOwnership,
+    reservation: &ResourceReservation,
+    child: &ManagedProcessChild,
+) -> Result<(), ProviderAdapterError> {
+    let pid = child.spawn_leader_pid().ok_or_else(|| {
+        ProviderAdapterError::provider_unavailable(
+            "claude launch ownership: spawned child has no leader pid",
+        )
+    })?;
+    ownership.backfill_spawned_identity(reservation, pid)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_claude_session_tail(
     stdout_reader: impl tokio::io::AsyncRead + Unpin,
@@ -685,6 +702,7 @@ async fn run_claude_session_tail(
     mut child: ManagedProcessChild,
     stderr_output: Arc<Mutex<String>>,
     stderr_task: tokio::task::JoinHandle<()>,
+    ownership: Option<TrustedLaunchOwnership>,
 ) {
     // r19 根修+oracle 残留②收口(fix 轮 2):CLI 子进程退出必须终结事件流。
     // stdout EOF 可能被「同进程组内仍存活、继承了管道写端的进程」无限推迟
@@ -806,14 +824,28 @@ async fn run_claude_session_tail(
             .await;
         }
     }
+    // B1-1:会话真实收口(子进程退出/进程组静止/取消收口完成)后注销——
+    // **不在协议 Completed 点注销**;静止不可证时保留 durable 记录,
+    // 由 scope 级 quiesce/恢复驱动停等接管。
+    if let Some(ownership) = ownership {
+        ownership.release_after_session_tail().await;
+    }
 }
 
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for ClaudeCodeProvider {
-    async fn start(
+impl ClaudeCodeProvider {
+    /// raw start 执行体(direct/legacy 直调面与 B1 受信归属共用)。
+    ///
+    /// `ownership = None`:无归属请求(legacy/单仓 direct/测试面),零登记、
+    /// 行为与既有裸 start 一致。
+    /// `ownership = Some`:B1-1 受信归属生命周期——预留(durable,失败零
+    /// spawn)→ spawn → 回填真实 PID+`/proc` starttime(PID 复用防护)→
+    /// 会话真实收口(子进程退出/取消收口完成)后注销;**不在协议
+    /// `Completed` 点注销**。
+    async fn start_inner(
         &self,
         mut input: StreamingProviderInput,
         cancel: CancellationToken,
+        ownership: Option<TrustedLaunchOwnership>,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         // 双向 spawn 前守卫（Task 3.1）：非法角色×策略组合在创建子进程之前拒绝。
         validate_tool_policy_for_role(&input.role, input.tool_policy.as_ref()).map_err(
@@ -1000,14 +1032,41 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         );
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
-        let process = ProcessManager::spawn(
+        // B1-1:归属在场时预留先于一切 spawn 副作用(durable;失败即
+        // 调用方不得 spawn——本函数直接上抛,零子进程)。
+        let reservation = match ownership.as_ref() {
+            Some(ownership) => Some(ownership.reserve()?),
+            None => None,
+        };
+        let process = match ProcessManager::spawn(
             &command,
             &arg_refs,
             &input.working_dir,
             &input.env_vars,
             cancel.clone(),
         )
-        .await?;
+        .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                // spawn 失败=零子进程:预留未确认,直接注销(幂等)。
+                if let Some(ownership) = ownership.as_ref() {
+                    ownership.release_after_session_tail().await;
+                }
+                return Err(error);
+            }
+        };
+        // B1-1:spawn 点回填真实 PID+starttime(PID 复用防护);身份不可证
+        // 即整组停止,不留未登记子进程。
+        if let (Some(ownership), Some(reservation)) = (ownership.as_ref(), reservation.as_ref()) {
+            if let Err(error) = backfill_launch_identity(ownership, reservation, &process.child) {
+                let mut child = process.child;
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                ownership.release_after_session_tail().await;
+                return Err(error);
+            }
+        }
 
         let stdin = Arc::new(Mutex::new(process.stdin));
         let stdout = process.stdout;
@@ -1184,6 +1243,10 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                             stderr_snapshot.len()
                         ));
                     }
+                    // B1-1:错误链已 kill+wait 子进程;按登记身份收口后注销。
+                    if let Some(ownership) = ownership.as_ref() {
+                        ownership.release_after_session_tail().await;
+                    }
                     return Err(error);
                 }
                 Err(_elapsed) => {
@@ -1200,6 +1263,10 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                             stderr_snapshot.len()
                         )
                     };
+                    // B1-1:超时路径同样先收口(kill+wait 已在上方完成)再注销。
+                    if let Some(ownership) = ownership.as_ref() {
+                        ownership.release_after_session_tail().await;
+                    }
                     return Err(ProviderAdapterError::timeout_with_details(
                         details,
                         String::new(),
@@ -1208,7 +1275,8 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                     ));
                 }
             };
-            // 成功：child 与续读 reader 移交会话收尾任务（流读取+终态处理）。
+            // 成功：child 与续读 reader 移交会话收尾任务（流读取+终态处理）；
+            // B1-1 归属随任务走，真实收口后注销。
             let usage_role = UsageReportData::role_text(&input.role);
             tokio::spawn(async move {
                 run_claude_session_tail(
@@ -1222,6 +1290,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                     child,
                     stderr_output,
                     stderr_task,
+                    ownership,
                 )
                 .await;
             });
@@ -1278,6 +1347,10 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                         message: tool::format_exit_failure(status, stderr),
                     })
                     .await;
+                // B1-1:子进程已 kill+wait;按登记身份收口后注销。
+                if let Some(ownership) = ownership.as_ref() {
+                    ownership.release_after_session_tail().await;
+                }
                 return;
             }
             let _ = event_tx
@@ -1309,6 +1382,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 child,
                 stderr_output,
                 stderr_task,
+                ownership,
             )
             .await;
         });
@@ -1325,11 +1399,14 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
     /// LC root 为进程 cwd 启动;统一落盘 `ProviderStartAudit.lc_projection`。
     /// 无通用 tool policy 的角色(Coding/Executor)同样执行 version 解析、
     /// 原生握手与统一 launch audit,不以 `tool_policy=None` 早退。
-    async fn start_validated(
+    async fn start_validated_inner(
         &self,
         validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        // B1-1:受信归属在拆包前取出(载体随 validated 输入的 crate 私有
+        // 绑定进入本 spawn 面;`None` = 无归属请求)。
+        let ownership = validated.launch_ownership().cloned();
         let (input, launch) = validated.into_parts();
         let envelope = launch.envelope().clone();
 
@@ -1487,14 +1564,41 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
         let process_cwd = envelope.working_directory.clone();
-        let process = ProcessManager::spawn(
+        // B1-1:归属在场时预留先于一切 spawn 副作用(durable;失败零
+        // spawn,直接上抛)。版本 `--version` 探测不是业务 writer,不计入。
+        let reservation = match ownership.as_ref() {
+            Some(ownership) => Some(ownership.reserve()?),
+            None => None,
+        };
+        let process = match ProcessManager::spawn(
             &command,
             &arg_refs,
             &process_cwd,
             &input.env_vars,
             cancel.clone(),
         )
-        .await?;
+        .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                // spawn 失败=零子进程:预留未确认,直接注销(幂等)。
+                if let Some(ownership) = ownership.as_ref() {
+                    ownership.release_after_session_tail().await;
+                }
+                return Err(error);
+            }
+        };
+        // B1-1:spawn 点回填真实 PID+starttime;身份不可证即整组停止,
+        // 不留未登记子进程。
+        if let (Some(ownership), Some(reservation)) = (ownership.as_ref(), reservation.as_ref()) {
+            if let Err(error) = backfill_launch_identity(ownership, reservation, &process.child) {
+                let mut child = process.child;
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                ownership.release_after_session_tail().await;
+                return Err(error);
+            }
+        }
 
         let stdin = Arc::new(Mutex::new(process.stdin));
         let stdout = process.stdout;
@@ -1698,6 +1802,10 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                         stderr_snapshot.len()
                     ));
                 }
+                // B1-1:错误链已 kill+wait 子进程;按登记身份收口后注销。
+                if let Some(ownership) = ownership.as_ref() {
+                    ownership.release_after_session_tail().await;
+                }
                 return Err(error);
             }
             Err(_elapsed) => {
@@ -1713,6 +1821,10 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                         stderr_snapshot.len()
                     )
                 };
+                // B1-1:超时路径同样先收口(kill+wait 已在上方完成)再注销。
+                if let Some(ownership) = ownership.as_ref() {
+                    ownership.release_after_session_tail().await;
+                }
                 return Err(ProviderAdapterError::timeout_with_details(
                     details,
                     String::new(),
@@ -1721,7 +1833,8 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 ));
             }
         };
-        // 成功:child 与续读 reader 移交会话收尾任务(与策略路径共用收尾)。
+        // 成功:child 与续读 reader 移交会话收尾任务(与策略路径共用收尾)；
+        // B1-1 归属随任务走，真实收口后注销。
         let usage_role = UsageReportData::role_text(&input.role);
         tokio::spawn(async move {
             run_claude_session_tail(
@@ -1735,6 +1848,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
                 child,
                 stderr_output,
                 stderr_task,
+                ownership,
             )
             .await;
         });
@@ -1752,7 +1866,7 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
     /// projection。guard 先行(早于版本 probe/child),adapter 匹配错位即
     /// typed 拒;全程零 spawn/零写,不从 registry/capability 空 version
     /// 取证。
-    async fn prepare_lc_facts(
+    async fn prepare_lc_facts_inner(
         &self,
         input: &StreamingProviderInput,
         launch: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
@@ -1787,5 +1901,57 @@ impl StreamingProviderAdapter for ClaudeCodeProvider {
         }
 
         self.observe_lc_facts(launch, cancel).await
+    }
+}
+
+/// 冻结 trait 合同面:raw/validated 两路都转交 inherent 执行体,使 B1-1
+/// 受信归属能在**同一 spawn 点**完成预留→spawn→回填→收口注销。
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for ClaudeCodeProvider {
+    /// direct/legacy 直调:无归属请求(零登记),行为与既有裸 start 一致。
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.start_inner(input, cancel, None).await
+    }
+
+    /// B1-1(波 2):raw start 的受信归属入口。与 trait 默认方法同义——
+    /// `None` = 无归属请求(保持裸 start 语义);`Some` = 预留(失败零
+    /// spawn)→ spawn → 回填真实 PID+starttime → 会话真实收口后注销。
+    async fn start_owned(
+        &self,
+        input: StreamingProviderInput,
+        ownership: Option<TrustedLaunchOwnership>,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        match ownership {
+            None => self.start(input, cancel).await,
+            Some(ownership) => self.start_inner(input, cancel, Some(ownership)).await,
+        }
+    }
+
+    /// LC validated 启动:载体随 validated 输入的 crate 私有绑定进入
+    /// inherent 执行体的 spawn 点(同一预留/回填/收口注销生命周期)。
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.start_validated_inner(validated, cancel).await
+    }
+
+    /// Task 3.2(B0a2):LC 只读 facts 观测(执行体在 inherent impl)。
+    async fn prepare_lc_facts(
+        &self,
+        input: &StreamingProviderInput,
+        launch: &crate::product::logical_codebase::provider_gateway::ValidatedSessionLaunchPolicy,
+        cancel: CancellationToken,
+    ) -> Result<
+        crate::product::logical_codebase::provider_projection::ProviderLcPrepareFacts,
+        ProviderAdapterError,
+    > {
+        self.prepare_lc_facts_inner(input, launch, cancel).await
     }
 }
