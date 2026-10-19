@@ -32,7 +32,10 @@ pub mod provider_availability_gate;
 pub mod provider_boundary;
 pub mod provider_capabilities;
 pub mod provider_context_builder;
-// 批2 Task 3:统一白名单环境构造器与 trust 发现一致性(§环境精确合同)。
+// 批2 Task 3(A1-a 环境回退底座):环境白名单构造器模块——provider 子
+// 进程已回退宿主继承语义(process_manager/cli_adapter/terminal 三路),
+// owner home 解析已迁 trust 侧(provider_trust_adapters);本模块待 A1-b
+// 随装配层注入点移除后删除,期间导出保持以避免中间态编译断裂。
 pub mod provider_environment;
 pub mod provider_execution;
 pub mod provider_health;

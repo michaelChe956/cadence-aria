@@ -1069,16 +1069,19 @@ mod tests {
         state.terminal.release(&id).await.expect("release");
     }
 
-    /// Task 6 绿证(冻结环境消费):terminal 子进程 env_clear 后只注入
-    /// dispatcher 的冻结会话环境——自定义键可见、未注入键不可见;两种
-    /// 命令形态(argv/legacy)消费同一 map。旧的固定 HOME/GIT_CONFIG_GLOBAL
-    /// 手搓环境已删,不再按授权根构造。
+    /// A1-a(Bug45 批2 环境回退底座)绿证:terminal 子进程继承宿主环境,
+    /// dispatcher 的冻结会话环境(session_env)作为显式覆盖层注入——
+    /// 自定义键可见、宿主键(session_env 未携带的 HOME)仍从宿主继承;
+    /// 两种命令形态(argv/legacy)消费同一覆盖语义。legacy 的受信
+    /// SHELL 回退(env 取 SHELL,缺失回退 POSIX /bin/sh)语义不变。
     #[cfg(unix)]
     #[tokio::test]
-    async fn terminal_children_consume_frozen_session_env() {
+    async fn terminal_children_inherit_host_env_with_session_overrides() {
         let dir = tempfile::tempdir().expect("dir");
         let (state, _events) = {
             let (event_tx, events) = mpsc::channel(64);
+            // session_env 不携带 HOME——宿主 HOME 只能经继承到达子进程,
+            // 以此区分「覆盖层注入」与「宿主继承」两个来源。
             let mut env = host_env();
             env.insert("T6_FROZEN_ENV".to_string(), "frozen-env-ok".to_string());
             let state = Arc::new(ClientServiceState {
@@ -1101,36 +1104,43 @@ mod tests {
             });
             (state, events)
         };
+        let host_home = std::env::var("HOME").expect("host HOME");
 
-        // argv 形态:冻结键可见、未注入键不可见。
+        // argv 形态:覆盖层自定义键可见 + 宿主 HOME 继承可见。
         let params = json!({
             "sessionId": "client-service-test",
             "command": "/bin/sh",
-            "args": ["-c", "printf '%s' \"$T6_FROZEN_ENV\"; test -z \"$T6_ABSENT_VAR\""],
+            "args": [
+                "-c",
+                "printf '%s' \"$T6_FROZEN_ENV\"; printf ':%s' \"$HOME\"; test -z \"$T6_ABSENT_VAR\""
+            ],
             "cwd": ""
         });
         let id = handle_terminal_create(&state, &params)
             .await
-            .expect("argv form consumes frozen env");
-        let result = state.terminal.wait_for_exit(&id).await.expect("wait");
-        assert_eq!(result.exit_code, Some(0));
-        assert_eq!(state.terminal.output(&id).expect("output"), "frozen-env-ok");
-        state.terminal.release(&id).await.expect("release");
-
-        // legacy 形态:受信 SHELL(-c)同环境执行。
-        let params = json!({
-            "sessionId": "client-service-test",
-            "command": "printf 'legacy-%s' \"$T6_FROZEN_ENV\"",
-            "cwd": ""
-        });
-        let id = handle_terminal_create(&state, &params)
-            .await
-            .expect("legacy form consumes frozen env");
+            .expect("argv form inherits host env with session overrides");
         let result = state.terminal.wait_for_exit(&id).await.expect("wait");
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(
             state.terminal.output(&id).expect("output"),
-            "legacy-frozen-env-ok"
+            format!("frozen-env-ok:{host_home}")
+        );
+        state.terminal.release(&id).await.expect("release");
+
+        // legacy 形态:受信 SHELL(-c)同语义执行(宿主继承+会话覆盖)。
+        let params = json!({
+            "sessionId": "client-service-test",
+            "command": "printf 'legacy-%s:%s' \"$T6_FROZEN_ENV\" \"$HOME\"",
+            "cwd": ""
+        });
+        let id = handle_terminal_create(&state, &params)
+            .await
+            .expect("legacy form inherits host env with session overrides");
+        let result = state.terminal.wait_for_exit(&id).await.expect("wait");
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(
+            state.terminal.output(&id).expect("output"),
+            format!("legacy-frozen-env-ok:{host_home}")
         );
         state.terminal.release(&id).await.expect("release");
     }

@@ -52,6 +52,10 @@ pub trait BoundedCommandRunner: Send + Sync {
 pub struct TokioBoundedCommandRunner;
 
 impl TokioBoundedCommandRunner {
+    /// A1-a(Bug45 批2 环境回退底座):`run`/`run_inherited` 已同义——两路
+    /// 都经 `ProcessManager` 宿主继承 spawn,`request.environment` 只是
+    /// 显式覆盖层(envs 覆盖同名键)。双入口保留仅为既有调用方零迁移,
+    /// 不再存在「隔离 env_clear」差异(F17 随 A1-a 消解)。
     pub async fn run_inherited(
         &self,
         request: BoundedCommandRequest,
@@ -417,10 +421,14 @@ mod tests {
         assert!(!marker.exists());
     }
 
+    /// A1-a(Bug45 批2 环境回退底座):runner 子进程继承宿主环境——显式
+    /// request.environment 只是覆盖层(自定义键注入生效),map 外的宿主
+    /// 键(HOME)从宿主继承到达子进程。
     #[cfg(unix)]
     #[tokio::test]
-    async fn bounded_command_runner_exposes_only_allowlisted_environment() {
+    async fn bounded_command_runner_inherits_host_environment_with_explicit_overrides() {
         let working_dir = tempfile::tempdir().expect("working dir");
+        let host_home = std::env::var("HOME").expect("host HOME");
         let command = write_executable(
             working_dir.path(),
             "env-provider",
@@ -436,6 +444,6 @@ mod tests {
             .await
             .expect("command succeeds");
 
-        assert_eq!(result.stdout, "visible:unset");
+        assert_eq!(result.stdout, format!("visible:{host_home}"));
     }
 }

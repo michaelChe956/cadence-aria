@@ -321,11 +321,10 @@ pub(crate) fn provider_child_exit_error(message: String) -> ProviderAdapterError
 pub struct ProcessManager;
 
 impl ProcessManager {
-    /// 批2 Task 3(§环境精确合同):统一 env_clear——spawn 不再隐式继承
-    /// 宿主环境;冻结白名单环境(provider_environment::build_provider_
-    /// environment 产物)经 env_vars 既有 env map 传输注入。与
-    /// spawn_isolated 同一语义(engine T11/T12 接线前生产调用方传
-    /// 空 map 即显式空环境,fail-closed)。
+    /// A1-a(Bug45 批2 环境回退底座):spawn 宿主继承——子进程继承宿主
+    /// 环境,`env_vars` 只是调用方显式覆盖层(envs 覆盖同名键),空 map
+    /// 即纯继承;裸名命令在 env_vars 无 PATH 时回退宿主 PATH 解析
+    /// (`path_env`),流式/同步/终端三路同一姿态。
     pub async fn spawn(
         command: &str,
         args: &[&str],
@@ -336,7 +335,8 @@ impl ProcessManager {
         Self::spawn_with_environment(command, args, working_dir, env_vars).await
     }
 
-    /// 兼容别名:与 spawn 同一 env_clear 语义(既有调用方零迁移)。
+    /// 兼容别名:与 spawn 同一宿主继承语义(既有调用方零迁移;A1-a 起
+    /// 两入口不再有 env_clear 差异)。
     pub async fn spawn_isolated(
         command: &str,
         args: &[&str],
@@ -357,10 +357,9 @@ impl ProcessManager {
             return Err(command_missing(command));
         }
 
-        // 批2 Task 3:统一 env_clear(§环境精确合同)——无隐式宿主继承,
-        // 白名单键值只经 env_vars 显式注入。
         let mut command_builder = Command::new(command);
-        command_builder.env_clear();
+        // A1-a(Bug45 批2 环境回退底座):env_clear 已删——子进程继承宿主
+        // 环境,env_vars 仅作显式覆盖层(envs 覆盖同名键)。
         command_builder
             .args(args)
             .current_dir(working_dir)
@@ -369,9 +368,9 @@ impl ProcessManager {
     }
 
     // 批2 Task 10(旧物理 launcher 退役):provider 进程统一经
-    // `spawn`/`spawn_isolated` 受信 Host 启动(env_clear 白名单环境);
-    // `spawn_with_boundary[_resolved]`(bwrap 写边界 spawn)已删除,不再
-    // 存在「无 bwrap 不可用」的启动前置——物理隔离档不保留可选回退路径。
+    // `spawn`/`spawn_isolated` 受信 Host 启动(A1-a 起宿主继承 + 显式
+    // 覆盖层);`spawn_with_boundary[_resolved]`(bwrap 写边界 spawn)已删除,
+    // 不再存在「无 bwrap 不可用」的启动前置——物理隔离档不保留可选回退路径。
 }
 
 /// 已构造好的 Command 统一走瞬态重试 + 管道提取(spawn 共用;
@@ -448,9 +447,12 @@ fn command_is_resolvable(
 }
 
 fn path_env(env_vars: &BTreeMap<String, String>) -> Option<OsString> {
-    // 批2 Task 3:不回退未冻结宿主 PATH——env_vars 无 PATH 即显式缺工具
-    // (command_missing),绝不解析 Aria 进程自身 PATH。
-    env_vars.get("PATH").map(OsString::from)
+    // A1-a(Bug45 批2 环境回退底座):env_vars 无 PATH 时回退宿主 PATH
+    // (std::env)——裸名 CLI 解析不断链;显式 PATH 仍优先(覆盖层)。
+    env_vars
+        .get("PATH")
+        .map(OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
 }
 
 fn command_missing(command: &str) -> ProviderAdapterError {
@@ -550,66 +552,94 @@ mod tests {
         assert!(status.success());
     }
 
-    /// 批2 Task 3:spawn 不隐式继承宿主环境——子进程只看到显式传入的键。
+    /// A1-a(Bug45 批2 环境回退底座):spawn 传空 env map 时子进程继承
+    /// 宿主环境——隔离父进程不构造 marker env,真实子进程读到宿主
+    /// PATH/HOME(只读宿主键,不 set_var 污染并行测试)。
     #[cfg(unix)]
     #[tokio::test]
-    async fn spawn_does_not_implicitly_inherit_host_environment() {
+    async fn spawn_inherits_host_environment_when_env_map_is_empty() {
         use tokio::io::{AsyncRead, AsyncReadExt};
 
-        let root = std::path::Path::new("/tmp/aria-bug45/t3");
-        fs::create_dir_all(root).expect("create t3 fixture root");
-        let dir = tempfile::tempdir_in(root).expect("t3 fixture dir");
-        let script = dir.path().join("print-env-keys");
-        fs::write(&script, "#!/bin/sh\nenv | cut -d= -f1 | sort\n").expect("write fixture");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod fixture");
+        let host_home = std::env::var("HOME").expect("host HOME");
+        let host_path = std::env::var("PATH").expect("host PATH");
 
-        let env = BTreeMap::from([
-            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
-            ("ARIA_T3_MARKER".to_string(), "1".to_string()),
-        ]);
         let mut process = ProcessManager::spawn(
-            &script.to_string_lossy(),
-            &[],
-            dir.path(),
-            &env,
+            "/bin/sh",
+            &["-c", "printf '%s\\n%s\\n' \"$HOME\" \"$PATH\""],
+            &std::env::current_dir().expect("cwd"),
+            &BTreeMap::new(),
             CancellationToken::new(),
         )
         .await
-        .expect("spawn key printer fixture");
+        .expect("spawn host env printer");
 
         let mut stdout = String::new();
         let mut reader = std::pin::pin!(process.stdout);
-        reader.read_to_string(&mut stdout).await.expect("read keys");
+        reader.read_to_string(&mut stdout).await.expect("read env");
         let _ = process.child.wait().await.expect("wait fixture");
-        // /bin/sh 自身会补 PWD/SHLVL/_ 等 shell 运行时键(非继承注入),
-        // 排除后必须与显式传入键集完全一致。
-        let keys: Vec<&str> = stdout
-            .lines()
-            .filter(|key| !matches!(*key, "PWD" | "SHLVL" | "_" | "OLDPWD"))
-            .collect();
+        let mut lines = stdout.lines();
         assert_eq!(
-            keys,
-            vec!["ARIA_T3_MARKER", "PATH"],
-            "spawn 后子进程必须只看到显式传入的环境键",
+            lines.next(),
+            Some(host_home.as_str()),
+            "子进程必须读到宿主 HOME(不在输入 env map 中)",
+        );
+        assert_eq!(
+            lines.next(),
+            Some(host_path.as_str()),
+            "子进程必须读到宿主 PATH(不在输入 env map 中)",
         );
     }
 
-    /// 批2 Task 3:env_vars 无 PATH 时不回退未冻结宿主 PATH——裸命令显式
-    /// 缺工具(command_missing),绝不解析宿主 PATH。
+    /// A1-a(Bug45 批2 环境回退底座):env_vars 无 PATH 时回退宿主
+    /// PATH——裸名命令经宿主 PATH 解析成功,不再显式缺工具。
     #[cfg(unix)]
     #[tokio::test]
-    async fn spawn_without_path_does_not_fall_back_to_host_path() {
-        let result = ProcessManager::spawn(
+    async fn spawn_without_explicit_path_resolves_via_host_path() {
+        let mut process = ProcessManager::spawn(
             "sh",
             &["-c", "exit 0"],
             &std::env::current_dir().expect("cwd"),
             &BTreeMap::new(),
             CancellationToken::new(),
         )
-        .await;
+        .await
+        .expect("裸名命令必须经宿主 PATH 解析成功");
 
-        let error = result.expect_err("无 PATH 的裸命令必须显式缺工具");
-        assert_eq!(error.code, ProviderErrorCode::ProviderCommandMissing);
+        let status = process.child.wait().await.expect("wait fixture");
+        assert!(status.success());
+    }
+
+    /// A1-a(Bug45 批2 环境回退底座):显式 env map 是覆盖层而非快照——
+    /// 自定义 token 经 envs 覆盖注入生效,map 外的宿主键(HOME)仍从
+    /// 宿主继承到达子进程;断言子进程拿到宿主值,不是输入 map 快照。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_env_map_overrides_host_without_replacing_it() {
+        use tokio::io::{AsyncRead, AsyncReadExt};
+
+        let host_home = std::env::var("HOME").expect("host HOME");
+        let mut process = ProcessManager::spawn(
+            "/bin/sh",
+            &["-c", "printf '%s|%s' \"$ARIA_A1A_TOKEN\" \"$HOME\""],
+            &std::env::current_dir().expect("cwd"),
+            &BTreeMap::from([(
+                "ARIA_A1A_TOKEN".to_string(),
+                "override-ok".to_string(),
+            )]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn token+home printer");
+
+        let mut stdout = String::new();
+        let mut reader = std::pin::pin!(process.stdout);
+        reader.read_to_string(&mut stdout).await.expect("read env");
+        let _ = process.child.wait().await.expect("wait fixture");
+        assert_eq!(
+            stdout,
+            format!("override-ok|{host_home}"),
+            "token 来自输入 env map,HOME 必须来自宿主(非输入 map 快照)",
+        );
     }
 
     /// 批2 Task 5:spawn 即冻结 PID-start 真实身份(PID 与 /proc starttime)。

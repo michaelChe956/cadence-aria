@@ -9,9 +9,10 @@
 //! 先于 `start`,spawn 前占住并发名额),spawn 失败立即释放名额。
 //!
 //! 批2 Task 6:全角色 Host 单路径——不再有 bwrap/netns/no-new-privs 执行
-//! 隔离,也没有固定解释器/只读 grammar。子进程环境是冻结会话环境(与
-//! provider 进程 spawn 消费的同一 env map):`env_clear` 后只注入该 map,
-//! 裸名 program 经该环境的 `PATH` 解析(fail-closed,不回退宿主 PATH)。
+//! 隔离,也没有固定解释器/只读 grammar。A1-a(Bug45 批2 环境回退底座):
+//! 子进程继承宿主环境,冻结会话环境(`TerminalCommand::env`,与 provider
+//! 进程同一 env map)作为显式覆盖层注入同名键;裸名 program 经(覆盖后
+//! 的)PATH 解析,legacy 单字符串形态的受信 SHELL 回退语义不变。
 
 use std::collections::{BTreeMap, HashMap};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -41,9 +42,9 @@ pub struct TerminalCommand {
     pub args: Vec<String>,
     /// Verified working directory (canonical, anchored at the face root).
     pub cwd: PathBuf,
-    /// 冻结会话环境(与 provider 进程 spawn 消费的同一 env map)。子进程
-    /// `env_clear` 后只注入该 map;ACP 参数不参与构造(不能根据 ACP 参数
-    /// 造 profile)。
+    /// 冻结会话环境(与 provider 进程 spawn 消费的同一 env map)。A1-a
+    /// 起作为显式覆盖层注入(覆盖同名宿主键),其余环境继承宿主;ACP
+    /// 参数不参与构造(不能根据 ACP 参数造 profile)。
     pub env: BTreeMap<String, String>,
 }
 
@@ -348,9 +349,10 @@ impl Drop for TerminalChild {
     }
 }
 
-// 批2 Task 6:固定 HOME/GIT_CONFIG_GLOBAL 等手搓子进程环境已删——终端
-// 子进程消费冻结会话环境(TerminalCommand::env,与 provider 进程同一
-// env map),不再按授权根另行构造。
+// 批2 Task 6:固定 HOME/GIT_CONFIG_GLOBAL 等手搓子进程环境已删——A1-a
+// (Bug45 批2 环境回退底座)起 terminal 子进程继承宿主环境,冻结会话
+// 环境(TerminalCommand::env,与 provider 进程同一 env map)仅作显式
+// 覆盖层注入,不再按授权根另行构造。
 
 async fn run_terminal(entry: Arc<TerminalEntry>, command: TerminalCommand) {
     let started = Instant::now();
@@ -493,7 +495,6 @@ fn build_terminal_command(command: &TerminalCommand, anchor: Option<&OwnedFd>) -
         builder.current_dir(&command.cwd);
     }
     builder
-        .env_clear()
         .envs(
             command
                 .env

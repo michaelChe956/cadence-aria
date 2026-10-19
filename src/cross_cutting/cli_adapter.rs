@@ -84,15 +84,20 @@ impl ProviderAdapter for CliProviderAdapter {
                 sink: Arc::clone(sink),
             });
         let stream_log_dir = input.provider_stream_log_dir.as_deref().map(Path::new);
-        // 批2 Task 3→T11 集成轮:同步 CLI 旁路消费 `AdapterInput::env_vars`
-        // 传输的冻结白名单环境(受信构造点注入 build_provider_environment
-        // 产物,裸名 CLI 靠最终 PATH 可解析);空 = 显式空环境(env_clear +
-        // 零注入,fail-closed),adapter 不隐式全继承、不自行复制白名单。
+        // A1-a(Bug45 批2 环境回退底座):同步 CLI 旁路不再构造显式空环境
+        // ——`env_vars` 非空时作为调用方显式覆盖层注入,空时传 None(平台
+        // 不构造、不覆盖),子进程直接继承宿主环境;绝不把宿主 env 抄进
+        // BTreeMap 冒充继承(那会丢非 UTF-8 值)。
+        let environment = if input.env_vars.is_empty() {
+            None
+        } else {
+            Some(&input.env_vars)
+        };
         let raw = run_command_capture_with_stream(
             &command,
             worktree_path,
             stream_log_dir,
-            Some(&input.env_vars),
+            environment,
             Some(&input.prompt),
             Some(Duration::from_secs(input.timeout)),
             stream_context,
@@ -211,9 +216,8 @@ pub fn run_command_capture(
     )
 }
 
-/// 批2 Task 3:同步 CLI 旁路的冻结环境捕获入口——env_clear 后只注入给定
-/// 键值(build_provider_environment 产物经既有 env map 传输到达),不隐式
-/// 全继承宿主环境。
+/// 显式环境覆盖层的同步捕获入口——继承宿主环境,给定键值作为覆盖层
+/// 注入(同名键覆盖,其余宿主键保留)。
 pub fn run_command_capture_with_environment(
     command_spec: &CommandSpec,
     current_dir: Option<&Path>,
@@ -250,11 +254,10 @@ fn run_command_capture_with_stream(
     if let Some(current_dir) = current_dir {
         command.current_dir(current_dir);
     }
-    // 批2 Task 3(§环境精确合同):冻结白名单环境——env_clear 后只注入给定
-    // 键值,不隐式全继承;None 仅供平台侧能力探针(provider_capabilities,
-    // T9 换代重写面)沿既有宿主继承,provider 子进程/同步旁路必须传 Some。
+    // A1-a(Bug45 批2 环境回退底座):独立 env_clear 已删——`Some(env)` 只是
+    // 调用方显式覆盖层(envs 覆盖同名键),`None` 为平台不构造不覆盖;两条
+    // 路径下子进程都继承宿主环境。环境具体值不写入流日志/错误信息。
     if let Some(env) = environment {
-        command.env_clear();
         command.envs(env);
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -670,5 +673,68 @@ mod provider_stream_tests {
             path.file_name().and_then(|name| name.to_str()),
             Some("cl_ude-42-stderr.log")
         );
+    }
+}
+
+/// A1-a(Bug45 批2 环境回退底座)绿证:同步 CLI 捕获通道的宿主继承语义。
+#[cfg(all(test, unix))]
+mod host_inheritance_tests {
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    use super::*;
+
+    fn sh_spec(script: &str) -> CommandSpec {
+        CommandSpec::new(
+            "/bin/sh".to_string(),
+            vec!["-c".to_string(), script.to_string()],
+        )
+    }
+
+    /// 隔离父进程不构造 marker env(空 env_vars → None):真实子进程读到
+    /// 宿主 PATH/HOME——子进程拿到的是宿主值,不是输入 map 快照。
+    #[test]
+    fn sync_capture_inherits_host_environment_without_explicit_map() {
+        let host_home = std::env::var("HOME").expect("host HOME");
+        let host_path = std::env::var("PATH").expect("host PATH");
+
+        let output = run_command_capture_with_stream(
+            &sh_spec("printf '%s\\n%s' \"$HOME\" \"$PATH\""),
+            None,
+            None,
+            None,
+            None,
+            Some(Duration::from_secs(30)),
+            None,
+        )
+        .expect("sync capture inherits host env");
+
+        assert_eq!(output.exit_code, Some(0), "stderr: {}", output.stderr);
+        assert_eq!(output.stdout, format!("{host_home}\n{host_path}"));
+    }
+
+    /// 显式 env map 是覆盖层而非快照:自定义 token 注入生效,map 外的
+    /// 宿主键(HOME)仍从宿主继承到达子进程。
+    #[test]
+    fn sync_capture_env_map_overrides_host_without_replacing_it() {
+        let host_home = std::env::var("HOME").expect("host HOME");
+        let environment = BTreeMap::from([(
+            "ARIA_A1A_TOKEN".to_string(),
+            "override-ok".to_string(),
+        )]);
+
+        let output = run_command_capture_with_stream(
+            &sh_spec("printf '%s|%s' \"$ARIA_A1A_TOKEN\" \"$HOME\""),
+            None,
+            None,
+            Some(&environment),
+            None,
+            Some(Duration::from_secs(30)),
+            None,
+        )
+        .expect("sync capture applies env map as overrides");
+
+        assert_eq!(output.exit_code, Some(0), "stderr: {}", output.stderr);
+        assert_eq!(output.stdout, format!("override-ok|{host_home}"));
     }
 }

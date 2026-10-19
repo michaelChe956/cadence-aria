@@ -586,10 +586,22 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// 受信 owner home 的环境解析(HOME/USERPROFILE,仅绝对路径):trust
+/// 发现(`production()`)的 owner_home 单一入口,禁止多处各自解析造成
+/// HOME/CODEX_HOME 发现漂移。
+///
+/// A1-a(Bug45 批2 环境回退底座):自 `cross_cutting::provider_environment`
+/// 迁入 trust 侧(逐字等价实现)——环境白名单模块待 A1-b 删除,owner
+/// home 只读发现职责落位于其存活消费方(trust adapter)。
+pub(crate) fn resolve_owner_home_from_env() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+}
+
 fn home_from_env() -> Option<PathBuf> {
-    // 批2 Task 3:trust 发现与环境构造器同源(owner home 解析单一入口),
-    // 禁止两处各自解析造成 HOME/CODEX_HOME 发现漂移。
-    crate::cross_cutting::provider_environment::resolve_trusted_owner_home_from_env()
+    resolve_owner_home_from_env()
 }
 
 /// Temp-file + rename atomic text write, mirroring `json_store::write_json`.

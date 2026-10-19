@@ -4,7 +4,7 @@
 //! 六职责、`ProviderExecutionProfile::{HostCoding, ReviewerVerify}` 与
 //! `FrozenProviderExecution` 冻结快照由 crate 内受信 builder
 //! （[`freeze_provider_execution`]）从不可伪造的 [`TrustedRunIdentity`] 冻结；
-//! T3（白名单环境）/T5（资源归属）/T10–T13（四家接线）/T17/T20 共同消费。
+//! T3（环境合同,A1-a 起宿主继承）/T5（资源归属）/T10–T13（四家接线）/T17/T20 共同消费。
 //!
 //! 不可伪造性合同（对齐 `session_launch`/`ValidatedSessionLaunchPolicy` 的
 //! crate 内 constructor + private 字段范式）：
@@ -41,9 +41,11 @@ pub const PROVIDER_EXECUTION_CONTRACT_RESUME_SCHEMA: &str = "provider-execution-
 /// 执行合同自身的 profile 版本（本期冻结为 1）。
 pub const PROVIDER_EXECUTION_PROFILE_VERSION: u32 = 1;
 
-/// 环境策略版本（T2 冻结时点）：环境白名单合同由 T3 冻结并复用本版本源；
-/// T2 先把执行基线事实（部署上下文/profile/职责/资源归属）纳入环境策略
-/// 摘要，任何一项漂移即失配。
+/// 环境策略版本（T2 冻结时点）。A1-a（Bug45 批2 环境回退底座）起环境
+/// 语义为宿主继承：子进程继承宿主环境，显式 env map 只是调用方覆盖层；
+/// 环境具体值与键集合不入摘要/日志。**版本不升**——摘要只覆盖执行基线
+/// 事实（部署上下文/profile/职责/资源归属），升版会使存量 resume 指纹
+/// 全变，环境回退不构成执行基线漂移。
 pub const PROVIDER_ENV_POLICY_VERSION: u32 = 1;
 
 /// 环境策略摘要的 schema 前缀（与 [`PROVIDER_ENV_POLICY_VERSION`] 同源冻结）。
@@ -333,12 +335,12 @@ impl FrozenProviderExecution {
         self.deployment_context
     }
 
-    /// 环境策略版本（T3 白名单环境消费/续冻结）。
+    /// 环境策略版本（环境合同消费；A1-a 起宿主继承语义，版本不升）。
     pub fn env_policy_version(&self) -> u32 {
         self.env_policy_version
     }
 
-    /// 环境策略摘要（T2 冻结执行基线事实；T3 起纳入白名单键集合摘要）。
+    /// 环境策略摘要（T2 冻结执行基线事实；不含环境键集合/具体值）。
     pub fn env_policy_digest(&self) -> &str {
         &self.env_policy_digest
     }
@@ -549,8 +551,9 @@ pub(crate) fn freeze_provider_execution(
     // 二期受信 launcher 侧显式拒绝)。
     let deployment_context = DeploymentContext::HostLocal;
 
-    // 环境策略摘要:T2 冻结执行基线事实(部署上下文/profile/职责/资源归属);
-    // T3 白名单环境在同一版本源上续冻结键集合摘要。
+    // 环境策略摘要:T2 冻结执行基线事实(部署上下文/profile/职责/资源
+    // 归属)与环境策略版本号;A1-a 起环境语义为宿主继承,摘要不含环境
+    // 键集合/具体值,版本不升(resume 指纹稳定)。
     let env_policy_digest = hash_domains(
         PROVIDER_ENV_POLICY_SCHEMA,
         &[
@@ -986,7 +989,7 @@ mod tests {
     }
 
     /// 环境策略摘要随执行基线事实漂移：profile/职责/部署上下文任一变化 →
-    /// 摘要变化（T3 白名单环境在此基础上续冻结键集合摘要）。
+    /// 摘要变化（环境具体值不入摘要,A1-a 起语义为宿主继承）。
     #[test]
     fn env_policy_digest_tracks_execution_basis_facts() {
         let reviewer = identity(TrustedProviderRole::Reviewer, AdapterRole::Reviewer);

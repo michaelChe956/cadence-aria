@@ -447,6 +447,11 @@ pub(crate) fn trusted_launch_environment(
 /// 受信 owner home 的环境解析(HOME/USERPROFILE,仅绝对路径):trust
 /// adapter(`production()`)与受信启动配置的 owner_home 同源入口,禁止两处
 /// 各自解析造成发现漂移。
+///
+/// A1-a(Bug45 批2 环境回退底座):trust 侧消费已迁移至
+/// `product::logical_codebase::provider_trust_adapters::resolve_owner_home_from_env`
+/// (逐字等价);本定义仅供本模块 `trusted_launch_environment` 与装配层既有
+/// 引用过渡使用,随本模块(A1-b)删除一并消失,不新增引用。
 pub fn resolve_trusted_owner_home_from_env() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
