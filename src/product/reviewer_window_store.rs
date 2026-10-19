@@ -524,14 +524,43 @@ fn with_channel_lock<T>(
     operation()
 }
 
-/// `/proc/<pid>/stat` → (state 字符, starttime ticks)。进程消失返回 None。
-fn proc_stat(pid: u32) -> Option<(char, u64)> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, tail) = stat.rsplit_once(") ")?;
+/// `/proc/<pid>/stat` 探针:区分「进程已消失」与「取证失败」——两者
+/// 对租约 owner 判定的方向相反(消失=已死可接管;取证失败=未知
+/// fail-closed,不得当死 owner 乱动)。
+enum ProcStatProbe {
+    Present { state: char, starttime: u64 },
+    NoSuchProcess,
+    Unreadable,
+}
+
+fn proc_stat_probe(pid: u32) -> ProcStatProbe {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ProcStatProbe::NoSuchProcess;
+        }
+        Err(_) => return ProcStatProbe::Unreadable,
+    };
+    let Some((_, tail)) = stat.rsplit_once(") ") else {
+        return ProcStatProbe::Unreadable;
+    };
     let mut fields = tail.split_whitespace();
-    let state = fields.next()?.chars().next()?;
-    let starttime = fields.nth(18)?.parse().ok()?;
-    Some((state, starttime))
+    let Some(state) = fields.next().and_then(|field| field.chars().next()) else {
+        return ProcStatProbe::Unreadable;
+    };
+    match fields.nth(18).and_then(|starttime| starttime.parse().ok()) {
+        Some(starttime) => ProcStatProbe::Present { state, starttime },
+        None => ProcStatProbe::Unreadable,
+    }
+}
+
+/// `/proc/<pid>/stat` → (state 字符, starttime ticks)。进程消失/取证
+/// 失败返回 None(通道 writer 收割语义:无法证明仍在=按已退出处理)。
+fn proc_stat(pid: u32) -> Option<(char, u64)> {
+    match proc_stat_probe(pid) {
+        ProcStatProbe::Present { state, starttime } => Some((state, starttime)),
+        ProcStatProbe::NoSuchProcess | ProcStatProbe::Unreadable => None,
+    }
 }
 
 /// writer 存活判定:PID-start 一致且非僵尸/陈尸(ticks=0 表示无法取证
@@ -548,21 +577,43 @@ pub(crate) fn channel_writer_alive(writer: &ChannelWriter) -> bool {
     }
 }
 
-/// ⚠3(T21):租约 owner 进程存活判定(与 channel writer 收割同语义):
-/// proc 无此 pid = 已死(可接管);ticks 不符 = PID 复用后的无关进程 =
-/// 原 owner 已死;未知(owner_pid=0/取证失败)fail-closed 视为存活——
-/// 不得在无法取证时放行并发重入。
-fn lease_owner_alive(lease: &WindowLeaseRecord) -> bool {
+/// ⚠3(T21)→B2/F3:租约 owner 存活三分判定:
+/// - `Alive`:PID-start 一致且非僵尸/陈尸(owner 持有中,他人不得动树);
+/// - `Dead`:进程已消失、ticks 不符(PID 复用后的无关进程)或僵尸/陈尸
+///   ——原 owner 已死,可在租约锁域内接管;
+/// - `Unknown`:owner_pid=0(旧记录缺省)或 /proc 取证失败——fail-closed,
+///   不得当死 owner 乱动(B2 补偿闸门与 acquire_lease 共用)。
+pub(crate) enum LeaseOwnerLiveness {
+    Alive,
+    Dead,
+    Unknown,
+}
+
+pub(crate) fn lease_owner_liveness(lease: &WindowLeaseRecord) -> LeaseOwnerLiveness {
     if lease.owner_pid == 0 {
-        return true;
+        return LeaseOwnerLiveness::Unknown;
     }
-    match proc_stat(lease.owner_pid) {
-        None => false,
-        Some((state, starttime)) => {
-            lease.owner_start_ticks == 0
-                || (starttime == lease.owner_start_ticks && state != 'Z' && state != 'X')
+    match proc_stat_probe(lease.owner_pid) {
+        ProcStatProbe::NoSuchProcess => LeaseOwnerLiveness::Dead,
+        ProcStatProbe::Unreadable => LeaseOwnerLiveness::Unknown,
+        ProcStatProbe::Present { state, starttime } => {
+            if lease.owner_start_ticks == 0 {
+                return LeaseOwnerLiveness::Unknown;
+            }
+            if starttime == lease.owner_start_ticks && state != 'Z' && state != 'X' {
+                LeaseOwnerLiveness::Alive
+            } else {
+                LeaseOwnerLiveness::Dead
+            }
         }
     }
+}
+
+/// 租约 owner 存活判定(布尔视图;Unknown → true,fail-closed 视为存活
+/// ——不得在无法取证时放行并发重入)。`acquire_lease` 的同窗重入互斥
+/// 与 B2/F3 补偿闸门共用。
+pub(crate) fn lease_owner_alive(lease: &WindowLeaseRecord) -> bool {
+    !matches!(lease_owner_liveness(lease), LeaseOwnerLiveness::Dead)
 }
 
 // ---------------------------------------------------------------------------

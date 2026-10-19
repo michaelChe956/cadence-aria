@@ -744,21 +744,14 @@ pub async fn serve_web(
         events,
         work_item_plan_single_candidate,
     );
-    // T21:启动先扫描未关闭 reviewer 窗口并补偿(停旧登记资源→按原
-    // manifest 续恢复→人工门/释放),再放行 claimed-run/autopilot 分诊
-    // 与 Provider 探活——不得沿旧序仅日志后继续启动同树 runner。失败
-    // fail-visible,不阻塞服务(该树由租约闸门 fail-closed)。
-    if let Err(error) =
-        crate::web::autopilot_orchestrator::reconcile_claimed_coding_runs_once(&state).await
-    {
-        eprintln!("[aria-startup] coding run startup reconcile failed: {error}");
-    }
-    refresh_provider_health_for_startup(&state).await;
     let static_service = crate::web::static_assets::static_dist_service();
     let evidence_enabled = is_loopback_host(&host);
 
-    // 批2 T1：先 bind 拿真实端口，再装配控制面认证（默认受信 Origin/Host 精确
-    // 来自该监听地址；bind 非 loopback 时必须显式配置 ARIA_API_TRUSTED_ORIGINS）。
+    // 批2 T1:先 bind 拿真实端口,再装配控制面认证(默认受信 Origin/Host 精确
+    // 来自该监听地址;bind 非 loopback 时必须显式配置 ARIA_API_TRUSTED_ORIGINS)。
+    // B2/F3(批2 Bug45):bind 必须先于一切启动副作用——同端口 bind 失败
+    // (端口被占)时零副作用返回,不得破坏其他实例正在持有的 reviewer
+    // 窗口/租约/登记资源;补偿/分诊挪到 bind+认证之后(见下)。
     let listener = TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
     let explicit_origins = crate::web::api_auth::parse_trusted_origins_env(
@@ -773,6 +766,21 @@ pub async fn serve_web(
         crate::web::api_auth::delivery_notice(&auth, owner_terminal_attached())
     );
     let state = state.with_api_auth(auth);
+
+    // T21:bind 成功且认证配置完成后,先扫描未关闭 reviewer 窗口并补偿
+    // (停旧登记资源→按原 manifest 续恢复→人工门/释放),再放行
+    // claimed-run/autopilot 分诊与 Provider 探活——不得沿旧序仅日志后
+    // 继续启动同树 runner。失败 fail-visible,不阻塞服务(该树由租约
+    // 闸门 fail-closed)。B2/F3:整块 reconcile+探活从 bind 之前挪到
+    // bind/认证之后——同端口 bind 失败=零副作用;补偿自身另有租约
+    // 闸门,owner 存活时零副作用跳过,不同端口并存实例互不破坏。
+    if let Err(error) =
+        crate::web::autopilot_orchestrator::reconcile_claimed_coding_runs_once(&state).await
+    {
+        eprintln!("[aria-startup] coding run startup reconcile failed: {error}");
+    }
+    refresh_provider_health_for_startup(&state).await;
+
     let app = assemble_production_router(state.clone(), evidence_enabled, static_service);
     // P1 WIGA Task 6：随服务器生命周期启动 autopilot 有界扫描（事件仅唤醒）。
     let wake_rx = orchestrator_wake_subscribe(&state);

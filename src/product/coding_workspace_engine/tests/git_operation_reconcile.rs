@@ -810,6 +810,43 @@ async fn t19_open_window(
     .expect("open reviewer window")
 }
 
+/// B2/F3 适配:把本窗租约 owner 改写为「真实已死进程」身份(身份字段
+/// 不动,与生产 acquire_lease 接管写同形)——模拟崩溃重启现场:旧
+/// owner 进程确已死亡,启动补偿经租约闸门判死后接管续接。
+fn t19_dead_window_owner(root: &Path, worktree: &Path, window_id: &str) {
+    use crate::cross_cutting::process_manager::process_start_time_ticks;
+    use crate::product::reviewer_window_store::{WindowLeaseRecord, tree_key_of};
+
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn dead owner child");
+    let pid = child.id();
+    let ticks = process_start_time_ticks(pid).expect("dead owner starttime");
+    child.kill().expect("kill dead owner child");
+    child.wait().expect("reap dead owner child");
+
+    let window_store = T19WindowStore::new(root.join(".aria").join("reviewer-windows"));
+    let tree_key = tree_key_of(&worktree.canonicalize().expect("canonical worktree"));
+    let mut lease: WindowLeaseRecord = window_store
+        .load_lease(&tree_key)
+        .expect("load lease")
+        .expect("lease held");
+    assert_eq!(lease.window_id, window_id, "改写前租约必须属本窗");
+    lease.owner_pid = pid;
+    lease.owner_start_ticks = ticks;
+    let path = root
+        .join(".aria")
+        .join("reviewer-windows")
+        .join("leases")
+        .join(format!("{tree_key}.json"));
+    fs::write(
+        &path,
+        serde_json::to_string(&lease).expect("serialize lease"),
+    )
+    .expect("rewrite lease owner");
+}
+
 #[tokio::test]
 async fn review_request_platform_write_rejected_while_window_frozen_resumes_after_release() {
     let (root, store, attempt) = running_attempt_with_worktree();
@@ -1258,6 +1295,9 @@ async fn startup_compensation_resumes_cancelled_review_commit_after_window_relea
 
     // 冻结窗口开在同树(T19 API 直连;无在途 writer,直接 Frozen)。
     let handle = t19_open_window(root.path(), &attempt, &worktree, "t21-comp-window").await;
+    // B2/F3:模拟崩溃重启——开窗进程(旧 owner)确已死亡,启动补偿的
+    // 租约闸门判死后接管,而非对存活 owner 的窗口动树。
+    t19_dead_window_owner(root.path(), &worktree, "t21-comp-window");
     let error = engine
         .compensate_cancelled_review_commit(&attempt, &journal)
         .await

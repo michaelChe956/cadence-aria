@@ -354,8 +354,8 @@ use crate::product::reviewer_window::{
     resolve_manual_gate, resolve_worktree_git_identity, restore_window,
 };
 use crate::product::reviewer_window_store::{
-    ChannelWriter, ReportAcceptance, ReviewerWindowRecord, ReviewerWindowState,
-    ReviewerWindowStore, WriteChannelKind, tree_key_of, wire_acceptance,
+    ChannelWriter, LeaseOwnerLiveness, ReportAcceptance, ReviewerWindowRecord, ReviewerWindowState,
+    ReviewerWindowStore, WriteChannelKind, lease_owner_liveness, tree_key_of, wire_acceptance,
 };
 
 /// 窗口 store 生产根(`<aria>/reviewer-windows`;engine 与 coding_attempt_store
@@ -874,6 +874,10 @@ pub(crate) struct StartupWindowCompensation {
     pub(crate) state: ReviewerWindowState,
     /// 树已释放(终态关闭;租约释放、四通道解冻)。
     pub(crate) released: bool,
+    /// B2/F3:租约闸门跳过(活/未知/异常 owner)——零副作用,未动树,
+    /// 不动 generation/租约/attempt 投影;与「补偿后保持锁」语义分离
+    /// (调用方据此区分跳过日志与停等告警)。
+    pub(crate) skipped_live_owner: bool,
     /// 保持锁时的人工处置原因(人工门/停等投影)。
     pub(crate) manual_attention: Option<String>,
 }
@@ -886,6 +890,96 @@ pub(crate) enum AttemptWindowCloseMode {
     /// 删除:工作树随之删除,恢复 best-effort 后无条件弃置关闭(通道/
     /// 租约必须收口,不留冻结残锁卡共享 common-dir 的主仓 git mutation)。
     Delete,
+}
+
+/// B2/F3:崩溃补偿的驱动来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrashCompensationDrive {
+    /// 启动扫描(serve_web 启动序列):owner 存活即零副作用跳过——
+    /// owner==self 也不是启动扫描动树的通行证(窗口可能仍在正常推进)。
+    StartupScan,
+    /// 人工显式重驱(socket RecoverCoding 前置):owner=本进程(存活)
+    /// 的窗口放行续接(同进程自持窗口的恢复不被永久挡)。
+    ExplicitRedrive,
+}
+
+/// B2/F3:补偿破坏单元(停资源/恢复/弃置)前的租约闸门——启动扫描
+/// 与显式重驱共用。分类不洗白:
+/// - owner 存活 → 跳过(不同端口并发实例持窗,零副作用);
+/// - owner 未知(owner_pid=0//proc 取证失败)→ 停等跳过;
+/// - 租约不可读(缺失损坏)/租约属他窗 → 显式分类跳过,不当死 owner;
+/// - 租约缺失:Preparing/无 baseline(开窗在租约持久化前崩溃,本就
+///   无主可查)与非 Running 停等/恢复中态(finalize_terminal「先释放
+///   租约后落终态」的重入前缀,幂等收口是既有语义)均放行;Running
+///   却无租约属异常,停等;
+/// - 死 owner → 借现有租约锁域原子认领(acquire_lease 域锁内读-判-写
+///   +身份比对;两恢复者竞争=一赢一停等),认领成功才放行。
+///
+/// `Ok(())` = 可进入破坏单元;`Err(reason)` = 零副作用跳过(原因可见)。
+fn crash_compensation_lease_gate(
+    window_store: &ReviewerWindowStore,
+    record: &ReviewerWindowRecord,
+    drive: CrashCompensationDrive,
+) -> Result<(), String> {
+    let tree_key = tree_key_of(&record.identity.canonical_worktree);
+    let lease = match window_store.load_lease(&tree_key) {
+        Ok(Some(lease)) => lease,
+        Ok(None) => {
+            if matches!(record.state, ReviewerWindowState::Preparing)
+                || record.baseline.is_none()
+                || record.state != ReviewerWindowState::Running
+            {
+                return Ok(());
+            }
+            return Err(
+                "lease_missing_for_running_window(异常:Running 窗无租约,显式停等不动树)"
+                    .to_string(),
+            );
+        }
+        Err(error) => {
+            return Err(format!(
+                "lease_unreadable_fail_closed(租约缺失损坏,不当死 owner): {error}"
+            ));
+        }
+    };
+    if lease.window_id != record.window_id || lease.attempt_id != record.attempt_id {
+        return Err(format!(
+            "lease_owner_mismatch(租约属窗口 {}/{},本窗 {}/{}):不改写他人租约",
+            lease.window_id, lease.attempt_id, record.window_id, record.attempt_id
+        ));
+    }
+    let self_pid = std::process::id();
+    match lease_owner_liveness(&lease) {
+        LeaseOwnerLiveness::Alive => {
+            let self_owned = lease.owner_pid == self_pid
+                && lease.owner_start_ticks
+                    == crate::cross_cutting::process_manager::process_start_time_ticks(self_pid)
+                        .unwrap_or(0);
+            if drive == CrashCompensationDrive::ExplicitRedrive && self_owned {
+                return Ok(());
+            }
+            Err(format!(
+                "lease_owner_alive(owner pid {}):并发实例持窗,跳过(零副作用)",
+                lease.owner_pid
+            ))
+        }
+        LeaseOwnerLiveness::Unknown => Err(format!(
+            "lease_owner_unknown(owner_pid={} 或取证失败):fail-closed 停等,不当死 owner 处理",
+            lease.owner_pid
+        )),
+        LeaseOwnerLiveness::Dead => {
+            // 死 owner:现有租约锁域内原子认领——身份字段不变,owner 换成
+            // 本恢复者;并发恢复者一赢(Ok)一停等(Conflict:他者已认领
+            // 且存活)。
+            let mut takeover = lease.clone();
+            takeover.owner_pid = self_pid;
+            takeover.owner_start_ticks = crate::cross_cutting::process_manager::process_start_time_ticks(self_pid)
+                .unwrap_or(0);
+            window_store
+                .acquire_lease(&takeover)
+                .map_err(|error| format!("lease_takeover_lost(他恢复者已认领或租约冲突,停等): {error}"))
+        }
+    }
 }
 
 impl CodingWorkspaceEngine {
@@ -912,9 +1006,24 @@ impl CodingWorkspaceEngine {
                 continue;
             }
             let outcome = self
-                .compensate_window_after_crash(&window_store, &snapshot_store, record)
+                .compensate_window_after_crash(
+                    &window_store,
+                    &snapshot_store,
+                    record,
+                    CrashCompensationDrive::StartupScan,
+                )
                 .await;
-            if !outcome.released {
+            if outcome.skipped_live_owner {
+                // B2/F3:活/未知/异常 owner 跳过——零副作用,非失败,
+                // 与停等告警分流。
+                tracing::info!(
+                    window = %outcome.window_id,
+                    attempt = %outcome.attempt_id,
+                    state = outcome.state.as_str(),
+                    reason = outcome.manual_attention.as_deref().unwrap_or("unresolved"),
+                    "startup reviewer window compensation skipped (lease owner gate)"
+                );
+            } else if !outcome.released {
                 tracing::warn!(
                     window = %outcome.window_id,
                     attempt = %outcome.attempt_id,
@@ -930,20 +1039,42 @@ impl CodingWorkspaceEngine {
 
     /// 单窗补偿单元(启动驱动与人工恢复续接共用)。锁序沿 T19:窗口
     /// 租约/冻结在前,attempt git 补偿仅在窗口终态释放后续接。
+    /// B2/F3:破坏单元(停资源/恢复/弃置)之前先过 `crash_compensation_
+    /// lease_gate`——owner 存活/未知/租约异常零副作用跳过;死 owner
+    /// 经租约锁域原子认领后才放行。
     async fn compensate_window_after_crash(
         &self,
         window_store: &ReviewerWindowStore,
         snapshot_store: &ReviewerSnapshotStore,
         record: ReviewerWindowRecord,
+        drive: CrashCompensationDrive,
     ) -> StartupWindowCompensation {
         let window_id = record.window_id.clone();
         let attempt_id = record.attempt_id.clone();
+        if let Err(reason) = crash_compensation_lease_gate(window_store, &record, drive) {
+            tracing::warn!(
+                window = %window_id,
+                attempt = %attempt_id,
+                state = record.state.as_str(),
+                %reason,
+                "crash compensation skipped: lease owner gate (zero side effects)"
+            );
+            return StartupWindowCompensation {
+                state: record.state,
+                released: false,
+                skipped_live_owner: true,
+                manual_attention: Some(reason),
+                window_id,
+                attempt_id,
+            };
+        }
         // ManualGate:人工裁决待定——不动状态、保持锁,投影人工面。
         if record.state == ReviewerWindowState::ManualGate {
             self.project_window_manual_attention(&record, "reviewer_window_manual_gate");
             return StartupWindowCompensation {
                 state: record.state,
                 released: false,
+                skipped_live_owner: false,
                 manual_attention: Some(
                     "违规人工门:仅人工裁决(Invalidate/RequireNewReview)可收口".to_string(),
                 ),
@@ -964,6 +1095,7 @@ impl CodingWorkspaceEngine {
             return StartupWindowCompensation {
                 state,
                 released: false,
+                skipped_live_owner: false,
                 manual_attention: Some(reason),
                 window_id,
                 attempt_id,
@@ -978,6 +1110,7 @@ impl CodingWorkspaceEngine {
                 return StartupWindowCompensation {
                     state: record.state,
                     released: false,
+                    skipped_live_owner: false,
                     manual_attention: Some(reason),
                     window_id,
                     attempt_id,
@@ -1002,6 +1135,7 @@ impl CodingWorkspaceEngine {
                     return StartupWindowCompensation {
                         state: current.state,
                         released: false,
+                        skipped_live_owner: false,
                         manual_attention: Some(reason),
                         window_id,
                         attempt_id,
@@ -1026,6 +1160,7 @@ impl CodingWorkspaceEngine {
                 Err(error) => StartupWindowCompensation {
                     state: current.state,
                     released: false,
+                    skipped_live_owner: false,
                     manual_attention: Some(format!("abandon failed: {error}")),
                     window_id,
                     attempt_id,
@@ -1045,6 +1180,7 @@ impl CodingWorkspaceEngine {
                 StartupWindowCompensation {
                     state: summary.record.state,
                     released: false,
+                    skipped_live_owner: false,
                     manual_attention: Some("恢复完整但违规事实落 journal:人工门待裁决".to_string()),
                     window_id,
                     attempt_id,
@@ -1066,6 +1202,7 @@ impl CodingWorkspaceEngine {
                     Err(error) => StartupWindowCompensation {
                         state: summary.record.state,
                         released: false,
+                        skipped_live_owner: false,
                         manual_attention: Some(format!("abandon failed: {error}")),
                         window_id,
                         attempt_id,
@@ -1083,6 +1220,7 @@ impl CodingWorkspaceEngine {
                 StartupWindowCompensation {
                     state,
                     released: false,
+                    skipped_live_owner: false,
                     manual_attention: Some(format!("恢复停等: {reason}")),
                     window_id,
                     attempt_id,
@@ -1099,6 +1237,7 @@ impl CodingWorkspaceEngine {
                 StartupWindowCompensation {
                     state,
                     released: false,
+                    skipped_live_owner: false,
                     manual_attention: Some(error.to_string()),
                     window_id,
                     attempt_id,
@@ -1121,6 +1260,7 @@ impl CodingWorkspaceEngine {
             attempt_id,
             state,
             released: true,
+            skipped_live_owner: false,
             manual_attention: None,
         }
     }
@@ -1367,7 +1507,12 @@ impl CodingWorkspaceEngine {
                 ));
             }
             let outcome = self
-                .compensate_window_after_crash(&window_store, &snapshot_store, record)
+                .compensate_window_after_crash(
+                    &window_store,
+                    &snapshot_store,
+                    record,
+                    CrashCompensationDrive::ExplicitRedrive,
+                )
                 .await;
             if !outcome.released {
                 return Err(CodingWorkspaceEngineError::Store(

@@ -75,6 +75,13 @@ impl WindowStartupFixture {
     /// 共享根构造(局部坏窗用例:多树同 `.aria`,project/issue 只种一次)。
     pub(super) fn new_in(root: &Path, label: &str) -> Self {
         let worktree = root.join(label).join("worktree");
+        // B2/F3:serve_web 用例需要 schema 就绪——真实 aria 工作区由首次
+        // 启动写 v2 schema 后才有业务数据;fixture 先种 schema 再建数据,
+        // 否则 ensure_product_data_schema 会把既有数据判为 legacy。
+        crate::product::product_data_schema::ensure_product_data_schema(&ProductAppPaths::new(
+            root.join(".aria"),
+        ))
+        .expect("seed product data schema");
         std::fs::create_dir_all(&worktree).expect("worktree dir");
         std::fs::write(worktree.join("tracked.txt"), "base\n").expect("tracked base");
         git_ok(&worktree, &["init", "-q", "-b", "main"]);
@@ -191,7 +198,18 @@ impl WindowStartupFixture {
     }
 
     /// 真实开窗(engine 服务入口;空登记主 scope 即合法静止证明)。
+    /// B2/F3 适配:开窗后把租约 owner 改写为「真实已死进程」身份——
+    /// 本组用例模拟崩溃重启现场(旧 owner 进程确已死亡),启动补偿
+    /// 经租约闸门判死、原子接管后续接。
     pub(super) async fn open_window(&self, window_id: &str, run_id: &str) {
+        self.open_window_live_owner(window_id, run_id).await;
+        let (pid, ticks) = dead_owner_identity();
+        rewrite_lease_owner(self, window_id, pid, ticks);
+    }
+
+    /// 活 owner 开窗(owner = 本测试进程,存活):「活窗不动」与
+    /// 「显式恢复不被永久挡」用例的对照组。
+    pub(super) async fn open_window_live_owner(&self, window_id: &str, run_id: &str) {
         self.engine()
             .begin_reviewer_window_for_run(
                 window_id,
@@ -377,6 +395,56 @@ async fn run_startup_compensation(
     fx.engine()
         .compensate_open_reviewer_windows_at_startup()
         .await
+}
+
+/// 「真实死 owner」身份:短命子进程(pid+starttime 取证于退出前,
+/// 击杀收尸)——租约闸门必须按 pid 消失判死,不得依赖伪造 pid。
+fn dead_owner_identity() -> (u32, u64) {
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn dead owner child");
+    let pid = child.id();
+    let ticks = process_start_time_ticks(pid).expect("dead owner starttime");
+    child.kill().expect("kill dead owner child");
+    child.wait().expect("reap dead owner child");
+    (pid, ticks)
+}
+
+/// 直接改写本窗租约的 owner 字段(身份字段不动,与生产 acquire_lease
+/// 接管写同形):测试视角注入活/死/未知 owner。
+fn rewrite_lease_owner(
+    fx: &WindowStartupFixture,
+    window_id: &str,
+    owner_pid: u32,
+    owner_start_ticks: u64,
+) {
+    let store = fx.window_store();
+    let tree_key = tree_key_of(&fx.worktree.canonicalize().expect("canonical worktree"));
+    let mut lease = store
+        .load_lease(&tree_key)
+        .expect("load lease")
+        .expect("lease held");
+    assert_eq!(lease.window_id, window_id, "改写前租约必须属本窗");
+    lease.owner_pid = owner_pid;
+    lease.owner_start_ticks = owner_start_ticks;
+    let path = fx
+        .paths()
+        .root()
+        .join("reviewer-windows")
+        .join("leases")
+        .join(format!("{tree_key}.json"));
+    std::fs::write(&path, serde_json::to_string(&lease).expect("serialize lease"))
+        .expect("rewrite lease owner");
+}
+
+/// 读取本树当前租约(owner 保持/接管断言用)。
+fn current_lease(fx: &WindowStartupFixture) -> WindowLeaseRecord {
+    let tree_key = tree_key_of(&fx.worktree.canonicalize().expect("canonical worktree"));
+    fx.window_store()
+        .load_lease(&tree_key)
+        .expect("load lease")
+        .expect("lease held")
 }
 
 /// 崩溃前缀「租约已持久/manifest 未全」:手工构造 Preparing 记录 + 租约
@@ -1371,4 +1439,395 @@ async fn manual_redrive_completes_recovery_or_requires_decision() {
         .redrive_reviewer_window_recovery_for_attempt(&fx3.reload_attempt())
         .await
         .expect("no window: proceed");
+}
+
+// ---------------------------------------------------------------------------
+// B2/F3:补偿租约闸门(启动扫描与显式重驱共用的破坏单元前置)
+// ---------------------------------------------------------------------------
+
+/// B2/F3:活 owner 窗口(不同端口并发实例持有)在启动扫描下零副作用——
+/// 不 quiesce/不恢复/不弃置,不动 generation/租约/attempt 投影;全链路
+/// reconcile 分诊同样不恢复该树 runner(租约闸门 fail-closed)。
+#[tokio::test]
+async fn live_owner_window_untouched_by_startup_compensation() {
+    let fx = WindowStartupFixture::new("live");
+    fx.open_window_live_owner(&fx.window_id, "run-t21-live")
+        .await;
+    pollute_worktree_scratch(&fx);
+    let generation = fx.window_record(&fx.window_id).generation;
+
+    let outcomes = run_startup_compensation(&fx).await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(!outcomes[0].released, "活 owner 窗口不得补偿收口");
+    assert!(
+        outcomes[0].skipped_live_owner,
+        "必须以活 owner 跳过结局上报"
+    );
+    assert!(
+        outcomes[0]
+            .manual_attention
+            .as_deref()
+            .unwrap_or_default()
+            .contains("lease_owner_alive"),
+        "跳过原因可见:{:?}",
+        outcomes[0].manual_attention
+    );
+
+    // 零副作用:窗口/租约/attempt/树全部原样。
+    let record = fx.window_record(&fx.window_id);
+    assert_eq!(record.state, ReviewerWindowState::Running);
+    assert_eq!(record.generation, generation, "不得动窗口 generation");
+    let lease = current_lease(&fx);
+    assert_eq!(
+        lease.owner_pid,
+        std::process::id(),
+        "租约仍归原 owner(本测试进程)"
+    );
+    assert_eq!(
+        fx.reload_attempt().status,
+        CodingAttemptStatus::Running,
+        "活窗跳过不得把 attempt 投影成人工恢复面"
+    );
+    assert!(
+        fx.worktree.join("reviewer-scratch.txt").exists(),
+        "活窗跳过不得动树(reviewer 残留保持现场)"
+    );
+    assert!(
+        !fx.channel_allows_platform_write(),
+        "冻结保持(窗口仍 Running)"
+    );
+
+    // 全链路分诊:该树零 runner 恢复。
+    let state = fx.restart_state();
+    let resumed = crate::web::autopilot_orchestrator::reconcile_claimed_coding_runs_once(&state)
+        .await
+        .expect("reconcile");
+    assert_eq!(resumed, 0, "活 owner 树不放行 runner");
+    assert_eq!(state.coding_runs.runner_count(&fx.attempt_key()), 0);
+    assert_eq!(
+        fx.window_record(&fx.window_id).generation,
+        generation,
+        "分诊不得动活窗"
+    );
+}
+
+/// B2/F3:死 owner(真实已退出进程)窗口被启动补偿在租约锁域内原子
+/// 接管并照常补偿收口——不同端口的第二实例视角:接管-恢复-释放闭环。
+#[tokio::test]
+async fn dead_owner_window_taken_over_and_released() {
+    let fx = WindowStartupFixture::new("dead");
+    // fixture:真实死 owner 身份。
+    fx.open_window(&fx.window_id, "run-t21-dead").await;
+    pollute_worktree_scratch(&fx);
+    let baseline_head = fx.head();
+
+    let outcomes = run_startup_compensation(&fx).await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].released, "死 owner 必须经接管放行补偿");
+    assert!(
+        !outcomes[0].skipped_live_owner,
+        "死 owner 走接管补偿,不是跳过"
+    );
+    assert_eq!(
+        fx.window_record(&fx.window_id).state,
+        ReviewerWindowState::ClosedInvalidated
+    );
+    assert!(!lease_held(&fx), "接管补偿完成即释放租约");
+    assert!(
+        !fx.worktree.join("reviewer-scratch.txt").exists(),
+        "恢复清残留"
+    );
+    assert_eq!(fx.head(), baseline_head, "HEAD 回基线");
+}
+
+/// B2/F3:两恢复者竞争一赢一停等——恢复者 A(存活进程,已在租约锁域
+/// 内完成认领、补偿进行中)持租约期间,恢复者 B 启动扫描必须停等跳过
+/// (零副作用);A 死亡后 B 接管照常收口。
+#[tokio::test]
+async fn competing_recoverers_one_wins_other_stops_and_waits() {
+    let fx = WindowStartupFixture::new("race");
+    // 原 owner 已死(fixture),A 接管认领。
+    fx.open_window(&fx.window_id, "run-t21-race").await;
+    let mut winner = spawn_group_child();
+    let winner_pid = winner.id();
+    let winner_ticks = process_start_time_ticks(winner_pid).expect("winner ticks");
+    rewrite_lease_owner(&fx, &fx.window_id, winner_pid, winner_ticks);
+    let generation = fx.window_record(&fx.window_id).generation;
+
+    // 恢复者 B(本进程):A 存活 → 停等跳过,零副作用。
+    let outcomes = run_startup_compensation(&fx).await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(!outcomes[0].released, "先到恢复者存活期间不得并发动树");
+    assert!(
+        outcomes[0].skipped_live_owner,
+        "停等必须以租约闸门跳过结局上报(先到恢复者持有)"
+    );
+    assert_eq!(
+        fx.window_record(&fx.window_id).generation,
+        generation,
+        "停等不动窗口"
+    );
+    assert_eq!(
+        current_lease(&fx).owner_pid,
+        winner_pid,
+        "租约仍归先到恢复者 A"
+    );
+    assert_eq!(
+        fx.window_record(&fx.window_id).state,
+        ReviewerWindowState::Running
+    );
+
+    // A 死亡(崩溃)→ B 接管认领并完成补偿收口。
+    winner.kill().expect("kill winner");
+    winner.wait().expect("reap winner");
+    let second = run_startup_compensation(&fx).await;
+    assert_eq!(second.len(), 1);
+    assert!(second[0].released, "先到者死亡后接管照常补偿");
+    assert_eq!(
+        fx.window_record(&fx.window_id).state,
+        ReviewerWindowState::ClosedInvalidated
+    );
+    assert!(!lease_held(&fx));
+}
+
+/// B2/F3:同端口 bind 失败(端口被占)= 零副作用——启动补偿/分诊必须
+/// 排在 bind 成功+认证配置之后,失败即返回,不得破坏他人现场。
+#[tokio::test]
+async fn same_port_bind_failure_has_zero_startup_side_effects() {
+    let fx = WindowStartupFixture::new("bindfail");
+    // 死 owner 窗口在场:若补偿在 bind 前运行,该窗会被收口(红测锚点)。
+    fx.open_window(&fx.window_id, "run-t21-bindfail").await;
+    pollute_worktree_scratch(&fx);
+    let (dead_pid, dead_ticks) = {
+        let lease = current_lease(&fx);
+        (lease.owner_pid, lease.owner_start_ticks)
+    };
+    let generation = fx.window_record(&fx.window_id).generation;
+
+    // 占住端口 → serve_web 在 bind 处失败。
+    let blocker = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("blocker listener");
+    let port = blocker.local_addr().expect("blocker addr").port();
+    let error = crate::web::app::serve_web(
+        fx.root.clone(),
+        "127.0.0.1".to_string(),
+        Some(port),
+        false,
+    )
+    .await
+    .expect_err("同端口 bind 必须失败");
+    assert!(
+        error.to_string().contains("Address already in use"),
+        "失败必须是 bind 冲突:{error}"
+    );
+
+    // 零副作用:补偿未运行——窗口/租约(死 owner 未被接管)/attempt/树原样。
+    let record = fx.window_record(&fx.window_id);
+    assert_eq!(
+        record.state,
+        ReviewerWindowState::Running,
+        "bind 失败不得触发补偿"
+    );
+    assert_eq!(record.generation, generation);
+    let lease = current_lease(&fx);
+    assert_eq!(
+        (lease.owner_pid, lease.owner_start_ticks),
+        (dead_pid, dead_ticks),
+        "未接管租约"
+    );
+    assert_eq!(
+        fx.reload_attempt().status,
+        CodingAttemptStatus::Running,
+        "attempt 不被投影"
+    );
+    assert!(
+        fx.worktree.join("reviewer-scratch.txt").exists(),
+        "树未被恢复"
+    );
+
+    // 端口让开后再补偿:照常接管收口(bind 失败不留残留)。
+    drop(blocker);
+    let outcomes = run_startup_compensation(&fx).await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].released);
+    assert_eq!(
+        fx.window_record(&fx.window_id).state,
+        ReviewerWindowState::ClosedInvalidated
+    );
+}
+
+/// B2/F3:显式恢复不被永久挡——owner=本进程(存活)的窗口,启动扫描
+/// 跳过(不得以 owner==self 当启动扫描动树的通行证),人工显式重驱
+/// 则放行续接补偿收口。
+#[tokio::test]
+async fn explicit_redrive_proceeds_for_self_owned_live_window() {
+    let fx = WindowStartupFixture::new("selfredrive");
+    fx.open_window_live_owner(&fx.window_id, "run-t21-self")
+        .await;
+    let generation = fx.window_record(&fx.window_id).generation;
+
+    // 启动扫描:owner 存活(即使==self)→ 跳过零副作用。
+    let outcomes = run_startup_compensation(&fx).await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(!outcomes[0].released, "启动扫描不得以 self 放行动树");
+    assert!(
+        outcomes[0].skipped_live_owner,
+        "启动扫描对 self 持有的活窗同样跳过"
+    );
+    assert_eq!(fx.window_record(&fx.window_id).generation, generation);
+    assert_eq!(
+        fx.window_record(&fx.window_id).state,
+        ReviewerWindowState::Running
+    );
+
+    // 显式重驱:owner=本进程 → 放行,照常补偿收口。
+    fx.engine()
+        .redrive_reviewer_window_recovery_for_attempt(&fx.reload_attempt())
+        .await
+        .expect("self-owned live window: explicit redrive proceeds");
+    assert_eq!(
+        fx.window_record(&fx.window_id).state,
+        ReviewerWindowState::ClosedInvalidated
+    );
+    assert!(!lease_held(&fx));
+}
+
+/// B2/F3:未知 owner(owner_pid=0/取证失败)停等——不当死 owner 乱动,
+/// 启动扫描与显式重驱均零副作用跳过(fail-closed)。
+#[tokio::test]
+async fn unknown_owner_lease_fails_closed_stop_and_wait() {
+    let fx = WindowStartupFixture::new("unknown-owner");
+    fx.open_window(&fx.window_id, "run-t21-unknown-owner").await;
+    // owner 未知:owner_pid=0(旧记录缺省/取证不可用)。
+    rewrite_lease_owner(&fx, &fx.window_id, 0, 0);
+    let generation = fx.window_record(&fx.window_id).generation;
+
+    let outcomes = run_startup_compensation(&fx).await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(!outcomes[0].released, "未知 owner 不当死 owner 处理");
+    assert!(
+        outcomes[0].skipped_live_owner,
+        "未知 owner 必须以租约闸门跳过结局上报"
+    );
+    assert!(
+        outcomes[0]
+            .manual_attention
+            .as_deref()
+            .unwrap_or_default()
+            .contains("lease_owner_unknown"),
+        "停等原因可见:{:?}",
+        outcomes[0].manual_attention
+    );
+    assert_eq!(
+        fx.window_record(&fx.window_id).state,
+        ReviewerWindowState::Running
+    );
+    assert_eq!(
+        fx.window_record(&fx.window_id).generation,
+        generation,
+        "停等不动窗口"
+    );
+    assert!(lease_held(&fx), "租约保持(不释放、不改写)");
+    assert_eq!(
+        current_lease(&fx).owner_pid,
+        0,
+        "owner 字段未被洗白"
+    );
+    assert_eq!(
+        fx.reload_attempt().status,
+        CodingAttemptStatus::Running,
+        "不投影人工恢复面"
+    );
+
+    // 显式恢复同样不越权:owner 未知非己 → 拒绝并保持现场。
+    let error = fx
+        .engine()
+        .redrive_reviewer_window_recovery_for_attempt(&fx.reload_attempt())
+        .await
+        .expect_err("unknown owner: redrive must stop and wait");
+    assert!(
+        error.to_string().contains("recovery_unresolved"),
+        "{error}"
+    );
+    assert_eq!(
+        fx.window_record(&fx.window_id).state,
+        ReviewerWindowState::Running,
+        "重驱被挡后窗口原样"
+    );
+}
+
+/// B2/F3:Preparing 未获租约前缀(崩溃于窗口记录落盘与 acquire_lease
+/// 之间)不被破坏——无租约即无主可查,补偿照常弃置释放,不因「租约
+/// 缺失」停等卡死。
+#[tokio::test]
+async fn preparing_without_lease_prefix_still_abandons() {
+    let fx = WindowStartupFixture::new("prep-nolease");
+    // 手工构造 Preparing 记录,不取租约。
+    let canonical = fx.worktree.canonicalize().expect("canonical worktree");
+    let (_, gitdir, common_dir) =
+        crate::product::reviewer_window::resolve_worktree_git_identity(&canonical)
+            .expect("resolve identity");
+    let record = WindowRecordForPrefix::new(
+        &fx.window_id,
+        crate::product::reviewer_snapshot::ReviewWorktreeLockIdentity {
+            canonical_worktree: canonical,
+            gitdir,
+            common_dir,
+            lease_id: format!("wlease-{}", fx.window_id),
+        },
+        &fx.attempt.id,
+        "run-t21-prep-nolease",
+        "fake",
+        Vec::new(),
+    );
+    fx.window_store()
+        .create_or_resume_window(&record)
+        .expect("create preparing record");
+    assert!(!lease_held(&fx), "前置:本前缀确无租约");
+
+    let outcomes = run_startup_compensation(&fx).await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].released, "未获租约的 Preparing 前缀必须照常弃置释放");
+    assert!(!outcomes[0].skipped_live_owner);
+    assert_eq!(
+        fx.window_record(&fx.window_id).state,
+        ReviewerWindowState::ClosedInvalidated
+    );
+}
+
+/// B2/F3:终态释放中途前缀(finalize_terminal「先释放租约后落终态」,
+/// 崩溃于两步之间)不被破坏——非 Running 停等/恢复中态缺租约属该前缀,
+/// 补偿重入照常幂等收口到终态。
+#[tokio::test]
+async fn mid_terminal_release_prefix_still_completes() {
+    let fx = WindowStartupFixture::new("midrel");
+    fx.open_window(&fx.window_id, "run-t21-midrel").await;
+    let record = fx.window_record(&fx.window_id);
+    let quiescing = crate::product::reviewer_window::begin_quiesce(
+        &fx.window_store(),
+        &fx.window_id,
+        record.generation,
+        "t21 mid terminal release prefix",
+    )
+    .expect("quiesce");
+    let _ = quiescing;
+    // 模拟 finalize_terminal 已释放租约、终态记录未落的中途崩溃。
+    let tree_key = tree_key_of(&fx.worktree.canonicalize().expect("canonical worktree"));
+    std::fs::remove_file(
+        fx.paths()
+            .root()
+            .join("reviewer-windows")
+            .join("leases")
+            .join(format!("{tree_key}.json")),
+    )
+    .expect("remove lease (mid terminal release)");
+    assert!(!lease_held(&fx), "前置:租约已被终态释放路径删除");
+
+    let outcomes = run_startup_compensation(&fx).await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].released, "释放中途前缀必须重入幂等收口");
+    assert!(!outcomes[0].skipped_live_owner);
+    assert_eq!(
+        fx.window_record(&fx.window_id).state,
+        ReviewerWindowState::ClosedInvalidated
+    );
 }
