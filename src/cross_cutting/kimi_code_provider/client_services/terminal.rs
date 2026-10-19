@@ -61,6 +61,10 @@ pub struct TerminalResult {
 pub enum TerminalError {
     TooManyTerminals,
     UnknownTerminal(String),
+    /// F6:进程从未启动成功(非瞬态 ETXTBSY 的 spawn 失败,或退避重试
+    /// 耗尽)。经 `wait_for_exit`/ACP 以错误传播,不伪装成
+    /// `exit_code=None` 的正常完成。
+    SpawnFailed(String),
 }
 
 impl std::fmt::Display for TerminalError {
@@ -71,6 +75,9 @@ impl std::fmt::Display for TerminalError {
                 "terminal concurrency limit of {MAX_TERMINALS} reached"
             ),
             TerminalError::UnknownTerminal(id) => write!(formatter, "unknown terminal: {id}"),
+            TerminalError::SpawnFailed(detail) => {
+                write!(formatter, "terminal process failed to spawn: {detail}")
+            }
         }
     }
 }
@@ -89,7 +96,11 @@ struct TerminalEntry {
     state: Mutex<TerminalState>,
     kill: CancellationToken,
     done: Arc<Notify>,
-    result: Mutex<Option<TerminalResult>>,
+    /// 终局槽(F6):`Ok` = 真实进程结局(Exited/Killed/Released 收口),
+    /// `Err` = spawn 终局失败(进程从未启动,消息为底层 io 错误)——
+    /// 写入后不变(write-once),wait_for_exit 据此稳定返回 Ok 或
+    /// `TerminalError::SpawnFailed`,不伪造 `exit_code=None` 的完成。
+    result: Mutex<Option<Result<TerminalResult, String>>>,
     command: Mutex<Option<TerminalCommand>>,
     /// Combined stdout+stderr retained for the server's `terminal/output`
     /// request (kimi 0.38.0 asks for output as a request/response, after
@@ -215,8 +226,14 @@ impl TerminalManager {
         };
         loop {
             let notified = entry.done.notified();
-            if let Some(result) = entry.result.lock().expect("terminal result lock").clone() {
-                return Ok(result);
+            match entry.result.lock().expect("terminal result lock").clone() {
+                // F6:终局槽区分真实完成(Ok)与 spawn 终局失败(Err)——
+                // 后者经 wait_for_exit 以错误传播给调用方/ACP。
+                Some(Ok(result)) => return Ok(result),
+                Some(Err(spawn_error)) => {
+                    return Err(TerminalError::SpawnFailed(spawn_error));
+                }
+                None => {}
             }
             notified.await;
         }
@@ -360,13 +377,13 @@ async fn run_terminal(entry: Arc<TerminalEntry>, command: TerminalCommand) {
         let mut state = entry.state.lock().expect("terminal state lock");
         if *state == TerminalState::Released {
             let mut result = entry.result.lock().expect("terminal result lock");
-            *result = Some(TerminalResult {
+            *result = Some(Ok(TerminalResult {
                 exit_code: None,
                 timed_out: false,
                 killed: true,
                 truncated: false,
                 duration_ms: 0,
-            });
+            }));
             entry.done.notify_waiters();
             return;
         }
@@ -400,14 +417,11 @@ async fn run_terminal(entry: Arc<TerminalEntry>, command: TerminalCommand) {
             }
             Err(error) => {
                 tracing::debug!(target: "kimi_code_provider", %error, "terminal spawn failed");
+                // F6:非 ETXTBSY(或重试耗尽)的 spawn 失败是终局错误——
+                // 写入 Err 终局槽经 wait 传播,不伪造
+                // TerminalResult{exit_code:None,killed:false} 的「完成」。
                 let mut result = entry.result.lock().expect("terminal result lock");
-                *result = Some(TerminalResult {
-                    exit_code: None,
-                    timed_out: false,
-                    killed: false,
-                    truncated: false,
-                    duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-                });
+                *result = Some(Err(format!("{error}")));
                 entry.done.notify_waiters();
                 let mut state = entry.state.lock().expect("terminal state lock");
                 // 批2 Task 6:spawn 失败释放并发名额——失败终端不得占住
@@ -469,13 +483,13 @@ async fn run_terminal(entry: Arc<TerminalEntry>, command: TerminalCommand) {
 
     {
         let mut result = entry.result.lock().expect("terminal result lock");
-        *result = Some(TerminalResult {
+        *result = Some(Ok(TerminalResult {
             exit_code,
             timed_out,
             killed,
             truncated: truncated.load(Ordering::Relaxed),
             duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-        });
+        }));
         entry.done.notify_waiters();
     }
     {
@@ -865,9 +879,15 @@ mod tests {
             .await
             .expect("create");
         manager.start(&id).expect("start");
-        let result = manager.wait_for_exit(&id).await.expect("wait");
-        assert_eq!(result.exit_code, None);
-        assert!(!result.killed);
+        // F6:spawn 失败经 wait 传播错误(不再伪装 exit_code=None 完成)。
+        let failure = manager
+            .wait_for_exit(&id)
+            .await
+            .expect_err("spawn failure propagates through wait");
+        assert!(
+            matches!(failure, TerminalError::SpawnFailed(_)),
+            "spawn failure kind: {failure:?}"
+        );
 
         // spawn 失败释放名额后:满额 4 个 create 必须全部成功。
         let bin = write_executable(dir.path(), "slow", "sleep 30");
@@ -879,6 +899,92 @@ mod tests {
             manager.start(&id).expect("start");
         }
         manager.cleanup_all();
+    }
+
+    /// F6 红测①:非 ETXTBSY 的 spawn 失败(目标二进制不存在)不得伪装成
+    /// `exit_code=None` 的正常完成——wait_for_exit 必须把错误传播给调用方
+    /// (现状:写入 TerminalResult{exit_code:None,killed:false} 且 wait 返回
+    /// Ok,ACP 事件面记 Completed)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn non_etxtbsy_spawn_failure_propagates_error_not_fake_completion() {
+        let dir = tempfile::tempdir().expect("dir");
+        let manager = manager();
+        let id = manager
+            .create(command(
+                &dir.path().join("definitely-missing-bin"),
+                dir.path(),
+                &[],
+            ))
+            .await
+            .expect("create");
+        manager.start(&id).expect("start");
+        let error = manager
+            .wait_for_exit(&id)
+            .await
+            .expect_err("spawn failure must propagate as an error, not a fake completion");
+        assert!(
+            matches!(error, TerminalError::SpawnFailed(_)),
+            "spawn failure error kind: {error:?}"
+        );
+        // 终态稳定:重复 wait 观察到同一 spawn 失败,不翻转为别的终态。
+        let repeat = manager
+            .wait_for_exit(&id)
+            .await
+            .expect_err("repeat wait must observe the same spawn failure");
+        assert!(
+            matches!(repeat, TerminalError::SpawnFailed(_)),
+            "repeat spawn failure kind: {repeat:?}"
+        );
+        // 输出仍可查(登记保留,空输出)。
+        assert_eq!(manager.output(&id).expect("output still queryable"), "");
+        // 不在途。
+        assert!(!manager.has_active_terminals());
+        // 配额已释放:满额 4 个 create 全部成功。
+        let bin = write_executable(dir.path(), "slow", "sleep 30");
+        for _ in 0..MAX_TERMINALS {
+            let id = manager
+                .create(command(&bin, dir.path(), &[]))
+                .await
+                .expect("spawn failure must free the concurrency quota");
+            manager.start(&id).expect("start");
+        }
+        manager.cleanup_all();
+    }
+
+    /// F6 红测②:ETXTBSY 退避重试耗尽(写句柄持有超过重试预算)后同样是
+    /// spawn 失败——必须传播错误,而不是吞成「exit_code=None 的正常完成」。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn etxtbsy_retry_exhaustion_propagates_spawn_failure() {
+        let dir = tempfile::tempdir().expect("dir");
+        let bin = write_executable(dir.path(), "busy-forever", "exit 0");
+        // 写句柄持有超过 2s 重试预算(预算从 spawn 起算),耗尽后 spawn 以
+        // ETXTBSY 终局失败——错误必须传播。
+        let hold = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&bin)
+            .expect("hold writer open on script");
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2600)).await;
+            drop(hold);
+        });
+        let manager = manager();
+        let id = manager
+            .create(command(&bin, dir.path(), &[]))
+            .await
+            .expect("create");
+        manager.start(&id).expect("start");
+        let error = tokio::time::timeout(Duration::from_secs(10), manager.wait_for_exit(&id))
+            .await
+            .expect("retry exhaustion must bound the wait")
+            .expect_err("exhausted ETXTBSY retries must propagate spawn failure");
+        release.await.expect("release task");
+        assert!(
+            matches!(error, TerminalError::SpawnFailed(_)),
+            "exhaustion error kind: {error:?}"
+        );
+        assert!(!manager.has_active_terminals());
     }
 
     #[cfg(unix)]
@@ -957,7 +1063,11 @@ mod tests {
             .await
             .expect("create doomed");
         manager.start(&fail_id).expect("start doomed");
-        manager.wait_for_exit(&fail_id).await.expect("wait doomed");
+        let failure = manager
+            .wait_for_exit(&fail_id)
+            .await
+            .expect_err("spawn 失败经 wait 传播错误(F6)");
+        assert!(matches!(failure, TerminalError::SpawnFailed(_)));
         assert!(!manager.has_active_terminals(), "创建失败移除在途状态");
     }
 

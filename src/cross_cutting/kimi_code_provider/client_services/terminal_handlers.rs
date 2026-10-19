@@ -19,7 +19,7 @@ use crate::protocol::contracts::AdapterRole;
 
 use super::policy::ClientAction;
 use super::sandbox::{canonical_path_of_fd, open_dir_no_follow};
-use super::terminal::{TerminalCommand, TerminalResult};
+use super::terminal::{TerminalCommand, TerminalError, TerminalResult};
 use super::{ClientServiceError, ClientServiceState, check_session, evaluate_policy};
 
 use crate::cross_cutting::provider_boundary::ProviderBoundaryMode;
@@ -228,11 +228,37 @@ pub(super) async fn handle_terminal_wait(
         .get("terminalId")
         .and_then(Value::as_str)
         .ok_or_else(|| ClientServiceError::Rejected("terminalId is required".to_string()))?;
-    let result = state
-        .terminal
-        .wait_for_exit(terminal_id)
-        .await
-        .map_err(ClientServiceError::Terminal)?;
+    let result = match state.terminal.wait_for_exit(terminal_id).await {
+        Ok(result) => result,
+        // F6:spawn 终局失败经 ACP 以错误响应传播。`?` 提前返回会把与
+        // Started 配对的 Failed 事件丢掉——create 已发 Started,wait 必须
+        // 先补发同稳定 event_id 的 Failed 终态再返回错误(无 Completed 假
+        // 终态、无悬空在途事件)。
+        Err(TerminalError::SpawnFailed(spawn_error)) => {
+            emit_terminal_lifecycle_event(
+                state,
+                terminal_id,
+                ProviderExecutionEventStatus::Failed,
+                format!("terminal {terminal_id}"),
+                None,
+                None,
+                Some(
+                    json!({
+                        "terminalId": terminal_id,
+                        "spawnFailed": true,
+                        "error": spawn_error,
+                    })
+                    .to_string(),
+                ),
+                None,
+            )
+            .await;
+            return Err(ClientServiceError::Terminal(TerminalError::SpawnFailed(
+                spawn_error,
+            )));
+        }
+        Err(error) => return Err(ClientServiceError::Terminal(error)),
+    };
     emit_terminal_lifecycle_event(
         state,
         terminal_id,
@@ -478,6 +504,129 @@ mod tests {
         assert_eq!(
             lifecycle[1].event_id, expected_id,
             "终态事件与 Started 共用同一 event_id（可配对）"
+        );
+        state.terminal.release(&terminal_id).await.expect("release");
+    }
+
+    /// F6 红测:非 ETXTBSY 的 spawn 失败经 wait 传播为 ACP 错误,且与
+    /// Started 配对的终态事件必须是 Failed(稳定 event_id)——`?` 提前
+    /// 返回不得把 Failed 丢掉(现状:wait 返回 Ok{exit_code:None},事件
+    /// 面记 Completed,调用方无法区分真实完成)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_failed_wait_errors_and_emits_failed_event_paired_with_started() {
+        let _dir = tempfile::tempdir().expect("dir");
+        let (state, mut events) = test_state(AdapterRole::Executor);
+        let params = json!({
+            "sessionId": "client-service-test",
+            "command": "/nonexistent/definitely-missing-bin",
+            "args": [],
+            "cwd": ""
+        });
+        let terminal_id = handle_terminal_create(&state, &params)
+            .await
+            .expect("create registers before spawn");
+        let wait_params = json!({
+            "sessionId": "client-service-test",
+            "terminalId": terminal_id,
+        });
+        let error = handle_terminal_wait(&state, &wait_params)
+            .await
+            .expect_err("spawn failure must reach ACP as an error response");
+        assert!(
+            error.to_string().contains("spawn"),
+            "错误必须点名 spawn 失败: {error}"
+        );
+
+        // 事件面:Started → Failed,同稳定 event_id,无 Completed 假终态。
+        let mut lifecycle = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while lifecycle.len() < 2 {
+            match tokio::time::timeout_at(deadline, events.recv()).await {
+                Ok(Some(ProviderEvent::Execution(event))) => lifecycle.push(event),
+                other => panic!("unexpected event while collecting lifecycle: {other:?}"),
+            }
+        }
+        assert_eq!(
+            lifecycle[0].status,
+            ProviderExecutionEventStatus::Started,
+            "第一条生命周期事件是 Started"
+        );
+        assert_eq!(
+            lifecycle[1].status,
+            ProviderExecutionEventStatus::Failed,
+            "spawn 失败终态必须是 Failed: {:?}",
+            lifecycle[1]
+        );
+        let expected_id = format!("kimi_terminal_{terminal_id}");
+        assert_eq!(lifecycle[0].event_id, expected_id, "Started 用稳定 id");
+        assert_eq!(
+            lifecycle[1].event_id, expected_id,
+            "Failed 与 Started 共用同一 event_id(可配对)"
+        );
+        // 无重复终态:Failed 之后不得再冒出别的终态事件。
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), events.recv())
+                .await
+                .ok()
+                .flatten()
+                .is_none(),
+            "spawn 失败后不得再出现额外终态事件"
+        );
+        // 输出仍可查(登记保留);失败 terminal 可 release(幂等收口)。
+        assert_eq!(state.terminal.output(&terminal_id).expect("output"), "");
+        state
+            .terminal
+            .release(&terminal_id)
+            .await
+            .expect("release failed terminal");
+    }
+
+    /// F6 护栏:真实进程的正常非零 exit 不是 spawn 失败——wait 返回
+    /// Ok(exit_code=Some(n)),终态事件保持 Completed(不被改写成
+    /// spawn_failed/Failed)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nonzero_exit_is_reported_as_completion_not_spawn_failure() {
+        let _dir = tempfile::tempdir().expect("dir");
+        let (state, mut events) = test_state(AdapterRole::Executor);
+        let params = json!({
+            "sessionId": "client-service-test",
+            "command": "/bin/sh",
+            "args": ["-c", "exit 3"],
+            "cwd": ""
+        });
+        let terminal_id = handle_terminal_create(&state, &params)
+            .await
+            .expect("create");
+        let wait_params = json!({
+            "sessionId": "client-service-test",
+            "terminalId": terminal_id,
+        });
+        let result = handle_terminal_wait(&state, &wait_params)
+            .await
+            .expect("non-zero exit is a completion, not a spawn failure");
+        assert_eq!(result.exit_code, Some(3));
+        assert!(!result.killed);
+        assert!(!result.timed_out);
+
+        let mut lifecycle = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while lifecycle.len() < 2 {
+            match tokio::time::timeout_at(deadline, events.recv()).await {
+                Ok(Some(ProviderEvent::Execution(event))) => lifecycle.push(event),
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert_eq!(
+            lifecycle[0].status,
+            ProviderExecutionEventStatus::Started
+        );
+        assert_eq!(
+            lifecycle[1].status,
+            ProviderExecutionEventStatus::Completed,
+            "正常非零 exit 保持 Completed: {:?}",
+            lifecycle[1]
         );
         state.terminal.release(&terminal_id).await.expect("release");
     }
