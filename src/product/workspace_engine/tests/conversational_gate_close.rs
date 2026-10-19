@@ -502,7 +502,7 @@ fn sg3b_persist_candidate_with_ir(
     let source_ref = source_store
         .put_source_revision(&scope.project_id, &scope.issue_id, &scope.plan_id, &source)
         .expect("persist sg3b source");
-    let repository_id = engine
+    let _repository_id = engine
         .work_item_plan_repository_id(lifecycle, &{
             lifecycle
                 .get_issue_work_item_plan(&project_id, &issue_id, &plan_id)
@@ -855,7 +855,7 @@ async fn sg_03b_frozen_context_drift_refuses_without_relower() {
     let mut contract = canonical_contract_fixture("wi_sg3b_drift");
     contract.input_contracts.clear();
     contract.handoff_contract.provided_contract_refs.clear();
-    let (source_ref, ir_ref, _report_ref, source_id, ir_id) =
+    let (source_ref, ir_ref, _report_ref, _source_id, _ir_id) =
         sg3b_persist_candidate_with_ir(&lifecycle, &engine, "sg3b_drift", vec![single(contract)]);
     let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
     let source = source_store
@@ -1631,7 +1631,7 @@ mod confirmation_trust {
         LogicalCodebaseStore, PolicyTarget, PolicyTargetResolver, ProviderCapabilitySource,
         ProviderGatewayError, ProviderRef, ProviderTrustHomeAdapter, ProviderTrustPrecondition,
         ProviderTrustPreparationResult, ProviderTrustWaiting, SessionLaunchRequest,
-        SessionPolicyAction, requires_workspace_trust,
+        SessionPolicyAction,
     };
     use crate::product::models::{
         ProviderName, SingleCandidatePhase, WorkspaceSessionStatus, WorkspaceType,
@@ -1874,7 +1874,11 @@ mod confirmation_trust {
 
     /// T4.2 取消边界 fake：`ensure_ready_cancellable` 模拟 3.2 的提交边界
     /// ——spawn_blocking 内「临界区开始→收尾」，caller 可在结果前被取消；
-    /// detached 段独立完成。
+    /// detached 段独立完成。结果必须等临界区收尾后才回传（对齐 3.2 契约
+    /// 「Ready/Waiting 返回前 home 锁已释放」）：若在边界瞬间就回传，
+    /// 「观察到边界→取消」会退化为 select 分支轮询次序的随机竞争——rx
+    /// 唤醒后 confirm 后续链（CAS→compile）单次 poll 同步跑完，轮到
+    /// confirm 先 poll 即红（单跑亦有小概率红，非全局状态污染）。
     #[derive(Default)]
     struct DetachingTrustGate {
         section_started: Arc<AtomicBool>,
@@ -1910,9 +1914,9 @@ mod confirmation_trust {
             let (tx, rx) = tokio::sync::oneshot::channel::<()>();
             tokio::task::spawn_blocking(move || {
                 started.store(true, Ordering::SeqCst); // home 锁已获取=提交边界
-                let _ = tx.send(());
                 std::thread::sleep(std::time::Duration::from_millis(50)); // 临界区收尾
                 done.store(true, Ordering::SeqCst); // detached 安全收尾、不误删
+                let _ = tx.send(()); // 收尾完成后才回传结果（caller 取消即只丢失观察）
             });
             Box::pin(async move {
                 let _ = rx.await; // caller 取消点：drop 即停止等待
@@ -1988,7 +1992,7 @@ mod confirmation_trust {
                 review_rounds: 0,
                 superpowers_enabled: false,
                 openspec_enabled: false,
-                work_item_plan_options: (single_candidate).then(|| WorkItemPlanSessionOptions {
+                work_item_plan_options: (single_candidate).then_some(WorkItemPlanSessionOptions {
                     flow_kind: WorkItemPlanFlowKind::SingleCandidate,
                     run_policy: RunPolicy::Interactive,
                     rollout_snapshot: true,
@@ -2838,6 +2842,8 @@ mod confirmation_trust {
             Box::pin(engine.handle_human_gate_termination(HumanGateCloseDecision::Approve));
         // 并发轮询 confirm future 与「临界区开始」信号：confirm 被执行到
         // ensure 的提交边界（spawn_blocking 已启动）后，caller 取消。
+        // fake 在提交边界与结果回传之间保留临界区工作窗口，这里轮询到
+        // 边界即取消是确定性的，不依赖 select 的分支轮询次序。
         let started_wait = async {
             while !started.load(Ordering::SeqCst) {
                 tokio::task::yield_now().await;
