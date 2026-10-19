@@ -216,26 +216,6 @@ pub fn run_command_capture(
     )
 }
 
-/// 显式环境覆盖层的同步捕获入口——继承宿主环境,给定键值作为覆盖层
-/// 注入(同名键覆盖,其余宿主键保留)。
-pub fn run_command_capture_with_environment(
-    command_spec: &CommandSpec,
-    current_dir: Option<&Path>,
-    environment: &BTreeMap<String, String>,
-    stdin_text: Option<&str>,
-    timeout: Option<Duration>,
-) -> Result<CapturedCommandOutput, ProviderAdapterError> {
-    run_command_capture_with_stream(
-        command_spec,
-        current_dir,
-        None,
-        Some(environment),
-        stdin_text,
-        timeout,
-        None,
-    )
-}
-
 /// `current_dir` 是 provider 子进程的工作目录（目标仓库），`stream_log_dir` 是
 /// 流日志落盘目录（Aria 侧）。两者语义独立：`stream_log_dir` 为 `None` 时不写
 /// 流日志，且不得回退到 `current_dir`。

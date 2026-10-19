@@ -1025,6 +1025,22 @@ pub struct GatewaySupersedeEntry {
     pub reason: String,
 }
 
+/// F8/C4(gateway 审计):三个审计集合锁的统一中毒恢复——持锁线程 panic
+/// 毒化锁后 `into_inner()` 取回既有审计事实并告警:不 panic、不置空。
+/// 否则一次 panic 会让此后每次 provider 启动都在 `record` 处再次 panic。
+fn lock_gateway_audit<'a, T>(
+    lock: &'a std::sync::Mutex<T>,
+    what: &'static str,
+) -> std::sync::MutexGuard<'a, T> {
+    lock.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            mutex = what,
+            "gateway audit mutex poisoned by a panicking holder; recovering retained audit facts via into_inner"
+        );
+        std::sync::PoisonError::into_inner(poisoned)
+    })
+}
+
 impl GatewayRunAudit {
     /// 构造一个空的审计记录。gateway 构造时默认注入一个独立实例;测试 fixture
     /// 通过 `shared()` 共享同一份审计,跨多次 gateway 构造累计。
@@ -1040,7 +1056,7 @@ impl GatewayRunAudit {
         argv: Vec<String>,
         execution_contract_digest: Option<String>,
     ) {
-        let mut entries = self.entries.lock().expect("gateway audit mutex poisoned");
+        let mut entries = lock_gateway_audit(&self.entries, "gateway audit entries");
         entries.push(GatewayRunAuditEntry {
             stack,
             policy_digest,
@@ -1053,7 +1069,7 @@ impl GatewayRunAudit {
     /// 批2 Task 2:最近一次成功启动的审计条目(无启动记录为 `None`)。供
     /// fixture/诊断断言该次启动冻结(或显式缺失)的执行合同摘要。
     pub fn last_entry(&self) -> Option<GatewayRunAuditEntry> {
-        let entries = self.entries.lock().expect("gateway audit mutex poisoned");
+        let entries = lock_gateway_audit(&self.entries, "gateway audit entries");
         entries.last().cloned()
     }
 
@@ -1061,10 +1077,10 @@ impl GatewayRunAudit {
     /// settings 及其 config digest。该标注是「已检测、已记录」的已知 gap,不阻断
     /// 启动——是否放行由 policy 决定(当前默认放行并标注)。
     fn annotate_managed_settings_active(&self, config_digest: &str) {
-        let mut annotations = self
-            .managed_settings_annotations
-            .lock()
-            .expect("gateway audit mutex poisoned");
+        let mut annotations = lock_gateway_audit(
+            &self.managed_settings_annotations,
+            "gateway managed-settings annotations",
+        );
         annotations.push(format!(
             "detected non-Aria-owned managed settings active; \
              gateway cannot guarantee these are suppressed; \
@@ -1074,16 +1090,16 @@ impl GatewayRunAudit {
 
     /// 返回已记录的 managed-settings 标注快照。空 Vec 表示尚未检测到。
     pub fn managed_settings_annotations(&self) -> Vec<String> {
-        let annotations = self
-            .managed_settings_annotations
-            .lock()
-            .expect("gateway audit mutex poisoned");
+        let annotations = lock_gateway_audit(
+            &self.managed_settings_annotations,
+            "gateway managed-settings annotations",
+        );
         annotations.clone()
     }
 
     /// 同步栈成功启动次数。
     pub fn sync_launches(&self) -> usize {
-        let entries = self.entries.lock().expect("gateway audit mutex poisoned");
+        let entries = lock_gateway_audit(&self.entries, "gateway audit entries");
         entries
             .iter()
             .filter(|entry| entry.stack == GatewayRunStack::Sync)
@@ -1092,7 +1108,7 @@ impl GatewayRunAudit {
 
     /// 流式栈成功启动次数。
     pub fn stream_launches(&self) -> usize {
-        let entries = self.entries.lock().expect("gateway audit mutex poisoned");
+        let entries = lock_gateway_audit(&self.entries, "gateway audit entries");
         entries
             .iter()
             .filter(|entry| entry.stack == GatewayRunStack::Stream)
@@ -1101,7 +1117,7 @@ impl GatewayRunAudit {
 
     /// 全部成功启动是否都携带非空 policy digest。空审计返回 false。
     pub fn all_have_policy_digest(&self) -> bool {
-        let entries = self.entries.lock().expect("gateway audit mutex poisoned");
+        let entries = lock_gateway_audit(&self.entries, "gateway audit entries");
         !entries.is_empty() && entries.iter().all(|entry| !entry.policy_digest.is_empty())
     }
 
@@ -1112,10 +1128,7 @@ impl GatewayRunAudit {
         superseded_session_id: &str,
         reason: &str,
     ) -> Result<(), ProviderGatewayError> {
-        let mut supersedes = self
-            .supersedes
-            .lock()
-            .expect("gateway audit mutex poisoned");
+        let mut supersedes = lock_gateway_audit(&self.supersedes, "gateway audit supersedes");
         supersedes.push(GatewaySupersedeEntry {
             superseded_session_id: superseded_session_id.to_string(),
             reason: reason.to_string(),
@@ -1125,19 +1138,13 @@ impl GatewayRunAudit {
 
     /// resume 一致性 supersede 计数。
     pub fn supersede_count(&self) -> usize {
-        let supersedes = self
-            .supersedes
-            .lock()
-            .expect("gateway audit mutex poisoned");
+        let supersedes = lock_gateway_audit(&self.supersedes, "gateway audit supersedes");
         supersedes.len()
     }
 
     /// 最近一次 supersede 的原因,无则 `None`。供 fixture 断言漂移维度。
     pub fn last_supersede_reason(&self) -> Option<String> {
-        let supersedes = self
-            .supersedes
-            .lock()
-            .expect("gateway audit mutex poisoned");
+        let supersedes = lock_gateway_audit(&self.supersedes, "gateway audit supersedes");
         supersedes.last().map(|entry| entry.reason.clone())
     }
 }
@@ -3150,3 +3157,83 @@ pub fn verify_published_policy_body(
 #[cfg(test)]
 #[path = "provider_gateway_tests.rs"]
 pub(crate) mod tests;
+
+/// C4/F8(gateway 审计)中毒回归:三个审计集合的锁被持锁线程 panic 毒化
+/// 后,`record`/`supersede`/标注与全部观测面仍可调用,既有审计事实原地
+/// 保留——不 panic、不重建空审计,避免一次 panic 后每次 provider 启动都
+/// 在 `record` 处持续 panic。毒化/恢复口径与 `api_auth` 中毒回归同型。
+#[cfg(test)]
+mod gateway_audit_poison_tests {
+    use super::*;
+
+    /// 让一个作用域线程持锁 panic,确认锁确实中毒后返回。
+    fn poison<T: Send>(lock: &std::sync::Mutex<T>, label: &str) {
+        let joined = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = lock.lock().expect("lock before poisoning");
+                    panic!("intentional panic while holding {label} lock");
+                })
+                .join()
+        });
+        assert!(joined.is_err(), "{label} holder thread must have panicked");
+        assert!(
+            lock.lock().is_err(),
+            "{label} mutex must actually be poisoned for this test to be meaningful"
+        );
+    }
+
+    #[test]
+    fn gateway_audit_poisoned_mutexes_recover_and_retain_facts() {
+        let audit = Arc::new(GatewayRunAudit::new());
+        audit.record(
+            GatewayRunStack::Stream,
+            "sha256:before-poison".to_string(),
+            None,
+            vec!["claude".to_string()],
+            None,
+        );
+        audit
+            .supersede("session_before", "resume_fingerprint_mismatch")
+            .expect("supersede before poisoning");
+        audit.annotate_managed_settings_active("sha256:managed");
+
+        poison(&audit.entries, "gateway audit entries");
+        poison(&audit.supersedes, "gateway audit supersedes");
+        poison(
+            &audit.managed_settings_annotations,
+            "gateway managed-settings annotations",
+        );
+
+        // 中毒后既有事实保留且观测面可用。
+        assert_eq!(audit.stream_launches(), 1);
+        assert_eq!(
+            audit.last_entry().expect("entry retained").policy_digest,
+            "sha256:before-poison"
+        );
+        assert!(audit.all_have_policy_digest());
+        assert_eq!(audit.supersede_count(), 1);
+        assert_eq!(
+            audit.last_supersede_reason().as_deref(),
+            Some("resume_fingerprint_mismatch")
+        );
+        assert_eq!(audit.managed_settings_annotations().len(), 1);
+
+        // 恢复后新启动仍能记录——每次 provider 启动不再 panic。
+        audit.record(
+            GatewayRunStack::Stream,
+            "sha256:after-poison".to_string(),
+            None,
+            Vec::new(),
+            None,
+        );
+        assert_eq!(audit.stream_launches(), 2);
+        assert_eq!(
+            audit
+                .last_entry()
+                .expect("entry after recovery")
+                .policy_digest,
+            "sha256:after-poison"
+        );
+    }
+}

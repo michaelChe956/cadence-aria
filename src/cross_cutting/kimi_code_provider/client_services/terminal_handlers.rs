@@ -32,12 +32,26 @@ use super::policy::ClientServicePolicy;
 use super::terminal::TerminalManager;
 
 /// 受信 SHELL:legacy 单字符串形态的解释器。取冻结会话环境的 `SHELL`
-/// (与 provider 进程同一环境合同;缺失时回退 POSIX `/bin/sh`)——不来自
-/// ACP 参数,宿主也不施加固定解释器白名单。
+/// (与 provider 进程同一环境合同);会话环境未携带时回退宿主
+/// `std::env::var("SHELL")`(A1 停掉白名单注入后生产 `session_env` 恒空),
+/// 宿主也未导出才回退 POSIX `/bin/sh`——不因拔掉 `session_env` 注入而
+/// 恒用 `/bin/sh`。
 fn trusted_shell(env: &BTreeMap<String, String>) -> String {
+    resolve_trusted_shell(env, std::env::var("SHELL").ok().as_deref())
+}
+
+/// [`trusted_shell`] 的纯解析面:会话冻结值优先,其次宿主 `SHELL`(空串
+/// 视为未携带),最后 POSIX `/bin/sh`。宿主值由调用方注入,便于在不改写
+/// 进程环境的前提下验证回退路径。
+fn resolve_trusted_shell(env: &BTreeMap<String, String>, host_shell: Option<&str>) -> String {
     env.get("SHELL")
         .filter(|shell| !shell.is_empty())
         .cloned()
+        .or_else(|| {
+            host_shell
+                .filter(|shell| !shell.is_empty())
+                .map(ToOwned::to_owned)
+        })
         .unwrap_or_else(|| "/bin/sh".to_string())
 }
 /// Task 4c 读写面分离:terminal 的授权面根——LC 会话(TargetWriteOnly)为
@@ -1220,7 +1234,7 @@ mod tests {
     /// dispatcher 的冻结会话环境(session_env)作为显式覆盖层注入——
     /// 自定义键可见、宿主键(session_env 未携带的 HOME)仍从宿主继承;
     /// 两种命令形态(argv/legacy)消费同一覆盖语义。legacy 的受信
-    /// SHELL 回退(env 取 SHELL,缺失回退 POSIX /bin/sh)语义不变。
+    /// SHELL 回退(会话 SHELL → 宿主 SHELL → POSIX /bin/sh)语义不变。
     #[cfg(unix)]
     #[tokio::test]
     async fn terminal_children_inherit_host_env_with_session_overrides() {
@@ -1292,19 +1306,104 @@ mod tests {
         state.terminal.release(&id).await.expect("release");
     }
 
-    /// Task 6 绿证(受信 SHELL 选择):SHELL 取冻结环境值;空/缺失回退
-    /// POSIX `/bin/sh`(不来自 ACP 参数,无固定解释器白名单)。
+    /// 受信 SHELL 回退链(回退分支显式注入宿主值,不向夹具塞 SHELL):
+    /// 会话冻结值优先;会话未携带(含空串)回退宿主 `SHELL`;宿主也未
+    /// 导出才回退 POSIX `/bin/sh`——A1 停掉白名单注入后不再恒用
+    /// `/bin/sh`。
     #[test]
-    fn trusted_shell_follows_frozen_env_with_posix_fallback() {
+    fn trusted_shell_falls_back_to_host_shell_before_posix_default() {
+        let session_bash = BTreeMap::from([("SHELL".to_string(), "/bin/bash".to_string())]);
+        assert_eq!(
+            resolve_trusted_shell(&session_bash, Some("/usr/bin/zsh")),
+            "/bin/bash",
+            "session frozen shell must win over the host shell"
+        );
+        assert_eq!(
+            resolve_trusted_shell(&BTreeMap::new(), Some("/usr/bin/zsh")),
+            "/usr/bin/zsh",
+            "empty session env must fall back to the host SHELL, not /bin/sh"
+        );
+        assert_eq!(
+            resolve_trusted_shell(&BTreeMap::new(), None),
+            "/bin/sh",
+            "missing host SHELL keeps the POSIX default"
+        );
+        assert_eq!(
+            resolve_trusted_shell(&BTreeMap::new(), Some("")),
+            "/bin/sh",
+            "empty host SHELL keeps the POSIX default"
+        );
+        assert_eq!(
+            resolve_trusted_shell(
+                &BTreeMap::from([("SHELL".to_string(), String::new())]),
+                Some("/usr/bin/zsh")
+            ),
+            "/usr/bin/zsh",
+            "empty session SHELL counts as absent and falls back to the host"
+        );
+    }
+
+    /// 受信 SHELL 接线:会话携带 `SHELL` 时原样使用;空会话环境经
+    /// `std::env::var("SHELL")` 读真实进程环境(宿主未导出时 `/bin/sh`)。
+    #[test]
+    fn trusted_shell_reads_process_shell_environment() {
         let with_shell = BTreeMap::from([
             ("SHELL".to_string(), "/bin/bash".to_string()),
             ("PATH".to_string(), "/usr/bin".to_string()),
         ]);
         assert_eq!(trusted_shell(&with_shell), "/bin/bash");
-        assert_eq!(trusted_shell(&BTreeMap::new()), "/bin/sh");
+
+        let host = std::env::var("SHELL")
+            .ok()
+            .filter(|shell| !shell.is_empty())
+            .unwrap_or_else(|| "/bin/sh".to_string());
         assert_eq!(
-            trusted_shell(&BTreeMap::from([("SHELL".to_string(), String::new())])),
-            "/bin/sh"
+            trusted_shell(&BTreeMap::new()),
+            host,
+            "empty session env must resolve to the process SHELL (or the POSIX default)"
         );
+    }
+
+    /// A1/P1 回归:生产链路 `session_env` 恒空后,legacy 单字符串仍由宿主
+    /// `SHELL` 执行。解释器回显其 `$0`(= 实际 argv[0]);期望值由同一
+    /// 解析直接取自进程环境——测试不向夹具塞 SHELL,回退路径被真实走一遍。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_terminal_with_empty_session_env_uses_host_shell() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (event_tx, _events) = mpsc::channel(64);
+        let state = Arc::new(ClientServiceState {
+            session_id: "client-service-test".to_string(),
+            root: dir.path().canonicalize().expect("root"),
+            policy: ClientServicePolicy::new(AdapterRole::Executor, ProviderPermissionMode::Auto),
+            bridge: Arc::new(ApprovalBridge::new(
+                ProviderPermissionMode::Auto,
+                event_tx.clone(),
+            )),
+            event_tx,
+            terminal: TerminalManager::new(),
+            session_env: BTreeMap::new(),
+            cleanup_cancel: CancellationToken::new().child_token(),
+            baseline_tree: None,
+            target_boundary: None,
+        });
+        let expected = trusted_shell(&BTreeMap::new());
+
+        let params = json!({
+            "sessionId": "client-service-test",
+            "command": "printf '%s' \"$0\"",
+            "cwd": ""
+        });
+        let id = handle_terminal_create(&state, &params)
+            .await
+            .expect("legacy form under host shell");
+        let result = state.terminal.wait_for_exit(&id).await.expect("wait");
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(
+            state.terminal.output(&id).expect("output"),
+            expected,
+            "legacy interpreter must be the host-resolved SHELL, not a hardcoded /bin/sh"
+        );
+        state.terminal.release(&id).await.expect("release");
     }
 }
