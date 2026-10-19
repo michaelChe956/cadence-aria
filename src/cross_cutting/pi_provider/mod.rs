@@ -22,6 +22,7 @@ use crate::cross_cutting::process_manager::{
     bounded_task_join, provider_child_exit_error, run_session_tail_with_exit_watch,
 };
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
+use crate::cross_cutting::provider_resources::{ResourceReservation, TrustedLaunchOwnership};
 use crate::cross_cutting::streaming_provider::{
     LcVersionCache, LcVersionObservation, LcVersionProbe, LcVersionProbeKey, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
@@ -531,12 +532,16 @@ fn lc_start_audit_literal(
     }
 }
 
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for PiProvider {
-    async fn start(
+impl PiProvider {
+    /// direct 启动实现(`StreamingProviderAdapter::start` 的本体)。B1-1:
+    /// `owned` 携带受信 launch 归属时,spawn 点回填真实 PID+starttime;
+    /// `None` 保持既有裸 start 语义。预留/收口生命周期由 `start_owned`
+    /// 覆写承担(错误路径收口注销;成功路径尾部收口注销)。
+    async fn start_direct(
         &self,
         mut input: StreamingProviderInput,
         cancel: CancellationToken,
+        owned: Option<(&TrustedLaunchOwnership, &ResourceReservation)>,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         // 双向 spawn 前守卫（Task 3.1）：非法角色×策略组合在创建子进程之前拒绝。
         validate_tool_policy_for_role(&input.role, input.tool_policy.as_ref()).map_err(
@@ -721,6 +726,18 @@ impl StreamingProviderAdapter for PiProvider {
         let peer = JsonRpcPeer::new(process.stdout, process.stdin);
         let stderr = process.stderr;
         let mut child = process.child;
+        // B1-1 接线片:spawn 成功即回填真实 PID+starttime(/proc 观察,PID
+        // 复用防护);确认失败整组停止——kill+wait 后上抛,收口注销由
+        // `start_owned` 错误路径承担(预留已落盘,身份未确认按无身份注销)。
+        if let Some((ownership, reservation)) = owned {
+            if let Err(error) =
+                ownership.backfill_spawned_identity(reservation, child.id().unwrap_or(0))
+            {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(error);
+            }
+        }
         let (event_tx, event_rx) = mpsc::channel(32);
         // Pi is Auto-only. Keep bridge construction consistent with the other streaming
         // providers, but never use it for authorization or command forwarding.
@@ -855,6 +872,89 @@ impl StreamingProviderAdapter for PiProvider {
             commands: command_tx,
         })
     }
+}
+
+/// B1-1(波 2):成功路径的会话包装——源事件通道真实终结(子进程退出后
+/// 有界排深,终结保证契约;**非**协议 `Completed` 事件点)或消费方提前
+/// 丢弃会话后,按登记身份真实收口(killpg+有界观察)再注销。包装通道
+/// 只转发事件,不引入新的无界等待;注销不推迟消费方 `recv` 终结(包装
+/// 通道在源终结点之后才关闭)。与 `streaming_provider::start_owned_default`
+/// 的成功路径生命周期同构,供 direct/raw 与 LC validated 两个 spawn 面复用。
+fn release_session_after_tail(
+    session: ProviderSession,
+    ownership: TrustedLaunchOwnership,
+) -> ProviderSession {
+    let ProviderSession {
+        native_session_id,
+        events,
+        commands,
+    } = session;
+    let (tail_tx, tail_rx) = mpsc::channel(32);
+    let release = ownership.clone();
+    tokio::spawn(async move {
+        let mut source = events;
+        while let Some(event) = source.recv().await {
+            if tail_tx.send(event).await.is_err() {
+                // 消费方提前丢弃会话(中止路径):同样先收口注销。
+                break;
+            }
+        }
+        // 会话真实终止 → 进程组真实收口后注销;静止不可证时保留 durable
+        // 记录停等(scope 级 quiesce/恢复驱动接管)。
+        release.release_after_session_tail().await;
+    });
+    ProviderSession {
+        native_session_id,
+        events: tail_rx,
+        commands,
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for PiProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        // B1-1(波 2):raw start 面统一走 start_direct;ownership=None 保持
+        // 既有裸语义(无登记、零行为变化)。归属生命周期在 start_owned
+        // 覆写中接线,不从此入口旁路。
+        self.start_direct(input, cancel, None).await
+    }
+
+    /// B1-1(波 2):受信资源归属启动覆写——在默认生命周期(预留→start→
+    /// 错误路径收口注销/成功路径尾部收口注销)之上,把载体穿到 spawn 点:
+    /// spawn 成功即经 `backfill_spawned_identity` 回填真实 PID+starttime
+    /// (确认失败整组停止)。未携带载体保持既有裸 start 语义(无登记,
+    /// 零行为变化)。注销不在协议 `Completed` 事件点——源事件通道真实
+    /// 终结(终结保证契约)后才按登记身份收口;静止不可证时保留 durable
+    /// 记录停等(scope 级 quiesce/恢复驱动接管)。
+    async fn start_owned(
+        &self,
+        input: StreamingProviderInput,
+        ownership: Option<TrustedLaunchOwnership>,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let Some(ownership) = ownership else {
+            // 无归属请求(legacy/单仓 direct/测试面):既有裸 start 语义。
+            return self.start(input, cancel).await;
+        };
+        // ① 预留先于一切 spawn 副作用(durable;失败零 spawn)。
+        let reservation = ownership.reserve()?;
+        match self
+            .start_direct(input, cancel, Some((&ownership, &reservation)))
+            .await
+        {
+            Ok(session) => Ok(release_session_after_tail(session, ownership)),
+            Err(error) => {
+                // ② 错误路径:adapter 错误链已 kill+wait;有登记身份则
+                // killpg+有界观察真实收口后注销(未回填身份按无身份注销)。
+                ownership.release_after_session_tail().await;
+                Err(error)
+            }
+        }
+    }
 
     /// LC validated 启动(Task 4b):只接受 gateway 产出的 validated input,
     /// 消费冻结 envelope 派生的不可伪造 boundary plan 与 LC 权限投影,以
@@ -873,6 +973,9 @@ impl StreamingProviderAdapter for PiProvider {
         validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
+        // B1-1:读取受信 launch 归属(crate 私有绑定面;`into_parts` 不携带,
+        // 先取后拆)。`None` = 无归属请求(存量构造/测试),零登记零注销。
+        let launch_ownership = validated.launch_ownership().cloned();
         let (input, launch) = validated.into_parts();
         let envelope = launch.envelope().clone();
 
@@ -1027,18 +1130,51 @@ impl StreamingProviderAdapter for PiProvider {
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
         let process_cwd = envelope.working_directory.clone();
-        let process = ProcessManager::spawn(
+        // B1-1 接线片:载体在位 → 预留先于 spawn(durable;失败零 spawn),
+        // 载体/预留活到错误/取消/正常尾部的收口注销。
+        let owned = launch_ownership
+            .as_ref()
+            .map(|ownership| {
+                ownership
+                    .reserve()
+                    .map(|reservation| (ownership.clone(), reservation))
+            })
+            .transpose()?;
+        let process = match ProcessManager::spawn(
             &command,
             &arg_refs,
             &process_cwd,
             &input.env_vars,
             cancel.clone(),
         )
-        .await?;
+        .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                // 预留已落盘但 spawn 未发生:无身份收口注销后上抛。
+                if let Some((ownership, _reservation)) = owned.as_ref() {
+                    ownership.release_after_session_tail().await;
+                }
+                return Err(error);
+            }
+        };
 
         let peer = JsonRpcPeer::new(process.stdout, process.stdin);
         let stderr = process.stderr;
         let mut child = process.child;
+        // B1-1 接线片:spawn 成功即回填真实 PID+starttime(/proc 观察,PID
+        // 复用防护);确认失败整组停止——kill+wait 后收口注销再上抛
+        // (不伪称零 spawn)。
+        if let Some((ownership, reservation)) = owned.as_ref() {
+            if let Err(error) =
+                ownership.backfill_spawned_identity(reservation, child.id().unwrap_or(0))
+            {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                ownership.release_after_session_tail().await;
+                return Err(error);
+            }
+        }
         let (event_tx, event_rx) = mpsc::channel(32);
         // pi 是 Auto-only:与 direct 路径一致构造 bridge,但授权/命令转发
         // 永不经过它。
@@ -1059,6 +1195,11 @@ impl StreamingProviderAdapter for PiProvider {
             {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                // B1-1:握手失败(已 spawn)——kill+wait 后按登记身份收口
+                // 注销再上抛。
+                if let Some((ownership, _reservation)) = owned.as_ref() {
+                    ownership.release_after_session_tail().await;
+                }
                 return Err(error);
             }
         }
@@ -1084,16 +1225,24 @@ impl StreamingProviderAdapter for PiProvider {
         // (握手 = id 已预生成/传入完成);无通用 tool policy 也有 canonical
         // digest(空 token 序列形态)。append 失败终止子进程并 fail-closed
         // (engine 沿既有 kill 链判失败)。
-        let tool_policy_digest = projection::lc_tool_policy_canonical_digest(
-            input.tool_policy.as_ref(),
-        )
-        .map_err(|error| {
-            ProviderAdapterError::parse_error(
-                format!("pi lc validated start: {error}"),
-                String::new(),
-                String::new(),
-            )
-        })?;
+        let tool_policy_digest =
+            match projection::lc_tool_policy_canonical_digest(input.tool_policy.as_ref()) {
+                Ok(digest) => digest,
+                Err(error) => {
+                    // B1-1:spawn 已发生——归属路径先 kill+wait 再收口注销,
+                    // 不留活 child;无归属路径保持既有上抛语义。
+                    if let Some((ownership, _reservation)) = owned.as_ref() {
+                        let _ = child.start_kill();
+                        let _ = child.wait().await;
+                        ownership.release_after_session_tail().await;
+                    }
+                    return Err(ProviderAdapterError::parse_error(
+                        format!("pi lc validated start: {error}"),
+                        String::new(),
+                        String::new(),
+                    ));
+                }
+            };
         let audit_event = DurableToolPolicyEvent::ProviderStart(ProviderStartAudit {
             provider: TOOL_POLICY_PROVIDER_NAME.to_string(),
             role: crate::cross_cutting::streaming_provider::adapter_role_text(&input.role)
@@ -1120,6 +1269,10 @@ impl StreamingProviderAdapter for PiProvider {
         if let Err(error) = sink.append_bound(audit_event) {
             let _ = child.start_kill();
             let _ = child.wait().await;
+            // B1-1:审计失败 kill 链之后按登记身份收口注销再上抛。
+            if let Some((ownership, _reservation)) = owned.as_ref() {
+                ownership.release_after_session_tail().await;
+            }
             return Err(tool_policy_session_error(format!(
                 "provider_start audit append failed: {error}"
             )));
@@ -1194,10 +1347,16 @@ impl StreamingProviderAdapter for PiProvider {
             }
         });
 
-        Ok(ProviderSession {
+        let session = ProviderSession {
             native_session_id: Some(native_session_id),
             events: event_rx,
             commands: command_tx,
+        };
+        // B1-1:成功路径包装——源事件通道真实终结(终结保证契约;**非**
+        // 协议 Completed 事件点)或消费方提前丢弃后,按登记身份收口注销。
+        Ok(match launch_ownership {
+            Some(ownership) => release_session_after_tail(session, ownership),
+            None => session,
         })
     }
 
