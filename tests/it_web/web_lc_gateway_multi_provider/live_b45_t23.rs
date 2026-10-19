@@ -38,9 +38,12 @@ use cadence_aria::protocol::contracts::{AdapterRole, ProviderType};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use super::failure_matrix::{
+    FIXED_FAILURE_SCENARIOS, ZERO_SPAWN_ACCOUNTING_KEYS, cell_accounting_dimension,
+};
 use super::harness::{
-    ENTRYPOINT_SPLIT_SYNC, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, EvidenceCell,
-    LiveLcGatewayHarness, LiveMatrixEvidence,
+    ENTRYPOINT_SPLIT_SYNC, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, EvidenceCell, FRESH,
+    LiveLcGatewayHarness, LiveMatrixEvidence, RESUME, carried_cell,
 };
 use super::live_matrix::require_lc_gateway_e2e_switch;
 
@@ -109,6 +112,323 @@ fn b45_t23_cell_summary(cell: &EvidenceCell) -> Value {
     })
 }
 
+/// resume 轮必需承继阶段(阶段, 入口):story/design/plan(streaming)+
+/// split(split_sync)。
+const RESUME_CARRIED_STAGES: [(&str, &str); 4] = [
+    ("story", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
+    ("design", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
+    ("plan", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
+    ("split", ENTRYPOINT_SPLIT_SYNC),
+];
+
+/// full_chain 轮逐 stage(plan 两入口)至少 1 个 fresh 执行格。
+const FULL_CHAIN_FRESH_STAGES: [(&str, &str); 6] = [
+    ("story", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
+    ("design", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
+    ("plan", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
+    ("plan", ENTRYPOINT_SPLIT_SYNC),
+    ("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
+    ("review", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
+];
+
+/// 轮次覆盖断言(纯函数;负测在 `mod tests` 钉死拒绝形态)。
+///
+/// - resume 轮:story/design/plan(streaming)+split(split_sync)各恰 1 个
+///   carried 格且来源链可复核;coding/review 各恰 1 个 executed-resume
+///   (真实执行、native ID 相同;carried 冒充 resume 拒绝)。
+/// - full_chain 轮:逐 stage(plan 两入口)至少 1 个 fresh 执行格。
+fn verify_round_coverage(resume_round: bool, cells: &[EvidenceCell]) -> Result<(), String> {
+    if resume_round {
+        verify_resume_round(cells)
+    } else {
+        verify_full_chain_round(cells)
+    }
+}
+
+fn verify_resume_round(cells: &[EvidenceCell]) -> Result<(), String> {
+    for (stage, entrypoint) in RESUME_CARRIED_STAGES {
+        let carried: Vec<&EvidenceCell> = cells
+            .iter()
+            .filter(|cell| {
+                cell.stage == stage
+                    && cell.entrypoint == entrypoint
+                    && cell.capability_state == "carried"
+            })
+            .collect();
+        if carried.len() != 1 {
+            return Err(format!(
+                "resume 轮 {stage}/{entrypoint} 必须恰 1 个 carried 格,实际 {}",
+                carried.len()
+            ));
+        }
+        let cell = carried[0];
+        if !cell.execution_origin.starts_with("carried:") || cell.run_ref.trim().is_empty() {
+            return Err(format!(
+                "resume 轮 {stage}/{entrypoint} 承继引用形态不完整:origin={:?} run_ref={:?}",
+                cell.execution_origin, cell.run_ref
+            ));
+        }
+        if cell
+            .carried_source_evidence_root
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
+            return Err(format!(
+                "resume 轮 {stage}/{entrypoint} 承继格缺来源证据根(引用不可复核)"
+            ));
+        }
+        for (label, digest) in [
+            ("workspace", cell.carried_workspace_digest.as_str()),
+            ("aggregate", cell.carried_aggregate_digest.as_str()),
+            ("capability", cell.carried_capability_digest.as_str()),
+            ("policy", cell.carried_policy_digest.as_str()),
+        ] {
+            if digest.trim().is_empty() {
+                return Err(format!(
+                    "resume 轮 {stage}/{entrypoint} 承继格缺 {label} 摘要(引用不可复核)"
+                ));
+            }
+        }
+    }
+    for stage in ["coding", "review"] {
+        let executed: Vec<&EvidenceCell> = cells
+            .iter()
+            .filter(|cell| {
+                cell.stage == stage
+                    && cell.capability_state == "confirmed"
+                    && cell.fresh_or_resume == RESUME
+            })
+            .collect();
+        if executed.len() != 1 {
+            return Err(format!(
+                "resume 轮 {stage} 必须恰 1 个 executed-resume 格(native ID 相同),实际 {}",
+                executed.len()
+            ));
+        }
+        let cell = executed[0];
+        if cell.execution_origin.starts_with("carried:") {
+            return Err(format!(
+                "resume 轮 {stage}:carried 格冒充 executed-resume(承继格不重新计票,不得计作原生恢复)"
+            ));
+        }
+        match (
+            cell.requested_resume_id.as_deref(),
+            cell.native_resume_confirmed_id.as_deref(),
+        ) {
+            (Some(requested), Some(confirmed))
+                if !requested.trim().is_empty() && requested == confirmed => {}
+            _ => {
+                return Err(format!(
+                    "resume 轮 {stage} executed-resume 的 native ID 不一致:请求 {:?} 确认 {:?}",
+                    cell.requested_resume_id, cell.native_resume_confirmed_id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_full_chain_round(cells: &[EvidenceCell]) -> Result<(), String> {
+    for (stage, entrypoint) in FULL_CHAIN_FRESH_STAGES {
+        let fresh_executed = cells.iter().any(|cell| {
+            cell.stage == stage
+                && cell.entrypoint == entrypoint
+                && cell.fresh_or_resume == FRESH
+                && cell.capability_state == "confirmed"
+                && !cell.execution_origin.starts_with("carried:")
+        });
+        if !fresh_executed {
+            return Err(format!(
+                "full_chain 轮 {stage}/{entrypoint} 缺 fresh 执行格(不得以 carried/resume 冒充)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 逐阶段 spawn 仪器断言(计划 §1.1 ③):fresh/执行 resume 必须有真实新增
+/// spawn(≥1);split_sync resume 契约零 spawn;零 spawn 格必须带五维会计
+/// 与可证伪观测(不用单维 0)。
+fn verify_spawn_instrumentation(cells: &[EvidenceCell]) -> Result<(), String> {
+    for cell in cells {
+        if cell.capability_state == "carried" {
+            continue;
+        }
+        let split_sync_resume =
+            cell.entrypoint == ENTRYPOINT_SPLIT_SYNC && cell.fresh_or_resume == RESUME;
+        if split_sync_resume {
+            if cell.provider_spawn_count != 0 {
+                return Err(format!(
+                    "split_sync resume 必须零 spawn,实测 {} ({})",
+                    cell.provider_spawn_count, cell.run_ref
+                ));
+            }
+        } else if cell.capability_state == "confirmed" && cell.provider_spawn_count == 0 {
+            return Err(format!(
+                "fresh/执行 resume 格必须 ≥1 真实 spawn,实测 0({}/{}/{};仪器未接入或真实未启动)",
+                cell.stage, cell.entrypoint, cell.fresh_or_resume
+            ));
+        }
+        if cell.provider_spawn_count == 0 {
+            verify_zero_spawn_evidence(cell)?;
+        }
+    }
+    Ok(())
+}
+
+/// 零 spawn 证明:五维会计齐备 + session child 维为 0 + 可证伪观测
+/// (zero_spawn_observation 前后审计相等/未启动标记 或 真实拒绝探针)。
+/// 单维 0 不构成证明;native_handshake 允许 ≥0(会话此前可能已握手,
+/// 该维不是本格新增 spawn 的判据)。
+fn verify_zero_spawn_evidence(cell: &EvidenceCell) -> Result<(), String> {
+    let cell_json = cell.to_cell_json();
+    for key in ZERO_SPAWN_ACCOUNTING_KEYS {
+        if cell_accounting_dimension(&cell_json, key) == u64::MAX {
+            return Err(format!(
+                "零 spawn 格 {} 缺五维会计维度 {key}(缺维度=不可证零)",
+                cell.run_ref
+            ));
+        }
+    }
+    for key in [
+        "session_child_count",
+        "extension_mcp_descendant_count",
+        "native_method_count",
+    ] {
+        if cell_accounting_dimension(&cell_json, key) != 0 {
+            return Err(format!(
+                "零 spawn 格 {} 的五维会计不自洽:{key}={}",
+                cell.run_ref,
+                cell_accounting_dimension(&cell_json, key)
+            ));
+        }
+    }
+    let observed_zero = cell.provider_events.iter().any(|event| {
+        let payload = &event["event"];
+        match payload["type"].as_str() {
+            Some("zero_spawn_observation") => {
+                payload["not_started"].as_bool() == Some(true)
+                    || payload["provider_start_audits_before"].as_u64()
+                        == payload["provider_start_audits_after"].as_u64()
+                        && payload["provider_start_audits_before"].as_u64().is_some()
+            }
+            Some("launch_rejected_probe") => payload["refused"].as_bool() == Some(true),
+            _ => false,
+        }
+    });
+    if !observed_zero {
+        return Err(format!(
+            "零 spawn 格 {} 仅有单维 provider_spawn_count=0,缺五维会计佐证\
+             (zero_spawn_observation 前后审计相等/未启动 或 launch_rejected_probe.refused)",
+            cell.run_ref
+        ));
+    }
+    Ok(())
+}
+
+/// M5 失败关闭:17 固定负向场景逐格三面(真实拒绝 或 合法 unknown 且带
+/// unobservable gate+非空原因;拒绝探针 refused/gate/audits 前后;五维)。
+fn verify_failure_scenarios(cells: &[EvidenceCell]) -> Result<(), String> {
+    let failure_cells: Vec<&EvidenceCell> = cells
+        .iter()
+        .filter(|cell| {
+            cell.boundary_matrix_evidence_flags()
+                .is_some_and(|flags| flags.contains_key("failure_scenario"))
+        })
+        .collect();
+    if failure_cells.len() != FIXED_FAILURE_SCENARIOS.len() {
+        return Err(format!(
+            "M5 失败关闭:负向场景格数({})必须等于固定清单({})",
+            failure_cells.len(),
+            FIXED_FAILURE_SCENARIOS.len()
+        ));
+    }
+    for cell in failure_cells {
+        verify_failure_cell(cell)?;
+    }
+    Ok(())
+}
+
+fn verify_failure_cell(cell: &EvidenceCell) -> Result<(), String> {
+    let scenario = cell
+        .boundary_matrix_evidence_flags()
+        .and_then(|flags| {
+            flags
+                .get("failure_scenario")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .ok_or_else(|| "失败场景格缺 failure_scenario flag".to_string())?;
+    let probe = cell
+        .provider_events
+        .iter()
+        .find(|event| event["event"]["type"].as_str() == Some("launch_rejected_probe"))
+        .map(|event| &event["event"])
+        .ok_or_else(|| format!("失败场景 {scenario} 缺拒绝探针(launch_rejected_probe)"))?;
+    let refusal_gate = probe["refusal_gate"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let refused = probe["refused"].as_bool().unwrap_or(false);
+    let reason = cell.denied_reason.as_deref().unwrap_or_default().trim();
+    match cell.capability_state.as_str() {
+        "denied" => {
+            if !refused {
+                return Err(format!(
+                    "失败场景 {scenario}:denied 但拒绝探针 refused=false({reason:?})"
+                ));
+            }
+            if refusal_gate.is_empty() {
+                return Err(format!("失败场景 {scenario}:拒绝探针 refusal_gate 为空"));
+            }
+        }
+        "unknown" => {
+            if refusal_gate != "unobservable" {
+                return Err(format!(
+                    "失败场景 {scenario}:unknown 必须带 unobservable gate,实际 {refusal_gate:?}"
+                ));
+            }
+            if reason.is_empty() {
+                return Err(format!("失败场景 {scenario}:unknown 缺非空原因"));
+            }
+        }
+        other => {
+            return Err(format!(
+                "失败场景 {scenario}:状态 {other} 非法(只允许真实拒绝 denied 或合法 unknown)"
+            ));
+        }
+    }
+    let observation = cell
+        .provider_events
+        .iter()
+        .find(|event| event["event"]["type"].as_str() == Some("zero_spawn_observation"))
+        .map(|event| &event["event"])
+        .ok_or_else(|| format!("失败场景 {scenario} 缺 zero_spawn_observation(审计前后)"))?;
+    let before = observation["provider_start_audits_before"].as_u64();
+    let after = observation["provider_start_audits_after"].as_u64();
+    if before != after {
+        return Err(format!(
+            "失败场景 {scenario}:拒绝后 audits 变化(before={before:?} after={after:?},零 spawn 不成立)"
+        ));
+    }
+    verify_zero_spawn_evidence(cell)?;
+    // 被拒格:除 session child 外,协议握手与 MCP/native 方法维也不得在场
+    //(失败矩阵五维口径;握手失败已创建 child 的 kill/reap 格不属被拒格)。
+    let cell_json = cell.to_cell_json();
+    for key in ["native_handshake_count"] {
+        if cell_accounting_dimension(&cell_json, key) != 0 {
+            return Err(format!(
+                "失败场景 {scenario}:被拒格 {key}={} 非零(握手/method 不应发生在拒绝格)",
+                cell_accounting_dimension(&cell_json, key)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 六职责域覆盖断言(M6 由 danger 探针承担,此处只记录归属)。
 ///
 /// 返回该 provider 的职责域摘要(roles-matrix.json 的单家段)。
@@ -124,52 +444,16 @@ fn b45_t23_assert_role_coverage(
     let stage_confirmed =
         |stage: &str| confirmed.iter().filter(|cell| cell.stage == stage).count();
 
-    // M1 Author:story/design/plan 三阶段真实执行格(resume 轮为承继格,
-    // 引用来源轮证据链,不重新计票)。
-    for stage in ["story", "design", "plan"] {
-        if resume_round {
-            let carried = matrix
-                .cells()
-                .iter()
-                .filter(|cell| cell.stage == stage && cell.capability_state == "carried")
-                .count();
-            assert!(
-                carried > 0,
-                "M1 Author({stage}):resume 轮必须有承继格(引用来源轮证据链)"
-            );
-        } else {
-            assert!(
-                stage_confirmed(stage) > 0,
-                "M1 Author({stage}):全链轮必须有真实 confirmed 格"
-            );
-        }
+    // 轮次覆盖(§1.1 ②术语修正):resume 轮=4 承继 + coding/review 各 1
+    // executed-resume(native 同 ID);full_chain 轮=逐 stage(plan 两入口)
+    // 至少 1 个 fresh 执行格。负测:删必需格/拿 carried 冒充 resume→红。
+    if let Err(error) = verify_round_coverage(resume_round, matrix.cells()) {
+        panic!("M1/M7 轮次覆盖断言失败:{error}");
     }
-    // Plan 双入口分列(Direct/LC:streaming 主入口与 split_sync 同步桥):
-    // full_chain 轮每入口必须有 confirmed 格;resume 轮校验承继引用形态
-    //(carried + 来源轮快照链 + 非空 run_ref),不以格存在冒充。
-    for entrypoint in [
-        ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT,
-        ENTRYPOINT_SPLIT_SYNC,
-    ] {
-        if resume_round {
-            assert!(
-                matrix.cells().iter().any(|cell| {
-                    cell.entrypoint == entrypoint
-                        && cell.capability_state == "carried"
-                        && cell.execution_origin.starts_with("carried:")
-                        && !cell.run_ref.trim().is_empty()
-                }),
-                "M1 Author(plan)缺 {entrypoint} 承继格引用(来源轮证据链)"
-            );
-        } else {
-            assert!(
-                matrix.cells().iter().any(|cell| {
-                    cell.entrypoint == entrypoint && cell.capability_state == "confirmed"
-                }),
-                "M1 Author(plan)缺 {entrypoint} confirmed 入口证据\
-                 (双栈分列,不以格存在冒充)"
-            );
-        }
+    // spawn 仪器(§1.1 ③):逐阶段 before/after 计数;fresh/执行 resume≥1、
+    // split_sync resume=0;零 spawn 格必须五维会计 + 可证伪观测。
+    if let Err(error) = verify_spawn_instrumentation(matrix.cells()) {
+        panic!("spawn 仪器断言失败:{error}");
     }
     // M2 Coder / M3 Reviewer:真实执行轮必须有 confirmed 格。
     assert!(
@@ -180,18 +464,6 @@ fn b45_t23_assert_role_coverage(
         stage_confirmed("review") > 0,
         "M3 Reviewer:review 必须有真实 confirmed 格"
     );
-    // M7 生命周期:resume 格原生同 ID(快照续跑轮);fresh 轮断言格完备
-    //(fresh_or_resume 标记与 spawn 计数在 confirmed 断言组已承载)。
-    if resume_round {
-        let resume_confirmed = confirmed
-            .iter()
-            .filter(|cell| cell.fresh_or_resume == "resume")
-            .count();
-        assert!(
-            resume_confirmed > 0,
-            "M7 生命周期:resume 轮必须有真实执行的 resume 格(coding/review)"
-        );
-    }
     // confirmed 格全要素(Step 1 断言组已在 validate_against 承担,此处
     // 抽查 M 矩阵要素:CLI exact version 与 argv/wire 捕获不得空壳)。
     for cell in confirmed {
@@ -240,10 +512,13 @@ fn b45_t23_assert_role_coverage(
             cell.denied_reason
         );
     }
-    // M5 失败关闭:17 固定负向场景逐格(boundary_matrix_evidence_flags 的
-    // failure_scenario);计数对齐固定清单且逐格否定"未被真实拒绝"形态
-    //(真实零 spawn 三面证明由 harness 场景体与现场断言承担)。
-    let expected_failures = super::failure_matrix::FIXED_FAILURE_SCENARIOS.len();
+    // M5 失败关闭(§1.1 ④):17 固定负向场景逐格——真实拒绝(denied +
+    // refused=true + gate 非空)或合法 unknown(unobservable gate + 非空
+    // 原因);拒绝探针 audits 前后相等;五维会计复用 failure_matrix 口径。
+    if let Err(error) = verify_failure_scenarios(boundary.cells()) {
+        panic!("M5 失败关闭断言失败:{error}");
+    }
+    let expected_failures = FIXED_FAILURE_SCENARIOS.len();
     let failure_cells: Vec<&EvidenceCell> = boundary
         .cells()
         .iter()
@@ -258,17 +533,6 @@ fn b45_t23_assert_role_coverage(
         "M5 失败关闭:负向场景格数({})必须等于固定清单({expected_failures}),不删格",
         failure_cells.len()
     );
-    for cell in &failure_cells {
-        assert!(
-            !cell.denied_reason
-                .as_deref()
-                .unwrap_or_default()
-                .starts_with("零 spawn 被拒验证失败"),
-            "M5 失败关闭:场景 {} 未被真实拒绝({:?})",
-            cell.run_ref,
-            cell.denied_reason
-        );
-    }
 
     json!({
         "provider": format!("{provider:?}"),
@@ -779,4 +1043,537 @@ async fn b45_live_codex_danger_apply_patch() {
     );
     // 场景 B:非纪律会话不中断(终态完成;若 Failed 如实记录,由判读面
     // 裁决,此处要求事件事实完整落盘——已由 evidence 落盘承载)。
+}
+
+// ---------------------------------------------------------------------------
+// 类 1 T23 断言加强负测(纯逻辑面;不需要真实 CLI/LC_GATEWAY_E2E)。
+// 先红后绿:负测钉死「删必需格 / carried 冒充 resume / 单维 0 / 拒绝后
+// audits 变化 / unknown 无 gate」的拒绝形态,实现转绿后由定向测试守护。
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod t23_assertion_tests {
+    use super::*;
+    use crate::web_lc_gateway_multi_provider::snapshot::{
+        SNAPSHOT_MANIFEST_SCHEMA_VERSION, SNAPSHOT_POINT_PLAN_CONFIRMED, SnapshotManifest,
+    };
+
+    fn test_manifest(source_root: &str) -> SnapshotManifest {
+        SnapshotManifest {
+            schema_version: SNAPSHOT_MANIFEST_SCHEMA_VERSION,
+            snapshot_point: SNAPSHOT_POINT_PLAN_CONFIRMED.to_string(),
+            provider_wire: "claude_code".to_string(),
+            cli_version: "claude 2.1.283".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            lc_id: "lc_0001".to_string(),
+            plan_id: "plan_0001".to_string(),
+            work_item_id: "work_item_0001".to_string(),
+            member_git_head: "deadbeef".to_string(),
+            capability_digest: "sha256:cap".to_string(),
+            policy_digest: "sha256:policy".to_string(),
+            harness_revision: "rev-1".to_string(),
+            workspace_digest: "sha256:ws".to_string(),
+            aggregate_digest: "sha256:agg".to_string(),
+            source_evidence_root: source_root.to_string(),
+            quiescent: true,
+            created_at: "2026-10-19T00:00:00Z".to_string(),
+        }
+    }
+
+    /// 基线格:confirmed、真实执行、spawn=1、native 齐全(可做负测变体)。
+    fn base_cell(stage: &str, entrypoint: &str, phase: &str) -> EvidenceCell {
+        EvidenceCell {
+            provider: ProviderName::ClaudeCode,
+            exact_version: "claude 2.1.283".to_string(),
+            stage: stage.to_string(),
+            entrypoint: entrypoint.to_string(),
+            fresh_or_resume: phase.to_string(),
+            process_cwd: PathBuf::from("/tmp/t23-root"),
+            target: PathBuf::from("/tmp/t23-root/alpha"),
+            audit_projection_digest: "sha256:p".to_string(),
+            frozen_projection_digest: "sha256:p".to_string(),
+            native_resume_confirmed_id: None,
+            native_resume_reattached: false,
+            requested_resume_id: None,
+            argv_or_wire_capture_exists: true,
+            approval_and_tool_events_exist: true,
+            completed_product_artifact_exists: true,
+            run_ref: format!("run-{stage}-{phase}"),
+            run_ref_is_unique_within_entrypoint: true,
+            action: "coding_target_write".to_string(),
+            role: "executor".to_string(),
+            gateway_dialect: "claude_code_cli_v1".to_string(),
+            wire_dialect: "claude-stream-json".to_string(),
+            native_session_id: "native-1".to_string(),
+            workspace_session_id: "ws-1".to_string(),
+            argv: vec!["claude".to_string()],
+            capability_state: "confirmed".to_string(),
+            denied_reason: None,
+            provider_pid: Some("4242".to_string()),
+            pid_unavailable_reason: None,
+            provider_spawn_count: 1,
+            session_projection_digest: "sha256:s".to_string(),
+            provider_events: Vec::new(),
+            execution_origin: "full_chain".to_string(),
+            carried_source_evidence_root: None,
+            carried_workspace_digest: String::new(),
+            carried_aggregate_digest: String::new(),
+            carried_capability_digest: String::new(),
+            carried_policy_digest: String::new(),
+        }
+    }
+
+    fn carried_test_cell(stage: &str, entrypoint: &str, manifest: &SnapshotManifest) -> EvidenceCell {
+        carried_cell(stage, &ProviderName::ClaudeCode, manifest, "snap-1")
+            .tap_entrypoint(entrypoint)
+    }
+
+    /// 小助手:carried_cell 按 stage 决定入口,测试需要显式入口。
+    trait TapEntrypoint {
+        fn tap_entrypoint(self, entrypoint: &str) -> Self;
+    }
+    impl TapEntrypoint for EvidenceCell {
+        fn tap_entrypoint(mut self, entrypoint: &str) -> Self {
+            self.entrypoint = entrypoint.to_string();
+            self
+        }
+    }
+
+    fn executed_resume_cell(stage: &str) -> EvidenceCell {
+        let mut cell = base_cell(stage, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, RESUME);
+        cell.execution_origin = "snapshot_boot".to_string();
+        cell.requested_resume_id = Some("native-7".to_string());
+        cell.native_resume_confirmed_id = Some("native-7".to_string());
+        cell
+    }
+
+    fn resume_round_cells(manifest: &SnapshotManifest) -> Vec<EvidenceCell> {
+        let mut cells = vec![
+            carried_test_cell("story", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, manifest),
+            carried_test_cell("design", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, manifest),
+            carried_test_cell("plan", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, manifest),
+            carried_test_cell("split", ENTRYPOINT_SPLIT_SYNC, manifest),
+        ];
+        for stage in ["coding", "review"] {
+            let mut fresh = base_cell(stage, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
+            fresh.execution_origin = "snapshot_boot".to_string();
+            cells.push(fresh);
+            cells.push(executed_resume_cell(stage));
+        }
+        cells
+    }
+
+    fn full_chain_cells() -> Vec<EvidenceCell> {
+        FULL_CHAIN_FRESH_STAGES
+            .iter()
+            .flat_map(|(stage, entrypoint)| {
+                [
+                    base_cell(stage, entrypoint, FRESH),
+                    base_cell(stage, entrypoint, RESUME),
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn t23_carried_source_chain_requires_existing_root_and_matching_digests() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_root = temp.path().join("evidence").join("matrix");
+        std::fs::create_dir_all(&source_root).expect("source root");
+        let snapshot_directory = temp.path().join("evidence").join("snapshots").join("snap-1");
+        std::fs::create_dir_all(&snapshot_directory).expect("snapshot dir");
+        let manifest = test_manifest(&source_root.to_string_lossy());
+        std::fs::write(
+            snapshot_directory.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).expect("manifest json"),
+        )
+        .expect("write manifest");
+        let canonical = PathBuf::from("/tmp/t23-root");
+        let member = canonical.join("alpha");
+
+        let cell = carried_test_cell(
+            "story",
+            ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT,
+            &manifest,
+        );
+        assert!(
+            cell.validate_against(&ProviderName::ClaudeCode, &canonical, &member)
+                .is_ok(),
+            "来源链可复核的承继格必须通过: {:?}",
+            cell.validate_against(&ProviderName::ClaudeCode, &canonical, &member)
+        );
+
+        let mut tampered = cell.clone();
+        tampered.carried_capability_digest = "sha256:tampered".to_string();
+        assert!(
+            tampered
+                .validate_against(&ProviderName::ClaudeCode, &canonical, &member)
+                .is_err(),
+            "摘要不符必须拒绝"
+        );
+
+        let mut missing_root = cell.clone();
+        missing_root.carried_source_evidence_root =
+            Some(temp.path().join("absent").to_string_lossy().to_string());
+        assert!(
+            missing_root
+                .validate_against(&ProviderName::ClaudeCode, &canonical, &member)
+                .is_err(),
+            "来源证据根不存在必须拒绝"
+        );
+
+        let mut missing_digest = cell.clone();
+        missing_digest.carried_policy_digest = String::new();
+        assert!(
+            missing_digest
+                .validate_against(&ProviderName::ClaudeCode, &canonical, &member)
+                .is_err(),
+            "承继格缺 manifest 摘要必须拒绝"
+        );
+
+        std::fs::remove_dir_all(&snapshot_directory).expect("remove snapshot");
+        assert!(
+            cell.validate_against(&ProviderName::ClaudeCode, &canonical, &member)
+                .is_err(),
+            "来源快照 manifest 不可复核必须拒绝"
+        );
+    }
+
+    #[test]
+    fn t23_resume_round_requires_carried_references_and_executed_resume() {
+        let manifest = test_manifest("/tmp/unused-source-root");
+        let cells = resume_round_cells(&manifest);
+        assert!(
+            verify_round_coverage(true, &cells).is_ok(),
+            "合法 resume 轮必须通过: {:?}",
+            verify_round_coverage(true, &cells)
+        );
+
+        // 删必需承继格 → 红。
+        let mut missing_carried = cells.clone();
+        missing_carried.retain(|cell| !(cell.stage == "split" && cell.capability_state == "carried"));
+        assert!(
+            verify_round_coverage(true, &missing_carried).is_err(),
+            "删 split 承继格必须拒绝"
+        );
+
+        // carried 冒充 executed-resume → 红。
+        let mut masquerade = cells.clone();
+        for cell in &mut masquerade {
+            if cell.stage == "coding" && cell.fresh_or_resume == RESUME {
+                cell.execution_origin = "carried:snap-1".to_string();
+            }
+        }
+        let error = verify_round_coverage(true, &masquerade).expect_err("carried 冒充必须拒绝");
+        assert!(error.contains("冒充"), "{error}");
+
+        // executed-resume native ID 不一致 → 红。
+        let mut mismatch = cells.clone();
+        for cell in &mut mismatch {
+            if cell.stage == "review" && cell.fresh_or_resume == RESUME {
+                cell.native_resume_confirmed_id = Some("native-other".to_string());
+            }
+        }
+        assert!(
+            verify_round_coverage(true, &mismatch).is_err(),
+            "native ID 不一致必须拒绝"
+        );
+
+        // 承继格引用不可复核(缺来源根/摘要)→ 红。
+        let mut incomplete = cells.clone();
+        for cell in &mut incomplete {
+            if cell.stage == "design" && cell.capability_state == "carried" {
+                cell.carried_workspace_digest = String::new();
+            }
+        }
+        assert!(
+            verify_round_coverage(true, &incomplete).is_err(),
+            "承继格缺摘要必须拒绝"
+        );
+    }
+
+    #[test]
+    fn t23_full_chain_requires_fresh_execution_per_stage() {
+        let cells = full_chain_cells();
+        assert!(
+            verify_round_coverage(false, &cells).is_ok(),
+            "合法 full_chain 轮必须通过"
+        );
+
+        let mut missing = cells.clone();
+        missing.retain(|cell| {
+            !(cell.stage == "plan"
+                && cell.entrypoint == ENTRYPOINT_SPLIT_SYNC
+                && cell.fresh_or_resume == FRESH)
+        });
+        assert!(
+            verify_round_coverage(false, &missing).is_err(),
+            "缺 plan/split_sync fresh 执行格必须拒绝"
+        );
+
+        // carried 冒充 fresh 执行格 → 红。
+        let mut masquerade = cells.clone();
+        for cell in &mut masquerade {
+            if cell.stage == "coding" && cell.fresh_or_resume == FRESH {
+                cell.capability_state = "carried".to_string();
+                cell.execution_origin = "carried:snap-1".to_string();
+            }
+        }
+        assert!(
+            verify_round_coverage(false, &masquerade).is_err(),
+            "carried 冒充 fresh 执行格必须拒绝"
+        );
+
+        // 只有 resume 格、无 fresh 执行格 → 红。
+        let mut resume_only = cells.clone();
+        for cell in &mut resume_only {
+            if cell.fresh_or_resume == FRESH {
+                cell.fresh_or_resume = RESUME.to_string();
+            }
+        }
+        assert!(
+            verify_round_coverage(false, &resume_only).is_err(),
+            "无 fresh 执行格必须拒绝"
+        );
+    }
+
+    fn zero_spawn_unknown_cell() -> EvidenceCell {
+        let mut cell = base_cell(
+            "coding",
+            ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT,
+            FRESH,
+        );
+        cell.capability_state = "unknown".to_string();
+        cell.provider_pid = None;
+        cell.pid_unavailable_reason = Some("零 spawn".to_string());
+        cell.native_session_id = String::new();
+        cell.argv = Vec::new();
+        cell.argv_or_wire_capture_exists = false;
+        cell.completed_product_artifact_exists = false;
+        cell.provider_spawn_count = 0;
+        cell
+    }
+
+    fn zero_spawn_event(before: u64, after: u64) -> Value {
+        json!({
+            "ts": "2026-10-19T00:00:00.000Z",
+            "event": {
+                "type": "zero_spawn_observation",
+                "provider_start_audits_before": before,
+                "provider_start_audits_after": after,
+                "pid_observed": false,
+                "argv_captured": false,
+            }
+        })
+    }
+
+    #[test]
+    fn t23_spawn_instrumentation_requires_real_spawn_and_five_dim_accounting() {
+        // fresh confirmed 有 spawn → 通过。
+        let fresh = base_cell(
+            "coding",
+            ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT,
+            FRESH,
+        );
+        assert!(verify_spawn_instrumentation(&[fresh.clone()]).is_ok());
+
+        // fresh 置 0 → 红(仪器缺失/真实未启动)。
+        let mut zero_fresh = fresh.clone();
+        zero_fresh.provider_spawn_count = 0;
+        assert!(
+            verify_spawn_instrumentation(&[zero_fresh]).is_err(),
+            "fresh 置 0 必须拒绝"
+        );
+
+        // executed resume 置 0 → 红。
+        let mut zero_resume = executed_resume_cell("coding");
+        zero_resume.provider_spawn_count = 0;
+        assert!(
+            verify_spawn_instrumentation(&[zero_resume]).is_err(),
+            "resume 置 0 必须拒绝"
+        );
+
+        // split_sync resume 非 0 → 红(契约零 spawn)。
+        let mut split_resume = base_cell("plan", ENTRYPOINT_SPLIT_SYNC, RESUME);
+        split_resume.capability_state = "unknown".to_string();
+        split_resume.provider_spawn_count = 1;
+        assert!(
+            verify_spawn_instrumentation(&[split_resume]).is_err(),
+            "split_sync resume 必须零 spawn"
+        );
+
+        // 单维 0、无五维/可证伪观测 → 红。
+        let bare = zero_spawn_unknown_cell();
+        assert!(
+            verify_spawn_instrumentation(&[bare]).is_err(),
+            "单维 0 无五维佐证必须拒绝"
+        );
+
+        // 前后审计相等 + 五维齐备 → 通过。
+        let mut observed = zero_spawn_unknown_cell();
+        observed.provider_events = vec![zero_spawn_event(2, 2)];
+        assert!(
+            verify_spawn_instrumentation(&[observed]).is_ok(),
+            "五维 + zero_spawn_observation 必须通过"
+        );
+
+        // 前后审计变化 → 红。
+        let mut drifted = zero_spawn_unknown_cell();
+        drifted.provider_events = vec![zero_spawn_event(2, 3)];
+        assert!(
+            verify_spawn_instrumentation(&[drifted]).is_err(),
+            "零 spawn 格审计前后变化必须拒绝"
+        );
+    }
+
+    fn failure_cell(state: &str) -> EvidenceCell {
+        let mut cell = zero_spawn_unknown_cell();
+        cell.capability_state = state.to_string();
+        cell.denied_reason = Some("真实拒绝/reason".to_string());
+        cell.run_ref = "t11-failure-missing_readiness".to_string();
+        cell.provider_events = vec![
+            json!({
+                "ts": "2026-10-19T00:00:00.000Z",
+                "event": {
+                    "type": "boundary_matrix_evidence",
+                    "failure_scenario": "missing_readiness",
+                }
+            }),
+            json!({
+                "ts": "2026-10-19T00:00:00.000Z",
+                "event": {
+                    "type": "launch_rejected_probe",
+                    "scenario": "missing_readiness",
+                    "refusal_gate": "validate",
+                    "refusal_text": "rejected",
+                    "refused": true,
+                }
+            }),
+            zero_spawn_event(0, 0),
+        ];
+        cell
+    }
+
+    #[test]
+    fn t23_failure_cell_requires_refused_probe_unchanged_audits_and_unobservable_gate() {
+        // 真实拒绝:refused=true + gate 非空 + audits 0→0 → 通过。
+        assert!(
+            verify_failure_cell(&failure_cell("denied")).is_ok(),
+            "真实拒绝 + audits 不变必须通过"
+        );
+
+        // 拒绝但 audits 变化 → 红。
+        let mut changed = failure_cell("denied");
+        changed.provider_events = vec![
+            json!({
+                "ts": "2026-10-19T00:00:00.000Z",
+                "event": {
+                    "type": "boundary_matrix_evidence",
+                    "failure_scenario": "missing_readiness",
+                }
+            }),
+            json!({
+                "ts": "2026-10-19T00:00:00.000Z",
+                "event": {
+                    "type": "launch_rejected_probe",
+                    "refusal_gate": "validate",
+                    "refused": true,
+                }
+            }),
+            zero_spawn_event(0, 1),
+        ];
+        let error = verify_failure_cell(&changed).expect_err("audits 变化必须拒绝");
+        assert!(error.contains("audits"), "{error}");
+
+        // denied 但 refused=false → 红。
+        let mut not_refused = failure_cell("denied");
+        not_refused.provider_events = vec![
+            json!({
+                "ts": "2026-10-19T00:00:00.000Z",
+                "event": {
+                    "type": "boundary_matrix_evidence",
+                    "failure_scenario": "missing_readiness",
+                }
+            }),
+            json!({
+                "ts": "2026-10-19T00:00:00.000Z",
+                "event": {
+                    "type": "launch_rejected_probe",
+                    "refusal_gate": "validate",
+                    "refused": false,
+                }
+            }),
+            zero_spawn_event(0, 0),
+        ];
+        assert!(
+            verify_failure_cell(&not_refused).is_err(),
+            "denied 且 refused=false 必须拒绝"
+        );
+
+        // unknown 无 unobservable gate → 红。
+        let mut unknown_bad_gate = failure_cell("unknown");
+        unknown_bad_gate.provider_events = vec![
+            json!({
+                "ts": "2026-10-19T00:00:00.000Z",
+                "event": {
+                    "type": "boundary_matrix_evidence",
+                    "failure_scenario": "missing_readiness",
+                }
+            }),
+            json!({
+                "ts": "2026-10-19T00:00:00.000Z",
+                "event": {
+                    "type": "launch_rejected_probe",
+                    "refusal_gate": "validate",
+                    "refused": false,
+                }
+            }),
+            zero_spawn_event(0, 0),
+        ];
+        assert!(
+            verify_failure_cell(&unknown_bad_gate).is_err(),
+            "unknown 无 unobservable gate 必须拒绝"
+        );
+
+        // 合法 unknown:unobservable gate + 非空原因 → 通过。
+        let mut allowed_unknown = failure_cell("unknown");
+        allowed_unknown.provider_events = vec![
+            json!({
+                "ts": "2026-10-19T00:00:00.000Z",
+                "event": {
+                    "type": "boundary_matrix_evidence",
+                    "failure_scenario": "missing_readiness",
+                }
+            }),
+            json!({
+                "ts": "2026-10-19T00:00:00.000Z",
+                "event": {
+                    "type": "launch_rejected_probe",
+                    "refusal_gate": "unobservable",
+                    "refusal_text": "OS 保护不可观察",
+                    "refused": false,
+                }
+            }),
+            zero_spawn_event(0, 0),
+        ];
+        assert!(
+            verify_failure_cell(&allowed_unknown).is_ok(),
+            "unobservable gate + 原因必须放行"
+        );
+    }
+
+    #[test]
+    fn t23_roles_matrix_counts_exactly_fixed_failure_scenarios() {
+        let mut cells: Vec<EvidenceCell> = FIXED_FAILURE_SCENARIOS
+            .iter()
+            .map(|_| failure_cell("denied"))
+            .collect();
+        assert!(verify_failure_scenarios(&cells).is_ok());
+        cells.pop();
+        assert!(
+            verify_failure_scenarios(&cells).is_err(),
+            "删任一失败场景格必须拒绝"
+        );
+    }
 }

@@ -73,6 +73,11 @@ fn complete_baseline_cell(
             "event": {"type": "tool_call", "tool": "Read", "native_session_id": "native-session-fixture"}
         })],
         execution_origin: "full_chain".to_string(),
+        carried_source_evidence_root: None,
+        carried_workspace_digest: String::new(),
+        carried_aggregate_digest: String::new(),
+        carried_capability_digest: String::new(),
+        carried_policy_digest: String::new(),
     }
 }
 

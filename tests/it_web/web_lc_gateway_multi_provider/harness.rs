@@ -226,6 +226,87 @@ pub(crate) struct EvidenceCell {
     /// snapshot_boot(快照续跑轮真实执行)|carried:<snapshot_id>
     ///(承继格:引用来源轮证据链,不重新计票)。
     pub execution_origin: String,
+    // ---- 承继格来源链(r52;非承继格为空/None) ----
+    /// 来源轮证据根(快照 manifest 记录;相对路径按仓库根解析)。
+    pub carried_source_evidence_root: Option<String>,
+    /// 快照 manifest 四摘要(承继格回填;`validate_against` 复核来源链)。
+    pub carried_workspace_digest: String,
+    pub carried_aggregate_digest: String,
+    pub carried_capability_digest: String,
+    pub carried_policy_digest: String,
+}
+
+/// 承继格来源链校验:origin 快照 id + 来源证据根存在 + manifest 四摘要一致。
+///
+/// 路径语义:`source_evidence_root` 允许相对(按仓库根 `CARGO_MANIFEST_DIR`
+/// 解析)或绝对;快照目录按 `snapshots_root(source_root)/<snapshot_id>` 定位
+///(与 `snapshot::capture_plan_snapshot` 同一布局)。任一不可复核即拒绝
+///(不以「有引用文本」冒充来源链)。
+pub(crate) fn validate_carried_source_chain(
+    execution_origin: &str,
+    source_evidence_root: &str,
+    workspace_digest: &str,
+    aggregate_digest: &str,
+    capability_digest: &str,
+    policy_digest: &str,
+) -> Result<(), String> {
+    let snapshot_id = execution_origin
+        .strip_prefix("carried:")
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("承继格 origin 非法(需 carried:<snapshot_id>):{execution_origin:?}"))?;
+    for (label, digest) in [
+        ("workspace", workspace_digest),
+        ("aggregate", aggregate_digest),
+        ("capability", capability_digest),
+        ("policy", policy_digest),
+    ] {
+        if digest.trim().is_empty() {
+            return Err(format!(
+                "承继格缺 {label} 摘要(来源链不可复核;carried_cell 必须回填 manifest 四摘要)"
+            ));
+        }
+    }
+    if source_evidence_root.trim().is_empty() {
+        return Err("承继格缺来源证据根(source_evidence_root 为空)".to_string());
+    }
+    let source_root = resolve_repo_relative(Path::new(source_evidence_root));
+    if !source_root.is_dir() {
+        return Err(format!(
+            "承继格来源证据根不存在:{}",
+            source_root.display()
+        ));
+    }
+    let snapshot_directory = super::snapshot::snapshots_root(&source_root).join(snapshot_id);
+    let manifest = super::snapshot::read_manifest(&snapshot_directory).map_err(|error| {
+        format!(
+            "承继格来源快照 manifest 不可复核({}):{error}",
+            snapshot_directory.display()
+        )
+    })?;
+    for (label, carried, actual) in [
+        ("workspace", workspace_digest, manifest.workspace_digest.as_str()),
+        ("aggregate", aggregate_digest, manifest.aggregate_digest.as_str()),
+        ("capability", capability_digest, manifest.capability_digest.as_str()),
+        ("policy", policy_digest, manifest.policy_digest.as_str()),
+    ] {
+        if carried != actual {
+            return Err(format!(
+                "承继格 {label} 摘要与来源 manifest 不一致:{carried} != {actual}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 证据根/来源根路径解析:相对路径按仓库根(`CARGO_MANIFEST_DIR`)解析,
+/// 绝对路径原样(承继格来源链与仓库根同源,不受测试进程 cwd 影响)。
+pub(crate) fn resolve_repo_relative(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
+    }
 }
 
 impl EvidenceCell {
@@ -243,15 +324,23 @@ impl EvidenceCell {
         member_worktree: &Path,
     ) -> Result<(), String> {
         // r52 快照:承继格=引用格(capability_state=carried),结构断言
-        // 属于来源轮;本轮只校验其引用形态(origin/run_ref)。
+        // 属于来源轮;本轮校验引用形态 + 来源链可复核(来源证据根存在、
+        // manifest 四摘要一致)。仅「有引用文本」不再放行。
         if self.capability_state == "carried" {
-            if !self.execution_origin.starts_with("carried:") || self.run_ref.trim().is_empty() {
+            if self.run_ref.trim().is_empty() {
                 return Err(format!(
-                    "承继格引用形态不完整:origin={:?} run_ref={:?}",
-                    self.execution_origin, self.run_ref
+                    "承继格引用形态不完整:origin={:?} run_ref 为空",
+                    self.execution_origin
                 ));
             }
-            return Ok(());
+            return validate_carried_source_chain(
+                &self.execution_origin,
+                self.carried_source_evidence_root.as_deref().unwrap_or_default(),
+                &self.carried_workspace_digest,
+                &self.carried_aggregate_digest,
+                &self.carried_capability_digest,
+                &self.carried_policy_digest,
+            );
         }
         if self.provider != *expected_provider {
             return Err(format!(
@@ -418,6 +507,18 @@ impl EvidenceCell {
             "provider_spawn_count": self.provider_spawn_count,
             "session_projection_digest": self.session_projection_digest,
             "timeline": self.timeline_summary(),
+            "execution_origin": self.execution_origin,
+            "carried_source_chain": if self.capability_state == "carried" {
+                json!({
+                    "source_evidence_root": self.carried_source_evidence_root,
+                    "workspace_digest": self.carried_workspace_digest,
+                    "aggregate_digest": self.carried_aggregate_digest,
+                    "capability_digest": self.carried_capability_digest,
+                    "policy_digest": self.carried_policy_digest,
+                })
+            } else {
+                Value::Null
+            },
         });
         // Task 11:零 spawn 会计五维(计划 Interfaces 冻结,分列可审计)+
         // 组装层经 provider_events 携带的边界矩阵证据 flag(首见为准)。
@@ -1034,6 +1135,11 @@ fn task11_cell_base(env: &MatrixEnvironment, run_ref: String) -> EvidenceCell {
         session_projection_digest: String::new(),
         provider_events: Vec::new(),
         execution_origin: "full_chain".to_string(),
+        carried_source_evidence_root: None,
+        carried_workspace_digest: String::new(),
+        carried_aggregate_digest: String::new(),
+        carried_capability_digest: String::new(),
+        carried_policy_digest: String::new(),
     }
 }
 
@@ -4682,6 +4788,8 @@ impl MatrixEnvironment {
         }
         observation.workspace_session_id = session_id.clone();
         self.prior_entity_session_id = Some(session_id.clone());
+        observation.spawn_audits_before =
+            Some(self.count_session_provider_starts(&session_id));
 
         // r21 C1 根修:实体 fresh 以零确认预算停在人工门(author_confirm)。
         // Completed 是终态(spec-design-dialog-revision:确认定稿不再经过
@@ -4693,6 +4801,9 @@ impl MatrixEnvironment {
         let (drive, ws) = self
             .drive_workspace_session_ws(&session_id, &mut observation, 0, self.entity_stage_timeout)
             .await;
+        observation.observed_spawn_count =
+            self.count_session_provider_starts(&session_id)
+                .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
         // 产物=author 轮已生成的实体 spec(generate 响应携带 spec id),
         // gate_reached 证明 author run 完整驱动到门。
         observation.completed_product_artifact_exists = spec_captured && drive.gate_reached;
@@ -4734,6 +4845,8 @@ impl MatrixEnvironment {
                 .denied_cell("fresh 轮未达人工门(无干净的同连接会话可供门上修订)".to_string());
         };
         observation.workspace_session_id = session_id.clone();
+        observation.spawn_audits_before =
+            Some(self.count_session_provider_starts(&session_id));
         fp(
             "resume_audit_scan_begin",
             format_args!("session={session_id}"),
@@ -4762,16 +4875,19 @@ impl MatrixEnvironment {
         if let Err(error) = ws.send_json(&revision).await {
             observation.push_event(json!({"type": "matrix_error", "message": error}));
             observation.run_failure = Some(format!("request_revision 发送失败:{error}"));
-            return observation.build_cell(self);
+            return observation.finish_cell(self);
         }
         let revision = self
             .pump_workspace_session(&mut ws, &mut observation, 1, self.entity_stage_timeout)
             .await;
+        observation.observed_spawn_count =
+            self.count_session_provider_starts(&session_id)
+                .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
         observation.completed_product_artifact_exists = revision.artifact_confirmed;
         // 原生恢复确认:revision 轮审计的 provider_session_id == 请求 id。
         observation.native_confirmed_id =
             self.latest_audit_native_id(&session_id, &self.provider, None);
-        observation.build_cell(self)
+        observation.finish_cell(self)
     }
 
 
@@ -5177,6 +5293,8 @@ impl MatrixEnvironment {
         }
         observation.workspace_session_id = session_id.clone();
         self.prior_plan_session_id = Some(session_id.clone());
+        observation.spawn_audits_before =
+            Some(self.count_session_provider_starts(&session_id));
         // 预检:work item 列表直接取 plan DTO 的 work_item_ids(形态已核对),
         // 不依赖列表端点探测。
         if let Some(ids) = body["work_item_plan"]["work_item_ids"].as_array() {
@@ -5208,6 +5326,9 @@ impl MatrixEnvironment {
                 Some(self.provider.clone()),
             )
             .await;
+        observation.observed_spawn_count =
+            self.count_session_provider_starts(&session_id)
+                .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
         // r27 问题1:产物判定按停门模型差异化——plan 的产物分两级:候选
         // plan markdown(author 轮产出,fresh 格)与 confirmed plan(resume
         // 格 typed confirm 后,work item 才落库)。fresh 判定=产物 markdown
@@ -5398,6 +5519,8 @@ impl MatrixEnvironment {
             );
         };
         observation.workspace_session_id = session_id.to_string();
+        observation.spawn_audits_before =
+            Some(self.count_session_provider_starts(session_id));
         // r52(#2 收口):请求基准必须与修订 turn 实际携带的 resume id 同源
         //——author 面(work_item_splitter)最新审计。role 不过滤会读到
         // fresh 轮 cross-review reviewer 的 id(r52 现场:请求 7d13=
@@ -5462,7 +5585,7 @@ impl MatrixEnvironment {
             if let Err(error) = ws.send_json(&feedback_command).await {
                 observation.push_event(json!({"type": "matrix_error", "message": error}));
                 observation.run_failure = Some(format!("human_gate_feedback 发送失败:{error}"));
-                return observation.build_cell(self);
+                return observation.finish_cell(self);
             }
             let revision_outcome = self
                 .pump_plan_sc_phase(
@@ -5513,7 +5636,7 @@ impl MatrixEnvironment {
             if let Err(error) = ws.send_json(&confirm_command).await {
                 observation.push_event(json!({"type": "matrix_error", "message": error}));
                 observation.run_failure = Some(format!("typed confirm 发送失败:{error}"));
-                return observation.build_cell(self);
+                return observation.finish_cell(self);
             }
                 let round_confirmed = matches!(
                     self.pump_plan_sc_phase(
@@ -5673,7 +5796,7 @@ impl MatrixEnvironment {
                 ),
             );
         }
-        observation.build_cell(self)
+        observation.finish_cell(self)
     }
 
     /// SC 门三相位泵(r58 起门帧驱动):AwaitRevisionComplete 等
@@ -6149,12 +6272,17 @@ impl MatrixEnvironment {
         resume.action = "planning_read_only".to_string();
         resume.force_resume = true;
         resume.workspace_session_id = workspace_session_id;
+        // 零 spawn 可证伪:resume 未启动 provider,阶段前后审计计数应相等
+        //(build_cell 据此落 zero_spawn_observation;before!=after 由断言侧
+        // 判红)。
+        resume.spawn_audits_before =
+            Some(self.count_session_provider_starts(&resume.workspace_session_id));
         resume.observed_spawn_count = 0;
         resume.run_failure = Some(
             "sync split 无 native session contract:resume=Unknown,零 spawn(新增 provider_start=0)"
                 .to_string(),
         );
-        cells.push(resume.build_cell(self));
+        cells.push(resume.finish_cell(self));
         cells
     }
 
@@ -6229,9 +6357,14 @@ impl MatrixEnvironment {
         }
         observation.workspace_session_id = attempt_id.clone();
         self.prior_coding_session_id = Some(attempt_id.clone());
+        observation.spawn_audits_before =
+            Some(self.count_session_provider_starts(&attempt_id));
         let drive = self
             .drive_coding_attempt_ws(&attempt_id, &mut observation)
             .await;
+        observation.observed_spawn_count =
+            self.count_session_provider_starts(&attempt_id)
+                .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
         observation.completed_product_artifact_exists = drive.artifact_confirmed;
         // F3:PID 取自该 attempt 的 provider stream log 目录(生产路径)。
         observation.observed_pid = self.scan_attempt_stream_log_pid(&attempt_id);
@@ -6248,6 +6381,8 @@ impl MatrixEnvironment {
         resume.action = "coding_workspace_write".to_string();
         resume.force_resume = true;
         resume.workspace_session_id = attempt_id.clone();
+        resume.spawn_audits_before =
+            Some(self.count_session_provider_starts(&attempt_id));
         // F5(r58 深掏审计):两次 native 断言扫描必须按 executor 角色过滤
         //(与观测格 role 对齐,r50/r52 已修 plan author 与 review reviewer,
         // coding 未跟进)——attempt 分区内 review round 的 reviewer
@@ -6264,7 +6399,7 @@ impl MatrixEnvironment {
         resume.observed_pid = self.scan_attempt_stream_log_pid(&attempt_id);
         resume.native_confirmed_id =
             self.latest_audit_native_id(&attempt_id, &self.provider, Some(CODING_EXECUTOR_ROLE));
-        cells.push(resume.build_cell(self));
+        cells.push(resume.finish_cell(self));
         cells
     }
 
@@ -6663,6 +6798,8 @@ impl MatrixEnvironment {
             .is_some();
         observation.workspace_session_id = session_id.clone();
         self.prior_review_session_id = Some(session_id.clone());
+        observation.spawn_audits_before =
+            Some(self.count_session_provider_starts(&session_id));
         // r63 根修(T22 b45 现场协议错):review 段对齐实体阶段 r21 C1 模型
         // ——fresh 以零确认预算停在人工门(reviewer 轮在 author 产物后、
         // 门 confirm 前已跑完,评审证据不丢),连接留给 resume 格同连接
@@ -6673,6 +6810,9 @@ impl MatrixEnvironment {
         let (drive, gate_ws) = self
             .drive_workspace_session_ws(&session_id, &mut observation, 0, self.entity_stage_timeout)
             .await;
+        observation.observed_spawn_count =
+            self.count_session_provider_starts(&session_id)
+                .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
         observation.completed_product_artifact_exists = spec_captured && drive.gate_reached;
         cells.push(observation.build_cell(self));
 
@@ -6687,6 +6827,8 @@ impl MatrixEnvironment {
         resume.action = "review_read_only".to_string();
         resume.force_resume = true;
         resume.workspace_session_id = session_id.clone();
+        resume.spawn_audits_before =
+            Some(self.count_session_provider_starts(&session_id));
         // 请求基准=修订 turn 实际携带的 resume id 同源:reviewer 面最新审计
         // (与 drive_entity_session_resume 的 author 面同构,role 过滤防读到
         // author 轮 id 造成假阳/假阴)。
@@ -6704,7 +6846,7 @@ impl MatrixEnvironment {
         resume.completed_product_artifact_exists = drive.artifact_confirmed;
         resume.native_confirmed_id =
             self.latest_audit_native_id(&session_id, &self.provider, Some("reviewer"));
-        cells.push(resume.build_cell(self));
+        cells.push(resume.finish_cell(self));
         cells
     }
 
@@ -6977,6 +7119,22 @@ impl MatrixEnvironment {
 // 阶段观测 → 证据格。
 // ---------------------------------------------------------------------------
 
+/// 零 spawn 观测事件:阶段前后 provider_start 审计计数 + 无 PID/argv。
+///
+/// 零 spawn 格的证明不能用单维 `provider_spawn_count==0`(「无审计记录」
+/// 不等于「零 child」);本事件把会计窗口的 before/after 落进证据流,断言
+/// 侧要求 before==after 且与五维会计同源。
+fn zero_spawn_observation_event(before: usize, after: usize, scan_window: &str) -> Value {
+    json!({
+        "type": "zero_spawn_observation",
+        "provider_start_audits_before": before,
+        "provider_start_audits_after": after,
+        "pid_observed": false,
+        "argv_captured": false,
+        "scan_window": scan_window,
+    })
+}
+
 struct StageObservation {
     stage: &'static str,
     entrypoint: String,
@@ -7010,6 +7168,10 @@ struct StageObservation {
     /// 走到 completed(在途 run 重挂;attempt 级原生恢复证据之一)。
     reattached_inflight_run: bool,
     observed_spawn_count: usize,
+    /// 逐阶段 spawn 仪器:相位开始前的会话 provider_start 审计计数
+    ///(before/after 差值即本格新增 spawn;零 spawn 格另落
+    /// zero_spawn_observation 事件)。
+    spawn_audits_before: Option<usize>,
     /// F3:驱动侧解析到的 provider 子进程 PID(stream log 文件名)。
     observed_pid: Option<String>,
 }
@@ -7040,6 +7202,7 @@ impl StageObservation {
             artifact_markdown_seen: false,
             reattached_inflight_run: false,
             observed_spawn_count: 0,
+            spawn_audits_before: None,
             observed_pid: None,
         }
     }
@@ -7069,6 +7232,24 @@ impl StageObservation {
     /// 失败/阻断格:保留键与入口维度,记录 reason(不删格)。
     fn denied_cell(mut self, reason: String) -> EvidenceCell {
         self.run_failure = Some(reason);
+        // 零 spawn 证明不用单维 0:本格在前置/复验阶段被拒时附
+        // zero_spawn_observation(未启动/未测量——不伪造 0/0 审计计数;
+        // not_started 标记由断言侧识别为「无启动尝试」)。
+        if self.observed_spawn_count == 0 {
+            self.push_event(json!({
+                "type": "zero_spawn_observation",
+                "provider_start_audits_before": Value::Null,
+                "provider_start_audits_after": Value::Null,
+                "pid_observed": false,
+                "argv_captured": false,
+                "not_started": true,
+                "scan_window": if self.workspace_session_id.trim().is_empty() {
+                    "未建立会话(前置/复验拒绝,无 provider 启动尝试)"
+                } else {
+                    "阶段在 provider 启动前被拒(未测量审计计数)"
+                },
+            }));
+        }
         let mut cell = self.placeholder_cell();
         cell.capability_state = if self.observed_spawn_count > 0 {
             "denied".to_string()
@@ -7117,6 +7298,11 @@ impl StageObservation {
             session_projection_digest: String::new(),
             provider_events: self.events.clone(),
             execution_origin: self.execution_origin.clone(),
+            carried_source_evidence_root: None,
+            carried_workspace_digest: String::new(),
+            carried_aggregate_digest: String::new(),
+            carried_capability_digest: String::new(),
+            carried_policy_digest: String::new(),
         }
     }
 
@@ -7130,6 +7316,23 @@ impl StageObservation {
             ),
         );
         let mut cell = self.placeholder_cell();
+        // 逐阶段 spawn 仪器(零 spawn 分支):记录阶段前后审计计数,使
+        // 「零 spawn」可证伪(单维 0 不算证明);before!=after 由断言侧判红。
+        if self.observed_spawn_count == 0 {
+            let after = if self.workspace_session_id.trim().is_empty() {
+                0
+            } else {
+                env.count_session_provider_starts(&self.workspace_session_id)
+            };
+            let before = self.spawn_audits_before.unwrap_or(after);
+            let scan_window = if self.workspace_session_id.trim().is_empty() {
+                "未建立会话(零 provider 启动)"
+            } else {
+                "阶段前后审计扫描(本格零新增 provider 启动)"
+            };
+            self.push_event(zero_spawn_observation_event(before, after, scan_window));
+            cell = self.placeholder_cell();
+        }
         cell.process_cwd = env.canonical_root.clone();
         cell.target = env.member_worktree.clone();
         cell.requested_resume_id = self.requested_resume_id.clone();
@@ -7250,6 +7453,20 @@ impl StageObservation {
             cell.denied_reason = Some("缺完成产物(产品确认门未通过)".to_string());
         }
         cell
+    }
+
+    /// 收口:按相位前记录的审计基数计算本格新增 provider 启动数,再组装
+    /// 证据格(早退分支同样计入,不依赖成功路径)。
+    fn finish_cell(&mut self, env: &MatrixEnvironment) -> EvidenceCell {
+        if let Some(before) = self.spawn_audits_before {
+            let after = if self.workspace_session_id.trim().is_empty() {
+                before
+            } else {
+                env.count_session_provider_starts(&self.workspace_session_id)
+            };
+            self.observed_spawn_count = after.saturating_sub(before);
+        }
+        self.build_cell(env)
     }
 }
 
@@ -7927,7 +8144,7 @@ fn seed_member_rule_material(path: &Path, member: &str) {
 /// 递归复制目录(诊断抄录用;缺失源返回 Ok(0))。
 /// r52 快照:承继格(引用来源轮证据链;不重新计票,不参与 Confirmed
 /// 断言)。capability_state=carried;denied_reason 携带来源引用说明。
-fn carried_cell(
+pub(crate) fn carried_cell(
     stage: &str,
     provider: &ProviderName,
     manifest: &super::snapshot::SnapshotManifest,
@@ -7973,6 +8190,11 @@ fn carried_cell(
         session_projection_digest: String::new(),
         provider_events: Vec::new(),
         execution_origin: format!("carried:{snapshot_id}"),
+        carried_source_evidence_root: Some(manifest.source_evidence_root.clone()),
+        carried_workspace_digest: manifest.workspace_digest.clone(),
+        carried_aggregate_digest: manifest.aggregate_digest.clone(),
+        carried_capability_digest: manifest.capability_digest.clone(),
+        carried_policy_digest: manifest.policy_digest.clone(),
     }
 }
 
