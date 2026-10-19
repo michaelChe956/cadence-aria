@@ -225,8 +225,10 @@ async fn b1_direct_launch_registers_real_process_with_engine_scope() {
     );
 }
 
-/// 预留失败 → 零 spawn:store 根不可写时 `start_owned` 直接失败,连
-/// `--version` 探测都不得发生。
+/// 预留失败 → 零 provider 会话 spawn:store 根不可写时 `start_owned`
+/// 直接失败。版本探测(每次 launch 前的兼容门)允许先于预留执行(与
+/// Claude/Codex 同序,B1 F2)——探测不计业务 writer;`acp` 会话 spawn
+/// 必须零次。
 #[tokio::test]
 async fn b1_reserve_failure_spawns_nothing() {
     let env = b1_env();
@@ -235,7 +237,7 @@ async fn b1_reserve_failure_spawns_nothing() {
     std::fs::write(
         &probe,
         format!(
-            "#!/usr/bin/env bash\nprintf 'spawned %s\\n' \"${{1:-}}\" >> '{}'\nexit 1\n",
+            "#!/usr/bin/env bash\nif [ \"${{1:-}}\" = \"--version\" ]; then echo 'kimi 0.34.0'; exit 0; fi\nprintf 'spawned %s\\n' \"${{1:-}}\" >> '{}'\nexit 1\n",
             marker.display()
         ),
     )
@@ -260,14 +262,16 @@ async fn b1_reserve_failure_spawns_nothing() {
         Err(error) => error,
     };
     assert!(
-        error.details.contains("provider_resources"),
-        "失败必须来自预留而非其它路径: {}",
+        error.code == crate::protocol::provider_errors::ProviderErrorCode::ProviderUnavailable
+            && error.details.contains("provider_resources_store:"),
+        "失败必须来自预留(provider_resources_store)而非其它路径: {:?} {}",
+        error.code,
         error.details
     );
+    let marker_text = std::fs::read_to_string(&marker).unwrap_or_default();
     assert!(
-        !marker.exists(),
-        "预留失败 → 零 spawn(含 --version 探测),marker={}",
-        marker.display()
+        !marker_text.lines().any(|line| line.trim() == "spawned acp"),
+        "预留失败 → 零 provider 会话 spawn(版本探测不计业务 writer),marker={marker_text:?}"
     );
 }
 

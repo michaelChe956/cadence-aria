@@ -1494,6 +1494,62 @@ pub trait StreamingProviderAdapter: Send + Sync {
     }
 }
 
+/// B1-1 F2:launch future 被外层 drop 时的预留兜底。
+///
+/// 引擎在 provider_start 期间取消/超时会 cancel 后 **drop launch future**;
+/// 此时 adapter 的 `Err` 分支与成功尾部任务都不会执行,预留会以"未确认"
+/// 永久留在 durable store(同 attempt 后续 quiesce 恒 `RecoveryRequired`,
+/// 阻塞下一次开窗)。守卫在该 Drop 点把尚未交给会话尾部的登记交回收口
+/// 注销:未回填身份 = 零 spawn 或无子进程身份,直接解除;已回填身份走
+/// release 的 killpg+有界观察。
+///
+/// 正常路径必须在交出会话前 `disarm`——此后注销由会话尾部负责,守卫
+/// 不得再动登记。
+pub(crate) struct LaunchReservationGuard {
+    ownership: crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
+    armed: bool,
+}
+
+impl LaunchReservationGuard {
+    pub(crate) fn new(
+        ownership: crate::cross_cutting::provider_resources::TrustedLaunchOwnership,
+    ) -> Self {
+        Self {
+            ownership,
+            armed: true,
+        }
+    }
+
+    /// 正常路径(会话已建立并交由尾部/显式收口完成):解除守卫。
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for LaunchReservationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let ownership = self.ownership.clone();
+        // Drop 不能 await:把收口注销交给当前运行时;无运行时(测试线程
+        // 外/运行期关闭)保留 durable 登记交 scope 级恢复面,不吞成"已清理"。
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    ownership.release_after_session_tail().await;
+                });
+            }
+            Err(_) => {
+                tracing::warn!(
+                    resource = ownership.resource_id(),
+                    "provider_launch_guard_drop_without_runtime: 预留未确认且无异步运行时,保留登记交恢复面"
+                );
+            }
+        }
+    }
+}
+
 /// `StreamingProviderAdapter::start_owned` 的默认生命周期实现(B1-1)。
 ///
 /// 预留(durable,失败零 spawn)→ adapter `start` → 失败路径收口后注销;
@@ -1699,4 +1755,84 @@ pub(crate) async fn run_legacy_bridge_stream<'a>(
     });
 
     Ok(rx)
+}
+
+/// B1-1 F2 兜底守卫的单元测试:armed Drop 把未确认预留交回收口注销;
+/// 正常路径 `disarm` 后守卫绝不触碰登记(注销归会话尾部)。
+#[cfg(all(test, unix))]
+mod launch_reservation_guard_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::LaunchReservationGuard;
+    use crate::cross_cutting::provider_resources::{
+        OwnedResourceKind, ProviderResourceRecord, ProviderRunResourceScope, ResourceScopeKey,
+        TrustedLaunchOwnership,
+    };
+    use crate::product::provider_resource_store::ProviderResourceStore;
+
+    fn records(
+        store_root: &std::path::Path,
+        key: &ResourceScopeKey,
+    ) -> Vec<ProviderResourceRecord> {
+        ProviderResourceStore::new(store_root)
+            .list_scope(key)
+            .expect("list guard scope")
+            .into_iter()
+            .filter(|record| matches!(record.kind, OwnedResourceKind::Process))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn armed_guard_drop_releases_unconfirmed_reservation_and_disarm_keeps_it() {
+        let base = tempfile::tempdir().expect("guard base");
+        let private_root = base.path().join("private-root");
+        std::fs::create_dir_all(&private_root).expect("private root");
+        let store_root = base.path().join("resource-store");
+        std::fs::create_dir_all(&store_root).expect("store root");
+        let key = ResourceScopeKey {
+            scope_id: "code-delivery-attempt-guard".to_string(),
+            run_id: "role-run-guard".to_string(),
+            boot_identity: format!("aria-engine-{}-guard", std::process::id()),
+        };
+        let scope = ProviderRunResourceScope::open_for_recovery(
+            &key,
+            None,
+            &private_root,
+            &store_root,
+            None,
+        )
+        .expect("open guard scope");
+        let ownership =
+            TrustedLaunchOwnership::mint(Arc::new(scope), "code_delivery provider process: guard");
+
+        let _reservation = ownership.reserve().expect("reserve");
+        assert_eq!(records(&store_root, &key).len(), 1, "预留已落盘");
+        {
+            let _guard = LaunchReservationGuard::new(ownership.clone());
+            // armed Drop:drop 时把未确认预留交回收口注销。
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !records(&store_root, &key).is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "armed guard 必须在 drop 后解除未确认预留"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let _reservation = ownership.reserve().expect("re-reserve");
+        {
+            let mut guard = LaunchReservationGuard::new(ownership.clone());
+            guard.disarm();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            records(&store_root, &key).len(),
+            1,
+            "disarm 后守卫不得触碰登记(注销归会话尾部)"
+        );
+        ownership.release_after_session_tail().await;
+        assert!(records(&store_root, &key).is_empty());
+    }
 }

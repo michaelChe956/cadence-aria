@@ -22,7 +22,7 @@ use crate::cross_cutting::process_manager::{
     bounded_task_join, provider_child_exit_error, run_session_tail_with_exit_watch,
 };
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
-use crate::cross_cutting::provider_resources::{ResourceReservation, TrustedLaunchOwnership};
+use crate::cross_cutting::provider_resources::TrustedLaunchOwnership;
 use crate::cross_cutting::streaming_provider::{
     LcVersionCache, LcVersionObservation, LcVersionProbe, LcVersionProbeKey, ProviderEvent,
     ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
@@ -534,14 +534,15 @@ fn lc_start_audit_literal(
 
 impl PiProvider {
     /// direct 启动实现(`StreamingProviderAdapter::start` 的本体)。B1-1:
-    /// `owned` 携带受信 launch 归属时,spawn 点回填真实 PID+starttime;
-    /// `None` 保持既有裸 start 语义。预留/收口生命周期由 `start_owned`
-    /// 覆写承担(错误路径收口注销;成功路径尾部收口注销)。
+    /// `owned` 携带受信 launch 归属时,spawn 前预留、spawn 点回填真实
+    /// PID+starttime;`None` 保持既有裸 start 语义。预留紧邻 spawn
+    /// (F2:版本探测/extension 等可取消 await 之前零 durable 副作用),
+    /// 收口注销生命周期由 `start_owned` 覆写与 Drop 守卫承担。
     async fn start_direct(
         &self,
         mut input: StreamingProviderInput,
         cancel: CancellationToken,
-        owned: Option<(&TrustedLaunchOwnership, &ResourceReservation)>,
+        owned: Option<&TrustedLaunchOwnership>,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         // 双向 spawn 前守卫（Task 3.1）：非法角色×策略组合在创建子进程之前拒绝。
         validate_tool_policy_for_role(&input.role, input.tool_policy.as_ref()).map_err(
@@ -714,22 +715,50 @@ impl PiProvider {
         );
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let command = self.command.to_string_lossy().to_string();
-        let process = ProcessManager::spawn(
+        // B1-1 F2:预留紧邻 spawn(与 Claude/Codex 同序)——此前的版本探测/
+        // extension 等可取消 await 不产生 durable 副作用;launch future 在
+        // 探测处被引擎 drop 时不会留下"预留未确认"。守卫覆盖预留→spawn→
+        // 回填之间仅剩的可取消点(瞬态 spawn 重试 sleep),Drop 即收口注销。
+        let (reservation, mut launch_guard) = match owned {
+            Some(ownership) => (
+                Some(ownership.reserve()?),
+                Some(
+                    crate::cross_cutting::streaming_provider::LaunchReservationGuard::new(
+                        ownership.clone(),
+                    ),
+                ),
+            ),
+            None => (None, None),
+        };
+        let process = match ProcessManager::spawn(
             &command,
             &arg_refs,
             &input.working_dir,
             &input.env_vars,
             cancel.clone(),
         )
-        .await?;
+        .await
+        {
+            Ok(process) => process,
+            Err(error) => {
+                // spawn 失败=零子进程:预留未确认,显式注销(守卫之外幂等兜底)。
+                if let Some(guard) = launch_guard.as_mut() {
+                    guard.disarm();
+                }
+                if let Some(ownership) = owned {
+                    ownership.release_after_session_tail().await;
+                }
+                return Err(error);
+            }
+        };
 
         let peer = JsonRpcPeer::new(process.stdout, process.stdin);
         let stderr = process.stderr;
         let mut child = process.child;
         // B1-1 接线片:spawn 成功即回填真实 PID+starttime(/proc 观察,PID
         // 复用防护);确认失败整组停止——kill+wait 后上抛,收口注销由
-        // `start_owned` 错误路径承担(预留已落盘,身份未确认按无身份注销)。
-        if let Some((ownership, reservation)) = owned {
+        // 守卫/`start_owned` 错误路径承担(身份未确认按无身份注销)。
+        if let (Some(ownership), Some(reservation)) = (owned, reservation.as_ref()) {
             if let Err(error) =
                 ownership.backfill_spawned_identity(reservation, child.id().unwrap_or(0))
             {
@@ -866,6 +895,10 @@ impl PiProvider {
             }
         });
 
+        // 会话已建立并交由 `release_session_after_tail` 尾部收口:守卫退出舞台。
+        if let Some(guard) = launch_guard.as_mut() {
+            guard.disarm();
+        }
         Ok(ProviderSession {
             native_session_id,
             events: event_rx,
@@ -925,11 +958,11 @@ impl StreamingProviderAdapter for PiProvider {
 
     /// B1-1(波 2):受信资源归属启动覆写——在默认生命周期(预留→start→
     /// 错误路径收口注销/成功路径尾部收口注销)之上,把载体穿到 spawn 点:
-    /// spawn 成功即经 `backfill_spawned_identity` 回填真实 PID+starttime
-    /// (确认失败整组停止)。未携带载体保持既有裸 start 语义(无登记,
-    /// 零行为变化)。注销不在协议 `Completed` 事件点——源事件通道真实
-    /// 终结(终结保证契约)后才按登记身份收口;静止不可证时保留 durable
-    /// 记录停等(scope 级 quiesce/恢复驱动接管)。
+    /// 预留紧邻 spawn(F2),spawn 成功即经 `backfill_spawned_identity`
+    /// 回填真实 PID+starttime(确认失败整组停止)。未携带载体保持既有
+    /// 裸 start 语义(无登记,零行为变化)。注销不在协议 `Completed`
+    /// 事件点——源事件通道真实终结(终结保证契约)后才按登记身份收口;
+    /// 静止不可证时保留 durable 记录停等(scope 级 quiesce/恢复驱动接管)。
     async fn start_owned(
         &self,
         input: StreamingProviderInput,
@@ -940,15 +973,10 @@ impl StreamingProviderAdapter for PiProvider {
             // 无归属请求(legacy/单仓 direct/测试面):既有裸 start 语义。
             return self.start(input, cancel).await;
         };
-        // ① 预留先于一切 spawn 副作用(durable;失败零 spawn)。
-        let reservation = ownership.reserve()?;
-        match self
-            .start_direct(input, cancel, Some((&ownership, &reservation)))
-            .await
-        {
+        match self.start_direct(input, cancel, Some(&ownership)).await {
             Ok(session) => Ok(release_session_after_tail(session, ownership)),
             Err(error) => {
-                // ② 错误路径:adapter 错误链已 kill+wait;有登记身份则
+                // 错误路径:adapter 错误链已 kill+wait;有登记身份则
                 // killpg+有界观察真实收口后注销(未回填身份按无身份注销)。
                 ownership.release_after_session_tail().await;
                 Err(error)
@@ -1140,6 +1168,12 @@ impl StreamingProviderAdapter for PiProvider {
                     .map(|reservation| (ownership.clone(), reservation))
             })
             .transpose()?;
+        // B1-1 F2:守卫覆盖预留→spawn→回填之间仅剩的可取消点(瞬态 spawn
+        // 重试 sleep / spawn 后握手的可取消 await);launch future 被 drop
+        // 时由 Drop 收口注销,不留下未确认登记。
+        let mut launch_guard = owned.as_ref().map(|(ownership, _)| {
+            crate::cross_cutting::streaming_provider::LaunchReservationGuard::new(ownership.clone())
+        });
         let process = match ProcessManager::spawn(
             &command,
             &arg_refs,
@@ -1354,6 +1388,9 @@ impl StreamingProviderAdapter for PiProvider {
         };
         // B1-1:成功路径包装——源事件通道真实终结(终结保证契约;**非**
         // 协议 Completed 事件点)或消费方提前丢弃后,按登记身份收口注销。
+        if let Some(guard) = launch_guard.as_mut() {
+            guard.disarm();
+        }
         Ok(match launch_ownership {
             Some(ownership) => release_session_after_tail(session, ownership),
             None => session,
@@ -1400,5 +1437,165 @@ impl StreamingProviderAdapter for PiProvider {
                 std::sync::Arc::new(PiPolicyProjector::new(exact_version)),
             ),
         )
+    }
+}
+
+/// B1 审查 F2 回归:launch future 在版本探测处被引擎 drop 时,不得留下
+/// "预留未确认"的 durable Process 记录(该记录会让同 attempt 后续
+/// quiesce 恒返回 RecoveryRequired,阻塞下一次开窗)。预留紧邻 spawn 之后,
+/// 版本探测阶段零 durable 副作用。
+#[cfg(all(test, unix))]
+mod b1_launch_cancel_tests {
+    use std::collections::BTreeMap;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::cross_cutting::provider_resources::{
+        OwnedResourceKind, ProviderResourceRecord, ProviderRunResourceScope, ResourceScopeKey,
+        TrustedLaunchOwnership,
+    };
+    use crate::product::provider_resource_store::ProviderResourceStore;
+    use crate::protocol::contracts::{AdapterRole, ProviderType};
+
+    fn write_executable(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        let mut file = std::fs::File::create(&path).expect("create fixture");
+        writeln!(file, "#!/bin/sh\n{body}").expect("write fixture");
+        let mut permissions = file.metadata().expect("fixture metadata").permissions();
+        permissions.set_mode(0o755);
+        file.set_permissions(permissions).expect("chmod fixture");
+        path
+    }
+
+    /// `--version` 先落 probe marker,再等 release(有界 2s)后打印兼容版本;
+    /// rpc 模式落 rpc marker 后常驻。测试据此把 launch future 精确停在版本
+    /// 探测 await 上,并在 drop 后确认从未进入 provider spawn。
+    fn blocking_probe_fixture(
+        dir: &Path,
+        probe_marker: &Path,
+        release_marker: &Path,
+        rpc_marker: &Path,
+    ) -> PathBuf {
+        let body = format!(
+            "if [ \"$1\" = \"--version\" ]; then\n  touch \"{probe}\"\n  n=0\n  while [ ! -f \"{release}\" ] && [ $n -lt 200 ]; do sleep 0.01; n=$((n+1)); done\n  echo 0.83.0\n  exit 0\nfi\ntouch \"{rpc}\"\nwhile IFS= read -r line; do :; done",
+            probe = probe_marker.display(),
+            release = release_marker.display(),
+            rpc = rpc_marker.display(),
+        );
+        write_executable(dir, "fake-pi-blocking-probe", &body)
+    }
+
+    fn process_records(store_root: &Path, key: &ResourceScopeKey) -> Vec<ProviderResourceRecord> {
+        ProviderResourceStore::new(store_root)
+            .list_scope(key)
+            .expect("list pi cancel scope")
+            .into_iter()
+            .filter(|record| matches!(record.kind, OwnedResourceKind::Process))
+            .collect()
+    }
+
+    fn input_for_test(working_dir: PathBuf) -> StreamingProviderInput {
+        StreamingProviderInput {
+            working_directory: None,
+            baseline_tree: None,
+            tool_policy: None,
+            audit_sink: None,
+            provider_type: ProviderType::Pi,
+            role: AdapterRole::Executor,
+            prompt: "pi cancel probe".to_string(),
+            working_dir,
+            workspace_session_id: None,
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: BTreeMap::new(),
+            timeout_secs: 60,
+        }
+    }
+
+    #[tokio::test]
+    async fn pi_direct_cancel_during_version_probe_leaves_no_reservation() {
+        let base = tempfile::tempdir().expect("pi cancel base");
+        let private_root = base.path().join("private-root");
+        std::fs::create_dir_all(&private_root).expect("private root");
+        let store_root = base.path().join("resource-store");
+        std::fs::create_dir_all(&store_root).expect("store root");
+        let key = ResourceScopeKey {
+            scope_id: "code-delivery-attempt-pi-cancel".to_string(),
+            run_id: "role-run-pi-cancel".to_string(),
+            boot_identity: format!("aria-engine-{}-pi-cancel", std::process::id()),
+        };
+        let scope = ProviderRunResourceScope::open_for_recovery(
+            &key,
+            None,
+            &private_root,
+            &store_root,
+            None,
+        )
+        .expect("open pi cancel scope");
+        let ownership = TrustedLaunchOwnership::mint(
+            Arc::new(scope),
+            "code_delivery provider process: pi cancel",
+        );
+
+        let marker_dir = tempfile::tempdir().expect("pi cancel markers");
+        let probe_marker = marker_dir.path().join("probe-started");
+        let release_marker = marker_dir.path().join("probe-release");
+        let rpc_marker = marker_dir.path().join("rpc-spawned");
+        let working_dir = marker_dir.path().join("cwd");
+        std::fs::create_dir_all(&working_dir).expect("working dir");
+        let provider = PiProvider::new(blocking_probe_fixture(
+            marker_dir.path(),
+            &probe_marker,
+            &release_marker,
+            &rpc_marker,
+        ));
+
+        let mut launch = Box::pin(provider.start_owned(
+            input_for_test(working_dir),
+            Some(ownership),
+            CancellationToken::new(),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if probe_marker.exists() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fixture 的 --version 探测必须启动(probe marker 未出现)"
+            );
+            match tokio::time::timeout(Duration::from_millis(10), &mut launch).await {
+                Ok(_) => panic!("launch 不得在版本探测完成前返回"),
+                Err(_) => {}
+            }
+        }
+        // 引擎取消时序:provider_start 的 select 分支 cancel 后 drop launch future。
+        drop(launch);
+        std::fs::write(&release_marker, b"release").expect("release probe");
+
+        // 取消发生在版本探测(预留之前)→ scope 内不得有任何 durable 登记。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if process_records(&store_root, &key).is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "取消于版本探测时不得留下未确认预留: {:?}",
+                process_records(&store_root, &key)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !rpc_marker.exists(),
+            "取消于版本探测时不得进入 provider spawn(rpc marker 不得出现)"
+        );
     }
 }

@@ -1162,7 +1162,7 @@ impl ProviderRunResourceScope {
     /// 资源启动包装器(进程面):持久预留 → spawn → 真实 PID-start 身份
     /// 确认,闭合预留与真实身份间的崩溃口。预留失败不 spawn;spawn 失败
     /// 解除登记;确认写失败停止子进程(整组)并进入补偿。
-    #[cfg_attr(not(test), allow(dead_code))] // F2 载体:预留→spawn→PID-start 确认的进程包装器;生产 adapter 接线前由 drop_tests 钉住合同
+    #[cfg_attr(not(test), allow(dead_code))] // 进程面包装器的合同载体:预留→spawn→PID-start 确认语义的参考实现。B1 生产接线经 `TrustedLaunchOwnership` + adapter 自带 spawn(四家真实 provider 的 spawn 点),本函数在非测试构建无调用方;保留以钉住"预留先于 spawn / spawn 失败零残留 / 确认失败整组停止"合同(drop_tests),不得误判存在生产调用或把它接回 adapter。
     pub(crate) async fn start_owned_process(
         &self,
         spec: OwnedResourceSpec,
@@ -1274,7 +1274,10 @@ impl ProviderRunResourceScope {
 /// **生命周期**(B1 raw start 4 点的默认合同,见
 /// `StreamingProviderAdapter::start_owned`):预留(durable,失败零 spawn)
 /// → spawn → `backfill_spawned_identity` 回填 PID+starttime → 会话真实
-/// 收口(进程组静止)后注销——**注销不在协议 Completed**。
+/// 收口(进程组静止)后注销——**注销不在协议 Completed**。预留必须紧邻
+/// spawn(版本探测等可取消 await 之前零 durable 副作用);launch future
+/// 被外层 drop 时由 `streaming_provider::LaunchReservationGuard` 兜底
+/// 收口(未确认预留直接解除)。
 ///
 /// **资源 ID**:每次 launch 唯一(`provider-process-{pid}-{seq}-{nanos}`,
 /// 进程内单调+时钟),禁止恒定 `provider-process` 使同 run 多次调用/重试

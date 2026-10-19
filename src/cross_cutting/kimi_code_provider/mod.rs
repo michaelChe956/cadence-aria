@@ -389,20 +389,33 @@ impl KimiCodeProvider {
         Ok(process)
     }
 
-    /// direct 启动体:`registration = None` 为既有裸 start 语义(零登记);
-    /// `Some` 为受信载体已预留的 launch。spawn 之前的失败(角色/策略/版本
-    /// 门)发生在预留之后、零 spawn,按无身份注销;会话真实尾部(子进程
-    /// 回收、事件通道关闭)后按登记身份收口注销——不在协议 Completed。
+    /// direct 启动体:`ownership = None` 为既有裸 start 语义(零登记);
+    /// `Some` 为受信载体 launch。预留紧邻 spawn(F2:版本探测等可取消
+    /// await 之前零 durable 副作用);spawn 前失败=零 spawn,预留未确认
+    /// 由外层按无身份注销;会话真实尾部(子进程回收、事件通道关闭)后
+    /// 按登记身份收口注销——不在协议 Completed。
     async fn start_session(
         &self,
         input: StreamingProviderInput,
-        registration: Option<(TrustedLaunchOwnership, ResourceReservation)>,
+        ownership: Option<TrustedLaunchOwnership>,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        let mut registration = registration;
+        let mut registration: Option<(TrustedLaunchOwnership, ResourceReservation)> = None;
+        let mut launch_guard = None;
         let result = self
-            .start_session_inner(input, &mut registration, cancel)
+            .start_session_inner(
+                input,
+                ownership.as_ref(),
+                &mut registration,
+                &mut launch_guard,
+                cancel,
+            )
             .await;
+        // 错误路径(含 spawn 前门禁)与内层提前返回:守卫退出舞台,显式
+        // 收口注销;成功路径内层已把句柄交给尾部任务并 disarm。
+        if let Some(guard) = launch_guard.as_mut() {
+            guard.disarm();
+        }
         if result.is_err()
             && let Some((ownership, _reservation)) = registration.take()
         {
@@ -414,7 +427,9 @@ impl KimiCodeProvider {
     async fn start_session_inner(
         &self,
         input: StreamingProviderInput,
+        ownership: Option<&TrustedLaunchOwnership>,
         registration: &mut Option<(TrustedLaunchOwnership, ResourceReservation)>,
+        launch_guard: &mut Option<crate::cross_cutting::streaming_provider::LaunchReservationGuard>,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
         // 批2 Task 20a-fix(F2):四家同源启动检查首步——非法角色×策略
@@ -434,6 +449,17 @@ impl KimiCodeProvider {
         ensure_kimi_version_compatible(&version)?;
         let args = self.build_args();
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        // B1-1 F2:预留紧邻 spawn(版本探测之后,与 Claude/Codex 同序);
+        // 守卫覆盖预留→spawn→回填之间仅剩的可取消点(瞬态 spawn 重试
+        // sleep),launch future 被引擎 drop 时由 Drop 收口注销。
+        if let Some(ownership) = ownership {
+            *registration = Some((ownership.clone(), ownership.reserve()?));
+            *launch_guard = Some(
+                crate::cross_cutting::streaming_provider::LaunchReservationGuard::new(
+                    ownership.clone(),
+                ),
+            );
+        }
         let process = self
             .spawn_registered(
                 &arg_refs,
@@ -454,6 +480,10 @@ impl KimiCodeProvider {
         let tail_ownership = registration
             .take()
             .map(|(ownership, _reservation)| ownership);
+        // 登记句柄已交给尾部任务:守卫退出舞台(此后注销归尾部收口)。
+        if let Some(guard) = launch_guard.as_mut() {
+            guard.disarm();
+        }
         let _ = event_tx
             .send(ProviderEvent::StatusChanged(ProviderStatus::Starting))
             .await;
@@ -570,10 +600,11 @@ impl StreamingProviderAdapter for KimiCodeProvider {
     }
 
     /// B1-1(波 2):direct 路径的受信资源登记接线。载体由 engine 三处真实
-    /// scope 铸造(本次 launch 唯一资源 ID):预留(durable,失败零 spawn)
-    /// → spawn → 回填真实 PID+starttime → 会话真实收口(进程组静止)后
-    /// 注销。未携带载体 = 无归属请求(legacy/测试面),走 trait 默认——
-    /// 既有裸 start 语义,不在此伪造登记、也不绕过默认方法。
+    /// scope 铸造(本次 launch 唯一资源 ID):预留紧邻 spawn(F2:版本探测
+    /// 等可取消 await 之前零 durable 副作用)→ spawn → 回填真实 PID+
+    /// starttime → 会话真实收口(进程组静止)后注销。未携带载体 = 无归属
+    /// 请求(legacy/测试面),走 trait 默认——既有裸 start 语义,不在此
+    /// 伪造登记、也不绕过默认方法。
     async fn start_owned(
         &self,
         input: StreamingProviderInput,
@@ -586,10 +617,7 @@ impl StreamingProviderAdapter for KimiCodeProvider {
             )
             .await;
         };
-        // 预留先于一切 spawn 副作用(含 --version 探测):失败即零 spawn。
-        let reservation = ownership.reserve()?;
-        self.start_session(input, Some((ownership, reservation)), cancel)
-            .await
+        self.start_session(input, Some(ownership), cancel).await
     }
 
     /// LC validated 启动(Task 4c):只接受 gateway 产出的 validated input。
@@ -606,17 +634,13 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        // B1-1:validated 载体的受信归属与 direct 同一生命周期——预留先于
-        // 版本探测与子进程(失败零 spawn);spawn 后回填真实 PID+starttime;
-        // 登记句柄活到会话真实尾部。未携带载体 = 无归属请求(存量构造)。
-        let mut registration = match validated.launch_ownership() {
-            Some(ownership) => {
-                let ownership = ownership.clone();
-                let reservation = ownership.reserve()?;
-                Some((ownership, reservation))
-            }
-            None => None,
-        };
+        // B1-1:validated 载体的受信归属与 direct 同一生命周期——预留紧邻
+        // spawn(F2:版本探测/投影/argv 等可取消 await 之前零 durable 副
+        // 作用);spawn 后回填真实 PID+starttime;登记句柄活到会话真实尾部。
+        // 未携带载体 = 无归属请求(存量构造)。
+        let ownership = validated.launch_ownership().cloned();
+        let mut registration: Option<(TrustedLaunchOwnership, ResourceReservation)> = None;
+        let mut launch_guard = None;
         let result = async {
         let (mut input, launch) = validated.into_parts();
         let envelope = launch.envelope().clone();
@@ -783,6 +807,17 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         let args = self.build_args();
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let process_cwd = envelope.working_directory.clone();
+        // B1-1 F2:预留紧邻 spawn(版本观测/投影复验/argv 全部完成之后)。
+        // 守卫覆盖预留→spawn→回填之间仅剩的可取消点(瞬态 spawn 重试
+        // sleep 与 spawn 后握手),launch future 被引擎 drop 时由 Drop 收口。
+        if let Some(ownership) = ownership.as_ref() {
+            registration = Some((ownership.clone(), ownership.reserve()?));
+            launch_guard = Some(
+                crate::cross_cutting::streaming_provider::LaunchReservationGuard::new(
+                    ownership.clone(),
+                ),
+            );
+        }
         let process = self
             .spawn_registered(
                 &arg_refs,
@@ -850,6 +885,10 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         let tail_ownership = registration
             .take()
             .map(|(ownership, _reservation)| ownership);
+        // 登记句柄已交给尾部任务:守卫退出舞台(此后注销归尾部收口)。
+        if let Some(guard) = launch_guard.as_mut() {
+            guard.disarm();
+        }
 
         // 8) 会话任务(与 direct `start` 同构:stderr 收集 + MCP 注入决策
         //    + 失败 kill 链);差异:携带 LC boundary plan 与统一 audit
@@ -990,9 +1029,12 @@ impl StreamingProviderAdapter for KimiCodeProvider {
         })
         }
         .await;
-        // spawn 之前的失败(策略/版本/投影门):预留已落盘但零 spawn,
-        // 无身份 → 直接注销;spawn 后回填失败的子进程已整组停止。
-        // 会话尾部路径(握手失败/取消/正常完成)已把句柄交给尾部任务。
+        // 错误路径(含 spawn 前门禁):守卫退出舞台,显式收口注销;成功
+        // 路径内层已把句柄交给尾部任务并 disarm。spawn 之前的失败零
+        // spawn,无身份 → 直接注销;spawn 后回填失败的子进程已整组停止。
+        if let Some(guard) = launch_guard.as_mut() {
+            guard.disarm();
+        }
         if result.is_err()
             && let Some((ownership, _reservation)) = registration.take()
         {
@@ -1069,5 +1111,166 @@ impl StreamingProviderAdapter for KimiCodeProvider {
                 observation.exact_version().to_string(),
             )),
         ))
+    }
+}
+
+/// B1 审查 F2 回归:Kimi direct 面的预留必须紧邻 spawn(版本探测之后)。
+/// launch future 在 `--version` 探测处被引擎 drop 时不得留下"预留未确认"
+/// 的 durable Process 记录(该记录会让同 attempt 后续 quiesce 恒返回
+/// RecoveryRequired,阻塞下一次开窗)。
+#[cfg(all(test, unix))]
+mod b1_launch_cancel_tests {
+    use std::collections::BTreeMap;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::cross_cutting::provider_resources::{
+        OwnedResourceKind, ProviderResourceRecord, ProviderRunResourceScope, ResourceScopeKey,
+        TrustedLaunchOwnership,
+    };
+    use crate::cross_cutting::streaming_provider::ProviderPermissionMode;
+    use crate::product::provider_resource_store::ProviderResourceStore;
+    use crate::protocol::contracts::{AdapterRole, ProviderType};
+
+    fn write_executable(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        let mut file = std::fs::File::create(&path).expect("create fixture");
+        writeln!(file, "#!/bin/sh\n{body}").expect("write fixture");
+        let mut permissions = file.metadata().expect("fixture metadata").permissions();
+        permissions.set_mode(0o755);
+        file.set_permissions(permissions).expect("chmod fixture");
+        path
+    }
+
+    /// `--version` 先落 probe marker,再等 release(有界 2s)后打印兼容版本;
+    /// ACP 模式落 rpc marker 后常驻。测试据此把 launch future 精确停在版本
+    /// 探测 await 上,并在 drop 后确认从未进入 provider spawn。
+    fn blocking_probe_fixture(
+        dir: &Path,
+        probe_marker: &Path,
+        release_marker: &Path,
+        rpc_marker: &Path,
+    ) -> PathBuf {
+        let body = format!(
+            "if [ \"$1\" = \"--version\" ]; then\n  touch \"{probe}\"\n  n=0\n  while [ ! -f \"{release}\" ] && [ $n -lt 200 ]; do sleep 0.01; n=$((n+1)); done\n  echo kimi 0.34.0\n  exit 0\nfi\ntouch \"{rpc}\"\nwhile IFS= read -r line; do :; done",
+            probe = probe_marker.display(),
+            release = release_marker.display(),
+            rpc = rpc_marker.display(),
+        );
+        write_executable(dir, "fake-kimi-blocking-probe", &body)
+    }
+
+    fn process_records(store_root: &Path, key: &ResourceScopeKey) -> Vec<ProviderResourceRecord> {
+        ProviderResourceStore::new(store_root)
+            .list_scope(key)
+            .expect("list kimi cancel scope")
+            .into_iter()
+            .filter(|record| matches!(record.kind, OwnedResourceKind::Process))
+            .collect()
+    }
+
+    fn input_for_test(working_dir: PathBuf) -> StreamingProviderInput {
+        StreamingProviderInput {
+            working_directory: None,
+            baseline_tree: None,
+            tool_policy: None,
+            audit_sink: None,
+            provider_type: ProviderType::KimiCode,
+            role: AdapterRole::Orchestrator,
+            prompt: "kimi cancel probe".to_string(),
+            working_dir,
+            workspace_session_id: None,
+            resume_provider_session_id: None,
+            permission_mode: ProviderPermissionMode::Auto,
+            structured_output_contract: None,
+            env_vars: BTreeMap::new(),
+            timeout_secs: 60,
+        }
+    }
+
+    #[tokio::test]
+    async fn kimi_direct_cancel_during_version_probe_leaves_no_reservation() {
+        let base = tempfile::tempdir().expect("kimi cancel base");
+        let private_root = base.path().join("private-root");
+        std::fs::create_dir_all(&private_root).expect("private root");
+        let store_root = base.path().join("resource-store");
+        std::fs::create_dir_all(&store_root).expect("store root");
+        let key = ResourceScopeKey {
+            scope_id: "code-delivery-attempt-kimi-cancel".to_string(),
+            run_id: "role-run-kimi-cancel".to_string(),
+            boot_identity: format!("aria-engine-{}-kimi-cancel", std::process::id()),
+        };
+        let scope = ProviderRunResourceScope::open_for_recovery(
+            &key,
+            None,
+            &private_root,
+            &store_root,
+            None,
+        )
+        .expect("open kimi cancel scope");
+        let ownership = TrustedLaunchOwnership::mint(
+            Arc::new(scope),
+            "code_delivery provider process: kimi cancel",
+        );
+
+        let marker_dir = tempfile::tempdir().expect("kimi cancel markers");
+        let probe_marker = marker_dir.path().join("probe-started");
+        let release_marker = marker_dir.path().join("probe-release");
+        let rpc_marker = marker_dir.path().join("rpc-spawned");
+        let working_dir = marker_dir.path().join("cwd");
+        std::fs::create_dir_all(&working_dir).expect("working dir");
+        let provider = KimiCodeProvider::new(blocking_probe_fixture(
+            marker_dir.path(),
+            &probe_marker,
+            &release_marker,
+            &rpc_marker,
+        ));
+
+        let mut launch = Box::pin(provider.start_owned(
+            input_for_test(working_dir),
+            Some(ownership),
+            CancellationToken::new(),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if probe_marker.exists() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fixture 的 --version 探测必须启动(probe marker 未出现)"
+            );
+            match tokio::time::timeout(Duration::from_millis(10), &mut launch).await {
+                Ok(_) => panic!("launch 不得在版本探测完成前返回"),
+                Err(_) => {}
+            }
+        }
+        // 引擎取消时序:provider_start 的 select 分支 cancel 后 drop launch future。
+        drop(launch);
+        std::fs::write(&release_marker, b"release").expect("release probe");
+
+        // 取消发生在版本探测(预留之前)→ scope 内不得有任何 durable 登记。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if process_records(&store_root, &key).is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "取消于版本探测时不得留下未确认预留: {:?}",
+                process_records(&store_root, &key)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !rpc_marker.exists(),
+            "取消于版本探测时不得进入 provider spawn(ACP marker 不得出现)"
+        );
     }
 }
