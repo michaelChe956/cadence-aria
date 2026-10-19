@@ -417,9 +417,11 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
 /// - A7(a) mid-commit journal 不抢跑:kill 时 ReviewRequest journal 停在
 ///   `commit_started`(提交进行中),重启后收敛到终态,且收敛时刻不早于
 ///   窗口恢复完成时刻(journal 在途/post-restore 先后关系可证);
-/// - A7(b) 未知容器停等:无登记记录的容器被 park 保持锁、不 kill 不
-///   clean(kill 时存活 + 重启后存活 + 停等期登记面 audits 不变),人工
-///   处置后才续;
+/// - A7(b) 容器停等双半边:已登记容器(确认身份登记,平台可枚举)
+///   锁定期不被清理(登记记录在场 + 实例存活 + 人工处置后才移除;
+///   登记面 audits 停等期逐字不变);无登记记录的未知容器对平台不可
+///   观测(quiesce 只消费登记面)——如实标注 unobservable_by_platform,
+///   存活字段只记录不断言,人工处置完成仍须可证;
 /// - 停等不误杀臂(drill B):park 态 recovery_required + kept locked 日志
 ///   + 未知 daemon 重启后存活。
 pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Vec<String>> {
@@ -795,14 +797,41 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
         if !audits_unchanged {
             failures.push("停等期 audits 发生变化(登记面被清理/改写——不 clean 被违反)".to_string());
         }
-        let container = &drill_b["unknown_container"];
-        let container_untouched = container["registered"].as_bool() == Some(false)
-            && container["alive_after_kill"].as_bool() == Some(true)
-            && container["alive_after_restart"].as_bool() == Some(true)
-            && container["removed_by_manual_disposition"].as_bool() == Some(true);
-        if !container_untouched {
+        // A7(b) 可观测半边(修复轮重设):已登记容器(确认身份登记,
+        // 平台 quiesce 可枚举)锁定期不被清理——登记记录仍在 + 容器
+        // 实例仍存活 + 人工处置完成。平台若 remove/deregister/停掉已
+        // 登记容器(而非 park),此处可红。
+        let registered_container = &drill_b["registered_container"];
+        let registered_untouched = registered_container["registered"].as_bool() == Some(true)
+            && registered_container["record_present_after_restart"].as_bool() == Some(true)
+            && registered_container["alive_after_kill"].as_bool() == Some(true)
+            && registered_container["alive_after_restart"].as_bool() == Some(true)
+            && registered_container["removed_by_manual_disposition"].as_bool() == Some(true);
+        if !registered_untouched {
             failures.push(
-                "未知容器被清理(无登记记录容器必须存活到人工处置:不 kill 不 clean)".to_string(),
+                "已登记容器在锁定期被清理(登记记录/容器实例必须原样保留到人工处置:park 而非 remove)"
+                    .to_string(),
+            );
+        }
+        // A7(b) 不可观测半边:无登记容器——平台 quiesce 只消费登记面
+        //(quiesce_scope 入口 list_scope),无枚举通道,容器存活性与平台
+        // 行为无因果:不再伪造恒真 alive 断言,改为如实标注口径
+        //(registered=false + unobservable_by_platform + 非空说明 +
+        // 人工处置完成);存活字段只记录不断言。
+        let unknown_container = &drill_b["unknown_container"];
+        let unknown_annotated = unknown_container["registered"].as_bool() == Some(false)
+            && unknown_container["observability"].as_str() == Some("unobservable_by_platform")
+            && !unknown_container["observability_note"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            && unknown_container["removed_by_manual_disposition"].as_bool() == Some(true);
+        if !unknown_annotated {
+            failures.push(
+                "未知容器证据口径不符(平台无枚举通道:须如实标注 unobservable_by_platform+\
+                 registered=false+非空说明,人工处置完成;存活性字段只记录不断言)"
+                    .to_string(),
             );
         }
         let resolved = drill_b
@@ -1444,17 +1473,31 @@ mod validator_crash_tests {
                 "daemon_alive_after_restart": true,
                 "park_audits": {
                     "before": [
+                        "/tmp/x/provider-resources/scopes/park/run/boot/resources/park-container.json sha256:bbb",
                         "/tmp/x/provider-resources/scopes/park/run/boot/resources/unconfirmed.json sha256:aaa",
                     ],
                     "after": [
+                        "/tmp/x/provider-resources/scopes/park/run/boot/resources/park-container.json sha256:bbb",
                         "/tmp/x/provider-resources/scopes/park/run/boot/resources/unconfirmed.json sha256:aaa",
                     ],
                     "unchanged": true,
                 },
+                "registered_container": {
+                    "exact_id": "ctr-registered",
+                    "name": "b45-t24-park-registered",
+                    "registered": true,
+                    "record": "/tmp/x/provider-resources/scopes/park/run/boot/resources/park-container.json",
+                    "record_present_after_restart": true,
+                    "alive_after_kill": true,
+                    "alive_after_restart": true,
+                    "removed_by_manual_disposition": true,
+                },
                 "unknown_container": {
                     "exact_id": "ctr-1",
-                    "name": "b45-t24-park",
+                    "name": "b45-t24-park-unknown",
                     "registered": false,
+                    "observability": "unobservable_by_platform",
+                    "observability_note": "平台 quiesce 只枚举登记面(provider_resources::quiesce_scope→list_scope);无登记容器对平台不可见,存活性不构成清理证据(只记录不断言)",
                     "alive_after_kill": true,
                     "alive_after_restart": true,
                     "removed_by_manual_disposition": true,
@@ -1653,22 +1696,96 @@ mod validator_crash_tests {
         );
     }
 
-    /// A7(b):未知容器被直接清理(kill/clean)→ 红。
+    /// A7(b):已登记容器在锁定期被清理(登记记录被移除/实例被停)→ 红
+    ///——可观测半边的真实断言(平台可枚举登记面,park 而非 remove)。
     #[test]
-    fn crash_validator_rejects_cleaned_unknown_container() {
+    fn crash_validator_rejects_cleaned_registered_container() {
         let mut evidence = crash_base();
-        evidence["drill_b"]["unknown_container"]["alive_after_restart"] = json!(false);
+        evidence["drill_b"]["registered_container"]["alive_after_restart"] = json!(false);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
-            failures.iter().any(|f| f.contains("未知容器被清理")),
+            failures.iter().any(|f| f.contains("已登记容器")),
             "{failures:?}"
         );
+
+        let mut evidence = crash_base();
+        evidence["drill_b"]["registered_container"]["record_present_after_restart"] = json!(false);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("已登记容器")),
+            "{failures:?}"
+        );
+
+        let mut evidence = crash_base();
+        evidence["drill_b"]["registered_container"]["alive_after_kill"] = json!(false);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("已登记容器")),
+            "{failures:?}"
+        );
+    }
+
+    /// A7(b):未知容器半边如实标注不可观测——缺标注/错标注/偷偷登记
+    /// (冒充可观测)/标注无说明/人工处置未完成 → 红。
+    #[test]
+    fn crash_validator_requires_unobservable_annotation_on_unknown_container() {
+        let mut evidence = crash_base();
+        evidence["drill_b"]["unknown_container"]
+            .as_object_mut()
+            .expect("unknown_container")
+            .remove("observability");
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("unobservable_by_platform")),
+            "{failures:?}"
+        );
+
+        let mut evidence = crash_base();
+        evidence["drill_b"]["unknown_container"]["observability"] = json!("observable");
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未知容器证据口径")),
+            "{failures:?}"
+        );
+
         let mut evidence = crash_base();
         evidence["drill_b"]["unknown_container"]["registered"] = json!(true);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
-            failures.iter().any(|f| f.contains("未知容器被清理")),
+            failures.iter().any(|f| f.contains("未知容器证据口径")),
             "{failures:?}"
+        );
+
+        let mut evidence = crash_base();
+        evidence["drill_b"]["unknown_container"]["observability_note"] = json!("");
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未知容器证据口径")),
+            "{failures:?}"
+        );
+
+        let mut evidence = crash_base();
+        evidence["drill_b"]["unknown_container"]["removed_by_manual_disposition"] = json!(false);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("未知容器证据口径")),
+            "{failures:?}"
+        );
+    }
+
+    /// A7(b):未知容器存活性字段只记录不断言——改写存活值不得改变判定
+    ///(旧恒真 alive 断言已删除;真实现场的清理证据由已登记半边与
+    /// park_audits 承担)。
+    #[test]
+    fn crash_validator_records_but_never_asserts_unknown_container_aliveness() {
+        let mut evidence = crash_base();
+        evidence["drill_b"]["unknown_container"]["alive_after_kill"] = json!(false);
+        evidence["drill_b"]["unknown_container"]["alive_after_restart"] = json!(false);
+        assert!(
+            validate_b45_t24_crash_evidence(&evidence).is_ok(),
+            "未知容器存活字段不是断言面,改写不得红"
         );
     }
 

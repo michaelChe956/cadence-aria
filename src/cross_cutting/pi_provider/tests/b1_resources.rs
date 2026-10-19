@@ -347,7 +347,9 @@ async fn pi_b1_start_owned_registers_process_and_releases_after_real_tail() {
         .expect("owned pi start");
 
     let pid = b1_wait_for_pid_marker(&pid_marker);
-    // F10:direct/legacy 真实 spawn 环境含宿主 PATH/HOME。
+    // F10:direct/legacy 真实 spawn 环境含宿主 PATH/HOME(/proc 依赖仅
+    // Linux;与 claude/codex 同款平台门,非 Linux unix 跳过该断言)。
+    #[cfg(target_os = "linux")]
     assert_child_inherits_host_environment(pid);
     let record = b1_poll_process_record(&store_root, scope.key());
     b1_assert_process_record_identity(&record, &ownership, pid, &tree_key);
@@ -470,7 +472,9 @@ async fn pi_b1_lc_validated_launch_registers_process_and_releases_after_tail() {
         .expect("owned lc validated start");
 
     let pid = b1_wait_for_pid_marker(&pid_marker);
-    // F10:direct/legacy 真实 spawn 环境含宿主 PATH/HOME。
+    // F10:direct/legacy 真实 spawn 环境含宿主 PATH/HOME(/proc 依赖仅
+    // Linux;与 claude/codex 同款平台门,非 Linux unix 跳过该断言)。
+    #[cfg(target_os = "linux")]
     assert_child_inherits_host_environment(pid);
     let record = b1_poll_process_record(&store_root, scope.key());
     b1_assert_process_record_identity(&record, &ownership, pid, &tree_key);

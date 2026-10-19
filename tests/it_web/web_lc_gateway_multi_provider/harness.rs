@@ -3181,6 +3181,28 @@ fn task11_availability_probe(env: &MatrixEnvironment) -> Option<Value> {
     }))
 }
 
+/// M5/F4(修复轮):失败场景是否把 launch 绑定到 `sid` 审计分区。
+///
+/// 只有绑定 sid 的场景(prepare/spawn 前复验携带该会话身份,真实 spawn
+/// 会落在 `t11-failure-{scenario}` 分区),「前后审计相等」才是可证伪的
+/// 零 spawn 证据;未绑定场景(validate/能力分格面拒绝,从不携带 sid)
+/// 的审计分区恒空,相等是 0==0 无信息——事件落 `audit_window:
+/// "not_applicable"`,断言侧对这类格不判等,零 spawn 由五维会计+拒绝
+/// 探针承担,且标注与冻结清单交叉核对(未绑定声明 session=伪造证据
+/// 口径,绑定声明 not_applicable=逃避判等,两者都红)。
+pub(crate) fn task11_failure_scenario_binds_session(scenario: &str) -> bool {
+    !matches!(
+        scenario,
+        "missing_body"
+            | "missing_receipt"
+            | "launch_unknown"
+            | "launch_denied"
+            | "boundary_unknown"
+            | "boundary_denied"
+            | "false_flag"
+    )
+}
+
 /// 失败段驱动:逐场景真实探测(逐格失败不中止矩阵;不删格)。
 async fn run_task11_failure_scenarios(env: &mut MatrixEnvironment) -> Vec<EvidenceCell> {
     let availability_event = task11_availability_probe(env);
@@ -3194,6 +3216,10 @@ async fn run_task11_failure_scenarios(env: &mut MatrixEnvironment) -> Vec<Eviden
         fp_enter_phase("t11-failure", scenario, phase);
         fp("t11_scenario_begin", format_args!("scenario={scenario}"));
         let sid = format!("t11-failure-{scenario}");
+        // M5/F4(修复轮):场景是否把 launch 绑定到 sid 审计分区——只有
+        // 绑定的场景,「前后审计相等」才是可证伪的零 spawn 证据;未绑定
+        // 场景标注 not_applicable,判等不适用(0==0 无信息)。
+        let binds_session = task11_failure_scenario_binds_session(scenario);
         // 零 spawn 会计三面之一:场景前后审计扫描(独立会话分区)。
         let audits_before = env.scan_session_audits(&sid).len();
         let outcome = run_task11_scenario(env, scenario, &sid).await;
@@ -3235,9 +3261,14 @@ async fn run_task11_failure_scenarios(env: &mut MatrixEnvironment) -> Vec<Eviden
                     "type": "zero_spawn_observation",
                     "provider_start_audits_before": audits_before,
                     "provider_start_audits_after": audits_after,
+                    "audit_window": if binds_session { "session" } else { "not_applicable" },
                     "pid_observed": false,
                     "argv_captured": false,
-                    "scan_window": "workspace session 分区 role_run_seq 0..=64",
+                    "scan_window": if binds_session {
+                        "workspace session 分区 role_run_seq 0..=64(launch 绑定该 sid,前后计数为零 spawn 证据)"
+                    } else {
+                        "not_applicable(场景在 validate/能力分格面拒绝,launch 不绑定 sid:审计分区无 spawn 落点,前后计数仅记录不作为零 spawn 证据——由五维会计+拒绝探针承担)"
+                    },
                 },
             }),
         ];
@@ -6036,6 +6067,10 @@ impl MatrixEnvironment {
         fresh.workspace_session_id = workspace_session_id.clone();
 
         let before_starts = self.count_session_provider_starts(&workspace_session_id);
+        // F2(修复轮):fresh 主路径必须落阶段前基线(与其余 9 相位同
+        // 口径)——否则 build_cell 零 spawn 分支只能以 after 冒充 before,
+        // 「前后审计相等」退化为恒等兜底。
+        fresh.spawn_audits_before = Some(before_starts);
         let gateway = match self
             .gateway_factory
             .build_for_lc(PROJECT_ID, Some(&self.lc_id))
@@ -7129,8 +7164,14 @@ impl MatrixEnvironment {
 ///
 /// 零 spawn 格的证明不能用单维 `provider_spawn_count==0`(「无审计记录」
 /// 不等于「零 child」);本事件把会计窗口的 before/after 落进证据流,断言
-/// 侧要求 before==after 且与五维会计同源。
-fn zero_spawn_observation_event(before: usize, after: usize, scan_window: &str) -> Value {
+/// 侧要求 before==after 且与五维会计同源。F2(修复轮):阶段前基线
+/// 未记录时 before 落 **null**(不得以 after 冒充 before 构造恒等——
+/// null before 由断言侧判红,仪器缺口可发现)。
+pub(crate) fn zero_spawn_observation_event(
+    before: Option<usize>,
+    after: usize,
+    scan_window: &str,
+) -> Value {
     json!({
         "type": "zero_spawn_observation",
         "provider_start_audits_before": before,
@@ -7139,6 +7180,33 @@ fn zero_spawn_observation_event(before: usize, after: usize, scan_window: &str) 
         "argv_captured": false,
         "scan_window": scan_window,
     })
+}
+
+#[cfg(test)]
+mod zero_spawn_event_tests {
+    use super::zero_spawn_observation_event;
+
+    /// F2 编码契约:未记录基线必须序列化为 null——build_cell 无法以
+    /// after 冒充 before(签名即合同);已记录基线必须如实落值。
+    #[test]
+    fn unrecorded_before_serializes_null_and_recorded_keeps_value() {
+        let unrecorded = zero_spawn_observation_event(None, 2, "阶段前后审计扫描");
+        assert!(
+            unrecorded["provider_start_audits_before"].is_null(),
+            "未记录基线必须落 null:{unrecorded}"
+        );
+        assert_eq!(
+            unrecorded["provider_start_audits_after"].as_u64(),
+            Some(2),
+            "after 必须如实落值"
+        );
+        let recorded = zero_spawn_observation_event(Some(3), 3, "阶段前后审计扫描");
+        assert_eq!(
+            recorded["provider_start_audits_before"].as_u64(),
+            Some(3),
+            "已记录基线必须如实落值"
+        );
+    }
 }
 
 struct StageObservation {
@@ -7324,19 +7392,27 @@ impl StageObservation {
         let mut cell = self.placeholder_cell();
         // 逐阶段 spawn 仪器(零 spawn 分支):记录阶段前后审计计数,使
         // 「零 spawn」可证伪(单维 0 不算证明);before!=after 由断言侧判红。
+        // F2(修复轮):阶段前基线缺记时不得以 after 冒充 before(恒等
+        // 兜底=伪造相等)——如实落 null,断言侧对 null before 判红
+        //(仪器缺口可发现)。
         if self.observed_spawn_count == 0 {
             let after = if self.workspace_session_id.trim().is_empty() {
                 0
             } else {
                 env.count_session_provider_starts(&self.workspace_session_id)
             };
-            let before = self.spawn_audits_before.unwrap_or(after);
-            let scan_window = if self.workspace_session_id.trim().is_empty() {
+            let scan_window = if self.spawn_audits_before.is_none() {
+                "阶段前基线未记录(仪器缺口;审计对照不可证,断言侧判红)"
+            } else if self.workspace_session_id.trim().is_empty() {
                 "未建立会话(零 provider 启动)"
             } else {
                 "阶段前后审计扫描(本格零新增 provider 启动)"
             };
-            self.push_event(zero_spawn_observation_event(before, after, scan_window));
+            self.push_event(zero_spawn_observation_event(
+                self.spawn_audits_before,
+                after,
+                scan_window,
+            ));
             cell = self.placeholder_cell();
         }
         cell.process_cwd = env.canonical_root.clone();
@@ -13770,20 +13846,73 @@ impl LiveLcGatewayHarness {
                                     Some("crash"),
                                 )
                             })?;
-                            // A7(b):真实容器(podman run -d)——**不落登记
-                            // 记录**(无登记记录的未知容器:平台无从证明
-                            // 归属,只许停等、不得 kill/clean)。
-                            let container = b45_t24_podman_run_park_container(&tree_key_two);
+                            // A7(b) 双半边(修复轮重设):
+                            // - 已登记容器:真实 podman 容器 + 确认身份登记
+                            //   (kind=container、exact_id 真实、aria.worktree
+                            //   归属标签)——平台 quiesce 可枚举的登记面,
+                            //   「锁定期不被清理」是可观测断言(记录与
+                            //   实例都不得被动,park 而非 remove);
+                            // - 未知容器:**不落登记**——平台只消费登记面
+                            //   (provider_resources::quiesce_scope 入口
+                            //   list_scope),无登记容器对平台不可见,
+                            //   存活性不构成清理证据:如实标注不可观测,
+                            //   存活字段只记录不断言。
+                            let unknown_container =
+                                b45_t24_podman_run_park_container(&tree_key_two, "unknown");
+                            let registered_container =
+                                b45_t24_podman_run_park_container(&tree_key_two, "registered");
+                            let registered_container_record = match &registered_container {
+                                Ok((exact_id, _)) => {
+                                    let mut container_labels = BTreeMap::new();
+                                    container_labels
+                                        .insert("aria.worktree".to_string(), tree_key_two.clone());
+                                    container_labels.insert(
+                                        "kind".to_string(),
+                                        "b45-t24-park-container".to_string(),
+                                    );
+                                    container_labels.insert(
+                                        "io.aria.b45.scene".to_string(),
+                                        "crash-park".to_string(),
+                                    );
+                                    b45_t24_preset_resource_record(
+                                        &app_root,
+                                        "b45-t24-park",
+                                        &format!("run-{attempt_two}"),
+                                        &format!("b45-t24-fixture-{daemon_two_pid}"),
+                                        "park-container",
+                                        "container",
+                                        &format!("podman run -d ... (exact_id={exact_id})"),
+                                        container_labels,
+                                        Some(json!({"container": {"exact_id": exact_id}})),
+                                        "confirmed",
+                                    )
+                                    .ok()
+                                }
+                                Err(_) => None,
+                            };
                             park["unconfirmed_record"] =
                                 json!(unconfirmed_path.display().to_string());
-                            park["container"] = match &container {
+                            park["unknown_container"] = match &unknown_container {
                                 Ok((exact_id, name)) => json!({
                                     "exact_id": exact_id,
                                     "name": name,
-                                    "registered_record": false,
                                 }),
                                 Err(error) => json!({"error": error}),
                             };
+                            park["registered_container"] =
+                                match (&registered_container, &registered_container_record) {
+                                    (Ok((exact_id, name)), Some(record)) => json!({
+                                        "exact_id": exact_id,
+                                        "name": name,
+                                        "record": record.display().to_string(),
+                                    }),
+                                    (Ok((exact_id, name)), None) => json!({
+                                        "exact_id": exact_id,
+                                        "name": name,
+                                        "record_error": "登记记录落盘失败(fixture preset 失败)",
+                                    }),
+                                    (Err(error), _) => json!({"error": error}),
+                                };
                             park["daemon_pid"] = json!(daemon_two_pid);
                             // kill 服务 #2(窗口 Running + 停等前置在场)。
                             let provider_pid_b =
@@ -13795,7 +13924,11 @@ impl LiveLcGatewayHarness {
                                 t24_resource_audit_lines(&app_root, "b45-t24-park");
                             server_two.kill_process_group();
                             let daemon_two_alive_after_kill = b45_t24_pid_alive(daemon_two_pid);
-                            let container_alive_after_kill = container
+                            let unknown_container_alive_after_kill = unknown_container
+                                .as_ref()
+                                .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
+                                .unwrap_or(false);
+                            let registered_container_alive_after_kill = registered_container
                                 .as_ref()
                                 .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
                                 .unwrap_or(false);
@@ -13821,10 +13954,20 @@ impl LiveLcGatewayHarness {
                             .await;
                             let park_log = server_three.log_text();
                             let daemon_two_alive_after_restart = b45_t24_pid_alive(daemon_two_pid);
-                            let container_alive_after_restart = container
+                            let unknown_container_alive_after_restart = unknown_container
                                 .as_ref()
                                 .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
                                 .unwrap_or(false);
+                            let registered_container_alive_after_restart = registered_container
+                                .as_ref()
+                                .map(|(exact_id, _)| b45_t24_podman_container_running(exact_id))
+                                .unwrap_or(false);
+                            // A7(b) 可观测半边:已登记容器的 durable 记录在
+                            // park 后必须仍在(平台不得 remove/deregister)。
+                            let registered_container_record_present_after_restart =
+                                registered_container_record
+                                    .as_ref()
+                                    .is_some_and(|record| record.exists());
                             // A7(b):park 后登记面 audits 对照(不 clean 证明)。
                             let park_audits_after =
                                 t24_resource_audit_lines(&app_root, "b45-t24-park");
@@ -13843,17 +13986,26 @@ impl LiveLcGatewayHarness {
                                     json!({"decision": "require_new_review"}),
                                 )
                                 .await;
-                            // 人工处置:deregister 未知 writer + kill 守护 +
-                            // 移除未知容器(人工动作;平台 park 期间不得动)。
+                            // 人工处置:deregister 未知 writer/已登记容器记录 +
+                            // kill 守护 + 移除两容器(人工动作;平台 park
+                            // 期间不得动)。
                             if let Err(error) = daemon_two.kill() {
                                 fp("t24_daemon_kill_failed", format_args!("{error}"));
                             }
                             let _ = daemon_two.wait();
-                            let container_removed_by_manual = match &container {
+                            let unknown_container_removed_by_manual = match &unknown_container {
+                                Ok((exact_id, _)) => b45_t24_podman_remove(exact_id),
+                                Err(_) => false,
+                            };
+                            let registered_container_removed_by_manual = match &registered_container
+                            {
                                 Ok((exact_id, _)) => b45_t24_podman_remove(exact_id),
                                 Err(_) => false,
                             };
                             t24_deregister_record(&app_root, &unconfirmed_path);
+                            if let Some(record) = &registered_container_record {
+                                t24_deregister_record(&app_root, record);
+                            }
                             // 重启 #4:人工处置后续接 → 释放。
                             let port_four = t24_pick_port().await;
                             let mut server_four =
@@ -13893,28 +14045,77 @@ impl LiveLcGatewayHarness {
                                 "provider_pid_at_kill": provider_pid_b,
                                 "windows_at_kill": windows_b_at_kill,
                                 "daemon_alive_after_kill": daemon_two_alive_after_kill,
-                                "container_alive_after_kill": container_alive_after_kill,
                                 "park_state": park_state,
                                 "parked": parked,
                                 "park_log_has_kept_locked": park_log.contains("kept locked"),
                                 "daemon_alive_after_restart": daemon_two_alive_after_restart,
-                                "container_alive_after_restart": container_alive_after_restart,
                                 "park_audits": {
                                     "before": park_audits_before,
                                     "after": park_audits_after,
                                     "unchanged": park_audits_unchanged,
                                 },
-                                "unknown_container": match &container {
+                                // A7(b) 可观测半边:已登记容器锁定期不被清理
+                                //(登记记录在场 + 实例存活,park 而非 remove)。
+                                "registered_container": match (
+                                    &registered_container,
+                                    &registered_container_record,
+                                ) {
+                                    (Ok((exact_id, name)), Some(record)) => json!({
+                                        "exact_id": exact_id,
+                                        "name": name,
+                                        "registered": true,
+                                        "record": record.display().to_string(),
+                                        "record_present_after_restart":
+                                            registered_container_record_present_after_restart,
+                                        "alive_after_kill": registered_container_alive_after_kill,
+                                        "alive_after_restart":
+                                            registered_container_alive_after_restart,
+                                        "removed_by_manual_disposition":
+                                            registered_container_removed_by_manual,
+                                    }),
+                                    (Ok((exact_id, name)), None) => json!({
+                                        "exact_id": exact_id,
+                                        "name": name,
+                                        "registered": true,
+                                        "record_present_after_restart": false,
+                                        "alive_after_kill": registered_container_alive_after_kill,
+                                        "alive_after_restart":
+                                            registered_container_alive_after_restart,
+                                        "removed_by_manual_disposition":
+                                            registered_container_removed_by_manual,
+                                        "record_error": "登记记录落盘失败(fixture preset 失败)",
+                                    }),
+                                    (Err(error), _) => json!({
+                                        "registered": true,
+                                        "record_present_after_restart": false,
+                                        "alive_after_kill": false,
+                                        "alive_after_restart": false,
+                                        "removed_by_manual_disposition": false,
+                                        "error": error,
+                                    }),
+                                },
+                                // A7(b) 不可观测半边:无登记容器——平台无枚举
+                                // 通道,如实标注;存活字段只记录不断言。
+                                "unknown_container": match &unknown_container {
                                     Ok((exact_id, name)) => json!({
                                         "exact_id": exact_id,
                                         "name": name,
                                         "registered": false,
-                                        "alive_after_kill": container_alive_after_kill,
-                                        "alive_after_restart": container_alive_after_restart,
-                                        "removed_by_manual_disposition": container_removed_by_manual,
+                                        "observability": "unobservable_by_platform",
+                                        "observability_note":
+                                            "平台 quiesce 只枚举登记面(provider_resources::quiesce_scope→list_scope);\
+                                             无登记容器对平台不可见,存活性不构成清理证据(只记录不断言)",
+                                        "alive_after_kill": unknown_container_alive_after_kill,
+                                        "alive_after_restart": unknown_container_alive_after_restart,
+                                        "removed_by_manual_disposition":
+                                            unknown_container_removed_by_manual,
                                     }),
                                     Err(error) => json!({
                                         "registered": false,
+                                        "observability": "unobservable_by_platform",
+                                        "observability_note":
+                                            "平台 quiesce 只枚举登记面(provider_resources::quiesce_scope→list_scope);\
+                                             无登记容器对平台不可见,存活性不构成清理证据(只记录不断言)",
                                         "alive_after_kill": false,
                                         "alive_after_restart": false,
                                         "removed_by_manual_disposition": false,
@@ -14254,9 +14455,16 @@ fn b45_t24_spawn_daemon(secs: u64) -> std::io::Result<std::process::Child> {
     command.spawn()
 }
 
-/// 真实 park 容器(podman run -d;返回(exact_id, name))。
-fn b45_t24_podman_run_park_container(tree_key: &str) -> Result<(String, String), String> {
-    let name = format!("b45-t24-park-{}", &tree_key[..12.min(tree_key.len())]);
+/// 真实 park 容器(podman run -d;返回(exact_id, name);role 区分
+/// 已登记/未知两半边的容器命名,避免同名冲突)。
+fn b45_t24_podman_run_park_container(
+    tree_key: &str,
+    role: &str,
+) -> Result<(String, String), String> {
+    let name = format!(
+        "b45-t24-park-{role}-{}",
+        &tree_key[..12.min(tree_key.len())]
+    );
     let output = std::process::Command::new("podman")
         .args([
             "run",
@@ -14583,8 +14791,9 @@ fn t24_mid_commit_convergence(
 }
 
 /// 停等期登记面 audits 行(指定 scope 下 `provider-resources` 记录的
-/// path + 内容摘要)。A7(b):无登记记录容器停等期间该 scope 必须逐字不变
-/// (不 clean/不 deregister 证据;其它树/其它 scope 的登记不参与对照)。
+/// path + 内容摘要)。A7(b):停等期间该 scope(含已登记容器记录)必须
+/// 逐字不变(不 clean/不 deregister/不推游标证据——已登记容器「锁定期
+/// 不被清理」的登记面半边;其它树/其它 scope 的登记不参与对照)。
 fn t24_resource_audit_lines(app_root: &Path, scope_id: &str) -> Vec<String> {
     let scope_fragment = format!("/scopes/{scope_id}/");
     let mut lines: Vec<String> = t24_read_resource_scopes(app_root)

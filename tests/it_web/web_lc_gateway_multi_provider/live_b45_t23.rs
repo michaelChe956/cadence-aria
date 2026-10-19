@@ -44,6 +44,7 @@ use super::failure_matrix::{
 use super::harness::{
     ENTRYPOINT_SPLIT_SYNC, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, EvidenceCell, FRESH,
     LiveLcGatewayHarness, LiveMatrixEvidence, RESUME, carried_cell,
+    task11_failure_scenario_binds_session,
 };
 use super::live_matrix::require_lc_gateway_e2e_switch;
 
@@ -309,10 +310,18 @@ fn verify_zero_spawn_evidence(cell: &EvidenceCell) -> Result<(), String> {
         let payload = &event["event"];
         match payload["type"].as_str() {
             Some("zero_spawn_observation") => {
-                payload["not_started"].as_bool() == Some(true)
-                    || payload["provider_start_audits_before"].as_u64()
-                        == payload["provider_start_audits_after"].as_u64()
-                        && payload["provider_start_audits_before"].as_u64().is_some()
+                // F2(修复轮):before 缺记(null,无 not_started)不构成
+                // 佐证——仪器缺口必须红,不得以 after 冒充 before。
+                // M5/F4(修复轮):not_applicable 窗口(场景 launch 不
+                // 绑定审计分区)的计数不作证据——0==0 无信息;该窗口的
+                // 零 spawn 证据由五维会计+拒绝探针承担(上方已判),
+                // 标注本身与冻结绑定清单的交叉核对在 verify_failure_cell。
+                let not_applicable = payload["audit_window"].as_str() == Some("not_applicable");
+                let audits_equal = payload["not_started"].as_bool() == Some(true)
+                    || (payload["provider_start_audits_before"].as_u64().is_some()
+                        && payload["provider_start_audits_before"].as_u64()
+                            == payload["provider_start_audits_after"].as_u64());
+                not_applicable || audits_equal
             }
             Some("launch_rejected_probe") => payload["refused"].as_bool() == Some(true),
             _ => false,
@@ -329,7 +338,8 @@ fn verify_zero_spawn_evidence(cell: &EvidenceCell) -> Result<(), String> {
 }
 
 /// M5 失败关闭:17 固定负向场景逐格三面(真实拒绝 或 合法 unknown 且带
-/// unobservable gate+非空原因;拒绝探针 refused/gate/audits 前后;五维)。
+/// unobservable gate+非空原因;拒绝探针 refused/gate + audits 前后——
+/// 仅对绑定 sid 的场景判等,未绑定场景 not_applicable 不判等;五维)。
 fn verify_failure_scenarios(cells: &[EvidenceCell]) -> Result<(), String> {
     let failure_cells: Vec<&EvidenceCell> = cells
         .iter()
@@ -407,12 +417,43 @@ fn verify_failure_cell(cell: &EvidenceCell) -> Result<(), String> {
         .find(|event| event["event"]["type"].as_str() == Some("zero_spawn_observation"))
         .map(|event| &event["event"])
         .ok_or_else(|| format!("失败场景 {scenario} 缺 zero_spawn_observation(审计前后)"))?;
-    let before = observation["provider_start_audits_before"].as_u64();
-    let after = observation["provider_start_audits_after"].as_u64();
-    if before != after {
-        return Err(format!(
-            "失败场景 {scenario}:拒绝后 audits 变化(before={before:?} after={after:?},零 spawn 不成立)"
-        ));
+    // M5/F4(修复轮):audits 相等仅对绑定 sid 的场景是零 spawn 证据;
+    // 未绑定场景(validate/能力分格面拒绝,launch 从不落在合成 sid 分区)
+    // 的相等是 0==0 无信息——标注 not_applicable,判等不适用,零 spawn
+    // 由五维会计+拒绝探针承担。标注与冻结绑定清单交叉核对,防止证据
+    // 侧随意声明窗口逃避判等或伪造证据口径。
+    let binds_session = task11_failure_scenario_binds_session(&scenario);
+    match observation["audit_window"].as_str().unwrap_or_default() {
+        "session" => {
+            if !binds_session {
+                return Err(format!(
+                    "失败场景 {scenario}:launch 不绑定 sid,审计分区恒空——\
+                     不得声明 session 审计窗口(0==0 无信息;须标注 not_applicable)"
+                ));
+            }
+            let before = observation["provider_start_audits_before"].as_u64();
+            let after = observation["provider_start_audits_after"].as_u64();
+            if before != after {
+                return Err(format!(
+                    "失败场景 {scenario}:拒绝后 audits 变化(before={before:?} after={after:?},零 spawn 不成立)"
+                ));
+            }
+        }
+        "not_applicable" => {
+            if binds_session {
+                return Err(format!(
+                    "失败场景 {scenario}:launch 绑定 sid,审计前后对照是零 spawn\
+                     证据——不得标注 not_applicable 逃避判等"
+                ));
+            }
+            // 审计分区与场景 launch 无绑定:前后计数仅记录,不作证据。
+        }
+        other => {
+            return Err(format!(
+                "失败场景 {scenario}:zero_spawn_observation 缺 audit_window 标注\
+                 ({other:?};session/not_applicable 必须如实声明)"
+            ));
+        }
     }
     verify_zero_spawn_evidence(cell)?;
     // 被拒格:除 session child 外,协议握手与 MCP/native 方法维也不得在场
@@ -1371,6 +1412,36 @@ mod t23_assertion_tests {
         })
     }
 
+    /// 失败格观测事件(t11 形态:显式 audit_window 口径标注)。
+    fn failure_zero_spawn_event(before: u64, after: u64, audit_window: &str) -> Value {
+        json!({
+            "ts": "2026-10-19T00:00:00.000Z",
+            "event": {
+                "type": "zero_spawn_observation",
+                "provider_start_audits_before": before,
+                "provider_start_audits_after": after,
+                "audit_window": audit_window,
+                "pid_observed": false,
+                "argv_captured": false,
+            }
+        })
+    }
+
+    /// 阶段格仪器缺口形态:阶段前审计基线未记录(before=null,无
+    /// not_started 标记)——build_cell 不得以 after 冒充 before。
+    fn unrecorded_zero_spawn_event(after: u64) -> Value {
+        json!({
+            "ts": "2026-10-19T00:00:00.000Z",
+            "event": {
+                "type": "zero_spawn_observation",
+                "provider_start_audits_before": Value::Null,
+                "provider_start_audits_after": after,
+                "pid_observed": false,
+                "argv_captured": false,
+            }
+        })
+    }
+
     #[test]
     fn t23_spawn_instrumentation_requires_real_spawn_and_five_dim_accounting() {
         // fresh confirmed 有 spawn → 通过。
@@ -1426,32 +1497,42 @@ mod t23_assertion_tests {
         );
     }
 
-    fn failure_cell(state: &str) -> EvidenceCell {
-        let mut cell = zero_spawn_unknown_cell();
-        cell.capability_state = state.to_string();
-        cell.denied_reason = Some("真实拒绝/reason".to_string());
-        cell.run_ref = "t11-failure-missing_readiness".to_string();
-        cell.provider_events = vec![
+    fn failure_cell_events(scenario: &str, audit_window: &str) -> Vec<Value> {
+        vec![
             json!({
                 "ts": "2026-10-19T00:00:00.000Z",
                 "event": {
                     "type": "boundary_matrix_evidence",
-                    "failure_scenario": "missing_readiness",
+                    "failure_scenario": scenario,
                 }
             }),
             json!({
                 "ts": "2026-10-19T00:00:00.000Z",
                 "event": {
                     "type": "launch_rejected_probe",
-                    "scenario": "missing_readiness",
+                    "scenario": scenario,
                     "refusal_gate": "validate",
                     "refusal_text": "rejected",
                     "refused": true,
                 }
             }),
-            zero_spawn_event(0, 0),
-        ];
+            failure_zero_spawn_event(0, 0, audit_window),
+        ]
+    }
+
+    fn failure_cell_scenario(state: &str, scenario: &str, audit_window: &str) -> EvidenceCell {
+        let mut cell = zero_spawn_unknown_cell();
+        cell.capability_state = state.to_string();
+        cell.denied_reason = Some("真实拒绝/reason".to_string());
+        cell.run_ref = format!("t11-failure-{scenario}");
+        cell.provider_events = failure_cell_events(scenario, audit_window);
         cell
+    }
+
+    fn failure_cell(state: &str) -> EvidenceCell {
+        // missing_readiness 把 launch 绑定到 sid(prepare 携带该会话身份)
+        //——session 窗口缺省形态。
+        failure_cell_scenario(state, "missing_readiness", "session")
     }
 
     #[test]
@@ -1462,49 +1543,15 @@ mod t23_assertion_tests {
             "真实拒绝 + audits 不变必须通过"
         );
 
-        // 拒绝但 audits 变化 → 红。
+        // 拒绝但 audits 变化(session 绑定场景)→ 红。
         let mut changed = failure_cell("denied");
-        changed.provider_events = vec![
-            json!({
-                "ts": "2026-10-19T00:00:00.000Z",
-                "event": {
-                    "type": "boundary_matrix_evidence",
-                    "failure_scenario": "missing_readiness",
-                }
-            }),
-            json!({
-                "ts": "2026-10-19T00:00:00.000Z",
-                "event": {
-                    "type": "launch_rejected_probe",
-                    "refusal_gate": "validate",
-                    "refused": true,
-                }
-            }),
-            zero_spawn_event(0, 1),
-        ];
+        changed.provider_events[2] = failure_zero_spawn_event(0, 1, "session");
         let error = verify_failure_cell(&changed).expect_err("audits 变化必须拒绝");
         assert!(error.contains("audits"), "{error}");
 
         // denied 但 refused=false → 红。
         let mut not_refused = failure_cell("denied");
-        not_refused.provider_events = vec![
-            json!({
-                "ts": "2026-10-19T00:00:00.000Z",
-                "event": {
-                    "type": "boundary_matrix_evidence",
-                    "failure_scenario": "missing_readiness",
-                }
-            }),
-            json!({
-                "ts": "2026-10-19T00:00:00.000Z",
-                "event": {
-                    "type": "launch_rejected_probe",
-                    "refusal_gate": "validate",
-                    "refused": false,
-                }
-            }),
-            zero_spawn_event(0, 0),
-        ];
+        not_refused.provider_events[1]["event"]["refused"] = json!(false);
         assert!(
             verify_failure_cell(&not_refused).is_err(),
             "denied 且 refused=false 必须拒绝"
@@ -1512,24 +1559,7 @@ mod t23_assertion_tests {
 
         // unknown 无 unobservable gate → 红。
         let mut unknown_bad_gate = failure_cell("unknown");
-        unknown_bad_gate.provider_events = vec![
-            json!({
-                "ts": "2026-10-19T00:00:00.000Z",
-                "event": {
-                    "type": "boundary_matrix_evidence",
-                    "failure_scenario": "missing_readiness",
-                }
-            }),
-            json!({
-                "ts": "2026-10-19T00:00:00.000Z",
-                "event": {
-                    "type": "launch_rejected_probe",
-                    "refusal_gate": "validate",
-                    "refused": false,
-                }
-            }),
-            zero_spawn_event(0, 0),
-        ];
+        unknown_bad_gate.provider_events[1]["event"]["refused"] = json!(false);
         assert!(
             verify_failure_cell(&unknown_bad_gate).is_err(),
             "unknown 无 unobservable gate 必须拒绝"
@@ -1537,29 +1567,72 @@ mod t23_assertion_tests {
 
         // 合法 unknown:unobservable gate + 非空原因 → 通过。
         let mut allowed_unknown = failure_cell("unknown");
-        allowed_unknown.provider_events = vec![
-            json!({
-                "ts": "2026-10-19T00:00:00.000Z",
-                "event": {
-                    "type": "boundary_matrix_evidence",
-                    "failure_scenario": "missing_readiness",
-                }
-            }),
-            json!({
-                "ts": "2026-10-19T00:00:00.000Z",
-                "event": {
-                    "type": "launch_rejected_probe",
-                    "refusal_gate": "unobservable",
-                    "refusal_text": "OS 保护不可观察",
-                    "refused": false,
-                }
-            }),
-            zero_spawn_event(0, 0),
-        ];
+        allowed_unknown.provider_events[1]["event"]["refusal_gate"] = json!("unobservable");
+        allowed_unknown.provider_events[1]["event"]["refusal_text"] = json!("OS 保护不可观察");
+        allowed_unknown.provider_events[1]["event"]["refused"] = json!(false);
         assert!(
             verify_failure_cell(&allowed_unknown).is_ok(),
             "unobservable gate + 原因必须放行"
         );
+    }
+
+    /// F2(修复轮):阶段前审计基线未记录(build_cell 曾以 after 冒充
+    /// before 构造恒等兜底)→ 必须红——仪器缺口可发现,不得伪造相等放行。
+    #[test]
+    fn t23_zero_spawn_requires_recorded_before_baseline() {
+        // 断言侧:阶段前基线未记录(before=null,无 not_started 标记)
+        // 不构成零 spawn 佐证 → 红——build_cell 不得以 after 冒充 before
+        // 构造恒等兜底(F2 仪器缺口必须可发现)。
+        let mut unrecorded = zero_spawn_unknown_cell();
+        unrecorded.provider_events = vec![unrecorded_zero_spawn_event(2)];
+        let error =
+            verify_spawn_instrumentation(&[unrecorded]).expect_err("before 基线缺记(null)必须拒绝");
+        assert!(error.contains("五维会计佐证"), "{error}");
+    }
+
+    /// M5/F4(修复轮):audits 相等仅对绑定 sid 的场景是零 spawn 证据;
+    /// 未绑定场景(validate/能力分格面拒绝,launch 从不落在合成 sid 分区)
+    /// 标注 not_applicable,判等不适用——审计漂移不得红、也不得计为证据,
+    /// 零 spawn 由五维会计 + 拒绝探针承担;标注与冻结绑定清单交叉核对。
+    #[test]
+    fn t23_failure_cell_audit_window_scopes_audits_equality() {
+        // 绑定 sid 场景(missing_readiness)声明 not_applicable → 红
+        //(逃避审计对照)。
+        let mut escape = failure_cell("denied");
+        escape.provider_events[2] = failure_zero_spawn_event(2, 2, "not_applicable");
+        let error = verify_failure_cell(&escape).expect_err("绑定场景不得标注 not_applicable");
+        assert!(error.contains("not_applicable"), "{error}");
+
+        // 未绑定场景(false_flag)声明 session → 红(伪造证据口径)。
+        let fake_session = failure_cell_scenario("denied", "false_flag", "session");
+        let error =
+            verify_failure_cell(&fake_session).expect_err("未绑定场景不得声明 session 窗口");
+        assert!(error.contains("不得声明 session"), "{error}");
+
+        // 缺标注 → 红(必须如实声明窗口口径)。
+        let mut unannotated = failure_cell("denied");
+        unannotated.provider_events[2] = zero_spawn_event(0, 0);
+        let error = verify_failure_cell(&unannotated).expect_err("缺 audit_window 标注必须拒绝");
+        assert!(error.contains("audit_window"), "{error}");
+
+        // 未绑定场景 + not_applicable + 审计漂移(0→3)→ 通过:
+        // 0==0 无信息,漂移不作证据;零 spawn 证据改由五维+拒绝探针承担。
+        let mut unbound = failure_cell_scenario("denied", "false_flag", "not_applicable");
+        unbound.provider_events[2] = failure_zero_spawn_event(0, 3, "not_applicable");
+        assert!(
+            verify_failure_cell(&unbound).is_ok(),
+            "未绑定场景审计漂移不是证据,不得红"
+        );
+
+        // 未绑定场景 + not_applicable + 五维破约(session child 观测在场)→ 红。
+        let mut five_dim_broken = failure_cell_scenario("denied", "false_flag", "not_applicable");
+        five_dim_broken.provider_events.push(json!({
+            "ts": "2026-10-19T00:00:01.000Z",
+            "event": {"type": "session_child_observed", "pid": 4242},
+        }));
+        let error = verify_failure_cell(&five_dim_broken)
+            .expect_err("not_applicable 场景零 spawn 仍须五维会计自洽");
+        assert!(error.contains("session_child_count"), "{error}");
     }
 
     #[test]
