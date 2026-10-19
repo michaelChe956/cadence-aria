@@ -5,12 +5,9 @@
 //!   capability 行（未探测全 Unknown；bootstrap 默认记录不显示 Confirmed）；
 //!   GET 不触发任何探针/写入。
 //! - POST `/logical-codebases/{lc_id}/capability-revalidate`：
-//!   - Fake/未知 provider_type → 422 `provider_capability_probe_unsupported`，
-//!    零探针、零 durable 写入；
-//!   - 全行已 Confirmed@当前版本（注入版本源）→ 200 `already_confirmed`
-//!     秒回（探针 runner 被调用即失败——证明不重跑）；
-//!   - 探针失败（注入恒败 runner）→ 稳定码 `provider_capability_probe_failed`
-//!     携带 action/detail，durable 保持点击前状态；
+//!   - Fake/未知 provider_type → 422 `provider_capability_probe_unsupported`，零探针、零 durable 写入；
+//!   - 全行已 Confirmed@当前版本（注入版本源）→ 200 `already_confirmed`，秒回（探针 runner 被调用即失败——证明不重跑）；
+//!   - 探针失败（注入恒败 runner）→ 稳定码 `provider_capability_probe_failed`，携带 action/detail，durable 保持点击前状态；
 //!   - 未知 LC → 404 `logical_codebase_not_found`。
 //! - 探测导入成功路径（probe→import→Confirmed→再点秒回）由产品层
 //!   `provider_capability_revalidate` 单测以真实三方一致性材料包覆盖

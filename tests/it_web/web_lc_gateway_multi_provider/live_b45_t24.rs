@@ -455,20 +455,20 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
 ///   窗口恢复完成时刻(journal 在途/post-restore 先后关系可证);
 /// - A7(b) 停等双臂(各占独立 scope,禁止同 scope 混排——同 scope 时
 ///   `list_scope` 按 resource_id 排序会抢占停等触发者):
-///   · writer 臂:未确认 writer(无容器记录)必须由 quiesce 未知 writer
+///   - writer 臂:未确认 writer(无容器记录)必须由 quiesce 未知 writer
 ///     分支触发 RecoveryRequired——窗口 recovery.detail 须含
 ///     `provider_resources_quiesce_unconfirmed_process_unknown` 且
 ///     `resource=unconfirmed-writer`(若 detail 来自容器 observer_missing,
 ///     说明"通过但证明错对象"→ FAIL);登记记录与 daemon 原样保留到人工
 ///     处置;
-///   · 已登记容器臂(**可观测半边=登记面**;实例存活不可观测):独立
+///   - 已登记容器臂(**可观测半边=登记面**;实例存活不可观测):独立
 ///     scope 内登记记录不得被清理/注销
 ///     (record_present_after_restart + 停等期 audits 逐字不变 + 人工
 ///     处置后才移除),停等原因须为本 scope 的
 ///     `provider_resources_quiesce_observer_missing`;生产恢复路径无
 ///     engine observer,容器实例存活只记录不断言(证据须标注
 ///     `observability="no_production_observer"`);
-///   · 未知容器臂(**不可观测半边**):无登记记录 → 平台不可观测(quiesce
+///   - 未知容器臂(**不可观测半边**):无登记记录 → 平台不可观测(quiesce
 ///     只消费登记面),如实标注 `unobservable_by_platform`,存活字段只
 ///     记录不断言,人工处置完成仍须可证;
 /// - 停等不误杀臂(drill B):park 态 recovery_required + kept locked 日志

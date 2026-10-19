@@ -351,6 +351,7 @@ fn lcg_t10_evidence_requires_exact_version_wire_and_native_confirmation() {
 /// - full/capture:五阶段真实执行×fresh/resume,plan 双入口分列
 ///   (streaming 10 + split_sync 2)= 12(各阶段失败早退路径同样恰好
 ///   2 格,不删格语义保持)。
+///
 /// 格数精确相等钉总数,阶段×入口×相位覆盖钉不缺格,双断言合一。
 fn assert_matrix_cell_completeness(cells: &[EvidenceCell], mode: RunMode) {
     let expected = match mode {
@@ -827,7 +828,7 @@ pub(crate) fn validate_b45_host_check_evidence(
         .filter(|record| record.tool == "maven")
         .map(|record| record.facet.as_str())
         .collect();
-    if !maven_facets.iter().any(|facet| *facet == "test") {
+    if !maven_facets.contains(&"test") {
         failures.push("缺 Maven mvn -B test 工具格".to_string());
     }
     for npm_facet in ["ci", "test", "build"] {
@@ -847,9 +848,7 @@ pub(crate) fn validate_b45_host_check_evidence(
         .collect();
     if podman_facets.is_empty() {
         failures.push("缺 Podman 工具格".to_string());
-    } else if !podman_facets.iter().any(|facet| *facet == "build")
-        || !podman_facets.iter().any(|facet| *facet == "run")
-    {
+    } else if !podman_facets.contains(&"build") || !podman_facets.contains(&"run") {
         failures.push(format!(
             "Podman 只有 {podman_facets:?} 无 build+run(仅 version 不算容器 CHECK)"
         ));
@@ -2221,7 +2220,7 @@ fn b45_classify_command(command: &str) -> (String, String) {
             match sub {
                 "build" => ("podman".to_string(), "build".to_string()),
                 "run" => {
-                    if tokens.iter().any(|token| *token == "mvn") {
+                    if tokens.contains(&"mvn") {
                         ("maven".to_string(), "test".to_string())
                     } else {
                         ("podman".to_string(), "run".to_string())

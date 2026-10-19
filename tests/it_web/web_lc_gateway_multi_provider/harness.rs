@@ -47,8 +47,8 @@ use cadence_aria::product::logical_codebase::production_policy_resolvers::{
     ProductionPolicyTargetResolver, StoreBackedProviderCapabilitySource,
 };
 use cadence_aria::product::logical_codebase::provider_boundary_probe::{
-    BOUNDARY_PROBE_EVIDENCE_SCHEMA, BoundaryFixture, HostOpenProbeScope, ProviderBoundaryProbe,
-    ResumeChannelKind, ResumeProbeSpec, provider_family_text, run_cli_boundary_probe,
+    BOUNDARY_PROBE_EVIDENCE_SCHEMA, HostOpenProbeScope, ProviderBoundaryProbe, ResumeChannelKind,
+    ResumeProbeSpec, provider_family_text, run_cli_boundary_probe,
 };
 use cadence_aria::product::logical_codebase::provider_capability_store::{
     CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
@@ -864,35 +864,31 @@ impl LiveLcGatewayHarness {
             )
         })?;
         let mut rejections = Vec::new();
-        for index in 0..cells.len() {
-            let verdict = cells[index].validate_against(
-                &env.provider,
-                &env.canonical_root,
-                &env.member_worktree,
-            );
+        for cell in &mut cells {
+            let verdict =
+                cell.validate_against(&env.provider, &env.canonical_root, &env.member_worktree);
             if let Err(reason) = verdict {
                 rejections.push(EvidenceCellRejection {
-                    stage: cells[index].stage.clone(),
-                    entrypoint: cells[index].entrypoint.clone(),
-                    fresh_or_resume: cells[index].fresh_or_resume.clone(),
+                    stage: cell.stage.clone(),
+                    entrypoint: cell.entrypoint.clone(),
+                    fresh_or_resume: cell.fresh_or_resume.clone(),
                     reason: reason.clone(),
                 });
                 // 结构不完整的 Confirmed 格降级为 denied(不以删格缩小验收)。
-                cells[index].capability_state = "denied".to_string();
-                cells[index].denied_reason =
-                    cells[index].denied_reason.take().or_else(|| Some(reason));
+                cell.capability_state = "denied".to_string();
+                cell.denied_reason = cell.denied_reason.take().or(Some(reason));
             }
             // F7:证据落盘失败不静默——该格降级 denied(reason=证据落盘失败),
             // 不出现绿格+空证据目录。
-            if let Err(io_reason) = env.write_cell_evidence(&cells[index]) {
+            if let Err(io_reason) = env.write_cell_evidence(cell) {
                 rejections.push(EvidenceCellRejection {
-                    stage: cells[index].stage.clone(),
-                    entrypoint: cells[index].entrypoint.clone(),
-                    fresh_or_resume: cells[index].fresh_or_resume.clone(),
+                    stage: cell.stage.clone(),
+                    entrypoint: cell.entrypoint.clone(),
+                    fresh_or_resume: cell.fresh_or_resume.clone(),
                     reason: io_reason.clone(),
                 });
-                cells[index].capability_state = "denied".to_string();
-                cells[index].denied_reason = Some(io_reason);
+                cell.capability_state = "denied".to_string();
+                cell.denied_reason = Some(io_reason);
             }
         }
 
@@ -1247,8 +1243,8 @@ fn task11_record_digest(record: &ProviderCapabilityRecord) -> String {
 /// 1. **当前证据守卫**:matrix env 的当前 capability 记录必须携带
 ///    `host-open-v1` 语义、Coding 行 write_boundary Confirmed 与可解析的
 ///    6c 证据工件(工件含 duty/资源身份事实);
-/// 2. **双阶段同源拒绝(DEV-01)**:受控突变为过渡桥形态(矩阵全 Unknown
-///    + legacy supported_actions 全列)后,validate 阶段(prepare)与
+/// 2. **双阶段同源拒绝(DEV-01)**:受控突变为过渡桥形态(矩阵全 Unknown +
+///    legacy supported_actions 全列)后,validate 阶段(prepare)与
 ///    spawn 前复验(start_streaming)都必须以
 ///    `provider_capability_*_not_confirmed` 稳定码拒绝、零 provider 启动;
 /// 3. **证据面零副作用**:守卫 Drop 恢复后记录摘要与探测前逐字节一致。
@@ -1551,52 +1547,53 @@ fn task11_coding_positive_cell(env: &MatrixEnvironment) -> Result<EvidenceCell, 
     // 会计观测:resume 段真实 CLI 子进程(launch/同 id resume/错 id 负探针)
     // 与 native 协议交互——真实观察,逐条带 argv;错 id 负探针是「握手失败
     // 已创建=kill/reap」形态(child 创建→失败退出),不属零 spawn 格。
-    if let Some(resume) = artifact.get("resume").and_then(Value::as_object) {
-        if resume.get("probed").and_then(Value::as_bool) == Some(true) {
-            for (phase, argv_key, exit_key, id_key) in [
-                (
-                    "launch",
-                    "launch_argv",
-                    "launch_exit",
-                    "launch_native_session_id",
-                ),
-                (
-                    "resume",
-                    "resume_argv",
-                    "resume_exit",
-                    "resume_native_session_id",
-                ),
-                (
-                    "wrong_id_negative",
-                    "wrong_id_argv",
-                    "wrong_id_exit",
-                    "wrong_id_native_session_id",
-                ),
-            ] {
-                let argv = resume.get(argv_key).cloned().unwrap_or(Value::Null);
-                let argv_non_empty = argv.as_array().is_some_and(|items| !items.is_empty());
-                if !argv_non_empty {
-                    continue;
-                }
+    if let Some(resume) = artifact.get("resume").and_then(Value::as_object)
+        && resume.get("probed").and_then(Value::as_bool) == Some(true)
+    {
+        for (phase, argv_key, exit_key, id_key) in [
+            (
+                "launch",
+                "launch_argv",
+                "launch_exit",
+                "launch_native_session_id",
+            ),
+            (
+                "resume",
+                "resume_argv",
+                "resume_exit",
+                "resume_native_session_id",
+            ),
+            (
+                "wrong_id_negative",
+                "wrong_id_argv",
+                "wrong_id_exit",
+                "wrong_id_native_session_id",
+            ),
+        ] {
+            let argv = resume.get(argv_key).cloned().unwrap_or(Value::Null);
+            let argv_non_empty = argv.as_array().is_some_and(|items| !items.is_empty());
+            if !argv_non_empty {
+                continue;
+            }
+            events.push(json!({
+                "ts": task11_now_ts(),
+                "event": {
+                    "type": "session_child_observed",
+                    "phase": phase,
+                    "argv": argv,
+                    "exit": resume.get(exit_key).cloned().unwrap_or(Value::Null),
+                },
+            }));
+            events.push(json!({
+                "ts": task11_now_ts(),
+                "event": {
+                    "type": "native_method_observed",
+                    "phase": phase,
+                    "native_session_id": resume.get(id_key).cloned().unwrap_or(Value::Null),
+                },
+            }));
+            if phase == "wrong_id_negative" {
                 events.push(json!({
-                    "ts": task11_now_ts(),
-                    "event": {
-                        "type": "session_child_observed",
-                        "phase": phase,
-                        "argv": argv,
-                        "exit": resume.get(exit_key).cloned().unwrap_or(Value::Null),
-                    },
-                }));
-                events.push(json!({
-                    "ts": task11_now_ts(),
-                    "event": {
-                        "type": "native_method_observed",
-                        "phase": phase,
-                        "native_session_id": resume.get(id_key).cloned().unwrap_or(Value::Null),
-                    },
-                }));
-                if phase == "wrong_id_negative" {
-                    events.push(json!({
                         "ts": task11_now_ts(),
                         "event": {
                             "type": "probe_child_kill_reap_observed",
@@ -1605,7 +1602,6 @@ fn task11_coding_positive_cell(env: &MatrixEnvironment) -> Result<EvidenceCell, 
                             "exit": resume.get(exit_key).cloned().unwrap_or(Value::Null),
                         },
                     }));
-                }
             }
         }
     }
@@ -2125,6 +2121,8 @@ struct ScenarioOutcome {
     refusal_text: String,
     /// 落格三态:denied(被拒/防护失效)/unknown(不可观察)。
     state: &'static str,
+    /// 证据全文:落盘摘要/排障读,断言面当前不读该字段。
+    #[allow(dead_code)]
     detail: Value,
     extra_events: Vec<Value>,
 }
@@ -2419,6 +2417,7 @@ impl Drop for Task11FileRestore {
 }
 
 /// 基线 prepare(真实 gateway 的 validate+role guard)。
+#[allow(clippy::result_large_err)] // ScenarioOutcome 是矩阵拒绝的观测载体,按值返回。
 async fn task11_prepare_baseline(
     env: &MatrixEnvironment,
     gateway: &LogicalCodebaseProviderGateway,
@@ -2435,11 +2434,16 @@ async fn task11_prepare_baseline(
 }
 
 /// 受控突变守卫(持有至 spawn 前复验完成;Drop 恢复)。
+#[allow(clippy::large_enum_variant)] // 守卫按值持有恢复材料,变体互斥;Box 只会加间接层。
 enum Task11MutationGuard {
-    Capability(Task11CapabilityRestore),
+    Capability(#[allow(dead_code)] Task11CapabilityRestore), // 字段仅保活至 Drop。
+    #[allow(dead_code)] // File 守卫待文件面突变场景接线。
     File(Task11FileRestore),
     None,
 }
+
+/// 场景驱动的受控突变器:返回守卫(持有至 spawn 前复验完成)。
+type MutationApplier = Box<dyn FnOnce(&MatrixEnvironment) -> Result<Task11MutationGuard, String>>;
 
 /// spawn 前复验驱动的漂移场景共用骨架:prepare(基线全绿)→ 受控突变
 ///(守卫持有)→ start_streaming(复验在 registry lookup/真实 adapter
@@ -2799,62 +2803,61 @@ async fn scenario_capability_drift(
         "d4_missing_or_drift" => "write_boundary(D4)分格复验",
         other => unreachable!("drift 场景分支外的场景 {other}"),
     };
-    let mutation: Box<dyn FnOnce(&MatrixEnvironment) -> Result<Task11MutationGuard, String>> =
-        match scenario {
-            "version_drift" => Box::new(|env| {
-                task11_mutate_selected_record(env, |record| {
-                    record.version = format!("{}-t11-drift", record.version);
-                })
-                .map(Task11MutationGuard::Capability)
-            }),
-            "wire_drift" => Box::new(|env| {
-                task11_mutate_selected_record(env, |record| {
-                    let (dialect, wire) = match record.adapter_dialect {
-                        ProviderDialect::ClaudeCodeCliV1 => (
-                            ProviderDialect::CodexCliV1,
-                            ProviderWireDialect::CodexAppServerRpc,
-                        ),
-                        ProviderDialect::CodexCliV1 => {
-                            (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc)
-                        }
-                        ProviderDialect::PiRpcV1 => {
-                            (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp)
-                        }
-                        ProviderDialect::KimiAcpV1 => (
-                            ProviderDialect::ClaudeCodeCliV1,
-                            ProviderWireDialect::ClaudeCodeStreamJson,
-                        ),
-                    };
-                    record.adapter_dialect = dialect;
-                    record.wire_dialect = wire;
-                })
-                .map(Task11MutationGuard::Capability)
-            }),
-            "resume_unknown" => Box::new(|env| {
-                task11_mutate_selected_record(env, |record| {
-                    let mut row = record
-                        .action_matrix
-                        .row(&SessionPolicyAction::CodingTargetWrite);
-                    row.resume = ProviderCapabilityEvidence::Unknown;
-                    record.action_matrix.replace_row(row);
-                })
-                .map(Task11MutationGuard::Capability)
-            }),
-            "d4_missing_or_drift" => Box::new(|env| {
-                task11_mutate_selected_record(env, |record| {
-                    let mut row = record
-                        .action_matrix
-                        .row(&SessionPolicyAction::CodingTargetWrite);
-                    row.write_boundary = ProviderCapabilityEvidence::Unknown;
-                    record.action_matrix.replace_row(row);
-                    record
-                        .supported_actions
-                        .retain(|action| *action != SessionPolicyAction::CodingTargetWrite);
-                })
-                .map(Task11MutationGuard::Capability)
-            }),
-            other => unreachable!("drift 场景分支外的场景 {other}"),
-        };
+    let mutation: MutationApplier = match scenario {
+        "version_drift" => Box::new(|env| {
+            task11_mutate_selected_record(env, |record| {
+                record.version = format!("{}-t11-drift", record.version);
+            })
+            .map(Task11MutationGuard::Capability)
+        }),
+        "wire_drift" => Box::new(|env| {
+            task11_mutate_selected_record(env, |record| {
+                let (dialect, wire) = match record.adapter_dialect {
+                    ProviderDialect::ClaudeCodeCliV1 => (
+                        ProviderDialect::CodexCliV1,
+                        ProviderWireDialect::CodexAppServerRpc,
+                    ),
+                    ProviderDialect::CodexCliV1 => {
+                        (ProviderDialect::PiRpcV1, ProviderWireDialect::PiRpc)
+                    }
+                    ProviderDialect::PiRpcV1 => {
+                        (ProviderDialect::KimiAcpV1, ProviderWireDialect::KimiAcp)
+                    }
+                    ProviderDialect::KimiAcpV1 => (
+                        ProviderDialect::ClaudeCodeCliV1,
+                        ProviderWireDialect::ClaudeCodeStreamJson,
+                    ),
+                };
+                record.adapter_dialect = dialect;
+                record.wire_dialect = wire;
+            })
+            .map(Task11MutationGuard::Capability)
+        }),
+        "resume_unknown" => Box::new(|env| {
+            task11_mutate_selected_record(env, |record| {
+                let mut row = record
+                    .action_matrix
+                    .row(&SessionPolicyAction::CodingTargetWrite);
+                row.resume = ProviderCapabilityEvidence::Unknown;
+                record.action_matrix.replace_row(row);
+            })
+            .map(Task11MutationGuard::Capability)
+        }),
+        "d4_missing_or_drift" => Box::new(|env| {
+            task11_mutate_selected_record(env, |record| {
+                let mut row = record
+                    .action_matrix
+                    .row(&SessionPolicyAction::CodingTargetWrite);
+                row.write_boundary = ProviderCapabilityEvidence::Unknown;
+                record.action_matrix.replace_row(row);
+                record
+                    .supported_actions
+                    .retain(|action| *action != SessionPolicyAction::CodingTargetWrite);
+            })
+            .map(Task11MutationGuard::Capability)
+        }),
+        other => unreachable!("drift 场景分支外的场景 {other}"),
+    };
     // resume 场景:输入标记 resume(分格在 spawn 前复验施加)。
     let mut input = task11_streaming_input(env);
     if scenario == "resume_unknown" {
@@ -2893,7 +2896,7 @@ async fn scenario_capability_drift(
                 "t11_scenario_refused",
                 format_args!("dimension={dimension} error={error}"),
             );
-            scenario_refused(&format!("spawn 前复验({dimension})"), error.to_string())
+            scenario_refused(format!("spawn 前复验({dimension})"), error.to_string())
         }
         Ok(session) => {
             drop(session);
@@ -2903,7 +2906,7 @@ async fn scenario_capability_drift(
                 format_args!("dimension={dimension}(已 cancel+drop 收口)"),
             );
             scenario_not_refused(
-                &format!("spawn 前复验({dimension})"),
+                format!("spawn 前复验({dimension})"),
                 format!("维度 {dimension} 漂移未被复验拒绝"),
             )
         }
@@ -3085,27 +3088,27 @@ async fn scenario_fingerprint_drift(env: &MatrixEnvironment, sid: &str) -> Scena
     )
     .await;
     // 受控复位:硬复位回漂移前 HEAD(仅本场景提交;fixture 仓)。
-    if let (Some(head_before), Some(head_after)) = (head_before, git_head(&env.member_worktree)) {
-        if head_before != head_after {
-            let _ = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&env.member_worktree)
-                .args(["reset", "--hard", "-q", &head_before])
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .status();
-            let _ = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&env.member_worktree)
-                .args(["clean", "-fdq"])
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .status();
-            fp(
-                "t11_git_restored",
-                format_args!("reset → {head_before}(fingerprint 漂移复位)"),
-            );
-        }
+    if let (Some(head_before), Some(head_after)) = (head_before, git_head(&env.member_worktree))
+        && head_before != head_after
+    {
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&env.member_worktree)
+            .args(["reset", "--hard", "-q", &head_before])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&env.member_worktree)
+            .args(["clean", "-fdq"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status();
+        fp(
+            "t11_git_restored",
+            format_args!("reset → {head_before}(fingerprint 漂移复位)"),
+        );
     }
     outcome
 }
@@ -3280,10 +3283,10 @@ async fn run_task11_failure_scenarios(env: &mut MatrixEnvironment) -> Vec<Eviden
                 },
             }),
         ];
-        if index == 0 {
-            if let Some(event) = availability_event.clone() {
-                events.push(event);
-            }
+        if index == 0
+            && let Some(event) = availability_event.clone()
+        {
+            events.push(event);
         }
         events.extend(outcome.extra_events);
         let mut cell = task11_cell_base(
@@ -6010,13 +6013,12 @@ impl MatrixEnvironment {
             json!({}),
         )
         .await;
-        if status.is_success() {
-            if let Some(id) = body
+        if status.is_success()
+            && let Some(id) = body
                 .pointer("/work_items/0/work_item_id")
                 .and_then(Value::as_str)
-            {
-                self.work_item_id = Some(id.to_string());
-            }
+        {
+            self.work_item_id = Some(id.to_string());
         }
     }
 
@@ -6359,7 +6361,7 @@ impl MatrixEnvironment {
         // fresh:组入口建 attempt → coding WS 驱动(StartCoding/阶段门)→
         // FinalConfirm。r37:schema v2 work item 的单件创建入口被产品正确
         // 拒收(schema_v2_group_coding_required,v2 必须经 work item group
-        /// lc-root v1.2 §2 coding 腿先例同款组链)——改走
+        // lc-root v1.2 §2 coding 腿先例同款组链)——改走
         // POST work-item-plans/{plan_id}/coding-attempts(create_group_
         // coding_attempt:Confirmed plan 校验+组初始化 journal+组锁)。
         let mut observation = StageObservation::new("coding", &self.provider);
@@ -7003,7 +7005,7 @@ impl MatrixEnvironment {
                 }
             }
         }
-        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.sort_by_key(|(seq, _)| std::cmp::Reverse(*seq));
         found
     }
 
@@ -7578,11 +7580,11 @@ fn truncate_verbose_wire_fields(value: &mut Value) {
     const FIELD_TEXT_LIMIT: usize = 512;
     if let Some(object) = value.as_object_mut() {
         for (_key, field) in object.iter_mut() {
-            if let Some(text) = field.as_str() {
-                if text.len() > FIELD_TEXT_LIMIT {
-                    let truncated: String = text.chars().take(FIELD_TEXT_LIMIT).collect();
-                    *field = Value::String(format!("{truncated}…[truncated]"));
-                }
+            if let Some(text) = field.as_str()
+                && text.len() > FIELD_TEXT_LIMIT
+            {
+                let truncated: String = text.chars().take(FIELD_TEXT_LIMIT).collect();
+                *field = Value::String(format!("{truncated}…[truncated]"));
             }
         }
     }
@@ -7598,7 +7600,7 @@ fn extract_requirement_ids(markdown: &str) -> Vec<(String, String)> {
         while let Some((id, after)) = find_requirement_token(rest) {
             let brief: String = after
                 .trim()
-                .trim_start_matches(|c| matches!(c, ':' | '：' | '-' | '—'))
+                .trim_start_matches([':', '：', '-', '—'])
                 .trim()
                 .chars()
                 .take(80)
@@ -7911,6 +7913,7 @@ enum PumpFrameDisposition {
 }
 
 /// r26:SC plan 门 resume 的泵相位;r58 起三相位(confirm 时序门帧驱动)。
+#[allow(clippy::enum_variant_names)] // 三相位同属 Await* 语义域,统一前缀可读性更高。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanScPumpPhase {
     /// 阶段 1:`human_gate_feedback` 修订轮,等 `human_gate_turn_completed`。
@@ -8739,10 +8742,8 @@ impl InflightCoderRunTracker {
                         self.started_before_window.insert(id.to_string());
                     }
                 }
-                "completed" => {
-                    if self.started_before_window.contains(id) {
-                        self.reattached = true;
-                    }
+                "completed" if self.started_before_window.contains(id) => {
+                    self.reattached = true;
                 }
                 _ => {}
             }
@@ -8798,6 +8799,7 @@ fn cli_version_token(version: &str) -> Option<String> {
 /// 2. 次选确认/正向口径——「确认/继续/是/同意/按建议」类;
 /// 3. 规避负向项——「取消/否/不/停止/拒绝/跳过」类(仅当无其他选项才落);
 /// 4. 无语义命中时维持首个非负向选项(与旧行为兼容)。
+///
 /// 多选题:有全量项只选全量项;否则全选所有非负向项(聚合视野)。
 fn semantic_choice_answers(message: &Value) -> (Vec<Value>, Vec<String>) {
     let questions: Vec<&Value> = message
@@ -8968,7 +8970,7 @@ fn semantic_option_selection(
             .collect();
         classified
             .iter()
-            .filter(|(index, tier)| {
+            .filter(|(_index, tier)| {
                 *tier != SemanticTier::Negative && *tier != SemanticTier::SelectAll
             })
             .find(|(index, _)| {
@@ -11282,8 +11284,7 @@ impl MatrixEnvironment {
         std::fs::create_dir_all(&java_dir).map_err(|error| error.to_string())?;
         std::fs::write(
             maven_dir.join("pom.xml"),
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -11315,8 +11316,7 @@ impl MatrixEnvironment {
     </plugins>
   </build>
 </project>
-"#
-            ),
+"#,
         )
         .map_err(|error| error.to_string())?;
         std::fs::write(
@@ -11572,15 +11572,14 @@ CMD ["sh", "-c", "cat /tmp/run-marker.txt && echo T22 podman run ok"]
                 if let Ok(children) = std::fs::read_dir(&path) {
                     stack.extend(children.flatten().map(|entry| entry.path()));
                 }
-            } else if path.extension().is_some_and(|ext| ext == "json") {
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                        found.push(json!({
-                            "path": path.display().to_string(),
-                            "record": value,
-                        }));
-                    }
-                }
+            } else if path.extension().is_some_and(|ext| ext == "json")
+                && let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(value) = serde_json::from_str::<Value>(&text)
+            {
+                found.push(json!({
+                    "path": path.display().to_string(),
+                    "record": value,
+                }));
             }
         }
         found
@@ -11648,7 +11647,7 @@ CMD ["sh", "-c", "cat /tmp/run-marker.txt && echo T22 podman run ok"]
     async fn drive_b45_cancel_cell(&self, attempt_id: &str) -> Value {
         fp_enter_phase("b45", "cancel-cell", FRESH);
         let url = format!("ws://{}/ws/coding-attempts/{attempt_id}", self.ws_addr);
-        let mut outcome;
+        let outcome;
         let ws = connect_live_ws(&url).await;
         let mut ws = match ws {
             Ok(ws) => ws,
@@ -12242,6 +12241,7 @@ pub(crate) enum B45T24Scenario {
     /// 崩溃·静默轮:验证含 ≥300s 静默 CHECK(kill 点=窗口 Running)。
     CrashSilent,
     /// 崩溃·违规轮:验证含违规探针(kill 点=窗口 Running)。
+    #[allow(dead_code)] // 违规崩溃轮为矩阵预留场景,当前只跑静默轮。
     CrashViolation,
 }
 
@@ -12510,6 +12510,7 @@ pub(crate) struct B45T24Server {
     /// pty 会话日志(script 落盘;bootstrap token/启动足迹来源)。
     pub(crate) log_path: PathBuf,
     /// workspace 根(服务 --workspace)。
+    #[allow(dead_code)] // 仅由服务进程消费;测试侧保留供证据对照。
     pub(crate) workspace_root: PathBuf,
     /// 已认证会话 cookie(`aria_session=...`;None=未完成交换)。
     pub(crate) cookie: Option<String>,
@@ -12728,10 +12729,8 @@ async fn b45_t24_remote_attempt_pump(
     {
         return json!({"hello_error": error});
     }
-    if start {
-        if let Err(error) = ws.send_json(&json!({"type": "start_coding"})).await {
-            return json!({"start_error": error});
-        }
+    if start && let Err(error) = ws.send_json(&json!({"type": "start_coding"})).await {
+        return json!({"start_error": error});
     }
     let mut events: Vec<Value> = Vec::new();
     let mut terminal_status: Option<String> = None;
@@ -12747,11 +12746,11 @@ async fn b45_t24_remote_attempt_pump(
             events.push(json!({"type": "t24_pump_timeout"}));
             break;
         }
-        if let Some(bound) = stop_after {
-            if started.elapsed() >= bound {
-                events.push(json!({"type": "t24_pump_stop_after_reached"}));
-                break;
-            }
+        if let Some(bound) = stop_after
+            && started.elapsed() >= bound
+        {
+            events.push(json!({"type": "t24_pump_stop_after_reached"}));
+            break;
         }
         let message = tokio::time::timeout_at(idle_deadline, ws.recv_json()).await;
         let message = match message {
@@ -12795,12 +12794,11 @@ async fn b45_t24_remote_attempt_pump(
                     .await;
             }
         }
-        if kind == "coding_session_state" {
-            if let Some(status) = message.pointer("/attempt/status").and_then(Value::as_str) {
-                if matches!(status, "completed" | "failed" | "aborted" | "blocked") {
-                    terminal_status = Some(status.to_string());
-                }
-            }
+        if kind == "coding_session_state"
+            && let Some(status) = message.pointer("/attempt/status").and_then(Value::as_str)
+            && matches!(status, "completed" | "failed" | "aborted" | "blocked")
+        {
+            terminal_status = Some(status.to_string());
         }
         events.push(message);
         if terminal_status.is_some() {
@@ -12828,13 +12826,12 @@ fn b45_t24_read_windows(app_root: &Path) -> Vec<Value> {
     if let Ok(entries) = std::fs::read_dir(&windows_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "json") {
-                if let Ok(text) = std::fs::read_to_string(&path)
-                    && let Ok(mut value) = serde_json::from_str::<Value>(&text)
-                {
-                    value["$path"] = json!(path.display().to_string());
-                    found.push(value);
-                }
+            if path.extension().is_some_and(|ext| ext == "json")
+                && let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(mut value) = serde_json::from_str::<Value>(&text)
+            {
+                value["$path"] = json!(path.display().to_string());
+                found.push(value);
             }
         }
     }
@@ -12917,7 +12914,7 @@ fn b45_t24_max_silent_gap_secs(role_rows: &[Value]) -> u64 {
     times.sort();
     let mut max_gap = 0i64;
     for pair in times.windows(2) {
-        let gap = pair[1].signed_duration_since(&pair[0]).num_seconds();
+        let gap = pair[1].signed_duration_since(pair[0]).num_seconds();
         max_gap = max_gap.max(gap);
     }
     max_gap.max(0) as u64
@@ -13072,9 +13069,9 @@ impl MatrixEnvironment {
         }))
     }
 
-    /// T24:释放 in-process 服跑态(固定根交真实 `aria web` 进程接管)。
-    /// 由 `run_b45_t24_crash` 内联执行(server.abort + 根/bare-origin 摘取
-    /// 后 drop(env));bare origin 必须持活至演练结束(push 契约)。
+    // T24:释放 in-process 服跑态(固定根交真实 `aria web` 进程接管)。
+    // 由 `run_b45_t24_crash` 内联执行(server.abort + 根/bare-origin 摘取
+    // 后 drop(env));bare origin 必须持活至演练结束(push 契约)。
 
     /// T24 durable 观测:reviewer-windows 面(windows/violations/leases)。
     fn b45_t24_reviewer_window_snapshot(&self) -> Value {
@@ -13086,13 +13083,12 @@ impl MatrixEnvironment {
             };
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "json") {
-                    if let Ok(text) = std::fs::read_to_string(&path)
-                        && let Ok(mut value) = serde_json::from_str::<Value>(&text)
-                    {
-                        value["$path"] = json!(path.display().to_string());
-                        found.push(value);
-                    }
+                if path.extension().is_some_and(|ext| ext == "json")
+                    && let Ok(text) = std::fs::read_to_string(&path)
+                    && let Ok(mut value) = serde_json::from_str::<Value>(&text)
+                {
+                    value["$path"] = json!(path.display().to_string());
+                    found.push(value);
                 }
             }
             found
@@ -13224,7 +13220,7 @@ impl LiveLcGatewayHarness {
             format_args!("lc={} issue={}", env.lc_id, env.issue_id),
         );
         let fixtures = env
-            .b45_t24_seed_fixture(scenario, &env.app_paths.root())
+            .b45_t24_seed_fixture(scenario, env.app_paths.root())
             .map_err(|message| {
                 matrix_failure("b45_t24_fixture_prerequisite_missing", message, Some("env"))
             })?;
@@ -13293,7 +13289,7 @@ impl LiveLcGatewayHarness {
                 // 窗口开点事实:首次观测到该 attempt 的 Running 窗口时立即
                 // 采集(worktree 状态/资源面;与驱动同任务并发,tokio::join!)
                 let watch_fut = async {
-                    let mut poll_deadline = tokio::time::Instant::now() + env.stage_timeout;
+                    let poll_deadline = tokio::time::Instant::now() + env.stage_timeout;
                     loop {
                         let watch = b45_t24_read_windows(env.app_paths.root());
                         let matched: Vec<Value> = watch
@@ -13521,7 +13517,7 @@ impl LiveLcGatewayHarness {
             Err(failure) => return Err(failure),
         };
         let fixtures = env
-            .b45_t24_seed_fixture(B45T24Scenario::CrashSilent, &env.app_paths.root())
+            .b45_t24_seed_fixture(B45T24Scenario::CrashSilent, env.app_paths.root())
             .map_err(|message| {
                 matrix_failure("b45_t24_fixture_prerequisite_missing", message, Some("env"))
             })?;
@@ -13697,8 +13693,7 @@ impl LiveLcGatewayHarness {
         let role_runs_at_kill = t24_read_role_runs(&app_root, &issue_id, &attempt_one);
         server.kill_process_group();
         let server_dead = !server.alive();
-        let provider_alive_after_kill =
-            provider_pid_at_kill.is_some_and(|pid| b45_t24_pid_alive(pid));
+        let provider_alive_after_kill = provider_pid_at_kill.is_some_and(b45_t24_pid_alive);
         fp(
             "t24_killed",
             format_args!(
@@ -14387,7 +14382,7 @@ pub(crate) fn b45_t24_cancel_provider_label(provider: &ProviderName) -> &'static
     }
 }
 
-/// T24 辅助集(app_root 直读;in-process env 释放后的观测面)。
+// T24 辅助集(app_root 直读;in-process env 释放后的观测面)。
 
 /// 预选空闲端口(bind 即释放;本地竞态可接受)。
 async fn t24_pick_port() -> u16 {
@@ -14476,12 +14471,11 @@ fn t24_read_leases(app_root: &Path) -> Vec<Value> {
     if let Ok(entries) = std::fs::read_dir(&leases_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "json") {
-                if let Ok(text) = std::fs::read_to_string(&path)
-                    && let Ok(value) = serde_json::from_str::<Value>(&text)
-                {
-                    found.push(value);
-                }
+            if path.extension().is_some_and(|ext| ext == "json")
+                && let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(value) = serde_json::from_str::<Value>(&text)
+            {
+                found.push(value);
             }
         }
     }
@@ -14956,14 +14950,14 @@ fn b45_t24_role_event_rows(app_root: &Path, issue_id: &str, attempt_id: &str) ->
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "jsonl") {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                for line in text.lines() {
-                    if let Ok(event) = serde_json::from_str::<Value>(line)
-                        && let Some(created_at) = event.get("created_at").and_then(Value::as_str)
-                    {
-                        rows.push(json!({"created_at": created_at}));
-                    }
+        if path.extension().is_some_and(|ext| ext == "jsonl")
+            && let Ok(text) = std::fs::read_to_string(&path)
+        {
+            for line in text.lines() {
+                if let Ok(event) = serde_json::from_str::<Value>(line)
+                    && let Some(created_at) = event.get("created_at").and_then(Value::as_str)
+                {
+                    rows.push(json!({"created_at": created_at}));
                 }
             }
         }

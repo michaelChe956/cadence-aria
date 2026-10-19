@@ -75,11 +75,11 @@ fn b45_t23_providers_from_env() -> Vec<ProviderName> {
     match std::env::var("B45_T23_PROVIDERS") {
         Ok(raw) if !raw.trim().is_empty() => raw
             .split(',')
-            .filter_map(|token| match token.trim() {
-                "claude" => Some(ProviderName::ClaudeCode),
-                "codex" => Some(ProviderName::Codex),
-                "pi" => Some(ProviderName::Pi),
-                "kimi" => Some(ProviderName::KimiCode),
+            .map(|token| match token.trim() {
+                "claude" => ProviderName::ClaudeCode,
+                "codex" => ProviderName::Codex,
+                "pi" => ProviderName::Pi,
+                "kimi" => ProviderName::KimiCode,
                 other => {
                     panic!("B45_T23_PROVIDERS 未知 provider:{other:?}(合法:claude/codex/pi/kimi)")
                 }
@@ -944,10 +944,10 @@ fn b45_read_audit_lines(partition: &Path) -> Vec<String> {
         return lines;
     };
     for entry in entries.flatten() {
-        if entry.path().extension().is_some_and(|ext| ext == "jsonl") {
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                lines.extend(content.lines().map(str::to_string));
-            }
+        if entry.path().extension().is_some_and(|ext| ext == "jsonl")
+            && let Ok(content) = std::fs::read_to_string(entry.path())
+        {
+            lines.extend(content.lines().map(str::to_string));
         }
     }
     lines
@@ -1446,7 +1446,7 @@ mod t23_assertion_tests {
     fn t23_spawn_instrumentation_requires_real_spawn_and_five_dim_accounting() {
         // fresh confirmed 有 spawn → 通过。
         let fresh = base_cell("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH);
-        assert!(verify_spawn_instrumentation(&[fresh.clone()]).is_ok());
+        assert!(verify_spawn_instrumentation(std::slice::from_ref(&fresh)).is_ok());
 
         // fresh 置 0 → 红(仪器缺失/真实未启动)。
         let mut zero_fresh = fresh.clone();

@@ -1396,11 +1396,11 @@ fn parse_workspace_stream_capture(content: &str) -> (Vec<String>, String) {
 /// 一次运行的存在性轮询有明确语义。
 async fn wait_workspace_stream_capture(capture: &std::path::Path) -> Option<(Vec<String>, String)> {
     for _ in 0..150 {
-        if let Ok(content) = std::fs::read_to_string(capture) {
-            if content.lines().count() >= 2 {
-                std::fs::remove_file(capture).expect("consume capture file");
-                return Some(parse_workspace_stream_capture(&content));
-            }
+        if let Ok(content) = std::fs::read_to_string(capture)
+            && content.lines().count() >= 2
+        {
+            std::fs::remove_file(capture).expect("consume capture file");
+            return Some(parse_workspace_stream_capture(&content));
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }

@@ -205,7 +205,7 @@ fn baseline_state_path(root: &Path) -> PathBuf {
 
 pub(crate) fn tree_digest(root: &Path) -> Result<String, String> {
     let mut entries: Vec<PathBuf> = Vec::new();
-    collect_files(root, root, &mut entries)
+    collect_files(root, &mut entries)
         .map_err(|error| format!("tree_digest 扫描 {} 失败:{error}", root.display()))?;
     entries.sort();
     let mut hasher = Sha256::new();
@@ -227,7 +227,7 @@ pub(crate) fn tree_digest(root: &Path) -> Result<String, String> {
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -242,7 +242,7 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Re
             if entry.file_name() == ".git" {
                 continue;
             }
-            collect_files(root, &entry.path(), out)?;
+            collect_files(&entry.path(), out)?;
         } else {
             out.push(entry.path());
         }
@@ -296,10 +296,10 @@ pub(crate) fn write_manifest_atomic(
             target.display()
         )
     })?;
-    if let Some(parent) = target.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
+    if let Some(parent) = target.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
     }
     Ok(())
 }
