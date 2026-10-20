@@ -435,6 +435,34 @@ pub(crate) fn validate_b45_t24_replay_evidence(evidence: &Value) -> Result<(), V
 // validator(crash)。
 // ---------------------------------------------------------------------------
 
+/// 补偿后"登记进程已消失"判定(与 kill 前核对 live (pid,starttime) 同口径)。
+///
+/// - 证据缺该 PID 条目(未观察)→ 不算消失;
+/// - `proc_alive=false`(含僵尸,Gone 口径)→ 消失;
+/// - `proc_alive=true` 但 `/proc` starttime 与登记 starttime 不同 → 原进程
+///   已死、该 PID 位置被新进程复用(PID 复用)→ 不算"旧 writer 仍存活";
+/// - starttime 任一侧缺失/不可比(无法证明复用)→ 仍按存活处理(不假绿)。
+fn t24_registered_process_gone(
+    entry: Option<&Value>,
+    expected_start_time_ticks: Option<u64>,
+) -> bool {
+    let Some(entry) = entry else {
+        return false;
+    };
+    match entry["proc_alive"].as_bool() {
+        Some(false) => true,
+        Some(true) => {
+            let expected = expected_start_time_ticks.filter(|ticks| *ticks > 0);
+            let observed = entry["proc_start_time_ticks"].as_u64();
+            matches!(
+                (expected, observed),
+                (Some(expected), Some(observed)) if observed != expected
+            )
+        }
+        _ => false,
+    }
+}
+
 /// crash validator:断言组(计划 Step 4 红测面的机器形态)。
 ///
 /// 必备(缺任一=FAIL):
@@ -647,13 +675,17 @@ pub(crate) fn validate_b45_t24_crash_evidence(evidence: &Value) -> Result<(), Ve
         if pid == 0 {
             continue;
         }
-        let gone = compensated
-            .iter()
-            .find(|entry| entry["pid"].as_u64() == Some(pid))
-            .is_some_and(|entry| entry["proc_alive"].as_bool() == Some(false));
+        // 按 (pid,starttime) 判活:PID 被系统复用、原 starttime 已不在 →
+        // 原进程确已消失,不因同号新进程假红(零额外取证)。
+        let gone = t24_registered_process_gone(
+            compensated
+                .iter()
+                .find(|entry| entry["pid"].as_u64() == Some(pid)),
+            record["start_time_ticks"].as_u64(),
+        );
         if !gone {
             failures.push(format!(
-                "登记 PID 未消失(补偿后 /proc/{pid} 仍存活或未观察——旧 writer 未停)"
+                "登记 PID 未消失(补偿后 /proc/{pid} 仍存活且 starttime 同登记或未观察——旧 writer 未停)"
             ));
         }
     }
@@ -1708,9 +1740,20 @@ mod validator_crash_tests {
         );
     }
 
-    /// 补偿后登记 PID 仍存活(未停旧 writer)→ 红。
+    /// 补偿后登记 PID 仍存活(PID 与 starttime 同登记 → 旧 writer 未停)→ 红;
+    /// `proc_alive=true` 但 starttime 未观察到(无法证明 PID 复用)同样红。
     #[test]
     fn crash_validator_rejects_surviving_registered_process() {
+        let mut evidence = crash_base();
+        evidence["restart"]["compensated_processes"][0]["proc_alive"] = json!(true);
+        evidence["restart"]["compensated_processes"][0]["proc_start_time_ticks"] =
+            json!(123456);
+        let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
+        assert!(
+            failures.iter().any(|f| f.contains("PID 未消失")),
+            "{failures:?}"
+        );
+        // 存活但 starttime 缺失:不能证明 PID 复用 → 仍红(不假绿)。
         let mut evidence = crash_base();
         evidence["restart"]["compensated_processes"][0]["proc_alive"] = json!(true);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
@@ -1718,6 +1761,18 @@ mod validator_crash_tests {
             failures.iter().any(|f| f.contains("PID 未消失")),
             "{failures:?}"
         );
+    }
+
+    /// 补偿后同一 PID 位置已被新进程占用(starttime 与登记不同 → PID 复用)
+    /// 即原进程确已消失:不判红(零额外取证,两字段均已在证据里)。
+    #[test]
+    fn crash_validator_accepts_pid_reused_by_new_process() {
+        let mut evidence = crash_base();
+        evidence["restart"]["compensated_processes"][0]["proc_alive"] = json!(true);
+        evidence["restart"]["compensated_processes"][0]["proc_start_time_ticks"] =
+            json!(999999);
+        let result = validate_b45_t24_crash_evidence(&evidence);
+        assert!(result.is_ok(), "PID 复用被误判为旧 writer 存活:{result:?}");
     }
 
     /// 补偿后登记项未清(/proc 已消失但 durable 记录仍在)→ 红。
