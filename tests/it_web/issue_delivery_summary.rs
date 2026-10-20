@@ -26,10 +26,12 @@ use cadence_aria::cross_cutting::provider_availability_gate::{
 };
 use cadence_aria::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
+use cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use cadence_aria::cross_cutting::streaming_provider::{
     ProviderCompletion, ProviderEvent, ProviderSession, StreamChunk, StreamingProviderAdapter,
     StreamingProviderInput,
 };
+use cadence_aria::cross_cutting::structured_output::StructuredOutputContract;
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::coding_attempt_store::CodingAttemptStore;
 use cadence_aria::product::coding_models::{
@@ -159,6 +161,11 @@ async fn build_delivery_fixture(
             description: None,
         })
         .expect("create project");
+
+    // 正向播种（4749a1fc 起 bootstrap 行恒 Unknown）：交付链（逻辑多仓/单仓皆
+    // 可）经 provider gateway 启动 claude_code，必须显式物化「已探测」事实，
+    // 否则 launch 分格 fail-closed 为 provider_capability_launch_not_confirmed。
+    crate::provider_capability_fixture::seed_confirmed_claude(&app_paths, PROJECT_ID, None);
 
     let mut repository_ids = Vec::new();
     for (index, repo_dir) in repo_dirs.iter().enumerate() {
@@ -349,10 +356,11 @@ async fn drive_work_item_attempt_to_completion(app: axum::Router, attempt_id: &s
         match timeout(Duration::from_secs(3), recv_json(&mut ws)).await {
             Ok(CodingWsOutMessage::CodingGateRequired { gate }) => {
                 observed.push(format!(
-                    "gate:{:?}:{:?}:reason={:?}",
+                    "gate:{:?}:{:?}:reason={:?}:{}",
                     gate.kind,
                     gate.stage.as_ref(),
-                    gate.reason_code.as_deref()
+                    gate.reason_code.as_deref(),
+                    gate.description
                 ));
                 if gate.kind == CodingGateKind::StageGate
                     && let Some(stage) = gate.stage.clone()
@@ -608,19 +616,17 @@ mod tests {
 
 struct FullChainStreamingProvider;
 
-#[async_trait::async_trait]
-impl StreamingProviderAdapter for FullChainStreamingProvider {
-    /// 逻辑代码库（Logical）路径经 gateway 调用 `start`；Legacy 路径调用 `run_streaming`。
-    async fn start(
-        &self,
-        input: StreamingProviderInput,
-        _cancel: CancellationToken,
-    ) -> Result<ProviderSession, ProviderAdapterError> {
+impl FullChainStreamingProvider {
+    /// 按 role 产出会话：Executor 把实现写进 worktree 并回文本，Reviewer 回
+    /// 审查结论 JSON，其余角色回 ok 文本。Legacy（`run_streaming`）与 LC
+    /// （`start` / `start_validated`）两路复用同一行为。
+    fn session(
+        role: AdapterRole,
+        working_dir: PathBuf,
+        contract: Option<StructuredOutputContract>,
+    ) -> ProviderSession {
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(8);
         let (command_tx, _command_rx) = tokio::sync::mpsc::channel(8);
-        let role = input.role.clone();
-        let working_dir = input.working_dir.clone();
-        let contract = input.structured_output_contract.clone();
         tokio::spawn(async move {
             match role {
                 AdapterRole::Executor => {
@@ -671,11 +677,44 @@ impl StreamingProviderAdapter for FullChainStreamingProvider {
                 }
             }
         });
-        Ok(ProviderSession {
+        ProviderSession {
             native_session_id: None,
             events: event_rx,
             commands: command_tx,
-        })
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for FullChainStreamingProvider {
+    /// Legacy（单仓 direct）路径的裸 `start`。
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        Ok(Self::session(
+            input.role,
+            input.working_dir,
+            input.structured_output_contract,
+        ))
+    }
+
+    /// 逻辑代码库（Logical）路径：gateway `start_streaming` 只经 validated 分发。
+    /// crate 外无法拆 `ValidatedStreamingProviderInput`，故取启动事实视图
+    /// （role + spawn cwd）后复刻同一行为；结构化契约不借出，Reviewer 走
+    /// plain 输出（`NotRequested` 时 review parser 直接解析 `full_output` JSON）。
+    async fn start_validated(
+        &self,
+        validated: ValidatedStreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let view = validated.launch_view();
+        Ok(Self::session(
+            view.role.clone(),
+            view.working_dir.to_path_buf(),
+            None,
+        ))
     }
 
     async fn run_streaming(

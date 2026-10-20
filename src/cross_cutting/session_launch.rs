@@ -70,6 +70,21 @@ impl ValidatedStreamingProviderInput {
         self.launch.frozen_execution()
     }
 
+    /// 启动事实只读投影(role / 实际 spawn cwd / prompt)。
+    ///
+    /// 外部 adapter 实现 `start_validated` 时要在自身上下文复刻 role 行为
+    /// (crate 外 fixture:按 role 写 worktree、按 prompt 识别 recipe 命令、
+    /// 产出 review 结论),而 `into_parts` 仍是 crate 私有。本投影只借出三个
+    /// 启动事实,不借出结构化契约与资源归属,也不提供拆包与所有权转移——
+    /// validated 载体仍是唯一启动凭据,`validate` 产出不可伪造。
+    pub fn launch_view(&self) -> ProviderLaunchView<'_> {
+        ProviderLaunchView {
+            role: &self.input.role,
+            working_dir: self.input.working_dir.as_path(),
+            prompt: self.input.prompt.as_str(),
+        }
+    }
+
     /// B1-1:绑定本次 launch 的受信资源归属(crate 内受信装配面——launch
     /// 分流点 `launch_provider_session` 的 validated+gateway 臂与同步桥接
     /// 透传消费)。字段 private、载体 crate 内铸造,caller/模型不可伪造。
@@ -88,6 +103,18 @@ impl ValidatedStreamingProviderInput {
     ) -> Option<&crate::cross_cutting::provider_resources::TrustedLaunchOwnership> {
         self.launch_ownership.as_ref()
     }
+}
+
+/// launcher 交给 adapter 的启动事实只读投影(见
+/// [`ValidatedStreamingProviderInput::launch_view`])。全部字段为借用视图,
+/// 不含资源归属与所有权,不可据此构造或重放 validated 载体。
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderLaunchView<'a> {
+    pub role: &'a crate::protocol::contracts::AdapterRole,
+    /// provider 实际 spawn cwd(target worktree;LC 会话的 cwd 授权根另存
+    /// `working_directory`,此处保持 target 语义)。
+    pub working_dir: &'a std::path::Path,
+    pub prompt: &'a str,
 }
 
 /// 已绑定 validated policy 的同步 adapter input。spawn 前复验在

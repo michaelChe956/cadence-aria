@@ -112,6 +112,8 @@ mod evidence_query;
 mod issue_delivery_summary;
 #[path = "it_web/pointer_publication.rs"]
 mod pointer_publication;
+#[path = "it_web/provider_capability_fixture.rs"]
+mod provider_capability_fixture;
 #[path = "it_web/provider_gateway_envelope.rs"]
 mod provider_gateway_envelope;
 #[path = "it_web/web_api_handlers.rs"]

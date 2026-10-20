@@ -20,6 +20,7 @@ use cadence_aria::cross_cutting::provider_health::{
     ProviderHealthService, SystemProviderHealthClock,
 };
 use cadence_aria::cross_cutting::provider_registry::ProviderRegistry;
+use cadence_aria::cross_cutting::session_launch::ValidatedStreamingProviderInput;
 use cadence_aria::cross_cutting::streaming_provider::{
     ProviderSession, StreamingProviderAdapter, StreamingProviderInput,
 };
@@ -125,23 +126,41 @@ impl StreamingProviderAdapter for RootRecipePublishingProvider {
         input: StreamingProviderInput,
         cancel: CancellationToken,
     ) -> Result<ProviderSession, ProviderAdapterError> {
-        use cadence_aria::product::repository_store::RepositoryInitializationStepKind as RepoStep;
-        if RepoStep::RuleConfig
-            .command()
-            .is_some_and(|command| input.prompt.contains(command))
-        {
-            let root = input.working_dir.clone();
-            fs::write(root.join("AGENTS.md"), ROOT_POLICY_TEST_AGENTS)
-                .expect("write root AGENTS.md");
-            fs::create_dir_all(root.join(".claude").join("rules")).expect("create root rules dir");
-            fs::write(
-                root.join(".claude").join("rules").join("language.md"),
-                ROOT_POLICY_TEST_LANGUAGE,
-            )
-            .expect("write root language rule");
-        }
+        publish_root_recipe_materials(&input.working_dir, &input.prompt);
         self.inner.start(input, cancel).await
     }
+
+    /// 逻辑代码库（LC）路径：gateway `start_streaming` 只经 validated 分发。
+    /// 先用启动事实投影复刻 root recipe 材料发布（RuleAndMcpConfig 时机的
+    /// recipe 命令），再恒等透传 validated 载体给 inner（fake 语义不变）。
+    async fn start_validated(
+        &self,
+        validated: ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let view = validated.launch_view();
+        publish_root_recipe_materials(view.working_dir, view.prompt);
+        self.inner.start_validated(validated, cancel).await
+    }
+}
+
+/// RuleAndMcpConfig 时机由 provider 生成的聚合根政策材料（本 target 的
+/// 受控 fixture：内容固定，发布时机与生产同构）。
+fn publish_root_recipe_materials(root: &Path, prompt: &str) {
+    use cadence_aria::product::repository_store::RepositoryInitializationStepKind as RepoStep;
+    if !RepoStep::RuleConfig
+        .command()
+        .is_some_and(|command| prompt.contains(command))
+    {
+        return;
+    }
+    fs::write(root.join("AGENTS.md"), ROOT_POLICY_TEST_AGENTS).expect("write root AGENTS.md");
+    fs::create_dir_all(root.join(".claude").join("rules")).expect("create root rules dir");
+    fs::write(
+        root.join(".claude").join("rules").join("language.md"),
+        ROOT_POLICY_TEST_LANGUAGE,
+    )
+    .expect("write root language rule");
 }
 
 /// P0 production-entrypoint fixture: after the real filesystem/Git setup every
@@ -684,18 +703,24 @@ async fn reg_init_idx_pln_p0_chain_uses_only_http_routes() {
     let (status, confirmed_design) = fixture.confirm_workspace(design_session).await;
     assert_eq!(status, StatusCode::OK, "confirm Design: {confirmed_design}");
 
-    // REQ-WSC-08（retire-legacy-workitem-protocol T5 fix round 1 后 preflight 恒
-    // 评估，无 legacy 回落）：2 逻辑仓 Issue 的 prepare 在 prepare 期即收敛新路径
-    // durable Failed 终态（SINGLE_CANDIDATE_PREFLIGHT_FAILED+原因），不再回落
-    // legacy 流 200——原「prepare 200/Draft 停步/work_item_ids 空」契约由单仓
-    // HTTP 用例承载（it_web web_lifecycle_api/part_03
-    // prepare_work_item_plan_logical_branch_validates_target_in_selection）。
-    assert_error(
-        fixture
-            .prepare_work_item_plan(&project_id, &issue_id, story_id, design_id)
-            .await,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "SINGLE_CANDIDATE_PREFLIGHT_FAILED",
+    // plan preflight 六象限放行（`da81f600`：involved ⊆ resolved 上界且非空 →
+    // 放行；仅界外实名拒、空 involved 回退「上界恰一仓」）：本 fixture 的
+    // Design 覆盖全部两个逻辑仓（involved == 上界），prepare 必须 200 落 Draft
+    // 单候选 plan 并创建规划会话——REQ-WSC-08 期「2 逻辑仓即
+    // SINGLE_CANDIDATE_PREFLIGHT_FAILED」的断言早于上表放行，已过期。
+    let (status, prepared) = fixture
+        .prepare_work_item_plan(&project_id, &issue_id, story_id, design_id)
+        .await;
+    assert_eq!(status, StatusCode::OK, "prepare Work Item Plan: {prepared}");
+    assert_eq!(prepared["work_item_plan"]["status"], "draft");
+    assert_eq!(
+        prepared["work_item_plan"]["work_item_ids"],
+        json!([]),
+        "prepare must not materialise work items before planning"
+    );
+    assert!(
+        prepared["workspace_session"]["workspace_session_id"].is_string(),
+        "prepare must create the single-candidate planning session: {prepared}"
     );
     assert_eq!(
         member_git_before,

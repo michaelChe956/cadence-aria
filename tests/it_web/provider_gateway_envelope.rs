@@ -91,9 +91,9 @@ async fn aggregate_initialization_provider_turns_validate_envelope_and_audit_thr
             description: None,
         })
         .expect("create multi-repository project fixture");
+    crate::provider_capability_fixture::seed_confirmed_claude(&paths, "project_0001", None); // 正向播种
 
-    // 聚合根必须真实存在：生产 `ProductionPolicyTargetResolver` 会 canonicalize。
-    let aggregate_root = root_path.join("aggregate-root");
+    let aggregate_root = root_path.join("aggregate-root"); // 必须真实存在:resolver 会 canonicalize
     std::fs::create_dir_all(&aggregate_root).expect("aggregate root");
     let manifest = LogicalCodebaseManifest::new("project_0001", aggregate_root.clone(), Vec::new());
     LogicalCodebaseStore::new(paths.clone())
@@ -104,8 +104,7 @@ async fn aggregate_initialization_provider_turns_validate_envelope_and_audit_thr
     let dependencies = aggregate_dependencies(root_path.clone(), Some(factory.clone()));
     let state = WebAppState::new(root_path.clone(), WebRuntime::new_fake(root_path.clone()))
         .with_aggregate_initialization_dependencies(dependencies.clone());
-    // 泄漏 tempdir：manifest 在测试期间保持落盘。
-    std::mem::forget(root);
+    std::mem::forget(root); // 泄漏 tempdir:manifest 需在测试期间落盘
     let app = build_web_router(state);
 
     let created = post_json(
@@ -388,6 +387,7 @@ async fn non_default_lc_coding_gateway_validate_resolves_lc_scoped_checkout_targ
         )
         .expect("create logical codebase record");
     let lc_id = record.id;
+    crate::provider_capability_fixture::seed_confirmed_claude(&paths, &project.id, Some(&lc_id)); // lc 子树
 
     let worktree = root.path().join("api");
     std::fs::create_dir_all(&worktree).expect("create repository root");
