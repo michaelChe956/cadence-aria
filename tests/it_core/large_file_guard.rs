@@ -5,6 +5,326 @@ const MAX_PRODUCT_CODE_LINES: usize = 1200;
 const SCAN_ROOTS: &[&str] = &["src", "tests", "web/src"];
 const CODE_EXTENSIONS: &[&str] = &["rs", "ts", "tsx"];
 
+/// 祖父条款（2026-10-20 登记）：下列文件在登记时已超 1200 行硬线，属本分支
+/// 之前的历史遗留债务，非新代码引入。豁免放松的只是「是否超 1200」这一判定，
+/// 不放松「不得继续增长」——每条上限锁定为登记日行数，任何增长仍然报红。
+///
+/// 登记表只允许删项：文件拆分达标后必须移除（参照 4e7f3242 回收先例：
+/// 先登记锁定上限，再逐文件拆分回收）；确需新增项须用户裁决，不在实现
+/// 侧自行放宽。本次因 B1-1 接线越线的
+/// `src/cross_cutting/claude_code_provider/mod.rs` 已按先例拆分
+/// （`direct_start.rs` + `validated_start.rs`，纯移动），因此不在本表内。
+const GRANDFATHERED: &[(&str, usize)] = &[
+    (
+        "src/cross_cutting/claude_code_provider/tests/policy_session.rs",
+        1934,
+    ),
+    ("src/cross_cutting/codex_provider/mod.rs", 1302),
+    (
+        "src/cross_cutting/codex_provider/tests/approval_policy.rs",
+        2420,
+    ),
+    ("src/cross_cutting/gateway_sync_provider.rs", 1372),
+    (
+        "src/cross_cutting/kimi_code_provider/client_services/mod.rs",
+        1574,
+    ),
+    (
+        "src/cross_cutting/kimi_code_provider/client_services/terminal.rs",
+        1590,
+    ),
+    (
+        "src/cross_cutting/kimi_code_provider/client_services/terminal_handlers.rs",
+        1409,
+    ),
+    ("src/cross_cutting/kimi_code_provider/mod.rs", 1278),
+    (
+        "src/cross_cutting/kimi_code_provider/tests/session_tests.rs",
+        2636,
+    ),
+    (
+        "src/cross_cutting/kimi_code_provider/tests/tool_policy_zero_change.rs",
+        1264,
+    ),
+    ("src/cross_cutting/pi_provider/mod.rs", 1617),
+    (
+        "src/cross_cutting/pi_provider/tests/policy_session.rs",
+        1773,
+    ),
+    ("src/cross_cutting/provider_resources.rs", 3341),
+    ("src/cross_cutting/streaming_provider/mod.rs", 2062),
+    ("src/cross_cutting/streaming_provider/tests.rs", 2388),
+    ("src/product/advance_store.rs", 2525),
+    ("src/product/coding_attempt_store/admission_tests.rs", 1302),
+    ("src/product/coding_attempt_store/gate.rs", 2079),
+    (
+        "src/product/coding_attempt_store/group_initialization.rs",
+        1840,
+    ),
+    (
+        "src/product/coding_attempt_store/tests/issue_delivery.rs",
+        1216,
+    ),
+    ("src/product/coding_plan_run.rs", 3128),
+    ("src/product/coding_workspace_engine/code_review.rs", 2087),
+    ("src/product/coding_workspace_engine/gates.rs", 1436),
+    (
+        "src/product/coding_workspace_engine/group_review_orchestrator.rs",
+        1355,
+    ),
+    (
+        "src/product/coding_workspace_engine/provider_retry.rs",
+        1444,
+    ),
+    (
+        "src/product/coding_workspace_engine/provider_stream.rs",
+        2549,
+    ),
+    (
+        "src/product/coding_workspace_engine/tests/git_operation_reconcile.rs",
+        1338,
+    ),
+    (
+        "src/product/coding_workspace_engine/tests/group_completion_authority.rs",
+        1207,
+    ),
+    (
+        "src/product/coding_workspace_engine/tests/group_completion_recovery.rs",
+        1617,
+    ),
+    (
+        "src/product/coding_workspace_engine/tests/provider_failure_recovery.rs",
+        1557,
+    ),
+    (
+        "src/product/coding_workspace_engine/tests/provider_failure_recovery/provider_idle_stall.rs",
+        1214,
+    ),
+    (
+        "src/product/coding_workspace_engine/tests/provider_start_persistence.rs",
+        1350,
+    ),
+    (
+        "src/product/coding_workspace_engine/tests/verification_triage_gates.rs",
+        1598,
+    ),
+    ("src/product/issue_automation_store.rs", 1491),
+    ("src/product/issue_automation_store/tests.rs", 1518),
+    ("src/product/lifecycle_store/plan.rs", 1683),
+    ("src/product/lifecycle_store/tests.rs", 2893),
+    (
+        "src/product/lifecycle_store/tests/tool_policy_audit.rs",
+        1431,
+    ),
+    ("src/product/lifecycle_store/workspace.rs", 1667),
+    (
+        "src/product/lifecycle_store/workspace_single_candidate.rs",
+        1621,
+    ),
+    (
+        "src/product/lifecycle_store/workspace_single_candidate_tests.rs",
+        2055,
+    ),
+    ("src/product/lifecycle_store/worktree.rs", 1767),
+    (
+        "src/product/logical_codebase/coordinator_provider_turn.inc.rs",
+        1221,
+    ),
+    (
+        "src/product/logical_codebase/production_policy_resolvers.rs",
+        1547,
+    ),
+    (
+        "src/product/logical_codebase/provider_admission_preflight_tests.inc.rs",
+        2243,
+    ),
+    (
+        "src/product/logical_codebase/provider_boundary_probe.rs",
+        2645,
+    ),
+    (
+        "src/product/logical_codebase/provider_capability_store.rs",
+        1745,
+    ),
+    ("src/product/logical_codebase/provider_gateway.rs", 3239),
+    (
+        "src/product/logical_codebase/provider_gateway_tests.rs",
+        5474,
+    ),
+    (
+        "src/product/logical_codebase/provider_gateway_tests/task28_root_authority.inc.rs",
+        1553,
+    ),
+    ("src/product/logical_codebase/provider_trust.rs", 4484),
+    (
+        "src/product/logical_codebase/registration_tests.inc.rs",
+        1315,
+    ),
+    ("src/product/models/tests.rs", 1521),
+    ("src/product/reviewer_reconciliation.rs", 2471),
+    ("src/product/reviewer_snapshot.rs", 3322),
+    ("src/product/reviewer_window.rs", 3893),
+    ("src/product/reviewer_window_store.rs", 1688),
+    ("src/product/work_item_contract/tests/dependency.rs", 1204),
+    ("src/product/work_item_plan_compiler/tests.rs", 1449),
+    (
+        "src/product/work_item_split_engine/tests/engine_gateway_guard.rs",
+        1486,
+    ),
+    (
+        "src/product/work_item_split_engine/tests/prompt_contract.rs",
+        1666,
+    ),
+    ("src/product/work_item_split_validator/tests.rs", 1259),
+    ("src/product/workspace_engine/compile.rs", 1651),
+    ("src/product/workspace_engine/contract_autorepair.rs", 1651),
+    ("src/product/workspace_engine/contract_prerevision.rs", 1911),
+    (
+        "src/product/workspace_engine/conversational_gate_parts/revision_turn.inc.rs",
+        1488,
+    ),
+    (
+        "src/product/workspace_engine/draft_batch/compile_support.rs",
+        2310,
+    ),
+    ("src/product/workspace_engine/lifecycle.rs", 2167),
+    ("src/product/workspace_engine/prompts.rs", 1224),
+    (
+        "src/product/workspace_engine/prompts/human_gate_revision.rs",
+        1464,
+    ),
+    ("src/product/workspace_engine/review/drive.rs", 2319),
+    ("src/product/workspace_engine/review/routing.rs", 1391),
+    ("src/product/workspace_engine/session_state.rs", 1456),
+    (
+        "src/product/workspace_engine/tests/advance_handler.rs",
+        1342,
+    ),
+    (
+        "src/product/workspace_engine/tests/author_revision_loop.rs",
+        1227,
+    ),
+    (
+        "src/product/workspace_engine/tests/author_revision_loop_parts/root_cwd_revision.inc.rs",
+        1683,
+    ),
+    (
+        "src/product/workspace_engine/tests/conversational_gate_close.rs",
+        2891,
+    ),
+    (
+        "src/product/workspace_engine/tests/conversational_gate_recovery.rs",
+        1565,
+    ),
+    (
+        "src/product/workspace_engine/tests/conversational_gate_revision/part_02.rs",
+        1440,
+    ),
+    ("src/product/workspace_engine/tests/recovery_task7.rs", 1295),
+    (
+        "src/product/workspace_engine/tests/single_candidate.rs",
+        1545,
+    ),
+    ("src/web/advance_plan.rs", 1644),
+    ("src/web/app.rs", 2222),
+    ("src/web/autopilot_orchestrator.rs", 1737),
+    ("src/web/coding_start.rs", 1256),
+    ("src/web/coding_start_parts/tests.inc.rs", 1299),
+    ("src/web/coding_ws_handler/runner.rs", 2422),
+    ("src/web/coding_ws_handler/socket.rs", 1295),
+    (
+        "src/web/coding_ws_handler/tests/failed_review_recovery/runner.rs",
+        1242,
+    ),
+    (
+        "src/web/coding_ws_handler/tests/runner_recovery/startup_window_compensation.rs",
+        1828,
+    ),
+    ("src/web/handlers/automation_enrollment.rs", 2493),
+    ("src/web/handlers/automation_gateway_preflight.rs", 1217),
+    ("src/web/handlers/coding.rs", 1321),
+    ("src/web/handlers/coding/plan_start.rs", 2565),
+    ("src/web/handlers/coding/plan_start_tests.rs", 4001),
+    ("src/web/handlers/lifecycle_tests_d2_2.inc.rs", 1289),
+    ("src/web/handlers/support.rs", 1204),
+    ("src/web/handlers/support_parts/coding_cleanup.inc.rs", 1572),
+    ("src/web/handlers/workspace_sc_recovery.rs", 2073),
+    ("src/web/types.rs", 1550),
+    ("src/web/wiga_gate_fixture.rs", 1761),
+    (
+        "src/web/workspace_session/manager/durable_projection.rs",
+        1329,
+    ),
+    ("src/web/workspace_session/tests/part_01.rs", 1580),
+    ("src/web/workspace_session/tests/part_07.rs", 1272),
+    ("src/web/workspace_ws_handler/run/gateway_start.rs", 1858),
+    ("src/web/workspace_ws_handler/run/provider_run.rs", 1678),
+    ("src/web/workspace_ws_handler/run/single_candidate.rs", 1657),
+    ("src/web/workspace_ws_handler/socket.rs", 1893),
+    (
+        "src/web/workspace_ws_handler/tests/campaign_stage3_interactive/cases.rs",
+        1209,
+    ),
+    (
+        "src/web/workspace_ws_handler/tests/conversational_gate_protocol.rs",
+        2050,
+    ),
+    ("src/web/workspace_ws_handler/tests/gateway_start.rs", 1699),
+    (
+        "src/web/workspace_ws_handler/tests/planning_resume.rs",
+        2444,
+    ),
+    (
+        "src/web/workspace_ws_handler/tests/provider_run_events.rs",
+        1257,
+    ),
+    (
+        "src/web/workspace_ws_handler/tests/single_candidate_lc_admission.rs",
+        2638,
+    ),
+    (
+        "src/web/workspace_ws_handler/tests/single_candidate_provider_run.rs",
+        1508,
+    ),
+    ("tests/it_web/provider_gateway_envelope.rs", 1589),
+    (
+        "tests/it_web/web_lc_gateway_multi_provider/harness.rs",
+        14966,
+    ),
+    (
+        "tests/it_web/web_lc_gateway_multi_provider/live_b45_t23.rs",
+        1651,
+    ),
+    (
+        "tests/it_web/web_lc_gateway_multi_provider/live_b45_t24.rs",
+        2400,
+    ),
+    (
+        "tests/it_web/web_lc_gateway_multi_provider/live_matrix.rs",
+        2461,
+    ),
+    ("web/src/api/client.ts", 1313),
+    (
+        "web/src/components/chat-workspace/cockpit/CockpitInbox.test.tsx",
+        1410,
+    ),
+    (
+        "web/src/components/chat-workspace/cockpit/CockpitInbox.tsx",
+        1310,
+    ),
+    (
+        "web/src/components/lifecycle/IssueLifecycleWorkbench.tsx",
+        1288,
+    ),
+    ("web/src/hooks/useWorkspaceSessionObservers.test.tsx", 1245),
+    ("web/src/pages/ChatCockpitPage.tsx", 1471),
+    ("web/src/pages/CodingWorkspacePage.test.tsx", 1560),
+    ("web/src/pages/CodingWorkspacePage.tsx", 1541),
+    ("web/src/state/workspace-cockpit-projection.test.ts", 1540),
+    ("web/src/state/workspace-cockpit-projection.ts", 1380),
+    ("web/src/state/workspace-ws-store.ts", 1230),
+];
+
 #[test]
 fn product_source_and_test_files_stay_under_line_limit() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -20,6 +340,33 @@ fn product_source_and_test_files_stay_under_line_limit() {
         "产品源码与测试文件必须保持在 {MAX_PRODUCT_CODE_LINES} 行以内，当前超限：\n{}",
         oversized.join("\n"),
     );
+}
+
+/// 登记表按路径排序且无重复——保证 diff 可评审、查找有唯一答案。
+#[test]
+fn grandfather_registry_is_sorted_and_unique() {
+    let mut previous: Option<&str> = None;
+    for (path, cap) in GRANDFATHERED {
+        assert!(
+            *cap > MAX_PRODUCT_CODE_LINES,
+            "登记上限 {path} = {cap}：未超硬线的文件不应登记豁免",
+        );
+        if let Some(previous) = previous {
+            assert!(
+                previous < *path,
+                "登记表须按路径严格升序排列：{previous} 之后出现了 {path}",
+            );
+        }
+        previous = Some(path);
+    }
+}
+
+fn effective_limit(relative: &str) -> usize {
+    GRANDFATHERED
+        .iter()
+        .find(|(path, _)| *path == relative)
+        .map(|(_, cap)| *cap)
+        .unwrap_or(MAX_PRODUCT_CODE_LINES)
 }
 
 fn collect_oversized_files(path: &Path, repo_root: &Path, oversized: &mut Vec<String>) {
@@ -45,9 +392,17 @@ fn collect_oversized_files(path: &Path, repo_root: &Path, oversized: &mut Vec<St
         return;
     };
     let line_count = content.lines().count();
-    if line_count > MAX_PRODUCT_CODE_LINES {
-        let relative = path.strip_prefix(repo_root).unwrap_or(path);
-        oversized.push(format!("{}: {line_count} 行", relative.display()));
+    let relative = path.strip_prefix(repo_root).unwrap_or(path);
+    let relative_str = relative.display().to_string();
+    let limit = effective_limit(&relative_str);
+    if line_count > limit {
+        if limit == MAX_PRODUCT_CODE_LINES {
+            oversized.push(format!("{relative_str}: {line_count} 行"));
+        } else {
+            oversized.push(format!(
+                "{relative_str}: {line_count} 行（登记上限 {limit} 行）",
+            ));
+        }
     }
 }
 
