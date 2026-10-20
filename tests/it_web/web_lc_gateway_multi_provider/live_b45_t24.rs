@@ -1746,8 +1746,7 @@ mod validator_crash_tests {
     fn crash_validator_rejects_surviving_registered_process() {
         let mut evidence = crash_base();
         evidence["restart"]["compensated_processes"][0]["proc_alive"] = json!(true);
-        evidence["restart"]["compensated_processes"][0]["proc_start_time_ticks"] =
-            json!(123456);
+        evidence["restart"]["compensated_processes"][0]["proc_start_time_ticks"] = json!(123456);
         let failures = validate_b45_t24_crash_evidence(&evidence).unwrap_err();
         assert!(
             failures.iter().any(|f| f.contains("PID 未消失")),
@@ -1769,8 +1768,7 @@ mod validator_crash_tests {
     fn crash_validator_accepts_pid_reused_by_new_process() {
         let mut evidence = crash_base();
         evidence["restart"]["compensated_processes"][0]["proc_alive"] = json!(true);
-        evidence["restart"]["compensated_processes"][0]["proc_start_time_ticks"] =
-            json!(999999);
+        evidence["restart"]["compensated_processes"][0]["proc_start_time_ticks"] = json!(999999);
         let result = validate_b45_t24_crash_evidence(&evidence);
         assert!(result.is_ok(), "PID 复用被误判为旧 writer 存活:{result:?}");
     }

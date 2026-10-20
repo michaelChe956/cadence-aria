@@ -117,8 +117,7 @@ fn coding_git_operation_journal_is_identity_strict_and_phase_monotonic() {
 #[test]
 fn review_git_operation_requires_commit_identity_and_durable_completion_outcome() {
     let (tmp, store, attempt) = setup();
-    let (repo_path, worktree_path) =
-        init_review_repo_worktree(tmp.path(), &attempt.branch_name);
+    let (repo_path, worktree_path) = init_review_repo_worktree(tmp.path(), &attempt.branch_name);
     let attempt = store
         .update_attempt_worktree_path(
             &attempt.project_id,
@@ -232,8 +231,7 @@ fn completed_review_journal(
 ) -> crate::product::coding_attempt_store::CodingGitOperationJournal {
     // ReviewRequest journal 只校验 identity、不校验 git 事实,但进入 reviewer
     // 写通道前必须解析到真实 worktree 的 gitdir/common-dir。
-    let (repo_path, worktree_path) =
-        init_review_repo_worktree(tmp.path(), &attempt.branch_name);
+    let (repo_path, worktree_path) = init_review_repo_worktree(tmp.path(), &attempt.branch_name);
     let attempt = store
         .update_attempt_worktree_path(
             &attempt.project_id,
