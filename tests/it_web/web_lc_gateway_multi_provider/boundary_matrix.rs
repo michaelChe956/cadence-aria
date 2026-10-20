@@ -14,7 +14,7 @@
 //! - 现场证据落点(计划 Files):`cadence/reports/lc-gateway-multi-provider/
 //!   <provider>/boundary/`、`failures/`,provider 目录名固定为
 //!   claude-code/codex/pi/kimi-code;设 `B45_T23_RUN_ID` 时证据根末段为
-//!   `<run-id>`(根计算统一走 `live_matrix::provider_evidence_root`)。
+//!   `<run-id>`(根计算统一走 `evidence_root::provider_evidence_root`)。
 
 use cadence_aria::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use cadence_aria::product::models::ProviderName;

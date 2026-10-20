@@ -3,7 +3,7 @@
 //! 四场景各自独立(各自证据根 + 各自 run.json + 各自 validator;一题红不
 //! 阻断其它题)。设 `B45_T24_RUN_ID` 时证据根为 `pi/<run-id>/<facet>`
 //! (缺省/空=旧固定 `pi/<facet>`;根计算统一走
-//! `live_matrix::provider_evidence_root`):
+//! `evidence_root::provider_evidence_root`):
 //! - `b45_live_pi_replay_normal`(Step 3 正常轮):合法验证→Accepted+
 //!   worktree 恢复+Coder dirty 保留;证据根 `pi/b45-t24-replay-normal`。
 //! - `b45_live_pi_replay_violation`(Step 3 违规轮):主动 commit/写 `.git`/
@@ -54,17 +54,16 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
-use cadence_aria::product::models::ProviderName;
 use serde_json::{Value, json};
 
 use super::harness::{
     B45_T24_SILENT_CHECK_SECS, B45T24Scenario, LiveLcGatewayHarness, b45_t24_cancel_provider_label,
 };
-use super::live_matrix::{
-    B45_T24_RUN_ID_ENV, provider_evidence_root, require_lc_gateway_e2e_switch,
+use super::live_b45_t24_env::{
+    b45_t24_cancel_providers_from_env, b45_t24_evidence_root, b45_t24_parse_cancel_providers,
 };
+use super::live_matrix::require_lc_gateway_e2e_switch;
 
 /// A7(b) 停等双臂契约(harness 落证据与 validator 断言共用同一组常量,
 /// 防两侧字面量漂移):
@@ -93,68 +92,6 @@ pub(crate) const B45_T24_OBSERVER_MISSING_QUIESCE_REASON: &str =
 /// 只记录不断言。
 pub(crate) const B45_T24_CONTAINER_OBSERVABILITY: &str = "no_production_observer";
 pub(crate) const B45_T24_CONTAINER_OBSERVABILITY_NOTE: &str = "生产恢复路径 open_for_recovery 全部 call site 传 engine_observer=None(code_review.rs/provider_stream.rs),全仓无生产 OwnedEngineObserver 实现——平台永不 stop_exact,容器实例存活只记录不断言;可红面=登记记录在场+登记面 audits 逐字不变+人工处置后才移除";
-
-/// T24 证据根(计划 Files:cadence/reports/lc-gateway-multi-provider/pi/<facet>/;
-/// 设 `B45_T24_RUN_ID` 时 `pi/<run-id>/<facet>/`,按轮隔离)。
-fn b45_t24_evidence_root(facet: &str) -> PathBuf {
-    provider_evidence_root(&ProviderName::Pi, B45_T24_RUN_ID_ENV).join(facet)
-}
-
-/// 取消格默认三家(env 未设即此集合)。
-fn b45_t24_cancel_default_providers() -> Vec<cadence_aria::product::models::ProviderName> {
-    use cadence_aria::product::models::ProviderName;
-    vec![
-        ProviderName::ClaudeCode,
-        ProviderName::Codex,
-        ProviderName::KimiCode,
-    ]
-}
-
-/// `B45_T24_CANCEL_PROVIDERS` 解析(逗号分隔 claude/codex/kimi;大小写与
-/// 重复记号按集合收敛)。
-///
-/// 语义(集合精确口径的另一半):未设→默认三家;设了但**空集合**或未知
-/// 记号→Err(必须红,不静默回退三家)。
-fn b45_t24_parse_cancel_providers(
-    raw: Option<&str>,
-) -> Result<Vec<cadence_aria::product::models::ProviderName>, String> {
-    use cadence_aria::product::models::ProviderName;
-    let Some(raw) = raw else {
-        return Ok(b45_t24_cancel_default_providers());
-    };
-    let mut providers = Vec::new();
-    for token in raw.split(',') {
-        let token = token.trim().to_lowercase();
-        if token.is_empty() {
-            continue;
-        }
-        let provider = match token.as_str() {
-            "claude" => ProviderName::ClaudeCode,
-            "codex" => ProviderName::Codex,
-            "kimi" => ProviderName::KimiCode,
-            other => {
-                return Err(format!(
-                    "未知 provider 记号 {other:?}(只认 claude/codex/kimi)"
-                ));
-            }
-        };
-        if !providers.contains(&provider) {
-            providers.push(provider);
-        }
-    }
-    if providers.is_empty() {
-        return Err(format!(
-            "空集合(B45_T24_CANCEL_PROVIDERS={raw:?});空集合必须红"
-        ));
-    }
-    Ok(providers)
-}
-
-/// env 解析入口(非法 env 直接 panic=红,不降级)。
-fn b45_t24_cancel_providers_from_env() -> Vec<cadence_aria::product::models::ProviderName> {
-    b45_t24_parse_cancel_providers(std::env::var("B45_T24_CANCEL_PROVIDERS").ok().as_deref())
-        .unwrap_or_else(|error| panic!("B45_T24_CANCEL_PROVIDERS 非法:{error}"))
-}
 
 /// env 集合 → 证据标签集合(validator 的期望集合口径)。
 fn b45_t24_cancel_labels(

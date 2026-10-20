@@ -310,40 +310,6 @@ pub(crate) fn validate_carried_source_chain(
     Ok(())
 }
 
-/// 证据根/来源根路径解析:相对路径按仓库根(`CARGO_MANIFEST_DIR`)解析,
-/// 绝对路径原样(承继格来源链与仓库根同源,不受测试进程 cwd 影响)。
-pub(crate) fn resolve_repo_relative(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
-    }
-}
-/// ⚠1(类1′ 独审补修):resume 轮快照来源根一致性——capture 轮 manifest
-/// 记录的 `source_evidence_root` 必须与本次 resume 的证据根同源(capture→
-/// resume 是同一逻辑轮,必须同一 run-id/同一根);不一致即 fail loudly,
-/// 不得静默读到异根快照(如 capture 设 run-id 而 resume 忘设 env,回落
-/// 旧固定根读到异轮 manifest)。相对路径按仓库根解析(承继格来源链同语义)。
-pub(crate) fn validate_snapshot_origin(
-    source_evidence_root: &str,
-    current_evidence_root: &Path,
-) -> Result<(), String> {
-    if source_evidence_root.trim().is_empty() {
-        return Err("快照 manifest 缺来源证据根(source_evidence_root 为空)".to_string());
-    }
-    let source_root = resolve_repo_relative(Path::new(source_evidence_root));
-    let current_root = resolve_repo_relative(current_evidence_root);
-    if source_root != current_root {
-        return Err(format!(
-            "resume 证据根与快照来源根不一致(capture→resume 必须同一 run-id/同一根):\
-             当前 {} != manifest 记录 {}",
-            current_root.display(),
-            source_root.display()
-        ));
-    }
-    Ok(())
-}
-
 impl EvidenceCell {
     /// 证据结构校验:缺字段/不一致记录必须拒绝(fail-closed,不以删格缩小验收)。
     ///
@@ -955,9 +921,12 @@ impl Default for LiveLcGatewayHarness {
 // 4. 证据落计划 Files 冻结目录 `cadence/reports/lc-gateway-multi-provider/
 //    <provider>/boundary/` 与 `failures/`(设 `B45_T23_RUN_ID` 时
 //    `<provider>/<run-id>/{boundary,failures}/`;根计算统一走
-//    `live_matrix::provider_evidence_root`,与 T23 矩阵/汇总同源)。
+//    `evidence_root::provider_evidence_root`,与 T23 矩阵/汇总同源)。
 // ---------------------------------------------------------------------------
 
+use super::evidence_root::{
+    resolve_repo_relative, task11_evidence_roots, validate_snapshot_origin,
+};
 /// 失败段场景清单:直接消费冻结测试面 `failure_matrix::FIXED_FAILURE_
 /// SCENARIOS`(boundary_matrix 现场覆盖断言同源,harness 不另立第二清单)。
 use super::failure_matrix::FIXED_FAILURE_SCENARIOS as TASK11_FAILURE_SCENARIOS;
@@ -969,16 +938,6 @@ use super::live_b45_t24::{
     B45_T24_OBSERVER_MISSING_QUIESCE_REASON, B45_T24_UNCONFIRMED_WRITER_QUIESCE_REASON,
     B45_T24_WRITER_RESOURCE_ID, B45_T24_WRITER_SCOPE_ID,
 };
-use super::live_matrix::{B45_T23_RUN_ID_ENV, provider_evidence_root};
-
-/// Task 11 现场证据根(计划 Files 冻结):`<provider>/{boundary,failures}/`
-/// (设 `B45_T23_RUN_ID` 时 `<provider>/<run-id>/{boundary,failures}/`);
-/// provider 族名与证据根计算统一走 `live_matrix` 的单一计算点,避免
-/// 与 T23 汇总/矩阵根各自拼路径导致 run-id 只落一处。
-fn task11_evidence_roots(provider: &ProviderName) -> (PathBuf, PathBuf) {
-    let base = provider_evidence_root(provider, B45_T23_RUN_ID_ENV);
-    (base.join("boundary"), base.join("failures"))
-}
 
 /// 事件封包 ts(与 StageObservation::push_event 同口径)。
 fn task11_now_ts() -> String {

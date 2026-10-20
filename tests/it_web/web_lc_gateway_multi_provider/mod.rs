@@ -9,10 +9,13 @@
 //! build+run)与静默长 CHECK 现场(live_matrix `b45_live_kimi_host_check`)。
 pub(crate) mod boundary_matrix;
 pub(crate) mod direct_comparison;
+pub(crate) mod evidence_root;
 pub(crate) mod failure_matrix;
 pub(crate) mod harness;
 pub(crate) mod live_b45_t23;
+pub(crate) mod live_b45_t23_evidence;
 pub(crate) mod live_b45_t24;
+pub(crate) mod live_b45_t24_env;
 pub(crate) mod live_matrix;
 pub(crate) mod policy_dependency;
 pub(crate) mod snapshot;
