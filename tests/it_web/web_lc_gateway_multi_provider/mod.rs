@@ -12,6 +12,7 @@ pub(crate) mod direct_comparison;
 pub(crate) mod evidence_root;
 pub(crate) mod failure_matrix;
 pub(crate) mod harness;
+pub(crate) mod live_b45_t22_support;
 pub(crate) mod live_b45_t23;
 pub(crate) mod live_b45_t23_evidence;
 pub(crate) mod live_b45_t24;

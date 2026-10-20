@@ -88,6 +88,11 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
+use super::live_b45_t22_support::{
+    b45_capture_plan_diagnostics, b45_kimi_issue_description, b45_member_git_snapshot,
+    b45_record_http_failure,
+};
+
 /// 真实现场开关:缺失时 `#[ignore]` 测试必须失败而非静默 return 成功。
 pub(crate) const LC_GATEWAY_E2E_SWITCH: &str = "LC_GATEWAY_E2E";
 
@@ -11150,32 +11155,6 @@ pub(crate) const B45_MAVEN_SILENT_SLEEP_MILLIS: u64 = 150_000;
 /// b45 外层角色 idle 界(Coder;live 测试经 ARIA_CODING_CODER_IDLE_SECS 覆写)。
 pub(crate) const B45_CODER_IDLE_BOUNDARY_SECS: u64 = 90;
 
-/// b45 钉定 issue 描述:验证命令逐字注入(AI 计划链的合同面)。
-fn b45_kimi_issue_description() -> String {
-    format!(
-        "在 alpha 仓新增 fixtures/ 三套宿主验证样例并完成 CHECK。本需求不修改 beta 仓。\
-代码改动很小:在 alpha 仓 src/lib.rs 增加 pub fn host_check_marker() -> &'static str {{ \
-return \"b45-host-check\"; }}。工作项验证命令(verification commands)是本需求主体,\
-必须逐字包含以下六条命令(cwd 为仓库内相对路径):\
-(1) maven-container-check: cd fixtures/maven-fixture && podman run --rm \
--v /tmp/aria-bug45/t22/m2-repo:/root/.m2 -v \"$PWD\":/workspace -w /workspace \
-{B45_MAVEN_IMAGE} mvn -B test ;\
-(2) npm-ci: cd fixtures/npm-fixture && npm ci ;\
-(3) npm-test: cd fixtures/npm-fixture && npm test ;\
-(4) npm-build: cd fixtures/npm-fixture && npm run build ;\
-(5) podman-build: cd fixtures/podman-fixture && podman build -t aria-t22-check . ;\
-(6) podman-run: cd fixtures/podman-fixture && podman run --rm aria-t22-check 。\
-六条验证命令都必须由 Coder 自己在 CHECK 阶段真实执行并在完成报告记录退出码与测试数量。\
-执行形态必须逐字保持:cd 目标目录与 -v 挂载的 $PWD 形态不得改写(不得改为从仓库根以绝对路径挂载执行)。\
-工作项划分约束:全部六条命令归属同一个工作项(即代码改动工作项),验收标准与验证计划\
-的路径字段一律填写 fixtures/ 开头的具体仓库内相对路径(机械校验拒绝基线树外路径);\
-禁止为 CHECK-EVIDENCE.log 或仓库根单独建立工作项或以 [.]/根路径作为验收/验证路径。\
-证据落盘要求:每条命令执行时把完整输出(含计数行,如 Maven 的 \"Tests run:\" 行、\
-npm 的 passed/failed 计数行、各命令的 EXIT 提示行)追加写入仓库根目录文件 \
-CHECK-EVIDENCE.log(可经 tee -a 或重定向后 cat 追加;该文件随工作区提交)。"
-    )
-}
-
 /// 同步宿主命令执行(测试内调用;b45 预热/探测专用,带 kill 超时)。
 fn b45_host_command_sync(
     program: &str,
@@ -11240,22 +11219,6 @@ fn b45_host_command_sync(
             .chars()
             .take(600)
             .collect::<String>(),
-    })
-}
-
-/// 成员仓 git 快照(HEAD+porcelain;前后对照证明只清登记资源/工作保留)。
-fn b45_member_git_snapshot(member_worktree: &Path) -> Value {
-    let git = |args: &[&str]| -> String {
-        std::process::Command::new("git")
-            .args(["-C", &member_worktree.display().to_string()])
-            .args(args)
-            .output()
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-            .unwrap_or_default()
-    };
-    json!({
-        "head": git(&["rev-parse", "HEAD"]),
-        "porcelain": git(&["status", "--porcelain"]),
     })
 }
 
@@ -11958,6 +11921,13 @@ impl LiveLcGatewayHarness {
             format_args!("plan cells={}", plan_cells.len()),
         );
         env.resolve_first_work_item().await;
+        // 可诊断化:plan 收口即把 .aria 的机械报告/候选 IR/编译事务复制进证据根
+        // (机械报告随测试 tempdir 销毁,T22 现场因此看不到违规项)。
+        b45_capture_plan_diagnostics(
+            env.app_paths.root(),
+            (PROJECT_ID, &env.issue_id, &env.plan_id),
+            evidence_root,
+        );
 
         // 4) Coder 自跑(Auto):组入口建 attempt→WS 驱动(CHECK 由 Kimi
         //    工具真实发起;长静默 Maven 跨 120s+90s idle 界,仍在总 deadline)。
@@ -11978,6 +11948,7 @@ impl LiveLcGatewayHarness {
             .await;
             if !status.is_success() {
                 coding_main = json!({"error": format!("coding attempt 创建失败({status}):{body}")});
+                b45_record_http_failure(evidence_root, "create-main", status.as_u16(), &body);
             } else {
                 let attempt_id = body["attempt_id"].as_str().unwrap_or_default().to_string();
                 let mut observation = StageObservation::new("coding", &env.provider);
