@@ -58,6 +58,9 @@ use super::harness::{
 use super::live_b45_t23_evidence::{b45_t23_evidence_root, b45_t23_write_provider_summary};
 use super::live_matrix::require_lc_gateway_e2e_switch;
 
+/// 轮次覆盖的 split_sync 对照入口/承继引用判据(大文件守卫:新增抽子模块)。
+mod split_sync_coverage;
+
 /// 分批 provider 清集(env 缺省=四家全跑)。
 fn b45_t23_providers_from_env() -> Vec<ProviderName> {
     let all = [
@@ -116,12 +119,12 @@ const RESUME_CARRIED_STAGES: [(&str, &str); 4] = [
     ("split", ENTRYPOINT_SPLIT_SYNC),
 ];
 
-/// full_chain 轮逐 stage(plan 两入口)至少 1 个 fresh 执行格。
-const FULL_CHAIN_FRESH_STAGES: [(&str, &str); 6] = [
+/// full_chain 轮 streaming 入口逐 stage 至少 1 个 confirmed fresh 执行格;
+/// split_sync 对照入口按 sync 桥合同单判(见 `verify_split_sync_control`)。
+const FULL_CHAIN_FRESH_STAGES: [(&str, &str); 5] = [
     ("story", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
     ("design", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
     ("plan", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
-    ("plan", ENTRYPOINT_SPLIT_SYNC),
     ("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
     ("review", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
 ];
@@ -131,7 +134,9 @@ const FULL_CHAIN_FRESH_STAGES: [(&str, &str); 6] = [
 /// - resume 轮:story/design/plan(streaming)+split(split_sync)各恰 1 个
 ///   carried 格且来源链可复核;coding/review 各恰 1 个 executed-resume
 ///   (真实执行、native ID 相同;carried 冒充 resume 拒绝)。
-/// - full_chain 轮:逐 stage(plan 两入口)至少 1 个 fresh 执行格。
+/// - full_chain 轮:streaming 入口逐 stage 至少 1 个 fresh 执行格;
+///   split_sync 对照入口按 sync 桥合同单判(carried 承继或任意状态的
+///   真实 fresh 尝试均可,不以 confirmed 口径要求)。
 fn verify_round_coverage(resume_round: bool, cells: &[EvidenceCell]) -> Result<(), String> {
     if resume_round {
         verify_resume_round(cells)
@@ -157,35 +162,10 @@ fn verify_resume_round(cells: &[EvidenceCell]) -> Result<(), String> {
             ));
         }
         let cell = carried[0];
-        if !cell.execution_origin.starts_with("carried:") || cell.run_ref.trim().is_empty() {
-            return Err(format!(
-                "resume 轮 {stage}/{entrypoint} 承继引用形态不完整:origin={:?} run_ref={:?}",
-                cell.execution_origin, cell.run_ref
-            ));
-        }
-        if cell
-            .carried_source_evidence_root
-            .as_deref()
-            .unwrap_or_default()
-            .trim()
-            .is_empty()
-        {
-            return Err(format!(
-                "resume 轮 {stage}/{entrypoint} 承继格缺来源证据根(引用不可复核)"
-            ));
-        }
-        for (label, digest) in [
-            ("workspace", cell.carried_workspace_digest.as_str()),
-            ("aggregate", cell.carried_aggregate_digest.as_str()),
-            ("capability", cell.carried_capability_digest.as_str()),
-            ("policy", cell.carried_policy_digest.as_str()),
-        ] {
-            if digest.trim().is_empty() {
-                return Err(format!(
-                    "resume 轮 {stage}/{entrypoint} 承继格缺 {label} 摘要(引用不可复核)"
-                ));
-            }
-        }
+        split_sync_coverage::verify_carried_reference(
+            cell,
+            &format!("resume 轮 {stage}/{entrypoint}"),
+        )?;
     }
     for stage in ["coding", "review"] {
         let executed: Vec<&EvidenceCell> = cells
@@ -240,7 +220,7 @@ fn verify_full_chain_round(cells: &[EvidenceCell]) -> Result<(), String> {
             ));
         }
     }
-    Ok(())
+    split_sync_coverage::verify_split_sync_control(cells)
 }
 
 /// 逐阶段 spawn 仪器断言(计划 §1.1 ③):fresh/执行 resume 必须有真实新增
@@ -1101,7 +1081,7 @@ pub(crate) mod t23_assertion_tests {
     }
 
     /// 基线格:confirmed、真实执行、spawn=1、native 齐全(可做负测变体)。
-    fn base_cell(stage: &str, entrypoint: &str, phase: &str) -> EvidenceCell {
+    pub(crate) fn base_cell(stage: &str, entrypoint: &str, phase: &str) -> EvidenceCell {
         EvidenceCell {
             provider: ProviderName::ClaudeCode,
             exact_version: "claude 2.1.283".to_string(),
@@ -1191,8 +1171,8 @@ pub(crate) mod t23_assertion_tests {
         cells
     }
 
-    fn full_chain_cells() -> Vec<EvidenceCell> {
-        FULL_CHAIN_FRESH_STAGES
+    pub(crate) fn full_chain_cells() -> Vec<EvidenceCell> {
+        let mut cells: Vec<EvidenceCell> = FULL_CHAIN_FRESH_STAGES
             .iter()
             .flat_map(|(stage, entrypoint)| {
                 [
@@ -1200,7 +1180,11 @@ pub(crate) mod t23_assertion_tests {
                     base_cell(stage, entrypoint, RESUME),
                 ]
             })
-            .collect()
+            .collect();
+        // split_sync 对照入口单列判读:真实 fresh 尝试 + 契约 resume 格。
+        cells.push(base_cell("plan", ENTRYPOINT_SPLIT_SYNC, FRESH));
+        cells.push(base_cell("plan", ENTRYPOINT_SPLIT_SYNC, RESUME));
+        cells
     }
 
     #[test]
@@ -1333,15 +1317,17 @@ pub(crate) mod t23_assertion_tests {
             "合法 full_chain 轮必须通过"
         );
 
+        // split_sync 入口覆判在 `split_sync_coverage` 子模块;这里钉 streaming
+        // 入口:删 plan(streaming)fresh 执行格 → 红。
         let mut missing = cells.clone();
         missing.retain(|cell| {
             !(cell.stage == "plan"
-                && cell.entrypoint == ENTRYPOINT_SPLIT_SYNC
+                && cell.entrypoint == ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT
                 && cell.fresh_or_resume == FRESH)
         });
         assert!(
             verify_round_coverage(false, &missing).is_err(),
-            "缺 plan/split_sync fresh 执行格必须拒绝"
+            "缺 plan(streaming)fresh 执行格必须拒绝"
         );
 
         // carried 冒充 fresh 执行格 → 红。
