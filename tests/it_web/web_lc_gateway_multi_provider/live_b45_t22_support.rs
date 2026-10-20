@@ -61,6 +61,7 @@ pub(crate) fn b45_capture_plan_diagnostics(
     let mut compile_transactions: Vec<Value> = Vec::new();
     let mut source_revisions: Vec<Value> = Vec::new();
     let mut plan_candidate_irs: Vec<Value> = Vec::new();
+    let mut drafts: Vec<Value> = Vec::new();
 
     if plan_id.is_empty() {
         errors.push("plan_id 为空(prepare 未返回 durable plan id),无 plan 产物可复制".to_string());
@@ -94,6 +95,14 @@ pub(crate) fn b45_capture_plan_diagnostics(
                     if !path.is_file() {
                         continue;
                     }
+                    // 产品文件锁(`.<id>.json.lock`)是空占位,不属证据。
+                    if path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with('.'))
+                    {
+                        continue;
+                    }
                     let Ok(relative) = path.strip_prefix(&issue_root) else {
                         errors.push(format!("路径不在 issue 根下:{}", path.display()));
                         continue;
@@ -115,6 +124,7 @@ pub(crate) fn b45_capture_plan_diagnostics(
                                 &mut compile_transactions,
                                 &mut source_revisions,
                                 &mut plan_candidate_irs,
+                                &mut drafts,
                                 &mut errors,
                             );
                         }
@@ -131,6 +141,7 @@ pub(crate) fn b45_capture_plan_diagnostics(
     summary["compile_transactions"] = json!(compile_transactions);
     summary["source_revisions"] = json!(source_revisions);
     summary["plan_candidate_irs"] = json!(plan_candidate_irs);
+    summary["drafts"] = json!(drafts);
     if let Err(error) = b45_write_json(&evidence_root.join("plan_diagnostics.json"), &summary) {
         errors.push(error);
     }
@@ -147,6 +158,7 @@ fn b45_summarize_plan_record(
     compile_transactions: &mut Vec<Value>,
     source_revisions: &mut Vec<Value>,
     plan_candidate_irs: &mut Vec<Value>,
+    drafts: &mut Vec<Value>,
     errors: &mut Vec<String>,
 ) {
     if !relative.ends_with(".json") {
@@ -171,7 +183,7 @@ fn b45_summarize_plan_record(
             "source_revision_id": record.get("source_revision_id").cloned().unwrap_or(Value::Null),
             "findings": findings,
         }));
-    } else if relative.contains("/work_item_plan_compiles/") {
+    } else if relative.contains("work_item_plan_compiles/") {
         compile_transactions.push(json!({
             "file": relative,
             "compile_id": record.get("compile_id").cloned().unwrap_or(Value::Null),
@@ -181,6 +193,15 @@ fn b45_summarize_plan_record(
             "plan_candidate_ir_ref": record.get("plan_candidate_ir_ref").cloned().unwrap_or(Value::Null),
             "source_revision_ref": record.get("source_revision_ref").cloned().unwrap_or(Value::Null),
             "validator_findings": record.get("validator_findings").cloned().unwrap_or_else(|| json!([])),
+        }));
+    } else if relative.contains("work_item_plan_drafts/") {
+        drafts.push(json!({
+            "file": relative,
+            "draft_id": record.get("draft_id").cloned().unwrap_or(Value::Null),
+            "generation_round_id": record.get("generation_round_id").cloned().unwrap_or(Value::Null),
+            "status": record.get("status").cloned().unwrap_or(Value::Null),
+            "active": record.get("active").cloned().unwrap_or(Value::Null),
+            "supersede_reason": record.get("supersede_reason").cloned().unwrap_or(Value::Null),
         }));
     } else if relative.contains("/source_revision/") {
         source_revisions.push(json!({
@@ -406,6 +427,40 @@ mod b45_t22_diagnostics_tests {
             &issue.join(&source_relative),
             &json!({"id": "source-1", "source": "# Work Item Plan"}).to_string(),
         );
+        // 编译事务(顶层目录名无前导 `/`,分类必须按目录族名匹配)。
+        let compile_relative = format!("work_item_plan_compiles/{plan_id}/compile-1.json");
+        write_file(
+            &issue.join(&compile_relative),
+            &json!({
+                "compile_id": "compile-1",
+                "status": "failed",
+                "failure_reason": "mechanical_validation_failed",
+                "mechanical_report_ref": "project/project_0001/issue/issue_0001/plan/issue_work_item_plan_0001/mechanical_report/report-x",
+                "validator_findings": [{
+                    "severity": "error",
+                    "code": "acceptance_path_not_in_baseline",
+                    "message": "引用路径 [.] 不存在于 plan 基线树",
+                    "work_item_ids": ["WI-001"]
+                }]
+            })
+            .to_string(),
+        );
+        // draft 记录(single candidate 候选本体所在族)。
+        let draft_relative = format!("work_item_plan_drafts/{plan_id}/round_1/draft_1.json");
+        write_file(
+            &issue.join(&draft_relative),
+            &json!({
+                "draft_id": "draft_1",
+                "generation_round_id": "round_1",
+                "status": "active",
+                "active": true
+            })
+            .to_string(),
+        );
+        // 产品文件锁是空占位,不得进证据根。
+        let lock_relative =
+            format!("work-item-plan-sources/{plan_id}/mechanical_report/.report-x.json.lock");
+        write_file(&issue.join(&lock_relative), "");
 
         let evidence = base.join("host-check");
         let summary =
@@ -446,6 +501,41 @@ mod b45_t22_diagnostics_tests {
             evidence.join("plan_diagnostics.json").is_file(),
             "摘要必须落盘:{}",
             evidence.join("plan_diagnostics.json").display()
+        );
+        // 编译事务:顶层目录名 `work_item_plan_compiles/` 无前导 `/`,
+        // 分类必须命中(否则失败原因/validator_findings 只剩裸文件)。
+        assert_eq!(
+            summary
+                .pointer("/compile_transactions/0/status")
+                .and_then(Value::as_str),
+            Some("failed"),
+            "编译事务必须进摘要:{summary}"
+        );
+        assert_eq!(
+            summary
+                .pointer("/compile_transactions/0/failure_reason")
+                .and_then(Value::as_str),
+            Some("mechanical_validation_failed"),
+        );
+        assert_eq!(
+            summary
+                .pointer("/compile_transactions/0/validator_findings/0/code")
+                .and_then(Value::as_str),
+            Some("acceptance_path_not_in_baseline"),
+        );
+        assert_eq!(
+            summary
+                .pointer("/drafts/0/draft_id")
+                .and_then(Value::as_str),
+            Some("draft_1"),
+            "draft 记录必须进摘要:{summary}"
+        );
+        assert!(
+            !evidence
+                .join("plan-diagnostics")
+                .join(&lock_relative)
+                .exists(),
+            "产品文件锁不得进证据根"
         );
         assert!(
             summary
