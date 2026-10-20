@@ -1,7 +1,9 @@
 //! 批2 Task 24(b45):Pi 事故副本重放与真崩溃恢复的现场测试与 validator。
 //!
 //! 四场景各自独立(各自证据根 + 各自 run.json + 各自 validator;一题红不
-//! 阻断其它题):
+//! 阻断其它题)。设 `B45_T24_RUN_ID` 时证据根为 `pi/<run-id>/<facet>`
+//! (缺省/空=旧固定 `pi/<facet>`;根计算统一走
+//! `live_matrix::provider_evidence_root`):
 //! - `b45_live_pi_replay_normal`(Step 3 正常轮):合法验证→Accepted+
 //!   worktree 恢复+Coder dirty 保留;证据根 `pi/b45-t24-replay-normal`。
 //! - `b45_live_pi_replay_violation`(Step 3 违规轮):主动 commit/写 `.git`/
@@ -54,12 +56,15 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use cadence_aria::product::models::ProviderName;
 use serde_json::{Value, json};
 
 use super::harness::{
     B45_T24_SILENT_CHECK_SECS, B45T24Scenario, LiveLcGatewayHarness, b45_t24_cancel_provider_label,
 };
-use super::live_matrix::require_lc_gateway_e2e_switch;
+use super::live_matrix::{
+    B45_T24_RUN_ID_ENV, provider_evidence_root, require_lc_gateway_e2e_switch,
+};
 
 /// A7(b) 停等双臂契约(harness 落证据与 validator 断言共用同一组常量,
 /// 防两侧字面量漂移):
@@ -89,9 +94,10 @@ pub(crate) const B45_T24_OBSERVER_MISSING_QUIESCE_REASON: &str =
 pub(crate) const B45_T24_CONTAINER_OBSERVABILITY: &str = "no_production_observer";
 pub(crate) const B45_T24_CONTAINER_OBSERVABILITY_NOTE: &str = "生产恢复路径 open_for_recovery 全部 call site 传 engine_observer=None(code_review.rs/provider_stream.rs),全仓无生产 OwnedEngineObserver 实现——平台永不 stop_exact,容器实例存活只记录不断言;可红面=登记记录在场+登记面 audits 逐字不变+人工处置后才移除";
 
-/// T24 证据根(计划 Files:cadence/reports/lc-gateway-multi-provider/pi/)。
+/// T24 证据根(计划 Files:cadence/reports/lc-gateway-multi-provider/pi/<facet>/;
+/// 设 `B45_T24_RUN_ID` 时 `pi/<run-id>/<facet>/`,按轮隔离)。
 fn b45_t24_evidence_root(facet: &str) -> PathBuf {
-    PathBuf::from("cadence/reports/lc-gateway-multi-provider/pi").join(facet)
+    provider_evidence_root(&ProviderName::Pi, B45_T24_RUN_ID_ENV).join(facet)
 }
 
 /// 取消格默认三家(env 未设即此集合)。

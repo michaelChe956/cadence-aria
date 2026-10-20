@@ -13,7 +13,8 @@
 //!   绝不以缺探针/删格冒充矩阵通过;
 //! - 现场证据落点(计划 Files):`cadence/reports/lc-gateway-multi-provider/
 //!   <provider>/boundary/`、`failures/`,provider 目录名固定为
-//!   claude-code/codex/pi/kimi-code。
+//!   claude-code/codex/pi/kimi-code;设 `B45_T23_RUN_ID` 时证据根末段为
+//!   `<run-id>`(根计算统一走 `live_matrix::provider_evidence_root`)。
 
 use cadence_aria::cross_cutting::provider_capabilities::ProviderCapabilityEvidence;
 use cadence_aria::product::models::ProviderName;
@@ -226,7 +227,8 @@ async fn run_live_boundary_and_failures(selected_provider: ProviderName) {
 ///     provider: ProviderName) -> Result<LiveMatrixEvidence, LiveMatrixFailure>`
 /// ——与 Task 10 同 schema;证据落计划 Files 冻结目录
 /// `cadence/reports/lc-gateway-multi-provider/<provider>/boundary/` 与
-/// `failures/`。Step 3 已落地:直接转调 harness 真实探针,断言组不变。
+/// `failures/`(设 `B45_T23_RUN_ID` 时 `<provider>/<run-id>/…`)。Step 3
+/// 已落地:直接转调 harness 真实探针,断言组不变。
 async fn boundary_failure_matrix(
     provider: &ProviderName,
 ) -> Result<LiveMatrixEvidence, LiveMatrixFailure> {

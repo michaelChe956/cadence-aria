@@ -48,7 +48,7 @@ use cadence_aria::product::logical_codebase::production_policy_resolvers::{
 };
 use cadence_aria::product::logical_codebase::provider_boundary_probe::{
     BOUNDARY_PROBE_EVIDENCE_SCHEMA, HostOpenProbeScope, ProviderBoundaryProbe, ResumeChannelKind,
-    ResumeProbeSpec, provider_family_text, run_cli_boundary_probe,
+    ResumeProbeSpec, run_cli_boundary_probe,
 };
 use cadence_aria::product::logical_codebase::provider_capability_store::{
     CapabilityEvidence, PROVIDER_CAPABILITY_RECORD_SCHEMA_VERSION, ProviderActionCapability,
@@ -929,7 +929,9 @@ impl Default for LiveLcGatewayHarness {
 //    child spawn 失败分清「创建失败=0」与「握手失败已创建=kill/reap」
 //    (后者 spawn≥1,不属零 spawn 格);
 // 4. 证据落计划 Files 冻结目录 `cadence/reports/lc-gateway-multi-provider/
-//    <provider>/boundary/` 与 `failures/`。
+//    <provider>/boundary/` 与 `failures/`(设 `B45_T23_RUN_ID` 时
+//    `<provider>/<run-id>/{boundary,failures}/`;根计算统一走
+//    `live_matrix::provider_evidence_root`,与 T23 矩阵/汇总同源)。
 // ---------------------------------------------------------------------------
 
 /// 失败段场景清单:直接消费冻结测试面 `failure_matrix::FIXED_FAILURE_
@@ -943,11 +945,14 @@ use super::live_b45_t24::{
     B45_T24_OBSERVER_MISSING_QUIESCE_REASON, B45_T24_UNCONFIRMED_WRITER_QUIESCE_REASON,
     B45_T24_WRITER_RESOURCE_ID, B45_T24_WRITER_SCOPE_ID,
 };
+use super::live_matrix::{B45_T23_RUN_ID_ENV, provider_evidence_root};
 
-/// Task 11 现场证据根(计划 Files 冻结):`<provider>/{boundary,failures}/`。
+/// Task 11 现场证据根(计划 Files 冻结):`<provider>/{boundary,failures}/`
+/// (设 `B45_T23_RUN_ID` 时 `<provider>/<run-id>/{boundary,failures}/`);
+/// provider 族名与证据根计算统一走 `live_matrix` 的单一计算点,避免
+/// 与 T23 汇总/矩阵根各自拼路径导致 run-id 只落一处。
 fn task11_evidence_roots(provider: &ProviderName) -> (PathBuf, PathBuf) {
-    let base = PathBuf::from("cadence/reports/lc-gateway-multi-provider")
-        .join(provider_family_text(provider));
+    let base = provider_evidence_root(provider, B45_T23_RUN_ID_ENV);
     (base.join("boundary"), base.join("failures"))
 }
 

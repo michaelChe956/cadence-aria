@@ -18,6 +18,14 @@
 //!
 //! 分批收证:`B45_T23_PROVIDERS`(逗号分隔 claude/codex/pi/kimi 子集,
 //! 缺省四家全跑);单家现场命令沿用 `LIVE_MATRIX_RUN_MODE` 快照身份合同。
+//!
+//! 类1′ 证据完整性(防异家并行/多轮互相覆盖):
+//! - 汇总按家分文件 `b45-t23-roles-matrix-<provider>.json`,每家跑完立即
+//!   落盘(不生成跨家合并视图,controller 需要时自行合并);
+//! - 证据根可接 `B45_T23_RUN_ID`(缺省/空=旧固定路径,向后兼容;设值作
+//!   provider 证据根末段)。capture→resume 是同一逻辑轮,两步必须用同一
+//!   run-id:承继格 `carried_source_evidence_root`(矩阵证据根)与快照
+//!   定位按同一根计算,只有根一致时来源链才可复核。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -33,6 +41,7 @@ use cadence_aria::cross_cutting::tool_policy_audit::{
 };
 use cadence_aria::product::app_paths::ProductAppPaths;
 use cadence_aria::product::lifecycle_store::LifecycleStore;
+use cadence_aria::product::logical_codebase::provider_boundary_probe::provider_family_text;
 use cadence_aria::product::models::ProviderName;
 use cadence_aria::protocol::contracts::{AdapterRole, ProviderType};
 use serde_json::{Value, json};
@@ -46,22 +55,64 @@ use super::harness::{
     LiveLcGatewayHarness, LiveMatrixEvidence, RESUME, carried_cell,
     task11_failure_scenario_binds_session,
 };
-use super::live_matrix::require_lc_gateway_e2e_switch;
+use super::live_matrix::{
+    B45_T23_RUN_ID_ENV, evidence_run_id_from_env, provider_evidence_root,
+    provider_evidence_root_with_run_id, require_lc_gateway_e2e_switch,
+};
 
 /// 矩阵证据根(计划 Files:cadence/reports/lc-gateway-multi-provider/
-/// <provider>/b45-t23-roles/)。
+/// <provider>/b45-t23-roles/<facet>/;设 `B45_T23_RUN_ID` 时
+/// `<provider>/<run-id>/b45-t23-roles/<facet>/`,按轮隔离)。
 fn b45_t23_evidence_root(provider: &ProviderName, facet: &str) -> PathBuf {
-    let family = match provider {
-        ProviderName::ClaudeCode => "claude-code",
-        ProviderName::Codex => "codex",
-        ProviderName::Pi => "pi",
-        ProviderName::KimiCode => "kimi-code",
-        ProviderName::Fake => "fake",
-    };
-    PathBuf::from("cadence/reports/lc-gateway-multi-provider")
-        .join(family)
+    provider_evidence_root(provider, B45_T23_RUN_ID_ENV)
         .join("b45-t23-roles")
         .join(facet)
+}
+
+/// 单家汇总文件名(类1′ ①:per-provider 分文件,异家并行/多轮互不覆盖)。
+pub(crate) fn b45_t23_summary_filename(provider: &ProviderName) -> String {
+    format!(
+        "b45-t23-roles-matrix-{}.json",
+        provider_family_text(provider)
+    )
+}
+
+/// 落盘单家汇总到给定证据根(纯 IO;单元测试直接调用 tempdir 根)。
+///
+/// 只写本家文件,不生成跨家合并视图:异家并行/同家多轮不会互相覆盖,
+/// 判定只认各 provider 的 cell.json 与本家汇总(controller 需要合并视图
+/// 时自行合并)。
+fn b45_t23_write_provider_summary_at(
+    evidence_root: &Path,
+    provider: &ProviderName,
+    run_id: Option<&str>,
+    summary: &Value,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(evidence_root)
+        .map_err(|error| format!("创建汇总目录 {}: {error}", evidence_root.display()))?;
+    let path = evidence_root.join(b45_t23_summary_filename(provider));
+    let payload = json!({
+        "provider": provider_family_text(provider),
+        "run_id": run_id,
+        "providers": { format!("{provider:?}"): summary },
+        "m6_codex_danger": "b45_live_codex_danger_apply_patch",
+    });
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&payload).map_err(|error| format!("汇总序列化失败:{error}"))?,
+    )
+    .map_err(|error| format!("{} 落盘失败:{error}", path.display()))?;
+    Ok(path)
+}
+
+/// 每家跑完立即落本家汇总(不跨家合并、不等进程末尾):后一家失败不会
+/// 抹掉前一家已落证据;证据根含可选 `B45_T23_RUN_ID` 段。
+fn b45_t23_write_provider_summary(provider: &ProviderName, summary: &Value) -> PathBuf {
+    let run_id = evidence_run_id_from_env(B45_T23_RUN_ID_ENV);
+    let root = provider_evidence_root_with_run_id(provider, run_id.as_deref())
+        .unwrap_or_else(|error| panic!("{B45_T23_RUN_ID_ENV} 非法:{error}"));
+    b45_t23_write_provider_summary_at(&root, provider, run_id.as_deref(), summary)
+        .unwrap_or_else(|error| panic!("roles-matrix.json 落盘失败:{error}"))
 }
 
 /// 分批 provider 清集(env 缺省=四家全跑)。
@@ -610,7 +661,6 @@ async fn b45_live_four_provider_roles() {
         !providers.is_empty(),
         "B45_T23_PROVIDERS 至少一家(claude/codex/pi/kimi)"
     );
-    let mut summary = BTreeMap::<String, Value>::new();
     for provider in providers {
         // (a) 五阶段矩阵:M1/M2/M3/M7(Author/Coder/Reviewer/生命周期)。
         let matrix_root = b45_t23_evidence_root(&provider, "matrix");
@@ -646,20 +696,11 @@ async fn b45_live_four_provider_roles() {
             ),
         };
         let provider_summary = b45_t23_assert_role_coverage(&provider, &matrix, &boundary);
-        summary.insert(format!("{provider:?}"), provider_summary);
+        // 类1′ ①:每家立即落本家汇总(b45-t23-roles-matrix-<provider>.json,
+        // 证据根含可选 run-id);不跨家合并、进程末尾不再整文件重写,
+        // 异家并行/同家多轮互不覆盖。
+        b45_t23_write_provider_summary(&provider, &provider_summary);
     }
-    // 汇总落盘(roles-matrix.json;不覆盖 cell.json 证据链)。
-    let aggregate_root = PathBuf::from("cadence/reports/lc-gateway-multi-provider");
-    std::fs::create_dir_all(&aggregate_root).expect("b45 t23 汇总目录");
-    std::fs::write(
-        aggregate_root.join("b45-t23-roles-matrix.json"),
-        serde_json::to_vec_pretty(&json!({
-            "providers": summary,
-            "m6_codex_danger": "b45_live_codex_danger_apply_patch",
-        }))
-        .expect("roles matrix json"),
-    )
-    .expect("roles-matrix.json 落盘");
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,6 +1132,7 @@ mod t23_assertion_tests {
     use super::*;
     use crate::web_lc_gateway_multi_provider::snapshot::{
         SNAPSHOT_MANIFEST_SCHEMA_VERSION, SNAPSHOT_POINT_PLAN_CONFIRMED, SnapshotManifest,
+        snapshots_root,
     };
 
     fn test_manifest(source_root: &str) -> SnapshotManifest {
@@ -1646,6 +1688,181 @@ mod t23_assertion_tests {
         assert!(
             verify_failure_scenarios(&cells).is_err(),
             "删任一失败场景格必须拒绝"
+        );
+    }
+
+    // ---- 类1′(证据完整性):per-provider 汇总 + run-id 证据根 ----
+
+    #[test]
+    fn t23_summary_paths_are_per_provider_and_run_id_scoped() {
+        // 旧固定根(未设 run-id)逐字不变。
+        assert_eq!(
+            provider_evidence_root_with_run_id(&ProviderName::ClaudeCode, None)
+                .expect("legacy root"),
+            PathBuf::from("cadence/reports/lc-gateway-multi-provider/claude-code")
+        );
+        // run-id 作末段:同一 provider 不同 run-id 各自留证。
+        let legacy = provider_evidence_root_with_run_id(&ProviderName::ClaudeCode, None)
+            .expect("legacy root");
+        let round_one =
+            provider_evidence_root_with_run_id(&ProviderName::ClaudeCode, Some("round-1"))
+                .expect("run root");
+        assert_eq!(round_one, legacy.join("round-1"));
+        // 汇总文件名按家分列,异家并行不互相覆盖。
+        assert_eq!(
+            b45_t23_summary_filename(&ProviderName::ClaudeCode),
+            "b45-t23-roles-matrix-claude-code.json"
+        );
+        assert_ne!(
+            b45_t23_summary_filename(&ProviderName::ClaudeCode),
+            b45_t23_summary_filename(&ProviderName::Codex)
+        );
+        // 矩阵根与汇总根同源(唯一计算点):b45-t23-roles/<facet> 挂在
+        // provider 证据根下(run-id 段在 facet 之前)。
+        assert_eq!(
+            b45_t23_evidence_root(&ProviderName::Pi, "matrix"),
+            provider_evidence_root(&ProviderName::Pi, B45_T23_RUN_ID_ENV)
+                .join("b45-t23-roles")
+                .join("matrix")
+        );
+        assert_ne!(
+            b45_t23_evidence_root(&ProviderName::Codex, "matrix"),
+            b45_t23_evidence_root(&ProviderName::Pi, "matrix"),
+            "异家矩阵根必须互不相同"
+        );
+    }
+
+    #[test]
+    fn t23_summary_write_does_not_overwrite_other_provider_or_other_run() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let run_one = temp.path().join("reports/claude-code/round-1");
+        let run_two = temp.path().join("reports/claude-code/round-2");
+        let claude_path = b45_t23_write_provider_summary_at(
+            &run_one,
+            &ProviderName::ClaudeCode,
+            Some("round-1"),
+            &json!({"duties": {"m2_coder": ["coding"]}}),
+        )
+        .expect("write claude summary");
+        let codex_path = b45_t23_write_provider_summary_at(
+            &run_one,
+            &ProviderName::Codex,
+            Some("round-1"),
+            &json!({"duties": {"m2_coder": ["coding"]}}),
+        )
+        .expect("write codex summary");
+        assert_ne!(claude_path, codex_path, "异家汇总必须分文件");
+        assert!(
+            claude_path.ends_with("b45-t23-roles-matrix-claude-code.json"),
+            "汇总文件名必须带 provider:{}",
+            claude_path.display()
+        );
+
+        // 同家不同 run-id:各自留证,先落的不被覆盖。
+        let claude_round_two = b45_t23_write_provider_summary_at(
+            &run_two,
+            &ProviderName::ClaudeCode,
+            Some("round-2"),
+            &json!({"duties": {"m2_coder": ["coding"]}}),
+        )
+        .expect("write claude round two");
+        assert_ne!(claude_path, claude_round_two);
+        assert!(claude_path.exists() && claude_round_two.exists());
+
+        // 重写同家同 run-id:只覆盖本家文件,不删异家、不生成跨家合并文件。
+        let rewritten = b45_t23_write_provider_summary_at(
+            &run_one,
+            &ProviderName::ClaudeCode,
+            Some("round-1"),
+            &json!({"duties": {"m2_coder": []}}),
+        )
+        .expect("rewrite claude summary");
+        assert_eq!(rewritten, claude_path);
+        assert!(codex_path.exists(), "重写单家不得动异家文件");
+        assert!(
+            !run_one.join("b45-t23-roles-matrix.json").exists(),
+            "不得生成跨家共享汇总文件(会互相覆盖)"
+        );
+
+        // 文件内容只含本家(可逐格复算),run-id 如实记录。
+        let written: Value =
+            serde_json::from_slice(&std::fs::read(&claude_path).expect("read claude summary"))
+                .expect("parse claude summary");
+        assert_eq!(written["provider"], "claude-code");
+        assert_eq!(written["run_id"], "round-1");
+        assert!(written["providers"].get("ClaudeCode").is_some());
+        assert!(
+            written["providers"].get("Codex").is_none(),
+            "单家汇总不得混入异家条目"
+        );
+    }
+
+    #[test]
+    fn t23_carried_source_chain_resolves_under_run_id_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // 带 run-id 的真实布局:<族>/<run-id>/b45-t23-roles/{matrix,snapshots}。
+        let run_root = temp
+            .path()
+            .join("reports")
+            .join("claude-code")
+            .join("20261020T010203Z-capture");
+        let matrix_root = run_root.join("b45-t23-roles").join("matrix");
+        std::fs::create_dir_all(&matrix_root).expect("matrix root");
+        let snapshot_directory = snapshots_root(&matrix_root).join("snap-1");
+        assert_eq!(
+            snapshots_root(&matrix_root),
+            run_root.join("b45-t23-roles").join("snapshots"),
+            "快照根必须是同 run-id 内的矩阵兄弟目录"
+        );
+        std::fs::create_dir_all(&snapshot_directory).expect("snapshot dir");
+        let manifest = test_manifest(&matrix_root.to_string_lossy());
+        std::fs::write(
+            snapshot_directory.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).expect("manifest json"),
+        )
+        .expect("write manifest");
+
+        // 承继格按来源证据根(带 run-id)复核仍通过。
+        let cell = carried_test_cell(
+            "story",
+            ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT,
+            &manifest,
+        );
+        let canonical = PathBuf::from("/tmp/t23-root");
+        let member = canonical.join("alpha");
+        assert!(
+            cell.validate_against(&ProviderName::ClaudeCode, &canonical, &member)
+                .is_ok(),
+            "带 run-id 的来源链必须可复核: {:?}",
+            cell.validate_against(&ProviderName::ClaudeCode, &canonical, &member)
+        );
+
+        // resume 轮消费者必须用同一 run-id 计算根:facet 结构一致时落在
+        // 同一相对布局(claude-code/<run-id>/b45-t23-roles/matrix)。
+        let resumed_root = provider_evidence_root_with_run_id(
+            &ProviderName::ClaudeCode,
+            Some("20261020T010203Z-capture"),
+        )
+        .expect("resume root")
+        .join("b45-t23-roles")
+        .join("matrix");
+        assert!(
+            resumed_root.ends_with(Path::new(
+                "claude-code/20261020T010203Z-capture/b45-t23-roles/matrix"
+            )),
+            "resume 轮证据根布局必须与 capture 轮同源:{}",
+            resumed_root.display()
+        );
+        // 不接 run-id 的旧根不会命中该快照(缺同一 run-id = 证据链断裂,
+        // 因此 capture→resume 必须复用同一 run-id)。
+        let legacy_matrix = provider_evidence_root_with_run_id(&ProviderName::ClaudeCode, None)
+            .expect("legacy root")
+            .join("b45-t23-roles")
+            .join("matrix");
+        assert_ne!(
+            snapshots_root(&legacy_matrix),
+            snapshots_root(&matrix_root),
+            "旧固定根不得装作同轮快照根"
         );
     }
 }
