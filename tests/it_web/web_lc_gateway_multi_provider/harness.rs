@@ -319,6 +319,30 @@ pub(crate) fn resolve_repo_relative(path: &Path) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
     }
 }
+/// ⚠1(类1′ 独审补修):resume 轮快照来源根一致性——capture 轮 manifest
+/// 记录的 `source_evidence_root` 必须与本次 resume 的证据根同源(capture→
+/// resume 是同一逻辑轮,必须同一 run-id/同一根);不一致即 fail loudly,
+/// 不得静默读到异根快照(如 capture 设 run-id 而 resume 忘设 env,回落
+/// 旧固定根读到异轮 manifest)。相对路径按仓库根解析(承继格来源链同语义)。
+pub(crate) fn validate_snapshot_origin(
+    source_evidence_root: &str,
+    current_evidence_root: &Path,
+) -> Result<(), String> {
+    if source_evidence_root.trim().is_empty() {
+        return Err("快照 manifest 缺来源证据根(source_evidence_root 为空)".to_string());
+    }
+    let source_root = resolve_repo_relative(Path::new(source_evidence_root));
+    let current_root = resolve_repo_relative(current_evidence_root);
+    if source_root != current_root {
+        return Err(format!(
+            "resume 证据根与快照来源根不一致(capture→resume 必须同一 run-id/同一根):\
+             当前 {} != manifest 记录 {}",
+            current_root.display(),
+            source_root.display()
+        ));
+    }
+    Ok(())
+}
 
 impl EvidenceCell {
     /// 证据结构校验:缺字段/不一致记录必须拒绝(fail-closed,不以删格缩小验收)。
@@ -3419,6 +3443,11 @@ impl MatrixEnvironment {
         let opened = super::snapshot::open_plan_snapshot(evidence_root, &snapshot_id)
             .map_err(|error| matrix_failure(error.reason_code(), error.message(), None))?;
         let manifest = opened.manifest.clone();
+        // ⚠1(类1′ 独审补修):resume 使用的快照必须来自同一证据根
+        // (capture→resume 同一 run-id/同一根);异根快照 fail loudly,
+        // 不静默续跑(如 capture 设 run-id 而 resume 忘设 env)。
+        validate_snapshot_origin(&manifest.source_evidence_root, evidence_root)
+            .map_err(|message| matrix_failure("snapshot_origin_mismatch", message, None))?;
         fp(
             "snapshot_opened",
             format_args!(

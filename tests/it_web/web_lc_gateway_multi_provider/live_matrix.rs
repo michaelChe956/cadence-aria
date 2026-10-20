@@ -520,6 +520,10 @@ async fn run_live_five_stage_matrix(selected_provider: ProviderName) {
 pub(crate) const LC_GATEWAY_REPORTS_ROOT: &str = "cadence/reports/lc-gateway-multi-provider";
 
 /// T22 证据根 run-id(缺省空=旧固定路径;设值作 provider 证据根末段)。
+///
+/// 偏差记录(类1′ 独审 ⚠4):计划 §1.7 ② 字面仅批准 `B45_T23_RUN_ID`/
+/// `B45_T24_RUN_ID`,本 env 属范围外新增;行为无破坏(缺省逐字回退旧
+/// 固定路径),按 §3.2-2「类1′ 改动清单 + 偏差」如实登记。
 pub(crate) const B45_T22_RUN_ID_ENV: &str = "B45_T22_RUN_ID";
 /// T23 证据根 run-id(同上;含五阶段/roles 矩阵/boundary/failures/汇总)。
 pub(crate) const B45_T23_RUN_ID_ENV: &str = "B45_T23_RUN_ID";
@@ -563,13 +567,18 @@ pub(crate) fn provider_evidence_root_with_run_id(
     Ok(root)
 }
 
-/// run-id env 读取(去空白;缺省/空白=None)。合法性由
+/// run-id env 读取(去空白;缺省/空白=None)。UTF-8 内的合法性由
 /// [`provider_evidence_root_with_run_id`] 统一校验。
+///
+/// F1(类1′ 独审补修):`var_os` 显式区分「未设」与「非 UTF-8」——后者
+/// 与非法 run-id 同类,直接 panic(fail-closed),不得静默视同未设而回落
+/// 固定根覆盖旧轮证据(与 RunMode/B45_T23_PROVIDERS 非法值即拒一致)。
 pub(crate) fn evidence_run_id_from_env(run_id_env: &str) -> Option<String> {
-    std::env::var(run_id_env)
-        .ok()
-        .map(|raw| raw.trim().to_string())
-        .filter(|raw| !raw.is_empty())
+    let raw = std::env::var_os(run_id_env)?;
+    let raw = raw.to_str().unwrap_or_else(|| {
+        panic!("{run_id_env} 值非 UTF-8:非法 run-id(fail-closed,不得静默落回固定路径)")
+    });
+    Some(raw.trim().to_string()).filter(|trimmed| !trimmed.is_empty())
 }
 
 /// env 版唯一入口:非法 run-id fail-closed(panic,不静默落回固定路径)。
@@ -2526,6 +2535,7 @@ async fn b45_live_kimi_host_check() {
 // 证据根 run-id 纯逻辑负测(类1′ ②;不需要真实 CLI/LC_GATEWAY_E2E):
 // 未设 env 旧行为不变、设值作末段且按轮隔离、注入形态 fail-closed、
 // 快照兄弟目录随根同轮隔离(capture→resume 同 run-id 同根)。
+// 补修:F1 非 UTF-8 fail-closed;⚠1 capture↔resume 来源根一致性。
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -2608,14 +2618,14 @@ mod evidence_root_tests {
             provider_evidence_root_with_run_id(&ProviderName::ClaudeCode, Some("round-1"))
                 .expect("run root");
         let matrix_root = run_root.join("b45-t23-roles").join("matrix");
-        // capture 轮与 resume 轮用同一 env → 同一 evidence_root(纯函数幂等)。
+        // capture→resume 同根(⚠5 补修):布局逐字钉死——报告根/家族映射/
+        // 段序任一漂移即红;不再用纯函数自证幂等(原断言两侧同一计算,恒真)。
         assert_eq!(
-            provider_evidence_root_with_run_id(&ProviderName::ClaudeCode, Some("round-1"))
-                .expect("run root")
-                .join("b45-t23-roles")
-                .join("matrix"),
             matrix_root,
-            "capture→resume 必须解析到同一证据根"
+            PathBuf::from(
+                "cadence/reports/lc-gateway-multi-provider/claude-code/round-1/b45-t23-roles/matrix"
+            ),
+            "capture→resume 证据根布局必须逐字钉死(run-id 段在 b45-t23-roles 之前)"
         );
         // 快照兄弟目录(capture 落盘 / resume 定位)随 run-id 同轮隔离。
         assert_eq!(
@@ -2654,5 +2664,58 @@ mod evidence_root_tests {
                 "合法 run-id {good:?} 必须接受"
             );
         }
+    }
+
+    // F1(类1′ 独审补修):非 UTF-8 run-id 必须 fail-closed(panic),
+    // 不得静默视同未设而回落固定路径(否则整轮证据覆盖旧固定根轮次)。
+    #[test]
+    #[cfg(unix)]
+    fn evidence_run_id_non_utf8_fails_closed_not_silent_fallback() {
+        use std::os::unix::ffi::OsStringExt;
+        let env_key = "B45_TEST_RUN_ID_NON_UTF8";
+        unsafe {
+            std::env::set_var(
+                env_key,
+                std::ffi::OsString::from_vec(vec![0xff, 0xfe, 0xfd]),
+            );
+        }
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panicked = std::panic::catch_unwind(|| evidence_run_id_from_env(env_key)).is_err();
+        std::panic::set_hook(previous_hook);
+        unsafe {
+            std::env::remove_var(env_key);
+        }
+        assert!(
+            panicked,
+            "非 UTF-8 run-id 必须 panic(fail-closed),不得静默当未设回落固定路径"
+        );
+    }
+
+    // ⚠1(类1′ 独审补修):capture↔resume 根一致性——快照 manifest 记录的
+    // 来源证据根与 resume 当前根不一致(如 capture 设 run-id 而 resume 忘设
+    // env 落回旧固定根读到异根快照)必须 fail loudly,不得静默续跑。
+    #[test]
+    fn snapshot_origin_mismatch_fails_loudly_on_resume_root_divergence() {
+        use crate::web_lc_gateway_multi_provider::harness::validate_snapshot_origin;
+        let captured = "cadence/reports/lc-gateway-multi-provider/claude-code/round-1/matrix";
+        let resume_legacy =
+            Path::new("cadence/reports/lc-gateway-multi-provider/claude-code/matrix");
+        let error = validate_snapshot_origin(captured, resume_legacy)
+            .expect_err("异根 resume 必须被拒绝(不得静默读异轮快照)");
+        assert!(error.contains("不一致"), "错误必须点明来源根不一致:{error}");
+        // 同根放行:manifest 相对 + resume 相对(同仓库根解析)。
+        assert_eq!(
+            validate_snapshot_origin(captured, Path::new(captured)),
+            Ok(()),
+            "capture→resume 同根(相对)必须放行"
+        );
+        // 同根放行:manifest 相对 + resume 绝对(等价解析)。
+        let absolute = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(captured);
+        assert_eq!(
+            validate_snapshot_origin(captured, &absolute),
+            Ok(()),
+            "capture→resume 同根(manifest 相对、resume 绝对)必须放行"
+        );
     }
 }

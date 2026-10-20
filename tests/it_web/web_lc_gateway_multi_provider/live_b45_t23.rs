@@ -5,9 +5,10 @@
 //!   M1 Author=story/design/plan×2、M2 Coder=coding、M3 Reviewer=review、
 //!   M7 生命周期=fresh/resume 与 spawn 计数)与 `run_boundary_and_failure_
 //!   matrix`(M4 group/repair=coding 正向/受控写/D4、M5 失败关闭=17 固定
-//!   负向场景零 spawn),逐家断言六职责域覆盖并汇总 roles-matrix.json
-//!   (每格 CLI exact version/native ID/argv 或 wire/policy digest/cwd/
-//!   target/spawn 计数全要素,cell.json 由 harness 落盘)。M6 Codex 岗位
+//!   负向场景零 spawn),逐家断言六职责域覆盖并落盘单家汇总
+//!   b45-t23-roles-matrix-<provider>.json(每格 CLI exact version/native
+//!   ID/argv 或 wire/policy digest/cwd/target/spawn 计数全要素,cell.json
+//!   由 harness 落盘)。M6 Codex 岗位
 //!   由 `b45_live_codex_danger_apply_patch` 承担。
 //! - `b45_live_codex_danger_apply_patch`:固定实际 CLI 版本,danger-full-
 //!   access 下 on-request(岗位纪律档)与 never(Coder 原生档)两个隔离
@@ -1717,13 +1718,24 @@ mod t23_assertion_tests {
             b45_t23_summary_filename(&ProviderName::ClaudeCode),
             b45_t23_summary_filename(&ProviderName::Codex)
         );
-        // 矩阵根与汇总根同源(唯一计算点):b45-t23-roles/<facet> 挂在
-        // provider 证据根下(run-id 段在 facet 之前)。
+        // 矩阵根布局逐字钉死(⚠5 补修:原断言两侧同一实现恒真):不带与带
+        // run-id 的 b45-t23-roles/<facet> 都挂在 provider 证据根下,run-id 段
+        // 插在 b45-t23-roles 之前(facet 结构不因 run-id 漂移)。
         assert_eq!(
-            b45_t23_evidence_root(&ProviderName::Pi, "matrix"),
-            provider_evidence_root(&ProviderName::Pi, B45_T23_RUN_ID_ENV)
+            provider_evidence_root_with_run_id(&ProviderName::Pi, None)
+                .expect("pi legacy root")
                 .join("b45-t23-roles")
-                .join("matrix")
+                .join("matrix"),
+            PathBuf::from("cadence/reports/lc-gateway-multi-provider/pi/b45-t23-roles/matrix"),
+            "T23 矩阵根必须钉死:facet 挂在 provider 证据根下"
+        );
+        assert_eq!(
+            provider_evidence_root_with_run_id(&ProviderName::Pi, Some("r1"))
+                .expect("pi run root")
+                .join("b45-t23-roles")
+                .join("matrix"),
+            PathBuf::from("cadence/reports/lc-gateway-multi-provider/pi/r1/b45-t23-roles/matrix"),
+            "run-id 段必须插在 b45-t23-roles 之前(不因 run-id 漂移 facet 结构)"
         );
         assert_ne!(
             b45_t23_evidence_root(&ProviderName::Codex, "matrix"),
