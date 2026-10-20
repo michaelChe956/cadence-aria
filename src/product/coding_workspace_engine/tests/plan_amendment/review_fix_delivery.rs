@@ -387,15 +387,53 @@ async fn coding_amendment_concurrent_recovery_reconciles_one_durable_delivery() 
         }
         event => panic!("unexpected concurrent recovery event: {event:?}"),
     };
-    let delivery = fixture
-        .store
-        .get_plan_amendment_delivery(&failed, &fixture.manifest.id)
-        .unwrap();
+    // ack 只唤醒 detached 投递任务；durable Delivered 由该任务随后写入。
+    // 断言前等 durable 收口，否则就是与调度次序赛跑（全量并行偶发
+    // left=Pending / right=Delivered）。
+    let delivery = settle_delivery_delivered(&fixture.store, &failed, &fixture.manifest.id).await;
     assert_eq!(delivery.event_id, event_id);
     assert_eq!(
         delivery.status,
         crate::product::coding_models::CodingPlanAmendmentDeliveryStatus::Delivered
     );
+}
+
+/// 等 durable delivery 推进到 `Delivered` 再断言。`confirm_plan_amendment_
+/// socket_write` 只结算 ack、唤醒等待中的 detached 观察任务；真正落盘的
+/// `mark_plan_amendment_delivery_delivered` 发生在该任务被再次调度之后，
+/// 故「confirm 返回」不等于「durable 已 Delivered」——直接断言即与调度
+/// 次序赛跑（全量并行偶发 Pending）。
+///
+/// 界取 30s（与生产 `PLAN_AMENDMENT_DELIVERY_ACK_TIMEOUT` 同量级）：只是
+/// 防止真卡死；`Unsent` 表示 ack 窗口内未结算，属前置条件破损，立即报出
+/// 而不是继续等。
+async fn settle_delivery_delivered(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    amendment_id: &str,
+) -> crate::product::coding_models::CodingPlanAmendmentDelivery {
+    use crate::product::coding_models::CodingPlanAmendmentDeliveryStatus;
+
+    const SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + SETTLE_TIMEOUT;
+    loop {
+        let delivery = store
+            .get_plan_amendment_delivery(attempt, amendment_id)
+            .expect("read amendment delivery record");
+        match delivery.status {
+            CodingPlanAmendmentDeliveryStatus::Delivered => return delivery,
+            CodingPlanAmendmentDeliveryStatus::Unsent => {
+                panic!("socket 写回执未在投递窗口内确认（delivery=Unsent）：本用例前置条件不成立")
+            }
+            CodingPlanAmendmentDeliveryStatus::Pending => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "delivery 未在 {SETTLE_TIMEOUT:?} 内推进到 Delivered（status={:?}）",
+            delivery.status
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
 }
 
 /// REQ-WIGA-06 Review Focus 2：观察端反压（事件通道容量占满）不得改写业务
