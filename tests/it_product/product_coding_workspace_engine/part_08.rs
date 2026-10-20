@@ -68,6 +68,18 @@ async fn execute_review_request_keeps_push_started_when_failed_push_cannot_query
     let root = tempdir().expect("root");
     let repo = root.path().join("repo");
     init_repo(&repo);
+    // 前提：远端「已配置但不可查询」。remote 名必须出现在 `git remote` 列表里
+    // （否则产品按「未配置」走本地交付 SkippedNotConfigured），但 URL 指向
+    // 不存在的路径，使 push 与随后的 `ls-remote --heads missing` 必然失败。
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "missing",
+            root.path().join("missing.git").to_str().unwrap(),
+        ],
+    );
     let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
     let attempt = store
         .create_attempt(create_input())
