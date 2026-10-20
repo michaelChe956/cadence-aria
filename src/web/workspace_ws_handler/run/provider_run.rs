@@ -86,6 +86,15 @@ const SC_MANUAL_ATTEMPT2_DELIVERY_REJECTED_CODE: &str = "SC_MANUAL_ATTEMPT2_DELI
 /// （P2 修复 aa823108 恢复车道语义的 spawn 侧防线）。
 const SC_MANUAL_STRUCTURAL_CLAIM_PENDING_CODE: &str = "SC_MANUAL_STRUCTURAL_CLAIM_PENDING";
 
+/// 取消后 drive 的收口窗口：`run_cancel` 取消时 drive 内建取消臂会执行
+/// `finish_aborted_run`（节点 Failed + 回 PrepareContext + StageChange 帧），
+/// 这些步骤是短促的本地收口（flush/durable 写/事件帧）。窗口只用于等它跑完，
+/// 真卡死（裸 await 悬停/长阻塞 provider）仍按原兜底路径收尾——同时必须显著
+/// 小于接替 run 的 engine 锁回收预算（1s 有界，见 provider_run_events
+/// 的 supersede_reclaims_engine_lock 用例），也远小于 manager
+/// `abort_active_run_and_wait_completion` 的 30s 兜底。
+const PROVIDER_RUN_CANCELLED_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// SG6a.2（P3 修复轮）：attempt2 冻结交付 join 的候选基线窗口——按
 /// SG5.3 join 口径把失败中间候选布置为内存修订基线（refs/版本/评审
 /// 不提升，REQ-CG-03 坏 source 零提升不受影响），执行精确 join。
@@ -1646,33 +1655,23 @@ pub(super) async fn spawn_provider_run_with_start_mode(
             drop(provider_drive_guard.take());
             manager_for_task.finish_run(run_token).await;
         };
-        tokio::select! {
-            _ = run_cancel.cancelled() => {
-                // 蒸发链顺手项（取消臂回显化）：drive 被 drop，run 永不收口——
-                // SC 修订 turn 会永停 Reserved/Running（后续 feedback 全被
-                // gate_busy 卡死）且零回显。此处兜底：打点 + durable
-                // Failed(cancelled) + HumanGateTurnFailed 回显帧；刚自然收口的
-                // turn 幂等跳过（见助手注释）。
-                eprintln!(
-                    "[aria-cancellation] workspace provider_run_cancelled_dropped_drive session_id={} run_label={} revision_turn={:?}",
-                    session_id, run_label, cancelled_revision_turn_id
-                );
-                if let Some(turn_id) = cancelled_revision_turn_id {
-                    fail_cancelled_human_gate_revision_turn(
-                        &engine_for_run,
-                        &cancel_arm_outbound_tx,
-                        &session_id,
-                        &turn_id,
-                    )
-                    .await;
-                }
-                let _ = supersede_reclaim_manager.finish_run(run_token).await;
-            }
-            _ = drive => {}
-        }
+        // 取消观察与有界收口窗口（含 drive 被 drop 的原兜底）见 cancel_settle.inc.rs。
+        drive_until_cancelled_settles(
+            drive,
+            &run_cancel,
+            cancelled_revision_turn_id,
+            &engine_for_run,
+            &cancel_arm_outbound_tx,
+            &session_id,
+            &run_label,
+            &supersede_reclaim_manager,
+            run_token,
+        )
+        .await;
     });
 
     Ok(true)
 }
 
 include!("provider_run/single_candidate_admission_waiting.inc.rs");
+include!("provider_run/cancel_settle.inc.rs");
