@@ -55,11 +55,21 @@ pub(super) fn preserve_option_index(options: &[Value]) -> Option<usize> {
     })
 }
 
+/// T23(kimi r2)修法F2:计划自洽句——plan 作者把**需要改某文件**的必需
+/// 检查挂到无权写该文件的 work item 上,该工作项在任何 coder 行为下都
+/// 不可满足。现场(kimi r2)WI-002 `exclusive_scopes: tests/**`,却要求
+/// 全仓 `cargo fmt --check` 与「审阅 lib.rs 新增 pub 项文档注释」,而
+/// lib.rs 在 `forbidden_scopes` → coder 在「tests-only→fmt 红」与
+/// 「改 lib.rs→越界红」之间确定性振荡 15 轮 review / 12 个 blocked 门
+/// 后阶段超时。与只读纪律句同族:把「计划必须对自己可写」这一契约前置
+/// 给作者模型,不放宽产品确认门/评审纪律。
+pub(crate) const ISSUE_PLAN_SELF_CONSISTENCY_CLAUSE: &str = "计划自洽约束:每个 Work Item 的 AC 与 Verification 只能约束本工作项 `exclusive_scopes` 允许写入的文件;禁止把需要修改某文件的必需检查(如全仓 `cargo fmt`/`cargo build`/`cargo test`,或对该文件新增 pub 项的文档注释审阅)挂在 `forbidden_scopes` 含该文件的 work item 上。";
+
 /// create_issue 默认描述(原 harness 内联文本 + 只读纪律句;句子恒进
 /// story/design/plan 的 [issue] 段,锚点无关)。
 pub(super) fn default_issue_description() -> String {
     format!(
-        "在 alpha 仓内实现会话过期签发、判定与用户提示;本需求不修改 beta 仓(beta 仅按既有接口消费,不属本需求交付范围)。{ISSUE_AUTHOR_READONLY_CLAUSE}四家五阶段真实矩阵驱动 issue。"
+        "在 alpha 仓内实现会话过期签发、判定与用户提示;本需求不修改 beta 仓(beta 仅按既有接口消费,不属本需求交付范围)。{ISSUE_AUTHOR_READONLY_CLAUSE}{ISSUE_PLAN_SELF_CONSISTENCY_CLAUSE}四家五阶段真实矩阵驱动 issue。"
     )
 }
 
@@ -194,6 +204,29 @@ mod tests {
             b45_kimi_issue_description().contains(ISSUE_AUTHOR_READONLY_CLAUSE),
             "b45 特化描述(b45_kimi_issue_description)必须含只读纪律句"
         );
+    }
+
+    /// T23(kimi r2)修法F2:两处 issue 描述都必须携带计划自洽句——plan
+    /// 作者把全仓级必需检查挂到 tests-only 工作项、同时把 lib.rs 写进
+    /// forbidden_scopes,kimi r2 现场因此确定性振荡满 3600s。句子恒进
+    /// [issue] 段,锚点无关。
+    #[test]
+    fn issue_descriptions_carry_plan_self_consistency_clause() {
+        assert!(
+            default_issue_description().contains(ISSUE_PLAN_SELF_CONSISTENCY_CLAUSE),
+            "create_issue 默认描述必须含计划自洽句"
+        );
+        assert!(
+            b45_kimi_issue_description().contains(ISSUE_PLAN_SELF_CONSISTENCY_CLAUSE),
+            "b45 特化描述(b45_kimi_issue_description)必须含计划自洽句"
+        );
+        // 句子必须点明两个约束对象与禁止形态(否则只是泛泛提示)。
+        for token in ["exclusive_scopes", "forbidden_scopes", "cargo fmt"] {
+            assert!(
+                ISSUE_PLAN_SELF_CONSISTENCY_CLAUSE.contains(token),
+                "计划自洽句必须点明 {token}"
+            );
+        }
     }
 
     /// T23 修法C:target 基数守卫——>1 个非空 target 报夹具漂移,单

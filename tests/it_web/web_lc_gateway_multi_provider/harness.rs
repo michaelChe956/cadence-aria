@@ -95,8 +95,14 @@ use super::live_b45_t22_support::{
     b45_capture_plan_diagnostics, b45_kimi_issue_description, b45_member_git_snapshot,
     b45_record_http_failure,
 };
+/// coding 泵到点归因 + blocked 门有界守卫(kimi r2 H1/H2)。
+mod coding_pump_guards;
 /// T23 夹具范围守卫:语义选答 Preserve 档/plan target 基数/issue 只读句。
 pub(crate) mod issue_scope_guards;
+/// 成员仓基线原文(kimi r2 F1:基线必须 rustfmt 干净,含钉住单测)。
+mod member_fixture_baseline;
+
+use coding_pump_guards::{BlockedGateGuardState, blocked_gate_guard, coding_pump_stage_timeout};
 
 /// 真实现场开关:缺失时 `#[ignore]` 测试必须失败而非静默 return 成功。
 pub(crate) const LC_GATEWAY_E2E_SWITCH: &str = "LC_GATEWAY_E2E";
@@ -3784,14 +3790,8 @@ impl MatrixEnvironment {
         // seed 属环境材料补齐(SC 场景自备),非产品门槛绕过;root 侧规则由 #8 发布链产出。
         seed_member_rule_material(&member_a, "alpha");
         seed_member_rule_material(&member_b, "beta");
-        commit(
-            &member_a,
-            "pub fn cross_repo_greeting() -> &'static str { \"alpha\" }",
-        );
-        commit(
-            &member_b,
-            "pub fn cross_repo_greeting() -> &'static str { \"beta\" }",
-        );
+        commit(&member_a, member_fixture_baseline::MEMBER_LIB_RS_ALPHA);
+        commit(&member_b, member_fixture_baseline::MEMBER_LIB_RS_BETA);
 
         // r55 修复:建仓即配本地 bare origin——coding 交付链(commit→
         // push→ls-remote)按真实部署假设消费 remote=origin;夹具此前
@@ -6517,10 +6517,9 @@ impl MatrixEnvironment {
             return DriveOutcome::default();
         }
         let mut outcome = DriveOutcome::default();
-        // r45:blocked 门重试计数(跨帧保持——r44 现场 retry 后同门重开,
-        // 第 2 次出现即判重试无效有界落格)。
-        let mut blocked_gate_retries: std::collections::BTreeMap<String, u32> =
-            std::collections::BTreeMap::new();
+        // r45/kimi r2·H2:blocked 门有界守卫状态(跨帧保持——同门 retry
+        // 后重开、或同因返修上限门换新 gate_id 重开,第 2 次即收口)。
+        let mut gates_seen = BlockedGateGuardState::default();
         // r50(#2,coding fresh 现场):gate_response 失败计数——retry_review
         // 应答失败(coding_failed_review_recovery_requires_reservation)
         // 是确定性的"预留判据未命中"(spawn 前零输出失败曾被调用面落成
@@ -6548,8 +6547,17 @@ impl MatrixEnvironment {
         );
         loop {
             if tokio::time::Instant::now() >= deadline {
-                observation.push_event(json!({"type": "matrix_stage_timeout"}));
-                return outcome;
+                // kimi r2(r3 H1,诊断 diag-kimi-coding-cell):该分支此前只
+                // push matrix_stage_timeout、不落 run_failure → 格以
+                // confirmed 进产品确认门被改写成「缺完成产物」,真实原因
+                // (3600s 未达终门)被掩盖。与 workspace 泵 r21 C1 逐字对齐。
+                return coding_pump_stage_timeout(
+                    observation,
+                    outcome,
+                    self.stage_timeout,
+                    coding_started,
+                    events_seen,
+                );
             }
             let message = tokio::time::timeout_at(idle_deadline, ws.recv_json()).await;
             let message = match message {
@@ -6618,28 +6626,17 @@ impl MatrixEnvironment {
                         .pointer("/gate/kind")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    let reason_code = message
-                        .pointer("/gate/reason_code")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
                     let action_id = coding_gate_action_id(&message);
-                    // r45:blocked 门有界处理——blocked 态的重试动作救不回
-                    // 配置类缺失(如 reviewer_configuration_missing,r44 现场
-                    // retry_review 后门原样重开,泵空转 3600s×2)。同一
-                    // blocked 门第 2 次出现=重试无效,落格如实带门详情。
-                    if gate_kind == "blocked" {
-                        let seen = blocked_gate_retries.entry(gate_id.to_string()).or_default();
-                        *seen += 1;
-                        if *seen >= 2 {
-                            observation.run_failure = Some(format!(
-                                "coding blocked 门重试无效(gate={gate_id} reason={reason_code});真人工恢复门,不空转"
-                            ));
-                            fp(
-                                "coding_pump_blocked_unrecoverable",
-                                format_args!("gate={gate_id} reason={reason_code}"),
-                            );
-                            return outcome;
-                        }
+                    // r45/kimi r2·H2:blocked 门有界处理——重试动作救不回
+                    // 配置类缺失(同门第 2 次重开),也不该把「返修上限」
+                    // 死局靠 send_to_coder 硬续满 stage_timeout;判定与足迹
+                    // 见 coding_pump_guards。
+                    if gate_kind == "blocked"
+                        && let Some(reason) =
+                            blocked_gate_guard(&mut gates_seen, &mut ws, &message).await
+                    {
+                        observation.run_failure = Some(reason);
+                        return outcome;
                     }
                     if !gate_id.is_empty() && !action_id.is_empty() {
                         last_gate_response = Some((gate_id.to_string(), action_id.to_string()));

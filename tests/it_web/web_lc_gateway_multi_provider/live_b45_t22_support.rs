@@ -21,7 +21,9 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 use super::harness::B45_MAVEN_IMAGE;
-use super::harness::issue_scope_guards::ISSUE_AUTHOR_READONLY_CLAUSE;
+use super::harness::issue_scope_guards::{
+    ISSUE_AUTHOR_READONLY_CLAUSE, ISSUE_PLAN_SELF_CONSISTENCY_CLAUSE,
+};
 
 /// 本 plan 在 issue 根下的 durable 目录(各自再挂 `<plan_id>`)。
 const B45_PLAN_DIAGNOSTIC_ROOTS: [&str; 4] = [
@@ -376,7 +378,7 @@ return \"b45-host-check\"; }}。工作项验证命令(verification commands)是�
 npm 的 passed/failed 计数行、各命令的 EXIT 提示行)追加写入仓库根目录文件 \
 CHECK-EVIDENCE.log(可经 tee -a 或重定向后 cat 追加;该文件随工作区提交;不要把该路径写进 AC)。\n\
 \n\
-{ISSUE_AUTHOR_READONLY_CLAUSE}"
+{ISSUE_AUTHOR_READONLY_CLAUSE}{ISSUE_PLAN_SELF_CONSISTENCY_CLAUSE}"
     )
 }
 
