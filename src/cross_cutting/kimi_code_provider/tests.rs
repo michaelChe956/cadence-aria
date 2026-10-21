@@ -29,3 +29,7 @@ mod tool_policy_zero_change;
 #[cfg(unix)]
 #[path = "tests/b1_resources_tests.rs"]
 mod b1_resources_tests;
+
+#[cfg(unix)]
+#[path = "tests/lc_resume_audit_tests.rs"]
+mod lc_resume_audit_tests;

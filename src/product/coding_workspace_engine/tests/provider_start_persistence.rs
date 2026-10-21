@@ -6,6 +6,7 @@ use super::provider_execution_context::{CapturingProjectionProvider, review_plan
 use super::*;
 
 mod choice_receipt_gate;
+mod prestart_zero_output;
 
 #[test]
 fn permission_wait_timeout_preserves_interaction_without_retry_budget() {
@@ -486,80 +487,6 @@ async fn unresolved_provider_choice_stays_non_retryable_interaction_wait() {
         &attempt,
         &role_run,
         "must not continue before choice",
-    );
-}
-
-#[tokio::test]
-async fn modern_start_io_invocation_keeps_typed_error_without_empty_raw_ref() {
-    let (_root, store, attempt) = running_attempt_with_worktree();
-    let role_run = store
-        .create_role_run(
-            &attempt,
-            CodingExecutionStage::Coding,
-            CodingProviderRole::Coder,
-            CodingRoleRunTrigger::Initial,
-            Some("coding_invocation_start_io".to_string()),
-        )
-        .expect("role run");
-    let (event_tx, _event_rx) = mpsc::channel(8);
-    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), event_tx);
-    let provider = StartIoInvocationProvider::default();
-    let (legacy_input, input) = provider_invocation_inputs(&attempt);
-    let provider_name = ProviderName::Codex;
-    let (_command_tx, mut command_rx) = mpsc::channel(1);
-
-    let outcome = engine
-        .run_provider_stream_invocation(CodingProviderStreamRun {
-            attempt: &attempt,
-            node_id: "coding_invocation_start_io",
-            role_run: Some(&role_run),
-            provider: &provider,
-            legacy_input: &legacy_input,
-            input,
-            provider_name: &provider_name,
-            provider_role: CodingProviderRole::Coder,
-            command_rx: &mut command_rx,
-            allow_legacy_stream_fallback: false,
-            timeout: None,
-            timeout_reason_code: None,
-            suppress_failure_side_effects: false,
-            validated_input: None,
-        })
-        .await;
-
-    assert!(matches!(
-        &outcome,
-        ProviderInvocationOutcome::RetryableTransport {
-            failure: RetryableProviderFailure::StartIo,
-            reason_code,
-            message,
-            partial_output,
-        } if reason_code == "provider_start_io"
-            && message.contains("ProviderExecutionFailed")
-            && message.contains("Text file busy")
-            && partial_output.is_empty()
-    ));
-    assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
-    // spawn 前零输出失败不落空 raw 引用:recoverable_failed_reviewer_run
-    // 以"raw refs 非空"表达 provider 真有产出证据,空文件引用会毒化
-    // 恢复判据(把可恢复的 spawn 前失败变成死门)。
-    let persisted_run = store
-        .get_role_run(
-            &attempt.project_id,
-            &attempt.issue_id,
-            &attempt.id,
-            &role_run.id,
-        )
-        .expect("persisted role run");
-    assert!(
-        persisted_run.raw_provider_output_refs.is_empty(),
-        "pre-start zero-output failure must not persist an empty raw output ref"
-    );
-    assert!(
-        store
-            .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
-            .expect("open gates")
-            .is_empty()
     );
 }
 
