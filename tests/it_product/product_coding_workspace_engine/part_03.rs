@@ -101,7 +101,7 @@ async fn retry_code_review_prompt_includes_previous_role_run_diagnostic() {
 }
 
 #[tokio::test]
-async fn coding_code_reviewer_run_resumes_persisted_provider_session() {
+async fn coding_code_reviewer_run_records_session_without_resume() {
     let root = tempdir().expect("root");
     let worktree = root.path().join("worktree");
     init_repo(&worktree);
@@ -181,10 +181,10 @@ async fn coding_code_reviewer_run_resumes_persisted_provider_session() {
     assert_eq!(inputs[0].permission_mode, ProviderPermissionMode::Auto);
     assert_eq!(inputs[0].provider_type, ProviderType::Pi);
     assert_eq!(inputs[0].timeout_secs, 10_800);
-    assert_eq!(
-        inputs[0].resume_provider_session_id.as_deref(),
-        Some("reviewer-session-1")
-    );
+    // 契约(仅 Coder 可 resume):reviewer 每轮 fresh spawn,历史
+    // CodeReviewer 会话不进 resume 通道(窗口 id 进入 LC 全投影,
+    // 跨轮 resume 必然审计漂移)。
+    assert_eq!(inputs[0].resume_provider_session_id, None);
     let updated = store
         .get_attempt("project_0001", "issue_0001", &attempt.id)
         .expect("updated attempt");

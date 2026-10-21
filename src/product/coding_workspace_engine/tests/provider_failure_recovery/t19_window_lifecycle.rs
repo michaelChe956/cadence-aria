@@ -420,15 +420,18 @@ impl StreamingProviderAdapter for ViolatingApproveProvider {
 
 use crate::product::reviewer_window_store::ReportAcceptance as ReportAcceptanceProjection;
 
-/// brief 参数化补齐:resume 形态(已有 CodeReviewer 会话的 attempt 经
-/// `execute_code_review_with_commands` 续跑)与 initial 同一窗口生命周期。
+/// brief 参数化补齐:注入历史 CodeReviewer 会话的 attempt 经
+/// `execute_code_review_with_commands` 续跑——契约(仅 Coder 可 resume,
+/// `should_resume_provider_conversation`)下 reviewer 恒 fresh spawn
+/// (每轮评审窗口 id 进入 LC 全投影,跨轮 resume 必然漂移),窗口
+/// 生命周期与 initial 同构。
 #[tokio::test]
-async fn reviewer_resume_entry_shares_window_lifecycle() {
+async fn reviewer_history_session_never_resumes_but_shares_window_lifecycle() {
     let (root, store, attempt) = running_attempt_with_worktree();
     let worktree = attempt.worktree_path.clone().expect("worktree");
     init_test_git_repo(&worktree);
     fs::write(worktree.join("reviewed.rs"), "pub fn reviewed() {}\n").expect("review diff");
-    // 注入历史 reviewer 会话 → 首轮 invocation 走 resume 通道。
+    // 注入历史 reviewer 会话 → 契约下不进 resume 通道,首轮即 fresh。
     let mut resumed = attempt.clone();
     resumed.provider_conversations = vec![crate::product::models::ProviderConversationRef {
         role: crate::product::models::ProviderConversationRole::CodeReviewer,
@@ -452,13 +455,10 @@ async fn reviewer_resume_entry_shares_window_lifecycle() {
         .await
         .expect("resume review completes");
 
-    // resume 通道确实消费了历史会话。
+    // 历史 reviewer 会话不进 resume 通道(仅 Coder 可 resume 契约)。
     let inputs = provider.inner.recorded_inputs();
     assert_eq!(inputs.len(), 1);
-    assert_eq!(
-        inputs[0].resume_provider_session_id.as_deref(),
-        Some("session-resume-1")
-    );
+    assert_eq!(inputs[0].resume_provider_session_id, None);
     // 窗口生命周期与 initial 同构:报告绑定窗口且被采信。
     assert_eq!(report.verdict, ReviewVerdict::Approve);
     assert_eq!(report.acceptance, Some(ReviewReportAcceptance::Accepted));

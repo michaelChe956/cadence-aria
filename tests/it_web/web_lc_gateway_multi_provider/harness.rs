@@ -6517,10 +6517,11 @@ impl MatrixEnvironment {
         let mut blocked_gate_retries: std::collections::BTreeMap<String, u32> =
             std::collections::BTreeMap::new();
         // r50(#2,coding fresh 现场):gate_response 失败计数——retry_review
-        // 应答撞 stale-read 竞态(coding_failed_review_recovery_requires_
-        // reservation)时补一次延迟重试(恢复 admission 需 durable Blocked
-        // 态落定);第 2 次失败即有界落格,不烧满 stage_timeout(r49 现场
-        // 34min 空转到阶段超时)。
+        // 应答失败(coding_failed_review_recovery_requires_reservation)
+        // 是确定性的"预留判据未命中"(spawn 前零输出失败曾被调用面落成
+        // 空 raw 引用,毒化 recoverable 判据;产品侧已修),不是竞态;
+        // 此处补一次延迟重试仅作 durable 态落定的兜底,第 2 次失败即
+        // 有界落格,不烧满 stage_timeout(r49 现场 34min 空转到阶段超时)。
         let mut gate_response_failures: std::collections::BTreeMap<String, (u32, String)> =
             std::collections::BTreeMap::new();
         let mut last_gate_response: Option<(String, String)> = None;

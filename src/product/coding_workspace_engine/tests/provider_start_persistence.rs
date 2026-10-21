@@ -490,7 +490,7 @@ async fn unresolved_provider_choice_stays_non_retryable_interaction_wait() {
 }
 
 #[tokio::test]
-async fn modern_start_io_invocation_keeps_typed_error_and_raw_output_ref() {
+async fn modern_start_io_invocation_keeps_typed_error_without_empty_raw_ref() {
     let (_root, store, attempt) = running_attempt_with_worktree();
     let role_run = store
         .create_role_run(
@@ -528,19 +528,33 @@ async fn modern_start_io_invocation_keeps_typed_error_and_raw_output_ref() {
         .await;
 
     assert!(matches!(
-        outcome,
+        &outcome,
         ProviderInvocationOutcome::RetryableTransport {
             failure: RetryableProviderFailure::StartIo,
-            ref reason_code,
-            ref message,
-            ref partial_output,
+            reason_code,
+            message,
+            partial_output,
         } if reason_code == "provider_start_io"
             && message.contains("ProviderExecutionFailed")
             && message.contains("Text file busy")
             && partial_output.is_empty()
     ));
     assert_eq!(provider.starts.load(Ordering::SeqCst), 1);
-    assert_role_run_raw_output(&store, &attempt, &role_run, "");
+    // spawn 前零输出失败不落空 raw 引用:recoverable_failed_reviewer_run
+    // 以"raw refs 非空"表达 provider 真有产出证据,空文件引用会毒化
+    // 恢复判据(把可恢复的 spawn 前失败变成死门)。
+    let persisted_run = store
+        .get_role_run(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            &role_run.id,
+        )
+        .expect("persisted role run");
+    assert!(
+        persisted_run.raw_provider_output_refs.is_empty(),
+        "pre-start zero-output failure must not persist an empty raw output ref"
+    );
     assert!(
         store
             .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)

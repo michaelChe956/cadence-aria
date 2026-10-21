@@ -78,15 +78,15 @@ impl CodingWorkspaceEngine {
                 Some(node.id.clone()),
             )?,
         };
-        let initial_resume_provider_session_id = attempt
-            .provider_conversations
-            .iter()
-            .find(|conversation| {
-                conversation.role == ProviderConversationRole::CodeReviewer
-                    && conversation.provider == reviewer
-            })
-            .map(|conversation| conversation.provider_session_id.trim().to_string())
-            .filter(|session_id| !session_id.is_empty());
+        // 契约(types.rs `should_resume_provider_conversation`):仅 Coder
+        // 可 resume。reviewer 每轮评审的窗口 id(ReviewerVerify{window_id})
+        // 进入 LC 全投影,跨轮 resume 必然审计漂移被拒,因此恒 fresh
+        // spawn(prompt 每轮全量重建 findings/上下文,语义安全)。
+        let initial_resume_provider_session_id = self.provider_resume_session_id_for_attempt(
+            &attempt,
+            &CodingProviderRole::CodeReviewer,
+            &reviewer,
+        );
         // T19:开窗必须在 reviewer_context/Git diff/material 采集之前——
         // 重试循环内的 prompt 构建/reviewer_context 渲染全部发生在窗口
         // Running 之后(材料与 baseline manifest 同指纹)。

@@ -732,10 +732,9 @@ async fn reviewer_transport_failure_then_invalid_structured_output_stops_without
     assert!(report.summary.contains("不是有效 JSON"));
     let inputs = provider.recorded_inputs();
     assert_eq!(inputs.len(), 2);
-    assert_eq!(
-        inputs[0].resume_provider_session_id.as_deref(),
-        Some("reviewer-session-before-retry")
-    );
+    // 契约(仅 Coder 可 resume):历史 reviewer 会话不进 resume 通道,
+    // 每轮评审均为 fresh spawn;attempt_no>1 恒 fresh(既有行为)。
+    assert_eq!(inputs[0].resume_provider_session_id, None);
     assert_eq!(inputs[1].resume_provider_session_id, None);
     let persisted = store
         .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
