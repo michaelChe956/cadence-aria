@@ -207,3 +207,124 @@ fn b3_failure_cell_count_must_match_audit_delta() {
         verify_failure_cell(&spawned).expect_err("拒绝格真起进程即零 spawn 负向证明失效,必须红");
     assert!(error.contains("零 spawn 负向证明不成立"), "{error}");
 }
+
+/// R1:评审 resume 格「无可续评审会话」形态(reviewer 恒 fresh spawn)。
+fn review_idle_resume_cell() -> EvidenceCell {
+    let mut cell = idle_resume_cell();
+    cell.stage = "review".to_string();
+    cell.role = "reviewer".to_string();
+    cell.action = "review_read_only".to_string();
+    cell.denied_reason = Some(format!(
+        "无可续评审会话:{}——评审阶段不存在可续的原生会话",
+        r2_evidence_semantics::REVIEWER_FRESH_ONLY_REASON_MARKER
+    ));
+    cell
+}
+
+/// R1 正例:自证齐备的 review 空转格替代 executed-resume,两项断言集均放行。
+#[test]
+fn r1_resume_round_accepts_review_idle_cell() {
+    let manifest = t23_assertion_tests::test_manifest("/tmp/unused-source-root");
+    let mut cells = t23_assertion_tests::resume_round_cells(&manifest);
+    for cell in &mut cells {
+        if cell.stage == "review" && cell.fresh_or_resume == RESUME {
+            let idle = review_idle_resume_cell();
+            cell.capability_state = idle.capability_state;
+            cell.execution_origin = idle.execution_origin;
+            cell.denied_reason = idle.denied_reason;
+            cell.requested_resume_id = idle.requested_resume_id;
+            cell.native_resume_confirmed_id = idle.native_resume_confirmed_id;
+            cell.provider_spawn_count = 0;
+            cell.provider_events = idle.provider_events;
+        }
+    }
+    assert_eq!(verify_resume_round(&cells), Ok(()));
+    assert_eq!(verify_spawn_instrumentation(&cells), Ok(()));
+}
+
+/// R1 负测:review 空转格缺任一自证要素即红(状态名不构成豁免)。
+#[test]
+fn r1_review_idle_cell_without_evidence_is_rejected() {
+    let manifest = t23_assertion_tests::test_manifest("/tmp/unused-source-root");
+
+    // (a) 缺 zero_spawn_observation:零新增不可证。
+    let mut unproven = t23_assertion_tests::resume_round_cells(&manifest);
+    for cell in &mut unproven {
+        if cell.stage == "review" && cell.fresh_or_resume == RESUME {
+            let idle = review_idle_resume_cell();
+            cell.capability_state = idle.capability_state;
+            cell.execution_origin = idle.execution_origin;
+            cell.denied_reason = idle.denied_reason;
+            cell.requested_resume_id = idle.requested_resume_id;
+            cell.native_resume_confirmed_id = idle.native_resume_confirmed_id;
+            cell.provider_spawn_count = 0;
+            cell.provider_events.clear();
+        }
+    }
+    assert!(
+        verify_resume_round(&unproven).is_err(),
+        "review 空转格缺 zero_spawn_observation 必须拒绝"
+    );
+    assert!(
+        verify_spawn_instrumentation(&unproven).is_err(),
+        "spawn 仪器侧同样不得放行"
+    );
+
+    // (b) 真起了进程却标 not_applicable。
+    let mut spawned = t23_assertion_tests::resume_round_cells(&manifest);
+    for cell in &mut spawned {
+        if cell.stage == "review" && cell.fresh_or_resume == RESUME {
+            *cell = review_idle_resume_cell();
+            cell.provider_spawn_count = 1;
+        }
+    }
+    assert!(
+        verify_spawn_instrumentation(&spawned).is_err(),
+        "review 格真起进程不得标 not_applicable"
+    );
+
+    // (c) 原因复用 coding 终门口径(阶段语义冒充)。
+    let mut wrong_reason = t23_assertion_tests::resume_round_cells(&manifest);
+    for cell in &mut wrong_reason {
+        if cell.stage == "review" && cell.fresh_or_resume == RESUME {
+            *cell = review_idle_resume_cell();
+            cell.denied_reason =
+                Some("无待恢复工作:attempt 已停 final_confirm 人工终门".to_string());
+        }
+    }
+    assert!(
+        verify_resume_round(&wrong_reason).is_err(),
+        "review 空转格复用 coding 原因必须拒绝"
+    );
+}
+
+/// R1/M7 红线:空转格的 native ID 一致判据不放宽(请求≠实测仍红)。
+#[test]
+fn r1_review_idle_cell_keeps_native_id_equality() {
+    let manifest = t23_assertion_tests::test_manifest("/tmp/unused-source-root");
+    let mut cells = t23_assertion_tests::resume_round_cells(&manifest);
+    for cell in &mut cells {
+        if cell.stage == "review" && cell.fresh_or_resume == RESUME {
+            *cell = review_idle_resume_cell();
+            cell.native_resume_confirmed_id = Some("native-other".to_string());
+        }
+    }
+    let error = verify_resume_round(&cells).expect_err("空转格 native ID 不一致必须拒绝");
+    assert!(error.contains("原生会话一致证据"), "{error}");
+    assert!(error.contains("native-other"), "{error}");
+}
+
+/// R1:review 空转格不得借 carried 来源冒充(承继格不重新计票)。
+#[test]
+fn r1_review_idle_cell_rejects_carried_masquerade() {
+    let manifest = t23_assertion_tests::test_manifest("/tmp/unused-source-root");
+    let mut cells = t23_assertion_tests::resume_round_cells(&manifest);
+    for cell in &mut cells {
+        if cell.stage == "review" && cell.fresh_or_resume == RESUME {
+            *cell = review_idle_resume_cell();
+            cell.execution_origin = "carried:snap-1".to_string();
+        }
+    }
+    let error = verify_resume_round(&cells).expect_err("carried 冒充必须拒绝");
+    assert!(error.contains("carried"), "{error}");
+}

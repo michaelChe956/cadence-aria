@@ -14,6 +14,11 @@
 //!   指纹维度(canonical target git identity=`.git` 路径),spawn 前复验必然
 //!   放行;改为把 `.git` 重指到**可解析的替代 gitdir**,使复验真触发
 //!   `PolicyDrift{resume_fingerprint}`。
+//! - R1(第六处红):续跑轮 review resume 格恒「原生恢复未确认:请求 None
+//!   实测 None」。产品 5c54caf1 起 **reviewer 恒 fresh spawn**
+//!   (`should_resume_provider_conversation` 仅对 Coder 为真),评审阶段本就不
+//!   存在可续的原生会话 ⇒ 该格不是「恢复失败」,而是与 coding 终门空转同类
+//!   的「无可续会话」,必须标 `not_applicable`/`no_pending_work` 并自证齐备。
 //!
 //! 产品代码零改动:本文件只承载测试侧判据/夹具突变,harness 只留薄接线。
 
@@ -29,6 +34,14 @@ use super::{
 
 /// A1 格的执行来源标注:resume attach 已无可恢复工作(产品按设计不重启)。
 pub(crate) const NO_PENDING_WORK_ORIGIN: &str = "no_pending_work";
+
+/// A1 空转原因的阶段标记(coding):终门空转现场说明。
+const NO_PENDING_WORK_REASON_MARKER: &str = "无待恢复工作";
+
+/// R1 空转原因的阶段标记(review):产品语义=reviewer 恒 fresh spawn,评审
+/// 阶段不存在可续的原生会话。两阶段的原因标记互斥——coding 的终门口径
+/// 不得复用到评审格(阶段语义不可互相冒充)。
+pub(crate) const REVIEWER_FRESH_ONLY_REASON_MARKER: &str = "reviewer 恒 fresh spawn";
 
 /// B1:期望由 spawn 前复验给出的漂移维度(产品
 /// `ProviderGatewayError::PolicyDrift` 的 Display 前缀 + dimension)。
@@ -85,6 +98,41 @@ pub(super) fn no_pending_work_reason(
         "无待恢复工作:resume attach 时 attempt 已停在 status={status}/stage={stage},\
          产品按设计不重启 runner(ensure_runner_for_resumed_attempt 仅对半启动 \
          Running attempt 重启);本格零新增 ProviderStart 审计,不计作执行 resume"
+    ))
+}
+
+/// R1(评审 resume 格):reviewer 恒 fresh spawn ⇒ 评审阶段无待恢复的原生会话。
+///
+/// 产品语义(5c54caf1 起,`types.rs should_resume_provider_conversation` 仅对
+/// Coder 为真 / `code_review.rs` 走 `provider_resume_session_id_for_attempt`
+/// 恒返回 `None`):reviewer 每轮评审窗口 `ReviewerVerify{window_id}` 进入 LC
+/// 全投影,跨轮 resume 必审计漂移 ⇒ 产品**恒 fresh spawn**。因此评审阶段
+/// 不存在「可被续上的原生会话」,该格不是「恢复失败」,而是与 coding 的终门
+/// 空转同类的「无可续会话」。
+///
+/// 五条件缺一不成立:评审载体已交付(fresh 轮产物在场且停在人工门)、本格
+/// 零新增 spawn、无运行失败、无在途重挂、且该会话分区内没有任何 reviewer 面
+/// `ProviderStart`。最后一条是语义漂移探针——一旦产品真把 reviewer 会话
+/// 持久化进该分区,判据即不成立,该格回到 native id 判等并如实落红。
+pub(super) fn review_no_resumable_session_reason(
+    observation: &StageObservation,
+    review_delivered: bool,
+    reviewer_audits_present: bool,
+) -> Option<String> {
+    if reviewer_audits_present
+        || !review_delivered
+        || observation.run_failure.is_some()
+        || observation.observed_spawn_count > 0
+        || observation.reattached_inflight_run
+    {
+        return None;
+    }
+    Some(format!(
+        "无可续评审会话:{REVIEWER_FRESH_ONLY_REASON_MARKER}——产品 \
+         should_resume_provider_conversation 仅对 Coder 为真(reviewer 的 LC 全投影\
+         含每轮变动的 ReviewerVerify window_id,跨轮 resume 必漂移);本格会话\
+         分区内无 reviewer 面 ProviderStart,未做 resume 驱动,零新增 ProviderStart \
+         审计,不计作执行 resume"
     ))
 }
 
@@ -155,6 +203,19 @@ pub(crate) fn not_applicable_evidence_error(cell: &EvidenceCell) -> Option<Strin
         .is_empty()
     {
         return Some("not_applicable 格缺非空原因(无待恢复工作的现场说明)".to_string());
+    }
+    // 阶段语义不可互相冒充:coding 的「终门空转」原因不得复用到评审格,
+    // 反之亦然(原因必须落在本阶段的真实产品语义上)。
+    let reason = cell.denied_reason.as_deref().unwrap_or_default();
+    let expected_marker = if cell.stage == "review" {
+        REVIEWER_FRESH_ONLY_REASON_MARKER
+    } else {
+        NO_PENDING_WORK_REASON_MARKER
+    };
+    if !reason.contains(expected_marker) {
+        return Some(format!(
+            "not_applicable 格原因未落在本阶段语义上(需含 {expected_marker:?}):{reason}"
+        ));
     }
     let observation = cell.provider_events.iter().find_map(|event| {
         let payload = event.get("event")?;
@@ -694,5 +755,75 @@ mod tests {
             not_applicable_evidence_error(&drifted).is_some(),
             "审计前后不等=真 spawn,不得标 not_applicable"
         );
+    }
+
+    /// R1(评审 resume 格):reviewer 恒 fresh spawn ⇒ 评审阶段无可续原生会话。
+    /// 判据五条件缺一不成立(交付在门/零新增 spawn/无失败/无在途重挂/
+    /// 分区内无 reviewer 面 ProviderStart)。
+    #[test]
+    fn r1_review_idle_requires_delivery_zero_spawn_and_no_reviewer_audits() {
+        let observation = StageObservation::new("review", &ProviderName::ClaudeCode);
+        let reason = review_no_resumable_session_reason(&observation, true, false)
+            .expect("评审载体已交付 + 零新增 spawn + 无 reviewer 审计 ⇒ 无可续评审会话");
+        assert!(
+            reason.contains(REVIEWER_FRESH_ONLY_REASON_MARKER),
+            "原因必须落在 reviewer 恒 fresh 语义上:{reason}"
+        );
+        assert!(
+            reason.contains("未做 resume 驱动"),
+            "原因必须说明未做 resume 驱动:{reason}"
+        );
+        // 语义漂移:该会话分区出现 reviewer 面 ProviderStart ⇒ 判据不成立
+        // (该格回到 native id 判等,不得靠 not_applicable 静默放行)。
+        assert!(review_no_resumable_session_reason(&observation, true, true).is_none());
+        // 评审载体未交付(未到门/产物缺失)⇒ 不得标 not_applicable。
+        assert!(review_no_resumable_session_reason(&observation, false, false).is_none());
+        // 真起了进程 ⇒ 不得标 not_applicable。
+        let mut spawned = StageObservation::new("review", &ProviderName::ClaudeCode);
+        spawned.observed_spawn_count = 1;
+        assert!(review_no_resumable_session_reason(&spawned, true, false).is_none());
+        // 运行失败不得洗成「无可续会话」。
+        let mut failed = StageObservation::new("review", &ProviderName::ClaudeCode);
+        failed.run_failure = Some("review 泵超时".to_string());
+        assert!(review_no_resumable_session_reason(&failed, true, false).is_none());
+        // 在途重挂=真实恢复形态,由 native id 判等裁决。
+        let mut reattached = StageObservation::new("review", &ProviderName::ClaudeCode);
+        reattached.reattached_inflight_run = true;
+        assert!(review_no_resumable_session_reason(&reattached, true, false).is_none());
+    }
+
+    /// R1:review 空转观测经 `resume_cell_verdict` 落 not_applicable +
+    /// no_pending_work 标注,且自证齐备。
+    #[test]
+    fn r1_review_idle_observation_becomes_certified_not_applicable() {
+        let mut observation = StageObservation::new("review", &ProviderName::ClaudeCode);
+        observation.force_resume = true;
+        observation.observed_spawn_count = 0;
+        observation.requested_resume_id = Some("native-review-1".to_string());
+        observation.native_confirmed_id = Some("native-review-1".to_string());
+        observation.no_pending_work_reason =
+            review_no_resumable_session_reason(&observation, true, false);
+        let mut cell = idle_cell();
+        cell.stage = "review".to_string();
+        cell.denied_reason = None;
+        resume_cell_verdict(&mut cell, &observation);
+        assert_eq!(cell.capability_state, "not_applicable");
+        assert_eq!(cell.execution_origin, NO_PENDING_WORK_ORIGIN);
+        assert_eq!(not_applicable_evidence_error(&cell), None);
+    }
+
+    /// R1:review 空转格的原因必须落在评审语义上——coding 的终门口径不得
+    /// 复用到评审格(阶段语义不可互相冒充)。
+    #[test]
+    fn r1_review_idle_reason_marker_is_stage_specific() {
+        let mut cell = idle_cell();
+        cell.stage = "review".to_string();
+        let error = not_applicable_evidence_error(&cell)
+            .expect("review 空转格复用 coding「无待恢复工作」口径必须拒绝");
+        assert!(error.contains(REVIEWER_FRESH_ONLY_REASON_MARKER), "{error}");
+        cell.denied_reason = Some(format!(
+            "无可续评审会话:{REVIEWER_FRESH_ONLY_REASON_MARKER}(reviewer 恒 fresh spawn)"
+        ));
+        assert_eq!(not_applicable_evidence_error(&cell), None);
     }
 }

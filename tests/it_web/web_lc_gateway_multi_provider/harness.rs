@@ -6804,12 +6804,12 @@ impl MatrixEnvironment {
         observation.spawn_audits_before = Some(self.count_session_provider_starts(&session_id));
         // r63 根修(T22 b45 现场协议错):review 段对齐实体阶段 r21 C1 模型
         // ——fresh 以零确认预算停在人工门(reviewer 轮在 author 产物后、
-        // 门 confirm 前已跑完,评审证据不丢),连接留给 resume 格同连接
-        // request_revision(AuthorConfirm×非 SC 流合法)。旧形态 fresh 以
-        // 8 轮确认预算就地 confirm 到 Completed,resume 新连接在 Completed
-        // 上发 request_revision 被协议矩阵正确拒收(INVALID_MESSAGE_FOR_
-        // STAGE(stage=completed),b45 现场 reviewer resume 格实拍)。
-        let (drive, gate_ws) = self
+        // 门 confirm 前已跑完,评审证据不丢)。旧形态 fresh 以 8 轮确认预算
+        // 就地 confirm 到 Completed,resume 新连接在 Completed 上发
+        // request_revision 被协议矩阵正确拒收(INVALID_MESSAGE_FOR_STAGE
+        // (stage=completed),b45 现场 reviewer resume 格实拍)。R1 起评审
+        // 阶段无 resume 驱动(reviewer 恒 fresh spawn),门上连接用完即放。
+        let (drive, _gate_ws) = self
             .drive_workspace_session_ws(&session_id, &mut observation, 0, self.entity_stage_timeout)
             .await;
         observation.observed_spawn_count = self
@@ -6818,8 +6818,13 @@ impl MatrixEnvironment {
         observation.completed_product_artifact_exists = spec_captured && drive.gate_reached;
         cells.push(observation.build_cell(self));
 
-        // resume:同一连接门上 request_revision 修订重驱(reviewer 原生恢复)
-        // →回门→真实 HTTP confirm 定稿。
+        // resume:reviewer 恒 fresh spawn(产品 5c54caf1:
+        // `should_resume_provider_conversation` 仅对 Coder 为真;reviewer 的
+        // LC 全投影含每轮变动的 ReviewerVerify{window_id},跨轮 resume 必漂移)
+        // ⇒ 评审阶段不存在可续的原生会话。本格**不做 resume 驱动**:把评审
+        // 载体的 author 修订重驱计作「reviewer 原生恢复」是冒充。如实标
+        // not_applicable/no_pending_work + 零新增 spawn 自证(判据见
+        // r2_evidence_semantics::review_no_resumable_session_reason)。
         let mut resume = StageObservation::new("review", &self.provider);
         if self.snapshot_boot {
             resume.execution_origin = "snapshot_boot".to_string();
@@ -6830,62 +6835,22 @@ impl MatrixEnvironment {
         resume.force_resume = true;
         resume.workspace_session_id = session_id.clone();
         resume.spawn_audits_before = Some(self.count_session_provider_starts(&session_id));
-        // 请求基准=修订 turn 实际携带的 resume id 同源:reviewer 面最新审计
-        // (与 drive_entity_session_resume 的 author 面同构,role 过滤防读到
-        // author 轮 id 造成假阳/假阴)。
-        resume.requested_resume_id =
-            self.latest_audit_native_id(&session_id, &self.provider, Some("reviewer"));
+        // 评审载体会话的原生 id(该分区内 reviewer 面 ProviderStart 应为空;
+        // 一旦出现,判据不成立——见 reviewer_audits_present)。
+        resume.requested_resume_id = self.latest_audit_native_id(&session_id, &self.provider, None);
         resume.frozen_digest = self.latest_audit_projection_digest(&session_id, &self.provider);
-        let drive = self
-            .drive_review_gate_resume(
-                &session_id,
-                gate_ws,
-                &mut resume,
-                "矩阵 review resume:显式修订重驱,须原生恢复 reviewer 会话",
-            )
-            .await;
-        resume.completed_product_artifact_exists = drive.artifact_confirmed;
-        resume.native_confirmed_id =
-            self.latest_audit_native_id(&session_id, &self.provider, Some("reviewer"));
+        let reviewer_audits_present = self
+            .scan_session_audits(&session_id)
+            .iter()
+            .any(|(_, record)| record.role == "reviewer");
+        resume.no_pending_work_reason = r2_evidence_semantics::review_no_resumable_session_reason(
+            &resume,
+            spec_captured && drive.gate_reached && observation.run_failure.is_none(),
+            reviewer_audits_present,
+        );
+        resume.native_confirmed_id = self.latest_audit_native_id(&session_id, &self.provider, None);
         cells.push(resume.finish_cell(self));
         cells
-    }
-
-    /// r63(T22 b45 现场):review 段门上修订——fresh 轮保留下来的同一条
-    /// 连接上发 request_revision(修订→回门→1 轮真实 HTTP confirm 定稿)。
-    /// 与 `drive_entity_session_resume` 同模型;独立方法保持两阶段各自的
-    /// 审计基准/产物判据演进自由。
-    async fn drive_review_gate_resume(
-        &self,
-        session_id: &str,
-        gate_ws: Option<LiveWs>,
-        observation: &mut StageObservation,
-        description: &str,
-    ) -> DriveOutcome {
-        let Some(mut ws) = gate_ws else {
-            observation.run_failure =
-                Some("review fresh 未达人工门(无干净的同连接会话可供门上修订)".to_string());
-            return DriveOutcome::default();
-        };
-        fp(
-            "review_gate_resume_begin",
-            format_args!("session={session_id}"),
-        );
-        let revision = json!({
-            "type": "request_revision",
-            "feedback": {
-                "feedback_types": ["scope"],
-                "description": description,
-                "target_artifact_version": null
-            }
-        });
-        if let Err(error) = ws.send_json(&revision).await {
-            observation.push_event(json!({"type": "matrix_error", "message": error}));
-            observation.run_failure = Some(format!("request_revision 发送失败:{error}"));
-            return DriveOutcome::default();
-        }
-        self.pump_workspace_session(&mut ws, observation, 1, self.entity_stage_timeout)
-            .await
     }
 
     // -----------------------------------------------------------------------
