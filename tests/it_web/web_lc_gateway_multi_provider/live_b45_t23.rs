@@ -52,12 +52,15 @@ use super::failure_matrix::{
 };
 use super::harness::{
     ENTRYPOINT_SPLIT_SYNC, ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, EvidenceCell, FRESH,
-    LiveLcGatewayHarness, LiveMatrixEvidence, RESUME, carried_cell,
+    LiveLcGatewayHarness, LiveMatrixEvidence, RESUME, carried_cell, r2_evidence_semantics,
     task11_failure_scenario_binds_session,
 };
 use super::live_b45_t23_evidence::{b45_t23_evidence_root, b45_t23_write_provider_summary};
 use super::live_matrix::require_lc_gateway_e2e_switch;
 
+/// r2 简化批次新增断言的负测(A1/A2/B3 三面)。
+#[cfg(test)]
+mod r2_assertion_tests;
 /// 轮次覆盖的 split_sync 对照入口/承继引用判据(大文件守卫:新增抽子模块)。
 mod split_sync_coverage;
 
@@ -168,21 +171,20 @@ fn verify_resume_round(cells: &[EvidenceCell]) -> Result<(), String> {
         )?;
     }
     for stage in ["coding", "review"] {
-        let executed: Vec<&EvidenceCell> = cells
+        let phase_cells: Vec<&EvidenceCell> = cells
             .iter()
-            .filter(|cell| {
-                cell.stage == stage
-                    && cell.capability_state == "confirmed"
-                    && cell.fresh_or_resume == RESUME
-            })
+            .filter(|cell| cell.stage == stage && cell.fresh_or_resume == RESUME)
             .collect();
-        if executed.len() != 1 {
+        if phase_cells.len() != 1 {
             return Err(format!(
-                "resume 轮 {stage} 必须恰 1 个 executed-resume 格(native ID 相同),实际 {}",
-                executed.len()
+                "resume 轮 {stage} 必须恰 1 个 resume 格,实际 {}",
+                phase_cells.len()
             ));
         }
-        let cell = executed[0];
+        let cell = phase_cells[0];
+        // A1:终门空转格(attempt 已停终门、产品不重启 runner)合法但须自证;
+        // 其余状态一律非法,不借状态名逃避 resume 判等。
+        r2_evidence_semantics::verify_resume_phase_cell(stage, cell)?;
         if cell.execution_origin.starts_with("carried:") {
             return Err(format!(
                 "resume 轮 {stage}:carried 格冒充 executed-resume(承继格不重新计票,不得计作原生恢复)"
@@ -229,6 +231,12 @@ fn verify_full_chain_round(cells: &[EvidenceCell]) -> Result<(), String> {
 fn verify_spawn_instrumentation(cells: &[EvidenceCell]) -> Result<(), String> {
     for cell in cells {
         if cell.capability_state == "carried" {
+            continue;
+        }
+        // A1:终门空转格(产品按设计不重启 runner)不进 ≥1 spawn 判据,但须
+        // 自证零新增(状态名不构成豁免)。
+        if cell.capability_state == "not_applicable" {
+            r2_evidence_semantics::verify_not_applicable_resume_cell(cell)?;
             continue;
         }
         let split_sync_resume =
@@ -429,6 +437,8 @@ fn verify_failure_cell(cell: &EvidenceCell) -> Result<(), String> {
             ));
         }
     }
+    // B3:格内 spawn 计数必须取审计 delta,真起进程即零 spawn 负向证明失效。
+    r2_evidence_semantics::verify_failure_audit_delta(&scenario, cell, observation)?;
     verify_zero_spawn_evidence(cell)?;
     // 被拒格:除 session child 外,协议握手与 MCP/native 方法维也不得在场
     //(失败矩阵五维口径;握手失败已创建 child 的 kill/reap 格不属被拒格)。
@@ -1151,7 +1161,7 @@ pub(crate) mod t23_assertion_tests {
         cell
     }
 
-    fn resume_round_cells(manifest: &SnapshotManifest) -> Vec<EvidenceCell> {
+    pub(crate) fn resume_round_cells(manifest: &SnapshotManifest) -> Vec<EvidenceCell> {
         let mut cells = vec![
             carried_test_cell("story", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, manifest),
             carried_test_cell(
@@ -1560,10 +1570,11 @@ pub(crate) mod t23_assertion_tests {
         assert!(error.contains("五维会计佐证"), "{error}");
     }
 
-    /// M5/F4(修复轮):audits 相等仅对绑定 sid 的场景是零 spawn 证据;
-    /// 未绑定场景(validate/能力分格面拒绝,launch 从不落在合成 sid 分区)
-    /// 标注 not_applicable,判等不适用——审计漂移不得红、也不得计为证据,
-    /// 零 spawn 由五维会计 + 拒绝探针承担;标注与冻结绑定清单交叉核对。
+    /// M5/F4(修复轮)+ B3(r2):audits 相等仅对绑定 sid 的场景是零 spawn
+    /// 证据;未绑定场景(validate/能力分格面拒绝,launch 从不落在合成 sid
+    /// 分区)标注 not_applicable,判等不适用。但格内 spawn 计数一律取审计
+    /// delta(B3:不再恒 0):delta>0 与「denied 零 spawn 负向格」互斥,
+    /// fail-closed 落红——真起过进程的格不得靠状态/窗口标注过关。
     #[test]
     fn t23_failure_cell_audit_window_scopes_audits_equality() {
         // 绑定 sid 场景(missing_readiness)声明 not_applicable → 红
@@ -1585,13 +1596,27 @@ pub(crate) mod t23_assertion_tests {
         let error = verify_failure_cell(&unannotated).expect_err("缺 audit_window 标注必须拒绝");
         assert!(error.contains("audit_window"), "{error}");
 
-        // 未绑定场景 + not_applicable + 审计漂移(0→3)→ 通过:
-        // 0==0 无信息,漂移不作证据;零 spawn 证据改由五维+拒绝探针承担。
+        // 未绑定场景 + not_applicable + 审计漂移(0→3):B3 起拒绝格必须消费
+        // 审计 delta——漂移虽不作「零 spawn 证据」,但它是**真起进程**的证据,
+        // 与 denied/零 spawn 负向格互斥,故 fail-closed 落红(计数与观测同源)。
         let mut unbound = failure_cell_scenario("denied", "false_flag", "not_applicable");
         unbound.provider_events[2] = failure_zero_spawn_event(0, 3, "not_applicable");
+        let error =
+            verify_failure_cell(&unbound).expect_err("格内计数(恒0)与审计 delta(3)不自洽必须红");
+        assert!(error.contains("不自洽"), "{error}");
+
+        // 计数改成真实 delta(3)后,「拒绝格真起进程」这一条必须红。
+        unbound.provider_spawn_count = 3;
+        let error = verify_failure_cell(&unbound)
+            .expect_err("拒绝格真起进程即零 spawn 负向证明失效,必须红");
+        assert!(error.contains("零 spawn 负向证明不成立"), "{error}");
+
+        // 未绑定场景 + not_applicable + 审计相等(0==0)= 合法形态。
+        let mut unbound_clean = failure_cell_scenario("denied", "false_flag", "not_applicable");
+        unbound_clean.provider_events[2] = failure_zero_spawn_event(0, 0, "not_applicable");
         assert!(
-            verify_failure_cell(&unbound).is_ok(),
-            "未绑定场景审计漂移不是证据,不得红"
+            verify_failure_cell(&unbound_clean).is_ok(),
+            "未绑定场景零 spawn 形态(计数=审计 delta=0)必须通过"
         );
 
         // 未绑定场景 + not_applicable + 五维破约(session child 观测在场)→ 红。

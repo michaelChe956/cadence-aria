@@ -101,6 +101,8 @@ mod coding_pump_guards;
 pub(crate) mod issue_scope_guards;
 /// 成员仓基线原文(kimi r2 F1:基线必须 rustfmt 干净,含钉住单测)。
 mod member_fixture_baseline;
+/// r2 简化批次证据语义(A1/A2/B1;产品零改动的测试侧判据)。
+pub(crate) mod r2_evidence_semantics;
 
 use coding_pump_guards::{BlockedGateGuardState, blocked_gate_guard, coding_pump_stage_timeout};
 
@@ -359,6 +361,14 @@ impl EvidenceCell {
                 &self.carried_aggregate_digest,
                 &self.carried_capability_digest,
                 &self.carried_policy_digest,
+            );
+        }
+        if self.capability_state == "not_applicable" {
+            return r2_evidence_semantics::validate_not_applicable(
+                self,
+                expected_provider,
+                canonical_root,
+                member_worktree,
             );
         }
         if self.provider != *expected_provider {
@@ -3042,81 +3052,6 @@ fn scenario_false_flag(env: &MatrixEnvironment) -> ScenarioOutcome {
     }
 }
 
-/// 场景 15:git_refs_mutation_observed_not_identity_drift——prepare 后真实
-/// commit 前移 HEAD(k3 终审澄清:产品指纹=canonical git-dir 路径,
-/// provider_gateway.rs canonical_target_git_identity,HEAD/refs 突变不改
-/// 该路径,复验不拒=设计必然且对正常 coding 自提交流程正确);本场景
-/// 如实记录「复验未拒+spawn 后 cancel 收口」形态,不构成 identity 漂移
-/// 负向证明(该判定面需 gitdir 路径突变才触发,受控复位)。
-async fn scenario_fingerprint_drift(env: &MatrixEnvironment, sid: &str) -> ScenarioOutcome {
-    let drift_file = env.member_worktree.join("t11-fingerprint-drift.txt");
-    let head_before = git_head(&env.member_worktree);
-    let mutation = |env: &MatrixEnvironment| -> Result<Task11MutationGuard, String> {
-        if std::fs::write(&drift_file, b"t11 fingerprint drift fixture").is_err() {
-            return Err(format!("写入 {} 失败", drift_file.display()));
-        }
-        let git = |arguments: &[&str]| -> std::io::Result<()> {
-            let status = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&env.member_worktree)
-                .args(["-c", "user.email=t11@aria", "-c", "user.name=t11"])
-                .args(arguments)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .status()?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(std::io::Error::other(format!("git {arguments:?} 失败")))
-            }
-        };
-        git(&["add", "."]).map_err(|error| format!("git add 失败:{error}"))?;
-        git(&[
-            "commit",
-            "-q",
-            "-m",
-            "t11 fingerprint drift(受控,场景后复位)",
-        ])
-        .map_err(|error| format!("git commit 失败:{error}"))?;
-        fp(
-            "t11_scenario_git_mutation",
-            "target 真实 commit(受控:git add+commit;场景后复位)",
-        );
-        Ok(Task11MutationGuard::None)
-    };
-    let outcome = task11_revalidate_drift(
-        env,
-        sid,
-        "resume_fingerprint(target git identity)",
-        mutation,
-    )
-    .await;
-    // 受控复位:硬复位回漂移前 HEAD(仅本场景提交;fixture 仓)。
-    if let (Some(head_before), Some(head_after)) = (head_before, git_head(&env.member_worktree))
-        && head_before != head_after
-    {
-        let _ = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&env.member_worktree)
-            .args(["reset", "--hard", "-q", &head_before])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .status();
-        let _ = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&env.member_worktree)
-            .args(["clean", "-fdq"])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .status();
-        fp(
-            "t11_git_restored",
-            format_args!("reset → {head_before}(fingerprint 漂移复位)"),
-        );
-    }
-    outcome
-}
-
 /// 场景 16:target_git_pointer_missing_or_drift——prepare 后 target 的
 /// `.git`(目录或 linked-worktree 指针)被篡改 → resolver 重解析失败或
 /// 不一致(零 spawn;受控恢复)。
@@ -3304,6 +3239,10 @@ async fn run_task11_failure_scenarios(env: &mut MatrixEnvironment) -> Vec<Eviden
         cell.capability_state = outcome.state.to_string();
         cell.denied_reason = Some(outcome.refusal_text.clone());
         cell.workspace_session_id = sid;
+        // B3:失败格的 spawn 计数必须取审计 delta(与 zero_spawn_observation
+        // 同口径)——旧实现恒 0,场景一旦真起进程(如失效突变放行)格内
+        // 计数与自身观测自相矛盾,五维/零 spawn 断言都会基于错的 0 判断。
+        cell.provider_spawn_count = audits_after.saturating_sub(audits_before) as u64;
         cell.pid_unavailable_reason = Some(format!(
             "零 spawn 被拒:无 provider 子进程(provider_start audits={audits_after},\
              PID 无观测,argv 无捕获)"
@@ -3334,7 +3273,7 @@ async fn run_task11_scenario(
         "codex_danger_full_access" => scenario_codex_danger(env, sid).await,
         "illegal_role" => scenario_illegal_role(env, sid),
         "false_flag" => scenario_false_flag(env),
-        "fingerprint_drift" => scenario_fingerprint_drift(env, sid).await,
+        "fingerprint_drift" => r2_evidence_semantics::scenario_fingerprint_drift(env, sid).await,
         "target_git_pointer_missing_or_drift" => scenario_target_git_pointer(env, sid).await,
         other => scenario_unobservable(format!("未知场景 {other}(清单漂移,须对齐冻结测试面)")),
     }
@@ -5335,16 +5274,7 @@ impl MatrixEnvironment {
                 "/api/projects/{PROJECT_ID}/issues/{}/work-item-plans:prepare",
                 self.issue_id
             ),
-            json!({
-                "title": "矩阵 plan:跨仓修复拆分",
-                "story_spec_ids": self.story_spec_ids(),
-                "design_spec_ids": [design_spec_id],
-                "author_provider": self.provider_wire,
-                "reviewer_provider": self.provider_wire,
-                "review_rounds": 1,
-                "superpowers_enabled": false,
-                "openspec_enabled": true
-            }),
+            plan_prepare_body(&self.story_spec_ids(), &design_spec_id, &self.provider_wire),
         )
         .await;
         if !status.is_success() {
@@ -6471,6 +6401,11 @@ impl MatrixEnvironment {
         resume.observed_pid = self.scan_attempt_stream_log_pid(&attempt_id);
         resume.native_confirmed_id =
             self.latest_audit_native_id(&attempt_id, &self.provider, Some(CODING_EXECUTOR_ROLE));
+        resume.observed_spawn_count = self
+            .count_session_provider_starts(&attempt_id)
+            .saturating_sub(resume.spawn_audits_before.unwrap_or(0));
+        resume.no_pending_work_reason =
+            r2_evidence_semantics::no_pending_work_reason(&resume, drive.artifact_confirmed);
         cells.push(resume.finish_cell(self));
         cells
     }
@@ -7269,6 +7204,9 @@ struct StageObservation {
     /// kimi-9:resume 窗口内观察到重连前启动的 coder role run 从 running
     /// 走到 completed(在途 run 重挂;attempt 级原生恢复证据之一)。
     reattached_inflight_run: bool,
+    /// A1:resume 泵收口时 attempt 已停人工终门且零新增 spawn 的现场说明
+    /// (产品按设计不重启 runner;该格标 not_applicable,不计作执行 resume)。
+    no_pending_work_reason: Option<String>,
     observed_spawn_count: usize,
     /// 逐阶段 spawn 仪器:相位开始前的会话 provider_start 审计计数
     ///(before/after 差值即本格新增 spawn;零 spawn 格另落
@@ -7303,6 +7241,7 @@ impl StageObservation {
             completed_product_artifact_exists: false,
             artifact_markdown_seen: false,
             reattached_inflight_run: false,
+            no_pending_work_reason: None,
             observed_spawn_count: 0,
             spawn_audits_before: None,
             observed_pid: None,
@@ -7533,23 +7472,10 @@ impl StageObservation {
             };
             cell.denied_reason = Some(reason);
         } else if self.force_resume {
-            // resume 格:kimi-9 修订——确认=(请求 id==实测 id)或在途
-            // coder run 重挂(判据语义见 coding_resume_native_confirmed)。
-            if coding_resume_native_confirmed(
-                &self.requested_resume_id,
-                &self.native_confirmed_id,
-                self.reattached_inflight_run,
-            ) {
-                cell.capability_state = "confirmed".to_string();
-            } else {
-                cell.capability_state = "unknown".to_string();
-                cell.denied_reason = Some(format!(
-                    "原生恢复未确认:请求 {:?} 实测 {:?}(在途重挂={})",
-                    self.requested_resume_id,
-                    self.native_confirmed_id,
-                    self.reattached_inflight_run
-                ));
-            }
+            // A1/A2:终门空转格显式标 not_applicable,否则按
+            // 请求 id==实测 id **且**本格新增 ProviderStart/在途重挂判确认
+            // (判据与自证语义见 r2_evidence_semantics)。
+            r2_evidence_semantics::resume_cell_verdict(&mut cell, self);
         } else if cell.exact_version.is_empty() {
             cell.capability_state = "unknown".to_string();
             cell.denied_reason =
@@ -8036,6 +7962,32 @@ fn pump_frame_disposition(
     }
 }
 
+/// 夹具一致性修复(C1):矩阵会话一律按「Superpowers 可用」下发请求体。
+/// 场景环境确有技能(`~/.agents/skills` + 托管软链层),写 `false` 会让产品
+/// 在提示词里同时要求「必调 Skill」与「未启用必调 Skill,必须停止并报告」,
+/// 造成夹具自相矛盾(codex r2 fresh story 依令阻塞被产品正确 fail-closed)。
+/// 三处请求体同源,缺一即重新引入矛盾——`r2_evidence_semantics::tests`
+/// 逐处钉住为 true。
+const FIXTURE_SUPERPOWERS_ENABLED: bool = true;
+
+/// plan prepare 请求体(矩阵 plan 阶段;`superpowers_enabled` 见上常量)。
+fn plan_prepare_body(
+    story_spec_ids: &[String],
+    design_spec_id: &str,
+    provider_wire: &str,
+) -> Value {
+    json!({
+        "title": "矩阵 plan:跨仓修复拆分",
+        "story_spec_ids": story_spec_ids,
+        "design_spec_ids": [design_spec_id],
+        "author_provider": provider_wire,
+        "reviewer_provider": provider_wire,
+        "review_rounds": 1,
+        "superpowers_enabled": FIXTURE_SUPERPOWERS_ENABLED,
+        "openspec_enabled": true
+    })
+}
+
 /// r23 问题2:design 生成请求体——产品端点原生支持调用方钉定聚合视野
 /// (`GenerateDesignSpecsRequest.involved_repository_ids`/`change_order`,
 /// 方案X 阶段1);不传则由 AI 结构化输出自决回写,r22 实测自决
@@ -8056,7 +8008,7 @@ fn pinned_design_generate_body(
         "author_provider": provider_wire,
         "reviewer_provider": provider_wire,
         "review_rounds": 1,
-        "superpowers_enabled": false,
+        "superpowers_enabled": FIXTURE_SUPERPOWERS_ENABLED,
         "openspec_enabled": true
     })
 }
@@ -8072,7 +8024,7 @@ fn pinned_story_generate_body(title: &str, member_logical_id: &str, provider_wir
         "author_provider": provider_wire,
         "reviewer_provider": provider_wire,
         "review_rounds": 1,
-        "superpowers_enabled": false,
+        "superpowers_enabled": FIXTURE_SUPERPOWERS_ENABLED,
         "openspec_enabled": true
     })
 }
@@ -8695,24 +8647,32 @@ fn latest_native_id_in_audits(
         .map(|(_, record)| record.provider_session_id.clone())
 }
 
-/// kimi-9 现场(r10 2026-10-09)coding resume 原生恢复确认判据(纯函数,
-/// `coding_resume_native_reattach_tests` 钉死):确认 = (a) 请求 id ==
-/// 实测 id(真 native resume:kimi 方言 session/load 不回显、session/update
-/// 携带同 id;或零 spawn 空转形——重连即终态,两次扫描读同一条旧审计,
-/// kimi-8 形),或 (b) 重连窗口内观察到「重连前启动的 coder role run 从
-/// running 走到 completed」(在途 run 重挂:provider 子进程跨 WS 重连存活,
-/// 事件继续流到新连接;不产生新 provider_start 审计)。blocked 门
-/// retry_coding 按产品冻结设计清除 coder 会话引用后开全新 native 会话
-/// (gates_parts/blocked_gate.inc.rs RetryCoding→clear_attempt_provider_
-/// conversation),重挂之后的 retry spawn 拿新 id 不构成「未恢复」;两条件
-/// 皆缺才是真 fork/未恢复(denied)。
+/// coding resume 原生恢复确认判据(纯函数,`coding_resume_native_reattach_tests`
+/// 钉死)。
+///
+/// A2(r2 简化批次):`请求 id == 实测 id` **单独不成立**——resume 泵前后两次
+/// 扫描读的是同一条既有审计(零 spawn 空转形),该等式恒真,无法区分「真实
+/// 恢复」与「什么都没发生」。确认必须另有本格**新增 ProviderStart** 审计
+/// (真起了一次恢复进程/真 native resume)`或` 真实在途 run 重挂。
+///
+/// 合法形态:(a) 请求 id == 实测 id **且**本格新增 ProviderStart(真 native
+/// resume:kimi 方言 session/load 不回显、session/update 携带同 id);
+/// (b) 重连窗口内观察到「重连前启动的 coder role run 从 running 走到
+/// completed」(在途 run 重挂:provider 子进程跨 WS 重连存活,事件继续流到
+/// 新连接;不产生新 provider_start 审计)。blocked 门 retry_coding 按产品冻结
+/// 设计清除 coder 会话引用后开全新 native 会话(gates_parts/blocked_gate.inc.rs
+/// RetryCoding→clear_attempt_provider_conversation),重挂之后的 retry spawn
+/// 拿新 id 不构成「未恢复」;两条件皆缺才是真 fork/未恢复(denied)。
 fn coding_resume_native_confirmed(
     requested: &Option<String>,
     confirmed: &Option<String>,
     reattached_inflight_run: bool,
+    new_provider_start: bool,
 ) -> bool {
     match (requested, confirmed) {
-        (Some(requested), Some(confirmed)) if requested == confirmed => true,
+        (Some(requested), Some(confirmed)) if requested == confirmed => {
+            new_provider_start || reattached_inflight_run
+        }
         (Some(_), Some(_)) => reattached_inflight_run,
         _ => false,
     }
@@ -10789,29 +10749,39 @@ mod coding_resume_native_reattach_tests {
 
     #[test]
     fn lcg_coding_resume_native_confirmed_accepts_id_equality_or_reattachment() {
-        // (a) 请求==实测:真 native resume(kimi 方言 session/load→
-        // session/update 同 id)或零 spawn 空转形(kimi-8:重连即终态,
-        // 两次扫描读同一条旧审计)。
+        // (a) 请求==实测 + 本格新增 ProviderStart:真 native resume(kimi 方言
+        // session/load→session/update 同 id)。
         assert!(coding_resume_native_confirmed(
             &Some("session-a".to_string()),
             &Some("session-a".to_string()),
+            false,
+            true
+        ));
+        // A2 负测:请求==实测但**无**新增 ProviderStart——两侧读同一条既有
+        // 审计(空转),不得判确认(旧实现恒真,正是本批要堵的自证)。
+        assert!(!coding_resume_native_confirmed(
+            &Some("session-a".to_string()),
+            &Some("session-a".to_string()),
+            false,
             false
         ));
         // (b) kimi-9 形:实测 id 变(retry 门清引用后全新会话)+ 在途
-        // coder run 重挂证据 → 恢复成立。
+        // coder run 重挂证据 → 恢复成立(不要求新增 ProviderStart)。
         assert!(coding_resume_native_confirmed(
             &Some("session-ddde50e2".to_string()),
             &Some("session-8e4c3334".to_string()),
-            true
+            true,
+            false
         ));
         // 真 fork/未恢复:实测 id 变且无重挂证据 → 不确认。
         assert!(!coding_resume_native_confirmed(
             &Some("session-a".to_string()),
             &Some("session-b".to_string()),
-            false
+            false,
+            true
         ));
         // 双缺(扫描不到 executor 启动)不因重挂标志放行。
-        assert!(!coding_resume_native_confirmed(&None, &None, true));
+        assert!(!coding_resume_native_confirmed(&None, &None, true, true));
     }
 
     fn state_frame(runs: &[(&str, &str, &str, &str)]) -> Value {
