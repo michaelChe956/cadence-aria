@@ -65,11 +65,19 @@ pub(super) fn preserve_option_index(options: &[Value]) -> Option<usize> {
 /// 给作者模型,不放宽产品确认门/评审纪律。
 pub(crate) const ISSUE_PLAN_SELF_CONSISTENCY_CLAUSE: &str = "计划自洽约束:每个 Work Item 的 AC 与 Verification 只能约束本工作项 `exclusive_scopes` 允许写入的文件;禁止把需要修改某文件的必需检查(如全仓 `cargo fmt`/`cargo build`/`cargo test`,或对该文件新增 pub 项的文档注释审阅)挂在 `forbidden_scopes` 含该文件的 work item 上。";
 
-/// create_issue 默认描述(原 harness 内联文本 + 只读纪律句;句子恒进
-/// story/design/plan 的 [issue] 段,锚点无关)。
+/// create_issue 默认描述（T23 r2/r3 最小常见 issue；r1 共用）。
+/// 设计约束：
+/// - 只出现 alpha 一个仓，不出现 beta / “不修改某仓”的排除句（防语义应答造出范围题）；
+/// - 单文件（lib.rs）+ 单工作项（“用一个工作项完成”）；
+/// - 验证命令固定为 cargo test（仓根直接执行），不引入 podman/maven/npm；
+/// - 保留只读纪律句（codex）与计划自洽句（kimi）。
 pub(super) fn default_issue_description() -> String {
     format!(
-        "在 alpha 仓内实现会话过期签发、判定与用户提示;本需求不修改 beta 仓(beta 仅按既有接口消费,不属本需求交付范围)。{ISSUE_AUTHOR_READONLY_CLAUSE}{ISSUE_PLAN_SELF_CONSISTENCY_CLAUSE}四家五阶段真实矩阵驱动 issue。"
+        "在 alpha 仓的 lib.rs 中，给已有的 pub fn cross_repo_greeting 增加英文文档注释，\
+         并新增一个单元测试（在 `#[cfg(test)]` 模块内用 `#[test]`）验证它返回 \"alpha\"。\
+         本次只修改 alpha 仓的 lib.rs，用一个工作项完成。\
+         验证命令为 cargo test（在仓根直接执行），Coder 必须自己执行并在完成报告中记录退出码与测试数量。\
+         {ISSUE_AUTHOR_READONLY_CLAUSE}{ISSUE_PLAN_SELF_CONSISTENCY_CLAUSE}"
     )
 }
 
@@ -227,6 +235,85 @@ mod tests {
                 "计划自洽句必须点明 {token}"
             );
         }
+    }
+
+    /// T23 r2/r3 最小常见 issue(设计 2026-10-21 §2.2):默认描述必须是
+    /// 「单仓 alpha + 单文件 lib.rs + 单工作项 + cargo test」形态——
+    /// 不得回潮 beta 排除句(制造范围判断题)、多能力描述(诱发多工作
+    /// 项)与轮次字样(r2/r3 共用同一 issue,轮次语义只由 RUN_MODE 承担)。
+    #[test]
+    fn default_issue_description_is_minimal_single_repo() {
+        let description = default_issue_description();
+        for token in [
+            "alpha",
+            "lib.rs",
+            "cross_repo_greeting",
+            "一个工作项",
+            "cargo test",
+        ] {
+            assert!(
+                description.contains(token),
+                "最小 issue 必须钉住 {token}(单仓/单文件/单工作项/验证命令)"
+            );
+        }
+        for forbidden in ["beta", "会话过期", "四家五阶段", "轮"] {
+            assert!(
+                !description.contains(forbidden),
+                "最小 issue 不得出现 {forbidden}(排除句/多能力旧文本/轮次耦合)"
+            );
+        }
+        assert!(description.contains(ISSUE_AUTHOR_READONLY_CLAUSE));
+        assert!(description.contains(ISSUE_PLAN_SELF_CONSISTENCY_CLAUSE));
+    }
+
+    /// A1 仓库范围题(§2.4):选项同时含「仅 alpha」与全量/多仓项,必须
+    /// 选单成员口径(single_scope 优先于 SelectAll),不得沿 involved
+    /// 扩到 beta(pi r2 红因形态)。
+    #[test]
+    fn semantic_selection_repo_scope_picks_single_member() {
+        let options = json!([
+            {"id": "opt_all", "label": "全部成员:alpha 与 beta 都修改"},
+            {"id": "opt_alpha", "label": "仅 alpha:只在 alpha 仓 lib.rs 内改动"},
+            {"id": "opt_both", "label": "alpha+beta:两仓联合交付"},
+            {"id": "opt_other", "label": "其他(我来补充)"},
+        ]);
+        assert_eq!(
+            semantic_option_selection("本次需求涉及哪些仓库?", options.as_array().unwrap(), false,),
+            vec!["opt_alpha".to_string()],
+            "A1 范围题必须选「仅 alpha」,不得选全量/多仓/宣告类"
+        );
+    }
+
+    /// A2 确认题(§2.4):确认/继续口径必须压过取消(Negative)。
+    #[test]
+    fn semantic_selection_confirm_question_picks_confirm() {
+        let options = json!([
+            {"id": "opt_cancel", "label": "取消:暂不执行本次方案"},
+            {"id": "opt_confirm", "label": "确认继续:按上述方案执行"},
+        ]);
+        assert_eq!(
+            semantic_option_selection("是否确认按此方案继续?", options.as_array().unwrap(), false,),
+            vec!["opt_confirm".to_string()],
+            "A2 确认题必须选确认/继续,不得选取消"
+        );
+    }
+
+    /// A4 其它题(§2.4,语言/用例数等 issue 已钉死项):兜底取首个非负向;
+    /// 更多用例/多工作项/改 beta/宣告类扩张项纵然在场也不得被选中
+    /// (出现即视为夹具设计失败)。
+    #[test]
+    fn semantic_selection_a4_fallback_picks_first_non_negative() {
+        let options = json!([
+            {"id": "opt_one", "label": "一个用例:验证 cross_repo_greeting 返回 \"alpha\""},
+            {"id": "opt_more", "label": "新增更多用例,并修改 beta 仓补齐对等测试"},
+            {"id": "opt_split", "label": "拆成多个工作项分别交付"},
+            {"id": "opt_other", "label": "其他(我来补充)"},
+        ]);
+        assert_eq!(
+            semantic_option_selection("单元测试需要几个用例?", options.as_array().unwrap(), false,),
+            vec!["opt_one".to_string()],
+            "A4 兜底必须取首个非负向(一个用例),不得选更多用例/多工作项/改 beta/宣告类"
+        );
     }
 
     /// T23 修法C:target 基数守卫——>1 个非空 target 报夹具漂移,单

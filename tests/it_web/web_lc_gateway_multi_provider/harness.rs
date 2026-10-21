@@ -3784,6 +3784,8 @@ impl MatrixEnvironment {
         let member_b = aggregate_root_path.join("beta");
         git_repo_at(&member_a);
         git_repo_at(&member_b);
+        member_fixture_baseline::seed_member_cargo_crate(&member_a, "alpha");
+        member_fixture_baseline::seed_member_cargo_crate(&member_b, "beta");
         // 真实产品语义(fix-admission-member-rules-scope 后):成员 checkout 缺
         // `.claude/rules/language.md` 不再全局阻断——bootstrap 凭据相位豁免、
         // Normal 根材料有效时仅审计;SC 链按实际消费路径在消费点停等。

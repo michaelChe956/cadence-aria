@@ -23,6 +23,33 @@ pub(super) const MEMBER_LIB_RS_ALPHA: &str =
 pub(super) const MEMBER_LIB_RS_BETA: &str =
     "pub fn cross_repo_greeting() -> &'static str {\n    \"beta\"\n}\n";
 
+/// 成员仓最小 Cargo manifest:让 issue 的 `cargo test` 在仓根真实可跑。
+/// lib.rs 保持在仓根(与既有基线/测试引用一致),用 `[lib] path` 指过去。
+///
+/// `doctest = false` 是**必须**的:产品 `parse_test_execution_count`
+/// (`src/product/coding_attempt_store/role_run_event.rs:549`)对 cargo
+/// 只取**最后一条** `test result:` 行。若保留 doc-tests,`cargo test`
+/// 的输出顺序是「unittests 1 passed」→「Doc-tests 0 passed」,最后一条
+/// 是 0,`non_zero_test_execution_required` 会误判为未执行测试。
+/// 关掉 doctest 后,最后一条就是单测的 `1 passed`。
+pub(super) fn member_cargo_toml(member: &str) -> String {
+    format!(
+        "[package]\nname = \"{member}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"lib.rs\"\ndoctest = false\n"
+    )
+}
+
+/// `cargo test` 的产物不进入交付 diff(受控 commit 只应包含 lib.rs)。
+pub(super) const MEMBER_GITIGNORE: &str = "/target\nCargo.lock\n";
+
+/// 成员仓 cargo 化播种(T23 r2/r3 最小 issue 的验证前提):随建仓首次
+/// 提交写入最小 manifest 与 .gitignore。落本文件而非 harness——大文件
+/// 守卫棘轮(harness.rs 上限 14966)只许删不许涨,harness 只留两行接线。
+pub(super) fn seed_member_cargo_crate(path: &std::path::Path, member: &str) {
+    std::fs::write(path.join("Cargo.toml"), member_cargo_toml(member))
+        .expect("write member Cargo.toml");
+    std::fs::write(path.join(".gitignore"), MEMBER_GITIGNORE).expect("write member .gitignore");
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::ErrorKind;
@@ -49,6 +76,40 @@ mod tests {
             if let Some(diff) = rustfmt_check_diff(text, member) {
                 panic!("基线 lib.rs({member})未通过 rustfmt --check:\n{diff}");
             }
+        }
+    }
+
+    /// T23 r2/r3 最小 issue 的验证前提:成员仓 manifest 必须让
+    /// `cargo test` 在仓根可跑——`[lib] path = "lib.rs"`(lib.rs 留仓
+    /// 根,与既有基线/断言一致)且 `doctest = false`(产品
+    /// parse_test_execution_count 取**最后一条** `test result:`,保留
+    /// doc-tests 会让 "Doc-tests 0 passed" 盖掉单测计数)。
+    #[test]
+    fn member_cargo_toml_pins_lib_root_and_disables_doctest() {
+        for member in ["alpha", "beta"] {
+            let manifest = member_cargo_toml(member);
+            assert!(
+                manifest.contains(&format!(
+                    "[package]\nname = \"{member}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
+                )),
+                "成员 {member} manifest 必须是最小 [package] 头"
+            );
+            assert!(
+                manifest.contains("[lib]\npath = \"lib.rs\"\ndoctest = false\n"),
+                "成员 {member} manifest 的 [lib] 必须钉 lib.rs 仓根路径并关 doctest"
+            );
+        }
+    }
+
+    /// `cargo test` 产物不得进交付 diff(受控 commit 只应包含 lib.rs):
+    /// .gitignore 必须挡 `/target` 与 `Cargo.lock`。
+    #[test]
+    fn member_gitignore_excludes_target_and_lockfile() {
+        for line in ["/target", "Cargo.lock"] {
+            assert!(
+                MEMBER_GITIGNORE.lines().any(|entry| entry == line),
+                "成员 .gitignore 必须逐行包含 {line}"
+            );
         }
     }
 
