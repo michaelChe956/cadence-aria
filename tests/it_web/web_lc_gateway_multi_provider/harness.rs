@@ -95,6 +95,8 @@ use super::live_b45_t22_support::{
     b45_capture_plan_diagnostics, b45_kimi_issue_description, b45_member_git_snapshot,
     b45_record_http_failure,
 };
+/// T23 夹具范围守卫:语义选答 Preserve 档/plan target 基数/issue 只读句。
+pub(crate) mod issue_scope_guards;
 
 /// 真实现场开关:缺失时 `#[ignore]` 测试必须失败而非静默 return 成功。
 pub(crate) const LC_GATEWAY_E2E_SWITCH: &str = "LC_GATEWAY_E2E";
@@ -4743,9 +4745,7 @@ impl MatrixEnvironment {
                     .ok()
                     .and_then(|guard| guard.clone())
             })
-            .unwrap_or_else(|| {
-                "在 alpha 仓内实现会话过期签发、判定与用户提示;本需求不修改 beta 仓(beta 仅按既有接口消费,不属本需求交付范围)。四家五阶段真实矩阵驱动 issue。".to_string()
-            });
+            .unwrap_or_else(issue_scope_guards::default_issue_description);
         let (status, body) = request_json(
             &self.app,
             Method::POST,
@@ -6360,6 +6360,11 @@ impl MatrixEnvironment {
     async fn run_coding_stage(&mut self) -> Vec<EvidenceCell> {
         let snapshot_boot = self.snapshot_boot;
         let mut cells = Vec::new();
+        // T23 修法C:多 target=夹具范围漂移,先以 matrix_fixture_scope_drift
+        // 夹具诊断归因收口,不让产品合法 409(repository_routing_ambiguous)变阶段红。
+        if let Some(cells) = issue_scope_guards::coding_scope_drift_guard(self).await {
+            return cells;
+        }
         let Some(work_item_id) = self.work_item_id.clone() else {
             cells.push(
                 StageObservation::new("coding", &self.provider).denied_cell(
@@ -9003,6 +9008,11 @@ fn semantic_option_selection(
         vec![index]
     } else if let Some((index, _)) = classified
         .iter()
+        .find(|(_, tier)| *tier == SemanticTier::Preserve)
+    {
+        vec![*index]
+    } else if let Some((index, _)) = classified
+        .iter()
         .find(|(_, tier)| *tier == SemanticTier::SelectAll)
     {
         vec![*index]
@@ -9020,7 +9030,10 @@ fn semantic_option_selection(
         if allow_multiple && non_negative.len() >= 2 {
             non_negative
         } else {
-            vec![non_negative.first().copied().unwrap_or(0)]
+            // T23(pi r2):全 Negative 兜底先按标签原文捞 Preserve 档,不盲取 index 0。
+            issue_scope_guards::preserve_option_index(options)
+                .map(|index| vec![index])
+                .unwrap_or_else(|| vec![non_negative.first().copied().unwrap_or(0)])
         }
     };
     eprintln!(
@@ -9040,6 +9053,7 @@ fn semantic_option_selection(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SemanticTier {
     Negative,
+    Preserve,
     Neutral,
     Confirm,
     SelectAll,
@@ -9066,6 +9080,10 @@ fn semantic_tier(text: &str) -> SemanticTier {
         .split_whitespace()
         .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()))
         .collect();
+    // T23(pi r2):Issue 边界保持档最高优先,判定必须先于 Negative(「不属交付范围」含「不」)。
+    if issue_scope_guards::is_preserve_issue_boundary_option(&normalized) {
+        return SemanticTier::Preserve;
+    }
     let negative_cjk = [
         "取消", "否", "不", "停止", "终止", "拒绝", "跳过", "暂停", "放弃", "无需",
     ];
