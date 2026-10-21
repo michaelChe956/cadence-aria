@@ -86,7 +86,7 @@ LC 会话 SHALL 以 manifest canonical provider_context_root 为进程 cwd，并
 
 #### Scenario: 原生恢复形态
 - **WHEN** 请求 Claude resume、Codex thread/resume、Pi session-id/RPC 或 Kimi session/load
-- **THEN** 系统 SHALL 验证原生同 ID 与完整冻结事实，不回填请求 ID 冒充确认；Reviewer 每次执行还须满足有效窗口合同
+- **THEN** 系统 SHALL 验证原生同 ID 与完整冻结事实，不回填请求 ID 冒充确认；Reviewer 每次执行还须满足有效窗口合同；仅在对应 action resume=Confirmed 且原生 session id、版本/dialect、projection 与全部冻结指纹一致时恢复；四家 adapter SHALL 在 spawn 前按原生 session id 比对 durable `provider_start.lc_projection`/v2 resume 材料，缺失或任一摘要漂移即对被取代旧 run 追加 `superseded_policy_drift` 并以 typed 错误拒绝（零 child、零新 `provider_start`），不得清 resume id 转 fresh；Kimi ACP `session/load` 与其余三家同受此门约束，不因该 provider 的 Aria 注入 MCP bundle digest 校验惰性而豁免
 
 #### Scenario: Resume capability 未确认
 - **WHEN** resume 为 Unknown/Denied

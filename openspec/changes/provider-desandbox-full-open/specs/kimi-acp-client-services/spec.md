@@ -111,3 +111,19 @@ terminal/fs SHALL 接受当前权限审批与受信岗位合同；Reviewer 与�
 #### Scenario: Splitter/Handoff 不得整体拒绝
 - **WHEN** Kimi 的 Splitter/Handoff 发起读取、普通 terminal 或适用 fs 操作
 - **THEN** 系统 SHALL 按实际岗位职责和权限决定，不按角色全拒；承担 author 职责的运行仅保留该岗位代码编辑工具限制
+
+### Requirement: MCP 受控注入（SHALL）
+
+系统 SHALL 满足本 requirement 的全部场景约束。
+
+`session/new` 与 `session/load` 的 `mcpServers` SHALL 来自经 session policy envelope 校验的 Aria-owned 受控 bundle（allowlist、配置 digest、凭据引用脱敏、argv 审计），不从普通 provider 配置透传任意 JSON；未配置时保持 `[]`。resume（session/load）时 SHALL 校验配置 digest：不一致则拒绝加载并报告差异，旧会话标记 superseded；随后只能由用户显式选择新会话（不静默 fresh），对齐 `session-policy-envelope` REQ-ENV-04。
+
+本 digest 校验只约束 Aria 注入 bundle 的来源与冻结值；无注入时（生产 `KimiCodeProvider::new`，MCP 来源恒 `native-project-config`）该校验不构成 resume 授权。provider resume 的完整冻结指纹（policy、authority、canonical cwd、target/git identity、exact version/dialect、capability、语义 tool policy、projection、trust、适用 MCP bundle）统一归 `lc-gateway-multi-provider`「Provider resume 与冻结指纹」；kimi 与其余三家同样 SHALL 在 spawn 前比对 durable `provider_start.lc_projection` 审计记录，缺失/漂移即 superseded + 零 child 拒绝。
+
+#### Scenario: 受控注入
+- **WHEN** envelope 提供 CodeGraph bundle 且 `.codegraph` 存在、路径/命令/版本通过校验
+- **THEN** kimi 会话可调用 codegraph 工具，argv 与 digest 记入审计
+
+#### Scenario: resume 配置漂移
+- **WHEN** session/load 时 bundle digest 与冻结值不一致
+- **THEN** 拒绝加载并报告差异，旧会话标记 superseded；随后只能由用户显式选择新会话（不静默 fresh）
