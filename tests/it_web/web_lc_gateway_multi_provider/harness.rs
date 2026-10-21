@@ -88,6 +88,9 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
+use super::index_rebuild::{
+    INDEX_MISSING_GRACE, IndexMissingGrace, aggregate_active_uri, aggregate_rebuild_uri,
+};
 use super::live_b45_t22_support::{
     b45_capture_plan_diagnostics, b45_kimi_issue_description, b45_member_git_snapshot,
     b45_record_http_failure,
@@ -4496,16 +4499,13 @@ impl MatrixEnvironment {
     /// 真实索引 ready(初始化 D5 后 active index 应可用;缺失则 rebuild)。
     async fn wait_for_index_ready(&mut self) -> Result<(), LiveMatrixFailure> {
         fp_enter_phase("env", "index_ready", "-");
-        let active_uri = format!(
-            "/api/projects/{PROJECT_ID}/logical-codebases/{}/aggregate-indexes/active",
-            self.lc_id
-        );
-        let rebuild_uri = format!(
-            "/api/projects/{PROJECT_ID}/logical-codebases/{}/aggregate-indexes:rebuild",
-            self.lc_id
-        );
+        let active_uri = aggregate_active_uri(PROJECT_ID, &self.lc_id);
+        // T25:rebuild 必须走注册的斜杠路由(冒号式 `:rebuild` 未注册任何
+        // 路由 → 404 空 body;构造唯一收口在 `index_rebuild` 子模块)。
+        let rebuild_uri = aggregate_rebuild_uri(PROJECT_ID, &self.lc_id);
         let deadline = tokio::time::Instant::now() + self.stage_timeout;
         let mut last_heartbeat = std::time::Instant::now();
+        let mut missing_grace = IndexMissingGrace::new(INDEX_MISSING_GRACE);
         loop {
             let (status, body) = request_json(&self.app, Method::GET, &active_uri, json!({})).await;
             if let Err(failure) = expect_ok(status, &body, "读取 active index", None) {
@@ -4526,21 +4526,36 @@ impl MatrixEnvironment {
                 // 中间态(building/rebuilding/未知)→ 继续轮询到终态,
                 // 有界超时兜底;不把中间态当终态判失败,也不重复 POST
                 // rebuild(已有任务在跑会 409)。
-                // 仅缺失(missing/None)时触发一次 rebuild。
+                // 仅持续缺失(missing/None)满 grace 才触发一次 rebuild。
                 missing @ (Some("missing") | None) => {
                     let _ = missing;
-                    let (rebuild_status, rebuild_body) =
-                        request_json(&self.app, Method::POST, &rebuild_uri, json!({})).await;
-                    if rebuild_status != StatusCode::ACCEPTED && rebuild_status != StatusCode::OK {
-                        let failure = matrix_failure(
-                            "index_rebuild_rejected",
-                            format!("索引 rebuild 被拒({rebuild_status}):{rebuild_body}"),
-                            None,
+                    // T25:missing 是初始化 Completed 与 detached build 落
+                    // Building 记录之间的合法瞬态;吃满 grace 才触发一次
+                    // rebuild,不把进行中的 build 误判为缺失(触发后复位)。
+                    if missing_grace.observe_missing(std::time::Instant::now()) {
+                        fp(
+                            "index_rebuild_triggered",
+                            format_args!("missing 持续满 {INDEX_MISSING_GRACE:?},触发一次 rebuild"),
                         );
-                        return Err(self.fail_with_diagnostics(failure, None).await);
+                        let (rebuild_status, rebuild_body) =
+                            request_json(&self.app, Method::POST, &rebuild_uri, json!({})).await;
+                        if rebuild_status != StatusCode::ACCEPTED
+                            && rebuild_status != StatusCode::OK
+                        {
+                            let failure = matrix_failure(
+                                "index_rebuild_rejected",
+                                format!("索引 rebuild 被拒({rebuild_status}):{rebuild_body}"),
+                                None,
+                            );
+                            return Err(self.fail_with_diagnostics(failure, None).await);
+                        }
+                        missing_grace.reset();
                     }
                 }
-                _ => {}
+                // 其他中间态(building 等):detached build 已在场,复位 grace。
+                _ => {
+                    missing_grace.reset();
+                }
             }
             if last_heartbeat.elapsed() >= FP_HEARTBEAT_SECS {
                 fp(
