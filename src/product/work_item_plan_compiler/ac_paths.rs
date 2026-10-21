@@ -48,7 +48,7 @@ pub(crate) fn extract_acceptance_path_refs(ir: &PlanCandidateIr) -> Vec<(String,
 }
 
 /// statement 的受限提取：方法前缀路由 + 反引号/引号 span。
-fn collect_statement_paths(statement: &str, refs: &mut Vec<String>) {
+pub(super) fn collect_statement_paths(statement: &str, refs: &mut Vec<String>) {
     collect_method_routes(statement, refs);
     collect_quoted_spans(statement, refs);
 }
@@ -107,7 +107,7 @@ fn collect_quoted_spans(statement: &str, refs: &mut Vec<String>) {
 /// （`node --test test/x.test.js` → `test/x.test.js`；`--test`/`node` 排除）。
 /// 无法精确确认路径本体的 token（残留/混合/不闭合引号）整体拒绝提取——
 /// 不扩成 shell parser，也绝不输出带引号的伪路径。
-fn collect_command_paths(command: &str, refs: &mut Vec<String>) {
+pub(super) fn collect_command_paths(command: &str, refs: &mut Vec<String>) {
     for token in command.split_whitespace() {
         let Some(token) = strip_paired_quotes(token) else {
             continue;

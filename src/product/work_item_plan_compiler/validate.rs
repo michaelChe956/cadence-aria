@@ -92,6 +92,10 @@ pub fn validate_plan_candidate_ir(
         }
     }
 
+    // bug45/t25（P1 计划自洽）：本工作项的检查目标落在本项 forbidden 写域
+    // 内 → Error finding（preflight 族，回灌修订）。自洽性核对不依赖基线
+    // 树可用性（域冲突是 plan 内部矛盾）。
+    findings.extend(super::check_target_forbidden::check_target_forbidden_findings(ir));
     // C1 Task 5（REQ-C1-PLAN-01）：existing/create 意图合同校验——未声明
     //（intent_undeclared）与不能执行（intent_unexecutable）分开停等修订，
     // 作为 preflight 族 Error 保留在报告里（不清既有 finding、不硬失败）。

@@ -92,7 +92,17 @@ pub const PREFLIGHT_FINDING_CODES: &[&str] = &[
     // Error 保留在报告里经既有修订轮回灌，不硬失败、不清既有 finding。
     "intent_undeclared",
     "intent_unexecutable",
+    // bug45/t25（P1 计划自洽）：检查目标×本项 forbidden 写域冲突——Error
+    // 留在报告里经既有修订轮回灌，不硬失败、不清既有 finding。
+    "work_item_check_target_forbidden",
 ];
+
+/// 检查目标×本项 forbidden 写域冲突（bug45/t25，P1 计划自洽）的共享修复
+/// 路径文案：删除/改写该检查、改引域外路径、或移交给允许写该路径的工作
+/// 项；不得以扩大写域或删除 forbidden 声明绕过。与 finding 消息、
+/// plan_preflight 的 required_action 适配（REQ-WSC-06）逐字同源；SC author
+/// prompt 质量预算已提额到顶，不内联本文案（教学由修订轮回灌承载）。
+pub const WORK_ITEM_CHECK_TARGET_FORBIDDEN_REPAIR_ACTION: &str = "删除或改写引用该 forbidden 路径的验收标准/验证检查，或将检查目标改为本项 forbidden 写域之外的既有路径；若该检查确需覆盖此文件，把它移交给允许写该路径的 work item 并声明依赖，不得以扩大本项写域或删除 forbidden 声明绕过";
 
 /// AC 路径×基线树核对（REQ-WSC-02 场景 13，F-56）的三条修复建议共享文案：
 /// 删除该 AC / 改用基线内路径 / 将新建文件先提交入基线或改引基线内既有

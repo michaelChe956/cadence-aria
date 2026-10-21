@@ -255,6 +255,10 @@ fn preflight_required_action(code: &str) -> String {
             crate::product::work_item_plan_compiler::ACCEPTANCE_PATH_NOT_IN_BASELINE_REPAIR_ACTION
                 .to_string()
         }
+        "work_item_check_target_forbidden" => {
+            crate::product::work_item_plan_compiler::WORK_ITEM_CHECK_TARGET_FORBIDDEN_REPAIR_ACTION
+                .to_string()
+        }
         other => format!("按 finding 消息修复 {other}"),
     }
 }
@@ -381,6 +385,31 @@ mod tests {
     fn non_preflight_errors_do_not_produce_verdict() {
         let report = report_with("traceability_refs_required", "unrelated structural error");
         assert!(preflight_review_verdict(&report).is_none());
+    }
+
+    /// bug45/t25（P1 计划自洽）：检查目标×本项 forbidden 写域冲突 finding
+    /// 同属 preflight 族——适配为机械返修 verdict，required_action 与编译器
+    /// 共享常量逐字同源（REQ-WSC-06 口径一致）。
+    #[test]
+    fn check_target_forbidden_gap_adapts_to_mechanical_revision_verdict() {
+        let report = report_with(
+            "work_item_check_target_forbidden",
+            "work item WI-001 的检查目标 [AC-001 → src/lib.rs（forbidden: src/lib.rs）] 落在本项 forbidden 写域内",
+        );
+        let verdict = preflight_review_verdict(&report).expect("gap must produce verdict");
+        assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
+        assert_eq!(verdict.review_gate, ReviewGate::RequiresRevision);
+        let finding = &verdict.findings[0];
+        assert_eq!(finding.severity, ReviewFindingSeverity::MustFix);
+        assert_eq!(
+            finding.contract_field.as_deref(),
+            Some("plan_preflight.work_item_check_target_forbidden")
+        );
+        assert_eq!(
+            finding.required_action,
+            crate::product::work_item_plan_compiler::WORK_ITEM_CHECK_TARGET_FORBIDDEN_REPAIR_ACTION,
+            "required_action 与共享常量逐字同源（REQ-WSC-06 口径一致）"
+        );
     }
 
     // ---- REQ-PIB-03 T3.2：plan_baseline_tree 按分支名取树 + fail-closed ----
