@@ -12,6 +12,10 @@
 //!   缺失 Host 一律 403。
 //! - 受信 Origin/Host 只来自真实 bind 地址推导与显式配置（环境变量
 //!   [`TRUSTED_ORIGINS_ENV`]），禁止 wildcard、禁止从请求头反推允许列表。
+//! - Origin 端口可省略：配置侧与请求侧共用同一归一（trim + scheme/host 小写 +
+//!   省略端口按 scheme 补默认 https→443/http→80 → `scheme://host:port` 全等比较）。
+//! - Host 允许形式含 `host:port` 与裸 `host`：默认端口的受信 origin（反代域名
+//!   的 Host 头不带端口）与回环口恒收录裸形式；非默认端口（如 8443）不放宽裸形式。
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -22,8 +26,9 @@ use std::sync::Arc;
 
 use crate::web::state::WebAppState;
 
-/// 显式受信 Origin 配置（逗号分隔，精确 `scheme://host:port`，如开发前端
-/// `http://localhost:5173`）。bind 非 loopback 时必须提供；仅收 Origin 允许列表。
+/// 显式受信 Origin 配置（逗号分隔，精确 `scheme://host[:port]`，端口可省略并
+/// 按 scheme 取默认（https→443、http→80），如开发前端 `http://localhost:5173`）。
+/// bind 非 loopback 时必须提供；仅收 Origin 允许列表。
 pub const TRUSTED_ORIGINS_ENV: &str = "ARIA_API_TRUSTED_ORIGINS";
 
 /// 配置错误（fail-visible，绝不静默放宽）。
@@ -31,7 +36,7 @@ pub const TRUSTED_ORIGINS_ENV: &str = "ARIA_API_TRUSTED_ORIGINS";
 pub enum ApiAuthConfigError {
     /// bind 非 loopback 且未显式配置受信 Origin。
     NonLoopbackRequiresExplicitOrigins { bind: String },
-    /// 显式 Origin 非法（scheme/通配符/路径/缺端口）。
+    /// 显式 Origin 非法（scheme/通配符/路径/畸形端口）。
     InvalidOrigin(String),
 }
 
@@ -44,7 +49,7 @@ impl std::fmt::Display for ApiAuthConfigError {
             ),
             Self::InvalidOrigin(raw) => write!(
                 f,
-                "受信 Origin 非法（须精确 scheme://host:port，禁止通配符/路径/缺端口）：{raw}"
+                "受信 Origin 非法（须为 scheme://host[:port]，端口可省略并按 scheme 取默认 https→443、http→80，禁止通配符/路径/query/fragment/空白）：{raw}"
             ),
         }
     }
@@ -52,7 +57,7 @@ impl std::fmt::Display for ApiAuthConfigError {
 
 impl std::error::Error for ApiAuthConfigError {}
 
-/// 精确受信 Origin（规范化小写；保留 IPv6 括号形式）。
+/// 精确受信 Origin（规范化小写、端口补齐；保留 IPv6 括号形式）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrustedOrigin {
     /// 完整 origin 字符串，如 `http://127.0.0.1:4317`。
@@ -62,16 +67,23 @@ pub struct TrustedOrigin {
     pub https: bool,
 }
 
-/// 解析一条显式受信 Origin：仅 http/https、无路径/query/通配符、必须显式端口。
+/// 解析一条显式受信 Origin：仅 http/https、无路径/query/通配符/空白；端口可
+/// 省略，缺省按 scheme 取默认（https→443、http→80），内部归一为
+/// `scheme://host:port`（显式端口照旧精确保留）。
 pub fn parse_trusted_origin(raw: &str) -> Result<TrustedOrigin, ApiAuthConfigError> {
+    normalize_origin(raw).ok_or_else(|| ApiAuthConfigError::InvalidOrigin(raw.trim().to_string()))
+}
+
+/// 归一化单条 origin（配置解析与请求侧 Origin 比较共用同一规则，防止两处
+/// 漂移）：trim、scheme/host 小写、省略的端口按 scheme 补默认（https→443、
+/// http→80），统一为 `scheme://host:port`。拒绝空串、非 http/https scheme、
+/// 通配符、路径、query、fragment、内嵌空白、空 host 与非法端口；返回 `None`。
+fn normalize_origin(raw: &str) -> Option<TrustedOrigin> {
     let raw = raw.trim();
-    let invalid = || ApiAuthConfigError::InvalidOrigin(raw.to_string());
-    let Some((scheme, rest)) = raw.split_once("://") else {
-        return Err(invalid());
-    };
+    let (scheme, rest) = raw.split_once("://")?;
     let scheme = scheme.to_ascii_lowercase();
     if scheme != "http" && scheme != "https" {
-        return Err(invalid());
+        return None;
     }
     if rest.is_empty()
         || rest.contains('/')
@@ -80,34 +92,70 @@ pub fn parse_trusted_origin(raw: &str) -> Result<TrustedOrigin, ApiAuthConfigErr
         || rest.contains('#')
         || rest.chars().any(char::is_whitespace)
     {
-        return Err(invalid());
+        return None;
     }
-    // 拆 host:port：IPv6 形如 [::1]:5173；否则取最后一个 ':'。
+    let default = default_port(scheme == "https");
+    // 拆 host[:port]：IPv6 形如 [::1] / [::1]:5173；否则取最后一个 ':'（无 ':' 即缺端口）。
     let (host, port) = if let Some(stripped) = rest.strip_prefix('[') {
-        let Some((inner, tail)) = stripped.split_once(']') else {
-            return Err(invalid());
-        };
-        let Some(port) = tail.strip_prefix(':') else {
-            return Err(invalid());
+        let (inner, tail) = stripped.split_once(']')?;
+        let port = if tail.is_empty() {
+            default
+        } else {
+            tail.strip_prefix(':')?.parse().ok()?
         };
         (format!("[{inner}]"), port)
     } else {
-        let Some((host, port)) = rest.rsplit_once(':') else {
-            return Err(invalid());
-        };
-        (host.to_string(), port)
+        match rest.rsplit_once(':') {
+            Some((host, port)) => (host.to_string(), port.parse().ok()?),
+            None => (rest.to_string(), default),
+        }
     };
-    let port: u16 = port.parse().map_err(|_| invalid())?;
     let host = host.to_ascii_lowercase();
     if host.is_empty() {
-        return Err(invalid());
+        return None;
     }
     let authority = format!("{host}:{port}");
-    Ok(TrustedOrigin {
+    Some(TrustedOrigin {
         origin: format!("{scheme}://{authority}"),
         authority,
         https: scheme == "https",
     })
+}
+
+/// scheme 默认端口（https→443、http→80）；缺省端口按此补齐。
+fn default_port(https: bool) -> u16 {
+    if https { 443 } else { 80 }
+}
+
+/// 从 `host:port` authority 取出端口（IPv6 括号形式同样适用）。
+fn authority_port(authority: &str) -> Option<u16> {
+    authority
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse().ok())
+}
+
+/// 从 `host:port` authority 取出裸 `host`（IPv6 保留括号形式，如 `[::1]`）。
+fn bare_host(authority: &str) -> &str {
+    match authority.rfind(':') {
+        Some(index) => &authority[..index],
+        None => authority,
+    }
+}
+
+/// 收录一条受信 origin 的 Host 允许形式：`host:port` 恒收录；裸 `host` 仅在
+/// `allow_bare_host` 为真时额外收录（反代域名的 Host 头不带端口；回环口恒收录）。
+fn push_expected_authorities(
+    expected_authorities: &mut Vec<String>,
+    origin: &TrustedOrigin,
+    allow_bare_host: bool,
+) {
+    expected_authorities.push(origin.authority.clone());
+    if allow_bare_host {
+        let bare = bare_host(&origin.authority).to_string();
+        if !expected_authorities.contains(&bare) {
+            expected_authorities.push(bare);
+        }
+    }
 }
 
 /// 解析环境变量原始值为显式 Origin 列表（逗号/空白分隔，空项跳过）。
@@ -136,18 +184,25 @@ impl ApiAuthState {
         let mut expected_authorities = Vec::new();
         if bound.ip().is_loopback() {
             for host in ["127.0.0.1", "localhost", "[::1]"] {
-                trusted_origins.push(TrustedOrigin {
+                let origin = TrustedOrigin {
                     origin: format!("http://{host}:{}", bound.port()),
                     authority: format!("{host}:{}", bound.port()),
                     https: false,
-                });
-                expected_authorities.push(format!("{host}:{}", bound.port()));
+                };
+                // 回环口恒收录裸 `host` 形式（生产入口 http://127.0.0.1:4317 的
+                // Host 头可能不带端口）；裸形式仅指本机名，无对外放宽面。
+                push_expected_authorities(&mut expected_authorities, &origin, true);
+                trusted_origins.push(origin);
             }
         }
         for raw in explicit_origins {
             let parsed = parse_trusted_origin(raw)?;
             if !trusted_origins.contains(&parsed) {
-                expected_authorities.push(parsed.authority.clone());
+                // 端口为 scheme 默认端口时额外收录裸 `host`（反代 https 域名的
+                // Host 头不带端口）；非默认端口（如 8443）不放宽裸形式。
+                let allow_bare_host =
+                    authority_port(&parsed.authority) == Some(default_port(parsed.https));
+                push_expected_authorities(&mut expected_authorities, &parsed, allow_bare_host);
                 trusted_origins.push(parsed);
             }
         }
@@ -167,20 +222,25 @@ impl ApiAuthState {
         &self.trusted_origins
     }
 
-    /// 允许的 Host authority 列表（诊断/测试）。
+    /// 允许的 Host authority 列表（诊断/测试）：每条受信 origin 收录 `host:port`，
+    /// 默认端口下额外收录裸 `host`（回环口恒收录裸形式）。
     pub fn expected_authorities(&self) -> &[String] {
         &self.expected_authorities
     }
 
-    /// Origin 是否精确受信（大小写不敏感；`null`/任意伪造值不匹配）。
+    /// Origin 是否精确受信（与配置侧共用 [`normalize_origin`] 归一：小写、去
+    /// 空白、缺省端口按 scheme 补默认；`null`/任意伪造值不匹配）。
     pub fn origin_allowed(&self, origin: &str) -> bool {
-        let normalized = origin.trim().to_ascii_lowercase();
+        let Some(normalized) = normalize_origin(origin).map(|parsed| parsed.origin) else {
+            return false;
+        };
         self.trusted_origins
             .iter()
             .any(|trusted| trusted.origin == normalized)
     }
 
-    /// Host authority 是否允许（DNS rebinding 防线；小写归一比较）。
+    /// Host authority 是否允许（DNS rebinding 防线；trim + 小写归一比较）。
+    /// 允许形式含 `host:port` 与（默认端口/回环口下的）裸 `host`。
     pub fn host_allowed(&self, host: &str) -> bool {
         let normalized = host.trim().to_ascii_lowercase();
         self.expected_authorities.contains(&normalized)
@@ -363,7 +423,12 @@ mod tests {
         assert!(auth.host_allowed("[::1]:39721"));
         assert!(!auth.host_allowed("127.0.0.1:39722"));
         assert!(!auth.host_allowed("evil.example:4317"));
-        assert!(!auth.host_allowed("127.0.0.1"));
+        // 回环口恒收录裸 host 形式（生产入口 http://127.0.0.1:4317 的 Host 头
+        // 可能不带端口）；裸形式仅指本机名。
+        assert!(auth.host_allowed("127.0.0.1"));
+        assert!(auth.host_allowed("localhost"));
+        assert!(auth.host_allowed("[::1]"));
+        assert!(!auth.host_allowed("evil.com"));
     }
 
     #[test]
@@ -396,16 +461,144 @@ mod tests {
     }
 
     #[test]
-    fn api_auth_rejects_wildcard_missing_port_paths_and_unknown_schemes() {
+    fn api_auth_rejects_wildcard_paths_and_unknown_schemes() {
         assert!(parse_trusted_origin("http://*").is_err());
         assert!(parse_trusted_origin("http://*.example").is_err());
-        assert!(parse_trusted_origin("http://localhost").is_err());
         assert!(parse_trusted_origin("http://localhost:5173/").is_err());
         assert!(parse_trusted_origin("http://localhost:5173/path").is_err());
         assert!(parse_trusted_origin("ftp://localhost:5173").is_err());
         assert!(parse_trusted_origin("localhost:5173").is_err());
+        assert!(parse_trusted_origin("https://host/path").is_err());
+        assert!(parse_trusted_origin("https://*").is_err());
+        assert!(parse_trusted_origin("ftp://host:21").is_err());
+        assert!(parse_trusted_origin("https://host:443/x").is_err());
+        assert!(parse_trusted_origin("").is_err());
+        assert!(parse_trusted_origin("https://host:").is_err());
+        assert!(parse_trusted_origin("https://host:99999").is_err());
+        assert!(parse_trusted_origin("https://:443").is_err());
         assert!(parse_trusted_origin("http://[::1]:5173").is_ok());
         assert!(parse_trusted_origin(" https://localhost:5173 ").is_ok());
+    }
+
+    /// 端口可省略：按 scheme 取默认（https→443、http→80），配置侧与请求侧
+    /// （`origin_allowed`）共用同一归一（trim、小写、补默认端口）后精确比较。
+    #[test]
+    fn api_auth_origin_port_defaults_by_scheme_when_omitted() {
+        // https 无端口 → 归一为 :443（owner 场景：反代 https 域名浏览器发不带端口）。
+        let https = parse_trusted_origin("https://arch-code.mikechelazyc.heiyu.space")
+            .expect("portless https origin");
+        assert_eq!(
+            https.origin,
+            "https://arch-code.mikechelazyc.heiyu.space:443"
+        );
+        assert_eq!(https.authority, "arch-code.mikechelazyc.heiyu.space:443");
+        assert!(https.https);
+
+        let bind: SocketAddr = "192.168.1.5:4317".parse().expect("bind");
+        let auth = ApiAuthState::for_bind(
+            &bind,
+            &["https://arch-code.mikechelazyc.heiyu.space".to_string()],
+        )
+        .expect("portless explicit origin accepted");
+        assert!(auth.origin_allowed("https://arch-code.mikechelazyc.heiyu.space"));
+        assert!(auth.origin_allowed("HTTPS://ARCH-CODE.MIKECHELAZYC.HEIYU.SPACE"));
+        assert!(
+            auth.origin_allowed("https://arch-code.mikechelazyc.heiyu.space:443"),
+            "portless and explicit-default-port forms normalize identically"
+        );
+        assert!(!auth.origin_allowed("https://arch-code.mikechelazyc.heiyu.space:8443"));
+        assert!(auth.host_allowed("arch-code.mikechelazyc.heiyu.space:443"));
+
+        // 请求侧同样拒绝路径/通配符/未知 scheme/空串（非法 Origin 一律 403）。
+        assert!(!auth.origin_allowed("https://arch-code.mikechelazyc.heiyu.space/path"));
+        assert!(!auth.origin_allowed("https://*"));
+        assert!(!auth.origin_allowed("ftp://arch-code.mikechelazyc.heiyu.space:21"));
+        assert!(!auth.origin_allowed(""));
+        assert!(!auth.origin_allowed("null"));
+
+        // http 无端口 → 归一为 :80。
+        let http = parse_trusted_origin("http://dev.example").expect("portless http origin");
+        assert_eq!(http.origin, "http://dev.example:80");
+        assert_eq!(http.authority, "dev.example:80");
+        assert!(!http.https);
+
+        // 显式端口照旧精确；与缺省写法归一后等价。
+        let explicit = parse_trusted_origin("https://host.example:443").expect("explicit port");
+        assert_eq!(explicit.origin, "https://host.example:443");
+        let auth = ApiAuthState::for_bind(&bind, &["https://host.example:443".to_string()])
+            .expect("explicit port origin accepted");
+        assert!(auth.origin_allowed("https://host.example:443"));
+        assert!(auth.origin_allowed("https://host.example"));
+
+        // IPv6 无端口同样补默认端口；缺省写法与显式默认端口归一后是同一条受信项。
+        let v6 = parse_trusted_origin("https://[::1]").expect("portless ipv6 origin");
+        assert_eq!(v6.origin, "https://[::1]:443");
+        let auth = ApiAuthState::for_bind(
+            &bind,
+            &[
+                "https://host.example".to_string(),
+                "https://host.example:443".to_string(),
+            ],
+        )
+        .expect("dedup after normalization");
+        assert_eq!(auth.trusted_origins().len(), 1);
+        // 同一受信 origin 归一后只留一条；其 Host 允许形式为 `host:443` + 裸 `host`。
+        assert_eq!(auth.expected_authorities().len(), 2);
+        assert!(
+            auth.expected_authorities()
+                .contains(&"host.example:443".to_string())
+        );
+        assert!(
+            auth.expected_authorities()
+                .contains(&"host.example".to_string())
+        );
+    }
+
+    /// Host 同时接受带端口与不带端口：`host:port` 恒允许；裸 `host` 仅在端口为
+    /// scheme 默认端口时额外允许（反代 https 域名的 Host 头不带端口），
+    /// 非默认端口（如 8443）不放宽裸形式；回环口恒允许裸形式。
+    #[test]
+    fn api_auth_host_accepts_both_with_and_without_port() {
+        let bind: SocketAddr = "192.168.1.5:4317".parse().expect("bind");
+
+        // 默认端口（https→443）：带端口与不带端口都允许。
+        let auth = ApiAuthState::for_bind(
+            &bind,
+            &["https://arch-code.mikechelazyc.heiyu.space".to_string()],
+        )
+        .expect("explicit origin accepted");
+        assert!(auth.host_allowed("arch-code.mikechelazyc.heiyu.space"));
+        assert!(auth.host_allowed("arch-code.mikechelazyc.heiyu.space:443"));
+        assert!(!auth.host_allowed("arch-code.mikechelazyc.heiyu.space:8443"));
+        assert!(!auth.host_allowed("evil.com"));
+
+        // 非默认端口：不放宽裸形式。
+        let auth = ApiAuthState::for_bind(&bind, &["https://h:8443".to_string()])
+            .expect("explicit origin accepted");
+        assert!(auth.host_allowed("h:8443"));
+        assert!(!auth.host_allowed("h"));
+        assert!(!auth.host_allowed("h:443"));
+
+        // http 默认端口 80：裸形式同样允许。
+        let auth = ApiAuthState::for_bind(&bind, &["http://dev.example".to_string()])
+            .expect("explicit origin accepted");
+        assert!(auth.host_allowed("dev.example:80"));
+        assert!(auth.host_allowed("dev.example"));
+
+        // 生产入口：http://127.0.0.1:4317（回环口）两种 Host 形式都允许。
+        let auth = ApiAuthState::for_bind(&loopback_bind(4317), &[]).expect("auth");
+        assert!(auth.host_allowed("127.0.0.1:4317"));
+        assert!(auth.host_allowed("127.0.0.1"));
+        assert!(auth.host_allowed("localhost:4317"));
+        assert!(auth.host_allowed("localhost"));
+        assert!(auth.host_allowed("[::1]:4317"));
+        assert!(auth.host_allowed("[::1]"));
+        assert!(!auth.host_allowed("evil.com"));
+        assert!(!auth.host_allowed("127.0.0.1:4318"));
+
+        // 无关 authority 一律拒绝。
+        assert!(!auth.host_allowed("evil.com:4317"));
+        assert!(!auth.host_allowed("evil.example"));
     }
 
     #[test]

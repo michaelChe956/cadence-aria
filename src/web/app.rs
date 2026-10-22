@@ -1286,7 +1286,7 @@ mod tests {
             }
 
             // 非法 Host（Origin 受信）→ 403。
-            for bad_host in ["evil.example:4317", "127.0.0.1:39722", "localhost"] {
+            for bad_host in ["evil.example:4317", "127.0.0.1:39722"] {
                 let response = app
                     .clone()
                     .oneshot(request(
@@ -1310,6 +1310,14 @@ mod tests {
                 .oneshot(request(None, Some("localhost:39721"), "/api/tasks", false))
                 .await
                 .expect("loopback variant GET");
+            assert_eq!(response.status(), StatusCode::OK);
+
+            // loopback Host 变体（裸 host，不带端口）→ 200（回环口恒收录裸形式）。
+            let response = app
+                .clone()
+                .oneshot(request(None, Some("localhost"), "/api/tasks", false))
+                .await
+                .expect("bare loopback variant GET");
             assert_eq!(response.status(), StatusCode::OK);
 
             // mutation：缺 Origin → 403；恶意 Origin → 403；受信 → 直达 handler。
