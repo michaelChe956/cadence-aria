@@ -36,8 +36,8 @@ fn group_final_review_execution_entry_is_removed() {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     // ① internal_pr_review.rs 不得再 include legacy_group_final_review.inc.rs
-    let internal_pr_review = manifest_dir
-        .join("src/product/coding_workspace_engine/internal_pr_review.rs");
+    let internal_pr_review =
+        manifest_dir.join("src/product/coding_workspace_engine/internal_pr_review.rs");
     let content = std::fs::read_to_string(&internal_pr_review)
         .expect("internal_pr_review.rs must be readable");
     assert!(
