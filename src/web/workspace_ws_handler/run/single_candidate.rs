@@ -914,6 +914,7 @@ pub(crate) async fn run_single_candidate_author(
     let repository_structure =
         crate::product::work_item_split_engine::context::summarize_repository_structure(
             &repository.path,
+            issue.logical_codebase_id.is_some(),
         );
     let author_provider = engine.session().author_provider.clone();
     // B2b1(Task 5.2,REQ-PLN-08):envelope target 恒聚合根锚(E native

@@ -441,7 +441,8 @@ impl WorkItemSplitEngine {
         let story_context = collect_story_context(lifecycle, request, issue)?;
         let design_context = collect_design_context(lifecycle, request, issue)?;
 
-        let repository_structure = summarize_repository_structure(&repository.path);
+        let repository_structure =
+            summarize_repository_structure(&repository.path, issue.logical_codebase_id.is_some());
         let prompt = build_split_prompt(
             request,
             issue,
@@ -472,7 +473,8 @@ impl WorkItemSplitEngine {
     ) -> ApiResult<WorkItemSplitInvocation> {
         let story_context = collect_story_context(lifecycle, request, issue)?;
         let design_context = collect_design_context(lifecycle, request, issue)?;
-        let repository_structure = summarize_repository_structure(&repository.path);
+        let repository_structure =
+            summarize_repository_structure(&repository.path, issue.logical_codebase_id.is_some());
         let capabilities = merge_design_context_capabilities(&design_context);
         let gaps = design_context_gaps(&capabilities);
         let (prompt, sentinel_nonce) = build_outline_prompt_with_nonce(
@@ -547,7 +549,10 @@ impl WorkItemSplitEngine {
         let facts = outline_fresh_revision_facts(source_context)?;
         let story_context = collect_story_context(lifecycle, request, issue)?;
         let design_context = collect_design_context(lifecycle, request, issue)?;
-        let repository_structure = summarize_repository_structure(&business_repository.path);
+        let repository_structure = summarize_repository_structure(
+            &business_repository.path,
+            issue.logical_codebase_id.is_some(),
+        );
         let capabilities = merge_design_context_capabilities(&design_context);
         let gaps = design_context_gaps(&capabilities);
         let context_resolutions =
@@ -592,7 +597,8 @@ impl WorkItemSplitEngine {
         let story_context = collect_story_context(lifecycle, request, issue)?;
         let design_context = collect_design_context(lifecycle, request, issue)?;
 
-        let repository_structure = summarize_repository_structure(&repository.path);
+        let repository_structure =
+            summarize_repository_structure(&repository.path, issue.logical_codebase_id.is_some());
         let prompt = build_revision_prompt(
             request,
             issue,
