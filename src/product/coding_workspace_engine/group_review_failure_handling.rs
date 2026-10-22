@@ -3,7 +3,8 @@ use super::group_review_orchestrator::GroupReviewOrchestrator;
 use super::*;
 
 // Legacy group review executor retained for regression coverage
-// (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+// (`group_review_e2e` 及 orchestrator 直测；原 `group_review_runner` 已随
+//  Task 12 删除)
 // and legacy artifact reader support. No production callers remain after the
 // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
 // no longer need regression coverage.
@@ -105,7 +106,8 @@ pub(crate) fn map_group_review_orchestration_error(
 }
 
 // Legacy group review executor retained for regression coverage
-// (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+// (`group_review_e2e` 及 orchestrator 直测；原 `group_review_runner` 已随
+//  Task 12 删除)
 // and legacy artifact reader support. No production callers remain after the
 // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
 // no longer need regression coverage.
@@ -119,7 +121,8 @@ enum GroupReviewFailureDisposition {
 }
 
 // Legacy group review executor retained for regression coverage
-// (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+// (`group_review_e2e` 及 orchestrator 直测；原 `group_review_runner` 已随
+//  Task 12 删除)
 // and legacy artifact reader support. No production callers remain after the
 // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
 // no longer need regression coverage.
@@ -143,7 +146,8 @@ fn group_review_failure_disposition(
 
 impl CodingWorkspaceEngine {
     // Legacy group review executor retained for regression coverage
-    // (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+    // (`group_review_e2e` 及 orchestrator 直测；原 `group_review_runner` 已随
+    //  Task 12 删除)
     // and legacy artifact reader support. No production callers remain after the
     // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
     // no longer need regression coverage.
@@ -241,7 +245,8 @@ impl CodingWorkspaceEngine {
     }
 
     // Legacy group review executor retained for regression coverage
-    // (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+    // (`group_review_e2e` 及 orchestrator 直测；原 `group_review_runner` 已随
+    //  Task 12 删除)
     // and legacy artifact reader support. No production callers remain after the
     // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
     // no longer need regression coverage.

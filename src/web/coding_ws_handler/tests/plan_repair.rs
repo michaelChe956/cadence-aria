@@ -72,7 +72,6 @@ enum ProviderEntry {
     CoderRework,
     CodeReviewer,
     InternalReviewer,
-    GroupFinalReviewer,
 }
 
 #[derive(Clone, Default)]
@@ -598,7 +597,6 @@ async fn coding_plan_repair_provider_runs_fail_closed_during_amendment() {
             ProviderEntry::CoderRework,
             ProviderEntry::CodeReviewer,
             ProviderEntry::InternalReviewer,
-            ProviderEntry::GroupFinalReviewer,
         ] {
             assert_provider_entry_blocked(status.clone(), entry).await;
         }
@@ -711,15 +709,6 @@ async fn assert_provider_entry_blocked(status: CodingAttemptStatus, entry: Provi
             .await
             .expect_err("internal reviewer must be blocked")
             .to_string(),
-        ProviderEntry::GroupFinalReviewer => {
-            let (_command_tx, mut command_rx) = mpsc::channel(1);
-            fixture
-                .engine
-                .execute_group_final_review_with_commands(&attempt, &provider, &mut command_rx)
-                .await
-                .expect_err("group final reviewer must be blocked")
-                .to_string()
-        }
     };
 
     assert!(

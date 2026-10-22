@@ -94,6 +94,7 @@ impl CodingWorkspaceEngine {
         ))
     }
 
+    // 多仓形态不再生成 group prompt；重复保留待清理（REQ-GFR-CR-01，Task 12）。
     pub(crate) async fn build_internal_pr_review_prompt(
         &self,
         attempt: &CodingExecutionAttempt,

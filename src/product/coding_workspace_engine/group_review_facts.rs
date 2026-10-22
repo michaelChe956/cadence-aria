@@ -7,7 +7,8 @@ use crate::product::coding_workspace_engine::plan_defect_routing::AuthoritativeG
 
 impl CodingWorkspaceEngine {
     // Legacy group review executor retained for regression coverage
-    // (`group_review_runner`, `group_review_compatibility`, and `group_review_e2e`)
+    // (`group_review_e2e` 及 orchestrator 直测；原 `group_review_runner` 已随
+    //  Task 12 删除)
     // and legacy artifact reader support. No production callers remain after the
     // Task 6 recovery reroute. Remove only when legacy shard/reduction artifacts
     // no longer need regression coverage.

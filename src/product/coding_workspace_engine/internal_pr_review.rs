@@ -137,6 +137,7 @@ impl CodingWorkspaceEngine {
         .await
     }
 
+    // 多仓形态不再生成 group prompt；重复保留待清理（REQ-GFR-CR-01，Task 12）。
     async fn build_group_internal_pr_review_prompt(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -627,8 +628,6 @@ impl CodingWorkspaceEngine {
         }
     }
 }
-
-include!("legacy_group_final_review.inc.rs");
 
 impl CodingWorkspaceEngine {
     pub async fn execute_review_request(

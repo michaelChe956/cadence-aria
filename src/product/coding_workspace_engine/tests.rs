@@ -56,23 +56,6 @@ pub(super) fn seed_group_attempt_fixture(
     );
 }
 
-fn seed_group_attempt_fixture_with_compact_routing(
-    store: &CodingAttemptStore,
-    attempt: &CodingExecutionAttempt,
-    initialize_attempt: bool,
-    with_dependency: bool,
-) {
-    seed_group_attempt_fixture_with_legacy_work_items(
-        store,
-        attempt,
-        initialize_attempt,
-        with_dependency,
-        true,
-        &[],
-        true,
-    );
-}
-
 fn seed_schema_v2_group_attempt_fixture(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
@@ -548,7 +531,6 @@ mod group_review_material;
 mod group_review_orchestrator;
 mod group_review_prompts;
 mod group_review_reduction;
-mod group_review_runner;
 mod group_start_context;
 mod group_terminal;
 mod handoffs_worktree_routing;
