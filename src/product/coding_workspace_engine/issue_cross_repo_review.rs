@@ -30,7 +30,6 @@ use super::cross_repo_review_prompts::{
     ISSUE_CROSS_REPO_REVIEW_OUTPUT_SCHEMA, build_issue_cross_repo_review_prompt,
 };
 
-
 /// advisory 跨仓评审的自带短时限（REQ-GFR-CR-05「MUST NOT 阻断最终确认/
 /// 交付」）：触发只登记并异步执行，provider 楔死时按此时限收敛为 `Failed`
 /// 落盘，不与整 run 总上限 `DEFAULT_PROVIDER_TIMEOUT_SECS`（3h）同界。
@@ -63,7 +62,9 @@ fn register_cross_repo_review_inflight(
     INFLIGHT_CROSS_REPO_REVIEWS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(cross_repo_review_inflight_key(store_root, project_id, issue_id))
+        .insert(cross_repo_review_inflight_key(
+            store_root, project_id, issue_id,
+        ))
 }
 
 /// 释放在飞登记（评审任务退出路径统一经 guard 触发）。
@@ -71,7 +72,9 @@ fn release_cross_repo_review_inflight(store_root: &Path, project_id: &str, issue
     INFLIGHT_CROSS_REPO_REVIEWS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&cross_repo_review_inflight_key(store_root, project_id, issue_id));
+        .remove(&cross_repo_review_inflight_key(
+            store_root, project_id, issue_id,
+        ));
 }
 
 /// 在飞登记的 panic 安全释放守卫：后台评审任务任何退出路径（完成/失败/
@@ -302,11 +305,7 @@ impl CodingWorkspaceEngine {
             None => None,
         };
         // 在飞登记：同一 issue 至多一条在飞评审（重入的收口钩子不双跑）。
-        if !register_cross_repo_review_inflight(
-            self.store.paths().root(),
-            project_id,
-            issue_id,
-        ) {
+        if !register_cross_repo_review_inflight(self.store.paths().root(), project_id, issue_id) {
             return Ok(());
         }
         let engine = self.clone();
@@ -463,12 +462,14 @@ impl CodingWorkspaceEngine {
         project_id: &str,
         issue_id: &str,
     ) -> Result<bool, ProductStoreError> {
-        Ok(crate::product::logical_codebase::resolve_issue_logical_codebase_id(
-            &self.store.paths(),
-            project_id,
-            issue_id,
-        )?
-        .is_some())
+        Ok(
+            crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+                &self.store.paths(),
+                project_id,
+                issue_id,
+            )?
+            .is_some(),
+        )
     }
 
     /// 「全部开发完成」判定（触发前置，设计 B §七 E + controller 裁定）。
@@ -672,7 +673,7 @@ impl CodingWorkspaceEngine {
 
     /// 单次 provider 执行：不开窗、不写 role run、不产 acceptance；失败 / 超时 /
     /// 输出不可解析 → `Failed` 记录（不重试，REQ-GFR-CR-05）。
-#[allow(clippy::too_many_arguments)] // 标识三元组/材料/attempt/provider 名与句柄各自来源不同，拆结构体只会多一层转抄。
+    #[allow(clippy::too_many_arguments)] // 标识三元组/材料/attempt/provider 名与句柄各自来源不同，拆结构体只会多一层转抄。
     async fn run_issue_cross_repo_review_provider(
         &self,
         project_id: &str,
