@@ -9,6 +9,7 @@ Bug4 的 Reviewer 污染与自提交、Bug5 的 Coder CHECK 无法执行，需�
 - **BREAKING**：Claude Code、Codex、Pi、Kimi Code 的全部角色统一宿主直跑，退役应用层 OS 沙箱；Codex LC 全相位 `danger-full-access` 为明示终裁，Direct 同步全开是“诉求 1：四家全角色统一”的推论，并非锚点对 Direct 的逐字裁定；审批维度仍独立。
 - **BREAKING**：作者仅保留“不配编辑代码文件内建工具”的岗位规则；Codex danger 下无预防保证，以 `fileChange` 事件检测后中断 turn、失败关闭和 durable 审计实现检测型岗位纪律，必须真机探针验收。Reviewer 不继承作者 deny，采用快照恢复、平台通道锁、违规整轮作废的 B 档，无独立 UID。
 - **BREAKING**：LC gateway 保留真实能力证据、身份/配置/投影冻结及 spawn 复验，但撤销“宿主写成功即能力失败”的只读/target-only 证明门；旧隔离能力记录不能自动当作新基线证据。
+- **BREAKING**：plan 评审范围对齐 Issue 选集的有效成员全集并于评审启动时冻结；Story/Design/WorkItem 阶段的 involved/focus/change_order/target 不得收窄评审范围。评审改为 N 成员各一窗口、全窗先开且整轮持锁、依次评审、末统一收口的集合屏障；plan reviewer 采用显式 ZeroWrite 档（任何已观察 worktree 差异即违规），其它 Reviewer 保留既有临时验证豁免；可读面保持 LC 根全树，对账面仅含选中成员，根级非成员条目逐项披露“根域未对账”；报告为一份按成员分节并带唯一确定性总判定，PARTIAL 仅诊断不推进；完整闭环前不启用多成员评审入口。
 - Kimi 的终端 OS 隔离、封闭 grammar、角色与 fs 三条合同整体改为全角色宿主执行；fs API 的 no-follow/授权根校验与资源护栏保留，长 CHECK 不受独立 120 秒硬截断。
 - Coder 在宿主环境自行执行 CHECK，环境能力声明不等于授权；A′ verification-triage 仅补充，不新增平台通用命令 runner。
 - 平台 API 鉴权（REST、WS、敏感 GET）及 Origin/Host 校验为无条件上线前置，不等风险触发、外网暴露或二期部署。
@@ -23,8 +24,8 @@ Bug4 的 Reviewer 污染与自提交、Bug5 的 Coder CHECK 无法执行，需�
 ### Modified Capabilities
 
 - `lc-gateway-multi-provider`：修改真实主规范的 Codex 基线、角色守卫、write_boundary 证据语义及双阶段门；显式废止 Unknown 迁移放行桥，仅当前语义 Confirmed 允许启动。
-- `session-policy-envelope`：修订 REQ-ENV-01/02/03/05/09 的角色策略与受限档语义，补充受信宿主执行及 Reviewer B 档要求。
-- `logical-codebase-aggregate-planning`：修订 REQ-PLN-01/06 的规划只读承诺，保留聚合上下文与作者岗位纪律。
+- `session-policy-envelope`：修订 REQ-ENV-01/02/03/05/09 的角色策略与受限档语义，补充受信宿主执行及 Reviewer B 档要求；按评审范围与多成员对账域方案新增 REQ-ENV-13/14/15/16/17（变更政策分档、范围冻结与选集预检、集合屏障、可读面与对账面分离、窗口标识与终态接管），并改写 REQ-ENV-REVIEW-B 的集合作废与恢复前取证语义。
+- `logical-codebase-aggregate-planning`：修订 REQ-PLN-01/06 的规划只读承诺，保留聚合上下文与作者岗位纪律；新增 REQ-PLN-11/12/13（评审范围对齐 Issue 选集全集、成员分段报告与总判定、多成员评审入口启用门）。
 - `kimi-acp-client-services`：三条真实沙箱合同及终端生命周期配套修订，保留 fs API 校验、并发与输出预算。
 - `kimi-code-provider-integration`：ACP 会话、Auto/Supervised 与逐工具审批三条集成合同明确采用全角色宿主执行，不再把审批当隔离或额外角色禁用。
 - `coding-provider-transport-retry`：Reviewer 技术重试改为新的完整 B 档审查窗口，不重建已退役的只读会话。
@@ -35,7 +36,8 @@ Bug4 的 Reviewer 污染与自提交、Bug5 的 Coder CHECK 无法执行，需�
 - 后续实现涉及受信 engine builder、Direct/LC gateway、四家 adapter、Kimi ACP client services、平台 Git 启动与窗口恢复、API 路由与鉴权；本阶段不修改任何 `src/`、现有设计或笔记。
 - 保留 authority、canonical cwd/native target、policy/config/MCP/trust、原生 session 身份、精确版本观测与失败关闭，不借去沙箱绕过材料缺失或角色配置。
 - owner 接受同 UID 读取凭据、恶意依赖执行、审计非物理防写及外部副作用不可回滚；不新增 UID 隔离、cgroup、容器调度器、CHECK schema 路由或升级自动触发。二期 dev-sandbox 由 owner 自行安排。
+- 评审范围与多成员对账域方案的契约落点：主规格 `logical-codebase-aggregate-planning`（PLN-02/04 与 primary 语义）、`target-aware-work-item`（TGT-01/03）、`multi-target-group-coding`（MTG-01/02）同步修订；在途 delta `lc-root-initialization`（session-policy-envelope ENV-03/04/10/11）与 `fix-planning-session-anchor-recovery`（logical-codebase-aggregate-planning PLN-03/05/07/08）按同一边界最小修订。主规格 `session-policy-envelope` 的 ENV-01..09 均被在途 delta 占用，B 段与 ZeroWrite 只经本 change 的活 delta 新增，不在主规格另发冲突修订。
 
 ### 同 capability 冲突面与归档顺序
 
-原 `lc-gateway-multi-provider` 须先完成 strict 与十四项实施证据核验，再由 controller 归档建立真实主规范，本 change 网关 delta 只使用 MODIFIED。`fix-planning-session-anchor-recovery` 不作为已完成合同，不以 supersedes 标注代替修订；它排在去沙箱③之后，须先按依赖门最小修订其 Codex/角色/写边界冲突条款。本 change 的 tasks 设置归档硬门，未修订不准归档；重叠 header 与失效措辞清单见 design.md。
+原 `lc-gateway-multi-provider` 须先完成 strict 与十四项实施证据核验，再由 controller 归档建立真实主规范，本 change 网关 delta 只使用 MODIFIED。`fix-planning-session-anchor-recovery` 不作为已完成合同，不以 supersedes 标注代替修订；它排在去沙箱③之后，须先按依赖门最小修订其 Codex/角色/写边界冲突条款，并已按评审范围方案最小修订其 PLN-03/05/07/08。`lc-root-initialization` 的 session-policy-envelope delta 已按同一边界最小修订 ENV-03/04/10/11，不新增第二套 root cwd 语义。本 change 的 tasks 设置归档硬门，未修订不准归档；重叠 header 与失效措辞清单见 design.md。

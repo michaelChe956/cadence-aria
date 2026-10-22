@@ -4,7 +4,7 @@
 
 ### Requirement: 规划上下文快照（REQ-PLN-03）
 
-系统 SHALL 每次规划 run 固化 PlanningContextSnapshot（membership_revision、每仓 checkout identity/revision/dirty/availability、index revision、policy digest、canonical working directory、target identity 与 access fingerprint），作为 context/cwd/prompt/audit 的唯一依据。resume、revision、follow-up 与 split planning SHALL 使用同一 snapshot 合同；失配 SHALL 拒绝旧 native 会话并持久等待用户明确 fresh，不能自动重建后启动。
+系统 SHALL 每次规划 run 固化 PlanningContextSnapshot（membership_revision、每仓 checkout identity/revision/dirty/availability、index revision、policy digest、canonical working directory、target identity 与 access fingerprint），作为 context/cwd/prompt/audit 的唯一依据。resume、revision、follow-up 与 split planning SHALL 使用同一 snapshot 合同；失配 SHALL 拒绝旧 native 会话并持久等待用户明确 fresh，不能自动重建后启动。快照 SHALL 另冻结评审范围 set digest；阶段 scope 回写 SHALL NOT 收窄已冻结的评审范围。
 
 #### Scenario: 恢复/续接规划会话
 - **WHEN** 恢复或续接规划会话且 cwd、target、policy 或成员/index 快照任一指纹不一致
@@ -18,9 +18,13 @@
 - **WHEN** native target 固定聚合根但成员 checkout identity/revision/dirty/availability 或 membership/index 发生变化
 - **THEN** 系统 SHALL 继续按 snapshot 检测变化并拒绝旧会话，不因聚合根无 Git 而免检成员事实
 
+#### Scenario: 阶段 scope 回写不收窄评审范围
+- **WHEN** Design scope 从单仓回写为多仓 involved/change_order，或 Story/WorkItem 声明变更
+- **THEN** 已冻结的评审范围 set digest SHALL 保持不变；回写只改业务产物，不收窄评审集合，也不迁移 native anchor
+
 ### Requirement: Design 聚合视野与改动顺序（REQ-PLN-05）
 
-系统 SHALL 使 Design 显式携带 logical_codebase_ref 与 involved_repositories，不回落 issue.repo_id；跨仓关系由 AI 从聚合索引按需检索（启发式，非语义级服务图）。Design SHALL 表达改动顺序作为 Work Item depends_on 依据；多仓 involved_repository SHALL 必须提供 change_order，缺失即 blocker change_order_required_for_logical_codebase；单仓 change_order 可选。scope/change_order SHALL NOT 被解释为迁移 PlanningReadOnly native target 的授权。
+系统 SHALL 使 Design 显式携带 logical_codebase_ref 与 involved_repositories，不回落 issue.repo_id；跨仓关系由 AI 从聚合索引按需检索（启发式，非语义级服务图）。Design SHALL 表达改动顺序作为 Work Item depends_on 依据；多仓 involved_repository SHALL 必须提供 change_order，缺失即 blocker change_order_required_for_logical_codebase；单仓 change_order 可选。scope/change_order SHALL NOT 被解释为迁移 PlanningReadOnly native target 的授权，亦 SHALL NOT 作为 plan reviewer 的授权上限或对账域。
 
 #### Scenario: Design 表达跨仓改动顺序
 - **WHEN** Design 涉及跨仓接口/契约变更
@@ -36,7 +40,7 @@
 
 ### Requirement: 唯一规划 launch/resolver（REQ-PLN-07）
 
-系统 SHALL 提供唯一规划 resolver，使 Story、Design、WorkItemPlan、review/revision、resume 与 WebSocket follow-up 的 context、canonical root cwd、独立 native target、业务材料/compile target、prompt、session audit 均来自同一 PlanningContextSnapshot/authority。native anchor 与业务 target SHALL 分离派生；禁止 issue.repo_id/first Story fallback、另写第二选仓算法或以 target worktree 覆盖 root cwd。
+系统 SHALL 提供唯一规划 resolver，使 Story、Design、WorkItemPlan、review/revision、resume 与 WebSocket follow-up 的 context、canonical root cwd、独立 native target、业务材料/compile target、prompt、session audit 均来自同一 PlanningContextSnapshot/authority。native anchor 与业务 target SHALL 分离派生；禁止 issue.repo_id/first Story fallback、另写第二套选仓算法或以 target worktree 覆盖 root cwd。评审范围与成员材料 SHALL 从同一冻结快照与 set digest 派生。
 
 #### Scenario: 规划全链路一致
 - **WHEN** 启动、run-next、revision、resume、review 或 WebSocket follow-up
@@ -45,6 +49,10 @@
 #### Scenario: 聚合视图不得成为 IR 成员身份
 - **WHEN** SC Plan 从生成 source 降为 IR 并进入 logical compile
 - **THEN** 材料 SHALL 从原业务 repository 读取，IR target SHALL 是原有效 physical member ID；aggregate-root view ID SHALL NOT 写入 IR 或冒充成员 identity
+
+#### Scenario: 评审范围与规划同源
+- **WHEN** plan 评审解析成员材料与评审范围
+- **THEN** 成员集合 SHALL 与规划快照的有效全集同源派生，不从 Story/Design/WorkItem 声明或首仓重建
 
 ## ADDED Requirements
 
@@ -67,3 +75,7 @@ LC Story/Design/WorkItemPlan 的 PlanningReadOnly native launch anchor SHALL 固
 #### Scenario: direct 与 Coding 不变
 - **WHEN** 传统单仓或 Coding/WorkItem 写面启动
 - **THEN** 系统 SHALL 保持原目录/target/member/write-root 与 direct native 恢复行为，不把 Coding writable root 扩到聚合根
+
+#### Scenario: 多成员子评审不搬迁 Author native target
+- **WHEN** plan reviewer 为多个成员开启子评审窗口
+- **THEN** Author 与规划侧的 native target SHALL 仍固定为 canonical aggregate root；子评审窗口的目标 SHALL 独立记录，不回写或取代 Author native target

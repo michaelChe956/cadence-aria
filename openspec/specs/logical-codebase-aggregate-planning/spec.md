@@ -16,7 +16,7 @@
 - **WHEN** 成员 inventory/摘要/证据超出 token 或 byte 预算
 - **THEN** 系统 SHALL 按确定性顺序截断并标记未检索成员，不撑爆 context window
 ### Requirement: Issue 逻辑代码库归属与参与仓库（REQ-PLN-02）
-系统 SHALL 通过 `project_id` 表达 Issue 的逻辑代码库归属，通过 `IssueCodebaseSelection`（include/exclude/focus）表达参与仓库；`IssueRecord.repo_id` 仅作迁移期 focus/primary 投影；focus 可为多值、必须在 include 集合内，include/exclude 重叠时 exclude 优先。
+系统 SHALL 通过 `project_id` 表达 Issue 的逻辑代码库归属，通过 `IssueCodebaseSelection`（include/exclude/focus）表达参与仓库；`IssueRecord.repo_id` 仅作迁移期 focus/primary 投影；focus 可为多值、必须在 include 集合内，include/exclude 重叠时 exclude 优先。Author 与 plan reviewer SHALL 覆盖同一有效成员全集（include 且未 exclude、未删除/停用）；selection 是唯一权威来源，Story/Design/WorkItem 阶段的 involved/focus/change_order/target SHALL NOT 收窄该集合。
 
 #### Scenario: 创建逻辑代码库 Issue
 - **WHEN** 创建逻辑代码库下的 Issue
@@ -25,6 +25,10 @@
 #### Scenario: 成员变更
 - **WHEN** 规划后成员被删除/停用
 - **THEN** 系统 SHALL 使相关 Issue selection 与 planning snapshot 失效或标记，阻塞指向已删除成员的新工作项
+
+#### Scenario: Author 与 plan reviewer 同源有效全集
+- **WHEN** Issue 选集含多个有效成员并进入规划与 plan 评审
+- **THEN** Author 与 plan reviewer SHALL 覆盖同一有效成员全集；focus、involved、change_order 与 WorkItem target 只作阶段声明与评审重点，不构成评审集合收窄
 ### Requirement: 规划上下文快照（REQ-PLN-03）
 系统 SHALL 每次规划 run 固化 `PlanningContextSnapshot`（membership_revision、每仓 checkout revision/dirty/availability、index revision、policy digest、access fingerprint），作为 context/cwd/prompt/audit 的唯一依据。
 
@@ -32,11 +36,15 @@
 - **WHEN** 恢复或续接规划会话
 - **THEN** 系统 SHALL 校验快照指纹；不一致时启动新会话并重建上下文，不沿用可能过时/越权的内容
 ### Requirement: Story 聚合视野（REQ-PLN-04）
-系统 SHALL 使 Story 生成时列出涉及仓库（`involved_repositories`，引用 member ID）；AI 不确定涉及仓库时产生 blocker 向用户确认，不得猜测或默认塞给 primary。
+系统 SHALL 使 Story 生成时列出涉及仓库（`involved_repositories`，引用 member ID）；AI 不确定涉及仓库时产生 blocker 向用户确认，不得猜测或默认塞给 primary。`involved_repositories` SHALL 是本阶段改动声明与评审重点，SHALL NOT 作为 plan reviewer 的授权上限或对账域。
 
 #### Scenario: Story 涉及跨仓改动
 - **WHEN** Story 涉及跨仓改动（如订单服务 + 库存服务 + 前端）
 - **THEN** Story SHALL 明确列出涉及仓库并描述各自改动范围；AI 无法确定涉及仓库时产生 blocker
+
+#### Scenario: Story involved 不是评审上限
+- **WHEN** Story 只声明一个 involved_repository 而 Issue 选集含多个有效成员
+- **THEN** plan reviewer SHALL 仍覆盖完整有效成员全集；Story 声明只作评审重点，不构成对账域收窄
 ### Requirement: Design 聚合视野与改动顺序（REQ-PLN-05）
 系统 SHALL 使 Design 显式携带 `logical_codebase_ref` 与 `involved_repositories`，不再回落 `issue.repo_id`；跨仓关系由 AI 从聚合索引按需检索（启发式，非语义级服务图）；Design 表达改动顺序作为 Work Item `depends_on` 依据；**当 Design 涉及多个 involved_repository（多仓）时，SHALL 必须提供 `change_order`（改动顺序图），缺失即 blocker `change_order_required_for_logical_codebase`**；单仓 Design（involved_repository 唯一）的 `change_order` 可选。
 
@@ -62,7 +70,7 @@
 
 ### Requirement: 逻辑 issue 的 selection 初始写入
 
-多仓 project 创建 issue 时服务端自动写入 all_members 代码库选区，保证 Story/Design/WorkItemPlan 生成可达。
+多仓 project 创建 issue 时服务端自动写入 all_members 代码库选区，保证 Story/Design/WorkItemPlan 生成可达。primary repository SHALL NOT 决定 plan 评审集合，评审集合恒为 Issue 有效选集全集；SHALL NOT 以首仓锚定或「非主成员未对账但继续」的路径交付。
 
 #### Scenario: 自动 all_members
 - **WHEN** 多仓 project 创建 issue（请求体与单仓一致，repository_id 为 primary repository，须属于 manifest active member）
@@ -71,6 +79,10 @@
 #### Scenario: primary repository 语义
 - **WHEN** 多仓 issue 携带 repository_id
 - **THEN** 该字段语义为 primary repository（UI 归属与兼容投影），不影响 selection 成员范围（恒为 all_members）
+
+#### Scenario: primary 不决定评审集合
+- **WHEN** 多仓 issue 的 primary repository 与其它有效成员并存并进入 plan 评审
+- **THEN** plan 评审集合 SHALL 为 Issue 有效选集全集，primary 仅作 UI 归属与兼容投影；不得以首仓锚定替代全集对账
 
 ### Requirement: 多仓 Design change_order 强制
 

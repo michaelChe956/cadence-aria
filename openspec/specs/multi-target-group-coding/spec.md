@@ -7,7 +7,7 @@ mixed-target WorkItemGroup 按 target 分流执行的一期契约：每个目标
 
 ### Requirement: 按 target 分流创建与 per-(plan,target) 唯一性（REQ-MTG-01）
 
-建组与 advance 初始化 SHALL 按 target 显式分流：解析 authoritative plan binding 后按 unit 的 `target_repository_id` 分组——单一 target（含无 target 且 selection focus 唯一）SHALL 走既有建组路径且行为与本 change 前完全一致（单 attempt、收敛路由、零变化）；多 target SHALL 为每个目标仓库分别建立独立的 target-attempt（scope 为 WorkItemGroup、绑定同一 plan），MUST NOT 以单一 attempt 承载多 target。target-attempt 唯一性 SHALL 为 per-`(plan, target)`：同一 `(plan, target)` 至多一个 target-attempt，重复建组/advance/重放 SHALL 命中既有 target-attempt 而非新建。units SHALL 按 target 归属分入各自 target-attempt 的 coding units；无 target 归属且 selection focus 不唯一 SHALL 保持 fail-closed 拒绝并返回稳定错误码。创建、恢复、replay 三处校验与全部路由消费面 SHALL 一致适用本分流规则；「group 内存在多 target」本身 SHALL NOT 构成拒绝理由。
+建组与 advance 初始化 SHALL 按 target 显式分流：解析 authoritative plan binding 后按 unit 的 `target_repository_id` 分组——单一 target（含无 target 且 selection focus 唯一）SHALL 走既有建组路径且行为与本 change 前完全一致（单 attempt、收敛路由、零变化）；多 target SHALL 为每个目标仓库分别建立独立的 target-attempt（scope 为 WorkItemGroup、绑定同一 plan），MUST NOT 以单一 attempt 承载多 target。target-attempt 唯一性 SHALL 为 per-`(plan, target)`：同一 `(plan, target)` 至多一个 target-attempt，重复建组/advance/重放 SHALL 命中既有 target-attempt 而非新建。units SHALL 按 target 归属分入各自 target-attempt 的 coding units；无 target 归属且 selection focus 不唯一 SHALL 保持 fail-closed 拒绝并返回稳定错误码。创建、恢复、replay 三处校验与全部路由消费面 SHALL 一致适用本分流规则；「group 内存在多 target」本身 SHALL NOT 构成拒绝理由。plan 评审 SHALL 是独立的集合窗口，SHALL NOT 改变本分流规则或以 attempt 数组化表达评审集合。
 
 #### Scenario: mixed-target group 按 target 分流创建
 
@@ -29,9 +29,14 @@ mixed-target WorkItemGroup 按 target 分流执行的一期契约：每个目标
 - **WHEN** units 均无 `target_repository_id` 且 issue codebase selection focus 不唯一
 - **THEN** 建组被拒绝并返回稳定错误码（TargetMissing 语义），不静默选择任一 target
 
+#### Scenario: plan 评审集合与 attempt 分流正交
+
+- **WHEN** 某 plan 的 WorkItemGroup 涉及多个 target 且同时进入 plan 评审
+- **THEN** 建组与 advance SHALL 仍按 target 分流各建独立 target-attempt，per-(plan,target) 唯一性不变；plan 评审集合 SHALL NOT 数组化 attempt，也不改变分流结果
+
 ### Requirement: per-target 冻结快照与单 worktree 不变式（REQ-MTG-02）
 
-每个 target-attempt SHALL 各自冻结其目标仓库的 `AttemptTargetSnapshot`（三层身份映射、revision、policy digest、membership revision），REQ-COD-02 的「创建、恢复、重放一律使用冻结快照、不得从活 Work Item 重新猜测」语义 SHALL per-attempt 原样适用。`CodingExecutionAttempt` 的单值持久化字段（worktree_path、head_commit、stage、target_snapshot）SHALL 保持单值语义：每 attempt 恰对应一个 worktree、一个 head、一个 target 快照，MUST NOT 数组化或以集合字段承载多 target。target-attempt 的路由权威 SHALL 为其自身冻结快照（恢复、重放、半启动恢复按各自快照与 worktree 独立运转），MUST NOT 从 plan binding 的 units 重新收敛单一 target。同 target 的串行（REQ-COD-03 同仓串行与三元键 worktree lock）与 attempt 内 unit 级约束（REQ-GCE-01 共享 worktree 单 active unit）SHALL 原样适用；异 target 的 target-attempts SHALL 可并行存在与执行（各自 worktree lock 隔离）。
+每个 target-attempt SHALL 各自冻结其目标仓库的 `AttemptTargetSnapshot`（三层身份映射、revision、policy digest、membership revision），REQ-COD-02 的「创建、恢复、重放一律使用冻结快照、不得从活 Work Item 重新猜测」语义 SHALL per-attempt 原样适用。`CodingExecutionAttempt` 的单值持久化字段（worktree_path、head_commit、stage、target_snapshot）SHALL 保持单值语义：每 attempt 恰对应一个 worktree、一个 head、一个 target 快照，MUST NOT 数组化或以集合字段承载多 target。target-attempt 的路由权威 SHALL 为其自身冻结快照（恢复、重放、半启动恢复按各自快照与 worktree 独立运转），MUST NOT 从 plan binding 的 units 重新收敛单一 target。同 target 的串行（REQ-COD-03 同仓串行与三元键 worktree lock）与 attempt 内 unit 级约束（REQ-GCE-01 共享 worktree 单 active unit）SHALL 原样适用；异 target 的 target-attempts SHALL 可并行存在与执行（各自 worktree lock 隔离）。活动的 plan 评审集合窗口 SHALL 临时冻结相关成员域的平台写通道；非评审期的异 target 并行与单值不变式 SHALL 原样保留。
 
 #### Scenario: 每 target-attempt 各持冻结快照
 
@@ -47,6 +52,11 @@ mixed-target WorkItemGroup 按 target 分流执行的一期契约：每个目标
 
 - **WHEN** 同一 plan 的两个 target-attempt 分别处于执行中
 - **THEN** 两者各自经 `(project, issue, repository)` 三元键 worktree lock 隔离，可并行推进；同 target 的第二个 active attempt 仍被拒绝（per-(issue,target) 单 active）
+
+#### Scenario: 评审期通道冻结不改变异 target 并行
+
+- **WHEN** 某 LC 正在进行覆盖多成员的 plan 评审集合窗口
+- **THEN** 相关成员域的 stage/commit/push/compensation 通道 SHALL 在该轮被冻结；非评审期的异 target 并行与单值快照不变式 SHALL 原样保留
 
 ### Requirement: 手动推进与启动门（REQ-MTG-03）
 
