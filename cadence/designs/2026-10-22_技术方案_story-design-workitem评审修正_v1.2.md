@@ -85,10 +85,10 @@
 
 ### 4｜仓库清单全量注入，超预算显式阻断（lc 专用）
 - 落点：`src/product/logical_codebase/planning_context_set.rs:157-300`（`InventoryInjectionBudget`/`render_compact_inventory`：`:217` 全量→`:228` 裁 profile→`:243` 只留目标成员 + `omitted_member_ids`）、`logical_codebase/mod.rs:103-104`。
-- 改法：删 soft/hard 裁剪与 `omitted_member_count`/`omitted_member_ids`/`truncated`；`render_compact_inventory` 改全量渲染 + 绝对上限 256 KiB，超限 `Err(InvalidRecord{kind:"planning_material_over_budget"})`。
+- 改法：删 soft/hard 裁剪与 `omitted_member_count`/`omitted_member_ids`/`truncated`；`render_compact_inventory` 改全量渲染 + 绝对上限 500 KiB，超限 `Err(InvalidRecord{kind:"planning_material_over_budget"})`。
 - **单仓证明**：该 resolver 只在 `RepositoryRouting::Logical` 分支构造（`web/workspace_context/builder.rs:141-199` 置 `aggregate_planning`）；单仓 `aggregate_planning=None`，永不进入。`InventoryInjection*` 类型面属 lc 独占。
 - **边界**：`logical_codebase/aggregate_index/freshness.rs:214/284/328` 另有一套 `trimmed_profile_count`/`omitted_member_count` 渲染（`AggregateIndexRenderer`），**无生产调用者**，本批不改（§十 待办 3）。
-- 验收：lc N=3 全量命中；超 256 KiB → 明确错误码且评审不启动；单仓 prompt 字节不变。风险：低。
+- 验收：lc N=3 全量命中；超 500 KiB → 明确错误码且评审不启动；单仓 prompt 字节不变。风险：低。
 
 ### 6｜材料改稳定注入（lc 专用；单仓**不注入**成员清单）
 - 落点：`prompts.rs:754-775`（`aggregate_story_scope_prompt`，marker 文案在 `:759`）、`:44`（`const AGGREGATE_SCOPE_MARKER`）、`prompts/history_compaction.rs:317-328`（`must_replay_raw`）、`web/workspace_context/builder.rs:141-199`。
@@ -155,7 +155,7 @@
 | 1 | lc 评审经 `plan_review_window_worktree` 解析出 primary 成员并 emit "primary-member anchored"（`review/drive.rs:54,386,1689-1747`） | lc 不再出现 primary 概念/事件，reviewer 一次看到全部成员；单仓窗口路径不变 |
 | 2 | lc reviewer target 必须是成员 worktree，缺则报 `logical plan review requires an explicit member target worktree`（`review_context.rs:621-627`） | lc reviewer 以 LC 根为 target/cwd，不再因成员 worktree 缺失启动失败；单仓 `:628-633` 不变 |
 | 3 | `drive_review_session` 无条件开窗、收窗，`assert_plan_review_window` 对 lc 也生效（`drive.rs:24-73,1816-1840`） | lc 不开窗、无窗口错误码；材料缺失改为 `plan_review_material_unresolved: <cause>` 明确阻断；单仓窗口与零锁恢复不变 |
-| 4 | lc 清单按 soft/hard 预算裁剪，附 `omitted_member_count`（`planning_context_set.rs:217-243`） | lc 清单全量注入；超 256 KiB 报 `planning_material_over_budget`，评审不启动（不静默缺员） |
+| 4 | lc 清单按 soft/hard 预算裁剪，附 `omitted_member_count`（`planning_context_set.rs:217-243`） | lc 清单全量注入；超 500 KiB 报 `planning_material_over_budget`，评审不启动（不静默缺员） |
 | 6 | 聚合清单粘在消息尾部，历史压缩/长会话后丢失；单仓无该块 | lc 清单进 `[canonical_inputs]` 稳定重放，3 轮以上评审仍可见；单仓 prompt 字节不变 |
 | 5 | 材料只有成员 id/profile，无逐仓实况 | lc 每仓出现「职责/关键目录/入口/构建测试命令/基线」5 行，缺项显 `未识别` |
 | 16 | 默认链硬编码猜 `main`→`master`（`issue_baseline.rs:84-91`） | lc 基线 = 各仓 `git rev-parse --abbrev-ref HEAD`；detached/空仓该仓标「基线未识别」，其余仓继续；单仓仍 fail-closed |
