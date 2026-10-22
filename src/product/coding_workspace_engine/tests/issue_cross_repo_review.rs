@@ -12,7 +12,7 @@ use crate::cross_cutting::streaming_provider::{ProviderCompletion, ProviderSessi
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
     AttemptTargetSnapshot, CodingAttemptStatus, CodingRoleProviderConfigSnapshot,
-    CodingStageGateStatus, IssueCrossRepoReviewStatus, IssueCrossRepoRiskAcknowledgement,
+    CodingStageGateStatus, IssueCrossRepoReview, IssueCrossRepoReviewStatus,
 };
 use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
 use std::path::PathBuf;
@@ -22,6 +22,9 @@ use uuid::Uuid;
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
+/// 夹具 issue 的多仓逻辑代码库 id（P2-3：issue 形态判据是
+/// `logical_codebase_id`，不是 attempt 快照仓数）。
+const CROSS_REPO_LC_ID: &str = "lc_cross_repo_fixture";
 
 /// 计数假 provider：每次 `start` 计一次启动并记录 prompt，随后立即以固定
 /// 输出完成会话（无窗口、无命令交互）。
@@ -29,6 +32,7 @@ struct CountingFakeProvider {
     output: String,
     starts: Arc<AtomicUsize>,
     prompts: Arc<Mutex<Vec<String>>>,
+    inputs: Arc<Mutex<Vec<StreamingProviderInput>>>,
 }
 
 impl CountingFakeProvider {
@@ -37,6 +41,7 @@ impl CountingFakeProvider {
             output: output.to_string(),
             starts: Arc::new(AtomicUsize::new(0)),
             prompts: Arc::new(Mutex::new(Vec::new())),
+            inputs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -46,6 +51,11 @@ impl CountingFakeProvider {
 
     fn first_prompt(&self) -> String {
         self.prompts.lock().unwrap()[0].clone()
+    }
+
+    /// 第一个收到的完整 input（P1-1：交给 adapter 前的策略/时限断言）。
+    fn first_input(&self) -> StreamingProviderInput {
+        self.inputs.lock().unwrap()[0].clone()
     }
 
     /// 计数句柄（provider 被移入 `Arc<dyn StreamingProviderAdapter>` 后仍可观测）。
@@ -63,6 +73,7 @@ impl StreamingProviderAdapter for CountingFakeProvider {
     ) -> Result<ProviderSession, ProviderAdapterError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
         self.prompts.lock().unwrap().push(input.prompt.clone());
+        self.inputs.lock().unwrap().push(input.clone());
         let (event_tx, event_rx) = mpsc::channel(4);
         let (command_tx, _command_rx) = mpsc::channel(4);
         let output = self.output.clone();
@@ -107,7 +118,21 @@ fn cross_repo_fixture(
     Vec<CodingExecutionAttempt>,
 ) {
     let root = tempdir().expect("tempdir");
-    let store = CodingAttemptStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    // P2-3：issue 形态判据是 issue 的 `logical_codebase_id`——显式执行入口的
+    // 夹具必须建多仓 issue，否则引擎按「单仓不评审」兜底，评审不会执行。
+    IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: PROJECT_ID.to_string(),
+            repo_id: Some("repository_0000".to_string()),
+            logical_codebase_id: Some(CROSS_REPO_LC_ID.to_string()),
+            title: "issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("issue");
+    let store = CodingAttemptStore::new(paths);
     let mut attempts = Vec::new();
     for index in 0..repo_count {
         let worktree = root.path().join(format!("worktree_{index}"));
@@ -320,7 +345,7 @@ fn cross_repo_trigger_fixture(
     CodingWorkspaceEngine,
     Vec<CodingExecutionAttempt>,
 ) {
-    cross_repo_trigger_fixture_with_states(repo_count, &[])
+    cross_repo_trigger_fixture_inner(repo_count, repo_count, Some(CROSS_REPO_LC_ID), &[])
 }
 
 /// 同上，但可指定每仓 attempt 的收尾形态：`true` = 停在「人工最终确认前」
@@ -335,13 +360,61 @@ fn cross_repo_trigger_fixture_with_states(
     CodingWorkspaceEngine,
     Vec<CodingExecutionAttempt>,
 ) {
+    cross_repo_trigger_fixture_inner(
+        repo_count,
+        repo_count,
+        Some(CROSS_REPO_LC_ID),
+        awaiting_final_confirm,
+    )
+}
+
+/// 多仓 issue 但**全部 work item 同仓**（P2-3 用例形态）：`repo_count` 个
+/// attempt 的材料只覆盖 `1` 个去重逻辑仓。
+fn cross_repo_trigger_fixture_single_repo(
+    repo_count: usize,
+) -> (
+    tempfile::TempDir,
+    CodingAttemptStore,
+    CodingWorkspaceEngine,
+    Vec<CodingExecutionAttempt>,
+) {
+    cross_repo_trigger_fixture_inner(repo_count, 1, Some(CROSS_REPO_LC_ID), &[])
+}
+
+/// **单仓 issue**（`logical_codebase_id=None`，P2-3 负例形态）：attempt 快照
+/// 仍横跨 `repo_count` 个逻辑仓——证明快照仓数不再是触发判据。
+fn single_repo_trigger_fixture(
+    repo_count: usize,
+) -> (
+    tempfile::TempDir,
+    CodingAttemptStore,
+    CodingWorkspaceEngine,
+    Vec<CodingExecutionAttempt>,
+) {
+    cross_repo_trigger_fixture_inner(repo_count, repo_count, None, &[])
+}
+
+/// 全量夹具：issue（形态由 `issue_lc_id` 决定）+ `repo_count` 个 work item +
+/// `repo_count` 个已完成 attempt（材料覆盖 `distinct_logical_repos` 个去重
+/// 逻辑仓；`awaiting_final_confirm` 同 `cross_repo_trigger_fixture_with_states`）。
+fn cross_repo_trigger_fixture_inner(
+    repo_count: usize,
+    distinct_logical_repos: usize,
+    issue_lc_id: Option<&str>,
+    awaiting_final_confirm: &[bool],
+) -> (
+    tempfile::TempDir,
+    CodingAttemptStore,
+    CodingWorkspaceEngine,
+    Vec<CodingExecutionAttempt>,
+) {
     let root = tempdir().expect("tempdir");
     let paths = ProductAppPaths::new(root.path().join(".aria"));
     IssueStore::new(paths.clone())
         .create(CreateProductIssueInput {
             project_id: PROJECT_ID.to_string(),
             repo_id: Some("repository_0001".to_string()),
-            logical_codebase_id: None,
+            logical_codebase_id: issue_lc_id.map(str::to_string),
             title: "issue".to_string(),
             description: None,
             change_id: None,
@@ -390,7 +463,10 @@ fn cross_repo_trigger_fixture_with_states(
                     review_rounds: 0,
                     permission_modes: Default::default(),
                 },
-                target_snapshot: Some(target_snapshot_with_logical_id(index, repo_count)),
+                target_snapshot: Some(target_snapshot_with_logical_id(
+                    index % distinct_logical_repos.max(1),
+                    distinct_logical_repos.max(1),
+                )),
                 max_auto_rework: 1,
             })
             .expect("create attempt");
@@ -451,6 +527,68 @@ fn fake_review_provider(
     (resolver, starts, prompts)
 }
 
+/// 轮询等待评审记录落盘（P1-2：触发层只登记并异步执行，终态经 store 落盘）。
+async fn wait_for_review_record(store: &CodingAttemptStore) -> IssueCrossRepoReview {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if let Some(review) = store
+            .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
+            .expect("load review")
+        {
+            return review;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "跨仓评审记录必须最终落盘（15s 内）"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// 挂起假 provider（P1-2）：`start` 计数后会话永不产出事件——事件 sender 被
+/// 一个长眠 task 持有，模拟真实 provider 楔死。
+struct HangingFakeProvider {
+    starts: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for HangingFakeProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(4);
+        tokio::spawn(async move {
+            // 永不产出任何事件：持有 sender 长眠（远超 advisory 时限）。
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            drop(event_tx);
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+/// 挂起 provider 的触发边界（P1-2：调用方秒级返回断言用）。
+fn hanging_review_provider() -> (
+    IssueCrossRepoReviewProviderResolver<'static>,
+    Arc<AtomicUsize>,
+) {
+    let provider = HangingFakeProvider {
+        starts: Arc::new(AtomicUsize::new(0)),
+    };
+    let starts = provider.starts.clone();
+    let adapter: Arc<dyn StreamingProviderAdapter> = Arc::new(provider);
+    let resolver =
+        IssueCrossRepoReviewProviderResolver::new(move |_: &ProviderName| Some(adapter.clone()));
+    (resolver, starts)
+}
+
 #[tokio::test]
 async fn cross_repo_review_triggers_exactly_once_after_all_work_items_completed() {
     let (_root, store, engine, attempts) = cross_repo_trigger_fixture(3);
@@ -464,11 +602,8 @@ async fn cross_repo_review_triggers_exactly_once_after_all_work_items_completed(
         .await
         .expect("issue delivery completion");
 
+    let review = wait_for_review_record(&store).await;
     assert_eq!(starts.load(Ordering::SeqCst), 1, "跨仓评审必须恰好执行一次");
-    let review = store
-        .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
-        .expect("load persisted review")
-        .expect("cross repo review record");
     assert_eq!(review.status, IssueCrossRepoReviewStatus::Completed);
     assert_eq!(
         review.repository_sections.len(),
@@ -515,10 +650,7 @@ async fn cross_repo_review_is_not_triggered_twice() {
         .maybe_complete_issue_delivery(&attempts[2], &resolver)
         .await
         .expect("first issue delivery completion");
-    let first = store
-        .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
-        .expect("load persisted review")
-        .expect("cross repo review record");
+    let first = wait_for_review_record(&store).await;
 
     // 重复进入收口钩子 → 不得重复评审、不得新增工件。
     engine
@@ -576,11 +708,8 @@ async fn cross_repo_review_material_covers_attempt_awaiting_final_confirm() {
         .await
         .expect("issue delivery completion");
 
+    let review = wait_for_review_record(&store).await;
     assert_eq!(starts.load(Ordering::SeqCst), 1);
-    let review = store
-        .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
-        .expect("load persisted review")
-        .expect("cross repo review record");
     assert_eq!(review.status, IssueCrossRepoReviewStatus::Completed);
     assert_eq!(
         review.repository_sections.len(),
@@ -633,10 +762,7 @@ async fn cross_repo_request_changes_still_allows_final_confirm() {
         .maybe_complete_issue_delivery(&attempts[0], &resolver)
         .await
         .expect("issue delivery completion");
-    let review = store
-        .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
-        .expect("load review")
-        .expect("review record");
+    let review = wait_for_review_record(&store).await;
     assert_eq!(review.verdict, ReviewVerdict::RequestChanges);
 
     // REQ-GFR-CR-05：要求修改仍可最终确认，attempt 进入完成态。
@@ -694,10 +820,7 @@ async fn cross_repo_acknowledgement_written_once_after_final_confirm() {
         .maybe_complete_issue_delivery(&attempts[0], &resolver)
         .await
         .expect("issue delivery completion");
-    let review = store
-        .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
-        .expect("load review")
-        .expect("review record");
+    let review = wait_for_review_record(&store).await;
     assert_eq!(review.verdict, ReviewVerdict::RequestChanges);
     assert_eq!(review.findings.len(), 2);
 
@@ -794,5 +917,179 @@ async fn cross_repo_acknowledgement_written_once_after_final_confirm() {
             .len(),
         1,
         "重复确认不得产生第二条留痕"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P1-1 / P1-2 / P2-3 修复回归：Reviewer 窗口合同、触发不阻塞、issue 形态判据。
+// ---------------------------------------------------------------------------
+
+/// P1-1：交给 adapter 前的 input 必须已携带非空 `tool_policy`，且能通过真实
+/// adapter spawn 前的同一守卫（`validate_tool_policy_for_role`）——fake
+/// provider 不跑该守卫，因此此处显式调用守卫断言。修复前
+/// `tool_policy = None`，守卫对 `Reviewer + None` 直接 `PolicyRequired` 拒启
+/// （生产恒 `Failed("provider 启动失败…")`，测试不可见）。
+#[tokio::test]
+async fn cross_repo_review_input_carries_window_unbound_reviewer_contract() {
+    let (_root, store, engine, attempts) = cross_repo_fixture(2);
+    seed_role_provider_config(&store, &attempts, Some(ProviderName::ClaudeCode), None);
+    let provider = CountingFakeProvider::new(
+        "{\"verdict\":\"approve\",\"summary\":\"跨仓一致性检查通过\",\"findings\":[]}",
+    );
+
+    let review = engine
+        .maybe_run_issue_cross_repo_final_review(PROJECT_ID, ISSUE_ID, &provider)
+        .await
+        .expect("cross repo review executes")
+        .expect("review record");
+
+    let input = provider.first_input();
+    assert_eq!(
+        input.role,
+        AdapterRole::Reviewer,
+        "跨仓评审以 Reviewer wire 角色运行"
+    );
+    let policy = input
+        .tool_policy
+        .clone()
+        .expect("input.tool_policy 必须在交给 adapter 前设置（P1-1）");
+    crate::cross_cutting::streaming_provider::validate_tool_policy_for_role(
+        &AdapterRole::Reviewer,
+        Some(&policy),
+    )
+    .expect("真实 adapter 的 spawn 前守卫必须放行本策略（P1-1）");
+    // 合同身份与评审窗口解绑：等于本 issue 级评审记录的 id（durable、按 issue
+    // 唯一），不复用任何评审窗 id。
+    assert_eq!(
+        policy,
+        ProviderToolPolicy::reviewer_verify(review.id.clone()),
+        "ReviewerVerify 合同引用必须是本评审记录 id"
+    );
+    assert!(!review.id.trim().is_empty());
+    // P1-2：advisory 评审自带短时限（≤120s），不与 3h 的整 run 总上限同界。
+    assert!(
+        input.timeout_secs <= 120,
+        "advisory 评审时限必须 ≤120s，实际 {}s",
+        input.timeout_secs
+    );
+}
+
+/// P1-2：收口钩子触发跨仓评审必须与 provider 耗时无关地秒级返回——挂起
+/// provider（楔死）下调用方 2s 内返回；评审在后台按 advisory 短时限收敛为
+/// `Failed` 落盘。修复前触发同步 await provider 终态（总超时 3h），调用方
+/// 被挂住直到超时。
+#[tokio::test]
+async fn cross_repo_review_trigger_returns_without_waiting_for_provider() {
+    let (_root, store, engine, attempts) = cross_repo_trigger_fixture(2);
+    let (resolver, starts) = hanging_review_provider();
+
+    let began = std::time::Instant::now();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        engine.maybe_complete_issue_delivery(&attempts[1], &resolver),
+    )
+    .await
+    .expect("触发必须与 provider 无关地秒级返回（REQ-GFR-CR-05 不阻断）")
+    .expect("issue delivery completion");
+    assert!(
+        began.elapsed() < std::time::Duration::from_secs(2),
+        "收口钩子不得等待 provider 终态，实际耗时 {:?}",
+        began.elapsed()
+    );
+
+    // 登记后评审确实在后台执行（provider 被启动），而非静默不跑。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while starts.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "后台评审任务必须启动 provider"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // 楔死 provider 按 advisory 短时限收敛为 `Failed` 落盘（测试态时限 1s）。
+    let review = wait_for_review_record(&store).await;
+    assert_eq!(review.status, IssueCrossRepoReviewStatus::Failed);
+    assert!(
+        review
+            .failure_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("超时"),
+        "挂起 provider 必须按 advisory 时限收敛为 Failed：{:?}",
+        review.failure_reason
+    );
+}
+
+/// P2-3：多仓 issue（`logical_codebase_id=Some`）的全部 work item 落在同一仓
+/// 时仍必须评审——形态按 issue 判，不按 attempt 快照的去重仓数。修复前
+/// `distinct_logical_repos < 2` 把这类 issue 全部静默跳过（无记录、无提醒）。
+#[tokio::test]
+async fn cross_repo_issue_with_all_work_items_in_one_repo_still_reviewed() {
+    let (_root, store, engine, attempts) = cross_repo_trigger_fixture_single_repo(2);
+    let (resolver, starts, _prompts) = fake_review_provider(
+        "{\"verdict\":\"approve\",\"summary\":\"跨仓一致性检查通过\",\"findings\":[]}",
+    );
+
+    engine
+        .maybe_complete_issue_delivery(&attempts[1], &resolver)
+        .await
+        .expect("issue delivery completion");
+
+    let review = wait_for_review_record(&store).await;
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        1,
+        "全部 work item 同仓的多仓 issue 仍必须评审（P2-3）"
+    );
+    assert_eq!(review.status, IssueCrossRepoReviewStatus::Completed);
+    assert_eq!(
+        review.repository_sections.len(),
+        2,
+        "每 attempt 一段（同仓也分段）"
+    );
+    let distinct_repos: std::collections::BTreeSet<&str> = review
+        .repository_sections
+        .iter()
+        .map(|section| section.logical_repository_id.as_str())
+        .collect();
+    assert_eq!(distinct_repos.len(), 1, "两段同属一个逻辑仓");
+}
+
+/// P2-3 负例：单仓 issue（`logical_codebase_id=None`）即使 attempt 快照横跨
+/// 多个逻辑仓也不评审——快照仓数不再是触发判据，REQ-GFR-CR-02「单仓不产生
+/// 跨仓评审」的引擎侧兜底改挂在 issue 形态上。
+#[tokio::test]
+async fn single_repo_issue_never_cross_repo_reviewed_even_with_multi_repo_snapshots() {
+    let (_root, store, engine, attempts) = single_repo_trigger_fixture(2);
+    let (resolver, starts, _prompts) = fake_review_provider(
+        "{\"verdict\":\"approve\",\"summary\":\"跨仓一致性检查通过\",\"findings\":[]}",
+    );
+
+    engine
+        .maybe_complete_issue_delivery(&attempts[1], &resolver)
+        .await
+        .expect("issue delivery completion");
+
+    // 修复前：attempt 快照跨 2 仓 → 评审执行、记录立即落盘。修复后：单仓
+    // issue 不评审——轮询确认记录在宽限期内始终缺失。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    loop {
+        assert!(
+            store
+                .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
+                .expect("load review")
+                .is_none(),
+            "单仓 issue 不得产生跨仓评审记录（P2-3）"
+        );
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        0,
+        "单仓 issue 不得启动评审 provider"
     );
 }

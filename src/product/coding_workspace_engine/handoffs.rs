@@ -652,8 +652,9 @@ impl CodingWorkspaceEngine {
     /// 为 `Completed`；否则不动。单仓/多仓共用，Legacy 单仓走同一路径（纯增量追加
     /// 一次 Completed 落盘）。幂等由 `IssueStore::update_status` 保证。
     ///
-    /// REQ-GFR-CR-03（跨仓最终评审触发接线）：收口尾部并行触发 issue 级跨仓
-    /// 最终评审——**旁路**，不参与交付判定、不改 issue `Completed` 判定。
+    /// REQ-GFR-CR-03（跨仓最终评审触发接线）：收口尾部触发 issue 级跨仓最终
+    /// 评审——**旁路**，不参与交付判定、不改 issue `Completed` 判定；触发只
+    /// 登记并异步执行（REQ-GFR-CR-05「MUST NOT 阻断」），本调用立即返回。
     pub(crate) async fn maybe_complete_issue_delivery(
         &self,
         attempt: &CodingExecutionAttempt,
@@ -669,33 +670,9 @@ impl CodingWorkspaceEngine {
                 IssueStatus::Completed,
             )?;
         }
-        self.trigger_issue_cross_repo_final_review(attempt, review_provider)
+        self.dispatch_issue_cross_repo_final_review_trigger(attempt, review_provider)
             .await;
         Ok(())
-    }
-
-    /// 跨仓最终评审触发的**旁路**调用（REQ-GFR-CR-03）：advisory 语义——任何失败
-    /// 都不得阻断 per-attempt 收口（不抛错、不改 attempt / issue 状态）。
-    async fn trigger_issue_cross_repo_final_review(
-        &self,
-        attempt: &CodingExecutionAttempt,
-        review_provider: &IssueCrossRepoReviewProviderResolver<'_>,
-    ) {
-        if let Err(error) = self
-            .maybe_trigger_issue_cross_repo_final_review(
-                &attempt.project_id,
-                &attempt.issue_id,
-                review_provider,
-            )
-            .await
-        {
-            tracing::warn!(
-                project_id = %attempt.project_id,
-                issue_id = %attempt.issue_id,
-                error = %error,
-                "issue 级跨仓最终评审触发失败（advisory，不阻断收口）"
-            );
-        }
     }
 
     /// 将已完成独立审查的 group attempt 交给人工最终确认。
@@ -734,9 +711,10 @@ impl CodingWorkspaceEngine {
             .event_tx
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node })
             .await;
-        // REQ-GFR-CR-03（跨仓最终评审触发接线）：group 形态的收口尾部并行触发
-        // issue 级跨仓最终评审——**旁路**，不参与交付判定、不阻断人工确认。
-        self.trigger_issue_cross_repo_final_review(&updated, review_provider)
+        // REQ-GFR-CR-03（跨仓最终评审触发接线）：group 形态的收口尾部触发
+        // issue 级跨仓最终评审——**旁路**，不参与交付判定、不阻断人工确认；
+        // 触发只登记并异步执行（REQ-GFR-CR-05），本调用立即返回。
+        self.dispatch_issue_cross_repo_final_review_trigger(&updated, review_provider)
             .await;
         Ok(updated)
     }
@@ -873,7 +851,7 @@ fn cross_repo_ack_findings_summary(findings: &[ReviewFinding]) -> String {
         .collect::<Vec<_>>()
         .join("；");
     if !messages.is_empty() {
-        summary.push_str("；");
+        summary.push('；');
         summary.push_str(&messages);
     }
     summary

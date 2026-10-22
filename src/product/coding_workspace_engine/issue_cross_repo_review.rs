@@ -12,7 +12,9 @@
 //!
 //! 触发接线（REQ-GFR-CR-03「issue 级跨仓最终评审恰好一次」，设计 B §七 E）：
 //! `maybe_trigger_issue_cross_repo_final_review` 是**触发层**入口——幂等 +
-//! 「全部开发完成」门禁 + provider adapter 由调用边界注入。
+//! 「全部开发完成」门禁 + provider adapter 由调用边界注入；触发**只登记并
+//! 异步执行**（REQ-GFR-CR-05「MUST NOT 阻断」）：评审在独立 task 按
+//! advisory 短时限驱动，终态记录经 store 落盘、可轮询，调用方立即返回。
 
 use super::*;
 use crate::product::coding_models::{
@@ -27,6 +29,64 @@ use super::cross_repo_review_prompts::{
     CROSS_REPO_DIFF_SECTION_MAX_CHARS, CROSS_REPO_MATERIAL_MAX_BYTES,
     ISSUE_CROSS_REPO_REVIEW_OUTPUT_SCHEMA, build_issue_cross_repo_review_prompt,
 };
+
+
+/// advisory 跨仓评审的自带短时限（REQ-GFR-CR-05「MUST NOT 阻断最终确认/
+/// 交付」）：触发只登记并异步执行，provider 楔死时按此时限收敛为 `Failed`
+/// 落盘，不与整 run 总上限 `DEFAULT_PROVIDER_TIMEOUT_SECS`（3h）同界。
+/// 测试态缩短（`provider_drive/watchdog.rs` 的 `#[cfg]` 对偶先例）。
+#[cfg(not(test))]
+const ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS: u64 = 120;
+#[cfg(test)]
+const ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS: u64 = 1;
+
+/// 进行中的 issue 级跨仓评审登记（进程内）：触发层「check → spawn → write」
+/// 窗口内同一 store 的同一 issue 至多一条在飞评审（防止收口钩子重入导致
+/// provider 双跑）。登记在评审任务退出时释放；进程重启后登记清空、记录
+/// 缺失 → 下一次收口钩子仍可触发（advisory，与 REQ-GFR-CR-03 的落盘幂等
+/// 互补）。
+static INFLIGHT_CROSS_REPO_REVIEWS: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// 在飞登记键：store 根 + project + issue（同一 issue 的唯一身份；含 store
+/// 根使同 id 的不同 store 互不干扰）。
+fn cross_repo_review_inflight_key(store_root: &Path, project_id: &str, issue_id: &str) -> String {
+    format!("{}/{project_id}/{issue_id}", store_root.display())
+}
+
+/// 登记在飞评审；已登记（同 issue 有在飞评审）返回 `false`。
+fn register_cross_repo_review_inflight(
+    store_root: &Path,
+    project_id: &str,
+    issue_id: &str,
+) -> bool {
+    INFLIGHT_CROSS_REPO_REVIEWS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(cross_repo_review_inflight_key(store_root, project_id, issue_id))
+}
+
+/// 释放在飞登记（评审任务退出路径统一经 guard 触发）。
+fn release_cross_repo_review_inflight(store_root: &Path, project_id: &str, issue_id: &str) {
+    INFLIGHT_CROSS_REPO_REVIEWS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&cross_repo_review_inflight_key(store_root, project_id, issue_id));
+}
+
+/// 在飞登记的 panic 安全释放守卫：后台评审任务任何退出路径（完成/失败/
+/// panic/取消）都释放登记。
+struct CrossRepoReviewInflightGuard {
+    store_root: PathBuf,
+    project_id: String,
+    issue_id: String,
+}
+
+impl Drop for CrossRepoReviewInflightGuard {
+    fn drop(&mut self) {
+        release_cross_repo_review_inflight(&self.store_root, &self.project_id, &self.issue_id);
+    }
+}
 
 /// 跨仓评审的 provider adapter 查询闭包（按 provider 名称取 adapter）。
 type CrossRepoReviewProviderLookup<'a> =
@@ -188,9 +248,16 @@ impl CodingWorkspaceEngine {
     /// 调用点：两个既有收口钩子的尾部（`handoffs.rs` 的
     /// `maybe_complete_issue_delivery` 与 `prepare_group_final_confirm_from_readiness`）。
     ///
-    /// - **幂等**：issue 级评审记录已存在 → 直接返回，不重复触发、不重试。
-    /// - **门禁**：「全部开发完成」不满足 → 不触发、**不落任何工件**（不得让
-    ///   半成品 issue 提前消费掉唯一一次评审机会）。
+    /// - **只登记并异步执行**（REQ-GFR-CR-05「MUST NOT 阻断最终确认/交付」）：
+    ///   本方法完成幂等/门禁/adapter 解析判定后 `tokio::spawn` 独立任务驱动
+    ///   评审，**立即返回**、不等待 provider 终态；终态记录（Completed /
+    ///   Failed / Skipped）经 store 落盘、可轮询，provider 楔死由 advisory
+    ///   短时限收敛为 `Failed` 落盘。
+    /// - **幂等**：issue 级评审记录已存在（或本进程内已有在飞评审）→ 直接
+    ///   返回，不重复触发、不重试。
+    /// - **门禁**：单仓 issue（无 `logical_codebase_id`）或「全部开发完成」不
+    ///   满足 → 不触发、**不落任何工件**（不得让半成品 issue 提前消费掉唯一
+    ///   一次评审机会）。
     /// - **provider 注入**：引擎只定 provider **名称**，adapter 由调用边界按该
     ///   名称解析后注入；调用边界解析不出 adapter → 评审不执行、**不落工件**
     ///   （既不 `Completed` 也不 `Skipped`），下一次进入收口钩子仍可触发。
@@ -199,16 +266,21 @@ impl CodingWorkspaceEngine {
         project_id: &str,
         issue_id: &str,
         review_provider: &IssueCrossRepoReviewProviderResolver<'_>,
-    ) -> Result<Option<IssueCrossRepoReview>, ProductStoreError> {
+    ) -> Result<(), ProductStoreError> {
         if self
             .store
             .load_issue_cross_repo_review(project_id, issue_id)?
             .is_some()
         {
-            return Ok(None);
+            return Ok(());
+        }
+        // 形态门禁（REQ-GFR-CR-03 触发口径）：按 issue 的 logical_codebase_id
+        // 判多仓形态——单仓 issue 不评审、不落任何工件。
+        if !self.issue_is_cross_repo_shape(project_id, issue_id)? {
+            return Ok(());
         }
         if !self.issue_development_finished(project_id, issue_id)? {
-            return Ok(None);
+            return Ok(());
         }
         let provider_name =
             self.resolve_issue_cross_repo_review_provider_name(project_id, issue_id)?;
@@ -222,14 +294,70 @@ impl CodingWorkspaceEngine {
                         provider = ?name,
                         "跨仓最终评审的 provider adapter 无法由调用边界解析：评审不执行、不落工件"
                     );
-                    return Ok(None);
+                    return Ok(());
                 }
             },
-            // 两个 reviewer 都未配置 → 落 `Skipped` 记录（与显式执行入口同语义）。
+            // 两个 reviewer 都未配置 → 后台落 `Skipped` 记录（与显式执行入口
+            // 同语义）。
             None => None,
         };
-        self.run_issue_cross_repo_final_review(project_id, issue_id, adapter.as_deref())
+        // 在飞登记：同一 issue 至多一条在飞评审（重入的收口钩子不双跑）。
+        if !register_cross_repo_review_inflight(
+            self.store.paths().root(),
+            project_id,
+            issue_id,
+        ) {
+            return Ok(());
+        }
+        let engine = self.clone();
+        let guard = CrossRepoReviewInflightGuard {
+            store_root: self.store.paths().root().to_path_buf(),
+            project_id: project_id.to_string(),
+            issue_id: issue_id.to_string(),
+        };
+        let project_id = guard.project_id.clone();
+        let issue_id = guard.issue_id.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            if let Err(error) = engine
+                .run_issue_cross_repo_final_review(&project_id, &issue_id, adapter.as_deref())
+                .await
+            {
+                tracing::warn!(
+                    project_id = %project_id,
+                    issue_id = %issue_id,
+                    error = %error,
+                    "issue 级跨仓最终评审执行失败（advisory，不阻断收口）"
+                );
+            }
+        });
+        Ok(())
+    }
+
+    /// 跨仓最终评审触发的**旁路**分发（REQ-GFR-CR-03）：advisory 语义——任何
+    /// 失败都不得阻断 per-attempt 收口（不抛错、不改 attempt / issue 状态）；
+    /// 触发本身只登记并异步执行（见 `maybe_trigger_issue_cross_repo_final_review`），
+    /// 调用方（收口钩子 / 最终确认迁移）立即返回。
+    pub(crate) async fn dispatch_issue_cross_repo_final_review_trigger(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        review_provider: &IssueCrossRepoReviewProviderResolver<'_>,
+    ) {
+        if let Err(error) = self
+            .maybe_trigger_issue_cross_repo_final_review(
+                &attempt.project_id,
+                &attempt.issue_id,
+                review_provider,
+            )
             .await
+        {
+            tracing::warn!(
+                project_id = %attempt.project_id,
+                issue_id = %attempt.issue_id,
+                error = %error,
+                "issue 级跨仓最终评审触发失败（advisory，不阻断收口）"
+            );
+        }
     }
 
     /// 评审执行核心。`provider == None` 表示两个 reviewer 都未配置 → 落
@@ -253,10 +381,15 @@ impl CodingWorkspaceEngine {
             return Ok(None);
         };
 
+        // 本 issue 级评审记录的稳定身份：在 provider 启动前铸造，既作为落盘
+        // 记录的 id，也作为 Reviewer wire 会话的工具策略合同引用（P1-1：与
+        // 评审窗口解绑——本评审不开窗，REQ-GFR-CR-05）。
+        let review_id = next_sequential_id("cross_repo_review", 0);
         let mut review = if let Some(reason) = material.failure.as_deref() {
             self.build_failed_cross_repo_review(
                 project_id,
                 issue_id,
+                &review_id,
                 &material,
                 &format!("材料装配失败: {reason}"),
             )
@@ -271,6 +404,7 @@ impl CodingWorkspaceEngine {
                         self.run_issue_cross_repo_review_provider(
                             project_id,
                             issue_id,
+                            &review_id,
                             &material,
                             &latest_attempt,
                             &provider_name,
@@ -281,6 +415,7 @@ impl CodingWorkspaceEngine {
                     None => self.build_skipped_cross_repo_review(
                         project_id,
                         issue_id,
+                        &review_id,
                         &material,
                         "未执行：provider adapter 不可用",
                         "跨仓最终评审所需的 provider adapter 不可用（调用边界未解析出该 \
@@ -290,6 +425,7 @@ impl CodingWorkspaceEngine {
                 None => self.build_skipped_cross_repo_review(
                     project_id,
                     issue_id,
+                    &review_id,
                     &material,
                     "未执行：internal_reviewer 与 code_reviewer 均未配置",
                     "internal_reviewer 与 code_reviewer provider 配置均缺失，\
@@ -316,6 +452,23 @@ impl CodingWorkspaceEngine {
             return Ok(None);
         };
         self.resolve_issue_cross_repo_review_provider(project_id, issue_id, &latest_attempt)
+    }
+
+    /// issue 形态判定（REQ-GFR-CR-03 触发口径）：`logical_codebase_id.is_some()`
+    /// 即多仓逻辑代码库 issue——多仓 issue 的全部 work item 落在同一仓、或
+    /// attempt 快照缺失（旧记录）时仍必须评审；仅单仓 issue（`Ok(None)`，含
+    /// issue 记录缺失）不评审。**不**以 attempt 快照的去重仓数判形态。
+    fn issue_is_cross_repo_shape(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<bool, ProductStoreError> {
+        Ok(crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            &self.store.paths(),
+            project_id,
+            issue_id,
+        )?
+        .is_some())
     }
 
     /// 「全部开发完成」判定（触发前置，设计 B §七 E + controller 裁定）。
@@ -406,14 +559,11 @@ impl CodingWorkspaceEngine {
                 failure: None,
             });
         }
-        // 跨仓判定：快照在场的逻辑仓不足 2 个 → 单仓 issue，不评审、不落工件。
-        let distinct_logical_repos = completed
-            .iter()
-            .filter_map(|attempt| attempt.target_snapshot.as_ref())
-            .map(|snapshot| snapshot.logical_repository_id)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
-        if distinct_logical_repos < 2 {
+        // 形态判定（REQ-GFR-CR-03 触发口径）：按 issue 的 `logical_codebase_id`
+        // 判多仓形态，而非 attempt 快照的去重仓数——多仓 issue 的全部 work
+        // item 落在同一仓（材料只有 1 段）或快照缺失（旧记录）时仍必须评审；
+        // 仅单仓 issue 不评审、不落任何工件（REQ-GFR-CR-02 的引擎侧兜底）。
+        if !self.issue_is_cross_repo_shape(project_id, issue_id)? {
             return Ok(CrossRepoReviewMaterial {
                 sections: Vec::new(),
                 diffs: Vec::new(),
@@ -522,10 +672,12 @@ impl CodingWorkspaceEngine {
 
     /// 单次 provider 执行：不开窗、不写 role run、不产 acceptance；失败 / 超时 /
     /// 输出不可解析 → `Failed` 记录（不重试，REQ-GFR-CR-05）。
+#[allow(clippy::too_many_arguments)] // 标识三元组/材料/attempt/provider 名与句柄各自来源不同，拆结构体只会多一层转抄。
     async fn run_issue_cross_repo_review_provider(
         &self,
         project_id: &str,
         issue_id: &str,
+        review_id: &str,
         material: &CrossRepoReviewMaterial,
         latest_attempt: &CodingExecutionAttempt,
         provider_name: &ProviderName,
@@ -566,12 +718,20 @@ impl CodingWorkspaceEngine {
             prompt: prompt.clone(),
             context_files: Vec::new(),
             output_schema: ISSUE_CROSS_REPO_REVIEW_OUTPUT_SCHEMA.to_string(),
-            timeout: DEFAULT_PROVIDER_TIMEOUT_SECS,
+            timeout: ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS,
             max_retries: 0,
         };
         let mut provider_input =
             streaming_input_from_adapter(&legacy_input, working_dir, permission_mode);
         provider_input.workspace_session_id = Some(format!("issue-cross-repo-{issue_id}"));
+        // P1-1：Reviewer wire 角色在真实 adapter spawn 前经
+        // `validate_tool_policy_for_role` 复验——`Reviewer + None` 直接
+        // `PolicyRequired` 拒启（生产恒 `Failed("provider 启动失败…")`）。本
+        // 评审不开评审窗（REQ-GFR-CR-05），为此铸造**与窗口解绑**的稳定合同
+        // 引用：本 issue 级评审记录的 id（durable、按 issue 唯一），不复用
+        // 任何评审窗 id。
+        provider_input.tool_policy =
+            Some(ProviderToolPolicy::reviewer_verify(review_id.to_string()));
 
         let failure_reason = match self
             .drive_issue_cross_repo_provider(provider, provider_input)
@@ -594,7 +754,7 @@ impl CodingWorkspaceEngine {
                     CodingExecutionStage::IssueCrossRepoReview,
                 ) {
                     Ok(payload) => IssueCrossRepoReview {
-                        id: next_sequential_id("cross_repo_review", 0),
+                        id: review_id.to_string(),
                         project_id: project_id.to_string(),
                         issue_id: issue_id.to_string(),
                         plan_id: material.plan_id.clone(),
@@ -611,6 +771,7 @@ impl CodingWorkspaceEngine {
                         let mut record = self.build_failed_cross_repo_review(
                             project_id,
                             issue_id,
+                            review_id,
                             material,
                             &format!("provider 输出不可解析: {error}"),
                         );
@@ -621,12 +782,21 @@ impl CodingWorkspaceEngine {
             }
             CrossRepoProviderRun::Failed(reason) => reason,
         };
-        self.build_failed_cross_repo_review(project_id, issue_id, material, &failure_reason)
+        self.build_failed_cross_repo_review(
+            project_id,
+            issue_id,
+            review_id,
+            material,
+            &failure_reason,
+        )
     }
 
     /// 一次性驱动 provider 会话直到终态（Completed / Failed / 通道关闭）或总超时
-    /// （`DEFAULT_PROVIDER_TIMEOUT_SECS`）。无交互面：权限/选择请求不响应，
-    /// 由总超时收敛为 `Failed`。
+    /// （advisory 短时限 `ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS`）。无交互面：
+    /// 权限/选择请求不响应，由总超时收敛为 `Failed`。
+    ///
+    /// 本方法运行在触发层 `tokio::spawn` 的独立任务内（P1-2），不阻塞任何
+    /// 收口/最终确认调用方。
     async fn drive_issue_cross_repo_provider(
         &self,
         provider: &dyn StreamingProviderAdapter,
@@ -644,7 +814,7 @@ impl CodingWorkspaceEngine {
         let mut events = session.events;
         let mut accumulated = String::new();
         let terminal = tokio::time::timeout(
-            Duration::from_secs(DEFAULT_PROVIDER_TIMEOUT_SECS),
+            Duration::from_secs(ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS),
             async move {
                 loop {
                     match events.recv().await {
@@ -683,7 +853,7 @@ impl CodingWorkspaceEngine {
             Ok(outcome) => outcome,
             Err(_) => CrossRepoProviderRun::Failed(format!(
                 "provider 超时（{} 秒）",
-                DEFAULT_PROVIDER_TIMEOUT_SECS
+                ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS
             )),
         }
     }
@@ -692,11 +862,12 @@ impl CodingWorkspaceEngine {
         &self,
         project_id: &str,
         issue_id: &str,
+        review_id: &str,
         material: &CrossRepoReviewMaterial,
         reason: &str,
     ) -> IssueCrossRepoReview {
         IssueCrossRepoReview {
-            id: next_sequential_id("cross_repo_review", 0),
+            id: review_id.to_string(),
             project_id: project_id.to_string(),
             issue_id: issue_id.to_string(),
             plan_id: material.plan_id.clone(),
@@ -717,12 +888,13 @@ impl CodingWorkspaceEngine {
         &self,
         project_id: &str,
         issue_id: &str,
+        review_id: &str,
         material: &CrossRepoReviewMaterial,
         summary: &str,
         reason: &str,
     ) -> IssueCrossRepoReview {
         IssueCrossRepoReview {
-            id: next_sequential_id("cross_repo_review", 0),
+            id: review_id.to_string(),
             project_id: project_id.to_string(),
             issue_id: issue_id.to_string(),
             plan_id: material.plan_id.clone(),
