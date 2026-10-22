@@ -1,11 +1,15 @@
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
+use crate::product::logical_codebase::member_reality::{
+    collect_member_reality, render_member_reality, MemberReality, MEMBER_REALITY_SECTION_MARKER,
+};
 use crate::product::logical_codebase::{
-    CodebaseMemberRecord, IssueCodebaseSelectionStore, LogicalCodebaseStore, LogicalRepositoryId,
-    MemberStatus, RepositoryAuthorityResolver, RepositoryCheckoutRecord, RepositoryType,
+    CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelectionStore, LogicalCodebaseStore,
+    LogicalRepositoryId, MemberStatus, RepositoryAuthorityResolver, RepositoryCheckoutRecord,
+    RepositoryType,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 单个参与仓库的 inventory 摘要条目。Task 4 inventory 渲染与 Task 5 resolver 只消费该集合，
 /// 禁止直接枚举 manifest。
@@ -19,12 +23,16 @@ pub struct RepositoryContextSet {
     pub tech_stack: Vec<String>,
 }
 
-/// 解析结果：参与仓库集合 + 失效成员 id + manifest 成员修订号（供 freshness 比对）。
+/// 解析结果：参与仓库集合 + 失效成员 id + manifest 成员修订号（供 freshness 比对）
+/// + 各成员仓本地 checkout 根目录（逐仓实况与逐仓基线的唯一来源）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryContextResolution {
     pub set: Vec<RepositoryContextSet>,
     pub invalid_member_ids: Vec<LogicalRepositoryId>,
     pub membership_revision: u64,
+    /// 成员 → 本地 checkout 根目录。缺失该成员的 checkout 时该成员不出现（逐仓实况
+    /// 相应项显「未识别」）。
+    pub member_checkout_paths: BTreeMap<LogicalRepositoryId, PathBuf>,
 }
 
 /// 从 manifest + issue selection 解析参与仓库集合与成员 inventory 摘要。
@@ -119,6 +127,7 @@ impl PlanningContextSetResolver {
         let checkouts = logical.list_checkouts(project_id)?;
         let paths_by_member =
             member_root_relative_paths(&manifest.provider_context_root, &checkouts);
+        let member_checkout_paths = member_checkout_paths(&checkouts);
 
         let mut set = Vec::with_capacity(resolution.effective_member_ids.len());
         for member_id in &resolution.effective_member_ids {
@@ -146,6 +155,7 @@ impl PlanningContextSetResolver {
             set,
             invalid_member_ids,
             membership_revision: manifest.membership_revision,
+            member_checkout_paths,
         })
     }
 }
@@ -158,16 +168,23 @@ impl PlanningContextSetResolver {
 pub const PLANNING_MATERIAL_MAX_BYTES: usize = 500 * 1024;
 
 /// `render_compact_inventory` 的渲染结果。Task 5 与 6 只注入该结果，禁止重新枚举 manifest。
+///
+/// `rendered` = 紧凑成员清单 + 逐仓实况段（REQ-PLN-14）。二者同属「评审材料」，
+/// 共同受 `PLANNING_MATERIAL_MAX_BYTES` 绝对上限约束。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryInjection {
     pub rendered: String,
 }
 
-/// 渲染紧凑 inventory 清单（全量渲染，绝不裁剪）。
+/// 渲染紧凑 inventory 清单（全量渲染，绝不裁剪）+ 逐仓实况段。
 ///
 /// 渲染顺序：目标成员在前（保持 `target_member_ids` 顺序），其余成员按 alias 序。
 /// 全部成员逐行输出（`id | alias | path | role | profile`），MUST NOT 按 soft/hard 预算
 /// 裁剪成员，MUST NOT 输出 `omitted_member_count` 等缺员标记（REQ-PLN-12）。
+///
+/// 清单之后追加逐仓实况段（REQ-PLN-14）：每仓固定 5 行（`职责` / `关键目录` / `入口` /
+/// `构建/测试命令` / `基线`），缺项显「未识别」并保留该行。逐仓基线取该仓 checkout
+/// 当前 HEAD 所在分支；detached / 空仓 → 该仓「基线未识别」，其余仓继续。
 ///
 /// 渲染字节数超过 `PLANNING_MATERIAL_MAX_BYTES`（500 KiB）→ 返回
 /// `Err(ProductStoreError::InvalidRecord { kind: "planning_material_over_budget" })`，
@@ -193,19 +210,28 @@ pub fn render_compact_inventory(
         }
     });
 
-    let rendered = render_inventory_lines(&ordered);
+    let inventory = render_inventory_lines(&ordered);
+    // 清单本身已超限时立即阻断（不进入逐仓实况采集，避免超限场景的无谓 IO）。
+    if inventory.len() > PLANNING_MATERIAL_MAX_BYTES {
+        return Err(material_over_budget(inventory.len(), ordered.len()));
+    }
+    let mut rendered = inventory;
+    rendered.push_str(&render_member_reality_section(&ordered, resolution));
     if rendered.len() > PLANNING_MATERIAL_MAX_BYTES {
-        return Err(ProductStoreError::InvalidRecord {
-            kind: "planning_material_over_budget",
-            reason: format!(
-                "planning material inventory over budget: rendered {} bytes > {} bytes ({} members)",
-                rendered.len(),
-                PLANNING_MATERIAL_MAX_BYTES,
-                ordered.len()
-            ),
-        });
+        return Err(material_over_budget(rendered.len(), ordered.len()));
     }
     Ok(InventoryInjection { rendered })
+}
+
+/// 评审材料超预算诊断（500 KiB 绝对上限）。
+fn material_over_budget(rendered_bytes: usize, member_count: usize) -> ProductStoreError {
+    ProductStoreError::InvalidRecord {
+        kind: "planning_material_over_budget",
+        reason: format!(
+            "planning material inventory over budget: rendered {} bytes > {} bytes ({} members)",
+            rendered_bytes, PLANNING_MATERIAL_MAX_BYTES, member_count
+        ),
+    }
 }
 
 /// 渲染紧凑清单行：每行 `id | alias | path | role | profile`（全量渲染，无裁剪、无缺员标记）。
@@ -251,6 +277,67 @@ fn member_root_relative_paths(
         }
     }
     map
+}
+
+/// 成员 → 本地 checkout 根目录（逐仓实况与逐仓基线的唯一来源）。
+///
+/// 取 `CheckoutKind::Main` 的 checkout（成员主 checkout）；同一成员存在多个 checkout
+/// 时优先 Main，其次按 checkout id 稳定取首个。缺失 checkout 的成员不出现——逐仓
+/// 实况渲染时该成员相应项显「未识别」（MUST NOT 省略整仓）。
+fn member_checkout_paths(
+    checkouts: &[RepositoryCheckoutRecord],
+) -> BTreeMap<LogicalRepositoryId, PathBuf> {
+    let mut main: BTreeMap<LogicalRepositoryId, PathBuf> = BTreeMap::new();
+    let mut fallback: BTreeMap<LogicalRepositoryId, PathBuf> = BTreeMap::new();
+    let mut sorted: Vec<&RepositoryCheckoutRecord> = checkouts.iter().collect();
+    sorted.sort_by_key(|checkout| checkout.checkout_id.0);
+    for checkout in sorted {
+        if checkout.kind == CheckoutKind::Main {
+            main.entry(checkout.logical_repository_id)
+                .or_insert_with(|| checkout.canonical_path.clone());
+        } else {
+            fallback
+                .entry(checkout.logical_repository_id)
+                .or_insert_with(|| checkout.canonical_path.clone());
+        }
+    }
+    for (member_id, path) in fallback {
+        main.entry(member_id).or_insert(path);
+    }
+    main
+}
+
+/// 逐仓实况渲染（REQ-PLN-14）。
+///
+/// 每个成员仓固定 5 行：`职责` / `关键目录` / `入口` / `构建/测试命令` / `基线`。
+/// 缺项显「未识别」并保留该行（MUST NOT 省略整仓）；基线取该仓 checkout 当前 HEAD
+/// 所在分支，detached / 空仓 → 该仓「基线未识别」并附诊断，其余仓继续渲染。
+///
+/// 段首带 `MEMBER_REALITY_SECTION_MARKER`（材料块渲染器据此分节）。
+pub fn render_member_reality_section(
+    ordered: &[&RepositoryContextSet],
+    resolution: &RepositoryContextResolution,
+) -> String {
+    if ordered.is_empty() {
+        return String::new();
+    }
+    let mut realities: Vec<MemberReality> = Vec::with_capacity(ordered.len());
+    for member in ordered {
+        let checkout_root = resolution
+            .member_checkout_paths
+            .get(&member.member_id)
+            .map(|path| path.as_path());
+        realities.push(collect_member_reality(
+            &member.member_id.0.to_string(),
+            &member.role,
+            checkout_root,
+        ));
+    }
+    let mut section = String::new();
+    section.push_str(MEMBER_REALITY_SECTION_MARKER);
+    section.push('\n');
+    section.push_str(&render_member_reality(&realities));
+    section
 }
 
 #[cfg(test)]
@@ -564,4 +651,93 @@ mod tests {
     // 全量渲染与超限阻断的用例落在 `planning_context_resolver_tests.inc.rs`
     // （`inventory_renders_all_members_without_omitted_count` /
     // `inventory_over_500kib_is_rejected_not_truncated`）；本模块只保留解析语义用例。
+
+    // --- REQ-PLN-14（Task 7）：逐仓实况 + 逐仓基线 ---
+
+    /// 逐仓实况必须随材料返回：每仓固定 5 行（职责 / 关键目录 / 入口 / 构建测试命令 /
+    /// 基线），基线取该仓 checkout 当前 HEAD 所在分支。
+    #[test]
+    fn member_reality_section_is_rendered_into_material_with_head_branch_baseline() {
+        let fixture = context_set_fixture();
+        fixture.write_two_member_manifest_with_one_removed();
+
+        // 造一个真实 git 仓作为成员 checkout（基线来源）。
+        let checkout_root = fixture.provider_context_root().join("api");
+        std::fs::create_dir_all(&checkout_root).unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&checkout_root)
+                .stdin(std::process::Stdio::null())
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git {args:?}");
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test User"]);
+        std::fs::write(checkout_root.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::create_dir_all(checkout_root.join("src")).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "base"]);
+        run(&["checkout", "-b", "feature/api"]);
+
+        let resolution = fixture
+            .resolver()
+            .resolve("project_0001", "issue_0001")
+            .unwrap();
+        let injection = render_compact_inventory(&resolution, &[]).unwrap();
+
+        assert!(
+            injection.rendered.contains(MEMBER_REALITY_SECTION_MARKER),
+            "材料必须含逐仓实况段：{}",
+            injection.rendered
+        );
+        for label in ["职责", "关键目录", "入口", "构建/测试命令", "基线"] {
+            assert!(
+                injection.rendered.contains(&format!("{label}:")),
+                "实况段必须含「{label}」行：{}",
+                injection.rendered
+            );
+        }
+        assert!(
+            injection.rendered.contains("基线: feature/api"),
+            "基线必须取该仓当前 HEAD 所在分支：{}",
+            injection.rendered
+        );
+        assert!(
+            injection.rendered.contains("构建/测试命令: cargo test"),
+            "Rust 仓构建测试命令必须可判定：{}",
+            injection.rendered
+        );
+    }
+
+    /// 成员无 checkout 时：实况仍逐行渲染，基线显「基线未识别」，MUST NOT 省略整仓。
+    #[test]
+    fn member_reality_keeps_every_member_when_checkout_is_missing() {
+        let fixture = context_set_fixture();
+        fixture.write_two_member_manifest_with_one_removed();
+
+        let resolution = fixture
+            .resolver()
+            .resolve("project_0001", "issue_0001")
+            .unwrap();
+        let injection = render_compact_inventory(&resolution, &[]).unwrap();
+
+        assert!(
+            injection.rendered.contains(MEMBER_REALITY_SECTION_MARKER),
+            "材料必须含逐仓实况段：{}",
+            injection.rendered
+        );
+        assert!(
+            injection.rendered.contains("基线未识别"),
+            "无 checkout 时基线必须显未识别：{}",
+            injection.rendered
+        );
+        assert!(
+            injection.rendered.contains("职责: service"),
+            "成员角色仍必须渲染：{}",
+            injection.rendered
+        );
+    }
 }

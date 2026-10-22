@@ -3,6 +3,7 @@ use crate::cross_cutting::structured_output::StructuredOutputContract;
 use crate::product::cadence_skills::routing_reference::{
     RoutingReferenceContext, generation_cadence_routing_rules_reference,
 };
+use crate::product::logical_codebase::member_reality::MEMBER_REALITY_SECTION_MARKER;
 
 mod author_revision;
 mod baseline_teaching;
@@ -759,16 +760,29 @@ fn structured_interaction_artifact_decision_contract(
 ///
 /// - 首行是唯一 marker `AGGREGATE_SCOPE_MARKER`（`has_aggregate_scope_system_context`
 ///   据此识别多仓会话；历史压缩后据此判定「多仓 canonical inputs 必须原文重放」）；
-/// - 正文是全量成员清单 `inventory_rendered`（来自 `InventoryInjection.rendered`，
-///   已按 500 KiB 预算截断）；
+/// - 正文是全量成员清单 + 逐仓实况段（来自 `InventoryInjection.rendered`，已按
+///   500 KiB 预算截断）。实况段以 `MEMBER_REALITY_SECTION_MARKER` 起头，本渲染器
+///   把它整理成独立小节（成员清单小节 + 逐仓实况小节），保证每节标题只出现一次；
 /// - 正文 MUST NOT 出现 `\n\n[`——`generation_brief_section` 以 `\n\n[` 切段，
 ///   出现即截断 `[constraint_summary]` 等后续材料段；故空行一律丢弃。
 pub fn aggregate_scope_material_prompt(inventory_rendered: &str) -> String {
     let mut prompt = String::new();
     prompt.push_str(AGGREGATE_SCOPE_MARKER);
     prompt.push('\n');
+    let mut reality_heading_written = false;
     for line in inventory_rendered.lines() {
-        if line.trim().is_empty() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == MEMBER_REALITY_SECTION_MARKER {
+            // 逐仓实况段标题只渲染一次（重复出现不重复渲染标题）。
+            if reality_heading_written {
+                continue;
+            }
+            reality_heading_written = true;
+            prompt.push_str(MEMBER_REALITY_SECTION_MARKER);
+            prompt.push('\n');
             continue;
         }
         prompt.push_str(line);
@@ -1041,6 +1055,53 @@ mod aggregate_scope_prompt_tests {
         assert!(
             reviewer.contains("约束。"),
             "canonical inputs 截断不得影响后续段：{reviewer}"
+        );
+    }
+
+    /// REQ-PLN-14：材料块 MUST 保留逐仓实况段（每仓 5 行），且实况段标题只出现一次。
+    #[test]
+    fn aggregate_material_block_keeps_member_reality_section() {
+        let material = format!(
+            "00000000-0000-7000-8000-000000000001 | api | api/ | service\n{}\n\
+             职责: 后端服务（成员 00000000-0000-7000-8000-000000000001）\n\
+             关键目录: src/（成员 00000000-0000-7000-8000-000000000001）\n\
+             入口: Cargo.toml（成员 00000000-0000-7000-8000-000000000001）\n\
+             构建/测试命令: cargo test（成员 00000000-0000-7000-8000-000000000001）\n\
+             基线: feature/api（成员 00000000-0000-7000-8000-000000000001）\n",
+            super::MEMBER_REALITY_SECTION_MARKER,
+        );
+
+        let block = aggregate_scope_material_prompt(&material);
+
+        assert!(
+            block.contains("api/ | service"),
+            "材料块必须保留成员清单：{block}"
+        );
+        assert!(
+            block.contains(super::MEMBER_REALITY_SECTION_MARKER),
+            "材料块必须保留逐仓实况段：{block}"
+        );
+        for label in ["职责", "关键目录", "入口", "构建/测试命令", "基线"] {
+            assert!(
+                block.contains(&format!("{label}:")),
+                "逐仓实况段必须含「{label}」行：{block}"
+            );
+        }
+        assert!(
+            block.contains("基线: feature/api"),
+            "逐仓基线必须可见：{block}"
+        );
+        assert_eq!(
+            block
+                .lines()
+                .filter(|line| line.trim() == super::MEMBER_REALITY_SECTION_MARKER)
+                .count(),
+            1,
+            "逐仓实况段标题只出现一次：{block}"
+        );
+        assert!(
+            !block.contains("\n\n["),
+            "材料块不得含裸段界：{block}"
         );
     }
 

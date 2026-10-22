@@ -113,6 +113,37 @@ pub fn resolve_effective_base_branch(
     }
 }
 
+/// 逐仓基线解析（多仓 lc 专用）：取该仓 checkout **当前 HEAD 所在分支**。
+///
+/// REQ-PLN-14 / 设计 A 条目 16：逐仓基线 = 各仓 `git rev-parse --abbrev-ref HEAD`，
+/// MUST NOT 猜测 `main` / `master`（与单仓 `default_local_branch` 的猜测链不同）。
+///
+/// - 成功且输出 ≠ `HEAD` → 返回分支名；
+/// - 输出 `HEAD`（detached HEAD）→ `Err`（诊断文本含 `HEAD`）；
+/// - git 命令失败 / 空仓（无任何 commit，`rev-parse` 报 unknown revision）→ `Err`。
+///
+/// 该函数只服务多仓逐仓实况渲染：单仓失败由调用方降级为「该仓基线未识别」，
+/// MUST NOT 终止整轮。单仓 issue 的基线语义仍走既有
+/// `resolve_effective_base_branch`（fail-closed），本函数不参与。
+pub fn resolve_member_head_branch(checkout: &Path) -> Result<String, String> {
+    let output = run_git(checkout, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .map_err(|error| error.diagnosis())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "git rev-parse --abbrev-ref HEAD 失败（无法解析该仓当前 HEAD 所在分支）：{stderr}"
+        ));
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return Err("git rev-parse --abbrev-ref HEAD 无输出（无法解析该仓当前 HEAD 所在分支）".to_string());
+    }
+    if branch == "HEAD" {
+        return Err("detached HEAD（该仓 HEAD 未指向任何分支，无法解析当前 HEAD 所在分支）".to_string());
+    }
+    Ok(branch)
+}
+
 /// 全部本地分支（`refs/heads/*`，`refname` 稳定排序，去 `refs/heads/` 前缀）。
 /// 不隐式 fetch、不列远端跟踪引用与 tags（pib-oracle 裁决三）。
 pub fn list_local_branches(repo_path: &Path) -> Result<Vec<String>, IssueBaselineError> {
@@ -272,6 +303,52 @@ mod tests {
                 "main".to_string(),
                 "release/1.0".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn resolve_member_head_branch_returns_current_branch() {
+        // REQ-PLN-14 / 设计 A 条目 16：逐仓基线 = 该仓当前 HEAD 所在分支，
+        // MUST NOT 猜 main/master。
+        let repo = git_repo_with_branches("main", &["feature/x"]);
+        std::process::Command::new("git")
+            .args(["checkout", "feature/x"])
+            .current_dir(repo.path())
+            .status()
+            .expect("checkout feature/x");
+
+        assert_eq!(
+            resolve_member_head_branch(repo.path()).unwrap(),
+            "feature/x"
+        );
+    }
+
+    #[test]
+    fn resolve_member_head_branch_detached_is_unrecognized() {
+        // detached HEAD → Err（诊断文本含 HEAD）；空仓（无 commit）→ Err。
+        let repo = git_repo_with_branches("main", &[]);
+        std::process::Command::new("git")
+            .args(["checkout", "--detach", "HEAD"])
+            .current_dir(repo.path())
+            .status()
+            .expect("detach HEAD");
+
+        let error = resolve_member_head_branch(repo.path()).unwrap_err();
+        assert!(
+            error.contains("HEAD"),
+            "detached HEAD 诊断必须含 HEAD：{error}"
+        );
+
+        let empty = TempDir::new().expect("empty repo");
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(empty.path())
+            .status()
+            .expect("init empty repo");
+        let empty_error = resolve_member_head_branch(empty.path()).unwrap_err();
+        assert!(
+            empty_error.contains("HEAD"),
+            "空仓诊断必须含 HEAD：{empty_error}"
         );
     }
 

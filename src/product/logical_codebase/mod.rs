@@ -13,6 +13,7 @@ pub mod feature;
 pub mod identity_repair;
 pub mod issue_selection;
 pub mod legacy_shared_worktree_migration;
+pub mod member_reality;
 pub mod migration;
 pub mod planning_context;
 pub mod planning_context_resolver;
@@ -87,6 +88,10 @@ pub use issue_selection::{
 pub use legacy_shared_worktree_migration::{
     LegacySharedWorktreeMigration, LegacySharedWorktreeMigrationJournal,
     LegacySharedWorktreeRecord, LegacySharedWorktreeRedirect,
+};
+pub use member_reality::{
+    MEMBER_REALITY_SECTION_MARKER, MEMBER_REALITY_UNKNOWN, MemberReality, collect_member_reality,
+    render_member_reality, summarize_key_directories, summarize_layered_directories,
 };
 pub use migration::{
     IdentityMigrationExecutor, IdentityMigrationJournal, IdentityMigrationJournalStore,

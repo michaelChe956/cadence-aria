@@ -14,6 +14,7 @@ mod tests {
         RepositoryCheckoutId, RepositoryCheckoutRecord, RepositoryContextResolution,
         RepositoryContextSet, RepositorySourceIdentity, RepositoryType,
     };
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
@@ -1050,6 +1051,7 @@ mod tests {
             set,
             invalid_member_ids: Vec::new(),
             membership_revision: 1,
+            member_checkout_paths: BTreeMap::new(),
         }
     }
 
