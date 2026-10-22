@@ -283,40 +283,6 @@ pub fn resolve_workspace_repository_context_for_entity(
     }
 }
 
-/// 批2 Task 20b 修复轮 1(F1,Main 裁定 b):聚合形态(Story focus=None/
-/// Design involved 空/WorkItemPlan 多 target 非唯一)的规划审查窗口主成员锚
-/// ——manifest member_ids 首成员(注册序=primary)。真零成员(空 manifest)
-/// 返回 NotFound(family: logical_repository_primary_member),由调用方落
-/// 专用错误码;不在此静默选仓(选仓规则仍归 business resolver)。
-pub fn resolve_primary_member_repository(
-    app_paths: &ProductAppPaths,
-    project_id: &str,
-    issue_id: &str,
-) -> Result<RepositoryRecord, ProductStoreError> {
-    match RepositoryRouting::load_for_issue(app_paths, project_id, issue_id)? {
-        RepositoryRouting::Logical {
-            manifest,
-            selection,
-        } => {
-            let primary = manifest.member_ids.first().copied().ok_or_else(|| {
-                ProductStoreError::NotFound {
-                    kind: "logical_repository_primary_member",
-                    id: format!("{project_id}:{issue_id}"),
-                }
-            })?;
-            resolve_selected_logical_repository(
-                app_paths, project_id, issue_id, primary, &manifest, &selection,
-            )
-        }
-        RepositoryRouting::Legacy { .. } | RepositoryRouting::FailClosed { .. } => {
-            Err(ProductStoreError::NotFound {
-                kind: "logical_routing",
-                id: format!("{project_id}:{issue_id}"),
-            })
-        }
-    }
-}
-
 /// Legacy/direct 与 WorkItem/Coding 的双用途同锚：native launch 与业务解析是
 /// 同一计算（原目录/原 member/worktree），一次派生两字段共享同一结果；
 /// 失败对两 getter 同错（共享派生失败，outer Err）。

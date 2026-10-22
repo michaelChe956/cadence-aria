@@ -385,13 +385,13 @@ async fn reviewer_gateway_rejection_without_trust_face_stays_bare() {
     );
 }
 
-// ---- 批2 Task 20b 修复轮 1(F1,Main 裁定 b):聚合形态窗口目标钉测 ----
+// ---- 批2 Task 20b 修复轮 1(F1):聚合形态窗口目标钉测 ----
 // 形态枚举(报告同步):
 // A. Story focus=Some:业务解析→focus 成员 checkout→窗口锚成员(直选);
-// B. 聚合形态(Story focus=None/Design involved 空/Plan 多 target):主成员锚
-//    (manifest member_ids 首成员,Main 裁定 b)——评审照常走,窗口附注披露
-//    「primary-member anchored;非主成员面未对账」(R8 类已知边界);
-// C. 真零成员(空 manifest):专用码 plan_review_window_target_unresolved 停等。
+// B. 聚合形态(Story focus=None/Design involved 空/Plan 多 target 非唯一):
+//    无唯一成员→专用码 plan_review_window_target_unresolved 停等
+//    (REQ-PLN-11 条目 1:主成员锚定概念已删,不再回落任意单一仓库);
+// C. 真零成员(空 manifest):同上专用码停等。
 mod t20b_f1_plan_window_target {
     use crate::cross_cutting::provider_adapter::ProviderAdapterError;
     use crate::cross_cutting::streaming_provider::{
@@ -455,19 +455,19 @@ mod t20b_f1_plan_window_target {
     pub(super) enum FixtureEntity {
         /// Story:focus=首成员(唯一成员面,直选)。
         StoryFocusFirstMember,
-        /// Story:focus=None(聚合形态→主成员锚)。
+        /// Story:focus=None(聚合形态→无唯一成员,专用码停等)。
         StoryNoFocus,
-        /// Design:involved 空(聚合形态→主成员锚)。
+        /// Design:involved 空(聚合形态→无唯一成员,专用码停等)。
         DesignEmptyInvolved,
         /// Story:真零成员(manifest 空→专用码停等)。
         StoryZeroMembers,
     }
 
     pub(super) struct PlanWindowFixture {
-        _root: tempfile::TempDir,
+        pub(super) _root: tempfile::TempDir,
         pub(super) paths: ProductAppPaths,
         lifecycle: LifecycleStore,
-        member_a: Option<std::path::PathBuf>,
+        pub(super) member_a: Option<std::path::PathBuf>,
         project_id: String,
         issue_id: String,
         entity_id: String,
@@ -716,14 +716,15 @@ mod t20b_f1_plan_window_target {
             .await;
 
         let mut saw_error = None;
-        let mut saw_anchor_note = false;
+        let mut primary_noise = Vec::new();
         while let Ok(event) = rx.try_recv() {
             match event {
                 EngineEvent::Error { message } => saw_error = Some(message),
-                EngineEvent::ExecutionEvent { event, .. }
-                    if event.title.contains("primary-member anchored") =>
-                {
-                    saw_anchor_note = true;
+                EngineEvent::ExecutionEvent { event, .. } => {
+                    let text = format!("{} {}", event.title, event.detail.unwrap_or_default());
+                    if text.to_lowercase().contains("primary") || text.contains("主成员") {
+                        primary_noise.push(text);
+                    }
                 }
                 _ => {}
             }
@@ -733,8 +734,8 @@ mod t20b_f1_plan_window_target {
             "story focus form must review on the focus member: {saw_error:?}"
         );
         assert!(
-            !saw_anchor_note,
-            "focus-member direct selection must not carry the primary-anchor note"
+            primary_noise.is_empty(),
+            "focus-member direct selection must not carry any anchor note: {primary_noise:?}"
         );
         let window_store =
             crate::product::reviewer_window_store::ReviewerWindowStore::new(window_root);
@@ -751,14 +752,14 @@ mod t20b_f1_plan_window_target {
         );
     }
 
-    /// 形态 B(Story focus=None):主成员锚——评审照常走+窗口附注披露。
+    /// 形态 B(Story focus=None):无唯一成员 → 专用码停等,不再回落任何单一
+    /// 仓库(REQ-PLN-11 条目 1:主成员锚定概念已删),不产窗口记录、不产附注。
     #[tokio::test]
-    async fn story_without_focus_anchors_primary_member_and_completes_with_note() {
+    async fn story_without_focus_fails_closed_without_primary_fallback() {
         let fixture = logical_fixture(FixtureEntity::StoryNoFocus);
         let (_view, mut rx, mut engine) =
             engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Story);
         let session_id = engine.session().session_id.to_string();
-        let member_a = fixture.member_a.clone().expect("member a");
         let window_root = fixture.paths.root().join("reviewer-windows");
         let _kept = fixture._root.keep();
 
@@ -768,50 +769,54 @@ mod t20b_f1_plan_window_target {
             .drive_review_session(Arc::new(ApproveReviewProvider), command_rx)
             .await;
 
-        let mut saw_error = None;
-        let mut saw_anchor_note = false;
+        let mut error_message = None;
+        let mut primary_noise = Vec::new();
         while let Ok(event) = rx.try_recv() {
             match event {
-                EngineEvent::Error { message } => saw_error = Some(message),
-                EngineEvent::ExecutionEvent { event, .. }
-                    if event.title.contains("primary-member anchored")
-                        && event.title.contains("非主成员面未对账") =>
-                {
-                    saw_anchor_note = true;
+                EngineEvent::Error { message } => error_message = Some(message),
+                EngineEvent::ExecutionEvent { event, .. } => {
+                    let text = format!("{} {}", event.title, event.detail.unwrap_or_default());
+                    if text.to_lowercase().contains("primary") || text.contains("主成员") {
+                        primary_noise.push(text);
+                    }
                 }
                 _ => {}
             }
         }
+        let message =
+            error_message.expect("no-focus aggregate form must stop with an explicit error");
         assert!(
-            saw_error.is_none(),
-            "no-focus aggregate form must review via the primary-member anchor: {saw_error:?}"
+            message.contains("plan_review_window_target_unresolved"),
+            "must stop with the dedicated owner-ruling code: {message}"
         );
         assert!(
-            saw_anchor_note,
-            "primary-member anchoring must carry the R8-class disclosure note"
+            !message.to_lowercase().contains("primary") && !message.contains("主成员"),
+            "error must not reintroduce the removed primary concept: {message}"
+        );
+        assert!(
+            primary_noise.is_empty(),
+            "fail-closed form must not emit any anchor note: {primary_noise:?}"
         );
         let window_store =
             crate::product::reviewer_window_store::ReviewerWindowStore::new(window_root);
-        let record = window_store
-            .load_window(&crate::product::reviewer_window_store::role_run_window_id(
-                &session_id,
-                engine.active_run_id().unwrap_or(session_id.as_str()),
-            ))
-            .expect("window record must exist");
-        let expected = member_a.canonicalize().expect("member a canonical");
-        assert_eq!(
-            record.identity.canonical_worktree, expected,
-            "window must anchor the primary member checkout (member_ids first)"
+        assert!(
+            window_store
+                .load_window(&crate::product::reviewer_window_store::role_run_window_id(
+                    &session_id,
+                    engine.active_run_id().unwrap_or(session_id.as_str()),
+                ))
+                .is_err(),
+            "fail-closed target resolution must not open a window"
         );
     }
 
-    /// 形态 B(Design involved 空):主成员锚——评审照常走+附注披露。
+    /// 形态 B(Design involved 空):无唯一成员 → 专用码停等,不再回落任何
+    /// 单一仓库(REQ-PLN-11 条目 1),不产窗口记录。
     #[tokio::test]
-    async fn design_empty_involved_anchors_primary_member_and_completes() {
+    async fn design_empty_involved_fails_closed_without_primary_fallback() {
         let fixture = logical_fixture(FixtureEntity::DesignEmptyInvolved);
         let (_view, mut rx, mut engine) =
             engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Design);
-        let member_a = fixture.member_a.clone().expect("member a");
         let window_root = fixture.paths.root().join("reviewer-windows");
         let _kept = fixture._root.keep();
 
@@ -821,49 +826,41 @@ mod t20b_f1_plan_window_target {
             .drive_review_session(Arc::new(ApproveReviewProvider), command_rx)
             .await;
 
-        let mut saw_error = None;
-        let mut saw_anchor_note = false;
+        let mut error_message = None;
+        let mut primary_noise = Vec::new();
         while let Ok(event) = rx.try_recv() {
             match event {
-                EngineEvent::Error { message } => saw_error = Some(message),
-                EngineEvent::ExecutionEvent { event, .. }
-                    if event.title.contains("primary-member anchored") =>
-                {
-                    saw_anchor_note = true;
+                EngineEvent::Error { message } => error_message = Some(message),
+                EngineEvent::ExecutionEvent { event, .. } => {
+                    let text = format!("{} {}", event.title, event.detail.unwrap_or_default());
+                    if text.to_lowercase().contains("primary") || text.contains("主成员") {
+                        primary_noise.push(text);
+                    }
                 }
                 _ => {}
             }
         }
+        let message =
+            error_message.expect("design empty-involved form must stop with an explicit error");
         assert!(
-            saw_error.is_none(),
-            "design empty-involved form must review via the primary-member anchor: {saw_error:?}"
+            message.contains("plan_review_window_target_unresolved"),
+            "must stop with the dedicated owner-ruling code: {message}"
         );
         assert!(
-            saw_anchor_note,
-            "must carry the primary-anchor disclosure note"
+            !message.to_lowercase().contains("primary") && !message.contains("主成员"),
+            "error must not reintroduce the removed primary concept: {message}"
         );
-        // 窗口记录目录扫描:存在锚定主成员的窗口记录(记录文件含成员路径)。
-        let expected = member_a.canonicalize().expect("member a canonical");
-        let mut anchored = false;
-        fn scan(dir: &std::path::Path, expected: &std::path::Path, out: &mut bool) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    scan(&path, expected, out);
-                } else if let Ok(content) = std::fs::read_to_string(&path)
-                    && content.contains(&expected.display().to_string())
-                {
-                    *out = true;
-                }
-            }
-        }
-        scan(&window_root, &expected, &mut anchored);
         assert!(
-            anchored,
-            "a window record anchored on the primary member must exist under {}",
+            primary_noise.is_empty(),
+            "fail-closed form must not emit any anchor note: {primary_noise:?}"
+        );
+        assert!(
+            !window_root.exists()
+                || std::fs::read_dir(&window_root)
+                    .map(|entries| entries.count())
+                    .unwrap_or(0)
+                    == 0,
+            "fail-closed target resolution must not leave window records under {}",
             window_root.display()
         );
     }
@@ -1045,7 +1042,7 @@ mod t2_lc_no_review_window {
 
     /// 构造仅满足形态判据的最小 gateway;authority root 用独立临时目录,
     /// 返回 (gateway, authority_root, 临时目录锚)。
-    fn lc_gateway_fixture() -> (
+    pub(super) fn lc_gateway_fixture() -> (
         Arc<LogicalCodebaseProviderGateway>,
         PathBuf,
         tempfile::TempDir,
@@ -1223,6 +1220,160 @@ mod t2_lc_no_review_window {
             cwd.as_deref(),
             Some(authority_root.as_path()),
             "lc 评审 cwd 必须同为 LC 根"
+        );
+    }
+}
+
+// ---- Task 3(REQ-PLN-11,设计 A 条目 1):删除多仓「主仓/主成员」概念 ----
+// lc 形态以注入 logical gateway 表达(T1 门禁唯一判据):reviewer prompt 与
+// 事件流均不得出现 primary / 主成员 字样(聚合形态无唯一成员时已改由
+// t20b 形态 B/C 用例钉定专用码停等);单仓仍走 `.git` 早返回,行为逐字不变。
+mod t3_primary_concept_removed {
+    use super::t2_lc_no_review_window::lc_gateway_fixture;
+    use super::t20b_f1_plan_window_target::{
+        ApproveReviewProvider, FixtureEntity, engine_with_aggregate_view, logical_fixture,
+    };
+    use crate::product::models::WorkspaceType;
+    use crate::product::workspace_engine::types::{EngineEvent, SessionMessage};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    fn event_text(event: EngineEvent) -> Option<String> {
+        match event {
+            EngineEvent::Error { message } => Some(message),
+            EngineEvent::ExecutionEvent { event, .. } => Some(format!(
+                "{} {}",
+                event.title,
+                event.detail.unwrap_or_default()
+            )),
+            _ => None,
+        }
+    }
+
+    fn assert_no_primary_text(text: &str, surface: &str) {
+        assert!(
+            !text.to_lowercase().contains("primary"),
+            "{surface} 不得出现 primary 字样: {text}"
+        );
+        assert!(
+            !text.contains("主成员"),
+            "{surface} 不得出现「主成员」字样: {text}"
+        );
+    }
+
+    /// REQ-PLN-11(设计 A 条目 1):lc 评审链路零 primary——聚合视野作者 prompt
+    /// 片段落在会话消息里并进入 reviewer 压缩历史,故 reviewer prompt 与全部
+    /// 事件文本都不得出现 `primary` / `主成员`。
+    #[tokio::test]
+    async fn lc_review_prompt_contains_no_primary_wording() {
+        let fixture = logical_fixture(FixtureEntity::StoryFocusFirstMember);
+        let (gateway, _authority_root, _authority_kept) = lc_gateway_fixture();
+        let (_view, mut rx, engine) = engine_with_aggregate_view(&fixture, WorkspaceType::Story);
+        let mut engine = engine.with_logical_provider_gateway(gateway);
+        engine.session.messages.push(SessionMessage {
+            id: "t3_aggregate_story_scope".to_string(),
+            role: "user".to_string(),
+            // 生产形态:workspace context 消息 = 材料块(清单) + 指令块(聚合
+            // 视野要求,禁回落措辞所在);两者都会进 reviewer 压缩历史。
+            content: format!(
+                "{}{}",
+                crate::product::workspace_engine::aggregate_scope_material_prompt(
+                    "api | api | /api | api | rust",
+                ),
+                crate::product::workspace_engine::aggregate_story_scope_instruction_prompt(&[]),
+            ),
+            checkpoint_id: None,
+            created_at: "2026-10-23T00:00:00Z".to_string(),
+        });
+
+        engine.start_review_or_skip().await;
+        let input = engine.build_review_input().expect("lc reviewer prompt");
+        assert_no_primary_text(&input.prompt, "lc reviewer prompt");
+
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        engine
+            .drive_review_session(Arc::new(ApproveReviewProvider), command_rx)
+            .await;
+
+        let mut offending = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let Some(text) = event_text(event)
+                && (text.to_lowercase().contains("primary") || text.contains("主成员"))
+            {
+                offending.push(text);
+            }
+        }
+        assert!(
+            offending.is_empty(),
+            "lc 评审链路不得出现 primary/主成员事件: {offending:?}"
+        );
+    }
+
+    /// REQ-PLN-11(设计 A 条目 1,单仓逐字不变):单仓评审仍由
+    /// `plan_review_window_worktree` 的 `.git` 早返回给出会话仓库路径作窗口
+    /// target——无错误、窗口记录锚定该路径、无「主成员锚定」附注。
+    #[tokio::test]
+    async fn single_repo_window_scope_still_resolves_repository() {
+        let fixture = logical_fixture(FixtureEntity::StoryFocusFirstMember);
+        let (_view, mut rx, mut engine) =
+            engine_with_aggregate_view(&fixture, WorkspaceType::Story);
+        let single_repo = fixture.member_a.clone().expect("member a");
+        let _kept = fixture._root.keep();
+        engine.session.repository_path = Some(single_repo.clone());
+        let session_id = engine.session().session_id.to_string();
+
+        engine.start_review_or_skip().await;
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        engine
+            .drive_review_session(Arc::new(ApproveReviewProvider), command_rx)
+            .await;
+
+        let mut offending = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let Some(text) = event_text(event) {
+                if text.contains("plan_review_window_target_unresolved") {
+                    offending.push(text);
+                }
+            }
+        }
+        assert!(
+            offending.is_empty(),
+            "单仓评审目标必须由 `.git` 早返回给出: {offending:?}"
+        );
+
+        let window_store = crate::product::reviewer_window_store::ReviewerWindowStore::new(
+            fixture.paths.root().join("reviewer-windows"),
+        );
+        let record = window_store
+            .load_window(&crate::product::reviewer_window_store::role_run_window_id(
+                &session_id,
+                engine.active_run_id().unwrap_or(session_id.as_str()),
+            ))
+            .expect("单仓形态必须仍产窗口记录");
+        assert_eq!(
+            record.identity.canonical_worktree,
+            single_repo.canonicalize().expect("single repo canonical"),
+            "窗口必须锚定会话仓库路径本身(早返回,不经业务选仓)"
+        );
+    }
+
+    /// 夹具形状守卫:聚合视野解析器在无 focus 时回聚合根视图(非 git),
+    /// 这正是 `.git` 早返回之后唯一可达的分支(形态 B 用例的前提)。
+    #[test]
+    fn story_without_focus_aggregate_view_is_not_git_worktree() {
+        let fixture = logical_fixture(FixtureEntity::StoryNoFocus);
+        let (aggregate_view, _rx, engine) =
+            engine_with_aggregate_view(&fixture, WorkspaceType::Story);
+        let _kept = fixture._root.keep();
+        let repository_path = engine
+            .session
+            .repository_path
+            .clone()
+            .expect("aggregate view repository path");
+        assert_eq!(repository_path, aggregate_view.path());
+        assert!(
+            !repository_path.join(".git").exists(),
+            "聚合根视图不得是 git worktree(否则早返回短路,用例失去意义)"
         );
     }
 }

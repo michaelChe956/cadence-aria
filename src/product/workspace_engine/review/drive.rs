@@ -51,7 +51,7 @@ impl WorkspaceEngine {
         // `drive_review_session_with_window`,无窗形态=内层测试 seam)。
         // 修复轮 1(F1):窗口目标经聚合根视图感知解析(成员 checkout/
         // direct 原样;聚合视图落唯一/focus 成员;无唯一成员=专用码)。
-        let (review_target, primary_anchored) = match self.plan_review_window_worktree() {
+        let review_target = match self.plan_review_window_worktree() {
             Ok(resolved) => resolved,
             Err(message) => {
                 let _ = self.event_tx.send(EngineEvent::Error { message }).await;
@@ -59,14 +59,6 @@ impl WorkspaceEngine {
                 return;
             }
         };
-        if primary_anchored {
-            Self::emit_primary_member_anchor_note(
-                &self.event_tx,
-                &self.session.session_id,
-                &review_target,
-            )
-            .await;
-        }
         if let Err(message) = self
             .begin_plan_review_window(&reviewer, review_target)
             .await
@@ -390,7 +382,7 @@ impl WorkspaceEngine {
             self.finish_failed_run().await;
             return;
         };
-        let (review_target, primary_anchored) = match self.plan_review_window_worktree() {
+        let review_target = match self.plan_review_window_worktree() {
             Ok(resolved) => resolved,
             Err(message) => {
                 let _ = self.event_tx.send(EngineEvent::Error { message }).await;
@@ -398,14 +390,6 @@ impl WorkspaceEngine {
                 return;
             }
         };
-        if primary_anchored {
-            Self::emit_primary_member_anchor_note(
-                &self.event_tx,
-                &self.session.session_id,
-                &review_target,
-            )
-            .await;
-        }
         if let Err(message) = self
             .begin_plan_review_window(&reviewer, review_target)
             .await
@@ -1694,27 +1678,25 @@ impl WorkspaceEngine {
         })
     }
 
-    /// 修复轮 1(F1,Main 裁定):规划审查窗口目标解析——与
-    /// `review_launch_target_and_cwd` 同源起步:目标带 `.git` 原样返回
-    /// (成员 checkout/direct);聚合根视图(非 git 的 provider_context_
-    /// root,Story focus=None/Design involved 空/WorkItemPlan 多 target
-    /// 非唯一三形态可达)时经实体四事实 resolver 落到本次评审实际的
-    /// 唯一/focus 成员 checkout;真·无唯一成员面不静默杀——返回专用
-    /// 错误码(聚合根规划评审窗口目标待 owner 裁定),不得以
-    /// IdentityDrift 形态误报。
-    fn plan_review_window_worktree(&self) -> Result<(std::path::PathBuf, bool), String> {
+    /// 规划审查窗口目标解析——与 `review_launch_target_and_cwd` 同源起步:
+    /// 目标带 `.git` 原样返回(单仓唯一出口,也是成员 checkout/direct 形态);
+    /// 聚合根视图(非 git 的 provider_context_root,Story focus=None/Design
+    /// involved 空/WorkItemPlan 多 target 非唯一三形态可达)时经实体四事实
+    /// resolver 落到本次评审实际的唯一/focus 成员 checkout;**无唯一成员不再
+    /// 回落任何单一仓库**(REQ-PLN-11 设计 A 条目 1:多仓已无「主仓/主成员」
+    /// 概念)——返回专用错误码(聚合根规划评审窗口目标待 owner 裁定),不得
+    /// 以 IdentityDrift 形态误报。
+    fn plan_review_window_worktree(&self) -> Result<std::path::PathBuf, String> {
         let target = self
             .session
             .repository_path
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         if target.join(".git").exists() {
-            return Ok((target, false));
+            return Ok(target);
         }
-        // 聚合根视图形态:优先业务仓唯一/focus 成员;聚合视图/无唯一成员
-        // 回落主成员锚(Main 裁定 b:材料不触成员 diff 的聚合评审以主成员
-        // checkout 作窗口对账域;非主成员面不在对账域=R8 类已知边界,由
-        // EngineEvent 附注披露+T24 评估)。真零成员(空 manifest)→专用码。
+        // 聚合根视图形态:必须解析出唯一/focus 业务仓;聚合视图(label 级)
+        // 与无唯一成员同属"无窗口对账域",一律专用码停等。
         let Some(store) = self.lifecycle_store.as_ref() else {
             return Err(format!(
                 "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: aggregate root view without a persistent lifecycle store; owner ruling pending"
@@ -1730,27 +1712,23 @@ impl WorkspaceEngine {
                 self.session.workspace_type.clone(),
             )
             .and_then(|context| context.business_repository);
-        let (repository, primary_anchored) = match business {
+        let repository = match business {
             Ok(repository)
                 if !crate::product::workspace_repository::is_aggregate_root_view_repository(
                     &repository,
                 ) =>
             {
-                (repository, false)
+                repository
             }
-            _ => {
-                // 聚合视图或无唯一成员:主成员锚(manifest member_ids 首成员)。
-                let primary = crate::product::workspace_repository::resolve_primary_member_repository(
-                    &store.app_paths(),
-                    &self.session.project_id,
-                    &self.session.issue_id,
-                )
-                .map_err(|error| {
-                    format!(
-                        "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: aggregate form without any member to anchor (primary member resolution failed: {error}); owner ruling pending"
-                    )
-                })?;
-                (primary, true)
+            Ok(_) => {
+                return Err(format!(
+                    "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: aggregate root view without a unique member repository; owner ruling pending"
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "{PLAN_REVIEW_WINDOW_TARGET_UNRESOLVED}: aggregate root view without a unique member repository (business resolution failed: {error}); owner ruling pending"
+                ));
             }
         };
         if !repository.path.join(".git").exists() {
@@ -1759,7 +1737,7 @@ impl WorkspaceEngine {
                 repository.path.display()
             ));
         }
-        Ok((repository.path, primary_anchored))
+        Ok(repository.path)
     }
 
     /// 入口开窗(T17 冻结顺序):必须早于 `ensure_review_invocation_scope`/
@@ -2002,9 +1980,8 @@ impl WorkspaceEngine {
     }
 
     /// F11(波3):规划评审窗口的用户可见注意事件——复用既有
-    /// EngineEvent::ExecutionEvent 事件流(与 emit_primary_member_anchor_note
-    /// 同款形态),status=Failed 表「需人工处理」。发送 best-effort
-    /// (`let _`,与既有事件发射一致),不影响窗口状态机。
+    /// EngineEvent::ExecutionEvent 事件流,status=Failed 表「需人工处理」。
+    /// 发送 best-effort(`let _`,与既有事件发射一致),不影响窗口状态机。
     async fn emit_plan_review_window_attention(
         event_tx: &mpsc::Sender<EngineEvent>,
         session_id: &str,
@@ -2037,34 +2014,6 @@ impl WorkspaceEngine {
     }
 }
 
-impl WorkspaceEngine {
-    /// 修复轮 1(Main 裁定 b):聚合形态主成员锚的窗口附注——R8 类已知
-    /// 边界如实披露(该窗内非主成员写入不在对账域;T24 重放/崩溃演练
-    /// 评估项与 owner 报告项)。
-    async fn emit_primary_member_anchor_note(
-        event_tx: &mpsc::Sender<EngineEvent>,
-        session_id: &str,
-        anchor: &std::path::Path,
-    ) {
-        let _ = event_tx
-            .send(EngineEvent::ExecutionEvent {
-                event: crate::cross_cutting::streaming_provider::ProviderExecutionEvent {
-                    event_id: format!("plan_review_window_primary_anchor_{session_id}"),
-                    kind: crate::cross_cutting::streaming_provider::ProviderExecutionEventKind::Provider,
-                    status: crate::cross_cutting::streaming_provider::ProviderExecutionEventStatus::Completed,
-                    title: "审查窗口主成员锚定(primary-member anchored;非主成员面未对账——R8 类已知边界,详 T20b 修复轮1 报告)".to_string(),
-                    detail: Some(format!("anchor: {}", anchor.display())),
-                    command: None,
-                    cwd: None,
-                    output: None,
-                    exit_code: None,
-                },
-                node_id: None,
-                agent: None,
-            })
-            .await;
-    }
-}
 #[cfg(test)]
 #[path = "drive_tests.rs"]
 mod tests;
