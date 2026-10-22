@@ -5,9 +5,10 @@
 //! 判等」的拒绝形态,正例与反例成对出现。
 
 use super::super::harness::{EvidenceCell, r2_evidence_semantics};
+use super::round_contract::verify_resume_round;
 use super::{
     ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT, FRESH, RESUME, t23_assertion_tests,
-    verify_failure_cell, verify_resume_round, verify_spawn_instrumentation,
+    verify_failure_cell, verify_spawn_instrumentation,
 };
 use serde_json::json;
 

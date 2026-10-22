@@ -5,10 +5,19 @@
 //! permission wire 的 provider 会如实落 denied/unknown)。故本入口的覆盖判读
 //! 只要求「可复核落格」:真实 fresh 尝试(run_ref 已绑定,证据状态不限)或
 //! 带四摘要的 carried 承继引用;缺失/仅 resume 形态/引用不可复核 → 红。
+//!
+//! ⚠阶段标签差异(F6,轮次合同修复):本文件的 `stage=="plan"` 过滤**只适用
+//! full_chain/capture 轮**(split_sync 落在 plan 阶段的对照入口);resume 轮的
+//! split_sync carried 格按合同用 `stage=="split"`(见
+//! `round_contract::RESUME_CARRIED_STAGES`),该轮由 `verify_carried_reference`
+//! 单判、**不得**复用本文件的 plan 过滤(否则形同漏判)。
 
 use super::super::harness::{ENTRYPOINT_SPLIT_SYNC, EvidenceCell, FRESH};
 
 /// full_chain 轮的 split_sync 对照入口判读(不得 N/A 降格)。
+///
+/// 只认 `stage=="plan"`(full/capture 轮的对照入口);resume 轮走
+/// `verify_carried_reference`(stage=="split"),见模块注释的阶段标签差异。
 pub(super) fn verify_split_sync_control(cells: &[EvidenceCell]) -> Result<(), String> {
     let recorded: Vec<&EvidenceCell> = cells
         .iter()

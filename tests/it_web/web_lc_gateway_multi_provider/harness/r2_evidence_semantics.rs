@@ -48,7 +48,23 @@ pub(crate) const REVIEWER_FRESH_ONLY_REASON_MARKER: &str = "reviewer 恒 fresh s
 const RESUME_FINGERPRINT_DRIFT: &str = "provider_gateway_policy_drift: resume_fingerprint";
 
 /// A1 + A2:resume 格结论(替换 harness `build_cell` 里的 resume 分支)。
+///
+/// F5(轮次合同修复):`resume_not_driven`(按产品语义本阶段不做 resume
+/// 驱动,如 reviewer 恒 fresh spawn)时,结论必须落在**事实**上——fresh 未
+/// 交付就写 fresh 未交付,自证齐备才写 not_applicable;绝不落「原生恢复
+/// 未确认」这种伪自证文本(该文本暗示做过 resume 尝试)。
 pub(super) fn resume_cell_verdict(cell: &mut EvidenceCell, observation: &StageObservation) {
+    // F5:未驱动 + fresh 未交付 ⇒ denied(原因=fresh 未交付),不判恢复。
+    if observation.resume_not_driven
+        && let Some(reason) = observation.fresh_cell_failed.as_deref()
+    {
+        cell.capability_state = "denied".to_string();
+        cell.denied_reason = Some(format!(
+            "resume 未驱动:{REVIEWER_FRESH_ONLY_REASON_MARKER},本阶段无 resume 尝试\
+             (不计作恢复失败);本轮 fresh 载体会话未交付:{reason}"
+        ));
+        return;
+    }
     if observation.observed_spawn_count == 0
         && !observation.reattached_inflight_run
         && observation.no_pending_work_reason.is_some()
@@ -56,6 +72,17 @@ pub(super) fn resume_cell_verdict(cell: &mut EvidenceCell, observation: &StageOb
         cell.capability_state = "not_applicable".to_string();
         cell.denied_reason = observation.no_pending_work_reason.clone();
         cell.execution_origin = NO_PENDING_WORK_ORIGIN.to_string();
+        return;
+    }
+    // F5:未驱动但自证不齐(fresh 已交付却缺交付/审计条件)→ denied 且如实
+    // 说明是自证不齐,仍不落到伪「原生恢复未确认」。
+    if observation.resume_not_driven {
+        cell.capability_state = "denied".to_string();
+        cell.denied_reason = Some(format!(
+            "resume 未驱动:{REVIEWER_FRESH_ONLY_REASON_MARKER},本阶段无 resume 尝试;\
+             且「无可续会话」自证不齐(fresh 交付/零 spawn/无 reviewer 面 ProviderStart \
+             未同时成立),不得静默放行"
+        ));
         return;
     }
     if super::coding_resume_native_confirmed(
@@ -825,5 +852,80 @@ mod tests {
             "无可续评审会话:{REVIEWER_FRESH_ONLY_REASON_MARKER}(reviewer 恒 fresh spawn)"
         ));
         assert_eq!(not_applicable_evidence_error(&cell), None);
+    }
+
+    /// F5(轮次合同修复):未驱动格不得伪造「原生恢复未确认」。
+    ///
+    /// kimi r3-resume 现场:review resume 格按设计**没有做 resume 驱动**
+    /// (reviewer 恒 fresh spawn),但归因链把它写成「原生恢复未确认」,再被
+    /// `validate_against` 的「完成产物缺失」改写——双重误导。修复后未驱动格
+    /// 的原因只能落在 fresh 是否交付上。
+    #[test]
+    fn f5_not_driven_resume_cell_does_not_fake_native_resume_failure() {
+        let not_driven_review = || {
+            let mut observation = StageObservation::new("review", &ProviderName::ClaudeCode);
+            observation.force_resume = true;
+            observation.resume_not_driven = true;
+            observation.requested_resume_id = Some("native-review-1".to_string());
+            observation.native_confirmed_id = Some("native-review-1".to_string());
+            observation
+        };
+
+        // ① 未驱动 + fresh 未交付 → denied,原因指 fresh(不落伪恢复文本)。
+        let mut failed_fresh = not_driven_review();
+        failed_fresh.fresh_cell_failed =
+            Some("产品 error 帧:Provider 未返回有效的 Design Spec artifact".to_string());
+        let mut cell = idle_cell();
+        cell.stage = "review".to_string();
+        cell.denied_reason = None;
+        resume_cell_verdict(&mut cell, &failed_fresh);
+        assert_eq!(cell.capability_state, "denied");
+        let reason = cell.denied_reason.clone().unwrap_or_default();
+        assert!(reason.contains("fresh 载体会话未交付"), "{reason}");
+        assert!(
+            !reason.contains("原生恢复未确认"),
+            "未驱动格不得出现伪恢复自证文本:{reason}"
+        );
+
+        // ② 未驱动 + fresh 已交付且自证齐备 → 仍是 not_applicable。
+        let mut idle = not_driven_review();
+        idle.no_pending_work_reason = review_no_resumable_session_reason(&idle, true, false);
+        let mut cell = idle_cell();
+        cell.stage = "review".to_string();
+        cell.denied_reason = None;
+        resume_cell_verdict(&mut cell, &idle);
+        assert_eq!(cell.capability_state, "not_applicable");
+        assert_eq!(cell.execution_origin, NO_PENDING_WORK_ORIGIN);
+
+        // ③ 未驱动 + fresh 已交付但自证不齐(reviewer 面 ProviderStart 在场,
+        //    语义漂移探针)→ denied 且说明自证不齐,仍不落伪恢复文本。
+        let mut drifted = not_driven_review();
+        drifted.no_pending_work_reason = review_no_resumable_session_reason(&drifted, true, true);
+        assert!(drifted.no_pending_work_reason.is_none());
+        let mut cell = idle_cell();
+        cell.stage = "review".to_string();
+        cell.denied_reason = None;
+        resume_cell_verdict(&mut cell, &drifted);
+        assert_eq!(cell.capability_state, "denied");
+        let reason = cell.denied_reason.clone().unwrap_or_default();
+        assert!(reason.contains("自证不齐"), "{reason}");
+        assert!(!reason.contains("原生恢复未确认"), "{reason}");
+    }
+
+    /// F5 反向护栏:被**真实驱动**的 resume 格仍按 native id 判等,不得
+    /// 借「未驱动」形态逃避判等(状态名/标注本身不构成豁免)。
+    #[test]
+    fn f5_driven_resume_cell_still_requires_native_match() {
+        let mut observation = StageObservation::new("coding", &ProviderName::ClaudeCode);
+        observation.force_resume = true;
+        observation.requested_resume_id = Some("native-7".to_string());
+        observation.native_confirmed_id = Some("native-9".to_string());
+        let mut cell = idle_cell();
+        cell.stage = "coding".to_string();
+        cell.denied_reason = None;
+        resume_cell_verdict(&mut cell, &observation);
+        assert_eq!(cell.capability_state, "unknown");
+        let reason = cell.denied_reason.clone().unwrap_or_default();
+        assert!(reason.contains("原生恢复未确认"), "{reason}");
     }
 }

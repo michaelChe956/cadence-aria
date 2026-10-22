@@ -109,6 +109,11 @@ pub(crate) fn resolve_repo_relative(path: &Path) -> PathBuf {
 /// resume 是同一逻辑轮,必须同一 run-id/同一根);不一致即 fail loudly,
 /// 不得静默读到异根快照(如 capture 设 run-id 而 resume 忘设 env,回落
 /// 旧固定根读到异轮 manifest)。相对路径按仓库根解析(承继格来源链同语义)。
+///
+/// F1(轮次合同修复):同一逻辑轮内矩阵面按腿分面(`matrix-capture` /
+/// `matrix-resume`),故轮的同一性按 **facet 的父目录**(`.../<run-id>/
+/// b45-t23-roles`)判定:facet 可比,而 run-id/provider 段仍必须逐字相等
+/// (异轮/异家照旧拒绝)。
 pub(crate) fn validate_snapshot_origin(
     source_evidence_root: &str,
     current_evidence_root: &Path,
@@ -116,8 +121,8 @@ pub(crate) fn validate_snapshot_origin(
     if source_evidence_root.trim().is_empty() {
         return Err("快照 manifest 缺来源证据根(source_evidence_root 为空)".to_string());
     }
-    let source_root = resolve_repo_relative(Path::new(source_evidence_root));
-    let current_root = resolve_repo_relative(current_evidence_root);
+    let source_root = round_root(&resolve_repo_relative(Path::new(source_evidence_root)));
+    let current_root = round_root(&resolve_repo_relative(current_evidence_root));
     if source_root != current_root {
         return Err(format!(
             "resume 证据根与快照来源根不一致(capture→resume 必须同一 run-id/同一根):\
@@ -127,6 +132,11 @@ pub(crate) fn validate_snapshot_origin(
         ));
     }
     Ok(())
+}
+
+/// 逻辑轮根(facet 的父目录):轮内 facet 可分面,轮本身不得漂移。
+fn round_root(facet_root: &Path) -> PathBuf {
+    facet_root.parent().unwrap_or(facet_root).to_path_buf()
 }
 
 /// Task 11 现场证据根(计划 Files 冻结):`<provider>/{boundary,failures}/`
@@ -323,5 +333,28 @@ mod evidence_root_tests {
             Ok(()),
             "capture→resume 同根(manifest 相对、resume 绝对)必须放行"
         );
+    }
+
+    // F1(轮次合同修复):同一 run-id 下矩阵面按腿分面——capture 腿记录的
+    // `matrix-capture` 与 resume 腿的 `matrix-resume` 属同一逻辑轮,必须放行;
+    // 跨 run-id 仍必须拒绝(轮的同一性不可被 facet 放宽)。
+    #[test]
+    fn snapshot_origin_allows_leg_facets_within_same_run_id() {
+        let captured = "cadence/reports/lc-gateway-multi-provider/claude-code/round-1/b45-t23-roles/matrix-capture";
+        let resume = "cadence/reports/lc-gateway-multi-provider/claude-code/round-1/b45-t23-roles/matrix-resume";
+        assert_eq!(
+            validate_snapshot_origin(captured, Path::new(resume)),
+            Ok(()),
+            "同 run-id 的两腿 facet 必须视为同一逻辑轮"
+        );
+        // 异 run-id:即使 facet 形态相同也必须拒绝。
+        let other_run = "cadence/reports/lc-gateway-multi-provider/claude-code/round-2/b45-t23-roles/matrix-resume";
+        let error = validate_snapshot_origin(captured, Path::new(other_run))
+            .expect_err("异 run-id 必须拒绝(轮同一性不因分面放宽)");
+        assert!(error.contains("不一致"), "{error}");
+        // 异家:同样拒绝。
+        let other_provider =
+            "cadence/reports/lc-gateway-multi-provider/pi/round-1/b45-t23-roles/matrix-resume";
+        assert!(validate_snapshot_origin(captured, Path::new(other_provider)).is_err());
     }
 }

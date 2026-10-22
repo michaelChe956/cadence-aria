@@ -364,6 +364,16 @@ pub(crate) fn capture_plan_snapshot(
     input: &CaptureInput<'_>,
     directory_override: Option<&Path>,
 ) -> Result<CapturedSnapshot, String> {
+    // F2(轮次合同修复):基线未 durable 定稿(空 work_item_id)时**不落
+    // manifest**——落下去就是假 `plan_confirmed` 基线,续跑轮必然
+    // `work_item_plan_not_confirmed`。闸门先于任何目录创建(不留空壳快照)。
+    // 调用侧另以 `snapshot_baseline_not_confirmed` 结束本轮(见
+    // `harness::plan_chain`),本处是落盘点的最后防线。
+    if input.work_item_id.trim().is_empty() {
+        return Err(
+            "快照基线未定稿:work_item_id 为空(capture 拒绝落基线,不写 manifest)".to_string(),
+        );
+    }
     // r52:capture 轮的 run/ 由 build 预建(固定路径指纹要求)——pristine
     // 必须落在**同一**目录(目录覆盖优先;快照 id 取目录名)。
     let root = snapshots_root(evidence_root);

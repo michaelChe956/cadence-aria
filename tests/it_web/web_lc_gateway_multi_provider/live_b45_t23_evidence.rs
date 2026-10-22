@@ -15,6 +15,7 @@ use super::evidence_root::{
     B45_T23_RUN_ID_ENV, evidence_run_id_from_env, provider_evidence_root,
     provider_evidence_root_with_run_id,
 };
+use super::snapshot::RunMode;
 
 /// 矩阵证据根(计划 Files:cadence/reports/lc-gateway-multi-provider/
 /// <provider>/b45-t23-roles/<facet>/;设 `B45_T23_RUN_ID` 时
@@ -25,10 +26,31 @@ pub(crate) fn b45_t23_evidence_root(provider: &ProviderName, facet: &str) -> Pat
         .join(facet)
 }
 
-/// 单家汇总文件名(类1′ ①:per-provider 分文件,异家并行/多轮互不覆盖)。
-pub(crate) fn b45_t23_summary_filename(provider: &ProviderName) -> String {
+/// F1(轮次合同修复):腿标签(capture→resume 是同一逻辑轮的两条腿,run-id
+/// 共用;腿内证据必须互不覆盖)。
+pub(crate) fn b45_t23_leg_label(run_mode: RunMode) -> &'static str {
+    match run_mode {
+        RunMode::FullChain => "full_chain",
+        RunMode::CapturePlanSnapshot => "capture",
+        RunMode::ResumeFromPlanSnapshot => "resume",
+    }
+}
+
+/// F1:按腿分面的矩阵证据根(`matrix-<leg>`)。
+///
+/// run-id 不变、facet 只加腿后缀——`snapshots_root()` 取 facet 的父目录
+/// (`b45-t23-roles/snapshots`),因此快照位置不随腿漂移,resume 腿仍能定位
+/// capture 腿落下的快照;而 cell.json 与汇总按腿分家,resume 腿不再覆写
+/// capture 腿的 fresh 格(§3.0 的 triage 误读根因)。
+pub(crate) fn b45_t23_matrix_evidence_root(provider: &ProviderName, run_mode: RunMode) -> PathBuf {
+    b45_t23_evidence_root(provider, &format!("matrix-{}", b45_t23_leg_label(run_mode)))
+}
+
+/// 单家汇总文件名(类1′ ①:per-provider 分文件,异家并行/多轮互不覆盖;
+/// F1:再按腿分列,capture 汇总不被 resume 汇总覆盖)。
+pub(crate) fn b45_t23_summary_filename(provider: &ProviderName, leg: &str) -> String {
     format!(
-        "b45-t23-roles-matrix-{}.json",
+        "b45-t23-roles-matrix-{}-{leg}.json",
         provider_family_text(provider)
     )
 }
@@ -37,18 +59,21 @@ pub(crate) fn b45_t23_summary_filename(provider: &ProviderName) -> String {
 ///
 /// 只写本家文件,不生成跨家合并视图:异家并行/同家多轮不会互相覆盖,
 /// 判定只认各 provider 的 cell.json 与本家汇总(controller 需要合并视图
-/// 时自行合并)。
+/// 时自行合并)。F1:文件名带腿后缀——capture 与 resume 共用 run-id 时
+/// 两份汇总各自留证。
 fn b45_t23_write_provider_summary_at(
     evidence_root: &Path,
     provider: &ProviderName,
+    leg: &str,
     run_id: Option<&str>,
     summary: &Value,
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(evidence_root)
         .map_err(|error| format!("创建汇总目录 {}: {error}", evidence_root.display()))?;
-    let path = evidence_root.join(b45_t23_summary_filename(provider));
+    let path = evidence_root.join(b45_t23_summary_filename(provider, leg));
     let payload = json!({
         "provider": provider_family_text(provider),
+        "leg": leg,
         "run_id": run_id,
         "providers": { format!("{provider:?}"): summary },
         "m6_codex_danger": "b45_live_codex_danger_apply_patch",
@@ -63,11 +88,15 @@ fn b45_t23_write_provider_summary_at(
 
 /// 每家跑完立即落本家汇总(不跨家合并、不等进程末尾):后一家失败不会
 /// 抹掉前一家已落证据;证据根含可选 `B45_T23_RUN_ID` 段。
-pub(crate) fn b45_t23_write_provider_summary(provider: &ProviderName, summary: &Value) -> PathBuf {
+pub(crate) fn b45_t23_write_provider_summary(
+    provider: &ProviderName,
+    leg: &str,
+    summary: &Value,
+) -> PathBuf {
     let run_id = evidence_run_id_from_env(B45_T23_RUN_ID_ENV);
     let root = provider_evidence_root_with_run_id(provider, run_id.as_deref())
         .unwrap_or_else(|error| panic!("{B45_T23_RUN_ID_ENV} 非法:{error}"));
-    b45_t23_write_provider_summary_at(&root, provider, run_id.as_deref(), summary)
+    b45_t23_write_provider_summary_at(&root, provider, leg, run_id.as_deref(), summary)
         .unwrap_or_else(|error| panic!("roles-matrix.json 落盘失败:{error}"))
 }
 
@@ -100,14 +129,19 @@ mod evidence_tests {
             provider_evidence_root_with_run_id(&ProviderName::ClaudeCode, Some("round-1"))
                 .expect("run root");
         assert_eq!(round_one, legacy.join("round-1"));
-        // 汇总文件名按家分列,异家并行不互相覆盖。
+        // 汇总文件名按家分列,异家并行不互相覆盖;F1:再按腿分列。
         assert_eq!(
-            b45_t23_summary_filename(&ProviderName::ClaudeCode),
-            "b45-t23-roles-matrix-claude-code.json"
+            b45_t23_summary_filename(&ProviderName::ClaudeCode, "capture"),
+            "b45-t23-roles-matrix-claude-code-capture.json"
         );
         assert_ne!(
-            b45_t23_summary_filename(&ProviderName::ClaudeCode),
-            b45_t23_summary_filename(&ProviderName::Codex)
+            b45_t23_summary_filename(&ProviderName::ClaudeCode, "capture"),
+            b45_t23_summary_filename(&ProviderName::Codex, "capture")
+        );
+        assert_ne!(
+            b45_t23_summary_filename(&ProviderName::ClaudeCode, "capture"),
+            b45_t23_summary_filename(&ProviderName::ClaudeCode, "resume"),
+            "同轮两腿汇总不得同名(否则 resume 覆写 capture)"
         );
         // 矩阵根布局逐字钉死(⚠5 补修:原断言两侧同一实现恒真):不带与带
         // run-id 的 b45-t23-roles/<facet> 都挂在 provider 证据根下,run-id 段
@@ -143,6 +177,7 @@ mod evidence_tests {
         let claude_path = b45_t23_write_provider_summary_at(
             &run_one,
             &ProviderName::ClaudeCode,
+            "capture",
             Some("round-1"),
             &json!({"duties": {"m2_coder": ["coding"]}}),
         )
@@ -150,14 +185,15 @@ mod evidence_tests {
         let codex_path = b45_t23_write_provider_summary_at(
             &run_one,
             &ProviderName::Codex,
+            "capture",
             Some("round-1"),
             &json!({"duties": {"m2_coder": ["coding"]}}),
         )
         .expect("write codex summary");
         assert_ne!(claude_path, codex_path, "异家汇总必须分文件");
         assert!(
-            claude_path.ends_with("b45-t23-roles-matrix-claude-code.json"),
-            "汇总文件名必须带 provider:{}",
+            claude_path.ends_with("b45-t23-roles-matrix-claude-code-capture.json"),
+            "汇总文件名必须带 provider 与腿:{}",
             claude_path.display()
         );
 
@@ -165,6 +201,7 @@ mod evidence_tests {
         let claude_round_two = b45_t23_write_provider_summary_at(
             &run_two,
             &ProviderName::ClaudeCode,
+            "capture",
             Some("round-2"),
             &json!({"duties": {"m2_coder": ["coding"]}}),
         )
@@ -176,6 +213,7 @@ mod evidence_tests {
         let rewritten = b45_t23_write_provider_summary_at(
             &run_one,
             &ProviderName::ClaudeCode,
+            "capture",
             Some("round-1"),
             &json!({"duties": {"m2_coder": []}}),
         )
@@ -187,17 +225,103 @@ mod evidence_tests {
             "不得生成跨家共享汇总文件(会互相覆盖)"
         );
 
-        // 文件内容只含本家(可逐格复算),run-id 如实记录。
+        // 文件内容只含本家(可逐格复算),run-id/腿如实记录。
         let written: Value =
             serde_json::from_slice(&std::fs::read(&claude_path).expect("read claude summary"))
                 .expect("parse claude summary");
         assert_eq!(written["provider"], "claude-code");
+        assert_eq!(written["leg"], "capture");
         assert_eq!(written["run_id"], "round-1");
         assert!(written["providers"].get("ClaudeCode").is_some());
         assert!(
             written["providers"].get("Codex").is_none(),
             "单家汇总不得混入异家条目"
         );
+    }
+
+    /// F1 负测(轮次合同修复):同一 run-id 下 capture 与 resume 两腿证据
+    /// **互不覆盖**——格按腿分面、汇总按腿分文件,两腿事后都可复核(旧形态
+    /// 下 resume 腿把 capture 腿 fresh 格与汇总一起写掉,是 triage 误读
+    /// 「现场 cell」的根因)。
+    #[test]
+    fn t23_two_legs_same_run_id_do_not_overwrite_each_other() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let run_id = "20261021T220734Z-claude-r3-capture-resume";
+        let run_root = temp.path().join("reports/claude-code").join(run_id);
+        let roles = run_root.join("b45-t23-roles");
+        let capture_root = roles.join("matrix-capture");
+        let resume_root = roles.join("matrix-resume");
+        assert_eq!(
+            b45_t23_leg_label(RunMode::CapturePlanSnapshot),
+            capture_root
+                .file_name()
+                .expect("capture facet")
+                .to_str()
+                .expect("utf8")
+                .trim_start_matches("matrix-"),
+            "腿标签必须与证据面后缀同源"
+        );
+
+        let write_leg_cell = |root: &Path, state: &str| {
+            let cell_dir = root.join("story/workspace_streaming_plan-split/fresh");
+            std::fs::create_dir_all(&cell_dir).expect("cell dir");
+            std::fs::write(
+                cell_dir.join("cell.json"),
+                serde_json::to_vec_pretty(&json!({
+                    "stage": "story",
+                    "fresh_or_resume": "fresh",
+                    "capability_state": state,
+                }))
+                .expect("cell json"),
+            )
+            .expect("write cell");
+            cell_dir.join("cell.json")
+        };
+        let capture_cell = write_leg_cell(&capture_root, "confirmed");
+        let capture_summary = b45_t23_write_provider_summary_at(
+            &run_root,
+            &ProviderName::ClaudeCode,
+            "capture",
+            Some(run_id),
+            &json!({"matrix_cells": ["capture-leg"]}),
+        )
+        .expect("capture summary");
+
+        // resume 腿写同名 stage/入口/相位(carried):同 run-id 下旧形态会
+        // 逐字覆写上面那份格。
+        let resume_cell = write_leg_cell(&resume_root, "carried");
+        let resume_summary = b45_t23_write_provider_summary_at(
+            &run_root,
+            &ProviderName::ClaudeCode,
+            "resume",
+            Some(run_id),
+            &json!({"matrix_cells": ["resume-leg"]}),
+        )
+        .expect("resume summary");
+
+        assert_ne!(capture_cell, resume_cell, "两腿格路径必须分面");
+        assert_ne!(capture_summary, resume_summary, "两腿汇总必须分文件");
+        let read_state = |path: &Path| -> String {
+            let doc: Value = serde_json::from_slice(&std::fs::read(path).expect("read cell"))
+                .expect("parse cell");
+            doc["capability_state"].as_str().unwrap_or("-").to_string()
+        };
+        assert_eq!(
+            read_state(&capture_cell),
+            "confirmed",
+            "resume 腿不得覆写 capture 腿的格"
+        );
+        assert_eq!(read_state(&resume_cell), "carried");
+        let read_cells = |path: &Path| -> Value {
+            let doc: Value = serde_json::from_slice(&std::fs::read(path).expect("read summary"))
+                .expect("parse summary");
+            doc["providers"]["ClaudeCode"]["matrix_cells"].clone()
+        };
+        assert_eq!(read_cells(&capture_summary), json!(["capture-leg"]));
+        assert_eq!(read_cells(&resume_summary), json!(["resume-leg"]));
+        // 分面只加腿后缀:快照根不随腿漂移,resume 腿仍能定位 capture 腿的快照。
+        assert_eq!(snapshots_root(&capture_root), roles.join("snapshots"));
+        assert_eq!(snapshots_root(&capture_root), snapshots_root(&resume_root));
     }
 
     #[test]

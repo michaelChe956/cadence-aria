@@ -6,7 +6,7 @@
 //!   M7 生命周期=fresh/resume 与 spawn 计数)与 `run_boundary_and_failure_
 //!   matrix`(M4 group/repair=coding 正向/受控写/D4、M5 失败关闭=17 固定
 //!   负向场景零 spawn),逐家断言六职责域覆盖并落盘单家汇总
-//!   b45-t23-roles-matrix-<provider>.json(每格 CLI exact version/native
+//!   b45-t23-roles-matrix-<provider>-<leg>.json(每格 CLI exact version/native
 //!   ID/argv 或 wire/policy digest/cwd/target/spawn 计数全要素,cell.json
 //!   由 harness 落盘)。M6 Codex 岗位
 //!   由 `b45_live_codex_danger_apply_patch` 承担。
@@ -27,6 +27,9 @@
 //!   provider 证据根末段)。capture→resume 是同一逻辑轮,两步必须用同一
 //!   run-id:承继格 `carried_source_evidence_root`(矩阵证据根)与快照
 //!   定位按同一根计算,只有根一致时来源链才可复核。
+//! - F1(轮次合同):同一 run-id 下矩阵面按腿分面 `matrix-<leg>`、汇总名加
+//!   腿后缀——两腿证据互不覆盖;`snapshots/` 在 facet 的父目录,位置不随
+//!   腿漂移(resume 腿仍能定位 capture 腿的快照)。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -55,14 +58,20 @@ use super::harness::{
     LiveLcGatewayHarness, LiveMatrixEvidence, RESUME, carried_cell, r2_evidence_semantics,
     task11_failure_scenario_binds_session,
 };
-use super::live_b45_t23_evidence::{b45_t23_evidence_root, b45_t23_write_provider_summary};
+use super::live_b45_t23_evidence::{
+    b45_t23_leg_label, b45_t23_matrix_evidence_root, b45_t23_write_provider_summary,
+};
 use super::live_matrix::require_lc_gateway_e2e_switch;
 
 /// r2 简化批次新增断言的负测(A1/A2/B3 三面)。
 #[cfg(test)]
 mod r2_assertion_tests;
+/// 轮次合同断言:覆盖 / plan 定稿链 / 级联归因优先(大文件守卫:整体抽出)。
+mod round_contract;
 /// 轮次覆盖的 split_sync 对照入口/承继引用判据(大文件守卫:新增抽子模块)。
 mod split_sync_coverage;
+
+use round_contract::{verify_plan_chain_durable, verify_round_coverage};
 
 /// 分批 provider 清集(env 缺省=四家全跑)。
 fn b45_t23_providers_from_env() -> Vec<ProviderName> {
@@ -111,118 +120,6 @@ fn b45_t23_cell_summary(cell: &EvidenceCell) -> Value {
         "execution_origin": cell.execution_origin,
         "denied_reason": cell.denied_reason,
     })
-}
-
-/// resume 轮必需承继阶段(阶段, 入口):story/design/plan(streaming)+
-/// split(split_sync)。
-const RESUME_CARRIED_STAGES: [(&str, &str); 4] = [
-    ("story", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
-    ("design", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
-    ("plan", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
-    ("split", ENTRYPOINT_SPLIT_SYNC),
-];
-
-/// full_chain 轮 streaming 入口逐 stage 至少 1 个 confirmed fresh 执行格;
-/// split_sync 对照入口按 sync 桥合同单判(见 `verify_split_sync_control`)。
-const FULL_CHAIN_FRESH_STAGES: [(&str, &str); 5] = [
-    ("story", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
-    ("design", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
-    ("plan", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
-    ("coding", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
-    ("review", ENTRYPOINT_WORKSPACE_STREAMING_PLAN_SPLIT),
-];
-
-/// 轮次覆盖断言(纯函数;负测在 `mod tests` 钉死拒绝形态)。
-///
-/// - resume 轮:story/design/plan(streaming)+split(split_sync)各恰 1 个
-///   carried 格且来源链可复核;coding/review 各恰 1 个 executed-resume
-///   (真实执行、native ID 相同;carried 冒充 resume 拒绝)。
-/// - full_chain 轮:streaming 入口逐 stage 至少 1 个 fresh 执行格;
-///   split_sync 对照入口按 sync 桥合同单判(carried 承继或任意状态的
-///   真实 fresh 尝试均可,不以 confirmed 口径要求)。
-fn verify_round_coverage(resume_round: bool, cells: &[EvidenceCell]) -> Result<(), String> {
-    if resume_round {
-        verify_resume_round(cells)
-    } else {
-        verify_full_chain_round(cells)
-    }
-}
-
-fn verify_resume_round(cells: &[EvidenceCell]) -> Result<(), String> {
-    for (stage, entrypoint) in RESUME_CARRIED_STAGES {
-        let carried: Vec<&EvidenceCell> = cells
-            .iter()
-            .filter(|cell| {
-                cell.stage == stage
-                    && cell.entrypoint == entrypoint
-                    && cell.capability_state == "carried"
-            })
-            .collect();
-        if carried.len() != 1 {
-            return Err(format!(
-                "resume 轮 {stage}/{entrypoint} 必须恰 1 个 carried 格,实际 {}",
-                carried.len()
-            ));
-        }
-        let cell = carried[0];
-        split_sync_coverage::verify_carried_reference(
-            cell,
-            &format!("resume 轮 {stage}/{entrypoint}"),
-        )?;
-    }
-    for stage in ["coding", "review"] {
-        let phase_cells: Vec<&EvidenceCell> = cells
-            .iter()
-            .filter(|cell| cell.stage == stage && cell.fresh_or_resume == RESUME)
-            .collect();
-        if phase_cells.len() != 1 {
-            return Err(format!(
-                "resume 轮 {stage} 必须恰 1 个 resume 格,实际 {}",
-                phase_cells.len()
-            ));
-        }
-        let cell = phase_cells[0];
-        // A1:终门空转格(attempt 已停终门、产品不重启 runner)合法但须自证;
-        // 其余状态一律非法,不借状态名逃避 resume 判等。
-        r2_evidence_semantics::verify_resume_phase_cell(stage, cell)?;
-        if cell.execution_origin.starts_with("carried:") {
-            return Err(format!(
-                "resume 轮 {stage}:carried 格冒充 executed-resume(承继格不重新计票,不得计作原生恢复)"
-            ));
-        }
-        match (
-            cell.requested_resume_id.as_deref(),
-            cell.native_resume_confirmed_id.as_deref(),
-        ) {
-            (Some(requested), Some(confirmed))
-                if !requested.trim().is_empty() && requested == confirmed => {}
-            _ => {
-                return Err(format!(
-                    "resume 轮 {stage} executed-resume 的 native ID 不一致:请求 {:?} 确认 {:?}",
-                    cell.requested_resume_id, cell.native_resume_confirmed_id
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn verify_full_chain_round(cells: &[EvidenceCell]) -> Result<(), String> {
-    for (stage, entrypoint) in FULL_CHAIN_FRESH_STAGES {
-        let fresh_executed = cells.iter().any(|cell| {
-            cell.stage == stage
-                && cell.entrypoint == entrypoint
-                && cell.fresh_or_resume == FRESH
-                && cell.capability_state == "confirmed"
-                && !cell.execution_origin.starts_with("carried:")
-        });
-        if !fresh_executed {
-            return Err(format!(
-                "full_chain 轮 {stage}/{entrypoint} 缺 fresh 执行格(不得以 carried/resume 冒充)"
-            ));
-        }
-    }
-    split_sync_coverage::verify_split_sync_control(cells)
 }
 
 /// 逐阶段 spawn 仪器断言(计划 §1.1 ③):fresh/执行 resume 必须有真实新增
@@ -468,9 +365,18 @@ fn b45_t23_assert_role_coverage(
     let confirmed = matrix.confirmed_cells();
     let stage_confirmed = |stage: &str| confirmed.iter().filter(|cell| cell.stage == stage).count();
 
+    // F3(轮次合同):full/capture 轮先判 plan **durable 定稿**再判逐格覆盖
+    // ——plan 未定稿时 coding/review 不可达,先报 plan 才不会把级联结果
+    // 当成下游缺格(pi r3-capture 的误报形态)。
+    if !resume_round
+        && let Err(error) = verify_plan_chain_durable(matrix.plan_chain(), matrix.cells())
+    {
+        panic!("M1 plan 定稿链断言失败:{error}");
+    }
     // 轮次覆盖(§1.1 ②术语修正):resume 轮=4 承继 + coding/review 各 1
-    // executed-resume(native 同 ID);full_chain 轮=逐 stage(plan 两入口)
-    // 至少 1 个 fresh 执行格。负测:删必需格/拿 carried 冒充 resume→红。
+    // 个 resume 格(confirmed 或自证齐备 not_applicable,native 同 ID);
+    // full_chain 轮=逐 stage(plan 两入口)至少 1 个 fresh 执行格。
+    // 负测:删必需格/拿 carried 冒充 resume/fresh 未确认先报 fresh→红。
     if let Err(error) = verify_round_coverage(resume_round, matrix.cells()) {
         panic!("M1/M7 轮次覆盖断言失败:{error}");
     }
@@ -595,8 +501,14 @@ async fn b45_live_four_provider_roles() {
         "B45_T23_PROVIDERS 至少一家(claude/codex/pi/kimi)"
     );
     for provider in providers {
+        // F1(轮次合同修复):同一 run-id 下按腿分面(capture 与 resume 是同一
+        // 逻辑轮的两条腿)——resume 腿不再覆写 capture 腿的 fresh 格与汇总;
+        // facet 只加腿后缀,快照根(= facet 父目录)不变,resume 腿仍能定位
+        // capture 腿落下的快照。
+        let run_mode = super::snapshot::RunMode::from_env()
+            .expect("LIVE_MATRIX_RUN_MODE 已在 run_provider_matrix 入口校验");
         // (a) 五阶段矩阵:M1/M2/M3/M7(Author/Coder/Reviewer/生命周期)。
-        let matrix_root = b45_t23_evidence_root(&provider, "matrix");
+        let matrix_root = b45_t23_matrix_evidence_root(&provider, run_mode);
         let matrix = match LiveLcGatewayHarness::new()
             .run_provider_matrix(provider.clone(), &matrix_root)
             .await
@@ -629,10 +541,11 @@ async fn b45_live_four_provider_roles() {
             ),
         };
         let provider_summary = b45_t23_assert_role_coverage(&provider, &matrix, &boundary);
-        // 类1′ ①:每家立即落本家汇总(b45-t23-roles-matrix-<provider>.json,
-        // 证据根含可选 run-id);不跨家合并、进程末尾不再整文件重写,
-        // 异家并行/同家多轮互不覆盖。
-        b45_t23_write_provider_summary(&provider, &provider_summary);
+        // 类1′ ① + F1:每家立即落本家汇总
+        // (b45-t23-roles-matrix-<provider>-<leg>.json,证据根含可选 run-id);
+        // 不跨家合并、进程末尾不再整文件重写,异家并行/同家多轮/同轮两腿
+        // 互不覆盖。
+        b45_t23_write_provider_summary(&provider, b45_t23_leg_label(run_mode), &provider_summary);
     }
 }
 
@@ -1062,6 +975,7 @@ async fn b45_live_codex_danger_apply_patch() {
 
 #[cfg(test)]
 pub(crate) mod t23_assertion_tests {
+    use super::round_contract::FULL_CHAIN_FRESH_STAGES;
     use super::*;
     use crate::web_lc_gateway_multi_provider::snapshot::{
         SNAPSHOT_MANIFEST_SCHEMA_VERSION, SNAPSHOT_POINT_PLAN_CONFIRMED, SnapshotManifest,
@@ -1284,7 +1198,7 @@ pub(crate) mod t23_assertion_tests {
             "删 split 承继格必须拒绝"
         );
 
-        // carried 冒充 executed-resume → 红。
+        // carried 冒充 resume 格(承继格不重新计票)→ 红。
         let mut masquerade = cells.clone();
         for cell in &mut masquerade {
             if cell.stage == "coding" && cell.fresh_or_resume == RESUME {
@@ -1294,7 +1208,7 @@ pub(crate) mod t23_assertion_tests {
         let error = verify_round_coverage(true, &masquerade).expect_err("carried 冒充必须拒绝");
         assert!(error.contains("冒充"), "{error}");
 
-        // executed-resume native ID 不一致 → 红。
+        // resume 格 native ID 不一致 → 红。
         let mut mismatch = cells.clone();
         for cell in &mut mismatch {
             if cell.stage == "review" && cell.fresh_or_resume == RESUME {

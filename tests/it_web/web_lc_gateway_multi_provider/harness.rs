@@ -101,6 +101,8 @@ mod coding_pump_guards;
 pub(crate) mod issue_scope_guards;
 /// 成员仓基线原文(kimi r2 F1:基线必须 rustfmt 干净,含钉住单测)。
 mod member_fixture_baseline;
+/// T23 plan 定稿链 durable 事实(F2 capture 基线闸门 / F3 轮次断言共用口径)。
+pub(crate) mod plan_chain;
 /// r2 简化批次证据语义(A1/A2/B1;产品零改动的测试侧判据)。
 pub(crate) mod r2_evidence_semantics;
 
@@ -663,9 +665,18 @@ pub(crate) struct LiveMatrixEvidence {
     pub(crate) member_worktree: PathBuf,
     pub(crate) cells: Vec<EvidenceCell>,
     pub(crate) rejections: Vec<EvidenceCellRejection>,
+    /// F3:本轮的 durable 计划定稿链事实(plan Confirmed + 子 work item
+    /// 落库);轮次断言用它判「下游可达」,不看格状态(claude r2 反例:
+    /// plan resume 格 denied 而已定稿)。
+    pub(crate) plan_chain: plan_chain::PlanChainDurability,
 }
 
 impl LiveMatrixEvidence {
+    /// F3:durable 计划定稿链事实(边界/失败矩阵段不消费,保持默认空)。
+    pub(crate) fn plan_chain(&self) -> &plan_chain::PlanChainDurability {
+        &self.plan_chain
+    }
+
     pub(crate) fn canonical_root(&self) -> &Path {
         &self.canonical_root
     }
@@ -816,8 +827,10 @@ impl LiveLcGatewayHarness {
             );
             fp("stage_end", format_args!("design cells={}", cells.len()));
             // Plan:workspace streaming 主入口(start_work_item_plan_author caller 链)。
+            // F2:capture 轮基线未定稿时本阶段以 snapshot_baseline_not_confirmed
+            // 结束整轮(不写 manifest)。
             fp("stage_begin", "plan streaming");
-            cells.extend(env.run_plan_streaming_stage().await);
+            cells.extend(env.run_plan_streaming_stage().await?);
             fp(
                 "stage_end",
                 format_args!("plan streaming cells={}", cells.len()),
@@ -891,8 +904,17 @@ impl LiveLcGatewayHarness {
                     reason: reason.clone(),
                 });
                 // 结构不完整的 Confirmed 格降级为 denied(不以删格缩小验收)。
-                cell.capability_state = "denied".to_string();
-                cell.denied_reason = cell.denied_reason.take().or(Some(reason));
+                // F5(轮次合同修复):denied/unknown/carried 已是否定/承继
+                // 形态,不得用 fresh 腿的 `completed_product_artifact_exists`
+                // 等字段做二次改写(状态名被悄悄升级成别的 denied 原因);
+                // 只保留 rejections 记录。
+                if !matches!(
+                    cell.capability_state.as_str(),
+                    "denied" | "unknown" | "carried"
+                ) {
+                    cell.capability_state = "denied".to_string();
+                    cell.denied_reason = cell.denied_reason.take().or(Some(reason));
+                }
             }
             // F7:证据落盘失败不静默——该格降级 denied(reason=证据落盘失败),
             // 不出现绿格+空证据目录。
@@ -914,6 +936,8 @@ impl LiveLcGatewayHarness {
             member_worktree: env.member_worktree.clone(),
             cells,
             rejections,
+            // F3:轮次断言用 durable 事实判「plan 是否定稿」,不看格状态。
+            plan_chain: env.durable_plan_chain(),
         })
     }
 }
@@ -1084,6 +1108,8 @@ impl LiveLcGatewayHarness {
             member_worktree: env.member_worktree.clone(),
             cells,
             rejections: Vec::new(),
+            // 边界/失败段不消费计划定稿链(F3 只判轮次覆盖),保持空事实。
+            plan_chain: plan_chain::PlanChainDurability::default(),
         })
     }
 }
@@ -3362,6 +3388,13 @@ impl MatrixEnvironment {
         // 不静默续跑(如 capture 设 run-id 而 resume 忘设 env)。
         validate_snapshot_origin(&manifest.source_evidence_root, evidence_root)
             .map_err(|message| matrix_failure("snapshot_origin_mismatch", message, None))?;
+        // F2(轮次合同修复):基线必须 durable 定稿(plan Confirmed + 子 work
+        // item 落库)。空 work_item_id 不再被塞成 `Some("")` 继续跑——否则
+        // 续跑轮会一路撞 coding 400 `work_item_plan_not_confirmed`,根因被
+        // 藏在「resume 格状态非法」后面。
+        plan_chain::verify_snapshot_baseline_at_open(&opened.workspace_root, &manifest).map_err(
+            |message| matrix_failure("snapshot_baseline_not_confirmed", message, Some("plan")),
+        )?;
         fp(
             "snapshot_opened",
             format_args!(
@@ -5245,7 +5278,9 @@ impl MatrixEnvironment {
     // Plan:workspace streaming 主入口。
     // -----------------------------------------------------------------------
 
-    async fn run_plan_streaming_stage(&mut self) -> Vec<EvidenceCell> {
+    /// F2:capture 轮基线未定稿时以 `snapshot_baseline_not_confirmed` 结束
+    /// 整轮(不写 manifest);其余阶段内失败照旧落格不删格。
+    async fn run_plan_streaming_stage(&mut self) -> Result<Vec<EvidenceCell>, LiveMatrixFailure> {
         let mut cells = Vec::new();
         if self.story_spec_id.is_none() || self.design_spec_id.is_none() {
             cells.push(
@@ -5258,7 +5293,7 @@ impl MatrixEnvironment {
                 plan_resume
                     .denied_cell("前置 story/design 未确认,plan resume 无会话可恢复".to_string()),
             );
-            return cells;
+            return Ok(cells);
         }
         // ---- fresh:prepare plan 会话(真实 start_work_item_plan_author
         // caller 链在 WS author 驱动里执行:begin handle→bind sink→start→
@@ -5282,7 +5317,7 @@ impl MatrixEnvironment {
             let mut plan_resume = StageObservation::new("plan", &self.provider);
             plan_resume.force_resume = true;
             cells.push(plan_resume.denied_cell("plan fresh 未启动,resume 无会话".to_string()));
-            return cells;
+            return Ok(cells);
         }
         let session_id = body["workspace_session"]["workspace_session_id"]
             .as_str()
@@ -5293,7 +5328,7 @@ impl MatrixEnvironment {
             let mut plan_resume = StageObservation::new("plan", &self.provider);
             plan_resume.force_resume = true;
             cells.push(plan_resume.denied_cell("plan fresh 未启动,resume 无会话".to_string()));
-            return cells;
+            return Ok(cells);
         }
         observation.workspace_session_id = session_id.clone();
         self.prior_plan_session_id = Some(session_id.clone());
@@ -5354,59 +5389,11 @@ impl MatrixEnvironment {
         // confirm 前移出——fresh 不再 confirm,work item 定稿在 resume 轮)。
         self.resolve_first_work_item().await;
         // r52 快照:capture 模式在此静止边界落快照(typed confirm 已
-        // confirmed、work item 已解析、无 running run/attempt)。
-        if matches!(
-            super::snapshot::RunMode::from_env(),
-            Ok(super::snapshot::RunMode::CapturePlanSnapshot)
-        ) && self.snapshot_id.is_none()
-        {
-            let lc_root = self
-                .app_paths
-                .logical_codebase_record_root(PROJECT_ID, &self.lc_id);
-            let audits =
-                self.scan_session_audits(&self.prior_plan_session_id.clone().unwrap_or_default());
-            let cli_version = audits
-                .first()
-                .map(|(_, record)| record.provider_version.clone())
-                .unwrap_or_default();
-            let input = super::snapshot::CaptureInput {
-                provider_wire: &self.provider_wire,
-                cli_version: &cli_version,
-                project_id: PROJECT_ID,
-                issue_id: &self.issue_id,
-                lc_id: &self.lc_id,
-                plan_id: &self.plan_id,
-                work_item_id: self.work_item_id.as_deref().unwrap_or_default(),
-                workspace_root: self.workspace_root_path(),
-                aggregate_root: self.aggregate_root_path(),
-                lc_root: &lc_root,
-                policy_root: &self.canonical_root,
-                source_evidence_root: &self.evidence_root,
-            };
-            match super::snapshot::capture_plan_snapshot(
-                &self.evidence_root,
-                &input,
-                self.capture_snapshot_dir.as_deref(),
-            ) {
-                Ok(captured) => {
-                    self.snapshot_id = Some(captured.snapshot_id.clone());
-                    fp(
-                        "snapshot_captured",
-                        format_args!(
-                            "snapshot={} dir={}",
-                            captured.snapshot_id,
-                            captured.directory.display()
-                        ),
-                    );
-                }
-                Err(message) => {
-                    // 快照失败不伪造、不阻断全链证据:fp 留痕,本轮无快照
-                    //(capture 是运营加速面,矩阵证据语义不受影响)。
-                    fp("snapshot_capture_failed", format_args!("{message}"));
-                }
-            }
-        }
-        cells
+        // confirmed、work item 已解析、无 running run/attempt)。F2:基线未
+        // durable 定稿时不写 manifest,本轮以 snapshot_baseline_not_confirmed
+        // 结束(实现与取数在 `harness::plan_chain`)。
+        self.capture_plan_baseline()?;
+        Ok(cells)
     }
 
     /// F1′(Bug45):读本轮权威 gate snapshot 的 `manual_repairs_remaining`
@@ -6816,7 +6803,13 @@ impl MatrixEnvironment {
             .count_session_provider_starts(&session_id)
             .saturating_sub(observation.spawn_audits_before.unwrap_or(0));
         observation.completed_product_artifact_exists = spec_captured && drive.gate_reached;
-        cells.push(observation.build_cell(self));
+        let fresh_cell = observation.build_cell(self);
+        // F5:评审阶段无 resume 驱动(reviewer 恒 fresh spawn,见下)。未驱动
+        // 格的原因必须指向 fresh 载体会话是否交付——不得把「fresh 未交付」
+        // 写成「原生恢复未确认」(kimi r3-resume 现场的失真归因)。
+        let fresh_cell_failed = (fresh_cell.capability_state != "confirmed")
+            .then(|| fresh_cell.denied_reason.clone().unwrap_or_default());
+        cells.push(fresh_cell);
 
         // resume:reviewer 恒 fresh spawn(产品 5c54caf1:
         // `should_resume_provider_conversation` 仅对 Coder 为真;reviewer 的
@@ -6835,6 +6828,9 @@ impl MatrixEnvironment {
         resume.force_resume = true;
         resume.workspace_session_id = session_id.clone();
         resume.spawn_audits_before = Some(self.count_session_provider_starts(&session_id));
+        // F5:本格没有做 resume 驱动,原因只能落在「fresh 是否交付」上。
+        resume.resume_not_driven = true;
+        resume.fresh_cell_failed = fresh_cell_failed;
         // 评审载体会话的原生 id(该分区内 reviewer 面 ProviderStart 应为空;
         // 一旦出现,判据不成立——见 reviewer_audits_present)。
         resume.requested_resume_id = self.latest_audit_native_id(&session_id, &self.provider, None);
@@ -7179,6 +7175,12 @@ struct StageObservation {
     spawn_audits_before: Option<usize>,
     /// F3:驱动侧解析到的 provider 子进程 PID(stream log 文件名)。
     observed_pid: Option<String>,
+    /// F5:该 resume 格按产品语义**没有做 resume 驱动**(reviewer 恒 fresh
+    /// spawn)——此时不得落「原生恢复未确认」这种伪自证文本。
+    resume_not_driven: bool,
+    /// F5:同阶段 fresh 格的失败原因(状态非 confirmed 时非空);未驱动格
+    /// 的原因必须指向 fresh 未交付,而不是「恢复未确认」。
+    fresh_cell_failed: Option<String>,
 }
 
 impl StageObservation {
@@ -7210,6 +7212,8 @@ impl StageObservation {
             observed_spawn_count: 0,
             spawn_audits_before: None,
             observed_pid: None,
+            resume_not_driven: false,
+            fresh_cell_failed: None,
         }
     }
 
@@ -11883,7 +11887,7 @@ impl LiveLcGatewayHarness {
 
         // 3) 规划合法 terminal:plan streaming(SC 单候选→Confirmed)。
         fp("b45_stage_begin", "plan");
-        let plan_cells = env.run_plan_streaming_stage().await;
+        let plan_cells = env.run_plan_streaming_stage().await?;
         fp(
             "b45_stage_end",
             format_args!("plan cells={}", plan_cells.len()),
@@ -13189,7 +13193,7 @@ impl LiveLcGatewayHarness {
                 "design_specs",
             )
             .await;
-        let plan_cells = env.run_plan_streaming_stage().await;
+        let plan_cells = env.run_plan_streaming_stage().await?;
         env.resolve_first_work_item().await;
 
         // coding attempt:创建后并行(驱动 WS + durable 窗口轮询)。
@@ -13484,7 +13488,7 @@ impl LiveLcGatewayHarness {
                 "design_specs",
             )
             .await;
-        let plan_cells = env.run_plan_streaming_stage().await;
+        let plan_cells = env.run_plan_streaming_stage().await?;
         env.resolve_first_work_item().await;
         let plan_id = env.plan_id.clone();
         if env.plan_id.is_empty() {
