@@ -1453,6 +1453,18 @@ pub struct PlanCodingFinalConfirmBlockingDto {
     pub message: String,
 }
 
+/// T18（REQ-GFR-CR-05 / REQ-GFR-CR-06）：issue 级跨仓最终评审的 advisory
+/// 警告——**仅呈现**，不参与 ready/blocked 判定与 state（advisory 红线）。
+/// 结论为通过（含 Failed/Skipped 记录，其 verdict 恒为 approve）时不出现。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CrossRepoReviewWarning {
+    /// 值域 `request_changes|blocked`。
+    pub verdict: String,
+    pub summary: String,
+    pub findings_count: usize,
+}
+
 /// P1-a（REQ-MTG-11 / 契约 A2）：plan 级聚合最终确认投影——
 /// `state` 值域 `not_ready|ready|partial|done`：Confirmed 视为已确认；
 /// 全 Completed → done；部分 Completed 且剩余全就绪 → partial；零确认且
@@ -1464,6 +1476,15 @@ pub struct PlanCodingFinalConfirmDto {
     pub ready_attempt_ids: Vec<String>,
     pub confirmed_attempt_ids: Vec<String>,
     pub blocking: Vec<PlanCodingFinalConfirmBlockingDto>,
+    /// T18（REQ-GFR-CR-05/06）：跨仓最终评审 advisory 警告；仅呈现，
+    /// 不参与 ready/blocked 与 state 判定。单仓 issue / 无评审记录 / 结论为
+    /// 通过时为 `None`（单仓路径序列化不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_repo_review_warning: Option<CrossRepoReviewWarning>,
+    /// T18（REQ-GFR-CR-06）：该 issue 的跨仓评审是否已有「已知风险，仍然
+    /// 确认」留痕。
+    #[serde(default)]
+    pub cross_repo_review_acknowledged: bool,
 }
 
 impl Default for PlanCodingFinalConfirmDto {
@@ -1473,6 +1494,8 @@ impl Default for PlanCodingFinalConfirmDto {
             ready_attempt_ids: Vec::new(),
             confirmed_attempt_ids: Vec::new(),
             blocking: Vec::new(),
+            cross_repo_review_warning: None,
+            cross_repo_review_acknowledged: false,
         }
     }
 }

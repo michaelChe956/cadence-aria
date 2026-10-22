@@ -28,7 +28,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingExecutionAttempt, CodingExecutionStage, CodingExecutionUnit,
-    CodingExecutionUnitStatus, GroupFinalReadinessStatus,
+    CodingExecutionUnitStatus, GroupFinalReadinessStatus, ReviewVerdict,
 };
 use crate::product::coding_plan_run::CodingPlanRunStore;
 use crate::product::coding_workspace_engine::CodingWorkspaceEngineError;
@@ -40,8 +40,8 @@ use crate::web::error::{ApiError, ApiResult};
 use crate::web::state::CodingAttemptRunKey;
 use crate::web::state::WebAppState;
 use crate::web::types::{
-    PlanCodingFinalConfirmBlockingDto, PlanCodingFinalConfirmDto, PlanCodingFinalConfirmResultDto,
-    PlanCodingFinalConfirmResultItemDto,
+    CrossRepoReviewWarning, PlanCodingFinalConfirmBlockingDto, PlanCodingFinalConfirmDto,
+    PlanCodingFinalConfirmResultDto, PlanCodingFinalConfirmResultItemDto,
 };
 
 /// 单冻结 target 的聚合确认分类（GET 投影与 POST 预检共用）。
@@ -299,7 +299,50 @@ pub(crate) fn build_plan_final_confirm(
         }
     }
     dto.state = final_confirm_state(plan_complete, &dto).to_string();
+    // T18（REQ-GFR-CR-05/06）：跨仓最终评审 advisory 呈现——只填展示字段，
+    // 上方 ready/blocked 分类与 final_confirm_state 一律不改（advisory 红线）。
+    fill_cross_repo_review_advisory(paths, project_id, issue_id, &mut dto)?;
     Ok(dto)
+}
+
+/// 跨仓最终评审 advisory 投影（REQ-GFR-CR-05：仅呈现，不进任何门）：
+/// issue 级评审记录结论为 `request_changes`/`blocked` →
+/// `cross_repo_review_warning`；该 issue 已有任何「已知风险，仍然确认」
+/// 留痕 → `cross_repo_review_acknowledged = true`。评审 Failed/Skipped 记录
+/// 的 `verdict` 恒为 `approve`，天然不产生警告；无评审记录两字段保持缺省。
+fn fill_cross_repo_review_advisory(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+    dto: &mut PlanCodingFinalConfirmDto,
+) -> Result<(), ProductStoreError> {
+    let store = CodingAttemptStore::new(paths.clone());
+    let Some(review) = store.load_issue_cross_repo_review(project_id, issue_id)? else {
+        return Ok(());
+    };
+    if matches!(
+        review.verdict,
+        ReviewVerdict::RequestChanges | ReviewVerdict::Blocked
+    ) {
+        dto.cross_repo_review_warning = Some(CrossRepoReviewWarning {
+            verdict: cross_repo_review_verdict_str(review.verdict).to_string(),
+            summary: review.summary.clone(),
+            findings_count: review.findings.len(),
+        });
+    }
+    dto.cross_repo_review_acknowledged = !store
+        .list_issue_cross_repo_acknowledgements(project_id, issue_id)?
+        .is_empty();
+    Ok(())
+}
+
+/// 跨仓评审结论的 wire 值（与 `ReviewVerdict` 的 snake_case 序列化一致）。
+fn cross_repo_review_verdict_str(verdict: ReviewVerdict) -> &'static str {
+    match verdict {
+        ReviewVerdict::Approve => "approve",
+        ReviewVerdict::RequestChanges => "request_changes",
+        ReviewVerdict::Blocked => "blocked",
+    }
 }
 
 /// state 判定：done=全已确认；ready=零确认且全就绪；partial=部分确认且剩余

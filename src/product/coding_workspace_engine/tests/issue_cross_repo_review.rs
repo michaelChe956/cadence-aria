@@ -12,7 +12,7 @@ use crate::cross_cutting::streaming_provider::{ProviderCompletion, ProviderSessi
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_models::{
     AttemptTargetSnapshot, CodingAttemptStatus, CodingRoleProviderConfigSnapshot,
-    IssueCrossRepoReviewStatus,
+    CodingStageGateStatus, IssueCrossRepoReviewStatus, IssueCrossRepoRiskAcknowledgement,
 };
 use crate::product::logical_codebase::{LogicalRepositoryId, RepositoryCheckoutId};
 use std::path::PathBuf;
@@ -590,4 +590,209 @@ async fn cross_repo_review_material_covers_attempt_awaiting_final_confirm() {
     let prompt = prompts.lock().unwrap()[0].clone();
     assert!(prompt.contains("repo_0.txt"));
     assert!(prompt.contains("repo_1.txt"));
+}
+
+// ---------------------------------------------------------------------------
+// Task 18：advisory 呈现 + 已知风险留痕（REQ-GFR-CR-05「advisory 红线」/
+// REQ-GFR-CR-06「已知风险确认留痕」，设计 B §五 C / §六 D）。
+// ---------------------------------------------------------------------------
+
+/// request_changes 假 provider 输出：1 条 error + 1 条 warning finding。
+const REQUEST_CHANGES_OUTPUT: &str = "{\"verdict\":\"request_changes\",\"summary\":\"跨仓契约不一致\",\"findings\":[{\"severity\":\"error\",\"message\":\"网关与前端对公告分页参数命名不一致\"},{\"severity\":\"warning\",\"message\":\"busi 删除接口缺少级联清理\"}]}";
+
+/// 把已停在人工最终确认的 attempt 补齐 `head_commit`（完成门需要）。
+fn with_head_commit(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> CodingExecutionAttempt {
+    let worktree = attempt
+        .worktree_path
+        .clone()
+        .expect("fixture attempt has worktree");
+    let head = super::git_stdout(&worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    store
+        .update_attempt_head_commit(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            Some(head),
+        )
+        .expect("seed head commit")
+}
+
+#[tokio::test]
+async fn cross_repo_request_changes_still_allows_final_confirm() {
+    let (_root, store, engine, attempts) =
+        cross_repo_trigger_fixture_with_states(2, &[false, true]);
+    let (resolver, _starts, _prompts) = fake_review_provider(REQUEST_CHANGES_OUTPUT);
+
+    // 评审记录在人工确认之前落盘（T17 接线），结论为要求修改。
+    engine
+        .maybe_complete_issue_delivery(&attempts[0], &resolver)
+        .await
+        .expect("issue delivery completion");
+    let review = store
+        .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
+        .expect("load review")
+        .expect("review record");
+    assert_eq!(review.verdict, ReviewVerdict::RequestChanges);
+
+    // REQ-GFR-CR-05：要求修改仍可最终确认，attempt 进入完成态。
+    let parked = with_head_commit(&store, &attempts[1]);
+    let confirmed = engine
+        .handle_final_confirm(PROJECT_ID, ISSUE_ID, &parked.id)
+        .await
+        .expect("request_changes 不得阻断最终确认");
+    assert_eq!(confirmed.status, CodingAttemptStatus::Completed);
+
+    // issue 不被阻断。
+    let issue = IssueStore::new(store.paths())
+        .get(PROJECT_ID, ISSUE_ID)
+        .expect("issue record");
+    assert_ne!(issue.status, IssueStatus::Blocked);
+
+    // 待处理门保持为空（advisory 不建门：choice / blocked / stage 全空）。
+    for attempt_id in [&attempts[0].id, &confirmed.id] {
+        assert!(
+            store
+                .list_open_choice_gates(PROJECT_ID, ISSUE_ID, attempt_id)
+                .expect("choice gates")
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_open_blocked_gate_facts(PROJECT_ID, ISSUE_ID, attempt_id)
+                .expect("blocked gates")
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_open_stage_gates(PROJECT_ID, ISSUE_ID, attempt_id)
+                .expect("stage gates")
+                .iter()
+                .all(|gate| gate.status != CodingStageGateStatus::Open)
+        );
+    }
+
+    // 确认在案：REQ-GFR-CR-06 留痕恰好一条（字段级断言见下一用例）。
+    let acks = store
+        .list_issue_cross_repo_acknowledgements(PROJECT_ID, ISSUE_ID)
+        .expect("acknowledgements");
+    assert_eq!(acks.len(), 1, "要求修改下确认必须留下已知风险留痕");
+    assert_eq!(acks[0].cross_repo_review_id, review.id);
+    assert_eq!(acks[0].attempt_id, confirmed.id);
+}
+
+#[tokio::test]
+async fn cross_repo_acknowledgement_written_once_after_final_confirm() {
+    let (_root, store, engine, attempts) =
+        cross_repo_trigger_fixture_with_states(2, &[false, true]);
+    let (resolver, _starts, _prompts) = fake_review_provider(REQUEST_CHANGES_OUTPUT);
+    engine
+        .maybe_complete_issue_delivery(&attempts[0], &resolver)
+        .await
+        .expect("issue delivery completion");
+    let review = store
+        .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
+        .expect("load review")
+        .expect("review record");
+    assert_eq!(review.verdict, ReviewVerdict::RequestChanges);
+    assert_eq!(review.findings.len(), 2);
+
+    // 确认前无留痕。
+    assert!(
+        store
+            .list_issue_cross_repo_acknowledgements(PROJECT_ID, ISSUE_ID)
+            .expect("acknowledgements")
+            .is_empty()
+    );
+
+    let parked = with_head_commit(&store, &attempts[1]);
+    engine
+        .handle_final_confirm(PROJECT_ID, ISSUE_ID, &parked.id)
+        .await
+        .expect("final confirm");
+
+    // 确认后恰好一条留痕：时间 + 评审 id + 结论 + findings 摘要。
+    let acks = store
+        .list_issue_cross_repo_acknowledgements(PROJECT_ID, ISSUE_ID)
+        .expect("acknowledgements");
+    assert_eq!(acks.len(), 1, "确认后必须恰好留痕一条");
+    let ack = &acks[0];
+    assert_eq!(ack.cross_repo_review_id, review.id);
+    assert_eq!(ack.attempt_id, parked.id);
+    assert_eq!(ack.verdict, ReviewVerdict::RequestChanges);
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&ack.acknowledged_at).is_ok(),
+        "acknowledged_at 必须是 RFC3339 时间"
+    );
+    assert!(ack.findings_summary.contains("error=1"));
+    assert!(ack.findings_summary.contains("warning=1"));
+    assert!(
+        ack.findings_summary
+            .contains("网关与前端对公告分页参数命名不一致")
+    );
+    assert!(ack.findings_summary.contains("busi 删除接口缺少级联清理"));
+
+    // 原始 JSON 只含允许字段：不得出现确认人 / 通道（owner 裁定）。
+    let ack_dir = store
+        .paths()
+        .issue_root(PROJECT_ID, ISSUE_ID)
+        .join("coding-cross-repo-reviews")
+        .join("acknowledgements");
+    let mut ack_files: Vec<PathBuf> = fs::read_dir(&ack_dir)
+        .expect("acknowledgements dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect();
+    ack_files.sort();
+    assert_eq!(ack_files.len(), 1);
+    let raw: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&ack_files[0]).expect("read ack"))
+            .expect("ack json");
+    let allowed = [
+        "id",
+        "project_id",
+        "issue_id",
+        "plan_id",
+        "attempt_id",
+        "cross_repo_review_id",
+        "verdict",
+        "findings_summary",
+        "acknowledged_at",
+    ];
+    for key in raw.as_object().expect("ack object").keys() {
+        assert!(
+            allowed.contains(&key.as_str()),
+            "留痕不得含确认人/通道等字段：{key}"
+        );
+    }
+    assert!(raw.get("acknowledged_by").is_none());
+    assert!(raw.get("acknowledged_channel").is_none());
+
+    // 幂等（REQ-GFR-CR-06）：同一 (cross_repo_review_id, attempt_id) 只写一条。
+    let mut duplicate = ack.clone();
+    duplicate.id = "cross_repo_review_ack_9999".to_string();
+    let written = store
+        .append_issue_cross_repo_acknowledgement(&duplicate)
+        .expect("duplicate append");
+    assert!(!written, "同键留痕必须幂等拒绝");
+    // 重复确认被状态机拒绝，也不得新增留痕。
+    assert!(
+        engine
+            .handle_final_confirm(PROJECT_ID, ISSUE_ID, &parked.id)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .list_issue_cross_repo_acknowledgements(PROJECT_ID, ISSUE_ID)
+            .expect("acknowledgements")
+            .len(),
+        1,
+        "重复确认不得产生第二条留痕"
+    );
 }

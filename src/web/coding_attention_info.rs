@@ -11,10 +11,12 @@
 //! attempt 同样投影。
 //!
 //! kind 语义（契约 A1）：`choice|triage|blocked|stalled|manual_recovery|
-//! final_confirm|plan_final_confirm`。多 target（≥2 冻结 target）plan 仅在
-//! A2 ready/partial 时聚一条 `plan_final_confirm`（target=coding_plan）并抑制
-//! 该 plan 逐 attempt 的 `final_confirm` 催点；单仓/非聚合待确认仍逐
-//! attempt 投影。
+//! final_confirm|plan_final_confirm|cross_repo_review`。多 target（≥2 冻结
+//! target）plan 仅在 A2 ready/partial 时聚一条 `plan_final_confirm`
+//!（target=coding_plan）并抑制该 plan 逐 attempt 的 `final_confirm` 催点；
+//! 单仓/非聚合待确认仍逐 attempt 投影。`cross_repo_review`（T18，
+//! REQ-GFR-CR-05/06）是 issue 级 advisory：跨仓评审非通过结论且尚无留痕时
+//! 提醒，留痕（最终确认）后自然消失——不建通知表、不建 ack。
 
 use std::collections::BTreeMap;
 
@@ -22,7 +24,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
 use crate::product::coding_models::{
     CodingAttemptStatus, CodingChoiceGate, CodingExecutionStage, CodingGateRequired,
-    CodingStageGateState, CodingStageGateStatus, CodingTimelineNodeStatus,
+    CodingStageGateState, CodingStageGateStatus, CodingTimelineNodeStatus, ReviewVerdict,
 };
 use crate::product::json_store::ProductStoreError;
 use crate::web::coding_final_confirm_info::CODING_FINAL_CONFIRM_WAITING_TITLE;
@@ -43,6 +45,8 @@ pub const CODING_ATTENTION_MANUAL_RECOVERY_TITLE: &str = "AI 中断，等待人�
 pub const CODING_ATTENTION_PLAN_FINAL_READY_TITLE: &str = "全部执行完成，待一键最终确认";
 /// plan 级聚合确认（`kind=plan_final_confirm`）标题（partial 态）。
 pub const CODING_ATTENTION_PLAN_FINAL_PARTIAL_TITLE: &str = "部分仓库已确认，剩余待一键确认";
+/// 跨仓最终评审 advisory 提醒（`kind=cross_repo_review`）固定标题。
+pub const CODING_ATTENTION_CROSS_REPO_REVIEW_TITLE: &str = "跨仓评审结论为非通过，请知悉后再确认";
 
 const ATTENTION_SUMMARY_TEXT_LIMIT: usize = 200;
 
@@ -428,6 +432,52 @@ pub fn issue_coding_attention_items(
         });
     }
 
+    // T18（REQ-GFR-CR-05/06）：跨仓最终评审 advisory 提醒——issue 级评审
+    // 记录结论为 request_changes/blocked 且尚无「已知风险，仍然确认」留痕时
+    // 投影一条；留痕（最终确认）后事实关闭，投影自然消失。结论为通过（含
+    // Failed/Skipped 记录，其 verdict 恒为 approve）不投影、不提醒。
+    if let Some(review) = store.load_issue_cross_repo_review(project_id, issue_id)?
+        && matches!(
+            review.verdict,
+            ReviewVerdict::RequestChanges | ReviewVerdict::Blocked
+        )
+        && store
+            .list_issue_cross_repo_acknowledgements(project_id, issue_id)?
+            .is_empty()
+    {
+        let (reason_code, verdict_label) = match review.verdict {
+            ReviewVerdict::Blocked => ("cross_repo_review_blocked", "阻塞"),
+            ReviewVerdict::RequestChanges => ("cross_repo_review_request_changes", "要求修改"),
+            ReviewVerdict::Approve => unreachable!("approve 已被上方 matches 过滤"),
+        };
+        let plan_id = (!review.plan_id.is_empty()).then(|| review.plan_id.clone());
+        items.push(CodingAttentionItemDto {
+            key: format!("cross_repo_review:{}", review.id),
+            kind: "cross_repo_review".to_string(),
+            project_id: project_id.to_string(),
+            issue_id: issue_id.to_string(),
+            plan_id,
+            attempt_id: None,
+            logical_work_item_id: None,
+            repository_name: None,
+            reason_code: Some(reason_code.to_string()),
+            title: CODING_ATTENTION_CROSS_REPO_REVIEW_TITLE.to_string(),
+            summary: truncate_attention_text(&format!(
+                "跨仓最终评审结论：{verdict_label}（findings {} 条）：{}",
+                review.findings.len(),
+                review.summary
+            )),
+            occurred_at: review.created_at.clone(),
+            target: CodingAttentionTargetDto {
+                target_type: "coding_plan".to_string(),
+                attempt_id: None,
+                plan_id: (!review.plan_id.is_empty()).then(|| review.plan_id.clone()),
+                session_id: None,
+            },
+            focus: None,
+        });
+    }
+
     items.sort_by(|left, right| {
         left.occurred_at
             .cmp(&right.occurred_at)
@@ -467,7 +517,8 @@ mod tests {
     use crate::product::coding_models::{
         CodingAttemptScope, CodingChoiceOption, CodingExecutionAttempt,
         CodingRoleProviderConfigSnapshot, CodingRoleRunStatus, CodingRoleRunTrigger,
-        CodingStartRunPolicy, CodingTimelineNode,
+        CodingStartRunPolicy, CodingTimelineNode, IssueCrossRepoReview, IssueCrossRepoReviewStatus,
+        IssueCrossRepoRiskAcknowledgement, ReviewVerdict,
     };
     use crate::product::models::{ProviderName, WorkspaceRolePermissionModes};
     use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -866,5 +917,104 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].kind, "final_confirm");
         assert_eq!(items[0].plan_id.as_deref(), Some("work_item_plan_ghost"));
+    }
+
+    /// T18（REQ-GFR-CR-05/06）：跨仓评审 advisory 提醒——非通过结论投影
+    /// `kind=cross_repo_review` 事项（reason_code 区分 request_changes/blocked），
+    /// 留痕（最终确认）后事实关闭、投影自然消失；结论为通过（含 Failed/
+    /// Skipped 记录，其 verdict 恒为 approve）不投影。
+    #[test]
+    fn cross_repo_attention_item_appears_then_disappears_after_ack() {
+        let fixture = attention_fixture();
+        let store = &fixture.store;
+
+        fn seeded_review(id: &str, verdict: ReviewVerdict, summary: &str) -> IssueCrossRepoReview {
+            IssueCrossRepoReview {
+                id: id.to_string(),
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                plan_id: "work_item_plan_0001".to_string(),
+                verdict,
+                summary: summary.to_string(),
+                findings: Vec::new(),
+                repository_sections: Vec::new(),
+                status: IssueCrossRepoReviewStatus::Completed,
+                failure_reason: None,
+                raw_provider_output_ref: None,
+                created_at: "2026-10-23T08:00:00Z".to_string(),
+            }
+        }
+        let attention_items = |paths: &ProductAppPaths| {
+            issue_coding_attention_items(paths, PROJECT_ID, ISSUE_ID).unwrap()
+        };
+
+        // 通过结论：不投影跨仓提醒（确认卡片也不显示跨仓警告）。
+        store
+            .save_issue_cross_repo_review(&seeded_review(
+                "cross_repo_review_0001",
+                ReviewVerdict::Approve,
+                "跨仓一致性检查通过",
+            ))
+            .unwrap();
+        assert!(attention_items(&fixture.paths).is_empty());
+
+        // 要求修改：投影一条 cross_repo_review。
+        store
+            .save_issue_cross_repo_review(&seeded_review(
+                "cross_repo_review_0002",
+                ReviewVerdict::RequestChanges,
+                "跨仓契约不一致",
+            ))
+            .unwrap();
+        let items = attention_items(&fixture.paths);
+        let item = items
+            .iter()
+            .find(|item| item.kind == "cross_repo_review")
+            .expect("request_changes 必须投影 cross_repo_review 事项");
+        assert_eq!(item.key, "cross_repo_review:cross_repo_review_0002");
+        assert_eq!(
+            item.reason_code.as_deref(),
+            Some("cross_repo_review_request_changes")
+        );
+        assert_eq!(item.occurred_at, "2026-10-23T08:00:00Z");
+        assert_eq!(item.plan_id.as_deref(), Some("work_item_plan_0001"));
+        assert_eq!(item.target.target_type, "coding_plan");
+
+        // 阻塞结论：reason_code 换为 blocked。
+        store
+            .save_issue_cross_repo_review(&seeded_review(
+                "cross_repo_review_0003",
+                ReviewVerdict::Blocked,
+                "跨仓数据迁移冲突",
+            ))
+            .unwrap();
+        let items = attention_items(&fixture.paths);
+        let item = items
+            .iter()
+            .find(|item| item.kind == "cross_repo_review")
+            .expect("blocked 必须投影 cross_repo_review 事项");
+        assert_eq!(
+            item.reason_code.as_deref(),
+            Some("cross_repo_review_blocked")
+        );
+
+        // 留痕（最终确认）后：事实关闭，投影自然消失。
+        store
+            .append_issue_cross_repo_acknowledgement(&IssueCrossRepoRiskAcknowledgement {
+                id: "cross_repo_review_ack_0001".to_string(),
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                plan_id: "work_item_plan_0001".to_string(),
+                attempt_id: "coding_attempt_0001".to_string(),
+                cross_repo_review_id: "cross_repo_review_0003".to_string(),
+                verdict: ReviewVerdict::Blocked,
+                findings_summary: "error=1, warning=0, info=0".to_string(),
+                acknowledged_at: "2026-10-23T08:30:00Z".to_string(),
+            })
+            .unwrap();
+        assert!(
+            attention_items(&fixture.paths).is_empty(),
+            "留痕后跨仓提醒必须消失"
+        );
     }
 }

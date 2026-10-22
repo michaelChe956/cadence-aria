@@ -2,7 +2,9 @@ use super::*;
 use crate::product::coding_attempt_store::IssueDeliveryOverall;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingStageGateStatus, GroupFinalReadinessStatus,
+    IssueCrossRepoRiskAcknowledgement,
 };
+use crate::product::id::next_sequential_id_from_existing;
 use crate::product::issue_store::IssueStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::IssueStatus;
@@ -115,6 +117,20 @@ impl CodingWorkspaceEngine {
                 &updated.id,
             )?;
         }
+
+        // REQ-GFR-CR-06（已知风险确认留痕，advisory 旁路）：跨仓评审结论为
+        // request_changes/blocked 而用户仍然确认 → 追加一条「已知风险，仍然
+        // 确认」留痕。写失败仅告警，不得让已成功的确认回退失败
+        //（REQ-GFR-CR-05：确认必须成功）。
+        if let Err(error) = self.record_cross_repo_risk_acknowledgement_if_needed(&updated) {
+            tracing::warn!(
+                project_id = %updated.project_id,
+                issue_id = %updated.issue_id,
+                attempt_id = %updated.id,
+                error = %error,
+                "跨仓评审已知风险留痕写入失败（advisory，不影响已完成的确认）"
+            );
+        }
         if let Some(node_id) =
             self.active_final_confirm_node_id(project_id, issue_id, attempt_id)?
         {
@@ -139,6 +155,60 @@ impl CodingWorkspaceEngine {
                 .await;
         }
         Ok(updated)
+    }
+
+    /// REQ-GFR-CR-06：「已知风险，仍然确认」留痕（advisory 旁路）。
+    ///
+    /// 该 issue 存在跨仓最终评审且结论为 `request_changes`/`blocked`、且尚无
+    /// 同一 `(cross_repo_review_id, attempt_id)` 的留痕时追加一条。内容只有
+    /// 「确认时间 + 评审记录 id + 结论 + findings 摘要」——不记确认人、不记
+    /// 通道（owner 裁定）。结论为通过（含 Failed/Skipped 记录，verdict 恒为
+    /// approve）不留痕。同一 `(cross_repo_review_id, attempt_id)` 至多一条：
+    /// 引擎前置判定 + store 幂等双保险。
+    fn record_cross_repo_risk_acknowledgement_if_needed(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        let Some(review) = self
+            .store
+            .load_issue_cross_repo_review(&attempt.project_id, &attempt.issue_id)?
+        else {
+            return Ok(());
+        };
+        if !matches!(
+            review.verdict,
+            ReviewVerdict::RequestChanges | ReviewVerdict::Blocked
+        ) {
+            return Ok(());
+        }
+        if self.store.has_issue_cross_repo_acknowledgement(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &review.id,
+            &attempt.id,
+        )? {
+            return Ok(());
+        }
+        let existing = self
+            .store
+            .list_issue_cross_repo_acknowledgements(&attempt.project_id, &attempt.issue_id)?;
+        let acknowledgement = IssueCrossRepoRiskAcknowledgement {
+            id: next_sequential_id_from_existing(
+                "cross_repo_review_ack",
+                existing.iter().map(|record| record.id.as_str()),
+            ),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            plan_id: review.plan_id.clone(),
+            attempt_id: attempt.id.clone(),
+            cross_repo_review_id: review.id.clone(),
+            verdict: review.verdict.clone(),
+            findings_summary: cross_repo_ack_findings_summary(&review.findings),
+            acknowledged_at: Utc::now().to_rfc3339(),
+        };
+        self.store
+            .append_issue_cross_repo_acknowledgement(&acknowledgement)?;
+        Ok(())
     }
 
     pub async fn handle_abort(
@@ -770,6 +840,46 @@ impl CodingWorkspaceEngine {
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// T18（REQ-GFR-CR-06）：跨仓评审已知风险留痕的 findings 摘要。
+// ---------------------------------------------------------------------------
+
+/// 留痕 findings 摘要最多摘录的 message 条数。
+const CROSS_REPO_ACK_FINDINGS_MAX_MESSAGES: usize = 5;
+/// 留痕 findings 摘要整体截断上限（防超长 findings 撑爆留痕 JSON）。
+const CROSS_REPO_ACK_FINDINGS_SUMMARY_LIMIT: usize = 500;
+
+/// 留痕 findings 摘要：severity 计数 + 前 N 条 finding 的 `message`，整体
+/// 截断到固定上限（REQ-GFR-CR-06：内容 = 时间 + 评审 id + 结论 + 摘要）。
+fn cross_repo_ack_findings_summary(findings: &[ReviewFinding]) -> String {
+    let count_severity = |severity: FindingSeverity| {
+        findings
+            .iter()
+            .filter(|finding| finding.severity == severity)
+            .count()
+    };
+    let mut summary = format!(
+        "error={}, warning={}, info={}",
+        count_severity(FindingSeverity::Error),
+        count_severity(FindingSeverity::Warning),
+        count_severity(FindingSeverity::Info),
+    );
+    let messages = findings
+        .iter()
+        .take(CROSS_REPO_ACK_FINDINGS_MAX_MESSAGES)
+        .map(|finding| finding.message.as_str())
+        .collect::<Vec<_>>()
+        .join("；");
+    if !messages.is_empty() {
+        summary.push_str("；");
+        summary.push_str(&messages);
+    }
+    summary
+        .chars()
+        .take(CROSS_REPO_ACK_FINDINGS_SUMMARY_LIMIT)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
