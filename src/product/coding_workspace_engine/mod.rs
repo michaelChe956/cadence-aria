@@ -62,6 +62,7 @@ pub(crate) use code_review::StartupWindowCompensation;
 mod coding;
 mod cross_attempt_handoff;
 mod cross_target_check;
+mod cross_repo_review_prompts;
 mod failed_review_recovery;
 mod gates;
 mod git_operation;
@@ -81,6 +82,7 @@ mod group_review_repair;
 mod group_review_types;
 mod handoffs;
 mod internal_pr_review;
+mod issue_cross_repo_review;
 mod legacy_tool_policy_audit;
 mod lifecycle;
 #[cfg(test)]
@@ -210,6 +212,8 @@ pub(crate) fn extract_json_object_candidates(output: &str) -> Vec<&str> {
     candidates
 }
 
+#[allow(unused_imports)]
+pub(crate) use cross_repo_review_prompts::*;
 #[allow(unused_imports)]
 pub(crate) use failed_review_recovery::{FailedCodeReviewRecovery, recoverable_failed_code_review};
 #[allow(unused_imports)]
