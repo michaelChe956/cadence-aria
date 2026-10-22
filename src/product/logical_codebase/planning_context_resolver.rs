@@ -47,7 +47,8 @@ pub struct ResolvedPlanningContext {
     pub snapshot: PlanningContextSnapshot,
     /// 聚合根 cwd，等于 manifest 的 `provider_context_root`。
     pub cwd: PathBuf,
-    /// 紧凑成员 inventory 注入（已按预算截断），供 prompt 注入。
+    /// 成员 inventory 注入（全量渲染，不裁剪成员；超 500 KiB 绝对上限时构建直接失败），
+    /// 供 prompt 注入。
     pub inventory_injection: InventoryInjection,
     /// 读到的 active aggregate index id（冗余于 snapshot，便于 gateway 直接消费）。
     pub aggregate_index_id: String,

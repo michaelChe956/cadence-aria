@@ -7,6 +7,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use cadence_aria::product::logical_codebase::planning_context_set::PLANNING_MATERIAL_MAX_BYTES;
+
 const MEMBER_COUNT: usize = 50;
 const BUDGET_QUERY: &str = "budget_boundary_symbol";
 
@@ -407,10 +409,11 @@ async fn fifty_member_http_evidence_query_filters_directory_scope_under_five_sec
 }
 
 #[tokio::test]
-async fn fifty_member_planning_budget_injection_truncates_and_keeps_target() {
-    // Long profile metadata puts the same store-backed 50-member data beyond the soft budget.
-    // This follows the production PlanningContextResolver path rather than reconstructing an
-    // inventory in the test, and still requires no checkout repositories or Provider call.
+async fn fifty_member_planning_injection_renders_all_members_without_truncation() {
+    // REQ-PLN-12（Task 5）：仓库清单 MUST 全量注入，MUST NOT 按 soft/hard 预算裁剪，
+    // MUST NOT 出现 omitted/truncated 缺员标记；只有渲染超过 500 KiB 绝对上限才显式阻断。
+    // 本用例走生产 PlanningContextResolver 路径，不重建 inventory，不需要真实 checkout 仓
+    // 或 Provider 调用。
     let fx = FiftyMemberFixture::with_role_padding(120);
     let logical = LogicalCodebaseStore::new(fx.app_paths.clone());
     let manifest = logical.load_manifest(PROJECT_ID).unwrap().unwrap();
@@ -435,14 +438,22 @@ async fn fifty_member_planning_budget_injection_truncates_and_keeps_target() {
     .await
     .expect("resolve store-backed 50-member planning context");
     let injection = context.inventory_injection;
-    assert!(injection.truncated, "50-member inventory must report truncation");
-    assert_eq!(injection.omitted_member_ids.len(), MEMBER_COUNT - 1);
-    assert!(injection.rendered.contains(&target.0.to_string()));
-    assert!(injection.rendered.contains("omitted_member_count=49"));
     assert!(
-        injection.rendered.len() <= injection.budget.hard_bytes,
-        "budget injection exceeded hard limit: {} > {}",
+        !injection.rendered.contains("omitted_member_count"),
+        "50-member inventory must not report omitted members: {}",
+        injection.rendered
+    );
+    for member in &fx.member_ids {
+        assert!(
+            injection.rendered.contains(&member.0.to_string()),
+            "50-member inventory must contain every member: {}",
+            member.0
+        );
+    }
+    assert!(
+        injection.rendered.len() <= PLANNING_MATERIAL_MAX_BYTES,
+        "inventory injection exceeded absolute limit: {} > {}",
         injection.rendered.len(),
-        injection.budget.hard_bytes
+        PLANNING_MATERIAL_MAX_BYTES
     );
 }

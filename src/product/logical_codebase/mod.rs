@@ -100,7 +100,7 @@ pub use planning_context_resolver::{
     BestEffortReadonlyStatus, PlanningContextResolver, ResolvedPlanningContext, ResumeDecision,
 };
 pub use planning_context_set::{
-    InventoryInjection, InventoryInjectionBudget, PlanningContextSetResolver,
+    InventoryInjection, PLANNING_MATERIAL_MAX_BYTES, PlanningContextSetResolver,
     RepositoryContextResolution, RepositoryContextSet, render_compact_inventory,
 };
 pub use pointer_publication::{

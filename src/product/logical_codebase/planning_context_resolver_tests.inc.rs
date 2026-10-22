@@ -4,14 +4,15 @@ mod tests {
     use crate::product::logical_codebase::aggregate_index::{
         AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
     };
-    use crate::product::logical_codebase::planning_context_set::InventoryInjectionBudget;
+    use crate::product::logical_codebase::planning_context_set::PLANNING_MATERIAL_MAX_BYTES;
     use crate::product::logical_codebase::policy::{
         AggregatePolicyArtifactStore, PolicyTarget, SessionPolicyAction,
     };
     use crate::product::logical_codebase::{
         CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelection,
         IssueCodebaseSelectionStore, LogicalCodebaseManifest, LogicalCodebaseStore, MemberStatus,
-        RepositoryCheckoutId, RepositoryCheckoutRecord, RepositorySourceIdentity, RepositoryType,
+        RepositoryCheckoutId, RepositoryCheckoutRecord, RepositoryContextResolution,
+        RepositoryContextSet, RepositorySourceIdentity, RepositoryType,
     };
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -720,8 +721,8 @@ mod tests {
         );
         assert_eq!(resolved.snapshot.policy_digest, fixture.policy_digest());
         assert!(
-            resolved.inventory_injection.rendered.len()
-                <= InventoryInjectionBudget::DEFAULT.hard_bytes
+            resolved.inventory_injection.rendered.len() <= PLANNING_MATERIAL_MAX_BYTES,
+            "渲染材料必须在 500 KiB 绝对上限内"
         );
         assert_eq!(
             resolved.best_effort_readonly_status,
@@ -1025,5 +1026,122 @@ mod tests {
             matches!(stale, ResumeDecision::StaleContext { .. }),
             "聚合根迁移必须触发 planning snapshot 重建"
         );
+    }
+
+    // --- REQ-PLN-12：仓库清单全量注入 + 500 KiB 超限阻断 ---
+
+    /// 纯内存成员集合夹具：直接构造 `RepositoryContextResolution`，避免落盘依赖。
+    /// `alias_pad` 控制单行长度，用于构造超过 500 KiB 上限的成员集。
+    fn inventory_resolution(count: usize, alias_pad: usize) -> RepositoryContextResolution {
+        let set = (0..count)
+            .map(|index| RepositoryContextSet {
+                member_id: LogicalRepositoryId(stable_uuid(0x0200 + index as u16)),
+                alias: format!("member_{index:04}_{}", "a".repeat(alias_pad)),
+                root_relative_path: format!(
+                    "services/member_{index:04}/{}",
+                    "p".repeat(alias_pad)
+                ),
+                role: "service".to_string(),
+                repo_type: RepositoryType::Backend,
+                tech_stack: vec!["rust".to_string()],
+            })
+            .collect();
+        RepositoryContextResolution {
+            set,
+            invalid_member_ids: Vec::new(),
+            membership_revision: 1,
+        }
+    }
+
+    #[test]
+    fn inventory_renders_all_members_without_omitted_count() {
+        // REQ-PLN-12：多仓评审材料 MUST 全量注入成员清单，MUST NOT 以
+        // omitted/truncated 形式的缺员标记呈现被省略成员。
+        let resolution = inventory_resolution(3, 8);
+        let targets: Vec<LogicalRepositoryId> = resolution
+            .set
+            .iter()
+            .take(2)
+            .map(|member| member.member_id)
+            .collect();
+
+        let injection = render_compact_inventory(&resolution, &targets).unwrap();
+
+        for member in &resolution.set {
+            assert!(
+                injection.rendered.contains(&member.alias),
+                "清单必须含成员 alias：{}",
+                member.alias
+            );
+            assert!(
+                injection.rendered.contains(&member.member_id.0.to_string()),
+                "清单必须含成员 id：{}",
+                member.member_id.0
+            );
+        }
+        // 3 个成员 → 3 行（每行投影 id | alias | path | role | profile）。
+        assert_eq!(
+            injection
+                .rendered
+                .lines()
+                .filter(|line| line.contains(" | "))
+                .count(),
+            3,
+            "清单必须逐行列出全部成员：\n{}",
+            injection.rendered
+        );
+        // 绝不出现任何缺员标记。
+        assert!(!injection.rendered.contains("omitted_member_count"));
+        assert!(!injection.rendered.contains("omitted_member_ids"));
+        assert!(!injection.rendered.contains("truncated"));
+
+        // 超出旧 soft 预算（4 KiB）的成员集：裁剪式实现在此会丢掉非目标成员并输出
+        // `omitted_member_count`——全量实现必须仍逐行列出全部成员（静默缺员即失败）。
+        let wide = inventory_resolution(50, 64);
+        let wide_targets = vec![wide.set[0].member_id];
+        let wide_injection = render_compact_inventory(&wide, &wide_targets).unwrap();
+        assert!(
+            !wide_injection.rendered.contains("omitted_member_count"),
+            "50 成员清单不得出现缺员标记：\n{}",
+            wide_injection.rendered
+        );
+        assert_eq!(
+            wide_injection
+                .rendered
+                .lines()
+                .filter(|line| line.contains(" | "))
+                .count(),
+            50,
+            "50 成员清单必须逐行列出全部成员"
+        );
+        for member in &wide.set {
+            assert!(
+                wide_injection.rendered.contains(&member.alias),
+                "清单必须含成员 alias：{}",
+                member.alias
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_over_500kib_is_rejected_not_truncated() {
+        // REQ-PLN-12：渲染材料超过 500 KiB 绝对上限时 MUST 以
+        // `planning_material_over_budget` 显式阻断，MUST NOT 裁剪成员后继续。
+        // 单成员行 ≈ 235 字节；4000 成员 ≈ 940 KiB > 512 KiB。
+        let resolution = inventory_resolution(4_000, 64);
+        let targets = vec![resolution.set[0].member_id];
+
+        let error = render_compact_inventory(&resolution, &targets).unwrap_err();
+
+        match error {
+            ProductStoreError::InvalidRecord { kind, reason } => {
+                assert_eq!(kind, "planning_material_over_budget");
+                assert!(
+                    reason.contains(&PLANNING_MATERIAL_MAX_BYTES.to_string()),
+                    "阻断原因必须含字节上限：{reason}"
+                );
+            }
+            other => panic!("期望 planning_material_over_budget，实际：{other:?}"),
+        }
     }
 }
