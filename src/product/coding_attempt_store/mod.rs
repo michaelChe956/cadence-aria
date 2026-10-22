@@ -21,6 +21,7 @@ mod group_review_store;
 mod group_terminal;
 mod group_validation;
 mod inputs;
+mod issue_cross_repo_review;
 mod issue_delivery;
 pub(crate) mod locking;
 mod paths;

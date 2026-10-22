@@ -1,4 +1,5 @@
 pub mod context;
+pub mod cross_repo_review;
 pub mod execution;
 pub mod gate;
 pub mod group;
@@ -17,6 +18,7 @@ pub mod timeline;
 pub mod tests;
 
 pub use context::*;
+pub use cross_repo_review::*;
 pub use execution::*;
 pub use gate::*;
 pub use group::*;
