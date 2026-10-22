@@ -40,21 +40,16 @@
 
 ### Requirement: action 与写根约束（REQ-ENV-03）
 
-系统 SHALL 使 envelope 区分 `PlanningReadOnly` / `CodingTargetWrite` / `ReviewReadOnly`；Planning/Review 的 writable roots 为空，Coding 的唯一 writable root 恰为当前 target worktree。canonical root working directory 是 provider 启动与目录发现边界，不得据此把 coding writable root 扩大为聚合根；root 约束仍是“配置目标 + best-effort”，不宣称 OS 级不可写。plan reviewer 的 target SHALL 对应该成员的子评审窗口，并另冻结完整成员集合的 scope/set digest 作为附加冻结证据；对账域仅含选中成员，SHALL NOT 据此收窄 readable_roots。
+系统 SHALL 使 envelope 区分 `PlanningReadOnly` / `CodingTargetWrite` / `ReviewReadOnly`；Planning/Review 的 writable roots 为空，Coding 的唯一 writable root 恰为当前 target worktree。canonical root working directory 是 provider 启动与目录发现边界，不得据此把 coding writable root 扩大为聚合根；root 约束仍是“配置目标 + best-effort”，不宣称 OS 级不可写。
 
 #### Scenario: coding target 与 envelope 不一致
 
 - **WHEN** coding run 的 target、worktree 或独立 working directory 与 envelope 不一致
 - **THEN** 启动 SHALL 被拒绝（fail-closed）；spawn 前复验 canonical root、git-dir、worktree identity 与 target snapshot
 
-#### Scenario: plan 子 launch target 与成员窗对应
-
-- **WHEN** plan reviewer 为多个选中成员分别启动子会话
-- **THEN** 每个子会话的 target SHALL 对应该成员子窗口，envelope SHALL 另冻结完整成员集合的 scope/set digest；Reviewer writable roots 仍为空，readable_roots 仍覆盖 LC 根全树
-
 ### Requirement: resume 一致性（REQ-ENV-04）
 
-系统 SHALL 仅当 policy digest、target identity、canonical working directory、provider version/dialect、capability snapshot 全部一致时允许 resume；任一维度变更时新建会话并使旧会话 superseded；对 planning/coding/review/initialization 均适用。plan 评审子会话的 resume SHALL 追加 scope/set digest 比对，冻结集合漂移即拒绝续接。
+系统 SHALL 仅当 policy digest、target identity、canonical working directory、provider version/dialect、capability snapshot 全部一致时允许 resume；任一维度变更时新建会话并使旧会话 superseded；对 planning/coding/review/initialization 均适用。
 
 #### Scenario: 续接旧 provider session
 
@@ -65,11 +60,6 @@
 
 - **WHEN** 尝试续接旧 provider session 且 canonical root working directory、target、政策或 capability 指纹任一不一致
 - **THEN** 系统 SHALL 拒绝 resume 并启动新会话，旧会话标记 superseded
-
-#### Scenario: 评审范围漂移拒绝续接
-
-- **WHEN** 尝试 resume 旧 plan 评审子会话且 scope/set digest 与当前冻结集合不一致
-- **THEN** 系统 SHALL 拒绝续接旧会话并等待显式新轮，不复用旧 scope、旧基线或旧分节
 
 ### Requirement: 配置来源隔离（REQ-ENV-06）
 
@@ -164,11 +154,6 @@
 - **WHEN** 登记、recipe、workspace/coding gateway 或 aggregate provider factory 得出的 canonical root 不一致
 - **THEN** 系统 SHALL 在 provider spawn 前 fail-closed，记录不一致字段和摘要，不允许一个 root 生成配置而另一个 root 消费配置
 
-#### Scenario: 完整成员集合随 root cwd 一同冻结
-
-- **WHEN** plan reviewer 从 canonical LC root 启动并按 Issue 选集覆盖多成员
-- **THEN** 启动审计与 envelope SHALL 同时记录 root identity 与冻结的完整成员集合映射，成员子窗与集合账本可互相追溯
-
 ### Requirement: cwd 与 target 的合法分离形态（REQ-ENV-11）
 
 系统 SHALL 允许逻辑代码库 session 的 canonical `working_directory` 与 target worktree/member checkout 不同，只要 working directory 位于 authority 允许范围且 target 通过 canonical path、成员归属、git-dir/worktree identity、policy action 与 capability 复验。`writable_roots` SHALL 继续表达逻辑授权：Planning/Review 为空，Coding 仅为 target worktree。
@@ -182,8 +167,3 @@
 
 - **WHEN** working directory 越出 authority、target 不属于 manifest、git-dir/worktree 身份漂移，或 Coding writable root 不是 target worktree
 - **THEN** 系统 SHALL 在 spawn 前拒绝，且不得用扩大 root、成员 fallback 或 direct provider 启动规避校验
-
-#### Scenario: 对账域收窄不收窄可读面
-
-- **WHEN** plan reviewer 的对账域仅含 Issue 选中的成员仓
-- **THEN** 其 cwd 仍为 canonical LC root、readable_roots 仍覆盖根全树并可加载根级规则与索引上下文；域外根级条目只作未对账披露，不转为不可读

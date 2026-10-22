@@ -36,16 +36,6 @@
 - [ ] 5.4 【归档硬门】在本 change 归档前，必须完成 anchor-recovery 的依赖门修订：该 change 排在去沙箱③之后，Codex read-only/workspace-write、旧角色 Reviewer deny 与物理 write_boundary 前提按本全开契约修订，并核对同 capability 的 requirement/header；交付修订审阅记录与两个 change 的 strict 结果，否则禁止归档本 change，不得以 supersedes 注释代替（design.md 同 capability 冲突面、REQ-LCG-04/06、REQ-PLN-01/06）。
 - [ ] 5.5 【归档前后措辞门】对主规范执行失效措辞扫描并人工判读：不能残留规范性“永久禁止 Codex danger-full-access”“宿主写成功即能力失败”“Reviewer 必带 deny”等旧结论；核对 PLN 与 anchor-recovery 的 header 无覆盖冲突，交付扫描结果及归档后主规范 strict 证据（五处契约变更）。
 
-## 6. plan 评审范围与多成员对账域（按范围/集合基础 → 屏障与对账 → 报告 → 验收推进）
-
-- [ ] 6.1 落地评审范围冻结与选集预检：评审范围取 Issue 选集有效成员全集并冻结 scope 快照，阶段声明不收窄；空集/失效/非 Git/解析不明以稳定错误码零材料零 reviewer 阻断，重复 common-dir 以专用码整轮阻断，冻结后漂移拒绝本轮采信（REQ-ENV-14、REQ-PLN-11、REQ-PLN-03）。
-- [ ] 6.2 落地窗口变更政策分档：窗口请求/记录/manifest 携带显式 mutation_policy 且进入指纹，plan reviewer 走 ZeroWrite（任何已观察 worktree 差异含 ignored 产物即违规、先落证据再恢复、恢复后仍作废），coding reviewer 与 internal reviewer 保留既有 B 档豁免，policy 缺失拒绝启动（REQ-ENV-13、REQ-ENV-REVIEW-B、REQ-ENV-03、REQ-PLN-06）。
-- [ ] 6.3 落地 durable 集合屏障与成员窗口编排：集合账本先于首窗落盘，全窗先开且基线完整后才评审，整轮持锁、依次评审、末统一收口；任一开窗失败零评审启动并回收已开窗口，任一成员失败或违规整轮 fail-closed（REQ-ENV-15、REQ-ENV-REVIEW-B）。
-- [ ] 6.4 落地可读面与对账面分离与逐项披露：所有角色 cwd 仍为 manifest 根、readable_roots 仍覆盖根全树，根级非成员条目不纳入基线/比对/恢复并在报告逐项标注“根域未对账”，成员内部同名条目仍完整对账（REQ-ENV-16、REQ-ENV-10/11）。
-- [ ] 6.5 落地成员分段报告与唯一总判定：一份报告每成员恰一节并由服务端计算总判定，PARTIAL 仅诊断不路由 pass、不触发返修或交付推进，采信先于成功路由；finding 按成员归属且跨成员重复不重置指纹（REQ-PLN-12、REQ-PLN-11）。
-- [ ] 6.6 落地窗口标识与终态接管，并核验同轮不同成员、跨会话同 run、重试新子 run 均不撞号，终态可接管、非终态仍拒绝（REQ-ENV-17）。
-- [ ] 6.7 执行全集对账验收并执行启用门：按三仓实际夹具覆盖选集全集、逐项违规检出与集合作废、根域未对账披露、双范围独立与 partial 不推进；闭环未全部通过时多成员评审入口保持关闭，不得以过渡模式交付（REQ-PLN-13、REQ-ENV-14/15/16）。
-
 ## 后续工作流
 
 - 契约审阅通过后才展开实施 Plan 和 apply；本次工件创建不代表任何源码行为已实现。

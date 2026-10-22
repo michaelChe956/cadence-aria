@@ -86,38 +86,9 @@ API 身份认证、Origin/Host、WS 与敏感 GET 覆盖是启用全开前的公
 | anchor-recovery projection（:27-41） | 先改 :29/:35-37 的 readonly/target-only Confirmed 前提；保留完整候选/基准/审计同源目标 | 旧负探针晚归档覆盖新合同 |
 | anchor-recovery resume（:43-61） | 后续完整 fingerprint 包含新执行与 Codex 检测纪律，不复制为本 change 已交付要求 | 旧 full map 回填当前模型 |
 | anchor-recovery 版本观测（:65-83） | 保留在其 change 内，依其工作流实施验收，本 change 不冒领 TTL 交付 | 提前同步尚未完成的合同 |
-| anchor-recovery aggregate-planning header | 它改 PLN-03/05/07、加 PLN-08；本 change 的 planning delta 改 PLN-01/06 并新增 PLN-11/12/13，**无同名 header 重叠**；评审范围边界已在其 delta 内按最小修订补齐（PLN-03/05/07/08） | 把 ReadOnly 名称当物理边界 |
+| anchor-recovery aggregate-planning header | 它改 PLN-03/05/07、加 PLN-08；本 change 只改 PLN-01/06，**无同名 header 重叠** | 把 ReadOnly 名称当物理边界 |
 
-tasks 5.4 是本 change 的归档硬门：先交付 anchor 的依赖/权限最小修订与审阅，核对 Codex 投影与测试预期；5.5 是失效措辞门。评审范围与多成员对账域批次已按最小修订补齐 anchor 的 aggregate-planning 侧（PLN-03/05/07/08）与 `lc-root-initialization` 的 session-policy-envelope 侧（ENV-03/04/10/11），其网关侧的 Codex/角色/写边界冲突仍按 5.4 门在本 change 归档前完成，不能后补注释。逻辑排期为原网关基线归档→本契约及去沙箱③实施→anchor 按修订依赖实施。
-
-### 8. plan 评审范围对齐 Issue 选集与多成员对账域（owner 已决，2026-10-22）
-
-技术方案见 `cadence/designs/2026-10-22_技术方案_评审范围对齐Issue选集与多成员对账域_v1.0.md`，第十节 F 表是本次契约修订的逐条清单。本节只固定已拍板边界，不重开产品决策。
-
-**范围与冻结**：plan 评审范围＝Issue 选集的有效成员全集，权威源是 `IssueCodebaseSelection` → 唯一 resolver → effective member ids，不从 Story/Design/WorkItem 的 involved/focus/change_order/target 收窄。范围在评审启动时冻结为 scope 快照（selection/set digest、membership revision、policy digest、有序成员映射），冻结早于任何材料采集与 provider 启动。空集、成员失效、checkout 不可解析、非 Git 工作树、身份解析不明与选集内 canonical common-dir 重复均以稳定错误码整轮 fail-closed，不回落 primary、不跳过成员。冻结后 selection/membership/checkout/root/policy 漂移即拒绝本轮采信并等待显式新轮。
-
-**窗口承载**：采用路线 (ii)——每个选中成员复用一个单树评审窗口，新增 durable 集合屏障：集合账本先于首个成员窗口落盘，全窗先开且基线完整后才开始评审，整轮持续持锁、成员依次评审、末次统一收口对账与恢复。common-dir 互异是本路线的前提；重复 common-dir 以专用码整轮阻断。任一成员开窗失败零 reviewer 启动并回收已开窗口；任一成员失败或违规即整轮 fail-closed，PARTIAL 仅留诊断。
-
-**变更政策分档**：窗口携带显式 `mutation_policy`（`RecoverableVerification` / `ZeroWrite`），冻结后不可变并进入 manifest 指纹。ZeroWrite 仅用于 plan reviewer，基线后任何 worktree 差异（含 ignored 产物）均生成违规事实，且先落证据再恢复、恢复成功不洗白；coding reviewer 与 internal reviewer 保持既有 B 档临时验证豁免，不得声称全部 Reviewer 已统一零写。ZeroWrite 是采信政策，不是物理 no-exec 承诺。
-
-**双范围**：可读面＝LC 根全树（所有角色 cwd＝manifest `provider_context_root`，`readable_roots` 覆盖根全树，根级规则/工具/索引上下文继续可读可加载）；对账面＝Issue 选中的成员仓。LC 根级非成员条目不纳入基线、比对与恢复，并在报告逐项披露“根域未对账”；成员仓内部同名条目仍属该成员完整基线。对账域收窄不等于可读面收窄，不做根 guard。
-
-**报告与判定**：一份报告按成员分节（每成员恰一节，含状态、成员 verdict、finding 归属、raw 引用、window/baseline 标识），外加一个由服务端事实计算的确定性总判定；模型不得伪造 accepted，completeness 为 partial 时 acceptance 不得为 accepted。成员分段只引用 finding ID，不复制内容分叉。
-
-**标识与接管**：集合基 ID 取 session+plan run，成员子窗 ID 追加成员 UUID（不用 alias 或顺序号）；终态旧窗口归档后可接管并延续原基线与 journal，非终态窗口仍拒绝接管。`fabf3e95` 已落地该前置，不重复修复。
-
-**启用门**：多成员评审入口只在范围冻结、集合屏障、ZeroWrite 对账、成员分段报告、总判定与恢复闭环全部落地并验收后启用；不得以单仓锚定、仅分段报告或漏检的过渡模式交付。
-
-**契约落点**：本 change 的 session-policy-envelope delta 新增 REQ-ENV-13/14/15/16/17 并改写 REQ-ENV-REVIEW-B；logical-codebase-aggregate-planning delta 新增 REQ-PLN-11/12/13 并在 PLN-06 补 plan ZeroWrite 全集对账。主规格同步 PLN-02/04 与 primary 语义、TGT-01/03、MTG-01/02；在途 delta 最小修订 `lc-root-initialization`（ENV-03/04/10/11）与 `fix-planning-session-anchor-recovery`（PLN-03/05/07/08）。主规格 session-policy-envelope 的 ENV-01..09 全部被在途 delta 占用，其 B 段与 ZeroWrite 只经活 delta 新增，不在主规格另发冲突修订。
-
-| 需求 | 承载条款 |
-|---|---|
-| 范围同源与冻结 | REQ-PLN-11、REQ-ENV-14、REQ-PLN-03（在途 delta）、REQ-ENV-04（在途 delta） |
-| 集合屏障与整轮 fail-closed | REQ-ENV-15、REQ-ENV-REVIEW-B、REQ-PLN-13 |
-| ZeroWrite 分档 | REQ-ENV-13、REQ-ENV-03、REQ-PLN-06 |
-| 可读面与对账面分离 | REQ-ENV-16、REQ-ENV-10/11（在途 delta） |
-| 成员分段报告与总判定 | REQ-PLN-12 |
-| 窗口标识与终态接管 | REQ-ENV-17 |
+tasks 5.4 是本 change 的归档硬门：先交付 anchor 的依赖/权限最小修订与审阅，核对 Codex 投影与测试预期；5.5 是失效措辞门。本任务仅列清单，不改 anchor。逻辑排期为原网关基线归档→本契约及去沙箱③实施→anchor 按修订依赖实施；anchor 工件冲突修订须在本 change 归档前完成，不能后补注释。
 
 ### 已知偏差台账
 
@@ -154,7 +125,6 @@ tasks 5.4 是本 change 的归档硬门：先交付 anchor 的依赖/权限最�
 4. 旧 capability/audit/native session 保留历史，失配进入明确核验或 fresh 等待；不沿用旧隔离指纹，不洗白未关闭 Reviewer 窗口。
 5. 真实验收覆盖四家×角色及 Direct/LC、fresh/resume/retry，Kimi Maven/npm/Podman、长静默 CHECK、Reviewer 自提交作废与崩溃恢复、鉴权拒绝及正常 Coder 交付。缺工具或登录态按真实前提缺失记录，不 skip 后宣称全通。
 6. 若部署回退，先停止新会话准入与活动 writer，收口/人工处理未闭 B 档窗口，再恢复与所部署版本匹配的旧契约/能力材料；不得仅回退代码却复用新证据，或把污染现场作为旧基线。
-7. plan 评审范围与多成员对账域按「范围/集合基础 → 集合屏障与 ZeroWrite 对账 → 报告与总判定 → 集成验收」推进；各批次可独立提交验收，但在范围冻结、集合屏障、ZeroWrite 对账、成员分段报告与恢复闭环全部落地并通过验收前，多成员评审入口保持关闭，不得以单仓锚定、仅分段报告或漏检的过渡模式对外交付。
 
 未决产品决策：无。原网关归档由 controller 执行，anchor 最小冲突修订是明确归档门、未声称本次完成。strict 只证明工件与 delta 合法，不证明实现或真实行为已通过。
 
@@ -171,8 +141,5 @@ tasks 5.4 是本 change 的归档硬门：先交付 anchor 的依赖/权限最�
 | Codex author + 不可达/强制 Decline/物理预防 | ENV-09 及规划场景 | 只承诺 fileChange 检测、中断 turn、失败关闭和 durable 审计；必须有 danger+apply_patch 双审批档真机观察 |
 | 规划只读/production_verified_readonly/best_effort_configured | PLN-01/06 与 Purpose；anchor PLN-03/05/07/08 | 本 change 改 PLN-01/06，anchor 改 PLN-03/05/07 与加 PLN-08，标题不重叠；ReadOnly action 名不被误解为物理限制，聚合身份需求仍归 anchor 后续实施 |
 | bwrap 不可用拒绝/封闭 grammar/TERMINAL_COMMAND_TIMEOUT_SECS=120 | Kimi ACP 三条与生命周期 | 全角色 Host 单路径；保留 fs no-follow、并发/输出/总 deadline，不复活旧沙箱或独立 120 秒硬截断 |
-| ZeroWrite + 物理不可写/no-exec/全部 Reviewer 统一零写 | REQ-ENV-03/13、REQ-ENV-REVIEW-B、REQ-PLN-06 | 只承诺观察差异判定、先取证后恢复与恢复后仍作废；不得宣称物理隔离，不得声称 coding/internal reviewer 已统一零写 |
-| 首仓锚定/非主成员未对账但继续/primary 决定评审集合 | REQ-PLN-11、主规格 PLN-02 与 primary 语义 | 评审集合恒为有效选集全集；旧首仓兼容路径与附注文案须删除 |
-| 根域已零写/根域未对账/对账域等同可读面 | REQ-ENV-16、REQ-ENV-10/11（在途 delta） | 根级条目逐项披露“根域未对账”且未采基线/未比对/不恢复；对账域收窄不得收窄 readable_roots，成员内部同名条目仍完整对账 |
 
 归档前未通过任一项时保持本 change 归档门关闭；归档后由 controller 对主规范执行同清单与 strict 验收，不以提案 strict 代替实现或同步后的真实主规范验收。

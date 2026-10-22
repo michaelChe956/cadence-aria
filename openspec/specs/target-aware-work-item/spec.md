@@ -6,15 +6,11 @@ Work Item 携带唯一 `target_repository_id`，贯穿拆分/编译/校验/运�
 ## Requirements
 
 ### Requirement: target 必填与校验集（REQ-TGT-01）
-系统 SHALL 使每个 Work Item 持久化唯一的 `target_repository_id`，其语义类型为 `LogicalRepositoryId`（稳定 UUID 逻辑身份，不可歧义指向 checkout 或物理投影）；target 必须属于该 Issue 冻结的 `IssueCodebaseSelection` 有效成员集合（include 且未 exclude、未删除/停用），而不只是 Project 全体成员。执行时由 member 解析为 `RepositoryCheckoutId`，再定位到 `RepositoryRecord.id` + canonical_path + git_dir_identity。WorkItem 的唯一 target SHALL 只约束编码对象，SHALL NOT 收窄上游 plan 评审集合；评审集合仍为 Issue 有效选集全集。
+系统 SHALL 使每个 Work Item 持久化唯一的 `target_repository_id`，其语义类型为 `LogicalRepositoryId`（稳定 UUID 逻辑身份，不可歧义指向 checkout 或物理投影）；target 必须属于该 Issue 冻结的 `IssueCodebaseSelection` 有效成员集合（include 且未 exclude、未删除/停用），而不只是 Project 全体成员。执行时由 member 解析为 `RepositoryCheckoutId`，再定位到 `RepositoryRecord.id` + canonical_path + git_dir_identity。
 
 #### Scenario: 拆分/编译产生 Work Item
 - **WHEN** 拆分或编译产生 Work Item
 - **THEN** 每个 item 均有合法 target，且 target 属于该 Issue selection 有效集合；指向被 Issue 排除或已删除成员的 target 被拒绝
-
-#### Scenario: 单项 target 不收窄评审集合
-- **WHEN** 某 Issue 的 Work Item 只声明一个 target_repository_id
-- **THEN** 该 target SHALL 只约束该 Work Item 的编码对象，上游 plan 评审集合 SHALL 仍为 Issue 有效选集全集
 ### Requirement: 缺失 target 即 blocker（REQ-TGT-02）
 系统 SHALL 使拆分引擎输出缺少 `target_repository_id` 或 target 非法时产生 blocker 进入人工确认；不发布任何可执行 item；原始输出、候选、blocker、人工补 target、再编译/重试全程可审计。
 
@@ -22,15 +18,11 @@ Work Item 携带唯一 `target_repository_id`，贯穿拆分/编译/校验/运�
 - **WHEN** provider 输出未明确 target 的工作项
 - **THEN** 该项被标记为 blocker，不生成可执行 Work Item；人工补充合法 target 后重新校验与编译
 ### Requirement: target 贯穿编译链路（REQ-TGT-03）
-系统 SHALL 使 `target_repository_id`（语义类型 `LogicalRepositoryId`）贯穿 Outline schema → Draft → compile transaction → `LifecycleWorkItemRecord` → runtime binding；删除「从第一个 Story 推导单一仓库并填充所有 item」的默认路径（当前 `compile_support.rs:25-39,118-123` 的实现须改造）；多个 Work Item 可共享同一合法 target（同一仓库多个任务），但不得统一回落 primary。单 target 不变式 SHALL NOT 因多成员 plan 评审而数组化；plan 评审集合窗口与单 target attempt 相互独立。
+系统 SHALL 使 `target_repository_id`（语义类型 `LogicalRepositoryId`）贯穿 Outline schema → Draft → compile transaction → `LifecycleWorkItemRecord` → runtime binding；删除「从第一个 Story 推导单一仓库并填充所有 item」的默认路径（当前 `compile_support.rs:25-39,118-123` 的实现须改造）；多个 Work Item 可共享同一合法 target（同一仓库多个任务），但不得统一回落 primary。
 
 #### Scenario: 跨仓 Story 拆分为多工作项
 - **WHEN** 跨仓 Story/Design 被拆分为多个工作项
 - **THEN** 各 item 的 target SHALL 分别保留其声明的合法成员仓（可同仓可异仓），不再全部落到同一仓库；编译 transaction 先验证全部 target 再一次性发布，禁止部分 item 已落库
-
-#### Scenario: 评审集合不数组化 attempt
-- **WHEN** plan 评审以集合窗口覆盖 Issue 选集的多个成员
-- **THEN** WorkItem 与 attempt 的单 target 持久化语义 SHALL 保持不变；评审集合窗口 SHALL NOT 把 attempt 数组化，也不改变 depends_on 与分组展示语义
 ### Requirement: 跨仓顺序表达（REQ-TGT-04）
 系统 SHALL 通过现有 work item 级 `depends_on` 表达跨仓执行顺序（执行顺序图，非服务调用图）；校验无环、未知 ID、同一 plan、target 成员有效性；完成级别明确定义（本地 commit 或 push 分支）。
 
