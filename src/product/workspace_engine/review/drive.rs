@@ -1866,9 +1866,7 @@ impl WorkspaceEngine {
     /// 继续,也不产任何 plan_review_window_* 错误码。
     fn assert_plan_review_material(&self) -> Result<(), String> {
         let Some(store) = self.lifecycle_store.as_ref() else {
-            return Err(
-                "plan_review_material_unresolved: lifecycle_store_unavailable".to_string(),
-            );
+            return Err("plan_review_material_unresolved: lifecycle_store_unavailable".to_string());
         };
         let resolution =
             crate::product::logical_codebase::PlanningContextSetResolver::new(store.app_paths())

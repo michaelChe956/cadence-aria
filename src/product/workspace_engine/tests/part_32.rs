@@ -13,11 +13,13 @@ use crate::cross_cutting::provider_availability_gate::{
 use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use crate::cross_cutting::provider_registry::ProviderRegistry;
 use crate::product::logical_codebase::{
-    AggregatePolicyArtifactStore, GatewayRunAudit, LogicalCodebaseManifest,
-    LogicalCodebaseProviderGateway, PolicyTarget, PolicyTargetResolver, ProviderCapability,
-    ProviderCapabilitySource, ProviderDialect, ProviderGatewayError, ProviderRef, ProviderRefType,
-    SessionLaunchRequest, SessionPolicyAction,
+    AggregatePolicyArtifactStore, GatewayRunAudit, IssueCodebaseSelection,
+    IssueCodebaseSelectionStore, LogicalCodebaseFeature, LogicalCodebaseManifest,
+    LogicalCodebaseProviderGateway, LogicalCodebaseStore, PolicyTarget, PolicyTargetResolver,
+    ProviderCapability, ProviderCapabilitySource, ProviderDialect, ProviderGatewayError,
+    ProviderRef, ProviderRefType, SessionLaunchRequest, SessionPolicyAction,
 };
+use crate::product::repository_store::{CreateRepositoryInput, RepositoryStore};
 use crate::protocol::contracts::{AdapterOutput, TimeoutStatus};
 
 /// 同步 adapter stub:`run` 返回最小成功输出,供 gateway 构造。
@@ -188,6 +190,7 @@ struct ReviewGatewayFixture {
     capabilities: Arc<ReviewStaticCapabilitySource>,
     audit: Arc<GatewayRunAudit>,
     worktree: std::path::PathBuf,
+    member_id: LogicalRepositoryId,
 }
 
 fn review_gateway_fixture() -> ReviewGatewayFixture {
@@ -214,7 +217,47 @@ fn review_gateway_fixture() -> ReviewGatewayFixture {
         }
     }
 
-    let manifest = LogicalCodebaseManifest::new("project_0001", worktree.clone(), Vec::new());
+    // Task 2 连带(REQ-ENV-14):lc 内层驱动经 `assert_plan_review_material`
+    // 前置解析材料集合——登记一个 project 级逻辑成员仓(manifest/member/
+    // checkout 由 repository store 的 lc feature 自动接线);issue selection
+    // 由 `equip_plan_review_window` 在 seed issue 后补齐。
+    let member_dir = root.path().join("member-a");
+    std::fs::create_dir_all(&member_dir).expect("create member dir");
+    {
+        use std::process::Command as StdCommand;
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["commit", "-m", "init", "--quiet", "--allow-empty"],
+        ] {
+            let status = StdCommand::new("git")
+                .current_dir(&member_dir)
+                .args(&args)
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git fixture {args:?} must succeed");
+        }
+    }
+    let member = RepositoryStore::with_logical_codebase_feature(
+        paths.clone(),
+        LogicalCodebaseFeature::enabled(),
+    )
+    .create(CreateRepositoryInput {
+        project_id: "project_0001".to_string(),
+        name: "member-a".to_string(),
+        path: member_dir,
+        default_policy_preset: None,
+        default_provider_mode: None,
+        idempotency_key: "part32-review-gateway-member-a".to_string(),
+    })
+    .expect("member repository");
+    let member_id = member.logical_repository_id.expect("logical member id");
+
+    let manifest = LogicalCodebaseStore::new(paths.clone())
+        .load_manifest("project_0001")
+        .expect("manifest io")
+        .expect("member registration wires the project manifest");
     let policy_store = AggregatePolicyArtifactStore::new(paths.clone());
     policy_store
         .ensure_bootstrap(&manifest)
@@ -251,6 +294,7 @@ fn review_gateway_fixture() -> ReviewGatewayFixture {
         capabilities,
         audit,
         worktree,
+        member_id,
     }
 }
 
@@ -260,15 +304,16 @@ fn review_gateway_fixture() -> ReviewGatewayFixture {
 /// ReviewerVerify 合同并通过网关复验。
 async fn equip_plan_review_window(
     engine: &mut crate::product::workspace_engine::types::WorkspaceEngine,
-    paths: &crate::product::app_paths::ProductAppPaths,
+    fixture: &ReviewGatewayFixture,
 ) {
+    let paths = &fixture.paths;
     engine.lifecycle_store = Some(crate::product::lifecycle_store::LifecycleStore::new(
         paths.clone(),
     ));
     // lifecycle store 注入会激活 author baseline fail-closed 链
     // (baseline_teaching)——种子最小 issue 记录(base_branch 缺省由
     // resolve_effective_base_branch 解析默认分支)。
-    crate::product::issue_store::IssueStore::new(paths.clone())
+    let issue = crate::product::issue_store::IssueStore::new(paths.clone())
         .create(crate::product::issue_store::CreateProductIssueInput {
             project_id: "project_0001".to_string(),
             repo_id: None,
@@ -279,6 +324,19 @@ async fn equip_plan_review_window(
             change_id: None,
         })
         .expect("seed issue for baseline chain");
+    // Task 2 连带(REQ-ENV-14):lc 内层驱动的材料断言
+    // (assert_plan_review_material)需要 issue selection 覆盖 fixture 已
+    // 登记成员——补 project 级 selection,使材料集合可解析出非空成员。
+    IssueCodebaseSelectionStore::new(paths.clone())
+        .save(&IssueCodebaseSelection::explicit(
+            "project_0001",
+            &issue.id,
+            vec![fixture.member_id],
+            Vec::new(),
+            Vec::new(),
+            None,
+        ))
+        .expect("seed issue selection");
     let reviewer = engine
         .session
         .reviewer_provider
@@ -317,7 +375,7 @@ async fn drive_review_session_via_gateway_records_audit_and_completes() {
     )
     .with_logical_provider_gateway(fixture.gateway.clone());
 
-    equip_plan_review_window(&mut engine, &fixture.paths).await;
+    equip_plan_review_window(&mut engine, &fixture).await;
     engine.start_review_or_skip().await;
     engine
         .drive_review_session_via_gateway_with_window(empty_provider_commands())
@@ -386,7 +444,7 @@ async fn drive_review_session_via_gateway_fails_closed_for_unavailable_kimi_revi
     )
     .with_logical_provider_gateway(fixture.gateway.clone());
 
-    equip_plan_review_window(&mut engine, &fixture.paths).await;
+    equip_plan_review_window(&mut engine, &fixture).await;
     engine.start_review_or_skip().await;
     engine
         .drive_review_session_via_gateway_with_window(empty_provider_commands())
@@ -449,7 +507,7 @@ async fn drive_review_session_via_gateway_blocks_codex_reviewer_at_route() {
     )
     .with_logical_provider_gateway(fixture.gateway.clone());
 
-    equip_plan_review_window(&mut engine, &fixture.paths).await;
+    equip_plan_review_window(&mut engine, &fixture).await;
     engine.start_review_or_skip().await;
     engine
         .drive_review_session_via_gateway_with_window(empty_provider_commands())

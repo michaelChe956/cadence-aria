@@ -375,11 +375,12 @@ fn design_reviewer_boundary_candidates_stay_out_of_the_deterministic_gate() {
 // `all_logical_plan_review_builders_keep_reviewer_write_guard`：LC 会话下
 // legacy 整组候选 / outline / draft / batch / single-candidate / projection
 // 六个 plan review builder 与 ReviewOnly 泛型分支均以 canonical LC root 为
-// cwd（消费 Task 2.5 `working_directory` 字段合同）、成员 checkout 为显式
-// review target（不从 cwd 推导）；Reviewer 写工具策略（DenyFileWriteBuiltins）
-// 不放宽。伴随断言：LC 缺显式 target fail-closed（绝不回退进程 cwd/成员
-// cwd）；单仓（无 gateway）builder 原值不变（`working_directory=None`、
-// cwd 语义仍由 `working_dir` 承载）。
+// cwd（消费 Task 2.5 `working_directory` 字段合同），Task 2（REQ-PLN-11
+// 条目 2）起 review target 同为 LC 根（lc 目标不再由成员 checkout 承载，
+// 不从 cwd/成员 worktree 推导）；Reviewer 写工具策略（DenyFileWriteBuiltins）
+// 不放宽。伴随断言：LC 缺 `repository_path` 时 target 仍恒为 LC 根（该字段
+// 在 lc 会话是兼容字段）；单仓（无 gateway）builder 原值不变
+// （`working_directory=None`、cwd 语义仍由 `working_dir` 承载）。
 // ============================================================================
 
 /// 最小 LC gateway 夹具：authority root = canonical manifest root，成员
@@ -419,13 +420,12 @@ fn logical_plan_review_gateway_fixture() -> (
     (root, gateway, authority_root, member_root)
 }
 
-/// LC 分支 builder 输出的统一断言：root cwd + 显式成员 target + Reviewer
-/// 写工具策略保持。
+/// LC 分支 builder 输出的统一断言：cwd 与 review target 均为 canonical
+/// LC root（Task 2 / REQ-PLN-11 条目 2）+ Reviewer 写工具策略保持。
 fn assert_logical_plan_review_input(
     input: &StreamingProviderInput,
     case: &str,
     authority_root: &std::path::Path,
-    member_root: &std::path::Path,
 ) {
     assert_eq!(input.role, AdapterRole::Reviewer, "{case}: reviewer role");
     // 批2 Task 11（T20 前中间态）：Reviewer wire 面全开（无 deny）——
@@ -440,8 +440,8 @@ fn assert_logical_plan_review_input(
         "{case}: LC cwd 必须是 canonical root——不得回退成员 worktree 或进程 cwd"
     );
     assert_eq!(
-        input.working_dir, member_root,
-        "{case}: review target 保持显式成员 checkout（不从 cwd 推导）"
+        input.working_dir, authority_root,
+        "{case}: LC review target 降级为 LC 根（不从 cwd/成员 checkout 推导）"
     );
 }
 
@@ -470,7 +470,7 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     let input = engine
         .build_work_item_plan_review_input()
         .expect("legacy plan review input");
-    assert_logical_plan_review_input(&input, "legacy", &authority_root, &member_root);
+    assert_logical_plan_review_input(&input, "legacy", &authority_root);
 
     // outline 分支。
     let outline_payload = work_item_plan_outline_artifact();
@@ -481,7 +481,7 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     let input = engine
         .build_work_item_plan_outline_review_input(&outline_candidate)
         .expect("outline review input");
-    assert_logical_plan_review_input(&input, "outline", &authority_root, &member_root);
+    assert_logical_plan_review_input(&input, "outline", &authority_root);
 
     // draft 分支。
     prepare_work_item_plan_outline_artifact(&mut engine).await;
@@ -498,14 +498,14 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     let input = engine
         .build_work_item_draft_review_input(&draft_candidate)
         .expect("draft review input");
-    assert_logical_plan_review_input(&input, "draft", &authority_root, &member_root);
+    assert_logical_plan_review_input(&input, "draft", &authority_root);
 
     // batch 分支。
     save_batch_work_item_plan_index_with_accepted_drafts(&engine, &plan_id);
     let input = engine
         .build_work_item_batch_review_input()
         .expect("batch review input");
-    assert_logical_plan_review_input(&input, "batch", &authority_root, &member_root);
+    assert_logical_plan_review_input(&input, "batch", &authority_root);
 
     // single-candidate 分支（durable IR + mechanical report）。
     let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
@@ -582,7 +582,7 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     let input = engine
         .build_work_item_plan_review_input()
         .expect("single-candidate review input");
-    assert_logical_plan_review_input(&input, "single-candidate", &authority_root, &member_root);
+    assert_logical_plan_review_input(&input, "single-candidate", &authority_root);
 
     // projection 分支（accepted-contract 夹具 + 初始编译产物；编译在 LC 覆盖
     // 前完成，避免 repository_path 参与编译链）。
@@ -600,7 +600,7 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     let input = projection_engine
         .build_work_item_plan_review_input()
         .expect("projection review input");
-    assert_logical_plan_review_input(&input, "projection", &authority_root, &member_root);
+    assert_logical_plan_review_input(&input, "projection", &authority_root);
 
     // ReviewOnly 泛型分支（Design review）同规则。
     let (_design_tmp, design_store) = setup();
@@ -617,16 +617,23 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     let input = design_engine
         .build_review_input()
         .expect("review-only input");
-    assert_logical_plan_review_input(&input, "review-only", &authority_root, &member_root);
+    assert_logical_plan_review_input(&input, "review-only", &authority_root);
 
-    // —— LC 缺显式 target：fail-closed，绝不回退进程 cwd / 成员 cwd ——
+    // —— LC 缺 repository_path：target 仍恒为 LC 根（Task 2 / REQ-PLN-11
+    //    条目 2;旧「缺显式成员 target fail-closed」契约随 lc 目标降级退役,
+    //    该字段在 lc 会话上是兼容字段）——
     engine.session.repository_path = None;
-    let error = engine
+    let input = engine
         .build_work_item_plan_review_input()
-        .expect_err("logical review without explicit target must fail closed");
-    assert!(
-        error.contains("explicit member target"),
-        "unexpected fail-closed message: {error}"
+        .expect("logical review target is always the LC root");
+    assert_eq!(
+        input.working_dir, authority_root,
+        "LC 缺 repository_path 时 target 必须仍为 LC 根（不从进程 cwd/成员 cwd 推导）"
+    );
+    assert_eq!(
+        input.working_directory.as_deref(),
+        Some(authority_root.as_path()),
+        "LC cwd 保持 canonical root"
     );
 
     // —— 单仓零变化：无 gateway 时 builder 原值不变 ——

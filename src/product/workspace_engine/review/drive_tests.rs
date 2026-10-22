@@ -905,7 +905,7 @@ mod t20b_f1_plan_window_target {
 // 的 logical_fixture/engine_with_aggregate_view,authority root 用独立临时目录。
 mod t2_lc_no_review_window {
     use super::t20b_f1_plan_window_target::{
-        engine_with_aggregate_view, logical_fixture, ApproveReviewProvider, FixtureEntity,
+        ApproveReviewProvider, FixtureEntity, engine_with_aggregate_view, logical_fixture,
     };
     use crate::cross_cutting::provider_adapter::ProviderAdapter;
     use crate::cross_cutting::provider_availability_gate::{
@@ -1045,8 +1045,7 @@ mod t2_lc_no_review_window {
 
     /// 构造仅满足形态判据的最小 gateway;authority root 用独立临时目录,
     /// 返回 (gateway, authority_root, 临时目录锚)。
-    fn lc_gateway_fixture()
-    -> (
+    fn lc_gateway_fixture() -> (
         Arc<LogicalCodebaseProviderGateway>,
         PathBuf,
         tempfile::TempDir,
@@ -1056,9 +1055,7 @@ mod t2_lc_no_review_window {
         std::fs::create_dir_all(&authority_root).expect("create authority root");
         (
             Arc::new(LogicalCodebaseProviderGateway::new(
-                AggregatePolicyArtifactStore::new(ProductAppPaths::new(
-                    root.path().join(".aria"),
-                )),
+                AggregatePolicyArtifactStore::new(ProductAppPaths::new(root.path().join(".aria"))),
                 Arc::new(UnusedCapabilitySource),
                 Arc::new(UnusedTargetResolver),
                 Arc::new(ProviderRegistry::new()),
@@ -1077,10 +1074,8 @@ mod t2_lc_no_review_window {
     async fn lc_review_session_opens_no_plan_review_window() {
         let fixture = logical_fixture(FixtureEntity::StoryFocusFirstMember);
         let (gateway, _authority_root, _authority_kept) = lc_gateway_fixture();
-        let (_view, mut rx, engine) = engine_with_aggregate_view(
-            &fixture,
-            crate::product::models::WorkspaceType::Story,
-        );
+        let (_view, mut rx, engine) =
+            engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Story);
         let mut engine = engine.with_logical_provider_gateway(gateway);
         let session_id = engine.session().session_id.to_string();
         let window_root = fixture.paths.root().join("reviewer-windows");
@@ -1105,17 +1100,13 @@ mod t2_lc_no_review_window {
                 _ => {}
             }
         }
-        assert!(
-            errors.is_empty(),
-            "lc 形态评审必须无错误收尾: {errors:?}"
-        );
+        assert!(errors.is_empty(), "lc 形态评审必须无错误收尾: {errors:?}");
         assert!(
             window_noise.is_empty(),
             "lc 形态不得出现窗口错误码/窗口注意力提示: {window_noise:?}"
         );
-        let window_store = crate::product::reviewer_window_store::ReviewerWindowStore::new(
-            window_root.clone(),
-        );
+        let window_store =
+            crate::product::reviewer_window_store::ReviewerWindowStore::new(window_root.clone());
         let window_id = crate::product::reviewer_window_store::role_run_window_id(
             &session_id,
             engine.active_run_id().unwrap_or(session_id.as_str()),
@@ -1141,10 +1132,8 @@ mod t2_lc_no_review_window {
     async fn lc_review_with_empty_member_set_is_blocked_as_material_unresolved() {
         let fixture = logical_fixture(FixtureEntity::StoryZeroMembers);
         let (gateway, _authority_root, _authority_kept) = lc_gateway_fixture();
-        let (_view, mut rx, engine) = engine_with_aggregate_view(
-            &fixture,
-            crate::product::models::WorkspaceType::Story,
-        );
+        let (_view, mut rx, engine) =
+            engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Story);
         let mut engine = engine.with_logical_provider_gateway(gateway);
 
         engine.start_review_or_skip().await;
@@ -1175,10 +1164,8 @@ mod t2_lc_no_review_window {
     #[tokio::test]
     async fn single_repo_review_session_still_opens_window() {
         let fixture = logical_fixture(FixtureEntity::StoryFocusFirstMember);
-        let (_view, mut rx, mut engine) = engine_with_aggregate_view(
-            &fixture,
-            crate::product::models::WorkspaceType::Story,
-        );
+        let (_view, mut rx, mut engine) =
+            engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Story);
         let session_id = engine.session().session_id.to_string();
 
         engine.start_review_or_skip().await;
@@ -1220,10 +1207,8 @@ mod t2_lc_no_review_window {
     fn lc_review_target_is_logical_root() {
         let fixture = logical_fixture(FixtureEntity::StoryFocusFirstMember);
         let (gateway, authority_root, _authority_kept) = lc_gateway_fixture();
-        let (_view, _rx, mut engine) = engine_with_aggregate_view(
-            &fixture,
-            crate::product::models::WorkspaceType::Story,
-        );
+        let (_view, _rx, mut engine) =
+            engine_with_aggregate_view(&fixture, crate::product::models::WorkspaceType::Story);
         engine.session.repository_path = None;
         let engine = engine.with_logical_provider_gateway(gateway);
 
