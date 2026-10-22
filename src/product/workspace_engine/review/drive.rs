@@ -26,6 +26,15 @@ impl WorkspaceEngine {
         provider: Arc<dyn StreamingProviderAdapter>,
         command_rx: mpsc::Receiver<ProviderCommand>,
     ) {
+        // Task 2(REQ-ENV-14,设计 A 条目 3):多仓(lc)形态不开评审窗——
+        // 直入内层承载(内层自带 reviewer 缺失 fail-closed);同源复验点
+        // 以材料断言替代窗口断言,无基线快照/对账/恢复,不产
+        // plan_review_window_* 错误码或窗口注意力提示。单仓路径不变。
+        if self.is_logical_codebase_issue() {
+            return self
+                .drive_review_session_with_window(provider, command_rx)
+                .await;
+        }
         // C2 Task 5（REQ-CRO-05）：reviewer 缺失（空 effective）不驱动 review
         // run——错误事件＋失败收尾，绝不以 Codex 顶替。
         let Some(reviewer) = self.session.reviewer_provider.clone() else {
@@ -364,6 +373,13 @@ impl WorkspaceEngine {
         &mut self,
         command_rx: mpsc::Receiver<ProviderCommand>,
     ) {
+        // Task 2(REQ-ENV-14,设计 A 条目 3):多仓(lc)形态不开评审窗——
+        // gateway 版公共入口同构直入内层承载,材料断言替代窗口断言。
+        if self.is_logical_codebase_issue() {
+            return self
+                .drive_review_session_via_gateway_with_window(command_rx)
+                .await;
+        }
         let Some(reviewer) = self.session.reviewer_provider.clone() else {
             let _ = self
                 .event_tx
@@ -1814,6 +1830,12 @@ impl WorkspaceEngine {
 
     /// 材料采集/provider 启动前同源复验(窗口 Running+指纹一致)。
     fn assert_plan_review_window(&self) -> Result<(), String> {
+        // Task 2(REQ-ENV-14/PLN-11):同源复验点形态分派——多仓(lc)形态
+        // 无评审窗,复验「材料集合可解析且非空」;单仓保持窗口 Running+
+        // 材料指纹一致复验,函数体逐字不变。
+        if self.is_logical_codebase_issue() {
+            return self.assert_plan_review_material();
+        }
         let Some(active) = self.active_review_window.as_ref() else {
             return Ok(());
         };
@@ -1833,6 +1855,32 @@ impl WorkspaceEngine {
         .map_err(|error| format!("plan_review_window_not_current: {error}"))?;
         if proof.manifest_sha256 != active.handle.manifest_sha256 {
             return Err("plan_review_window_material_fingerprint_drift".to_string());
+        }
+        Ok(())
+    }
+
+    /// Task 2(REQ-ENV-14/PLN-11):多仓(lc)形态材料断言——无评审窗路径
+    /// 下,provider 启动前以「参与仓库集合可解析且非空」替代窗口 Running
+    /// 复验。lifecycle store 缺失、解析失败或集合为空一律 fail-closed
+    /// (`plan_review_material_unresolved: <原因>`),绝不以空材料静默
+    /// 继续,也不产任何 plan_review_window_* 错误码。
+    fn assert_plan_review_material(&self) -> Result<(), String> {
+        let Some(store) = self.lifecycle_store.as_ref() else {
+            return Err(
+                "plan_review_material_unresolved: lifecycle_store_unavailable".to_string(),
+            );
+        };
+        let resolution =
+            crate::product::logical_codebase::PlanningContextSetResolver::new(store.app_paths())
+                .resolve(
+                    self.session.project_id.as_str(),
+                    self.session.issue_id.as_str(),
+                )
+                .map_err(|cause| format!("plan_review_material_unresolved: {cause}"))?;
+        if resolution.set.is_empty() {
+            return Err(
+                "plan_review_material_unresolved: resolved member set is empty".to_string(),
+            );
         }
         Ok(())
     }

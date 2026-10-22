@@ -410,7 +410,7 @@ mod t20b_f1_plan_window_target {
     use tokio_util::sync::CancellationToken;
 
     /// 最小 verdict provider:approve JSON 按结构化合同回 nonce。
-    struct ApproveReviewProvider;
+    pub(super) struct ApproveReviewProvider;
     #[async_trait::async_trait]
     impl StreamingProviderAdapter for ApproveReviewProvider {
         async fn start(
@@ -452,7 +452,7 @@ mod t20b_f1_plan_window_target {
         }
     }
 
-    enum FixtureEntity {
+    pub(super) enum FixtureEntity {
         /// Story:focus=首成员(唯一成员面,直选)。
         StoryFocusFirstMember,
         /// Story:focus=None(聚合形态→主成员锚)。
@@ -463,9 +463,9 @@ mod t20b_f1_plan_window_target {
         StoryZeroMembers,
     }
 
-    struct PlanWindowFixture {
+    pub(super) struct PlanWindowFixture {
         _root: tempfile::TempDir,
-        paths: ProductAppPaths,
+        pub(super) paths: ProductAppPaths,
         lifecycle: LifecycleStore,
         member_a: Option<std::path::PathBuf>,
         project_id: String,
@@ -490,7 +490,7 @@ mod t20b_f1_plan_window_target {
         }
     }
 
-    fn logical_fixture(entity: FixtureEntity) -> PlanWindowFixture {
+    pub(super) fn logical_fixture(entity: FixtureEntity) -> PlanWindowFixture {
         use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
         use crate::product::logical_codebase::{
             AggregatePolicyArtifactStore, LogicalCodebaseFeature,
@@ -639,7 +639,7 @@ mod t20b_f1_plan_window_target {
         }
     }
 
-    fn engine_with_aggregate_view(
+    pub(super) fn engine_with_aggregate_view(
         fixture: &PlanWindowFixture,
         workspace_type: crate::product::models::WorkspaceType,
     ) -> (
@@ -896,6 +896,348 @@ mod t20b_f1_plan_window_target {
         assert!(
             !message.contains("IdentityDrift") && !message.contains("identity_drift"),
             "must not misreport as git identity drift, got: {message}"
+        );
+    }
+}
+
+// ---- Task 2(REQ-ENV-14/REQ-PLN-11):多仓不开评审窗 + lc 评审目标降级 LC 根 ----
+// lc 形态以注入 logical gateway 表达(T1 门禁唯一判据);夹具复用 t20b_f1
+// 的 logical_fixture/engine_with_aggregate_view,authority root 用独立临时目录。
+mod t2_lc_no_review_window {
+    use super::t20b_f1_plan_window_target::{
+        engine_with_aggregate_view, logical_fixture, ApproveReviewProvider, FixtureEntity,
+    };
+    use crate::cross_cutting::provider_adapter::ProviderAdapter;
+    use crate::cross_cutting::provider_availability_gate::{
+        ProviderAvailabilityGate, ProviderHealthSource,
+    };
+    use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::logical_codebase::{
+        AggregatePolicyArtifactStore, LogicalCodebaseProviderGateway, PolicyTarget,
+        PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource, ProviderGatewayError,
+        ProviderRef, SessionLaunchRequest, SessionPolicyAction,
+    };
+    use crate::product::models::ProviderName;
+    use crate::product::workspace_engine::types::EngineEvent;
+    use crate::protocol::contracts::{AdapterOutput, TimeoutStatus};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    // ---- 最小 gateway 桩(与 prompts.rs T1 门禁测试同构):形态门禁只读
+    // `Option::is_some()`,不 bootstrap 政策,不触 validate 链。----
+
+    /// 占位 capability source:恒拒即可(不会被调用)。
+    struct UnusedCapabilitySource;
+
+    impl ProviderCapabilitySource for UnusedCapabilitySource {
+        fn require_supported(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "t2 fixture capability source is never queried".to_string(),
+            ))
+        }
+
+        fn require_resume_supported(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "t2 fixture capability source is never queried".to_string(),
+            ))
+        }
+
+        fn require_write_boundary(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "t2 fixture capability source is never queried".to_string(),
+            ))
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            _provider: &ProviderRef,
+            _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "t2 fixture capability source is never queried".to_string(),
+            ))
+        }
+    }
+
+    /// 占位 target resolver:透传请求 target(不会被调用)。
+    struct UnusedTargetResolver;
+
+    impl PolicyTargetResolver for UnusedTargetResolver {
+        fn resolve_and_revalidate(
+            &self,
+            request: &SessionLaunchRequest,
+        ) -> Result<PolicyTarget, ProviderGatewayError> {
+            Ok(request.target.clone())
+        }
+    }
+
+    /// 占位同步 adapter:gateway 构造参数,不会被调用。
+    struct UnusedSyncAdapter;
+
+    impl ProviderAdapter for UnusedSyncAdapter {
+        fn run(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+        ) -> Result<AdapterOutput, crate::cross_cutting::provider_adapter::ProviderAdapterError>
+        {
+            Ok(AdapterOutput {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                structured_output: None,
+                files_modified: Vec::new(),
+                duration_ms: 0,
+                timeout_status: TimeoutStatus::NotTimedOut,
+            })
+        }
+    }
+
+    fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
+        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+
+        impl ProviderHealthSource for AlwaysHealthy {
+            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+                self.0.clone()
+            }
+
+            fn degraded(&self) -> bool {
+                false
+            }
+        }
+
+        let checked_at = chrono::Utc::now();
+        let snapshot = Arc::new(ProviderHealthSnapshot {
+            schema_version: 1,
+            generation: 1,
+            checked_at,
+            providers: [ProviderName::ClaudeCode]
+                .into_iter()
+                .map(|provider| ProviderHealthEntry {
+                    provider,
+                    command: "stub".to_string(),
+                    available: true,
+                    version: Some("1.0".to_string()),
+                    reason_code: None,
+                    reason: None,
+                    checked_at,
+                })
+                .collect(),
+        });
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+            snapshot,
+        ))))
+    }
+
+    /// 构造仅满足形态判据的最小 gateway;authority root 用独立临时目录,
+    /// 返回 (gateway, authority_root, 临时目录锚)。
+    fn lc_gateway_fixture()
+    -> (
+        Arc<LogicalCodebaseProviderGateway>,
+        PathBuf,
+        tempfile::TempDir,
+    ) {
+        let root = tempfile::tempdir().expect("gateway authority root");
+        let authority_root = root.path().join("authority");
+        std::fs::create_dir_all(&authority_root).expect("create authority root");
+        (
+            Arc::new(LogicalCodebaseProviderGateway::new(
+                AggregatePolicyArtifactStore::new(ProductAppPaths::new(
+                    root.path().join(".aria"),
+                )),
+                Arc::new(UnusedCapabilitySource),
+                Arc::new(UnusedTargetResolver),
+                Arc::new(ProviderRegistry::new()),
+                Arc::new(UnusedSyncAdapter),
+                always_available_gate(),
+                authority_root.clone(),
+            )),
+            authority_root,
+            root,
+        )
+    }
+
+    /// REQ-ENV-14:lc 形态评审会话不开评审窗——无 plan_review_window_* 错误码、
+    /// 无窗口注意力提示、评审窗口 store 无新记录;材料齐备(2 成员)时照常走完。
+    #[tokio::test]
+    async fn lc_review_session_opens_no_plan_review_window() {
+        let fixture = logical_fixture(FixtureEntity::StoryFocusFirstMember);
+        let (gateway, _authority_root, _authority_kept) = lc_gateway_fixture();
+        let (_view, mut rx, engine) = engine_with_aggregate_view(
+            &fixture,
+            crate::product::models::WorkspaceType::Story,
+        );
+        let mut engine = engine.with_logical_provider_gateway(gateway);
+        let session_id = engine.session().session_id.to_string();
+        let window_root = fixture.paths.root().join("reviewer-windows");
+
+        engine.start_review_or_skip().await;
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        engine
+            .drive_review_session(Arc::new(ApproveReviewProvider), command_rx)
+            .await;
+
+        let mut errors = Vec::new();
+        let mut window_noise = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                EngineEvent::Error { message } => errors.push(message),
+                EngineEvent::ExecutionEvent { event, .. } => {
+                    let text = format!("{} {}", event.title, event.detail.unwrap_or_default());
+                    if text.contains("plan_review_window") || text.contains("评审窗") {
+                        window_noise.push(text);
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            errors.is_empty(),
+            "lc 形态评审必须无错误收尾: {errors:?}"
+        );
+        assert!(
+            window_noise.is_empty(),
+            "lc 形态不得出现窗口错误码/窗口注意力提示: {window_noise:?}"
+        );
+        let window_store = crate::product::reviewer_window_store::ReviewerWindowStore::new(
+            window_root.clone(),
+        );
+        let window_id = crate::product::reviewer_window_store::role_run_window_id(
+            &session_id,
+            engine.active_run_id().unwrap_or(session_id.as_str()),
+        );
+        assert!(
+            window_store.load_window(&window_id).is_err(),
+            "lc 形态评审不得产生评审窗记录({window_id})"
+        );
+        if window_root.exists() {
+            let leftover = std::fs::read_dir(&window_root)
+                .map(|entries| entries.count())
+                .unwrap_or(0);
+            assert_eq!(
+                leftover, 0,
+                "lc 形态评审后 reviewer-windows 树不得留任何记录"
+            );
+        }
+    }
+
+    /// REQ-ENV-14:lc 空成员集合(空 manifest)→ 材料未解析显式阻断,
+    /// 不启动 provider,错误码前缀 plan_review_material_unresolved:。
+    #[tokio::test]
+    async fn lc_review_with_empty_member_set_is_blocked_as_material_unresolved() {
+        let fixture = logical_fixture(FixtureEntity::StoryZeroMembers);
+        let (gateway, _authority_root, _authority_kept) = lc_gateway_fixture();
+        let (_view, mut rx, engine) = engine_with_aggregate_view(
+            &fixture,
+            crate::product::models::WorkspaceType::Story,
+        );
+        let mut engine = engine.with_logical_provider_gateway(gateway);
+
+        engine.start_review_or_skip().await;
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        engine
+            .drive_review_session(Arc::new(ApproveReviewProvider), command_rx)
+            .await;
+
+        let mut error_message = None;
+        while let Ok(event) = rx.try_recv() {
+            if let EngineEvent::Error { message } = event {
+                error_message = Some(message);
+            }
+        }
+        let message = error_message.expect("空成员集合必须以显式错误阻断评审");
+        assert!(
+            message.starts_with("plan_review_material_unresolved:"),
+            "必须以材料未解析错误码阻断, got: {message}"
+        );
+        assert!(
+            !message.contains("plan_review_window"),
+            "lc 形态不得产 plan_review_window_* 错误码, got: {message}"
+        );
+    }
+
+    /// REQ-ENV-14:单仓(未注入 gateway)仍开评审窗,窗口 id 形如
+    /// {session}-{run}-w01。
+    #[tokio::test]
+    async fn single_repo_review_session_still_opens_window() {
+        let fixture = logical_fixture(FixtureEntity::StoryFocusFirstMember);
+        let (_view, mut rx, mut engine) = engine_with_aggregate_view(
+            &fixture,
+            crate::product::models::WorkspaceType::Story,
+        );
+        let session_id = engine.session().session_id.to_string();
+
+        engine.start_review_or_skip().await;
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        engine
+            .drive_review_session(Arc::new(ApproveReviewProvider), command_rx)
+            .await;
+
+        let mut saw_error = None;
+        while let Ok(event) = rx.try_recv() {
+            if let EngineEvent::Error { message } = event {
+                saw_error = Some(message);
+            }
+        }
+        assert!(saw_error.is_none(), "单仓评审照常开窗完成: {saw_error:?}");
+        let run_id = engine
+            .active_run_id()
+            .unwrap_or(session_id.as_str())
+            .to_string();
+        let window_store = crate::product::reviewer_window_store::ReviewerWindowStore::new(
+            fixture.paths.root().join("reviewer-windows"),
+        );
+        let record = window_store
+            .load_window(&crate::product::reviewer_window_store::role_run_window_id(
+                &session_id,
+                &run_id,
+            ))
+            .expect("单仓形态必须仍产窗口记录");
+        assert_eq!(
+            record.window_id,
+            format!("{session_id}-{run_id}-w01"),
+            "窗口 id 必须保持 {{session}}-{{run}}-w01 形态"
+        );
+    }
+
+    /// REQ-PLN-11(设计 A 条目 2):lc 评审目标降级为 LC 根——target 与 cwd
+    /// 均为 authority root,不再要求 repository_path 是成员 worktree。
+    #[test]
+    fn lc_review_target_is_logical_root() {
+        let fixture = logical_fixture(FixtureEntity::StoryFocusFirstMember);
+        let (gateway, authority_root, _authority_kept) = lc_gateway_fixture();
+        let (_view, _rx, mut engine) = engine_with_aggregate_view(
+            &fixture,
+            crate::product::models::WorkspaceType::Story,
+        );
+        engine.session.repository_path = None;
+        let engine = engine.with_logical_provider_gateway(gateway);
+
+        let (target, cwd) = engine
+            .review_launch_target_and_cwd()
+            .expect("lc 评审目标必须解析为 LC 根");
+        assert_eq!(
+            target, authority_root,
+            "lc 评审 target 必须降级为 LC 根(authority root)"
+        );
+        assert_eq!(
+            cwd.as_deref(),
+            Some(authority_root.as_path()),
+            "lc 评审 cwd 必须同为 LC 根"
         );
     }
 }

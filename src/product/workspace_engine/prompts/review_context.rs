@@ -604,27 +604,27 @@ impl WorkspaceEngine {
     /// Task 2.4（REQ-ENV-10、REQ-PLN-01/PLN-07）：review builder 的
     /// cwd/target 分离合同（返回 `(target_worktree, session_cwd)`）。
     ///
-    /// LC 分支（注入 logical gateway）：cwd = gateway 冻结的 canonical
-    /// authority root（经 Task 2.5 `working_directory` 字段合同下发；不从
-    /// target/worktree/进程 cwd 推导）；target = 显式成员 checkout
-    ///（`session.repository_path`，缺失 fail-closed，绝不回退进程 cwd）。
-    /// legacy 直连面继续以 `working_dir` 表达 target——gateway 启动侧
-    ///（`start_review_session_via_gateway`）以它锚 `PolicyTarget`，spawn 前
+    /// LC 分支（注入 logical gateway）：Task 2（REQ-PLN-11，设计 A 条目 2）
+    /// lc 评审目标降级为 LC 根——target 与 cwd 均为 gateway 冻结的
+    /// canonical authority root（经 `working_directory` 字段合同下发；不从
+    /// target/worktree/进程 cwd 推导）；不再要求 `session.repository_path`
+    /// 是成员 worktree（多仓评审范围以材料集合解析为准，见
+    /// `assert_plan_review_material`）。legacy 直连面继续以 `working_dir`
+    /// 表达 target——gateway 启动侧以它锚 `PolicyTarget`，spawn 前
     /// effective cwd 复验以 envelope 冻结值为准。
     ///
     /// 单仓分支（无 gateway）：原值不变——cwd 语义仍由 `working_dir` 承载
     ///（`repository_path`，缺省回退进程 cwd），`working_directory` 保持
     /// `None`（存量构造零行为变化）。
-    pub(super) fn review_launch_target_and_cwd(
+    pub(crate) fn review_launch_target_and_cwd(
         &self,
     ) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), String> {
         if let Some(gateway) = self.logical_provider_gateway() {
-            let target = self.session.repository_path.clone().ok_or_else(|| {
-                "logical plan review requires an explicit member target worktree".to_string()
-            })?;
-            let cwd = gateway.authority_root().to_path_buf();
-            return Ok((target, Some(cwd)));
+            let authority_root = gateway.authority_root().to_path_buf();
+            return Ok((authority_root.clone(), Some(authority_root)));
         }
+        // 单仓分支逐字不动。注意：lc 会话上 `session.repository_path` 是
+        // 兼容字段，非 lc 范围权威（lc 评审范围 = 材料集合解析结果）。
         let working_dir = match &self.session.repository_path {
             Some(path) => path.clone(),
             None => std::env::current_dir()
