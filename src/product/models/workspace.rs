@@ -883,6 +883,15 @@ pub struct WorkspaceSessionRecord {
     /// 与 from_record 接线归 SG7a。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structural_governance_state: Option<StructuralGovernanceState>,
+    /// REQ-ENV-13（设计 A 条目 17）：每 workspace 会话唯一的评审/author
+    /// 运行身份（UUID simple 形态）——创建时生成；存量会话首读补生成
+    /// 并持久化一次（lifecycle_store get_workspace_session）。仅多仓(lc)
+    /// 形态消费：reviewer-verify canonical 摘要域与 author
+    /// resource_scope_id 派生；单仓仍用窗口编号身份，本字段不参与单仓
+    /// canonical 摘要。会话删除即随记录解绑，无独立身份映射。旧 JSON
+    /// 缺失读空串。
+    #[serde(default)]
+    pub review_identity_id: String,
     pub messages: Vec<WorkspaceMessageRecord>,
     pub created_at: String,
     pub updated_at: String,

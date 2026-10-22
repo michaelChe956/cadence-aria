@@ -393,6 +393,7 @@ fn workspace_session_runtime_binding_is_optional_and_work_item_scoped() {
         superseded_native_sessions: Vec::new(),
         lc_resume_recovery: None,
         structural_governance_state: None,
+        review_identity_id: String::new(),
     };
 
     assert_serde_roundtrip(&session);
@@ -1307,6 +1308,7 @@ fn anchor_t02_session_record() -> WorkspaceSessionRecord {
         superseded_native_sessions: vec![anchor_t02_superseded_native_session()],
         lc_resume_recovery: Some(anchor_t02_recovery_record(LcResumeRecoveryState::Waiting)),
         structural_governance_state: None,
+        review_identity_id: String::new(),
     }
 }
 

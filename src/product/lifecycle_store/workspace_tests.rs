@@ -123,3 +123,110 @@ fn create_workspace_session_bound_accepts_auto_if_valid_with_full_identity_compa
         Err(ProductStoreError::IdentityMismatch { .. })
     ));
 }
+
+/// REQ-ENV-13（设计 A 条目 17）：每次创建 workspace 会话 MUST 生成
+/// 全新的唯一评审身份（UUID simple 形态），两会话身份互不相同且非空。
+#[test]
+fn create_workspace_session_assigns_unique_review_identity() {
+    let temp = tempdir().unwrap();
+    let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+
+    let first = store
+        .create_workspace_session(create_input(WorkspaceType::Story, None))
+        .unwrap();
+    let second = store
+        .create_workspace_session(create_input(WorkspaceType::Story, None))
+        .unwrap();
+
+    assert!(
+        !first.review_identity_id.is_empty(),
+        "新会话必须携带非空评审身份"
+    );
+    assert!(
+        !second.review_identity_id.is_empty(),
+        "新会话必须携带非空评审身份"
+    );
+    assert_ne!(
+        first.review_identity_id, second.review_identity_id,
+        "两会话评审身份必须互不相同"
+    );
+}
+
+/// REQ-ENV-13（设计 A 条目 17）：存量会话（旧 JSON 无 review_identity_id
+/// 字段）首次读取时 MUST 补生成一个身份并持久化；二次读取 MUST 复用
+/// 同一持久值，MUST NOT 重新生成。
+#[test]
+fn legacy_session_without_review_identity_gets_one_persisted_once() {
+    fn find_session_json(dir: &std::path::Path, file_name: &str) -> std::path::PathBuf {
+        for entry in std::fs::read_dir(dir).expect("read dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                if let Some(found) = find_session_json_opt(&path, file_name) {
+                    return found;
+                }
+            } else if path
+                .file_name()
+                .is_some_and(|name| name == file_name)
+            {
+                return path;
+            }
+        }
+        panic!("session json {file_name} not found");
+    }
+    fn find_session_json_opt(
+        dir: &std::path::Path,
+        file_name: &str,
+    ) -> Option<std::path::PathBuf> {
+        for entry in std::fs::read_dir(dir).expect("read dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                if let Some(found) = find_session_json_opt(&path, file_name) {
+                    return Some(found);
+                }
+            } else if path
+                .file_name()
+                .is_some_and(|name| name == file_name)
+            {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    let temp = tempdir().unwrap();
+    let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+    let created = store
+        .create_workspace_session(create_input(WorkspaceType::Story, None))
+        .unwrap();
+
+    // 还原存量旧 JSON 形态：剥掉 review_identity_id 字段再落盘。
+    let session_path = find_session_json(temp.path(), &format!("{}.json", created.id));
+    let mut raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&session_path).unwrap()).unwrap();
+    assert!(
+        raw.as_object_mut().unwrap().remove("review_identity_id").is_some(),
+        "前置：创建即写入的字段应存在，剥除后才构成存量形态"
+    );
+    std::fs::write(&session_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+    // 首次读取：补生成身份并持久化。
+    let first = store.get_workspace_session(&created.id).unwrap();
+    assert!(
+        !first.review_identity_id.is_empty(),
+        "存量会话首读必须补生成评审身份"
+    );
+    let persisted: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&session_path).unwrap()).unwrap();
+    assert_eq!(
+        persisted["review_identity_id"].as_str(),
+        Some(first.review_identity_id.as_str()),
+        "首读补生成的身份必须落盘持久化"
+    );
+
+    // 二次读取：复用同一持久值，不重新生成。
+    let second = store.get_workspace_session(&created.id).unwrap();
+    assert_eq!(
+        first.review_identity_id, second.review_identity_id,
+        "二次读取必须复用持久化的评审身份"
+    );
+}

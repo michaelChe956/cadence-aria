@@ -350,6 +350,9 @@ impl LifecycleStore {
                 superseded_native_sessions: Vec::new(),
                 lc_resume_recovery: None,
                 structural_governance_state: None,
+                // REQ-ENV-13（设计 A 条目 17）：会话创建即绑定唯一评审
+                // 身份（UUID simple）；与记录同文件持久化，会话删除即解绑。
+                review_identity_id: uuid::Uuid::new_v4().simple().to_string(),
             };
 
             super::ensure_target_absent(&target_path)?;
@@ -585,7 +588,18 @@ impl LifecycleStore {
             super::workspace_session_read_spy::record_workspace_session_read();
         }
         validate_relative_id(session_id)?;
-        read_json(&self.find_workspace_session_path(session_id)?)
+        let record: WorkspaceSessionRecord =
+            read_json(&self.find_workspace_session_path(session_id)?)?;
+        // REQ-ENV-13（设计 A 条目 17）：存量会话（旧 JSON 无身份字段）
+        // 首读补生成一个身份并持久化一次（set 幂等不覆盖已有值）；后续
+        // 读取复用持久值，MUST NOT 每次重新生成。写失败 fail-closed，
+        // 绝不以未持久化的随机身份继续。
+        if record.review_identity_id.is_empty() {
+            let identity_id = uuid::Uuid::new_v4().simple().to_string();
+            self.set_workspace_session_review_identity(session_id, &identity_id)?;
+            return read_json(&self.find_workspace_session_path(session_id)?);
+        }
+        Ok(record)
     }
 
     pub fn ensure_work_item_runtime_binding(
@@ -1132,6 +1146,27 @@ impl LifecycleStore {
             session.updated_at = Utc::now().to_rfc3339();
             write_json(&session_path, &session)?;
             Ok(session)
+        })
+    }
+
+    /// REQ-ENV-13（设计 A 条目 17）：写入会话评审身份——幂等：已有值
+    /// 不覆盖（并发首读竞态下只落第一个）；仅在字段为空时写盘。身份
+    /// 与会话记录同文件，会话删除即解绑，无独立映射存储需清理。
+    pub fn set_workspace_session_review_identity(
+        &self,
+        session_id: &str,
+        identity_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let (session_path, scope) = self.resolve_session_scope(session_id)?;
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let mut session: WorkspaceSessionRecord = read_json(&session_path)?;
+            if session.review_identity_id.is_empty() {
+                session.review_identity_id = identity_id.to_string();
+                session.updated_at = Utc::now().to_rfc3339();
+                write_json(&session_path, &session)?;
+            }
+            Ok(())
         })
     }
 

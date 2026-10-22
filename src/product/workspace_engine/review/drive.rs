@@ -1862,11 +1862,22 @@ impl WorkspaceEngine {
     }
 
     /// reviewer 输入的 ReviewerVerify 窗口合同铸造(prompt 八点共用的
-    /// 唯一窗口来源;无活动窗=None,由四家启动检查/网关复验拒绝)。
+    /// 唯一窗口来源)。REQ-ENV-13(设计 A 条目 17)三分支:
+    /// ① 有活动窗口 → 窗口 id(单仓路径,canonical 摘要逐字不变);
+    /// ② 无窗口且多仓(lc)形态 → 每会话 UUID 身份(同一会话跨轮次/
+    ///    repair 恒定,digest 域即该 UUID);
+    /// ③ 无窗口且单仓 → None(由四家启动检查/网关复验拒绝,不得借
+    ///    会话身份放行)。
     pub(crate) fn reviewer_verify_policy(&self) -> Option<ProviderToolPolicy> {
-        self.active_review_window
-            .as_ref()
-            .map(|active| ProviderToolPolicy::reviewer_verify(active.handle.window_id.clone()))
+        if let Some(active) = self.active_review_window.as_ref() {
+            return Some(ProviderToolPolicy::reviewer_verify(active.handle.window_id.clone()));
+        }
+        if self.is_logical_codebase_issue() {
+            return Some(ProviderToolPolicy::reviewer_verify(
+                self.session.review_identity_id.clone(),
+            ));
+        }
+        None
     }
 
     /// 收口:干净恢复+释放(技术回收;规划面 verdict 无报告采信投影,
@@ -2487,6 +2498,59 @@ mod plan_window_id_tests {
         assert_eq!(
             store.load_window(&window_b).expect("record b").state,
             crate::product::reviewer_window_store::ReviewerWindowState::Running
+        );
+    }
+}
+
+/// REQ-ENV-13（Review Focus 1）：单仓「无窗口」路径 MUST 保持
+/// `reviewer_verify_policy() == None`——多仓（lc）会话身份 UUID 策略
+/// 不得外溢到单仓形态，否则本该被四家启动检查/网关复验拒绝的无窗
+/// 单仓调用会借 UUID 合同通过。
+#[cfg(test)]
+mod single_repo_review_identity_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, LifecycleStore};
+
+    #[test]
+    fn single_repo_without_window_yields_no_reviewer_verify_policy() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let record = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "issue_0001".to_string(),
+                workspace_type: crate::product::models::WorkspaceType::Story,
+                author_provider: crate::product::models::ProviderName::ClaudeCode,
+                reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            })
+            .expect("workspace session");
+        let checkpoint = std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+            paths.issue_lifecycle_root(&record.project_id, &record.issue_id),
+        ));
+        let (tx, _rx) = mpsc::channel(64);
+        let engine = WorkspaceEngine::new_persistent(
+            checkpoint,
+            LifecycleStore::new(paths.clone()),
+            tx,
+            crate::product::workspace_engine::types::WorkspaceSession::from_record(record),
+        );
+
+        // 单仓形态：未注入 logical gateway；未开评审窗。
+        assert!(
+            !engine.is_logical_codebase_issue(),
+            "前置：无 gateway 注入即单仓形态"
+        );
+        assert!(engine.active_review_window.is_none(), "前置：未开评审窗");
+        assert!(
+            engine.reviewer_verify_policy().is_none(),
+            "单仓无窗口路径必须保持 None，不得借用会话 UUID 身份铸合同"
         );
     }
 }

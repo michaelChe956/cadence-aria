@@ -709,6 +709,7 @@ mod anchor_t03_tests {
             superseded_native_sessions: Vec::new(),
             lc_resume_recovery: recovery,
             structural_governance_state: None,
+            review_identity_id: String::new(),
             messages: Vec::new(),
             created_at: "2026-10-11T00:00:00Z".to_string(),
             updated_at: "2026-10-11T00:00:00Z".to_string(),

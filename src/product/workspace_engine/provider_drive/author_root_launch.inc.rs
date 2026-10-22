@@ -229,7 +229,14 @@ impl WorkspaceEngine {
             &identity,
             ProviderExecutionProfile::HostCoding,
             Some(AuthorToolPolicy::author_v1()),
-            format!("role_run_author_{}", self.session.session_id),
+            // REQ-ENV-13(设计 A 条目 17):author 的 resource_scope_id 与
+            // reviewer 身份同源——多仓(lc)形态由会话 UUID 派生;单仓保持
+            // 既有 session_id 派生,逐字不变。
+            if self.is_logical_codebase_issue() {
+                format!("role_run_author_{}", self.session.review_identity_id)
+            } else {
+                format!("role_run_author_{}", self.session.session_id)
+            },
             None,
         )
         .map_err(|error| format!("author execution contract freeze failed: {}", error.details))?;

@@ -591,6 +591,7 @@ mod lc_finding_completeness_tests {
             superseded_native_sessions: Vec::new(),
             lc_resume_recovery: None,
             structural_governance_state: None,
+            review_identity_id: String::new(),
             repository_path: None,
         }
     }

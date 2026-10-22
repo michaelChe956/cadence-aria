@@ -116,6 +116,10 @@ pub struct WorkspaceSession {
     /// `sync_structural_governance_from_record` 同步；accepted/actual
     /// 单源仍在 HumanGateSnapshot 与 provider_start_ledger。
     pub structural_governance_state: Option<crate::product::models::StructuralGovernanceState>,
+    /// REQ-ENV-13（设计 A 条目 17）：每会话唯一评审/author 运行身份的
+    /// runtime 镜像（from_record 逐字段透传；持久源为
+    /// WorkspaceSessionRecord.review_identity_id）。
+    pub review_identity_id: String,
     pub repository_path: Option<PathBuf>,
 }
 
@@ -174,6 +178,7 @@ impl WorkspaceSession {
             superseded_native_sessions: record.superseded_native_sessions,
             lc_resume_recovery: record.lc_resume_recovery,
             structural_governance_state: record.structural_governance_state,
+            review_identity_id: record.review_identity_id,
             repository_path: None,
         }
     }

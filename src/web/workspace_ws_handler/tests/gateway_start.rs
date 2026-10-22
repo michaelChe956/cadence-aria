@@ -230,6 +230,7 @@ fn workspace_session(repository_path: std::path::PathBuf) -> WorkspaceSession {
         superseded_native_sessions: vec![],
         lc_resume_recovery: None,
         structural_governance_state: None,
+        review_identity_id: String::new(),
         repository_path: Some(repository_path),
     }
 }

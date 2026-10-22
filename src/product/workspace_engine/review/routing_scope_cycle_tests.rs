@@ -274,6 +274,7 @@ fn single_candidate_policy_invocation_rebuilds_verification_scope_from_durable_r
         superseded_native_sessions: Vec::new(),
         lc_resume_recovery: None,
         structural_governance_state: None,
+        review_identity_id: String::new(),
         repository_path: None,
     };
     session.workspace_type = crate::product::models::WorkspaceType::WorkItemPlan;
