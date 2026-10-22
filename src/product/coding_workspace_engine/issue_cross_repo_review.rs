@@ -39,6 +39,12 @@ const ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS: u64 = 120;
 #[cfg(test)]
 const ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS: u64 = 1;
 
+/// P3-3：生产 advisory 时限的编译期护栏。测试态常量恒为 `1`，测试内的
+/// `<= 120` 断言对生产值不可见（把常量改回 3h 的 `DEFAULT_PROVIDER_TIMEOUT_SECS`
+/// 也不会让任何测试变红）；本断言在两种构建下都求值，生产值 >120 直接
+/// 编译失败，守住「advisory 短时限不与整 run 总上限同界」的修复约束。
+const _: () = assert!(ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS <= 120);
+
 /// 进行中的 issue 级跨仓评审登记（进程内）：触发层「check → spawn → write」
 /// 窗口内同一 store 的同一 issue 至多一条在飞评审（防止收口钩子重入导致
 /// provider 双跑）。登记在评审任务退出时释放；进程重启后登记清空、记录
@@ -436,6 +442,17 @@ impl CodingWorkspaceEngine {
             review.summary = default_review_summary(&review.verdict);
         }
         self.store.save_issue_cross_repo_review(&review)?;
+        // P2-1（REQ-GFR-CR-06「确认 + 评审完成」双触发的评审侧触发点）：
+        // 用户确认可能早于本落盘（P1-2 异步化后触发不再 await 终态），
+        // 确认时刻 `record_cross_repo_risk_acknowledgement_if_needed` 读
+        // 不到记录直接返回、重复确认又被状态机拒绝 → 留痕永久缺失。
+        // 落盘后对评审所依据的 attempt 补一次留痕判定（幂等，与确认侧
+        // 共用 `(review_id, attempt_id)` 键）。
+        self.backfill_cross_repo_risk_acknowledgement_after_review_landing(
+            project_id,
+            issue_id,
+            &latest_attempt.id,
+        );
         Ok(Some(review))
     }
 
@@ -803,52 +820,62 @@ impl CodingWorkspaceEngine {
         provider: &dyn StreamingProviderAdapter,
         input: StreamingProviderInput,
     ) -> CrossRepoProviderRun {
-        let session = match provider
-            .start(input, self.cancellation_token().clone())
-            .await
+        // P3-1：advisory 时限覆盖端到端——`start`（版本探测/握手/进程
+        // spawn）与事件循环共享同一 deadline，合计 ≤
+        // `ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS`；start 楔死也按时限收敛
+        // 为 `Failed` 落盘、在飞登记随任务退出释放，不再出现「start 无界
+        // → 永不落盘」。
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS);
+        let session = match tokio::time::timeout_at(
+            deadline,
+            provider.start(input, self.cancellation_token().clone()),
+        )
+        .await
         {
-            Ok(session) => session,
-            Err(error) => {
+            Ok(Ok(session)) => session,
+            Ok(Err(error)) => {
                 return CrossRepoProviderRun::Failed(format!("provider 启动失败: {error}"));
+            }
+            Err(_) => {
+                return CrossRepoProviderRun::Failed(format!(
+                    "provider 启动超时（{} 秒）",
+                    ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS
+                ));
             }
         };
         let mut events = session.events;
         let mut accumulated = String::new();
-        let terminal = tokio::time::timeout(
-            Duration::from_secs(ISSUE_CROSS_REPO_REVIEW_TIMEOUT_SECS),
-            async move {
-                loop {
-                    match events.recv().await {
-                        Some(ProviderEvent::TextDelta { content }) => {
-                            accumulated.push_str(&content)
+        let terminal = tokio::time::timeout_at(deadline, async move {
+            loop {
+                match events.recv().await {
+                    Some(ProviderEvent::TextDelta { content }) => accumulated.push_str(&content),
+                    Some(ProviderEvent::Completed(completion)) => {
+                        return CrossRepoProviderRun::Completed(completion.full_output);
+                    }
+                    Some(ProviderEvent::Failed { message }) => {
+                        return CrossRepoProviderRun::Failed(format!(
+                            "provider 会话失败: {message}"
+                        ));
+                    }
+                    Some(ProviderEvent::ProtocolError { code, message, .. }) => {
+                        return CrossRepoProviderRun::Failed(format!(
+                            "provider 协议错误 {code}: {message}"
+                        ));
+                    }
+                    // advisory 一次性行：无权限/选择/工具交互面，忽略过程事件。
+                    Some(_) => {}
+                    None => {
+                        if accumulated.trim().is_empty() {
+                            return CrossRepoProviderRun::Failed(
+                                "provider 会话在完成前关闭且无任何输出".to_string(),
+                            );
                         }
-                        Some(ProviderEvent::Completed(completion)) => {
-                            return CrossRepoProviderRun::Completed(completion.full_output);
-                        }
-                        Some(ProviderEvent::Failed { message }) => {
-                            return CrossRepoProviderRun::Failed(format!(
-                                "provider 会话失败: {message}"
-                            ));
-                        }
-                        Some(ProviderEvent::ProtocolError { code, message, .. }) => {
-                            return CrossRepoProviderRun::Failed(format!(
-                                "provider 协议错误 {code}: {message}"
-                            ));
-                        }
-                        // advisory 一次性行：无权限/选择/工具交互面，忽略过程事件。
-                        Some(_) => {}
-                        None => {
-                            if accumulated.trim().is_empty() {
-                                return CrossRepoProviderRun::Failed(
-                                    "provider 会话在完成前关闭且无任何输出".to_string(),
-                                );
-                            }
-                            return CrossRepoProviderRun::Completed(accumulated);
-                        }
+                        return CrossRepoProviderRun::Completed(accumulated);
                     }
                 }
-            },
-        )
+            }
+        })
         .await;
         match terminal {
             Ok(outcome) => outcome,

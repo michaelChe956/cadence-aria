@@ -1093,3 +1093,335 @@ async fn single_repo_issue_never_cross_repo_reviewed_even_with_multi_repo_snapsh
         "单仓 issue 不得启动评审 provider"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P2-1 / P3-1 修复回归：确认早于评审落盘的留痕补写、advisory 时限覆盖
+// provider.start。
+// ---------------------------------------------------------------------------
+
+/// 受控假 provider（P2-1）：`start` 立即返回会话，但终态 `Completed` 事件被
+/// gate 挡住——`release` 前评审既不落盘也不结束，用于构造「用户确认早于
+/// 评审落盘」的时序。
+struct GatedFakeProvider {
+    output: String,
+    starts: Arc<AtomicUsize>,
+    release: tokio::sync::watch::Receiver<bool>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for GatedFakeProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (command_tx, _command_rx) = mpsc::channel(4);
+        let output = self.output.clone();
+        let mut release = self.release.clone();
+        tokio::spawn(async move {
+            while !*release.borrow_and_update() {
+                if release.changed().await.is_err() {
+                    return;
+                }
+            }
+            let _ = event_tx
+                .send(ProviderEvent::Completed(ProviderCompletion::from_output(
+                    output, None, None,
+                )))
+                .await;
+        });
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: event_rx,
+            commands: command_tx,
+        })
+    }
+}
+
+/// gated provider 的触发边界：`(resolver, starts, release)`——`release` 放行
+/// 前评审不落盘。
+fn gated_review_provider(
+    output: &str,
+) -> (
+    IssueCrossRepoReviewProviderResolver<'static>,
+    Arc<AtomicUsize>,
+    tokio::sync::watch::Sender<bool>,
+) {
+    let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+    let provider = GatedFakeProvider {
+        output: output.to_string(),
+        starts: Arc::new(AtomicUsize::new(0)),
+        release: release_rx,
+    };
+    let starts = provider.starts.clone();
+    let adapter: Arc<dyn StreamingProviderAdapter> = Arc::new(provider);
+    let resolver =
+        IssueCrossRepoReviewProviderResolver::new(move |_: &ProviderName| Some(adapter.clone()));
+    (resolver, starts, release_tx)
+}
+
+/// start 楔死假 provider（P3-1）：`start` 计数后永不返回——模拟版本探测/
+/// 握手/进程 spawn 楔死。修复前 `start` 在 advisory 时限之外，评审任务挂
+/// 在 `start` 上永不落盘、在飞登记永不释放。
+struct HangingStartProvider {
+    starts: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for HangingStartProvider {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        // start 永不返回（远超 advisory 时限）。
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        unreachable!("hanging start provider must never return a session")
+    }
+}
+
+/// P2-1 主场景夹具：多仓 issue + group 形态「最终确认」链路——readiness
+/// 材料（units/独立审查）由 `seed_complete_group_readiness` 补齐后，attempt
+/// 可经 `prepare_group_final_confirm_from_readiness` 进入 FinalConfirm、由
+/// `handle_final_confirm` 确认。readiness fixture 默认无 issue 记录、无
+/// lifecycle work items（schema_v2 拓扑）——两者补齐后跨仓触发门（issue
+/// 形态 + 全部 work item 开发完成）才放行。
+fn cross_repo_group_readiness_fixture() -> super::group_final_readiness_support::ReadinessFixture {
+    let fixture = super::group_final_readiness_support::readiness_fixture();
+    // 多仓 issue 记录（P2-3 口径：形态按 issue 的 logical_codebase_id）。
+    // readiness fixture 的 group attempt 已预建 `issues/issue_0001/` 目录
+    // 树（无 issue.json）——`IssueStore::create` 的目录序号分配只能拿到
+    // issue_0002；attempt 侧身份固定 issue_0001，把记录以 issue_0001 身份
+    // 直接落盘。
+    let mut issue = IssueStore::new(fixture.store.paths())
+        .create(CreateProductIssueInput {
+            project_id: PROJECT_ID.to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: Some(CROSS_REPO_LC_ID.to_string()),
+            title: "issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("create multi-repo issue record");
+    issue.id = ISSUE_ID.to_string();
+    crate::product::json_store::write_json(
+        &fixture
+            .store
+            .paths()
+            .project_root(PROJECT_ID)
+            .join("issues")
+            .join(ISSUE_ID)
+            .join("issue.json"),
+        &issue,
+    )
+    .expect("persist multi-repo issue under issue_0001");
+    // 触发门的 work item 拓扑（`issue_development_finished` 枚举 lifecycle
+    // work items；schema_v2 fixture 不建 v1 记录 → 空集不触发评审）。
+    let lifecycle = LifecycleStore::new(fixture.store.paths());
+    for index in 1..=3 {
+        lifecycle
+            .create_work_item(CreateWorkItemInput {
+                id: Some(format!("work_item_{index:04}")),
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: "repository_0001".to_string(),
+                title: format!("group work item {index}"),
+                work_item_set_id: Some("work_item_plan_0001".to_string()),
+                sequence_hint: Some(index * 10),
+                plan_status: WorkItemPlanStatus::Confirmed,
+                ..Default::default()
+            })
+            .expect("work item");
+    }
+    lifecycle
+        .create_issue_work_item_plan(
+            crate::product::lifecycle_store::CreateIssueWorkItemPlanInput {
+                id: Some("work_item_plan_0001".to_string()),
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                source_story_spec_ids: Vec::new(),
+                source_design_spec_ids: Vec::new(),
+                options: crate::product::models::IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: crate::product::models::IssueWorkItemPlanStatus::Confirmed,
+                work_item_ids: (1..=3)
+                    .map(|index| format!("work_item_{index:04}"))
+                    .collect(),
+                repository_profile_ref: None,
+                verification_plan_ids: Vec::new(),
+                dependency_graph: Vec::new(),
+                created_from_provider_run: None,
+                validator_findings: Vec::new(),
+            },
+        )
+        .expect("group plan");
+    // 跨仓评审 provider 在场（`.internal_reviewer`）。
+    fixture
+        .store
+        .update_role_provider_config_snapshot(
+            PROJECT_ID,
+            ISSUE_ID,
+            &fixture.attempt.id,
+            CodingRoleProviderConfigSnapshot {
+                coder: ProviderName::Codex,
+                code_reviewer: None,
+                internal_reviewer: Some(ProviderName::ClaudeCode),
+                review_rounds: 0,
+                permission_modes: Default::default(),
+            },
+        )
+        .expect("seed internal reviewer role snapshot");
+    fixture
+}
+
+/// 轮询等待留痕落盘（P2-1：补写发生在评审 `save` 之后的同一后台任务内，
+/// 观测方可能先看到评审记录、后看到留痕）。
+async fn wait_for_acknowledgements(
+    store: &CodingAttemptStore,
+) -> Vec<crate::product::coding_models::IssueCrossRepoRiskAcknowledgement> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let acks = store
+            .list_issue_cross_repo_acknowledgements(PROJECT_ID, ISSUE_ID)
+            .expect("acknowledgements");
+        if !acks.is_empty() {
+            return acks;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "留痕必须在评审落盘后被补写（5s 内）"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// P2-1（REQ-GFR-CR-06）：「用户确认早于评审落盘」时序——异步化（P1-2）
+/// 后触发不再 await 终态，用户点击确认时评审记录可能尚未落盘：确认侧
+/// 留痕（`record_cross_repo_risk_acknowledgement_if_needed`）读不到记录直接
+/// 返回，而重复确认被状态机拒绝 → 留痕永久缺失、advisory 提醒永久悬空。
+/// 修复：评审落盘后对已确认（`WorkItemGroup` attempt 的 `Completed` 唯一
+/// 路径是最终确认）的 attempt 补写留痕，幂等键 `(review_id, attempt_id)`
+/// 与确认侧共用。修复前本用例在「留痕必须被补写」处失败（留痕 0 条）。
+#[tokio::test]
+async fn cross_repo_acknowledgement_backfilled_when_confirm_precedes_review_landing() {
+    let fixture = cross_repo_group_readiness_fixture();
+    let running = super::group_final_readiness_support::seed_complete_group_readiness(&fixture);
+    let (resolver, starts, release) = gated_review_provider(REQUEST_CHANGES_OUTPUT);
+
+    // group 收口钩子：进 FinalConfirm 并触发跨仓评审（gated provider 已
+    // 启动，结论被挡住，评审尚未落盘）。
+    let prepared = fixture
+        .engine
+        .prepare_group_final_confirm_from_readiness(&running, &resolver)
+        .await
+        .expect("prepare group final confirm");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while starts.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "后台评审必须启动 provider"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(
+        fixture
+            .store
+            .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
+            .expect("load review")
+            .is_none(),
+        "gate 放行前评审不得落盘（构造「确认早于落盘」时序）"
+    );
+
+    // 用户在评审落盘之前完成最终确认（P2-1 时序）。
+    let confirmed = fixture
+        .engine
+        .handle_final_confirm(PROJECT_ID, ISSUE_ID, &prepared.id)
+        .await
+        .expect("final confirm before review lands");
+    assert_eq!(confirmed.status, CodingAttemptStatus::Completed);
+
+    // 确认时刻评审记录不在场 → 确认侧无留痕可写（P2-1 缺陷起点）。
+    assert!(
+        fixture
+            .store
+            .list_issue_cross_repo_acknowledgements(PROJECT_ID, ISSUE_ID)
+            .expect("acknowledgements")
+            .is_empty(),
+        "评审未落盘时确认侧不可能留痕"
+    );
+
+    // 评审以 request_changes 落盘。
+    release.send(true).expect("release provider gate");
+    let review = wait_for_review_record(&fixture.store).await;
+    assert_eq!(review.verdict, ReviewVerdict::RequestChanges);
+
+    // 落盘后补写留痕：最终存在且恰好 1 条，键 = (review.id, 被确认 attempt)。
+    let acks = wait_for_acknowledgements(&fixture.store).await;
+    assert_eq!(
+        acks.len(),
+        1,
+        "确认早于评审落盘时，落盘后必须补写恰好一条留痕（P2-1）"
+    );
+    assert_eq!(acks[0].cross_repo_review_id, review.id);
+    assert_eq!(acks[0].attempt_id, confirmed.id);
+    assert_eq!(acks[0].verdict, ReviewVerdict::RequestChanges);
+
+    // advisory 提醒事实关闭：注意力投影不再悬挂 cross_repo_review 待办。
+    let items = crate::web::coding_attention_info::issue_coding_attention_items(
+        &fixture.store.paths(),
+        PROJECT_ID,
+        ISSUE_ID,
+    )
+    .expect("attention items");
+    assert!(
+        items.iter().all(|item| item.kind != "cross_repo_review"),
+        "留痕补写后跨仓评审提醒必须消失：{items:?}"
+    );
+}
+
+/// P3-1：advisory 短时限必须覆盖 provider `start`（端到端 ≤ 时限）——
+/// start 楔死（版本探测/握手/进程 spawn 无返回）也要按时限收敛为 `Failed`
+/// 落盘、在飞登记随任务退出释放。修复前 start 在事件循环超时之外，
+/// 评审任务挂在 start 上永不落盘（本用例 15s 轮询超时失败）。
+#[tokio::test]
+async fn cross_repo_review_start_hang_converges_to_failed_within_deadline() {
+    let (_root, store, engine, attempts) = cross_repo_trigger_fixture(2);
+    let provider = HangingStartProvider {
+        starts: Arc::new(AtomicUsize::new(0)),
+    };
+    let starts = provider.starts.clone();
+    let adapter: Arc<dyn StreamingProviderAdapter> = Arc::new(provider);
+    let resolver =
+        IssueCrossRepoReviewProviderResolver::new(move |_: &ProviderName| Some(adapter.clone()));
+
+    engine
+        .maybe_complete_issue_delivery(&attempts[1], &resolver)
+        .await
+        .expect("issue delivery completion");
+
+    // start 楔死也必须按 advisory 短时限收敛为 Failed 落盘（测试态时限 1s，
+    // 轮询宽限 15s）。
+    let review = wait_for_review_record(&store).await;
+    assert!(
+        starts.load(Ordering::SeqCst) >= 1,
+        "provider start 必须被调用"
+    );
+    assert_eq!(review.status, IssueCrossRepoReviewStatus::Failed);
+    assert!(
+        review
+            .failure_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("启动超时"),
+        "start 楔死必须收敛为「启动超时」Failed：{:?}",
+        review.failure_reason
+    );
+}
