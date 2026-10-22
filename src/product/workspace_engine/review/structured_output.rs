@@ -238,7 +238,7 @@ impl WorkspaceEngine {
             return Err(self.verification_scope_error_if_needed(error));
         };
 
-        if self.session.workspace_type == WorkspaceType::WorkItemPlan {
+        let parsed = if self.session.workspace_type == WorkspaceType::WorkItemPlan {
             let scope = match self.active_node_type() {
                 Some(TimelineNodeType::WorkItemPlanOutlineReview) => {
                     WorkItemPlanReviewScope::Outline
@@ -247,19 +247,47 @@ impl WorkspaceEngine {
                 Some(TimelineNodeType::WorkItemBatchReview) => WorkItemPlanReviewScope::Batch,
                 _ => WorkItemPlanReviewScope::Outline,
             };
-            return parse_work_item_plan_review_value(
+            parse_work_item_plan_review_value(
                 value,
                 &completion.readable_output,
                 &self.current_work_item_plan_outline_ids(),
                 scope,
             )
             .map_err(ReviewCompletionError::Schema)
-            .map_err(|error| self.verification_scope_error_if_needed(error));
-        }
+        } else {
+            parse_review_value(value, &completion.readable_output)
+                .map_err(ReviewCompletionError::Schema)
+        };
 
-        parse_review_value(value, &completion.readable_output)
-            .map_err(ReviewCompletionError::Schema)
+        parsed
             .map_err(|error| self.verification_scope_error_if_needed(error))
+            .and_then(|verdict| self.reject_incomplete_logical_codebase_findings(verdict))
+    }
+
+    /// REQ-PLN-16（设计 A 条目 11）：多仓形态下 finding 的 `evidence` 与
+    /// `required_action` 缺任一即整轮判 `malformed_findings`——该 finding 不进
+    /// 入 `findings`，调用侧经 `fallback_review_verdict` 收敛为 `needs_human`
+    /// 且诊断码稳定为 `malformed_findings`。单仓形态（无 gateway）逐字不变。
+    ///
+    /// 该门置于 verification-scope 升级之后：契约要求该码稳定可见，不得被
+    /// 升级成 `verification_scope_violation`（`malformed_findings` 本就不在
+    /// `is_classification_fatal` 内）。
+    fn reject_incomplete_logical_codebase_findings(
+        &self,
+        verdict: ReviewVerdict,
+    ) -> Result<ReviewVerdict, ReviewCompletionError> {
+        if !self.is_logical_codebase_issue() {
+            return Ok(verdict);
+        }
+        let incomplete = verdict.findings.iter().any(|finding| {
+            finding.evidence.trim().is_empty() || finding.required_action.trim().is_empty()
+        });
+        if incomplete {
+            return Err(ReviewCompletionError::Schema(
+                ReviewStructuredOutputErrorCode::MalformedFindings,
+            ));
+        }
+        Ok(verdict)
     }
 }
 
@@ -363,5 +391,376 @@ mod tests {
         );
 
         assert!(!error.is_repairable());
+    }
+}
+
+/// REQ-PLN-16（设计 A 条目 11）：多仓（`is_logical_codebase_issue()` 为真）
+/// 评审的每条 finding 都必须带非空 `evidence` 与非空 `required_action`；缺
+/// 任一即整轮判 `malformed_findings`（→ `needs_human`），该 finding 不进入
+/// `findings`。单仓同输入沿用 `parsers.rs` 现状（空串照收），行为逐字不变。
+#[cfg(test)]
+mod lc_finding_completeness_tests {
+    use super::*;
+    use crate::cross_cutting::provider_availability_gate::{
+        ProviderAvailabilityGate, ProviderHealthSource,
+    };
+    use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::checkpoint_store::CheckpointStore;
+    use crate::product::logical_codebase::{
+        AggregatePolicyArtifactStore, LogicalCodebaseProviderGateway, PolicyTarget,
+        PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource, ProviderGatewayError,
+        ProviderRef, SessionLaunchRequest, SessionPolicyAction,
+    };
+    use crate::web::workspace_ws_types::ReviewVerdictType;
+    use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    /// 占位 capability source：形态门禁只读 `Option::is_some()`，恒拒即可。
+    struct UnusedCapabilitySource;
+
+    impl ProviderCapabilitySource for UnusedCapabilitySource {
+        fn require_supported(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "lc finding fixture capability source is never queried".to_string(),
+            ))
+        }
+
+        fn require_resume_supported(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "lc finding fixture capability source is never queried".to_string(),
+            ))
+        }
+
+        fn require_write_boundary(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "lc finding fixture capability source is never queried".to_string(),
+            ))
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            _provider: &ProviderRef,
+            _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "lc finding fixture capability source is never queried".to_string(),
+            ))
+        }
+    }
+
+    /// 占位 target resolver：透传请求 target（不会被调用）。
+    struct UnusedTargetResolver;
+
+    impl PolicyTargetResolver for UnusedTargetResolver {
+        fn resolve_and_revalidate(
+            &self,
+            request: &SessionLaunchRequest,
+        ) -> Result<PolicyTarget, ProviderGatewayError> {
+            Ok(request.target.clone())
+        }
+    }
+
+    /// 占位同步 adapter：gateway 构造参数，不会被调用。
+    struct UnusedSyncAdapter;
+
+    impl crate::cross_cutting::provider_adapter::ProviderAdapter for UnusedSyncAdapter {
+        fn run(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+        ) -> Result<
+            crate::protocol::contracts::AdapterOutput,
+            crate::cross_cutting::provider_adapter::ProviderAdapterError,
+        > {
+            Ok(crate::protocol::contracts::AdapterOutput {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                structured_output: None,
+                files_modified: Vec::new(),
+                duration_ms: 0,
+                timeout_status: crate::protocol::contracts::TimeoutStatus::NotTimedOut,
+            })
+        }
+    }
+
+    fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
+        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+
+        impl ProviderHealthSource for AlwaysHealthy {
+            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+                self.0.clone()
+            }
+
+            fn degraded(&self) -> bool {
+                false
+            }
+        }
+
+        let checked_at = chrono::Utc::now();
+        let snapshot = Arc::new(ProviderHealthSnapshot {
+            schema_version: 1,
+            generation: 1,
+            checked_at,
+            providers: [ProviderName::ClaudeCode]
+                .into_iter()
+                .map(|provider| ProviderHealthEntry {
+                    provider,
+                    command: "stub".to_string(),
+                    available: true,
+                    version: Some("1.0".to_string()),
+                    reason_code: None,
+                    reason: None,
+                    checked_at,
+                })
+                .collect(),
+        });
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+            snapshot,
+        ))))
+    }
+
+    /// 构造仅满足形态判据的最小 gateway（门禁只读 `Option::is_some()`，
+    /// 不触 bootstrap / capability / availability 链）。
+    fn stub_logical_gateway() -> Arc<LogicalCodebaseProviderGateway> {
+        let root = tempfile::tempdir().expect("gateway fixture root under /tmp");
+        let authority_root = root.path().join("authority");
+        std::fs::create_dir_all(&authority_root).expect("create authority root");
+        Arc::new(LogicalCodebaseProviderGateway::new(
+            AggregatePolicyArtifactStore::new(ProductAppPaths::new(root.path().join(".aria"))),
+            Arc::new(UnusedCapabilitySource),
+            Arc::new(UnusedTargetResolver),
+            Arc::new(ProviderRegistry::new()),
+            Arc::new(UnusedSyncAdapter),
+            always_available_gate(),
+            authority_root,
+        ))
+    }
+
+    fn session(workspace_type: WorkspaceType) -> WorkspaceSession {
+        WorkspaceSession {
+            session_id: "sess_lc_finding_completeness".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type,
+            stage: WorkspaceStage::Revision,
+            messages: Vec::new(),
+            artifact: None,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+            review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            provisional_reviewer_provider: None,
+            reviewer_enabled_at_start: None,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+            session_status: crate::product::models::WorkspaceSessionStatus::Open,
+            flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+            run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+            run_history: Default::default(),
+            review_invocation_scope: None,
+            human_gate_snapshot: None,
+            repair_reservation: None,
+            policy_diagnostics: Vec::new(),
+            provider_start_ledger: Vec::new(),
+            single_candidate_phase: None,
+            work_item_plan_source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            publication_provenance_ref: None,
+            approval_attempt_id: None,
+            approved_at: None,
+            compile_reservation: None,
+            provider_conversations: Vec::new(),
+            logical_launch_fingerprints: Vec::new(),
+            superseded_native_sessions: Vec::new(),
+            lc_resume_recovery: None,
+            structural_governance_state: None,
+            repository_path: None,
+        }
+    }
+
+    /// `logical == true` 走多仓形态（注入 gateway）；`false` 是单仓基线。
+    fn engine(workspace_type: WorkspaceType, logical: bool) -> WorkspaceEngine {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let store = Arc::new(CheckpointStore::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let engine = WorkspaceEngine::new(store, event_tx, session(workspace_type));
+        if logical {
+            engine.with_logical_provider_gateway(stub_logical_gateway())
+        } else {
+            engine
+        }
+    }
+
+    fn completion(payload: serde_json::Value) -> ProviderCompletion {
+        ProviderCompletion {
+            full_output: payload.to_string(),
+            readable_output: "审核意见".to_string(),
+            structured_output: StructuredOutputState::Parsed(payload),
+            provider_session_id: None,
+        }
+    }
+
+    fn generic_review_completion(findings: serde_json::Value) -> ProviderCompletion {
+        completion(json!({
+            "verdict": "revise",
+            "summary": "需要返修",
+            "findings": findings,
+        }))
+    }
+
+    #[test]
+    fn lc_review_rejects_finding_without_evidence() {
+        let cases = [
+            (
+                "evidence 缺字段",
+                json!({
+                    "severity": "must_fix",
+                    "message": "缺口未附证据",
+                    "required_action": "补充证据",
+                }),
+            ),
+            (
+                "evidence 全空白",
+                json!({
+                    "severity": "must_fix",
+                    "message": "缺口未附证据",
+                    "evidence": "   ",
+                    "required_action": "补充证据",
+                }),
+            ),
+            (
+                "required_action 缺字段",
+                json!({
+                    "severity": "must_fix",
+                    "message": "缺口未附证据",
+                    "evidence": "work_item=WI-002",
+                }),
+            ),
+        ];
+
+        for (label, finding) in cases {
+            let engine = engine(WorkspaceType::Story, true);
+            let completion = generic_review_completion(json!([finding]));
+            let error = engine
+                .parse_review_completion_for_active_node(&completion)
+                .expect_err("多仓缺证据 finding 必须整轮拒收");
+
+            assert!(
+                matches!(
+                    &error,
+                    ReviewCompletionError::Schema(
+                        ReviewStructuredOutputErrorCode::MalformedFindings
+                    )
+                ),
+                "{label}: 期望 Schema(MalformedFindings)，实得 {error:?}"
+            );
+            assert_eq!(error.code(), "malformed_findings", "{label}");
+            assert!(
+                !error.is_classification_fatal(),
+                "{label}: malformed_findings 不得进入分类致命臂"
+            );
+            assert!(
+                !error.is_repairable(),
+                "{label}: malformed_findings 不得进入一次 repair"
+            );
+
+            let fallback = fallback_review_verdict(&completion, &error, false);
+            assert_eq!(
+                fallback.verdict,
+                ReviewVerdictType::NeedsHuman,
+                "{label}: 缺证据轮必须判 needs_human"
+            );
+            assert!(
+                fallback.findings.is_empty(),
+                "{label}: 缺证据 finding 不得进入 findings"
+            );
+            assert_eq!(
+                fallback
+                    .structured_output_diagnostic
+                    .as_ref()
+                    .map(|diagnostic| diagnostic.code.as_str()),
+                Some("malformed_findings"),
+                "{label}: diagnostic 码必须是 malformed_findings"
+            );
+        }
+    }
+
+    #[test]
+    fn lc_review_accepts_finding_with_evidence_and_required_action() {
+        let engine = engine(WorkspaceType::Story, true);
+        let completion = generic_review_completion(json!([{
+            "severity": "must_fix",
+            "message": "缺口未附证据",
+            "evidence": "work_item=WI-002",
+            "required_action": "补充证据",
+        }]));
+
+        let verdict = engine
+            .parse_review_completion_for_active_node(&completion)
+            .expect("证据齐备的多仓 finding 必须照收");
+        assert_eq!(verdict.findings.len(), 1);
+        assert_eq!(verdict.findings[0].evidence, "work_item=WI-002");
+        assert_eq!(verdict.findings[0].required_action, "补充证据");
+    }
+
+    #[test]
+    fn lc_work_item_plan_review_rejects_finding_without_evidence() {
+        let engine = engine(WorkspaceType::WorkItemPlan, true);
+        let completion = completion(json!({
+            "review_scope": "outline",
+            "verdict": "revise",
+            "summary": "需要返修",
+            "generation_round_id": "gen_001",
+            "findings": [{
+                "severity": "must_fix",
+                "message": "缺口未附证据",
+                "required_action": "补充证据",
+            }],
+        }));
+
+        assert!(
+            matches!(
+                engine.parse_review_completion_for_active_node(&completion),
+                Err(ReviewCompletionError::Schema(
+                    ReviewStructuredOutputErrorCode::MalformedFindings
+                ))
+            ),
+            "多仓 Work Item Plan 评审同样必须拒收缺证据 finding"
+        );
+    }
+
+    #[test]
+    fn single_repo_still_accepts_finding_without_evidence() {
+        let engine = engine(WorkspaceType::Story, false);
+        let completion = generic_review_completion(json!([{
+            "severity": "must_fix",
+            "message": "缺口未附证据",
+            "required_action": "补充证据",
+        }]));
+
+        let verdict = engine
+            .parse_review_completion_for_active_node(&completion)
+            .expect("单仓同输入必须与改造前一致：照收");
+        assert_eq!(verdict.findings.len(), 1);
+        assert_eq!(verdict.findings[0].evidence, "");
+        assert_eq!(verdict.findings[0].required_action, "补充证据");
     }
 }
