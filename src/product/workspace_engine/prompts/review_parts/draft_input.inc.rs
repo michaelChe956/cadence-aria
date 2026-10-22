@@ -36,7 +36,10 @@ impl WorkspaceEngine {
         let mut prompt = String::new();
         prompt.push_str("请作为 reviewer 审核当前单个 Work Item Draft。\n\n");
         prompt.push_str("审核边界：只能审核当前 draft 是否符合对应 outline 以及是否正确消费已接受依赖。若需要修改当前 item，返回 `revise`；若需要修改前序 item 或拆分边界，必须返回 `plan_reopen_required`；不得用 `revise` 修改非当前 item。\n\n");
-        prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
+        prompt.push_str(&reviewer_boundary_rules_for(
+            &self.session.workspace_type,
+            self.is_logical_codebase_issue(),
+        ));
         prompt.push_str(&format!(
             "generation_round_id: {}\ndraft_id: {}\ntarget_outline_id: {}\n\n",
             draft_candidate.draft_record.generation_round_id,

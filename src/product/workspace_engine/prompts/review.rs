@@ -150,7 +150,10 @@ impl WorkspaceEngine {
             "Workspace 类型: {}\n",
             workspace_type_title(&self.session.workspace_type)
         ));
-        prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
+        prompt.push_str(&reviewer_boundary_rules_for(
+            &self.session.workspace_type,
+            self.is_logical_codebase_issue(),
+        ));
         if let Some(gate) = reviewer_artifact_schema_gate_for(&self.session.workspace_type) {
             prompt.push_str(&gate);
         }
@@ -296,7 +299,10 @@ impl WorkspaceEngine {
             "Workspace 类型: {}\n",
             workspace_type_title(&self.session.workspace_type)
         ));
-        prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
+        prompt.push_str(&reviewer_boundary_rules_for(
+            &self.session.workspace_type,
+            self.is_logical_codebase_issue(),
+        ));
         prompt.push_str("会话上下文:\n");
         for msg in &self.session.messages {
             let Some(content) = reviewer_context_content(msg) else {
@@ -608,7 +614,10 @@ impl WorkspaceEngine {
             "Workspace 类型: {}\n",
             workspace_type_title(&self.session.workspace_type)
         ));
-        prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
+        prompt.push_str(&reviewer_boundary_rules_for(
+            &self.session.workspace_type,
+            self.is_logical_codebase_issue(),
+        ));
         prompt.push_str("会话上下文:\n");
         for msg in &self.session.messages {
             let Some(content) = reviewer_context_content(msg) else {
@@ -793,7 +802,10 @@ impl WorkspaceEngine {
         let mut prompt = String::new();
         prompt
             .push_str("请作为 reviewer 审核 WorkItemPlan 自动模式生成的整组 Work Item Draft。\n\n");
-        prompt.push_str(&reviewer_boundary_rules_for(&self.session.workspace_type));
+        prompt.push_str(&reviewer_boundary_rules_for(
+            &self.session.workspace_type,
+            self.is_logical_codebase_issue(),
+        ));
         prompt.push_str(&format!(
             "generation_round_id: {}\nbatch_id: {}\n\n",
             batch.generation_round_id, batch.batch_id

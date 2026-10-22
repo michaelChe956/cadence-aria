@@ -163,9 +163,73 @@ fn review_input_keeps_generation_context_without_author_workflow_directives() {
     assert!(!input.prompt.contains("作者完成条件。"));
 }
 
+/// 改造前 `reviewer_boundary_rules_for` 输出的逐字快照（单仓口径）。
+/// 每条 must-fix 规则一行，前缀/后缀由渲染器固定。
+fn single_repo_boundary_rules_snapshot(workspace_type: &WorkspaceType) -> String {
+    let rule = match workspace_type {
+        WorkspaceType::Story => {
+            "Story artifact: Work Item heading, task splitting, [TASK-*], or WI-* content must be reported as must_fix."
+        }
+        WorkspaceType::Design => {
+            "Design artifact: Work Item Plan、开发任务列表、任务拆分、测试计划、测试范围或场景、测试文件或模块、测试框架或夹具、测试命令、构建命令、执行 checklist 或将测试或验证职责分配给组件或文件必须报告为 must_fix；仅把 [DEC-*] 关联到 [REQ-*]/[AC-*] 且不描述如何测试的抽象验收可追踪性不得报告为 must_fix。"
+        }
+        WorkspaceType::WorkItem => {
+            "Work Item artifact: sibling tasks, issue-level full plans, or cross-task content must be reported as must_fix."
+        }
+        WorkspaceType::WorkItemPlan => {
+            "Work Item Plan artifact: code implementation or rewritten full Story/Design content must be reported as must_fix."
+        }
+    };
+    format!("\n[artifact_boundary_must_fix_rules]\n- {rule}\n")
+}
+
+/// REQ-PLN-15：单仓（`logical=false`）must-fix 规则段必须与改造前逐字相同。
+#[test]
+fn reviewer_boundary_rules_single_repo_byte_identical() {
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
+    ] {
+        assert_eq!(
+            reviewer_boundary_rules_for(&workspace_type, false),
+            single_repo_boundary_rules_snapshot(&workspace_type),
+            "{workspace_type:?} 单仓 must-fix 规则段必须与改造前逐字相同"
+        );
+    }
+}
+
+/// REQ-PLN-15：多仓（`logical=true`）在既有规则之后追加四类必查。
+#[test]
+fn reviewer_boundary_rules_logical_appends_four_categories() {
+    for workspace_type in [
+        WorkspaceType::Story,
+        WorkspaceType::Design,
+        WorkspaceType::WorkItem,
+        WorkspaceType::WorkItemPlan,
+    ] {
+        let rules = reviewer_boundary_rules_for(&workspace_type, true);
+        for category in [
+            "需求漏项",
+            "仓库选择不合理",
+            "验收不可判定",
+            "跨仓影响缺失",
+        ] {
+            assert!(rules.contains(category), "missing `{category}`: {rules}");
+        }
+        let single_repo = single_repo_boundary_rules_snapshot(&workspace_type);
+        assert!(
+            rules.starts_with(&single_repo),
+            "{workspace_type:?} 多仓规则段必须在既有单仓规则之后追加: {rules}"
+        );
+        assert_ne!(rules, single_repo, "{workspace_type:?}");
+    }
+}
+
 #[test]
 fn design_reviewer_boundary_distinguishes_traceability_from_executable_testing() {
-    let rules = reviewer_boundary_rules_for(&WorkspaceType::Design);
+    let rules = reviewer_boundary_rules_for(&WorkspaceType::Design, false);
 
     assert!(rules.contains("抽象验收可追踪性"), "{rules}");
     assert!(rules.contains("不得报告为 must_fix"), "{rules}");

@@ -504,13 +504,35 @@ fn line_number_at(output: &str, byte: usize) -> usize {
         + 1
 }
 
-pub(crate) fn reviewer_boundary_rules_for(workspace_type: &WorkspaceType) -> String {
+/// REQ-PLN-15（设计 A 条目 8）：多仓（logical codebase）形态在既有
+/// must-fix 规则之后追加的四类必查项——需求漏项、仓库选择不合理、
+/// 验收不可判定、跨仓影响缺失。单仓形态不追加。
+const LOGICAL_CODEBASE_REVIEWER_MUST_FIX_RULES: [&str; 4] = [
+    "多仓（logical codebase）artifact：Issue 需求或范围未被覆盖时，需求漏项必须报告为 must_fix。",
+    "多仓（logical codebase）artifact：仓库选择不合理必须报告为 must_fix——列出了却不涉及本次改动，或实际涉及却未列出。",
+    "多仓（logical codebase）artifact：验收标准不可判定／验收不可判定必须报告为 must_fix——缺少可判定的判据，或无法据以判断是否达成。",
+    "多仓（logical codebase）artifact：跨仓影响缺失必须报告为 must_fix——未说明本次改动对其他成员仓的契约、接口或行为影响。",
+];
+
+/// 形态参数 `logical` 只做追加：`false` 时同一 `Vec`、同一循环，输出与
+/// 改造前逐字相同（REQ-PLN-15「单仓文案逐字不变」）。
+pub(crate) fn reviewer_boundary_rules_for(
+    workspace_type: &WorkspaceType,
+    logical: bool,
+) -> String {
     let spec = artifact_constraint_spec_for(workspace_type);
     let mut output = String::from("\n[artifact_boundary_must_fix_rules]\n");
     for rule in spec.reviewer_must_fix_rules {
         output.push_str("- ");
         output.push_str(rule);
         output.push('\n');
+    }
+    if logical {
+        for rule in LOGICAL_CODEBASE_REVIEWER_MUST_FIX_RULES {
+            output.push_str("- ");
+            output.push_str(rule);
+            output.push('\n');
+        }
     }
     output
 }
