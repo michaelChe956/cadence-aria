@@ -28,6 +28,10 @@ use super::cross_repo_review_prompts::{
     ISSUE_CROSS_REPO_REVIEW_OUTPUT_SCHEMA, build_issue_cross_repo_review_prompt,
 };
 
+/// 跨仓评审的 provider adapter 查询闭包（按 provider 名称取 adapter）。
+type CrossRepoReviewProviderLookup<'a> =
+    dyn Fn(&ProviderName) -> Option<Arc<dyn StreamingProviderAdapter>> + Send + Sync + 'a;
+
 /// 跨仓最终评审的 provider adapter 解析器（**调用边界注入**）。
 ///
 /// 引擎只决定 provider **名称**（角色快照 `.internal_reviewer` → 回退
@@ -35,8 +39,7 @@ use super::cross_repo_review_prompts::{
 /// **不自建 adapter**（设计 B §七 E）。
 #[derive(Clone)]
 pub(crate) struct IssueCrossRepoReviewProviderResolver<'a> {
-    inner:
-        Arc<dyn Fn(&ProviderName) -> Option<Arc<dyn StreamingProviderAdapter>> + Send + Sync + 'a>,
+    inner: Arc<CrossRepoReviewProviderLookup<'a>>,
 }
 
 impl<'a> IssueCrossRepoReviewProviderResolver<'a> {
@@ -85,8 +88,7 @@ fn latest_development_finished_attempt(
 ) -> Option<CodingExecutionAttempt> {
     attempts
         .iter()
-        .filter(|attempt| attempt_development_finished(attempt))
-        .last()
+        .rfind(|attempt| attempt_development_finished(attempt))
         .cloned()
 }
 
@@ -420,13 +422,13 @@ impl CodingWorkspaceEngine {
                 failure: None,
             });
         }
-        completed.sort_by(|left, right| {
-            cross_repo_section_sort_key(left).cmp(&cross_repo_section_sort_key(right))
-        });
+        // 排序键每次比较都要分配两个 String → 用 `sort_by_cached_key`（每元素算一次
+        // 键），与 `sort_by` 同序且无重复分配。
+        completed.sort_by_cached_key(cross_repo_section_sort_key);
         let plan_id = completed
             .iter()
             .filter_map(|attempt| attempt.work_item_group_id.clone())
-            .last()
+            .next_back()
             .unwrap_or_default();
 
         let mut sections = Vec::new();
