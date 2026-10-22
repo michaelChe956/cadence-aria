@@ -421,18 +421,26 @@ fn logical_plan_review_gateway_fixture() -> (
 }
 
 /// LC 分支 builder 输出的统一断言：cwd 与 review target 均为 canonical
-/// LC root（Task 2 / REQ-PLN-11 条目 2）+ Reviewer 写工具策略保持。
+/// LC root（Task 2 / REQ-PLN-11 条目 2）+ ReviewerVerify 合同按 REQ-ENV-13
+/// 以会话 UUID 身份铸造（lc 无窗形态；窗口域即该身份）。
 fn assert_logical_plan_review_input(
     input: &StreamingProviderInput,
     case: &str,
     authority_root: &std::path::Path,
+    review_identity_id: &str,
 ) {
     assert_eq!(input.role, AdapterRole::Reviewer, "{case}: reviewer role");
-    // 批2 Task 11（T20 前中间态）：Reviewer wire 面全开（无 deny）——
-    // 纪律=ReviewerVerify+窗口合同，真窗归 T20。
+    // REQ-ENV-13（设计 A 条目 17）：lc 无窗形态 MUST 以每会话 UUID 身份
+    // 铸 ReviewerVerify 合同（canonical 摘要域=该 UUID）；真窗（单仓
+    // 开窗路径）仍归 T20 窗口编号。
     assert_eq!(
-        input.tool_policy, None,
-        "{case}: reviewer wire 面全开（deny 矩阵退役）"
+        input.tool_policy,
+        Some(
+            crate::cross_cutting::streaming_provider::ProviderToolPolicy::reviewer_verify(
+                review_identity_id
+            )
+        ),
+        "{case}: lc 无窗形态以会话 UUID 铸 ReviewerVerify 合同（REQ-ENV-13）"
     );
     assert_eq!(
         input.working_directory.as_deref(),
@@ -470,7 +478,12 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     let input = engine
         .build_work_item_plan_review_input()
         .expect("legacy plan review input");
-    assert_logical_plan_review_input(&input, "legacy", &authority_root);
+    assert_logical_plan_review_input(
+        &input,
+        "legacy",
+        &authority_root,
+        &engine.session.review_identity_id,
+    );
 
     // outline 分支。
     let outline_payload = work_item_plan_outline_artifact();
@@ -481,7 +494,12 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     let input = engine
         .build_work_item_plan_outline_review_input(&outline_candidate)
         .expect("outline review input");
-    assert_logical_plan_review_input(&input, "outline", &authority_root);
+    assert_logical_plan_review_input(
+        &input,
+        "outline",
+        &authority_root,
+        &engine.session.review_identity_id,
+    );
 
     // draft 分支。
     prepare_work_item_plan_outline_artifact(&mut engine).await;
@@ -498,14 +516,24 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     let input = engine
         .build_work_item_draft_review_input(&draft_candidate)
         .expect("draft review input");
-    assert_logical_plan_review_input(&input, "draft", &authority_root);
+    assert_logical_plan_review_input(
+        &input,
+        "draft",
+        &authority_root,
+        &engine.session.review_identity_id,
+    );
 
     // batch 分支。
     save_batch_work_item_plan_index_with_accepted_drafts(&engine, &plan_id);
     let input = engine
         .build_work_item_batch_review_input()
         .expect("batch review input");
-    assert_logical_plan_review_input(&input, "batch", &authority_root);
+    assert_logical_plan_review_input(
+        &input,
+        "batch",
+        &authority_root,
+        &engine.session.review_identity_id,
+    );
 
     // single-candidate 分支（durable IR + mechanical report）。
     let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
@@ -582,7 +610,12 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     let input = engine
         .build_work_item_plan_review_input()
         .expect("single-candidate review input");
-    assert_logical_plan_review_input(&input, "single-candidate", &authority_root);
+    assert_logical_plan_review_input(
+        &input,
+        "single-candidate",
+        &authority_root,
+        &engine.session.review_identity_id,
+    );
 
     // projection 分支（accepted-contract 夹具 + 初始编译产物；编译在 LC 覆盖
     // 前完成，避免 repository_path 参与编译链）。
@@ -600,7 +633,12 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     let input = projection_engine
         .build_work_item_plan_review_input()
         .expect("projection review input");
-    assert_logical_plan_review_input(&input, "projection", &authority_root);
+    assert_logical_plan_review_input(
+        &input,
+        "projection",
+        &authority_root,
+        &projection_engine.session.review_identity_id,
+    );
 
     // ReviewOnly 泛型分支（Design review）同规则。
     let (_design_tmp, design_store) = setup();
@@ -617,7 +655,12 @@ async fn all_logical_plan_review_builders_keep_reviewer_write_guard() {
     let input = design_engine
         .build_review_input()
         .expect("review-only input");
-    assert_logical_plan_review_input(&input, "review-only", &authority_root);
+    assert_logical_plan_review_input(
+        &input,
+        "review-only",
+        &authority_root,
+        &design_engine.session.review_identity_id,
+    );
 
     // —— LC 缺 repository_path：target 仍恒为 LC 根（Task 2 / REQ-PLN-11
     //    条目 2;旧「缺显式成员 target fail-closed」契约随 lc 目标降级退役,
