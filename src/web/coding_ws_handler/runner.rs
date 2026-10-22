@@ -488,6 +488,25 @@ async fn handle_internal_review_flow_decision(
     .await
 }
 
+/// REQ-GFR-CR-01/02：多仓库逻辑代码库形态判定（唯一入口）。
+///
+/// 只有 issue 记录明确持久归属逻辑代码库（`logical_codebase_id == Some(_)`）才为真。
+/// `NotFound → Ok(None)` 与读错 → `Err` 都按单仓处理（不吞错也不新增失败面）：
+/// 单仓库代码库的判定恒为 `false`，`internal_pr_review` 分支既有步骤逐字不变。
+fn skips_per_repository_internal_review(
+    app_paths: &ProductAppPaths,
+    attempt: &CodingExecutionAttempt,
+) -> bool {
+    matches!(
+        crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+            app_paths,
+            &attempt.project_id,
+            &attempt.issue_id,
+        ),
+        Ok(Some(_))
+    )
+}
+
 pub(crate) async fn execute_start_coding_flow(
     state: &WebAppState,
     coding_store: &CodingAttemptStore,
@@ -647,6 +666,25 @@ pub(crate) async fn execute_start_coding_flow(
             current = engine
                 .prepare_group_final_confirm_from_readiness(&current)
                 .await?;
+            return emit_current_session_state(
+                event_tx,
+                coding_store,
+                &current,
+                engine.cancellation_token(),
+            )
+            .await;
+        }
+
+        // REQ-GFR-CR-01/02：多仓库逻辑代码库形态停用每仓 internal review。
+        // 存量 `internal_pr_review` 阶段的单 WI attempt 不启动 InternalReviewer
+        // provider，直接走单 WI 收口（readiness → FinalConfirm，与 fresh group 的
+        // 兼容处理同构）。单仓库代码库判定恒为 false，下方 provider 流程
+        // （await_stage_gate → execute_internal_pr_review_with_commands →
+        // handle_internal_review_flow_decision）逐字保持原实现。
+        if current.stage == CodingExecutionStage::InternalPrReview
+            && skips_per_repository_internal_review(&app_paths, &current)
+        {
+            current = engine.complete_attempt_after_final_rework(&current).await?;
             return emit_current_session_state(
                 event_tx,
                 coding_store,
@@ -1128,22 +1166,30 @@ mod tests {
     };
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::coding_attempt_store::{
-        CodingAttemptStore, CreateCodingExecutionUnitInput, CreateGroupCodingAttemptInput,
+        CodingAttemptStore, CreateCodingAttemptInput, CreateCodingExecutionUnitInput,
+        CreateGroupCodingAttemptInput,
     };
     use crate::product::coding_models::{
         CodingAttemptPlanBinding, CodingAttemptStatus, CodingExecutionAttempt,
-        CodingExecutionUnitStatus, CodingUnitRun, CodingUnitRunStatus,
+        CodingExecutionStage, CodingExecutionUnitStatus, CodingProviderRole,
+        CodingRoleProviderConfigSnapshot, CodingRoleRunStatus, CodingRoleRunTrigger, CodingUnitRun,
+        CodingUnitRunStatus,
     };
     use crate::product::coding_plan_run::{
         CodingPlanRun, CodingPlanRunPhase, CodingPlanRunStore, CodingPlanSelection,
         PLAN_CODING_MODE_FIRST_READY_UNIT,
     };
-    use crate::product::coding_workspace_engine::CodingWorkspaceEngine;
+    use crate::product::coding_workspace_engine::{
+        CodingWorkspaceEngine, CodingWorkspaceEngineError,
+    };
+    use crate::product::coding_workspace_runner::CodingRunnerCommand;
     use crate::product::git_workspace_service::GitWorkspaceService;
+    use crate::product::issue_store::{CreateProductIssueInput, IssueStore};
+    use crate::product::lifecycle_store::{CreateWorkItemInput, LifecycleStore};
     use crate::product::models::ProviderName;
     use crate::product::models::{
         DependencyGraphRevision, LogicalWorkItem, PlanProjectionBundle, PlanRevisionReason,
-        VerificationPlanRevision, WorkItemPlanLineage, WorkItemPlanRevision,
+        VerificationPlanRevision, WorkItemPlanLineage, WorkItemPlanRevision, WorkItemPlanStatus,
         WorkItemProjectionBundle, WorkItemRevision,
     };
     use crate::product::work_item_contract::{
@@ -2417,6 +2463,345 @@ mod tests {
                 .len(),
             1,
             "same-stage gate must remain open (warnings are read-only)"
+        );
+    }
+
+    struct InternalPrReviewFormFixture {
+        _root: TempDir,
+        root_path: std::path::PathBuf,
+        store: CodingAttemptStore,
+        attempt: CodingExecutionAttempt,
+    }
+
+    /// T13 夹具（REQ-GFR-CR-01/02）：WorkItem scope attempt 已停在
+    /// `internal_pr_review`，`head_commit` 与 lifecycle work item 齐备（单 WI
+    /// 收口门可过）；issue 记录按形态参数落 `logical_codebase_id`
+    /// （`Some` = 多仓逻辑代码库、`None` = 单仓）。`code_reviewer` 恒配置，
+    /// `internal_reviewer` 由参数决定是否配置。
+    fn internal_pr_review_form_fixture(
+        logical_codebase_id: Option<&str>,
+        internal_reviewer: Option<ProviderName>,
+    ) -> InternalPrReviewFormFixture {
+        let root = TempDir::new().expect("temp dir");
+        let root_path = root.path().to_path_buf();
+        let worktree = root_path.join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree directory");
+        run_git(&worktree, &["init", "--quiet"]);
+        run_git(&worktree, &["config", "user.email", "t13@example.test"]);
+        run_git(&worktree, &["config", "user.name", "T13 Runner"]);
+        std::fs::write(worktree.join("README.md"), "# t13\n").expect("readme");
+        run_git(&worktree, &["add", "README.md"]);
+        run_git(&worktree, &["commit", "--quiet", "-m", "initial commit"]);
+        let head = git_head(&worktree);
+
+        let paths = ProductAppPaths::new(root_path.join(".aria"));
+        IssueStore::new(paths.clone())
+            .create(CreateProductIssueInput {
+                project_id: "project_0001".to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id: logical_codebase_id.map(str::to_string),
+                title: "issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .expect("issue");
+        LifecycleStore::new(paths.clone())
+            .create_work_item(CreateWorkItemInput {
+                id: Some("work_item_0001".to_string()),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                repository_id: "repository_0001".to_string(),
+                title: "work item".to_string(),
+                planned_implementation_context: Some("work item context".to_string()),
+                plan_status: WorkItemPlanStatus::Confirmed,
+                ..Default::default()
+            })
+            .expect("work item");
+        let store = CodingAttemptStore::new(paths);
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: head.clone(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: Some(worktree),
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Codex,
+                    reviewer: Some(ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 2,
+            })
+            .expect("attempt");
+        store
+            .update_role_provider_config_snapshot(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingRoleProviderConfigSnapshot {
+                    coder: ProviderName::Codex,
+                    code_reviewer: Some(ProviderName::ClaudeCode),
+                    internal_reviewer,
+                    review_rounds: 1,
+                    permission_modes: Default::default(),
+                },
+            )
+            .expect("role provider config");
+        let attempt = store
+            .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("running attempt");
+        store
+            .update_attempt_stage(
+                &attempt.project_id,
+                &attempt.issue_id,
+                &attempt.id,
+                CodingExecutionStage::InternalPrReview,
+            )
+            .expect("internal review stage");
+        let mut attempt = store
+            .get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("attempt");
+        attempt.head_commit = Some(head);
+        store
+            .write_coding_attempt_for_test(&attempt)
+            .expect("persist internal review attempt");
+        InternalPrReviewFormFixture {
+            _root: root,
+            root_path,
+            store,
+            attempt,
+        }
+    }
+
+    /// 以 `internal_reviewer` 候选角色注册受控 provider：任何 start 都计数并失败。
+    fn internal_pr_review_form_state(
+        fixture: &InternalPrReviewFormFixture,
+        provider: &CountingProvider,
+    ) -> WebAppState {
+        let mut registry = ProviderRegistry::new();
+        registry.register(ProviderName::ClaudeCode, Arc::new(provider.clone()));
+        let mut state = WebAppState::with_provider_registry(
+            fixture.root_path.clone(),
+            WebRuntime::new_fake(fixture.root_path.clone()),
+            registry,
+        );
+        state.test_provider_enabled = true;
+        state
+    }
+
+    /// REQ-GFR-CR-01：多仓形态下 `internal_pr_review` 阶段不启动 InternalReviewer
+    /// provider，attempt 直接经单 WI 收口落到人工最终确认。
+    #[tokio::test]
+    async fn logical_codebase_attempt_skips_internal_pr_review_provider() {
+        let fixture = internal_pr_review_form_fixture(
+            Some("logical_codebase_0001"),
+            Some(ProviderName::ClaudeCode),
+        );
+        let provider = CountingProvider::default();
+        let state = internal_pr_review_form_state(&fixture, &provider);
+        let (event_tx, _event_rx) = mpsc::channel(64);
+        let engine = CodingWorkspaceEngine::new(
+            fixture.store.clone(),
+            GitWorkspaceService::new(),
+            event_tx.clone(),
+        );
+        let (command_tx, command_rx) = mpsc::channel(1);
+        command_tx
+            .send(CodingRunnerCommand::StageGateConfirm {
+                stage: CodingExecutionStage::InternalPrReview,
+            })
+            .await
+            .expect("stage gate confirmation");
+
+        execute_start_coding_flow(
+            &state,
+            &fixture.store,
+            &engine,
+            &event_tx,
+            command_rx,
+            &fixture.attempt,
+        )
+        .await
+        .expect("multi-repository attempts must not start the internal reviewer");
+
+        assert_eq!(
+            provider.starts(),
+            0,
+            "multi-repository form must not start the InternalReviewer provider"
+        );
+        let current = fixture
+            .store
+            .get_attempt(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("attempt");
+        assert_eq!(current.stage, CodingExecutionStage::FinalConfirm);
+        assert_eq!(current.status, CodingAttemptStatus::Completed);
+    }
+
+    /// REQ-GFR-CR-02：磁盘上 `stage = internal_pr_review` 的存量多仓 attempt
+    /// （已有历史 internal review role run）重启后被推进时不启动 provider，
+    /// 落到 `FinalConfirm`；阶段持久化字符串保持既有 `internal_pr_review`。
+    #[tokio::test]
+    async fn logical_codebase_legacy_internal_pr_review_attempt_skips_provider() {
+        let fixture = internal_pr_review_form_fixture(
+            Some("logical_codebase_0001"),
+            Some(ProviderName::ClaudeCode),
+        );
+        let persisted =
+            serde_json::to_string(&fixture.attempt).expect("serialize persisted attempt");
+        assert!(
+            persisted.contains("\"stage\":\"internal_pr_review\""),
+            "persisted stage string must stay unchanged: {persisted}"
+        );
+        let legacy_role_run = fixture
+            .store
+            .create_role_run(
+                &fixture.attempt,
+                CodingExecutionStage::InternalPrReview,
+                CodingProviderRole::InternalReviewer,
+                CodingRoleRunTrigger::Initial,
+                None,
+            )
+            .expect("legacy internal review role run");
+        fixture
+            .store
+            .update_role_run_status(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+                &legacy_role_run.id,
+                CodingRoleRunStatus::Completed,
+                Some("legacy internal review persisted before upgrade".to_string()),
+            )
+            .expect("complete legacy role run");
+
+        let provider = CountingProvider::default();
+        let state = internal_pr_review_form_state(&fixture, &provider);
+        let (event_tx, _event_rx) = mpsc::channel(64);
+        let engine = CodingWorkspaceEngine::new(
+            fixture.store.clone(),
+            GitWorkspaceService::new(),
+            event_tx.clone(),
+        );
+        // 重启形态：从磁盘重读存量 attempt 后再推进。
+        let reloaded = fixture
+            .store
+            .get_attempt(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("reload legacy attempt");
+        assert_eq!(reloaded.stage, CodingExecutionStage::InternalPrReview);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        command_tx
+            .send(CodingRunnerCommand::StageGateConfirm {
+                stage: CodingExecutionStage::InternalPrReview,
+            })
+            .await
+            .expect("stage gate confirmation");
+
+        execute_start_coding_flow(
+            &state,
+            &fixture.store,
+            &engine,
+            &event_tx,
+            command_rx,
+            &reloaded,
+        )
+        .await
+        .expect("legacy multi-repository attempt must not resume a provider-backed review");
+
+        assert_eq!(
+            provider.starts(),
+            0,
+            "legacy multi-repository attempt must not start the InternalReviewer provider"
+        );
+        let current = fixture
+            .store
+            .get_attempt(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("attempt");
+        assert_eq!(current.stage, CodingExecutionStage::FinalConfirm);
+        assert_eq!(current.status, CodingAttemptStatus::Completed);
+        assert_eq!(
+            legacy_role_run.stage,
+            CodingExecutionStage::InternalPrReview
+        );
+    }
+
+    /// 单仓形态逐字不变：`internal_reviewer` 缺配置仍落
+    /// `reviewer_configuration_missing` 门并停止推进，provider 启动次数为 0。
+    #[tokio::test]
+    async fn single_repo_missing_internal_reviewer_config_still_blocks() {
+        let fixture = internal_pr_review_form_fixture(None, None);
+        let provider = CountingProvider::default();
+        let state = internal_pr_review_form_state(&fixture, &provider);
+        let (event_tx, _event_rx) = mpsc::channel(64);
+        let engine = CodingWorkspaceEngine::new(
+            fixture.store.clone(),
+            GitWorkspaceService::new(),
+            event_tx.clone(),
+        );
+        let (command_tx, command_rx) = mpsc::channel(1);
+        command_tx
+            .send(CodingRunnerCommand::StageGateConfirm {
+                stage: CodingExecutionStage::InternalPrReview,
+            })
+            .await
+            .expect("stage gate confirmation");
+
+        let error = execute_start_coding_flow(
+            &state,
+            &fixture.store,
+            &engine,
+            &event_tx,
+            command_rx,
+            &fixture.attempt,
+        )
+        .await
+        .expect_err("single-repository missing internal reviewer must keep failing closed");
+        assert!(
+            matches!(
+                error,
+                CodingWorkspaceEngineError::ReviewerConfigurationMissing { .. }
+            ),
+            "expected ReviewerConfigurationMissing, got: {error:?}"
+        );
+        assert_eq!(provider.starts(), 0);
+
+        let current = fixture
+            .store
+            .get_attempt(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("attempt");
+        assert_eq!(current.stage, CodingExecutionStage::InternalPrReview);
+        assert_eq!(current.status, CodingAttemptStatus::Blocked);
+        let gates = fixture
+            .store
+            .list_open_blocked_gates(
+                &fixture.attempt.project_id,
+                &fixture.attempt.issue_id,
+                &fixture.attempt.id,
+            )
+            .expect("open gates");
+        assert_eq!(gates.len(), 1);
+        assert_eq!(
+            gates[0].reason_code.as_deref(),
+            Some("reviewer_configuration_missing")
         );
     }
 }
