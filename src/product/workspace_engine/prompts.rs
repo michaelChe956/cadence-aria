@@ -38,9 +38,9 @@ pub(crate) use review_context::{
     SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES, ensure_single_candidate_review_prompt_budget,
 };
 
-/// 聚合视野 prompt 的唯一 marker（`aggregate_story_scope_prompt` / `aggregate_design_scope_prompt` /
-/// `aggregate_work_item_target_scope_prompt` 均以 `## 聚合代码库成员清单` 开头）。用于在
-/// `build_streaming_input` 中识别 Logical（有 aggregate scope）Story/Design 会话。
+/// 聚合视野材料块的唯一 marker（`aggregate_scope_material_prompt` 以 `## 聚合代码库成员清单`
+/// 开头）。用于在 `build_streaming_input` 中识别 Logical（有 aggregate scope）Story/Design 会话；
+/// 同时是历史压缩后「多仓 canonical inputs 必须原文重放」的判据（REQ-PLN-13）。
 const AGGREGATE_SCOPE_MARKER: &str = "## 聚合代码库成员清单";
 
 pub(crate) fn workspace_type_title(workspace_type: &WorkspaceType) -> &'static str {
@@ -755,55 +755,87 @@ fn structured_interaction_artifact_decision_contract(
     }
 }
 
-/// 逻辑代码库分支的 Story prompt 注入片段（Task 7）。
+/// 聚合评审材料块（进 `[canonical_inputs]` 稳定注入面；REQ-PLN-13）。
 ///
-/// 附在 Story 生成/修订 prompt 末尾：渲染紧凑成员 inventory 清单，并附加「必须列出涉及仓库，
-/// 不确定即 blocker」指令。`inventory_injection.rendered` 来自
-/// `render_compact_inventory`（已按预算截断），`effective_member_ids` 来自
-/// `PlanningContextSnapshot.effective_member_ids`（权威），用于在指令中明示可选仓库范围。
-///
-/// 接入点：由 Web Story 生成/修订入口在逻辑代码库分支调用（`LogicalCodebaseFeature::is_enabled()`
-/// 且 issue 有 codebase-selection.json 时，经 `PlanningContextResolver::build` 取 inventory_injection
-/// 后注入）。方案 X 阶段1已由 generate_story_specs 接线。
-pub fn aggregate_story_scope_prompt(
-    inventory_rendered: &str,
-    effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
-) -> String {
+/// - 首行是唯一 marker `AGGREGATE_SCOPE_MARKER`（`has_aggregate_scope_system_context`
+///   据此识别多仓会话；历史压缩后据此判定「多仓 canonical inputs 必须原文重放」）；
+/// - 正文是全量成员清单 `inventory_rendered`（来自 `InventoryInjection.rendered`，
+///   已按 500 KiB 预算截断）；
+/// - 正文 MUST NOT 出现 `\n\n[`——`generation_brief_section` 以 `\n\n[` 切段，
+///   出现即截断 `[constraint_summary]` 等后续材料段；故空行一律丢弃。
+pub fn aggregate_scope_material_prompt(inventory_rendered: &str) -> String {
     let mut prompt = String::new();
-    prompt.push_str("\n\n## 聚合代码库成员清单（involved repositories 必须从此集合中选取）：\n");
-    prompt.push_str(inventory_rendered);
-    prompt.push_str("\n## 聚合视野要求\n");
-    prompt.push_str(
-        "本次 Story 位于聚合代码库。你必须在 artifact 中明确列出涉及的逻辑仓库 \n\
-         (`involved_repository_ids`，只能取上述成员清单中的 logical_repository_id)。\n\
-         若无法确定具体涉及仓库，必须明确声明并进入 blocker，禁止猜测、禁止默认全部成员、\n\
-         禁止回落到任意单一 primary 仓库。",
-    );
-    if !effective_member_ids.is_empty() {
-        prompt.push_str("\n可选仓库范围（logical_repository_id）：");
-        for member in effective_member_ids {
-            prompt.push_str(&format!("\n- {member:?}"));
+    prompt.push_str(AGGREGATE_SCOPE_MARKER);
+    prompt.push('\n');
+    for line in inventory_rendered.lines() {
+        if line.trim().is_empty() {
+            continue;
         }
+        prompt.push_str(line);
+        prompt.push('\n');
     }
     prompt
 }
 
-/// 逻辑代码库分支的 Design prompt 注入片段（Task 8 修复）。
+/// 逻辑代码库分支的 Story 指令块（留消息尾部；成员清单材料块见
+/// `aggregate_scope_material_prompt`）。
 ///
-/// 附在 Design 生成/修订 prompt 末尾：渲染紧凑成员 inventory 清单，并附加「必须列出涉及仓库
-/// 与改动顺序，不确定即 blocker」指令。`inventory_injection.rendered` 来自
-/// `render_compact_inventory`（已按预算截断），`effective_member_ids` 来自
+/// 附加「必须列出涉及仓库，不确定即 blocker」指令。`effective_member_ids` 来自
 /// `PlanningContextSnapshot.effective_member_ids`（权威），用于在指令中明示可选仓库范围。
 ///
-/// 与 `aggregate_story_scope_prompt` 同模式：`involved_repository_ids` 只能取成员清单中的
-/// logical_repository_id；`change_order` 作为 WorkItem `depends_on` 依据（Task 9 消费），
+/// 接入点：由 Web Story 生成/修订入口在逻辑代码库分支调用（`LogicalCodebaseFeature::is_enabled()`
+/// 且 issue 有 codebase-selection.json 时，经 `PlanningContextResolver::build` 取
+/// `inventory_injection` 后注入）。
+pub fn aggregate_story_scope_instruction_prompt(
+    effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("## 聚合视野要求\n");
+    prompt.push_str(
+        "本次 Story 位于聚合代码库。你必须在 artifact 中明确列出涉及的逻辑仓库 \n\
+         (`involved_repository_ids`，只能取上述成员清单中的 logical_repository_id)。\n\
+         若无法确定具体涉及仓库，必须明确声明并进入 blocker，禁止猜测、禁止默认全部成员、\n\
+         禁止回落到任意单一仓库。",
+    );
+    append_optional_member_range(
+        &mut prompt,
+        effective_member_ids,
+        "可选仓库范围（logical_repository_id）：",
+    );
+    prompt
+}
+
+/// 在指令块尾部追加可选仓库范围（有效成员 ID 列表）。
+fn append_optional_member_range(
+    prompt: &mut String,
+    effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
+    label: &str,
+) {
+    if effective_member_ids.is_empty() {
+        return;
+    }
+    prompt.push('\n');
+    prompt.push_str(label);
+    for member in effective_member_ids {
+        prompt.push_str(&format!("\n- {member:?}"));
+    }
+}
+
+/// 逻辑代码库分支的 Design 指令块（留消息尾部；成员清单材料块见
+/// `aggregate_scope_material_prompt`）。
+///
+/// 附加「必须列出涉及仓库与改动顺序，不确定即 blocker」指令。`effective_member_ids` 来自
+/// `PlanningContextSnapshot.effective_member_ids`（权威），用于在指令中明示可选仓库范围。
+///
+/// 与 `aggregate_story_scope_instruction_prompt` 同模式：`involved_repository_ids` 只能取
+/// 成员清单中的 logical_repository_id；`change_order` 作为 WorkItem `depends_on` 依据，
 /// 顺序为执行顺序图（如「先改公共契约 → 再改 provider → 最后改 consumer」），必须恰好覆盖
 /// 全部 involved 仓库且不重复；AI 不确定涉及仓库或顺序时必须进入 blocker，禁止猜测、
-/// 禁止默认全部成员、禁止回落到任意单一 primary 仓库。
+/// 禁止默认全部成员、禁止回落到任意单一仓库。
 ///
 /// 接入点：由 Web Design 生成/修订入口在逻辑代码库分支调用（`LogicalCodebaseFeature::is_enabled()`
-/// 且 issue 有 codebase-selection.json 时，经 `PlanningContextResolver::build` 取 inventory_injection
-/// 后注入）。方案 X 阶段1已由 generate_design_specs 接线。
+/// 且 issue 有 codebase-selection.json 时，经 `PlanningContextResolver::build` 取
+/// `inventory_injection` 后注入）。
 ///
 /// pi-7 钉定缺口根修（e78a97c6）：调用方钉定此前只落 record 出生值，不进 AI 输入
 /// ——AI sentinel 自决声明经方案X阶段2 write-back 覆写钉定值，Confirmed 后 plan
@@ -816,20 +848,17 @@ pub fn aggregate_story_scope_prompt(
 /// （其禁止少于钉定与「AI 在勾选范围内收敛 involved」的产品语义冲突）。
 /// 上界与出生值/write-back/preflight 四面同源（`IssueCodebaseSelection::
 /// resolved_upper_bound`）；未钉定（空）保持 AI 自决指令面不变。
-pub fn aggregate_design_scope_prompt(
-    inventory_rendered: &str,
+pub fn aggregate_design_scope_instruction_prompt(
     effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
     pinned_bound: &[crate::product::logical_codebase::LogicalRepositoryId],
 ) -> String {
     let mut prompt = String::new();
-    prompt.push_str("\n\n## 聚合代码库成员清单（involved repositories 必须从此集合中选取）：\n");
-    prompt.push_str(inventory_rendered);
-    prompt.push_str("\n## 聚合视野要求\n");
+    prompt.push_str("## 聚合视野要求\n");
     prompt.push_str(
         "本次 Design 位于聚合代码库。你必须在 artifact 中明确列出涉及的逻辑仓库 \n\
          (`involved_repository_ids`，只能取上述成员清单中的 logical_repository_id)。\n\
          若无法确定具体涉及仓库，必须明确声明并进入 blocker，禁止猜测、禁止默认全部成员、\n\
-         禁止回落到任意单一 primary 仓库。\n\n",
+         禁止回落到任意单一仓库。\n\n",
     );
     prompt.push_str(
         "改动顺序（change_order）是执行顺序图而非服务调用图，将作为后续 Work Item 的 \n\
@@ -857,39 +886,51 @@ pub fn aggregate_design_scope_prompt(
                且不重复，依赖顺序由你确定。"
         ));
     }
-    if !effective_member_ids.is_empty() {
-        prompt.push_str("\n可选仓库范围（logical_repository_id）：");
-        for member in effective_member_ids {
-            prompt.push_str(&format!("\n- {member:?}"));
-        }
-    }
+    append_optional_member_range(
+        &mut prompt,
+        effective_member_ids,
+        "可选仓库范围（logical_repository_id）：",
+    );
     prompt
 }
 
-/// 逻辑代码库分支的 WorkItem Outline prompt 注入片段（Task 9）。
+/// 逻辑代码库分支的 WorkItem 指令块（留消息尾部；成员清单材料块见
+/// `aggregate_scope_material_prompt`）。
 ///
 /// Outline 的每一个 item 都必须声明目标逻辑仓库。候选 Draft 将逐字继承该 target，
 /// Final Compile 只接受 `IssueCodebaseSelection` 的有效成员，绝不猜测 primary。
-#[allow(dead_code)] // 定义后由后续 Web 接入 task 接线（与 Task 7/8 的 aggregate prompt 一致）
-pub fn aggregate_work_item_target_scope_prompt(
-    inventory_rendered: &str,
+pub fn aggregate_work_item_target_scope_instruction_prompt(
     effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
 ) -> String {
     let mut prompt = String::new();
-    prompt.push_str("\n\n## 聚合代码库成员清单（WorkItem target 必须从此集合中选取）：\n");
-    prompt.push_str(inventory_rendered);
-    prompt.push_str("\n## WorkItem 目标仓库要求\n");
+    prompt.push_str("## WorkItem 目标仓库要求\n");
     prompt.push_str(
         "本次 WorkItem Plan 位于聚合代码库。work_item_outlines[] 的每一项必须提供 \\\n         target_repository_id，且只能取上述成员清单中的 logical_repository_id。\\n\
          target_repository_id 不确定、缺失或不在有效成员中时必须进入 blocker；禁止猜测、\\n\
          禁止回落到任意 primary 仓库。多个 WorkItem 可以使用同一 target_repository_id。",
     );
-    if !effective_member_ids.is_empty() {
-        prompt.push_str("\n可选目标仓库范围（logical_repository_id）：");
-        for member in effective_member_ids {
-            prompt.push_str(&format!("\n- {member:?}"));
-        }
-    }
+    append_optional_member_range(
+        &mut prompt,
+        effective_member_ids,
+        "可选目标仓库范围（logical_repository_id）：",
+    );
+    prompt
+}
+
+/// 逻辑代码库分支的 WorkItem Outline prompt 注入片段（材料块 + 指令块）。
+///
+/// 该调用方（WorkItem Plan legacy author）把片段整体接在 provider prompt 末尾，
+/// 没有 `[canonical_inputs]` 稳定注入面，故此处一次性给出材料块与指令块。
+#[allow(dead_code)] // 与 Story/Design 指令块同模式；接线由 WorkItem Plan author 入口消费
+pub fn aggregate_work_item_target_scope_prompt(
+    inventory_rendered: &str,
+    effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
+) -> String {
+    let mut prompt = String::from("\n\n");
+    prompt.push_str(&aggregate_scope_material_prompt(inventory_rendered));
+    prompt.push_str(&aggregate_work_item_target_scope_instruction_prompt(
+        effective_member_ids,
+    ));
     prompt
 }
 
@@ -905,6 +946,11 @@ mod aggregate_work_item_target_scope_prompt_tests {
         let web = LogicalRepositoryId(Uuid::from_u128(2));
         let prompt = aggregate_work_item_target_scope_prompt("api | service", &[api, web]);
 
+        assert!(
+            prompt.contains("聚合代码库成员清单"),
+            "缺成员清单材料块：{prompt}"
+        );
+        assert!(prompt.contains("api | service"), "缺成员行：{prompt}");
         assert!(prompt.contains("target_repository_id"));
         assert!(prompt.contains("只能取上述成员清单"));
         assert!(prompt.contains("禁止回落到任意 primary 仓库"));
@@ -915,7 +961,10 @@ mod aggregate_work_item_target_scope_prompt_tests {
 
 #[cfg(test)]
 mod aggregate_scope_prompt_tests {
-    use super::{aggregate_design_scope_prompt, aggregate_story_scope_prompt};
+    use super::{
+        aggregate_design_scope_instruction_prompt, aggregate_scope_material_prompt,
+        aggregate_story_scope_instruction_prompt,
+    };
     use crate::product::logical_codebase::LogicalRepositoryId;
     use uuid::Uuid;
 
@@ -931,10 +980,78 @@ mod aggregate_scope_prompt_tests {
     const API: LogicalRepositoryId = LogicalRepositoryId(stable_uuid(0x0001));
     const WEB: LogicalRepositoryId = LogicalRepositoryId(stable_uuid(0x0002));
 
+    /// REQ-PLN-13：材料块正文不得出现裸段界 `\n\n[`——`generation_brief_section` 以
+    /// `\n\n[` 切段，出现即截断 `[constraint_summary]` 等后续材料段。
     #[test]
-    fn aggregate_story_scope_prompt_lists_inventory_and_blocker_directive() {
+    fn aggregate_material_block_has_no_bare_bracket_break() {
+        let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n\n[oops]\n";
+        let material = aggregate_scope_material_prompt(inventory);
+
+        assert!(
+            !material.contains("\n\n["),
+            "材料块不得含裸段界（会截断后续材料段）：{material}"
+        );
+    }
+
+    /// 材料块必须保留聚合 scope marker（多仓会话判据）与全量成员清单。
+    #[test]
+    fn aggregate_scope_marker_preserved_in_material() {
         let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
-        let prompt = aggregate_story_scope_prompt(inventory, &[API, WEB]);
+        let material = aggregate_scope_material_prompt(inventory);
+
+        assert!(
+            material.starts_with(super::AGGREGATE_SCOPE_MARKER),
+            "材料块首行必须是聚合 scope marker：{material}"
+        );
+        assert!(
+            material.contains("api/ | service"),
+            "材料块缺成员行：{material}"
+        );
+    }
+
+    /// REQ-PLN-13：材料块落在 `[canonical_inputs]` 稳定注入面后，reviewer 侧按
+    /// `generation_brief_section` 抽取该段时必须仍能看到完整成员清单（不被段界截断）。
+    #[test]
+    fn aggregate_material_survives_reviewer_canonical_inputs_extraction() {
+        let material = aggregate_scope_material_prompt(
+            "00000000-0000-7000-8000-000000000001 | api | api/ | service\n",
+        );
+        let message = crate::product::workspace_engine::SessionMessage {
+            id: "msg_001".to_string(),
+            role: "system".to_string(),
+            content: format!(
+                "Workspace 生成任务已准备\n\n[system]\n{system}\n\n[canonical_inputs]\nWorkspace 类型: Story\nRepository 路径: /repo\n{material}关联上下文:\n\n\n[constraint_summary]\n约束。",
+                system = "story spec",
+            ),
+            checkpoint_id: None,
+            created_at: "2026-10-23T00:00:00Z".to_string(),
+        };
+
+        let reviewer = super::reviewer_context_filter::reviewer_context_content(&message)
+            .expect("reviewer context");
+
+        assert!(
+            reviewer.contains("[canonical_inputs]"),
+            "reviewer 上下文必须取自 canonical inputs 段：{reviewer}"
+        );
+        assert!(
+            reviewer.contains("api/ | service"),
+            "reviewer 上下文必须保留成员清单：{reviewer}"
+        );
+        assert!(
+            reviewer.contains("约束。"),
+            "canonical inputs 截断不得影响后续段：{reviewer}"
+        );
+    }
+
+    #[test]
+    fn aggregate_story_scope_instruction_prompt_lists_inventory_and_blocker_directive() {
+        let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
+        let prompt = format!(
+            "{}{}",
+            aggregate_scope_material_prompt(inventory),
+            aggregate_story_scope_instruction_prompt(&[API, WEB]),
+        );
 
         assert!(
             prompt.contains("聚合代码库成员清单"),
@@ -946,8 +1063,12 @@ mod aggregate_scope_prompt_tests {
             "缺 involved_repository_ids 指令：{prompt}"
         );
         assert!(
-            prompt.contains("禁止回落到任意单一 primary 仓库"),
-            "缺禁止 primary 回落指令：{prompt}"
+            prompt.contains("禁止回落到任意单一仓库"),
+            "缺禁止单一仓库回落指令：{prompt}"
+        );
+        assert!(
+            !prompt.to_lowercase().contains("primary"),
+            "聚合视野 prompt 不得再出现 primary 字样(REQ-PLN-11 条目 1)：{prompt}"
         );
         // 有效成员 ID 列出以限定 involved 取值范围。
         assert!(prompt.contains("00000000-0000-7000-8000-000000000001"));
@@ -955,9 +1076,13 @@ mod aggregate_scope_prompt_tests {
     }
 
     #[test]
-    fn aggregate_design_scope_prompt_lists_inventory_involved_change_order_and_blocker() {
+    fn aggregate_design_scope_instruction_prompt_lists_inventory_involved_change_order_and_blocker() {
         let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
-        let prompt = aggregate_design_scope_prompt(inventory, &[API, WEB], &[]);
+        let prompt = format!(
+            "{}{}",
+            aggregate_scope_material_prompt(inventory),
+            aggregate_design_scope_instruction_prompt(&[API, WEB], &[]),
+        );
 
         assert!(
             prompt.contains("聚合代码库成员清单"),
@@ -969,8 +1094,12 @@ mod aggregate_scope_prompt_tests {
             "缺 involved_repository_ids 指令：{prompt}"
         );
         assert!(
-            prompt.contains("禁止回落到任意单一 primary 仓库"),
-            "缺禁止 primary 回落指令：{prompt}"
+            prompt.contains("禁止回落到任意单一仓库"),
+            "缺禁止单一仓库回落指令：{prompt}"
+        );
+        assert!(
+            !prompt.to_lowercase().contains("primary"),
+            "聚合视野 prompt 不得再出现 primary 字样(REQ-PLN-11 条目 1)：{prompt}"
         );
         // change_order 作为 WorkItem depends_on 依据，且必须恰好覆盖全部 involved 仓库。
         assert!(
@@ -1000,13 +1129,17 @@ mod aggregate_scope_prompt_tests {
     }
 
     #[test]
-    fn aggregate_design_scope_prompt_pins_upper_bound_allowing_subset_and_rejecting_out_of_bound() {
+    fn aggregate_design_scope_instruction_prompt_pins_upper_bound_allowing_subset_and_rejecting_out_of_bound() {
         // add-multi-repo-issue-entry(组2 2.1):钉定块上界化——勾选集(selection.focus,
         // resolved 同源)是硬上界:AI 在界内收敛 involved(允许非空子集),界外即拒;
         // 取代 e78a97c6 的「原样输出」精确回显语义(那要求 AI 不得少于钉定,与
         // 「实际涉及仓可少于勾选」的产品语义冲突)。
         let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
-        let prompt = aggregate_design_scope_prompt(inventory, &[API, WEB], &[API]);
+        let prompt = format!(
+            "{}{}",
+            aggregate_scope_material_prompt(inventory),
+            aggregate_design_scope_instruction_prompt(&[API, WEB], &[API]),
+        );
 
         assert!(
             prompt.contains("聚合视野上界钉定"),
@@ -1036,10 +1169,14 @@ mod aggregate_scope_prompt_tests {
     }
 
     #[test]
-    fn aggregate_design_scope_prompt_unpinned_keeps_self_decide_directive_only() {
+    fn aggregate_design_scope_instruction_prompt_unpinned_keeps_self_decide_directive_only() {
         // 不钉定(AI 自决流)保持原指令面,无钉定块——语义不回归。
         let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
-        let prompt = aggregate_design_scope_prompt(inventory, &[API, WEB], &[]);
+        let prompt = format!(
+            "{}{}",
+            aggregate_scope_material_prompt(inventory),
+            aggregate_design_scope_instruction_prompt(&[API, WEB], &[]),
+        );
 
         assert!(
             !prompt.contains("聚合视野上界钉定"),

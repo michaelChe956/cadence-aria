@@ -18,8 +18,8 @@ use crate::product::logical_codebase::{
 use crate::product::models::{WorkspaceMessageRecord, WorkspaceSessionRecord, WorkspaceType};
 use crate::product::work_item_runtime_reader::WorkItemRuntimeReader;
 use crate::product::workspace_engine::{
-    aggregate_design_scope_prompt, aggregate_story_scope_prompt,
-    aggregate_work_item_target_scope_prompt,
+    aggregate_design_scope_instruction_prompt, aggregate_scope_material_prompt,
+    aggregate_story_scope_instruction_prompt, aggregate_work_item_target_scope_instruction_prompt,
 };
 use chrono::Utc;
 
@@ -195,20 +195,24 @@ async fn build_workspace_context_message(
         }
         _ => None,
     };
-    let aggregate_prompt =
+    // 多仓材料块（成员清单）进 `[canonical_inputs]` 稳定注入面（REQ-PLN-13）：历史压缩后
+    // 仍被完整重放，评审材料不因会话轮次增加而丢失。
+    let aggregate_material =
+        aggregate_planning
+            .as_ref()
+            .map(|resolved| aggregate_scope_material_prompt(&resolved.inventory_injection.rendered));
+    // 指令块留消息尾部。
+    let aggregate_instruction =
         aggregate_planning
             .as_ref()
             .map(|resolved| match session.workspace_type {
-                WorkspaceType::Story => aggregate_story_scope_prompt(
-                    &resolved.inventory_injection.rendered,
+                WorkspaceType::Story => {
+                    aggregate_story_scope_instruction_prompt(&resolved.snapshot.effective_member_ids)
+                }
+                WorkspaceType::WorkItemPlan => aggregate_work_item_target_scope_instruction_prompt(
                     &resolved.snapshot.effective_member_ids,
                 ),
-                WorkspaceType::WorkItemPlan => aggregate_work_item_target_scope_prompt(
-                    &resolved.inventory_injection.rendered,
-                    &resolved.snapshot.effective_member_ids,
-                ),
-                _ => aggregate_design_scope_prompt(
-                    &resolved.inventory_injection.rendered,
+                _ => aggregate_design_scope_instruction_prompt(
                     &resolved.snapshot.effective_member_ids,
                     aggregate_design_bound.as_deref().unwrap_or(&[]),
                 ),
@@ -249,7 +253,7 @@ async fn build_workspace_context_message(
          Issue 描述: {}\n\
          Repository: {} ({})\n\
          Repository 路径: {}\n\
-         关联上下文:\n{}{}\n\n\
+         {}关联上下文:\n{}{}\n\n\
          [constraint_summary]\n\
          {}\n\n\
          [runtime_contract]\n\
@@ -272,6 +276,7 @@ async fn build_workspace_context_message(
         repository_name,
         repository_id_label,
         repository_path,
+        aggregate_material.as_deref().unwrap_or(""),
         linked_context,
         work_item_context_block,
         constraint_summary_for(session),
@@ -280,8 +285,9 @@ async fn build_workspace_context_message(
         output_schema_for(&session.workspace_type),
         completion_or_failure_for(session),
     );
-    if let Some(aggregate_prompt) = aggregate_prompt {
-        message.push_str(&aggregate_prompt);
+    if let Some(aggregate_instruction) = aggregate_instruction {
+        message.push_str("\n\n");
+        message.push_str(&aggregate_instruction);
     }
     Ok(message)
 }

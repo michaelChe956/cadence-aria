@@ -320,7 +320,9 @@ fn must_replay_raw(
     latest_artifact: Option<&ArtifactVersion>,
 ) -> bool {
     is_choice_audit(message)
-        || (mode == HistoryCompactionMode::Reviewer && has_canonical_inputs(&message.content))
+        || (has_canonical_inputs(&message.content)
+            && (mode == HistoryCompactionMode::Reviewer
+                || message.content.contains(super::AGGREGATE_SCOPE_MARKER)))
         || latest_artifact.is_some_and(|artifact| {
             !artifact.markdown().is_empty()
                 && message_contains_artifact(message, artifact.markdown())
@@ -823,6 +825,54 @@ mod tests {
                 .rendered
                 .contains("完整 canonical input：不得省略。")
         );
+    }
+
+    /// REQ-PLN-13：多仓会话的 canonical inputs 内含聚合 scope marker（成员清单材料块），
+    /// 历史压缩后必须原文重放——否则长会话多轮评审后看不到仓库清单。
+    #[test]
+    fn must_replay_raw_true_for_aggregate_marker_author_mode() {
+        let message = message(
+            1,
+            "system",
+            "Workspace 生成任务已准备\n\n[canonical_inputs]\nWorkspace 类型: Story\nRepository 路径: /repo\n## 聚合代码库成员清单\nlc-1 | api | api/ | service | tech_stack=[rust]\n关联上下文:\n\n\n[constraint_summary]\n约束。",
+        );
+
+        assert!(
+            must_replay_raw(&message, HistoryCompactionMode::Author, None),
+            "多仓 canonical inputs 含聚合 marker 时 MUST 原文重放"
+        );
+    }
+
+    #[test]
+    fn must_replay_raw_true_for_aggregate_marker_reviewer_mode() {
+        let message = message(
+            1,
+            "system",
+            "Workspace 生成任务已准备\n\n[canonical_inputs]\nWorkspace 类型: Story\nRepository 路径: /repo\n## 聚合代码库成员清单\nlc-1 | api | api/ | service | tech_stack=[rust]\n关联上下文:\n\n\n[constraint_summary]\n约束。",
+        );
+
+        assert!(must_replay_raw(
+            &message,
+            HistoryCompactionMode::Reviewer,
+            None
+        ));
+    }
+
+    /// 单仓会话（canonical inputs 无聚合 marker）行为逐字不变：
+    /// author 模式不原文重放 canonical inputs。
+    #[test]
+    fn must_replay_raw_stays_false_for_single_repo_author_mode() {
+        let message = message(
+            1,
+            "system",
+            "Workspace 生成任务已准备\n\n[canonical_inputs]\n完整 canonical input：不得省略。\n\n[constraint_summary]\n约束。",
+        );
+
+        assert!(!must_replay_raw(
+            &message,
+            HistoryCompactionMode::Author,
+            None
+        ));
     }
 
     #[test]

@@ -848,9 +848,8 @@ fn aggregate_story_author_input_sets_structured_output_contract_with_nonce() {
     session.messages.push(SessionMessage {
         id: "msg_generation_context".to_string(),
         role: "system".to_string(),
-        content: crate::product::workspace_engine::aggregate_story_scope_prompt(
+        content: crate::product::workspace_engine::aggregate_scope_material_prompt(
             "inventory-rendered",
-            &[],
         ),
         checkpoint_id: None,
         created_at: "2026-08-11T00:00:00Z".to_string(),
@@ -895,10 +894,8 @@ fn aggregate_design_author_input_sets_structured_output_contract_with_change_ord
     session.messages.push(SessionMessage {
         id: "msg_generation_context".to_string(),
         role: "system".to_string(),
-        content: crate::product::workspace_engine::aggregate_design_scope_prompt(
+        content: crate::product::workspace_engine::aggregate_scope_material_prompt(
             "inventory-rendered",
-            &[],
-            &[],
         ),
         checkpoint_id: None,
         created_at: "2026-08-11T00:00:00Z".to_string(),
@@ -979,9 +976,8 @@ fn aggregate_work_item_plan_author_input_keeps_structured_output_contract_none()
     session.messages.push(SessionMessage {
         id: "msg_generation_context".to_string(),
         role: "system".to_string(),
-        content: crate::product::workspace_engine::aggregate_work_item_target_scope_prompt(
+        content: crate::product::workspace_engine::aggregate_scope_material_prompt(
             "inventory-rendered",
-            &[],
         ),
         checkpoint_id: None,
         created_at: "2026-08-11T00:00:00Z".to_string(),
@@ -1039,18 +1035,15 @@ fn author_family_streaming_inputs_pair_orchestrator_with_deny_file_write_policy(
         (
             "aggregate_story",
             WorkspaceType::Story,
-            Some(crate::product::workspace_engine::aggregate_story_scope_prompt(
+            Some(crate::product::workspace_engine::aggregate_scope_material_prompt(
                 "inventory-rendered",
-                &[],
             )),
         ),
         (
             "aggregate_design",
             WorkspaceType::Design,
-            Some(crate::product::workspace_engine::aggregate_design_scope_prompt(
+            Some(crate::product::workspace_engine::aggregate_scope_material_prompt(
                 "inventory-rendered",
-                &[],
-                &[],
             )),
         ),
         ("single_repo_story", WorkspaceType::Story, None),
@@ -1059,9 +1052,8 @@ fn author_family_streaming_inputs_pair_orchestrator_with_deny_file_write_policy(
             "aggregate_work_item_plan",
             WorkspaceType::WorkItemPlan,
             Some(
-                               crate::product::workspace_engine::aggregate_work_item_target_scope_prompt(
+                crate::product::workspace_engine::aggregate_scope_material_prompt(
                     "inventory-rendered",
-                    &[],
                 ),
             ),
         ),
