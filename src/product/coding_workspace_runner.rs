@@ -43,7 +43,9 @@ pub fn coding_provider_role_for_stage(stage: &CodingExecutionStage) -> Option<Co
         CodingExecutionStage::PrepareContext
         | CodingExecutionStage::WorktreePrepare
         | CodingExecutionStage::ReviewRequest
-        | CodingExecutionStage::FinalConfirm => None,
+        | CodingExecutionStage::FinalConfirm
+        // 跨仓评审角色固定为 InternalReviewer，不走 attempt 阶段选 provider。
+        | CodingExecutionStage::IssueCrossRepoReview => None,
     }
 }
 

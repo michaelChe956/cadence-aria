@@ -18,6 +18,9 @@ pub enum CodingExecutionStage {
     ReviewRequest,
     InternalPrReview,
     FinalConfirm,
+    /// REQ-GFR-CR-07：跨仓最终评审 findings 的 `source_stage` 取值。
+    /// **仅**作 findings 来源标记，**永不**出现在任何 attempt 的 `stage` 字段。
+    IssueCrossRepoReview,
 }
 
 impl CodingExecutionStage {
@@ -30,6 +33,7 @@ impl CodingExecutionStage {
             Self::ReviewRequest => 4,
             Self::InternalPrReview => 5,
             Self::FinalConfirm => 6,
+            Self::IssueCrossRepoReview => 7,
         }
     }
 }

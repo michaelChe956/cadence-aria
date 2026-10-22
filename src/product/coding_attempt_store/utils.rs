@@ -223,6 +223,8 @@ pub(crate) fn coding_stage_dir_name(stage: &CodingExecutionStage) -> &'static st
         CodingExecutionStage::ReviewRequest => "review_request",
         CodingExecutionStage::InternalPrReview => "internal_pr_review",
         CodingExecutionStage::FinalConfirm => "final_confirm",
+        // 该 stage 目录永不产生（仅作 findings 的 source_stage 取值）。
+        CodingExecutionStage::IssueCrossRepoReview => "issue_cross_repo_review",
     }
 }
 

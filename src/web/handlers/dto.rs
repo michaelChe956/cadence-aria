@@ -897,6 +897,8 @@ pub(crate) fn coding_execution_stage_text(stage: &CodingExecutionStage) -> &'sta
         CodingExecutionStage::ReviewRequest => "review_request",
         CodingExecutionStage::InternalPrReview => "internal_pr_review",
         CodingExecutionStage::FinalConfirm => "final_confirm",
+        // attempt.stage 永不为该值，UI 不出现。
+        CodingExecutionStage::IssueCrossRepoReview => "issue_cross_repo_review",
     }
 }
 pub(crate) fn push_status_text(status: &PushStatus) -> &'static str {

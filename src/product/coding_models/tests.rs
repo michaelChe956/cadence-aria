@@ -20,9 +20,37 @@ fn retained_coding_stages_keep_their_relative_order_after_testing_removal() {
         CodingExecutionStage::ReviewRequest,
         CodingExecutionStage::InternalPrReview,
         CodingExecutionStage::FinalConfirm,
+        CodingExecutionStage::IssueCrossRepoReview,
     ];
 
-    assert_eq!(stages.map(|stage| stage.order()), [0_u8, 1, 2, 3, 4, 5, 6]);
+    assert_eq!(
+        stages.map(|stage| stage.order()),
+        [0_u8, 1, 2, 3, 4, 5, 6, 7]
+    );
+}
+
+/// REQ-GFR-CR-07：跨仓 findings 的 `source_stage` 新取值排在 `FinalConfirm` 之后，
+/// 既有 7 个成员的相对序不变。
+#[test]
+fn issue_cross_repo_review_stage_order_is_seven() {
+    assert_eq!(CodingExecutionStage::IssueCrossRepoReview.order(), 7);
+    assert!(
+        CodingExecutionStage::IssueCrossRepoReview.order()
+            > CodingExecutionStage::FinalConfirm.order()
+    );
+}
+
+#[test]
+fn issue_cross_repo_review_serializes_to_snake_case() {
+    assert_eq!(
+        serde_json::to_string(&CodingExecutionStage::IssueCrossRepoReview)
+            .expect("serialize cross repo review stage"),
+        "\"issue_cross_repo_review\""
+    );
+
+    let parsed: CodingExecutionStage = serde_json::from_str("\"issue_cross_repo_review\"")
+        .expect("deserialize cross repo review stage");
+    assert_eq!(parsed, CodingExecutionStage::IssueCrossRepoReview);
 }
 
 #[test]

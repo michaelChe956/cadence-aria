@@ -132,6 +132,10 @@ pub fn is_coding_ws_message_allowed(
                 | CodingWsInMessage::RetryPush
                 | CodingWsInMessage::AbortAttempt
         ),
+        // attempt.stage 永不为该值；仅放行 AbortAttempt。
+        CodingExecutionStage::IssueCrossRepoReview => {
+            matches!(message, CodingWsInMessage::AbortAttempt)
+        }
     }
 }
 

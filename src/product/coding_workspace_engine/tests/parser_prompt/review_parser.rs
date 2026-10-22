@@ -274,6 +274,55 @@ fn review_parser_accepts_group_final_review_source_stage_alias() {
     );
 }
 
+/// REQ-GFR-CR-07：跨仓 findings 的 `source_stage` 新取值必须登记进严格来源字符串表，
+/// 且 provider 省略来源阶段时按调用方传入的默认值兜底。
+#[test]
+fn review_parser_accepts_issue_cross_repo_review_source_stage() {
+    let payload = r#"{
+      "verdict": "request_changes",
+      "summary": "cross repo review found one issue",
+      "findings": [
+        {
+          "severity": "error",
+          "file_path": "src/group.rs",
+          "message": "cross repo contract is not closed",
+          "source_stage": "issue_cross_repo_review"
+        }
+      ]
+    }"#;
+
+    let parsed = parse_review_payload(payload, CodingExecutionStage::IssueCrossRepoReview);
+
+    assert_eq!(parsed.verdict, ReviewVerdict::RequestChanges);
+    assert_eq!(parsed.findings.len(), 1);
+    assert_eq!(
+        parsed.findings[0].source_stage,
+        CodingExecutionStage::IssueCrossRepoReview
+    );
+}
+
+#[test]
+fn review_parser_falls_back_to_issue_cross_repo_review_when_source_stage_omitted() {
+    let payload = r#"{
+      "verdict": "approve",
+      "summary": "cross repo review passed",
+      "findings": [
+        {
+          "severity": "info",
+          "message": "no issue"
+        }
+      ]
+    }"#;
+
+    let parsed = parse_review_payload(payload, CodingExecutionStage::IssueCrossRepoReview);
+
+    assert_eq!(parsed.findings.len(), 1);
+    assert_eq!(
+        parsed.findings[0].source_stage,
+        CodingExecutionStage::IssueCrossRepoReview
+    );
+}
+
 #[test]
 fn review_parser_normalizes_incident_verification_finding_without_coder_route() {
     let payload = serde_json::json!({
