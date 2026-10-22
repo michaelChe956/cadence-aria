@@ -1,7 +1,7 @@
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
 use crate::product::logical_codebase::member_reality::{
-    collect_member_reality, render_member_reality, MemberReality, MEMBER_REALITY_SECTION_MARKER,
+    MEMBER_REALITY_SECTION_MARKER, MemberReality, collect_member_reality, render_member_reality,
 };
 use crate::product::logical_codebase::{
     CheckoutKind, CodebaseMemberRecord, IssueCodebaseSelectionStore, LogicalCodebaseStore,

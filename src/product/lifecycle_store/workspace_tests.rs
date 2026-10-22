@@ -164,29 +164,20 @@ fn legacy_session_without_review_identity_gets_one_persisted_once() {
                 if let Some(found) = find_session_json_opt(&path, file_name) {
                     return found;
                 }
-            } else if path
-                .file_name()
-                .is_some_and(|name| name == file_name)
-            {
+            } else if path.file_name().is_some_and(|name| name == file_name) {
                 return path;
             }
         }
         panic!("session json {file_name} not found");
     }
-    fn find_session_json_opt(
-        dir: &std::path::Path,
-        file_name: &str,
-    ) -> Option<std::path::PathBuf> {
+    fn find_session_json_opt(dir: &std::path::Path, file_name: &str) -> Option<std::path::PathBuf> {
         for entry in std::fs::read_dir(dir).expect("read dir") {
             let path = entry.expect("dir entry").path();
             if path.is_dir() {
                 if let Some(found) = find_session_json_opt(&path, file_name) {
                     return Some(found);
                 }
-            } else if path
-                .file_name()
-                .is_some_and(|name| name == file_name)
-            {
+            } else if path.file_name().is_some_and(|name| name == file_name) {
                 return Some(path);
             }
         }
@@ -204,7 +195,10 @@ fn legacy_session_without_review_identity_gets_one_persisted_once() {
     let mut raw: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&session_path).unwrap()).unwrap();
     assert!(
-        raw.as_object_mut().unwrap().remove("review_identity_id").is_some(),
+        raw.as_object_mut()
+            .unwrap()
+            .remove("review_identity_id")
+            .is_some(),
         "前置：创建即写入的字段应存在，剥除后才构成存量形态"
     );
     std::fs::write(&session_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();

@@ -1100,10 +1100,7 @@ mod aggregate_scope_prompt_tests {
             1,
             "逐仓实况段标题只出现一次：{block}"
         );
-        assert!(
-            !block.contains("\n\n["),
-            "材料块不得含裸段界：{block}"
-        );
+        assert!(!block.contains("\n\n["), "材料块不得含裸段界：{block}");
     }
 
     #[test]
@@ -1138,7 +1135,8 @@ mod aggregate_scope_prompt_tests {
     }
 
     #[test]
-    fn aggregate_design_scope_instruction_prompt_lists_inventory_involved_change_order_and_blocker() {
+    fn aggregate_design_scope_instruction_prompt_lists_inventory_involved_change_order_and_blocker()
+    {
         let inventory = "00000000-0000-7000-8000-000000000001 | api | api/ | service\n";
         let prompt = format!(
             "{}{}",
@@ -1191,7 +1189,8 @@ mod aggregate_scope_prompt_tests {
     }
 
     #[test]
-    fn aggregate_design_scope_instruction_prompt_pins_upper_bound_allowing_subset_and_rejecting_out_of_bound() {
+    fn aggregate_design_scope_instruction_prompt_pins_upper_bound_allowing_subset_and_rejecting_out_of_bound()
+     {
         // add-multi-repo-issue-entry(组2 2.1):钉定块上界化——勾选集(selection.focus,
         // resolved 同源)是硬上界:AI 在界内收敛 involved(允许非空子集),界外即拒;
         // 取代 e78a97c6 的「原样输出」精确回显语义(那要求 AI 不得少于钉定,与

@@ -516,10 +516,7 @@ const LOGICAL_CODEBASE_REVIEWER_MUST_FIX_RULES: [&str; 4] = [
 
 /// 形态参数 `logical` 只做追加：`false` 时同一 `Vec`、同一循环，输出与
 /// 改造前逐字相同（REQ-PLN-15「单仓文案逐字不变」）。
-pub(crate) fn reviewer_boundary_rules_for(
-    workspace_type: &WorkspaceType,
-    logical: bool,
-) -> String {
+pub(crate) fn reviewer_boundary_rules_for(workspace_type: &WorkspaceType, logical: bool) -> String {
     let spec = artifact_constraint_spec_for(workspace_type);
     let mut output = String::from("\n[artifact_boundary_must_fix_rules]\n");
     for rule in spec.reviewer_must_fix_rules {

@@ -216,7 +216,8 @@ fn summarize_repository_structure_logical(path: &Path) -> String {
     let directories = group_layered_directories(summarize_layered_directories(path));
 
     // 顶层条目（文件 + 目录）按名称排序，总数 ≤12。
-    let mut top_level: Vec<(String, bool)> = Vec::with_capacity(top_files.len() + directories.len());
+    let mut top_level: Vec<(String, bool)> =
+        Vec::with_capacity(top_files.len() + directories.len());
     for file in top_files {
         top_level.push((file, false));
     }

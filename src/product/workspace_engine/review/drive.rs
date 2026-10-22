@@ -1870,7 +1870,9 @@ impl WorkspaceEngine {
     ///    会话身份放行)。
     pub(crate) fn reviewer_verify_policy(&self) -> Option<ProviderToolPolicy> {
         if let Some(active) = self.active_review_window.as_ref() {
-            return Some(ProviderToolPolicy::reviewer_verify(active.handle.window_id.clone()));
+            return Some(ProviderToolPolicy::reviewer_verify(
+                active.handle.window_id.clone(),
+            ));
         }
         if self.is_logical_codebase_issue() {
             return Some(ProviderToolPolicy::reviewer_verify(
@@ -2531,9 +2533,10 @@ mod single_repo_review_identity_tests {
                 work_item_plan_options: None,
             })
             .expect("workspace session");
-        let checkpoint = std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
-            paths.issue_lifecycle_root(&record.project_id, &record.issue_id),
-        ));
+        let checkpoint =
+            std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                paths.issue_lifecycle_root(&record.project_id, &record.issue_id),
+            ));
         let (tx, _rx) = mpsc::channel(64);
         let engine = WorkspaceEngine::new_persistent(
             checkpoint,

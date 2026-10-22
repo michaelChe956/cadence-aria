@@ -197,18 +197,17 @@ async fn build_workspace_context_message(
     };
     // 多仓材料块（成员清单）进 `[canonical_inputs]` 稳定注入面（REQ-PLN-13）：历史压缩后
     // 仍被完整重放，评审材料不因会话轮次增加而丢失。
-    let aggregate_material =
-        aggregate_planning
-            .as_ref()
-            .map(|resolved| aggregate_scope_material_prompt(&resolved.inventory_injection.rendered));
+    let aggregate_material = aggregate_planning
+        .as_ref()
+        .map(|resolved| aggregate_scope_material_prompt(&resolved.inventory_injection.rendered));
     // 指令块留消息尾部。
     let aggregate_instruction =
         aggregate_planning
             .as_ref()
             .map(|resolved| match session.workspace_type {
-                WorkspaceType::Story => {
-                    aggregate_story_scope_instruction_prompt(&resolved.snapshot.effective_member_ids)
-                }
+                WorkspaceType::Story => aggregate_story_scope_instruction_prompt(
+                    &resolved.snapshot.effective_member_ids,
+                ),
                 WorkspaceType::WorkItemPlan => aggregate_work_item_target_scope_instruction_prompt(
                     &resolved.snapshot.effective_member_ids,
                 ),

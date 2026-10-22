@@ -474,7 +474,9 @@ mod tests {
         heavy.key_directories = (0..40)
             .map(|index| format!("very-long-directory-name-{index}/"))
             .collect();
-        heavy.entrypoints = (0..6).map(|index| format!("entrypoint-{index}.bin")).collect();
+        heavy.entrypoints = (0..6)
+            .map(|index| format!("entrypoint-{index}.bin"))
+            .collect();
 
         let rendered = render_member_reality(&[heavy]);
 

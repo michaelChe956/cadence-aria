@@ -136,10 +136,14 @@ pub fn resolve_member_head_branch(checkout: &Path) -> Result<String, String> {
     }
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if branch.is_empty() {
-        return Err("git rev-parse --abbrev-ref HEAD 无输出（无法解析该仓当前 HEAD 所在分支）".to_string());
+        return Err(
+            "git rev-parse --abbrev-ref HEAD 无输出（无法解析该仓当前 HEAD 所在分支）".to_string(),
+        );
     }
     if branch == "HEAD" {
-        return Err("detached HEAD（该仓 HEAD 未指向任何分支，无法解析当前 HEAD 所在分支）".to_string());
+        return Err(
+            "detached HEAD（该仓 HEAD 未指向任何分支，无法解析当前 HEAD 所在分支）".to_string(),
+        );
     }
     Ok(branch)
 }
