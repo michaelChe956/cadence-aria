@@ -14,8 +14,9 @@
 //!   [`TRUSTED_ORIGINS_ENV`]），禁止 wildcard、禁止从请求头反推允许列表。
 //! - Origin 端口可省略：配置侧与请求侧共用同一归一（trim + scheme/host 小写 +
 //!   省略端口按 scheme 补默认 https→443/http→80 → `scheme://host:port` 全等比较）。
-//! - Host 允许形式含 `host:port` 与裸 `host`：默认端口的受信 origin（反代域名
-//!   的 Host 头不带端口）与回环口恒收录裸形式；非默认端口（如 8443）不放宽裸形式。
+//! - Host 允许形式含 `host:port` 与裸 `host`：裸形式仅对**显式配置**且端口为
+//!   scheme 默认端口的受信 origin 放行（反代域名的 Host 头不带端口）；非默认端口
+//!   （如 8443）与回环口派生的 authority 只收 `host:port`。
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -143,7 +144,8 @@ fn bare_host(authority: &str) -> &str {
 }
 
 /// 收录一条受信 origin 的 Host 允许形式：`host:port` 恒收录；裸 `host` 仅在
-/// `allow_bare_host` 为真时额外收录（反代域名的 Host 头不带端口；回环口恒收录）。
+/// `allow_bare_host` 为真时额外收录（仅显式配置的默认端口 origin：反代域名的
+/// Host 头不带端口）。
 fn push_expected_authorities(
     expected_authorities: &mut Vec<String>,
     origin: &TrustedOrigin,
@@ -189,9 +191,9 @@ impl ApiAuthState {
                     authority: format!("{host}:{}", bound.port()),
                     https: false,
                 };
-                // 回环口恒收录裸 `host` 形式（生产入口 http://127.0.0.1:4317 的
-                // Host 头可能不带端口）；裸形式仅指本机名，无对外放宽面。
-                push_expected_authorities(&mut expected_authorities, &origin, true);
+                // 回环口派生的 authority 只收 `host:port`：裸 `host` 形式仅限
+                // 显式配置的受信 origin，不随 bind 自动放宽。
+                push_expected_authorities(&mut expected_authorities, &origin, false);
                 trusted_origins.push(origin);
             }
         }
@@ -223,7 +225,7 @@ impl ApiAuthState {
     }
 
     /// 允许的 Host authority 列表（诊断/测试）：每条受信 origin 收录 `host:port`，
-    /// 默认端口下额外收录裸 `host`（回环口恒收录裸形式）。
+    /// 仅显式配置且为 scheme 默认端口时额外收录裸 `host`。
     pub fn expected_authorities(&self) -> &[String] {
         &self.expected_authorities
     }
@@ -240,7 +242,7 @@ impl ApiAuthState {
     }
 
     /// Host authority 是否允许（DNS rebinding 防线；trim + 小写归一比较）。
-    /// 允许形式含 `host:port` 与（默认端口/回环口下的）裸 `host`。
+    /// 允许形式含 `host:port` 与（显式配置默认端口下的）裸 `host`。
     pub fn host_allowed(&self, host: &str) -> bool {
         let normalized = host.trim().to_ascii_lowercase();
         self.expected_authorities.contains(&normalized)
@@ -423,11 +425,11 @@ mod tests {
         assert!(auth.host_allowed("[::1]:39721"));
         assert!(!auth.host_allowed("127.0.0.1:39722"));
         assert!(!auth.host_allowed("evil.example:4317"));
-        // 回环口恒收录裸 host 形式（生产入口 http://127.0.0.1:4317 的 Host 头
-        // 可能不带端口）；裸形式仅指本机名。
-        assert!(auth.host_allowed("127.0.0.1"));
-        assert!(auth.host_allowed("localhost"));
-        assert!(auth.host_allowed("[::1]"));
+        // 回环口派生的 authority 只收 `host:port`：裸 host 形式仅限显式配置的受信
+        // origin，不随 bind 自动放宽（生产入口 Host 头必带端口）。
+        assert!(!auth.host_allowed("127.0.0.1"));
+        assert!(!auth.host_allowed("localhost"));
+        assert!(!auth.host_allowed("[::1]"));
         assert!(!auth.host_allowed("evil.com"));
     }
 
@@ -554,9 +556,9 @@ mod tests {
         );
     }
 
-    /// Host 同时接受带端口与不带端口：`host:port` 恒允许；裸 `host` 仅在端口为
-    /// scheme 默认端口时额外允许（反代 https 域名的 Host 头不带端口），
-    /// 非默认端口（如 8443）不放宽裸形式；回环口恒允许裸形式。
+    /// Host 同时接受带端口与不带端口：`host:port` 恒允许；裸 `host` 仅对显式配置
+    /// 且端口为 scheme 默认端口的受信 origin 额外允许（反代 https 域名的 Host 头
+    /// 不带端口），非默认端口（如 8443）与回环口派生的 authority 不放宽裸形式。
     #[test]
     fn api_auth_host_accepts_both_with_and_without_port() {
         let bind: SocketAddr = "192.168.1.5:4317".parse().expect("bind");
@@ -585,14 +587,15 @@ mod tests {
         assert!(auth.host_allowed("dev.example:80"));
         assert!(auth.host_allowed("dev.example"));
 
-        // 生产入口：http://127.0.0.1:4317（回环口）两种 Host 形式都允许。
+        // 生产入口：http://127.0.0.1:4317（回环口）只允许带端口的 Host 形式；
+        // 浏览器访问非默认端口必带端口，裸 host 不再放行。
         let auth = ApiAuthState::for_bind(&loopback_bind(4317), &[]).expect("auth");
         assert!(auth.host_allowed("127.0.0.1:4317"));
-        assert!(auth.host_allowed("127.0.0.1"));
+        assert!(!auth.host_allowed("127.0.0.1"));
         assert!(auth.host_allowed("localhost:4317"));
-        assert!(auth.host_allowed("localhost"));
+        assert!(!auth.host_allowed("localhost"));
         assert!(auth.host_allowed("[::1]:4317"));
-        assert!(auth.host_allowed("[::1]"));
+        assert!(!auth.host_allowed("[::1]"));
         assert!(!auth.host_allowed("evil.com"));
         assert!(!auth.host_allowed("127.0.0.1:4318"));
 
