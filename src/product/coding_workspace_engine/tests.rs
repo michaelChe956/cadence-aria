@@ -543,6 +543,7 @@ mod group_terminal;
 mod handoffs_worktree_routing;
 mod internal_review_triage;
 mod issue_cross_repo_review;
+mod issue_cross_repo_review_e2e;
 mod multi_target_delivery;
 mod parser_prompt;
 mod pi_rework_permission;

@@ -59,6 +59,7 @@ mod conversational_gate_recovery;
 mod conversational_gate_revision;
 mod conversational_gate_revision_fingerprint;
 mod f60_exit_contract_matrix;
+mod logical_codebase_review_e2e;
 mod plan_gate_terminate;
 mod provider_idle_watchdog;
 mod review_repair_prompt;
