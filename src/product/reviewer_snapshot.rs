@@ -7,6 +7,9 @@
 //!   worktree 写任何快照产物;`capture_baseline` 全部落盘成功才返回引用,
 //!   预算超限/读失败/不支持项(套接字/FIFO/设备/非 UTF-8 名)整单拒绝,
 //!   不留部分基线。
+//! - 终态窗口被同 id 的新 attempt 接管时,旧基线整体归档到
+//!   `<root>/windows-archive/<window_id>.<ts>`(归档不删除):旧窗口已
+//!   收口,其基线不再是新窗口的恢复依据,但仍留作审计痕迹。
 //! - 消费 T5 静止证明([`QuiescenceEvidence`],从 `QuiescentScope` 冻结)
 //!   与本 Task 定义的 [`ReviewWorktreeLockIdentity`](canonical
 //!   worktree/gitdir/common-dir + durable 窗口租约 id,纯身份材料,不授予
@@ -438,6 +441,43 @@ impl ReviewerSnapshotStore {
         let manifest = self.load_manifest(window_id)?;
         verify_cas_blobs(&self.window_dir(window_id), &manifest)?;
         Ok(manifest)
+    }
+
+    /// 归档已终结窗口的基线(终态接管用):`<root>/windows/<id>` →
+    /// `<root>/windows-archive/<id>.<ts>`。
+    ///
+    /// 归档而非删除:窗口记录已终态(已收口、锁已释放),其基线不再是新
+    /// 窗口的恢复依据,但仍留作审计痕迹。返回是否确有旧基线被归档
+    /// (false = 该窗口从无基线)。
+    pub(crate) fn archive_window_baseline(
+        &self,
+        window_id: &str,
+    ) -> Result<bool, ReviewerSnapshotError> {
+        validate_relative_id(window_id)?;
+        let dir = self.window_dir(window_id);
+        if !dir.exists() {
+            return Ok(false);
+        }
+        let archive_root = self.root.join("windows-archive");
+        std::fs::create_dir_all(&archive_root).map_err(|error| {
+            ReviewerSnapshotError::Io(format!("create {}: {error}", archive_root.display()))
+        })?;
+        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ").to_string();
+        let mut target = archive_root.join(format!("{window_id}.{stamp}"));
+        // 同毫秒重复归档:追加序号,不得覆盖既有归档。
+        let mut suffix = 1u32;
+        while target.exists() {
+            target = archive_root.join(format!("{window_id}.{stamp}-{suffix}"));
+            suffix += 1;
+        }
+        std::fs::rename(&dir, &target).map_err(|error| {
+            ReviewerSnapshotError::Io(format!(
+                "rename {} to {}: {error}",
+                dir.display(),
+                target.display()
+            ))
+        })?;
+        Ok(true)
     }
 
     /// 完整持久化基线:全部 blob + manifest 落盘成功才返回;预算超限/

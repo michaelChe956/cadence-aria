@@ -18,6 +18,8 @@
 //! <root>/leases/<tree_key>.json        — 树级 durable 租约(一树一窗)
 //! <root>/leases/domain.lock            — 租约域锁(创建/释放串行化)
 //! <root>/windows/<window_id>.json      — 窗口状态机记录(含 journal)
+//! <root>/window-archive/<window_id>.archived-g<gen>-<ts>.json
+//!                                        — 终态旧窗口记录归档(接管留证)
 //! <root>/channels/<common_key>/<channel>.json — 平台写通道闸门
 //! ```
 
@@ -41,7 +43,7 @@ pub(crate) const REVIEWER_WINDOW_SCHEMA: &str = "reviewer_window/1";
 /// 的静默分叉)。字面值不得变更(存量磁盘布局)。
 pub(crate) const REVIEWER_WINDOW_STORE_DIR: &str = "reviewer-windows";
 
-/// coding role-run 评审窗口 ID(`<attempt_id>-<role_run_id>-w01`)。
+/// role-run 评审窗口 ID(`<attempt_id>-<role_run_id>-w01`)。
 ///
 /// role run id 只在 attempt 目录内单调(每个 attempt 都从
 /// `coding_role_run_0001` 起),而窗口 store 是 project 级目录、窗口键就是
@@ -49,6 +51,12 @@ pub(crate) const REVIEWER_WINDOW_STORE_DIR: &str = "reviewer-windows";
 /// (第二个 attempt 开窗即 `reviewer_window_conflict`)。attempt 前缀保证
 /// 窗口 ID 全局唯一;`-w01` 后缀语义(同 run 首窗)保持不变。
 /// 全仓构造该 ID 只走本函数,不得另持格式化副本。
+///
+/// 规划面(plan review)窗口同走本函数:attempt 位用 workspace session
+/// id(规划面无 coding attempt 概念),role run 位用 plan run id。
+/// 规划面此前自持 `plan-<run>-w01` 格式化副本——窗口 store 目录跨会话
+/// 共享,不同会话的同号 plan run 会算出同一 ID 并撞车(开窗被拒)。
+/// attempt(session)位前缀是全局唯一的唯一保证。
 pub(crate) fn role_run_window_id(attempt_id: &str, role_run_id: &str) -> String {
     format!("{attempt_id}-{role_run_id}-w01")
 }
@@ -486,6 +494,16 @@ impl ReviewerWindowRecord {
     }
 }
 
+/// 开窗记录创建结果(记录 + 是否发生终态接管)。
+///
+/// `takeover=true` 表示同 id 的旧记录已终态(窗口已收口、锁已释放)、
+/// 本次由新 attempt 接管:旧记录已归档留证,新记录按新身份重建。
+#[derive(Debug, Clone)]
+pub(crate) struct WindowRecordCreation {
+    pub(crate) record: ReviewerWindowRecord,
+    pub(crate) takeover: bool,
+}
+
 // ---------------------------------------------------------------------------
 // 键与工具
 // ---------------------------------------------------------------------------
@@ -675,10 +693,20 @@ impl ReviewerWindowStore {
             .join(format!("{}.json", channel.as_str()))
     }
 
-    pub(crate) fn create_or_resume_window(
+    /// 开窗记录创建/续接/**终态接管**(开窗编排第 1 步的单一实现点)。
+    ///
+    /// - 无记录 → 写入新记录(Preparing);
+    /// - 有记录且 `Preparing` 且身份一致(identity/attempt/run/provider)
+    ///   → 续接(崩溃重入幂等);
+    /// - 有记录且**终态**(`Closed*`)→ **接管**:旧记录与旧违规
+    ///   journal 归档留证,按新身份写入新记录(Preparing)——终态窗口
+    ///   已收口(锁已释放),不再是活窗口,允许新 attempt 复用该 id;
+    /// - 有记录且**非终态且身份不一致** → `Conflict`(fail-closed:
+    ///   活窗口不得被他人抢走)。
+    pub(crate) fn create_or_takeover_window(
         &self,
         record: &ReviewerWindowRecord,
-    ) -> Result<ReviewerWindowRecord, ProductStoreError> {
+    ) -> Result<WindowRecordCreation, ProductStoreError> {
         validate_relative_id(&record.window_id)?;
         if record.schema != REVIEWER_WINDOW_SCHEMA {
             return Err(ProductStoreError::InvalidRecord {
@@ -697,8 +725,36 @@ impl ReviewerWindowStore {
                     && existing.run_id == record.run_id
                     && existing.provider == record.provider;
                 if resumable {
-                    return Ok(existing);
+                    return Ok(WindowRecordCreation {
+                        record: existing,
+                        takeover: false,
+                    });
                 }
+                if existing.state.is_terminal() {
+                    // 终态旧记录:窗口已收口(租约/通道已释放),不再是活
+                    // 窗口——允许新 attempt 接管同 id:旧记录(含违规
+                    // journal)归档留证,按新身份重建(归档而非静默覆盖,
+                    // 终态/采信/违规痕迹仍是审计证据)。
+                    self.archive_window_record(&path, &existing)?;
+                    self.archive_violation_journal(&record.window_id)?;
+                    let mut fresh = record.clone();
+                    if let Some(first) = fresh.transitions.first_mut() {
+                        first.note = format!(
+                            "created: 接管终态旧窗口(generation={}, state={}, attempt={}, run={})",
+                            existing.generation,
+                            existing.state.as_str(),
+                            existing.attempt_id,
+                            existing.run_id
+                        );
+                    }
+                    write_json(&path, &fresh)?;
+                    sync_dir(&self.windows_dir())?;
+                    return Ok(WindowRecordCreation {
+                        record: fresh,
+                        takeover: true,
+                    });
+                }
+                // 非终态且身份不一致 → 活窗口不得被他人抢走(fail-closed)。
                 return Err(ProductStoreError::Conflict {
                     kind: "reviewer_window",
                     id: record.window_id.clone(),
@@ -706,8 +762,117 @@ impl ReviewerWindowStore {
             }
             write_json(&path, record)?;
             sync_dir(&self.windows_dir())?;
-            Ok(record.clone())
+            Ok(WindowRecordCreation {
+                record: record.clone(),
+                takeover: false,
+            })
         })
+    }
+
+    /// 终态窗口记录归档(接管用):`<windows>/<id>.json` →
+    /// `<window-archive>/<id>.archived-g<generation>-<ts>.json`。
+    ///
+    /// 归档而非删除:旧窗口的终态/采信投影/违规痕迹是审计证据,不得被
+    /// 新窗口的活跃记录静默覆盖。归档后原路径由新记录接管。
+    fn archive_window_record(
+        &self,
+        path: &Path,
+        record: &ReviewerWindowRecord,
+    ) -> Result<PathBuf, ProductStoreError> {
+        let dir = self.archive_dir();
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| ProductStoreError::Io(format!("create {}: {error}", dir.display())))?;
+        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ").to_string();
+        let mut target = dir.join(format!(
+            "{}.archived-g{}-{}.json",
+            record.window_id, record.generation, stamp
+        ));
+        // 同毫秒重复接管:追加序号,不得覆盖既有归档。
+        let mut suffix = 1u32;
+        while target.exists() {
+            target = dir.join(format!(
+                "{}.archived-g{}-{}-{}.json",
+                record.window_id, record.generation, stamp, suffix
+            ));
+            suffix += 1;
+        }
+        std::fs::rename(path, &target).map_err(|error| {
+            ProductStoreError::Io(format!(
+                "rename {} to {}: {error}",
+                path.display(),
+                target.display()
+            ))
+        })?;
+        sync_dir(&dir)?;
+        sync_dir(&self.windows_dir())?;
+        Ok(target)
+    }
+
+    /// 归档目录(终态接管时旧窗口记录的归档位置;与 `windows/` 平级——
+    /// `windows/` 只放活跃记录,归档不参与 `list_windows` 扫描)。
+    fn archive_dir(&self) -> PathBuf {
+        self.root.join("window-archive")
+    }
+
+    /// 终态窗口的违规 journal 归档(接管用):`<violations>/<id>.json` →
+    /// `<violation-archive>/<id>.<ts>.json`。
+    ///
+    /// 归档而非删除:旧窗口的违规痕迹是审计证据(随旧记录归档留证)。
+    /// 新窗口从**空 journal**起算——旧轮已终态(恢复完整+人工/采信裁决
+    /// 完成),其违规不属新轮;否则新轮会被旧轮的「journal 非空即整轮
+    /// 作废」判定永久挡住(接管形同虚设)。
+    fn archive_violation_journal(&self, window_id: &str) -> Result<(), ProductStoreError> {
+        let source = self.violation_journal_path(window_id);
+        if !source.is_file() {
+            return Ok(());
+        }
+        let dir = self.root.join("violation-archive");
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| ProductStoreError::Io(format!("create {}: {error}", dir.display())))?;
+        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ").to_string();
+        let mut target = dir.join(format!("{window_id}.{stamp}.json"));
+        let mut suffix = 1u32;
+        while target.exists() {
+            target = dir.join(format!("{window_id}.{stamp}-{suffix}.json"));
+            suffix += 1;
+        }
+        std::fs::rename(&source, &target).map_err(|error| {
+            ProductStoreError::Io(format!(
+                "rename {} to {}: {error}",
+                source.display(),
+                target.display()
+            ))
+        })?;
+        sync_dir(&dir)?;
+        sync_dir(self.violation_journal_dir().as_path())?;
+        Ok(())
+    }
+
+    /// 读取最近一次归档的窗口记录(审计面:终态旧记录被接管后仍可查)。
+    #[cfg(test)]
+    pub(crate) fn load_archived_window(
+        &self,
+        window_id: &str,
+    ) -> Result<Option<ReviewerWindowRecord>, ProductStoreError> {
+        let dir = self.archive_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Ok(None);
+        };
+        let prefix = format!("{window_id}.archived-");
+        let mut archived: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix))
+            })
+            .collect();
+        archived.sort();
+        let Some(last) = archived.last() else {
+            return Ok(None);
+        };
+        Ok(Some(read_json(last)?))
     }
 
     pub(crate) fn load_window(
@@ -1378,16 +1543,18 @@ mod tests {
         let root = t17_dir();
         let store = ReviewerWindowStore::new(root.path());
         let created = store
-            .create_or_resume_window(&record("w-cas"))
+            .create_or_takeover_window(&record("w-cas"))
             .expect("create record");
-        assert_eq!(created.generation, 1);
-        assert_eq!(created.state, ReviewerWindowState::Preparing);
+        assert_eq!(created.record.generation, 1);
+        assert_eq!(created.record.state, ReviewerWindowState::Preparing);
+        assert!(!created.takeover);
 
         // resume:同 id + Preparing + 身份一致 → 幂等
         let resumed = store
-            .create_or_resume_window(&record("w-cas"))
+            .create_or_takeover_window(&record("w-cas"))
             .expect("resume idempotent");
-        assert_eq!(resumed.window_id, "w-cas");
+        assert_eq!(resumed.record.window_id, "w-cas");
+        assert!(!resumed.takeover);
 
         // CAS 正常推进
         let mut next = store.load_window("w-cas").expect("load");
@@ -1419,9 +1586,75 @@ mod tests {
 
         // 非 Preparing 重复 create → Conflict
         let err = store
-            .create_or_resume_window(&record("w-cas"))
+            .create_or_takeover_window(&record("w-cas"))
             .expect_err("recreate on running window");
         assert!(matches!(err, ProductStoreError::Conflict { .. }), "{err:?}");
+    }
+
+    /// 终态记录接管:旧记录归档留证(不被静默覆盖成活跃态),新记录按新
+    /// 身份重建;非终态记录仍拒绝接管(fail-closed 不放宽)。
+    #[test]
+    fn terminal_window_record_is_archived_then_taken_over() {
+        let root = t17_dir();
+        let store = ReviewerWindowStore::new(root.path());
+
+        // 终态旧记录(closed_invalidated)。
+        let created = store
+            .create_or_takeover_window(&record("w-take"))
+            .expect("create record")
+            .record;
+        let mut terminal = created.clone();
+        terminal.bump_transition(ReviewerWindowState::ClosedInvalidated, "test terminal");
+        store
+            .save_window_transition(terminal, created.generation)
+            .expect("terminal save");
+
+        // 新 attempt 接管同 id → 成功,新记录按新身份重建。
+        let mut second = record("w-take");
+        second.attempt_id = "attempt-2".to_string();
+        let takeover = store
+            .create_or_takeover_window(&second)
+            .expect("terminal record must be takeable");
+        assert!(takeover.takeover, "终态旧记录 → 接管");
+        assert_eq!(takeover.record.attempt_id, "attempt-2");
+        assert_eq!(takeover.record.generation, 1);
+        assert_eq!(takeover.record.state, ReviewerWindowState::Preparing);
+        assert!(
+            takeover
+                .record
+                .transitions
+                .first()
+                .is_some_and(|entry| entry.note.contains("接管终态旧窗口")),
+            "接管必须在新记录里留痕"
+        );
+
+        // 旧记录已归档(审计留证),不是被静默覆盖。
+        let archived = store
+            .load_archived_window("w-take")
+            .expect("archive read")
+            .expect("archived record");
+        assert_eq!(archived.attempt_id, "attempt-1");
+        assert_eq!(archived.state, ReviewerWindowState::ClosedInvalidated);
+
+        // 非终态(Preparing)且身份不一致 → 仍拒绝(fail-closed)。
+        let live = store
+            .create_or_takeover_window(&record("w-live"))
+            .expect("create live record")
+            .record;
+        assert_eq!(live.state, ReviewerWindowState::Preparing);
+        let mut other = record("w-live");
+        other.attempt_id = "attempt-2".to_string();
+        let err = store
+            .create_or_takeover_window(&other)
+            .expect_err("live window must not be taken over");
+        assert!(matches!(err, ProductStoreError::Conflict { .. }), "{err:?}");
+        assert!(
+            store
+                .load_archived_window("w-live")
+                .expect("archive read")
+                .is_none(),
+            "被拒的接管不得留下归档"
+        );
     }
 
     #[test]
@@ -1532,10 +1765,10 @@ mod tests {
         let store = ReviewerWindowStore::new(root.path());
         assert!(store.list_windows().expect("empty ok").is_empty());
         store
-            .create_or_resume_window(&record("w-ls-a"))
+            .create_or_takeover_window(&record("w-ls-a"))
             .expect("create a");
         store
-            .create_or_resume_window(&record("w-ls-b"))
+            .create_or_takeover_window(&record("w-ls-b"))
             .expect("create b");
         std::fs::write(store.windows_dir().join("w-corrupt.json"), "{ not json")
             .expect("corrupt record");

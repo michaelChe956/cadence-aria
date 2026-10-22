@@ -473,7 +473,7 @@ fn prepare_leased_window(fx: &WindowStartupFixture, run_id: &str) {
         Vec::new(),
     );
     store
-        .create_or_resume_window(&record)
+        .create_or_takeover_window(&record)
         .expect("create preparing record");
     let lease = WindowLeaseRecord {
         schema: REVIEWER_WINDOW_SCHEMA.to_string(),
@@ -1772,7 +1772,7 @@ async fn preparing_without_lease_prefix_still_abandons() {
         Vec::new(),
     );
     fx.window_store()
-        .create_or_resume_window(&record)
+        .create_or_takeover_window(&record)
         .expect("create preparing record");
     assert!(!lease_held(&fx), "前置:本前缀确无租约");
 

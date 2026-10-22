@@ -340,6 +340,11 @@ fn now_rfc3339() -> String {
 /// 已冻结通道保留(fail-closed),由恢复驱动/人工经 `abandon_window`
 /// 或重试处置;材料/spawn 闸门(`assert_review_window_current`)因窗口
 /// 未达 Running 而全部拒绝。
+///
+/// 同 id 已有记录时:非终态且身份一致(Preparing)→ 续接(崩溃重入
+/// 幂等);非终态且身份不一致 → 拒绝(fail-closed,活窗口不得被抢);
+/// **已终态** → 允许新 attempt 接管(旧记录与旧违规 journal 归档留证,
+/// 按新身份重建)——终态窗口已收口、锁已释放,不再是活窗口。
 pub(crate) async fn begin_review_window(
     store: &ReviewerWindowStore,
     snapshot: &ReviewerSnapshotStore,
@@ -378,8 +383,12 @@ pub(crate) async fn begin_review_window(
     };
 
     // 1. 窗口 durable 记录(Preparing;同 id 崩溃重入幂等)。
-    let mut current = store
-        .create_or_resume_window(&ReviewerWindowRecord::new(
+    // 同 id 旧记录**已终态**(窗口已收口、租约/通道已释放)→ 允许新
+    // attempt 接管:旧记录归档留证,按新身份重建(旧记录不被静默覆盖
+    // 成活跃态)。旧记录**非终态**且身份不一致 → 活窗口不得被他人抢
+    // 走(fail-closed 拒绝,不放宽)。
+    let creation = store
+        .create_or_takeover_window(&ReviewerWindowRecord::new(
             request.window_id,
             identity.clone(),
             request.attempt_id,
@@ -391,10 +400,13 @@ pub(crate) async fn begin_review_window(
             ProductStoreError::Conflict { id, .. } => ReviewerWindowError::Conflict {
                 kind: "reviewer_window",
                 id,
-                detail: "窗口记录已存在(非 Preparing 或身份不一致)".to_string(),
+                detail: "窗口记录已存在(非 Preparing 或身份不一致;终态旧记录可被新 attempt 接管)"
+                    .to_string(),
             },
             other => ReviewerWindowError::Store(other),
         })?;
+    let takeover = creation.takeover;
+    let mut current = creation.record;
 
     // 2. durable 树级租约(先于一切冻结动作;两 attempt 同树只能一窗,
     // 共享 common-dir 的兄弟树窗口互斥)。
@@ -494,84 +506,16 @@ pub(crate) async fn begin_review_window(
     // 「manifest 已发布、Running CAS 未落」窗口时,同窗重入对已发布
     // manifest 校验归属(window/attempt/run/identity)后**采用**,不
     // 作废最贵一步;仅身份不符才失败停等。
-    let baseline = match snapshot.capture_baseline(CaptureRequest {
-        window_id: request.window_id,
-        attempt_id: request.attempt_id,
-        run_id: request.run_id,
-        worktree: &canonical,
-        lock_identity: Some(identity.clone()),
-        quiescence: Some(QuiescenceEvidence::from_quiescent_scope(primary)),
-        platform_write_paths: request.platform_write_paths.clone(),
-        budget: request.budget,
-    }) {
-        Ok(_captured) => match snapshot.load_manifest(request.window_id) {
-            Ok(manifest) => BaselineFacts::from_manifest(
-                &manifest,
-                manifest_store_ref(request.window_id),
-                now_rfc3339(),
-            ),
-            Err(error) => {
-                mark_begin_recovery(
-                    store,
-                    &current,
-                    "reviewer_window_manifest_unreadable",
-                    error.to_string(),
-                );
-                return Err(ReviewerWindowError::Snapshot(error));
-            }
-        },
-        Err(ReviewerSnapshotError::Store(ProductStoreError::Conflict { ref id, .. }))
-            if id == request.window_id =>
-        {
-            // 同窗 manifest 已存在(崩溃重入):归属校验 + **CAS blob 完整
-            // 性预检**(NEW-1:manifest 已发布≠基线完整——掉电可丢 blob
-            // 目录项;预检与 restore_baseline 动树前同源,O(blob 数)),
-            // 全部通过才采用。
-            match snapshot.verify_baseline_cas(request.window_id) {
-                Ok(manifest)
-                    if manifest.window_id == request.window_id
-                        && manifest.attempt_id == request.attempt_id
-                        && manifest.run_id == request.run_id
-                        && manifest.lock_identity == identity =>
-                {
-                    BaselineFacts::from_manifest(
-                        &manifest,
-                        manifest_store_ref(request.window_id),
-                        now_rfc3339(),
-                    )
-                }
-                Ok(_) => {
-                    let detail =
-                        "已发布 manifest 归属不符(window/attempt/run/identity)".to_string();
-                    mark_begin_recovery(
-                        store,
-                        &current,
-                        "reviewer_window_manifest_owner_mismatch",
-                        detail.clone(),
-                    );
-                    return Err(ReviewerWindowError::IdentityDrift(detail));
-                }
-                Err(error) => {
-                    // blob 缺失/损坏或 manifest 不可读:停等,不绑定
-                    // 不可恢复基线。
-                    mark_begin_recovery(
-                        store,
-                        &current,
-                        "reviewer_window_snapshot_failed",
-                        error.to_string(),
-                    );
-                    return Err(ReviewerWindowError::Snapshot(error));
-                }
-            }
-        }
-        Err(error) => {
-            mark_begin_recovery(
-                store,
-                &current,
-                "reviewer_window_snapshot_failed",
-                error.to_string(),
-            );
-            return Err(ReviewerWindowError::Snapshot(error));
+    // 终态接管(旧记录已终态、新 attempt 复用同 id)时:旧基线归属不符
+    // → 归档旧基线并重新采集(旧窗口已收口,其基线不再是新窗口的恢复
+    // 依据);归属相符则照旧采用(同 attempt 重入,保留原基线)。
+    let baseline = match capture_or_adopt_baseline(
+        snapshot, request, &canonical, &identity, primary, takeover,
+    ) {
+        Ok(baseline) => baseline,
+        Err(failure) => {
+            mark_begin_recovery(store, &current, failure.reason, failure.detail);
+            return Err(failure.error);
         }
     };
 
@@ -600,6 +544,161 @@ pub(crate) async fn begin_review_window(
         entry_count: baseline.entry_count,
         total_bytes: baseline.total_bytes,
     })
+}
+
+/// 基线捕获失败(停等落账的 reason/detail + 原错误)。
+struct BaselineFailure {
+    error: ReviewerWindowError,
+    reason: &'static str,
+    detail: String,
+}
+
+/// 开窗第 5 步:基线捕获/采用(含终态接管的旧基线归档重采)。
+///
+/// - 无既有 manifest → 全新采集;
+/// - 既有 manifest 归属一致(window/attempt/run/identity)→ 采用
+///   (F4 崩溃重入;**CAS blob 完整性预检**同源——manifest 已发布≠基线
+///   完整,掉电可丢 blob 目录项);
+/// - 既有 manifest 归属不一致 → **终态接管**时归档旧基线并重新采集
+///   (旧窗口已收口,其基线不再是新窗口的恢复依据);非接管场景
+///   fail-closed(IdentityDrift,不得跨身份采信旧基线);
+/// - 既有基线损坏(blob 缺失/manifest 不可读)→ 终态接管时同处置;
+///   非接管场景停等(不绑定不可恢复基线)。
+fn capture_or_adopt_baseline(
+    snapshot: &ReviewerSnapshotStore,
+    request: &ReviewerWindowBeginRequest<'_>,
+    canonical: &Path,
+    identity: &ReviewWorktreeLockIdentity,
+    primary: &QuiescentScope,
+    takeover: bool,
+) -> Result<BaselineFacts, BaselineFailure> {
+    let capture = || CaptureRequest {
+        window_id: request.window_id,
+        attempt_id: request.attempt_id,
+        run_id: request.run_id,
+        worktree: canonical,
+        lock_identity: Some(identity.clone()),
+        quiescence: Some(QuiescenceEvidence::from_quiescent_scope(primary)),
+        platform_write_paths: request.platform_write_paths.clone(),
+        budget: request.budget,
+    };
+    // 终态接管时最多归档重采一次(归档后不应再有既有 manifest)。
+    let mut archived = false;
+    loop {
+        match snapshot.capture_baseline(capture()) {
+            Ok(_captured) => {
+                return match snapshot.load_manifest(request.window_id) {
+                    Ok(manifest) => Ok(BaselineFacts::from_manifest(
+                        &manifest,
+                        manifest_store_ref(request.window_id),
+                        now_rfc3339(),
+                    )),
+                    Err(error) => {
+                        let detail = error.to_string();
+                        Err(BaselineFailure {
+                            error: ReviewerWindowError::Snapshot(error),
+                            reason: "reviewer_window_manifest_unreadable",
+                            detail,
+                        })
+                    }
+                };
+            }
+            Err(ReviewerSnapshotError::Store(ProductStoreError::Conflict { ref id, .. }))
+                if id == request.window_id =>
+            {
+                // 同窗 manifest 已存在(崩溃重入):归属校验 + CAS blob 完
+                // 整性预检,全部通过才采用。
+                let verdict = match snapshot.verify_baseline_cas(request.window_id) {
+                    Ok(manifest)
+                        if manifest.window_id == request.window_id
+                            && manifest.attempt_id == request.attempt_id
+                            && manifest.run_id == request.run_id
+                            && &manifest.lock_identity == identity =>
+                    {
+                        BaselineVerdict::Adopted(BaselineFacts::from_manifest(
+                            &manifest,
+                            manifest_store_ref(request.window_id),
+                            now_rfc3339(),
+                        ))
+                    }
+                    Ok(_) => BaselineVerdict::OwnerMismatch,
+                    Err(error) => BaselineVerdict::Broken(error),
+                };
+                match verdict {
+                    BaselineVerdict::Adopted(facts) => return Ok(facts),
+                    BaselineVerdict::OwnerMismatch => {
+                        if takeover && !archived {
+                            match snapshot.archive_window_baseline(request.window_id) {
+                                Ok(_) => {
+                                    archived = true;
+                                    continue;
+                                }
+                                Err(error) => {
+                                    let detail = error.to_string();
+                                    return Err(BaselineFailure {
+                                        error: ReviewerWindowError::Snapshot(error),
+                                        reason: "reviewer_window_snapshot_failed",
+                                        detail,
+                                    });
+                                }
+                            }
+                        }
+                        let detail =
+                            "已发布 manifest 归属不符(window/attempt/run/identity)".to_string();
+                        return Err(BaselineFailure {
+                            error: ReviewerWindowError::IdentityDrift(detail.clone()),
+                            reason: "reviewer_window_manifest_owner_mismatch",
+                            detail,
+                        });
+                    }
+                    BaselineVerdict::Broken(error) => {
+                        if takeover && !archived {
+                            match snapshot.archive_window_baseline(request.window_id) {
+                                Ok(_) => {
+                                    archived = true;
+                                    continue;
+                                }
+                                Err(archive_error) => {
+                                    let detail = archive_error.to_string();
+                                    return Err(BaselineFailure {
+                                        error: ReviewerWindowError::Snapshot(archive_error),
+                                        reason: "reviewer_window_snapshot_failed",
+                                        detail,
+                                    });
+                                }
+                            }
+                        }
+                        // blob 缺失/损坏或 manifest 不可读:停等,不绑定
+                        // 不可恢复基线。
+                        let detail = error.to_string();
+                        return Err(BaselineFailure {
+                            error: ReviewerWindowError::Snapshot(error),
+                            reason: "reviewer_window_snapshot_failed",
+                            detail,
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                let detail = error.to_string();
+                return Err(BaselineFailure {
+                    error: ReviewerWindowError::Snapshot(error),
+                    reason: "reviewer_window_snapshot_failed",
+                    detail,
+                });
+            }
+        }
+    }
+}
+
+/// 既有基线核验结论。
+enum BaselineVerdict {
+    /// 归属一致且基线完整 → 采用。
+    Adopted(BaselineFacts),
+    /// manifest 归属与本次开窗身份不符。
+    OwnerMismatch,
+    /// 基线损坏(blob 缺失/manifest 不可读)。
+    Broken(ReviewerSnapshotError),
 }
 
 /// baseline 事实(捕获/采用两路径同构;指纹=manifest 规范化 JSON 序列
@@ -2786,7 +2885,7 @@ mod tests {
             "claude_code",
             Vec::new(),
         );
-        store.create_or_resume_window(&record).unwrap();
+        store.create_or_takeover_window(&record).unwrap();
         let mut counts = GatedCounts::default();
         counts.try_material_and_spawn(
             &store,
@@ -3537,7 +3636,7 @@ mod tests {
         // 仍为本窗持有——create_or_resume 同身份重建即该状态)
         fs::remove_file(fx.window_root.join("windows/w-adopt.json")).unwrap();
         store
-            .create_or_resume_window(&ReviewerWindowRecord::new(
+            .create_or_takeover_window(&ReviewerWindowRecord::new(
                 "w-adopt",
                 first.identity.clone(),
                 "attempt-1",
@@ -3653,7 +3752,7 @@ mod tests {
         // 崩溃点 + blob 目录项丢失(已接受的掉电窗口形态)
         fs::remove_file(fx.window_root.join("windows/w-n1.json")).unwrap();
         store
-            .create_or_resume_window(&ReviewerWindowRecord::new(
+            .create_or_takeover_window(&ReviewerWindowRecord::new(
                 "w-n1",
                 first.identity.clone(),
                 "attempt-1",
@@ -3889,5 +3988,211 @@ mod tests {
         let terminal = abandon_window(&store, "w-ab2", summary.record.generation, "stuck").unwrap();
         assert_eq!(terminal.state, ReviewerWindowState::ClosedInvalidated);
         assert_eq!(terminal.report_acceptance, ReportAcceptance::Invalidated);
+    }
+
+    /// 终态旧窗口可被新 attempt 接管(同 id):旧记录**归档留证**(不被
+    /// 静默覆盖成活跃态),新窗口按新身份重建(新基线)。
+    #[tokio::test]
+    async fn terminal_window_is_taken_over_by_new_attempt() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        let handle = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-takeover", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("begin");
+
+        // 旧窗口收口为终态(违规 → 人工门 → 作废关闭;租约/通道已释放)。
+        let quiescing = begin_quiesce(&store, "w-takeover", handle.generation, "abort").unwrap();
+        let violated = record_violation(
+            &store,
+            &snapshot,
+            "w-takeover",
+            quiescing.generation,
+            ViolationRecord {
+                kind: "platform_domain_write",
+                path: ".aria/direct-write.json",
+                before_digest: None,
+                after_digest: Some("sha256:deadbeef"),
+                detail: "夹具:旧轮违规(写入违规 journal)",
+                report_id: None,
+            },
+        )
+        .unwrap();
+        let summary = restore_window(&store, &snapshot, "w-takeover", violated.generation)
+            .await
+            .expect("restore");
+        assert!(summary.manual_gate, "旧轮违规 → 人工门");
+        let terminal = resolve_manual_gate(
+            &store,
+            "w-takeover",
+            summary.record.generation,
+            ManualGateDecision::Invalidate,
+        )
+        .expect("terminal close");
+        assert_eq!(terminal.state, ReviewerWindowState::ClosedInvalidated);
+        assert!(
+            !store
+                .load_violations("w-takeover")
+                .expect("old journal")
+                .is_empty(),
+            "前置:旧轮违规已落 journal"
+        );
+
+        // 同 id 终态 → 新 attempt 接管:开窗成功。
+        let scope2 = open_scope(&fx.base, "coder-2", None);
+        let targets2: [&ProviderRunResourceScope; 1] = [&scope2];
+        let taken = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-takeover", "attempt-2", &fx.worktree, &targets2),
+        )
+        .await
+        .expect("terminal window must be takeable");
+        assert_eq!(taken.window_id, "w-takeover");
+
+        // 当前记录 = 新 attempt 的活窗(旧报告采信投影不继承)。
+        let current = store.load_window("w-takeover").expect("current record");
+        assert_eq!(current.attempt_id, "attempt-2");
+        assert_eq!(current.state, ReviewerWindowState::Running);
+        assert_eq!(
+            current.report_acceptance,
+            ReportAcceptance::PendingAcceptance,
+            "接管的新窗口不得继承旧报告采信投影"
+        );
+        assert!(
+            current
+                .transitions
+                .iter()
+                .any(|entry| entry.note.contains("接管终态旧窗口")),
+            "接管必须在新记录里留痕"
+        );
+
+        // 旧记录归档留证:终态/采信投影仍在,不是被静默覆盖。
+        let archived = store
+            .load_archived_window("w-takeover")
+            .expect("archive read")
+            .expect("archived record");
+        assert_eq!(archived.attempt_id, "attempt-1");
+        assert_eq!(archived.state, ReviewerWindowState::ClosedInvalidated);
+        assert_eq!(archived.report_acceptance, ReportAcceptance::Invalidated);
+
+        // 旧轮违规 journal 随旧轮归档:新轮从空 journal 起算(旧轮违规
+        // 不得让新轮永久作废)。
+        assert!(
+            store
+                .load_violations("w-takeover")
+                .expect("new journal")
+                .is_empty(),
+            "接管的新窗口不得继承旧轮违规 journal"
+        );
+        assert!(
+            fs::read_dir(fx.window_root.join("violation-archive"))
+                .expect("violation archive dir")
+                .count()
+                > 0,
+            "旧轮 journal 必须归档留证"
+        );
+    }
+
+    /// 非终态窗口(活窗)不得被同 id 的其他 attempt 抢走(fail-closed
+    /// 不因接管语义而放宽)。
+    #[tokio::test]
+    async fn live_window_with_other_attempt_is_rejected() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-live", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("begin");
+
+        let scope2 = open_scope(&fx.base, "coder-2", None);
+        let targets2: [&ProviderRunResourceScope; 1] = [&scope2];
+        let err = begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-live", "attempt-2", &fx.worktree, &targets2),
+        )
+        .await
+        .expect_err("live window must not be taken over");
+        match err {
+            ReviewerWindowError::Conflict { kind, .. } => {
+                assert_eq!(kind, "reviewer_window", "必须是窗口记录冲突");
+            }
+            other => panic!("expected reviewer_window conflict, got {other:?}"),
+        }
+        // 原窗口仍是 attempt-1 的活窗,未被顶掉;被拒的接管不留归档。
+        let current = store.load_window("w-live").expect("record");
+        assert_eq!(current.attempt_id, "attempt-1");
+        assert_eq!(current.state, ReviewerWindowState::Running);
+        assert!(
+            store
+                .load_archived_window("w-live")
+                .expect("archive read")
+                .is_none(),
+            "被拒的接管不得留下归档"
+        );
+    }
+
+    /// 同 id + 同 attempt 的 Preparing 记录仍按现状续接(不重建、不接管)。
+    #[tokio::test]
+    async fn preparing_same_attempt_is_resumed() {
+        let fx = window_fixture();
+        let store = fx.store();
+        let snapshot = fx.snapshot();
+        let (canonical, gitdir, common_dir) =
+            resolve_worktree_git_identity(&fx.worktree).expect("identity");
+        let prepared = store
+            .create_or_takeover_window(&ReviewerWindowRecord::new(
+                "w-resume",
+                ReviewWorktreeLockIdentity {
+                    canonical_worktree: canonical,
+                    gitdir,
+                    common_dir,
+                    lease_id: "wlease-w-resume".to_string(),
+                },
+                "attempt-1",
+                "run-1",
+                "claude_code",
+                Vec::new(),
+            ))
+            .expect("preparing record")
+            .record;
+        assert_eq!(prepared.state, ReviewerWindowState::Preparing);
+
+        let scope = open_scope(&fx.base, "coder", None);
+        let targets: [&ProviderRunResourceScope; 1] = [&scope];
+        begin_review_window(
+            &store,
+            &snapshot,
+            &begin_request("w-resume", "attempt-1", &fx.worktree, &targets),
+        )
+        .await
+        .expect("resume preparing window");
+        let current = store.load_window("w-resume").expect("record");
+        assert_eq!(current.state, ReviewerWindowState::Running);
+        assert_eq!(
+            current.created_at, prepared.created_at,
+            "续接不得重建记录(仍为同一条 Preparing 记录)"
+        );
+        assert_eq!(current.generation, prepared.generation + 1);
+        assert!(
+            store
+                .load_archived_window("w-resume")
+                .expect("archive read")
+                .is_none(),
+            "续接不是接管,不得归档"
+        );
     }
 }

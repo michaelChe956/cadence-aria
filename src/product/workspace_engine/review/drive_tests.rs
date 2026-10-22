@@ -739,7 +739,10 @@ mod t20b_f1_plan_window_target {
         let window_store =
             crate::product::reviewer_window_store::ReviewerWindowStore::new(window_root);
         let record = window_store
-            .load_window(&format!("plan-{session_id}-w01"))
+            .load_window(&crate::product::reviewer_window_store::role_run_window_id(
+                &session_id,
+                engine.active_run_id().unwrap_or(session_id.as_str()),
+            ))
             .expect("window record must exist");
         let expected = member_a.canonicalize().expect("member a canonical");
         assert_eq!(
@@ -790,7 +793,10 @@ mod t20b_f1_plan_window_target {
         let window_store =
             crate::product::reviewer_window_store::ReviewerWindowStore::new(window_root);
         let record = window_store
-            .load_window(&format!("plan-{session_id}-w01"))
+            .load_window(&crate::product::reviewer_window_store::role_run_window_id(
+                &session_id,
+                engine.active_run_id().unwrap_or(session_id.as_str()),
+            ))
             .expect("window record must exist");
         let expected = member_a.canonicalize().expect("member a canonical");
         assert_eq!(

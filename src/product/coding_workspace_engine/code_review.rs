@@ -2017,7 +2017,7 @@ mod hygiene_tests {
                 lease_id: format!("f12-lease-{window_id}"),
             };
             store
-                .create_or_resume_window(&ReviewerWindowRecord::new(
+                .create_or_takeover_window(&ReviewerWindowRecord::new(
                     window_id,
                     identity,
                     "attempt-f12",

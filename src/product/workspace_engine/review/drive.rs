@@ -1754,11 +1754,16 @@ impl WorkspaceEngine {
         reviewer: &ProviderName,
         worktree: std::path::PathBuf,
     ) -> Result<(), String> {
-        let window_id = format!(
-            "plan-{}-w01",
+        // 窗口 ID 全局唯一:走 `role_run_window_id`(attempt 位=workspace
+        // session id,role run 位=plan run id)。此前此处自持
+        // `plan-<run>-w01` 格式化副本——窗口 store 目录跨会话共享,
+        // 不同会话的同号 plan run 会算出同一 ID 并撞车(旧记录命中 →
+        // `reviewer_window_conflict`,plan review fail-closed 走不下去)。
+        let window_id = crate::product::reviewer_window_store::role_run_window_id(
+            &self.session.session_id,
             self.active_run_id
-                .clone()
-                .unwrap_or_else(|| self.session.session_id.clone())
+                .as_deref()
+                .unwrap_or(&self.session.session_id),
         );
         let worktree = worktree.canonicalize().unwrap_or(worktree);
         let provider = serde_json::to_string(reviewer)
@@ -2315,5 +2320,178 @@ mod f11_close_attention_tests {
             .expect("lease read")
             .expect("锁保持:租约未释放");
         assert_eq!(lease.window_id, window_id);
+    }
+}
+
+/// 规划面窗口 ID 全局唯一(跨会话撞号回归)。
+///
+/// 窗口 store 目录跨会话共享(全局 `.aria` 目录):规划面此前自持
+/// `plan-<run>-w01` 格式化副本,不同会话的同号 plan run 会算出同一
+/// 窗口 ID → 后一个会话开窗命中旧记录被拒
+/// (`reviewer_window_conflict[reviewer_window]`),plan review
+/// fail-closed 走不下去。窗口 ID 必须带会话前缀
+/// (`role_run_window_id(session_id, run_id)`)。
+#[cfg(test)]
+mod plan_window_id_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, LifecycleStore};
+
+    fn git_init(dir: &std::path::Path) {
+        use std::process::Command;
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "plan-window@example.test"],
+            vec!["config", "user.name", "Plan Window"],
+            vec!["commit", "-m", "init", "--quiet", "--allow-empty"],
+        ] {
+            let status = Command::new("git")
+                .current_dir(dir)
+                .args(&args)
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git fixture {args:?} must succeed");
+        }
+    }
+
+    /// 同项目同 issue 下的两个会话 + 各自的评审工作树(直连形态:
+    /// repository_path 即评审目标)。
+    fn two_session_engines(
+        root: &std::path::Path,
+    ) -> (WorkspaceEngine, WorkspaceEngine, ProductAppPaths) {
+        let paths = ProductAppPaths::new(root.join(".aria"));
+        let project = crate::product::project_store::ProjectStore::new(paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "PLAN-WINDOW-ID".to_string(),
+                description: None,
+            })
+            .expect("project");
+        let issue = crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: project.id.clone(),
+                repo_id: None,
+                logical_codebase_id: None,
+                base_branch: None,
+                title: "plan window id".to_string(),
+                description: None,
+                change_id: None,
+            })
+            .expect("issue");
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let mut engines = Vec::new();
+        for index in 0..2 {
+            let record = lifecycle
+                .create_workspace_session(CreateWorkspaceSessionInput {
+                    project_id: project.id.clone(),
+                    issue_id: issue.id.clone(),
+                    entity_id: issue.id.clone(),
+                    workspace_type: crate::product::models::WorkspaceType::Story,
+                    author_provider: crate::product::models::ProviderName::ClaudeCode,
+                    reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
+                    review_rounds: 1,
+                    superpowers_enabled: false,
+                    openspec_enabled: false,
+                    work_item_plan_options: None,
+                })
+                .expect("workspace session");
+            let checkpoint =
+                std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                    paths.issue_lifecycle_root(&project.id, &issue.id),
+                ));
+            let (tx, _rx) = mpsc::channel(64);
+            let mut engine = WorkspaceEngine::new_persistent(
+                checkpoint,
+                LifecycleStore::new(paths.clone()),
+                tx,
+                crate::product::workspace_engine::types::WorkspaceSession::from_record(record),
+            );
+            let worktree = root.join(format!("plan-window-worktree-{index}"));
+            std::fs::create_dir_all(&worktree).expect("worktree");
+            git_init(&worktree);
+            engine.session.repository_path = Some(worktree.clone());
+            engines.push(engine);
+        }
+        let mut engines = engines.into_iter();
+        (
+            engines.next().expect("first engine"),
+            engines.next().expect("second engine"),
+            paths,
+        )
+    }
+
+    /// 回归:两个不同会话的同号 plan run → 窗口 ID 不撞,两窗都能开。
+    #[tokio::test]
+    async fn plan_window_ids_are_unique_across_sessions() {
+        let root = tempfile::tempdir().expect("root");
+        let (mut first, mut second, paths) = two_session_engines(root.path());
+        // 两个会话跑同一个 run id(生产上跨会话可撞同一 run 号)。
+        first.mark_active_run_started("run-2");
+        second.mark_active_run_started("run-2");
+
+        let worktree_a = first.session.repository_path.clone().expect("worktree a");
+        let worktree_b = second.session.repository_path.clone().expect("worktree b");
+        first
+            .begin_plan_review_window(
+                &crate::product::models::ProviderName::ClaudeCode,
+                worktree_a,
+            )
+            .await
+            .expect("first plan review window");
+        second
+            .begin_plan_review_window(
+                &crate::product::models::ProviderName::ClaudeCode,
+                worktree_b,
+            )
+            .await
+            .expect("second plan review window must not collide");
+
+        let window_a = first
+            .active_review_window
+            .as_ref()
+            .expect("window a")
+            .handle
+            .window_id
+            .clone();
+        let window_b = second
+            .active_review_window
+            .as_ref()
+            .expect("window b")
+            .handle
+            .window_id
+            .clone();
+        assert_ne!(
+            window_a, window_b,
+            "不同会话的同号 plan run 不得撞同一窗口 id"
+        );
+        assert_eq!(
+            window_a,
+            crate::product::reviewer_window_store::role_run_window_id(
+                &first.session.session_id,
+                "run-2"
+            ),
+            "窗口 id 必须带会话前缀(role_run_window_id)"
+        );
+        assert_eq!(
+            window_b,
+            crate::product::reviewer_window_store::role_run_window_id(
+                &second.session.session_id,
+                "run-2"
+            )
+        );
+
+        // 两个窗口记录都在 store 里(后者没有顶掉前者)。
+        let store = crate::product::reviewer_window_store::ReviewerWindowStore::new(
+            paths
+                .root()
+                .join(crate::product::reviewer_window_store::REVIEWER_WINDOW_STORE_DIR),
+        );
+        assert_eq!(
+            store.load_window(&window_a).expect("record a").state,
+            crate::product::reviewer_window_store::ReviewerWindowState::Running
+        );
+        assert_eq!(
+            store.load_window(&window_b).expect("record b").state,
+            crate::product::reviewer_window_store::ReviewerWindowState::Running
+        );
     }
 }
