@@ -150,8 +150,8 @@ pub struct WebAppState {
     pub aggregate_index_rebuilds: AggregateIndexRebuildRegistry,
     pub image_create_run_registry: Arc<ImageCreateRunRegistry>,
     pub image_create_engine: Option<Arc<ImageCreateEngine>>,
-    /// 批2 T1：控制面认证状态。仅生产 `serve_web` 装配；未装配（None）时认证
-    /// 中间件直通，进程内测试保持既有行为。
+    /// 控制面来源校验状态（Host/Origin 允许列表）。仅生产 `serve_web` 装配；
+    /// 未装配（None）时来源校验中间件直通，进程内测试保持既有行为。
     pub api_auth: Option<std::sync::Arc<crate::web::api_auth::ApiAuthState>>,
     pub logical_gateway_factory: Option<Arc<LogicalCodebaseGatewayFactory>>,
     /// add-provider-revalidate-probe：capability 重验证服务（生产缺省由
@@ -263,7 +263,7 @@ impl WebAppState {
         self
     }
 
-    /// 批2 T1：装配控制面认证状态（仅生产 `serve_web` 使用）。
+    /// 装配控制面来源校验状态（仅生产 `serve_web` 使用）。
     pub fn with_api_auth(
         mut self,
         auth: std::sync::Arc<crate::web::api_auth::ApiAuthState>,

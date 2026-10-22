@@ -26,7 +26,7 @@ interface CodingWsServerMessage {
 }
 
 /**
- * 批2 T1：scoped coding WS URL。认证经 aria_session cookie（HttpOnly）自动携带，
+ * scoped coding WS URL。控制面边界为 Host/Origin 来源校验（无会话/令牌），
  * URL 一律不加令牌/查询参数。
  */
 export function scopedCodingAttemptWebSocketUrl(

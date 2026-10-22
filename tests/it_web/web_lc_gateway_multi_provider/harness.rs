@@ -12150,7 +12150,7 @@ static B45_ISSUE_DESCRIPTION_OVERRIDE: std::sync::Mutex<Option<String>> =
 //   commit/写 `.git`/`.aria`→恢复前 durable 违规→Invalidated+人工门+
 //   平台 stage/commit/push 零推进);窗口外 Coder 正常提交/推送对照。
 // - `b45_live_review_crash`(消费 `run_b45_t24_crash`;不含取消格):真实
-//   `aria web` 服务进程(script pty 交付 bootstrap token)驱动 Pi 评审,
+//   `aria web` 服务进程(script pty 会话日志)驱动 Pi 评审,
 //   kill -9 服务(Provider 孤儿留验)后重启——先停旧 writer/清登记
 //   容器、原 manifest 续恢复、三域核对,再放行新材料;未确认 writer/
 //   登记容器补偿停等保持锁(不误杀);静默 CHECK 跨 300s 总 deadline
@@ -12437,19 +12437,17 @@ fn b45_t24_preset_resource_record(
     Ok(path)
 }
 
-/// 真实服务进程(script pty 交付 bootstrap token)句柄。
+/// 真实服务进程(script pty 会话日志)句柄。
 pub(crate) struct B45T24Server {
     /// `script` 进程(进程组组长;kill 组=kill 服务+shell,无清理机会)。
     child: std::process::Child,
     /// 服务监听端口(测试预选)。
     pub(crate) port: u16,
-    /// pty 会话日志(script 落盘;bootstrap token/启动足迹来源)。
+    /// pty 会话日志(script 落盘;启动足迹/补偿日志来源)。
     pub(crate) log_path: PathBuf,
     /// workspace 根(服务 --workspace)。
     #[allow(dead_code)] // 仅由服务进程消费;测试侧保留供证据对照。
     pub(crate) workspace_root: PathBuf,
-    /// 已认证会话 cookie(`aria_session=...`;None=未完成交换)。
-    pub(crate) cookie: Option<String>,
 }
 
 impl B45T24Server {
@@ -12472,61 +12470,18 @@ impl B45T24Server {
         std::fs::read_to_string(&self.log_path).unwrap_or_default()
     }
 
-    /// bootstrap token(pty 交付文案解析;缺失=None)。
-    pub(crate) fn bootstrap_token(&self) -> Option<String> {
-        let text = self.log_text();
-        text.lines().rev().find_map(|line| {
-            let marker = "[aria-auth] ";
-            let position = line.find(marker)?;
-            let token = line[position + marker.len()..].trim();
-            if token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit()) {
-                Some(token.to_string())
-            } else {
-                None
-            }
-        })
-    }
-
-    /// 完成认证交换(token→会话 cookie)。
-    pub(crate) async fn authenticate(&mut self) -> Result<String, String> {
-        let token = self
-            .bootstrap_token()
-            .ok_or("bootstrap token 未交付(pty 日志无 token 行)")?;
-        let client = reqwest::Client::new();
-        let response = client
-            .post(format!("http://127.0.0.1:{}/api/auth/session", self.port))
-            .json(&serde_json::json!({"token": token}))
-            .send()
-            .await
-            .map_err(|error| format!("auth session 交换失败:{error}"))?;
-        let cookie = response
-            .headers()
-            .get(reqwest::header::SET_COOKIE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|text| {
-                text.split(';')
-                    .find(|part| part.trim_start().starts_with("aria_session="))
-                    .map(|part| part.trim().to_string())
-            })
-            .ok_or("auth session 响应缺 aria_session cookie")?;
-        self.cookie = Some(cookie.clone());
-        Ok(cookie)
-    }
-
-    /// 已认证 HTTP JSON 调用。
+    /// HTTP JSON 调用(mutation 显式携带受信 Origin;无会话要求)。
     pub(crate) async fn request_json(
         &self,
         method: reqwest::Method,
         path: &str,
         body: Value,
     ) -> Result<(u16, Value), String> {
-        let cookie = self.cookie.as_deref().ok_or("未认证(先 authenticate)")?;
         let client = reqwest::Client::new();
         let origin = format!("http://127.0.0.1:{}", self.port);
         let is_get = method == reqwest::Method::GET;
         let mut request = client
             .request(method, format!("{origin}{path}"))
-            .header(reqwest::header::COOKIE, cookie)
             .header(reqwest::header::ORIGIN, &origin);
         if !is_get {
             request = request.json(&body);
@@ -12549,7 +12504,7 @@ fn server_log_tail(log_path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 派生真实 `aria web` 服务(script pty;stderr=TTY→bootstrap token 可交付)。
+/// 派生真实 `aria web` 服务(script pty 会话日志)。
 /// 环境变量透传当前进程(reviewer idle 界由调用方先行 set_var)。
 async fn b45_t24_spawn_server(
     workspace_root: &Path,
@@ -12582,22 +12537,20 @@ async fn b45_t24_spawn_server(
         port,
         log_path,
         workspace_root: workspace_root.to_path_buf(),
-        cookie: None,
     };
-    // 就绪等待:端口可连 + bootstrap token 交付(启动链含 provider 探活,
+    // 就绪等待:端口可连(bind 先于一切启动副作用;启动链含 provider 探活,
     // 有界 900s;超时=BLOCKED 真实报告)。
     let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
     loop {
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
-                "服务 {label} 就绪超时(token/端口未就绪);日志尾:\n{}",
+                "服务 {label} 就绪超时(端口未就绪);日志尾:\n{}",
                 server_log_tail(&server.log_path)
             ));
         }
-        if server.bootstrap_token().is_some()
-            && tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_ok()
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
         {
             fp(
                 "t24_server_ready",
@@ -12615,8 +12568,8 @@ async fn b45_t24_spawn_server(
     }
 }
 
-/// 远程 WS 连接(真实服务;Origin+Cookie 认证头)。
-async fn b45_t24_connect_remote_ws(port: u16, cookie: &str, path: &str) -> Result<LiveWs, String> {
+/// 远程 WS 连接(真实服务;受信 Origin 头)。
+async fn b45_t24_connect_remote_ws(port: u16, path: &str) -> Result<LiveWs, String> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let url = format!("ws://127.0.0.1:{port}{path}");
     let mut request = url
@@ -12629,7 +12582,6 @@ async fn b45_t24_connect_remote_ws(port: u16, cookie: &str, path: &str) -> Resul
             .parse()
             .expect("origin header"),
     );
-    headers.insert("Cookie", cookie.parse().expect("cookie header"));
     let (stream, _) = connect_async(request)
         .await
         .map_err(|error| error.to_string())?;
@@ -12642,16 +12594,13 @@ async fn b45_t24_connect_remote_ws(port: u16, cookie: &str, path: &str) -> Resul
 /// (崩溃演练的 kill 时机)。
 async fn b45_t24_remote_attempt_pump(
     port: u16,
-    cookie: &str,
     attempt_id: &str,
     start: bool,
     stop_after: Option<Duration>,
     timeout: Duration,
 ) -> Value {
     let mut ws =
-        match b45_t24_connect_remote_ws(port, cookie, &format!("/ws/coding-attempts/{attempt_id}"))
-            .await
-        {
+        match b45_t24_connect_remote_ws(port, &format!("/ws/coding-attempts/{attempt_id}")).await {
             Ok(ws) => ws,
             Err(error) => return json!({"connect_error": error}),
         };
@@ -13529,27 +13478,21 @@ impl LiveLcGatewayHarness {
             format_args!("workspace={}", workspace.display()),
         );
 
-        // ---- 3) 派生真实服务 #1 + 认证 ----
+        // ---- 3) 派生真实服务 #1 ----
         let port = t24_pick_port().await;
         let mut server = b45_t24_spawn_server(&workspace, port, "drill-a")
             .await
             .map_err(|message| {
                 matrix_failure("b45_t24_server_spawn_failed", message, Some("crash"))
             })?;
-        server.authenticate().await.map_err(|message| {
-            matrix_failure("b45_t24_server_auth_failed", message, Some("crash"))
-        })?;
-        let pump_cookie = server.cookie.clone().unwrap_or_default();
 
         // ---- 4) drill A:驱动 attempt #1 至 CodeReview 窗口 Running,
         //         静默 CHECK 在途时 kill -9 整个服务进程组 ----
         let pump_a = tokio::spawn({
             let attempt = attempt_one.clone();
-            let cookie = pump_cookie.clone();
             async move {
                 b45_t24_remote_attempt_pump(
                     port,
-                    &cookie,
                     &attempt,
                     true,
                     None,
@@ -13642,7 +13585,7 @@ impl LiveLcGatewayHarness {
             .unwrap_or_else(|error| json!({"join_error": error.to_string()}));
 
         // ---- 5) 重启(#2):启动补偿先行(停旧 writer/清登记容器/原
-        //         manifest 续恢复/三域核对)——端口/token 就绪即补偿已过 ----
+        //         manifest 续恢复/三域核对)——端口就绪即补偿已过 ----
         let port_two = t24_pick_port().await;
         let mut server_two = b45_t24_spawn_server(&workspace, port_two, "drill-a-restart")
             .await
@@ -13650,9 +13593,6 @@ impl LiveLcGatewayHarness {
                 matrix_failure("b45_t24_server_spawn_failed", message, Some("crash"))
             })?;
         let restarted_observed_at = Utc::now().to_rfc3339();
-        server_two.authenticate().await.map_err(|message| {
-            matrix_failure("b45_t24_server_auth_failed", message, Some("crash"))
-        })?;
         // 窗口 #1 收口(终态;补偿释放或保持锁)。有界等待。
         let window_one_terminal = b45_t24_wait_window_state(
             &app_root,
@@ -13694,10 +13634,8 @@ impl LiveLcGatewayHarness {
 
         // ---- 6) 新材料:重启后 attach 续驱至终态(第二次评审完整跑,
         //         含 310s 静默 CHECK 不误杀) ----
-        let cookie_two = server_two.cookie.clone().unwrap_or_default();
         let pump_resume = b45_t24_remote_attempt_pump(
             port_two,
-            &cookie_two,
             &attempt_one,
             false,
             None,
@@ -13758,11 +13696,9 @@ impl LiveLcGatewayHarness {
                 if !attempt_two.is_empty() {
                     let pump_b = tokio::spawn({
                         let attempt = attempt_two.clone();
-                        let cookie = cookie_two.clone();
                         async move {
                             b45_t24_remote_attempt_pump(
                                 port_two,
-                                &cookie,
                                 &attempt,
                                 true,
                                 Some(Duration::from_secs(3600)),

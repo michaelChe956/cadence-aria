@@ -1,4 +1,4 @@
-import { ApiRequestError, notifyAuthRequired } from "./client";
+import { ApiRequestError } from "./client";
 import type {
   CreateSessionRequest,
   GenerateImageRequest,
@@ -53,9 +53,6 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    if (response.status === 401) {
-      notifyAuthRequired();
-    }
     throw await imageCreateApiError(response);
   }
   const text = await response.text();
@@ -129,9 +126,6 @@ export async function generateImage(
     credentials: "same-origin",
     body: form,
   });
-  if (response.status === 401) {
-    notifyAuthRequired();
-  }
   if (!response.ok) {
     throw await imageCreateApiError(response);
   }

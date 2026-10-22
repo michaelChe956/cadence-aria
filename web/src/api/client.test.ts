@@ -32,6 +32,7 @@ import {
   rebindAutomationEnrollment,
   postRetryFailedScRun,
   takeoverWorkspaceSession,
+  workspaceSessionWebSocketUrl,
 } from "./client";
 import type {
   AutomationEnrollmentRebindRequest,
@@ -39,6 +40,8 @@ import type {
   RepositoryInitializationOperationSnapshot,
   RepositoryInitializationStep,
 } from "./types";
+import { imageCreateChatWebSocketUrl } from "./image-create";
+import { scopedCodingAttemptWebSocketUrl } from "../hooks/useCodingWorkspaceWs";
 
 function repositoryInitializationResult(): CreateRepositoryResponse {
   return {
@@ -1078,5 +1081,38 @@ describe("postRetryFailedScRun（批2 T1 修复轮 F1：wire 契约防退化）"
     expect(calls[0].init?.method).toBe("POST");
     expect(calls[0].init?.credentials).toBe("same-origin");
     expect(String(calls[0].init?.body)).toContain("cmd-sc-retry-node_0007");
+  });
+});
+
+describe("ws urls carry no token material", () => {
+  it("workspace / coding / image-create WS URLs have no query or token", () => {
+    const workspace = workspaceSessionWebSocketUrl("sess/1", {
+      protocol: "https:",
+      host: "aria.local:4317",
+    });
+    expect(workspace).toBe(
+      "wss://aria.local:4317/api/workspace-sessions/sess%2F1/ws",
+    );
+
+    const coding = scopedCodingAttemptWebSocketUrl("p/1", "i/1", "a/1", {
+      protocol: "http:",
+      host: "aria.local:4317",
+    });
+    expect(coding).toBe(
+      "ws://aria.local:4317/ws/projects/p%2F1/issues/i%2F1/coding-attempts/a%2F1",
+    );
+
+    const imageCreate = imageCreateChatWebSocketUrl("img/1", {
+      protocol: "http:",
+      host: "aria.local:4317",
+    });
+    expect(imageCreate).toBe(
+      "ws://aria.local:4317/api/image-create/sessions/img%2F1/chat",
+    );
+
+    for (const url of [workspace, coding, imageCreate]) {
+      expect(url).not.toContain("?");
+      expect(url).not.toContain("token");
+    }
   });
 });

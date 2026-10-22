@@ -276,25 +276,24 @@ cd web && pnpm dev --port 5173
 
 然后访问 `http://127.0.0.1:5173`，开发模式下前端会把 `/api/*` 代理到 `4317` 端口的后端。
 
-#### 控制面认证与浏览器会话（批2 T1）
+#### 控制面来源校验（Host/Origin）
 
-平台 API 默认启用入站认证（无条件前置，localhost 不豁免）：
+平台控制面以 Host/Origin 来源校验作为入站边界，**不要求登录、令牌或会话**：
 
-- 仅 `GET /api/health` 公开；其余 `/api/**` 与 `/ws/**`（含 test 路由与别名）都要求已认证会话，且在进入 handler / WebSocket upgrade 之前校验 Host 与 Origin（唯一例外：`POST /api/evidence-query` 按专用 evidence token 语义鉴权，见下节）。
-- 服务启动时生成一次性 bootstrap token（OS CSPRNG 32 字节），**只在 owner 受信终端（交互 TTY stderr）显示一次**。首次打开页面会看到认证入口，把终端显示的 token 粘贴进去完成交换；服务端通过 `aria_session` cookie（`HttpOnly; SameSite=Strict; Path=/`）建立会话。token 一次性消费，进程重启后会话与 token 全部失效，需要重启后在终端重新获取。
-- 长期运行建议在 `tmux`/`screen` 或交互终端中启动。`nohup ... > log 2>&1` 这类无 TTY 启动**无法交付 token**：服务会显式报告缺少受信终端交付前提，且绝不把 token 写入日志、文件或环境变量。
-- 状态变更（POST/PUT/DELETE）与 WebSocket 必须携带受信精确 Origin；敏感 GET 无 Origin 也可访问（仍需会话）；非法 / `null` Origin、伪造 Host 一律 403。
+- 所有 `/api/**` 与 `/ws/**`（含 test 路由与别名）在进入 handler / WebSocket upgrade 之前先校验 Host 与 Origin（唯一例外：`GET /api/health` 公开；`POST /api/evidence-query` 按专用 evidence token 语义鉴权，见下节）。
+- 请求必须携带允许的 Host（伪造/缺失/与 URI authority 冲突一律 403）；状态变更（POST/PUT/DELETE）与 WebSocket upgrade 必须携带受信精确 Origin（非法 / `null` / 缺失一律 403）；Host 受信时只读 GET/HEAD/OPTIONS 无 Origin 可访问。
+  打开页面即用，无需粘贴任何 token。
 - 默认受信 Origin/Host 从实际监听地址精确推导（如 `http://127.0.0.1:<port>`、`http://localhost:<port>`）。前端开发服务器（5173）或非回环监听必须显式配置：`ARIA_API_TRUSTED_ORIGINS=http://localhost:5173`（逗号分隔多个；精确 `scheme://host:port`，禁止通配符；非回环 bind 未配置时拒绝启动）。
-- 非浏览器自动化（CLI/脚本）：先显式携带受信 Origin 头，`POST /api/auth/session`（body：`{"token": "<终端获取的 token>"}`）交换后保存 cookie jar 再访问；收到 401 时回到认证流程，不要盲目重发副作用请求。
-- 前端刷新页面直接复用 cookie 会话（`GET /api/auth/session`：204 已认证 / 401 未认证）；WebSocket URL 一律不带任何令牌。
+- 非浏览器自动化（CLI/脚本）：显式携带受信 Origin 头即可访问（写操作必须带）；WebSocket URL 一律不带任何令牌。
+- 残余边界（已知并接受）：本机单用户场景下，同 UID 的本机程序可伪造 Host/Origin 访问控制面（与本地开发工具同级暴露面）；网页 drive-by 仍被 Host/Origin 校验挡住。
 
 #### evidence 查询脚本（专用 token，不与管理会话混用）
 
-worktree 内的 `.aria/bin/aria-evidence-query` 脚本走**专用 evidence token 语义**：鉴权由 handler 既有的 token→attempt→role→预算链承担（与运行中 attempt 绑定、仅证据只读），不持有也不需要管理会话。平台认证中间件对该端点保留 Host/Origin 来源卫生（脚本自动携带 `Origin: http://127.0.0.1:<port>`），body 内的 evidence token 由 `.aria/evidence-token`（0600）提供。残余边界（R9/GC8，与鉴权设计一致）：该 token 文件是同 UID 可读材料——平台鉴权阻止未授权/跨站调用，不抵御同 UID 恶意进程截获或复用。
+worktree 内的 `.aria/bin/aria-evidence-query` 脚本走**专用 evidence token 语义**：鉴权由 handler 既有的 token→attempt→role→预算链承担（与运行中 attempt 绑定、仅证据只读）。来源校验中间件对该端点保留 Host/Origin 来源卫生（脚本自动携带 `Origin: http://127.0.0.1:<port>`），body 内的 evidence token 由 `.aria/evidence-token`（0600）提供。残余边界（R9/GC8）：该 token 文件是同 UID 可读材料——来源校验阻止跨站调用，不抵御同 UID 恶意进程截获或复用。
 
 #### 受信执行环境与 Git 禁桥（批2 T2–T5）
 
-- Provider（Claude/Codex/Pi/Kimi）子进程不再继承宿主全部环境：只透传工具链与语言环境白名单（`PATH`、`JAVA_HOME`、`MAVEN_HOME`、`LANG` 等）；代理、包管理器、SSL/CA、容器连接等键必须写进受信 Provider 配置才生效。平台入站令牌（`ARIA_BOOTSTRAP_TOKEN`、`aria_session`）永不进入 Provider 环境。
+- Provider（Claude/Codex/Pi/Kimi）子进程不再继承宿主全部环境：只透传工具链与语言环境白名单（`PATH`、`JAVA_HOME`、`MAVEN_HOME`、`LANG` 等）；代理、包管理器、SSL/CA、容器连接等键必须写进受信 Provider 配置才生效。控制面不签发任何入站令牌/会话材料，evidence 专用 token 也永不进入 Provider 环境。
 - 给 Provider 额外环境变量（如 `DOCKER_HOST`、`NODE_OPTIONS`）只能通过受信配置批准，仅设置 shell 变量不再生效。`HOME` 固定为 owner 家目录；同时存在第二个 `CODEX_HOME` 会被拒绝并给出配置发现诊断。
 - Provider CLI 以裸名（`claude`/`codex`/`pi`/`kimi`）调用而 `PATH` 不在冻结环境中时，会明确报「缺少工具」，不会回退宿主 `PATH`。平台自身的仓库注册、终审与版本探测已显式携带 `PATH`，不受此影响。
 - 平台自己的 Git 操作（提交、worktree、状态、注册快照等）不执行仓库的 hooks 与 fsmonitor：仓库里的 `pre-commit` 等只在你自己终端或 Provider 会话执行 Git 时生效，平台提交不会被 hooks 拦截或偷偷触发。`git push` 到远端时，远端仓库自己的 hooks 仍会执行。
