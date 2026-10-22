@@ -442,6 +442,10 @@ impl WorkspaceEngine {
     /// 多仓分支的唯一判据。注意与 `is_aggregate_story_or_design` /
     /// `is_aggregate_planning_session`（聚合视野判据：workspace_type ×
     /// aggregate scope marker）区分——形态判据只看 gateway 注入，不看视野。
+    /// 分期接线：生产消费者（review/drive 等多仓分支）在后续 Task 落地，
+    /// 当前仅测试引用——沿用 streaming_provider 的 not(test) 豁免惯例，
+    /// 消费者落地后本属性可删。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_logical_codebase_issue(&self) -> bool {
         self.logical_provider_gateway().is_some()
     }
