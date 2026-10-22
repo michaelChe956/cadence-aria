@@ -1482,8 +1482,9 @@ pub struct PlanCodingFinalConfirmDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cross_repo_review_warning: Option<CrossRepoReviewWarning>,
     /// T18（REQ-GFR-CR-06）：该 issue 的跨仓评审是否已有「已知风险，仍然
-    /// 确认」留痕。
-    #[serde(default)]
+    /// 确认」留痕。仅存在评审记录时才可能为 true；`false` 视为可选字段缺省
+    /// （Plan 7.2「最终确认卡片两个可选字段」），单仓 GET 不得多出该键。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cross_repo_review_acknowledged: bool,
 }
 

@@ -443,10 +443,6 @@ impl WorkspaceEngine {
     /// 多仓分支的唯一判据。注意与 `is_aggregate_story_or_design` /
     /// `is_aggregate_planning_session`（聚合视野判据：workspace_type ×
     /// aggregate scope marker）区分——形态判据只看 gateway 注入，不看视野。
-    /// 分期接线：生产消费者（review/drive 等多仓分支）在后续 Task 落地，
-    /// 当前仅测试引用——沿用 streaming_provider 的 not(test) 豁免惯例，
-    /// 消费者落地后本属性可删。
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_logical_codebase_issue(&self) -> bool {
         self.logical_provider_gateway().is_some()
     }
@@ -913,7 +909,7 @@ pub fn aggregate_design_scope_instruction_prompt(
 /// `aggregate_scope_material_prompt`）。
 ///
 /// Outline 的每一个 item 都必须声明目标逻辑仓库。候选 Draft 将逐字继承该 target，
-/// Final Compile 只接受 `IssueCodebaseSelection` 的有效成员，绝不猜测 primary。
+/// Final Compile 只接受 `IssueCodebaseSelection` 的有效成员，绝不猜测目标仓库。
 pub fn aggregate_work_item_target_scope_instruction_prompt(
     effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
 ) -> String {
@@ -922,7 +918,7 @@ pub fn aggregate_work_item_target_scope_instruction_prompt(
     prompt.push_str(
         "本次 WorkItem Plan 位于聚合代码库。work_item_outlines[] 的每一项必须提供 \\\n         target_repository_id，且只能取上述成员清单中的 logical_repository_id。\\n\
          target_repository_id 不确定、缺失或不在有效成员中时必须进入 blocker；禁止猜测、\\n\
-         禁止回落到任意 primary 仓库。多个 WorkItem 可以使用同一 target_repository_id。",
+         禁止回落到任意单一仓库。多个 WorkItem 可以使用同一 target_repository_id。",
     );
     append_optional_member_range(
         &mut prompt,
@@ -936,7 +932,6 @@ pub fn aggregate_work_item_target_scope_instruction_prompt(
 ///
 /// 该调用方（WorkItem Plan legacy author）把片段整体接在 provider prompt 末尾，
 /// 没有 `[canonical_inputs]` 稳定注入面，故此处一次性给出材料块与指令块。
-#[allow(dead_code)] // 与 Story/Design 指令块同模式；接线由 WorkItem Plan author 入口消费
 pub fn aggregate_work_item_target_scope_prompt(
     inventory_rendered: &str,
     effective_member_ids: &[crate::product::logical_codebase::LogicalRepositoryId],
@@ -968,7 +963,14 @@ mod aggregate_work_item_target_scope_prompt_tests {
         assert!(prompt.contains("api | service"), "缺成员行：{prompt}");
         assert!(prompt.contains("target_repository_id"));
         assert!(prompt.contains("只能取上述成员清单"));
-        assert!(prompt.contains("禁止回落到任意 primary 仓库"));
+        assert!(
+            prompt.contains("禁止回落到任意单一仓库"),
+            "缺禁止单一仓库回落指令：{prompt}"
+        );
+        assert!(
+            !prompt.to_lowercase().contains("primary"),
+            "WorkItem 目标仓库 prompt 不得再出现 primary 字样(REQ-PLN-11 条目 1)：{prompt}"
+        );
         assert!(prompt.contains("00000000-0000-0000-0000-000000000001"));
         assert!(prompt.contains("00000000-0000-0000-0000-000000000002"));
     }

@@ -24,7 +24,9 @@ use crate::product::models::{HandoffRevision, PlanDefectClass, PlanDefectRoute};
 use crate::product::work_item_projection::{renderer_for, renderer_version_for_optional_provider};
 use crate::product::work_item_revision_store::WorkItemRevisionStore;
 use crate::web::advance_plan::{AdvancePlanOrigin, advance_plan};
-use crate::web::types::{PlanCodingFinalConfirmResultDto, PlanCodingFinalConfirmResultItemDto};
+use crate::web::types::{
+    PlanCodingFinalConfirmDto, PlanCodingFinalConfirmResultDto, PlanCodingFinalConfirmResultItemDto,
+};
 
 /// 冻结 4 targets（prepare → advance → bind → mark_start_requested），不启动
 /// runner：确定性拿到 run.target_attempts 与 4 个 Created 成员 attempt。
@@ -823,4 +825,46 @@ async fn plan_final_confirm_terminated_with_partial_completed_is_not_clickable()
         after, before,
         "terminated plan final confirm has zero effects"
     );
+}
+
+/// P3-8（Plan 7.2「最终确认卡片两个可选字段」）：未留痕（false）时 DTO MUST NOT
+/// 序列化 `cross_repo_review_acknowledged`——单仓 GET 不得多出该键；留痕后
+/// 必须呈现 `true`。
+#[test]
+fn cross_repo_review_acknowledged_absent_when_false() {
+    let dto = PlanCodingFinalConfirmDto::default();
+    let value = serde_json::to_value(&dto).expect("serialize final confirm dto");
+    assert!(
+        value.get("cross_repo_review_acknowledged").is_none(),
+        "false 时不得序列化可选字段：{value}"
+    );
+    assert!(
+        value.get("cross_repo_review_warning").is_none(),
+        "无警告时不得序列化可选字段：{value}"
+    );
+
+    let acknowledged = PlanCodingFinalConfirmDto {
+        cross_repo_review_acknowledged: true,
+        ..PlanCodingFinalConfirmDto::default()
+    };
+    let value = serde_json::to_value(&acknowledged).expect("serialize ack dto");
+    assert_eq!(
+        value.get("cross_repo_review_acknowledged"),
+        Some(&serde_json::Value::Bool(true)),
+        "留痕后必须呈现 true：{value}"
+    );
+}
+
+/// P3-8 反序列化兼容：缺省键回落到 false（单仓 / 旧 JSON 无该字段）。
+#[test]
+fn cross_repo_review_acknowledged_defaults_to_false_when_absent() {
+    let dto: PlanCodingFinalConfirmDto = serde_json::from_value(serde_json::json!({
+        "state": "not_ready",
+        "ready_attempt_ids": [],
+        "confirmed_attempt_ids": [],
+        "blocking": [],
+    }))
+    .expect("deserialize without optional fields");
+    assert!(!dto.cross_repo_review_acknowledged);
+    assert!(dto.cross_repo_review_warning.is_none());
 }

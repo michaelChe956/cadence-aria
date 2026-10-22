@@ -124,12 +124,15 @@ pub fn render_member_reality(members: &[MemberReality]) -> String {
                 entrypoints.pop();
                 continue;
             }
-            if role.len() > 64 {
-                role.truncate(32);
+            // P3-5：role/baseline 均为 UTF-8（manifest role / git 分支名），
+            // `String::truncate` 落在非 char boundary 会 panic（整轮材料渲染
+            // 失败）——按字符边界截断，并按字符数判上限保证每轮必然收缩。
+            if role.chars().count() > 64 {
+                truncate_to_chars(&mut role, 32);
                 continue;
             }
-            if baseline.len() > 64 {
-                baseline.truncate(32);
+            if baseline.chars().count() > 64 {
+                truncate_to_chars(&mut baseline, 32);
                 continue;
             }
             rendered.push_str(&block);
@@ -283,6 +286,14 @@ fn is_noise_directory(name: &str) -> bool {
         name,
         ".git" | ".idea" | ".vscode" | "node_modules" | "target" | "__pycache__" | ".venv"
     )
+}
+
+/// 按字符边界截断到 `max_chars` 个字符（UTF-8 多字节安全：`String::truncate`
+/// 只接受 char boundary，落在串中间会 panic）。
+fn truncate_to_chars(value: &mut String, max_chars: usize) {
+    if let Some((byte_index, _)) = value.char_indices().nth(max_chars) {
+        value.truncate(byte_index);
+    }
 }
 
 /// 空值兜底为「未识别」（MUST 保留该行）。
@@ -485,6 +496,49 @@ mod tests {
             rendered.len() <= MEMBER_REALITY_MAX_BYTES,
             "单仓实况必须 ≤ 2 KiB，实际 {} 字节",
             rendered.len()
+        );
+    }
+
+    /// P3-5：role/baseline 均为 UTF-8（role 来自 manifest、baseline 是 git 分支
+    /// 名），裁剪 MUST 落在字符边界——`String::truncate(32)` 在多字节串上会
+    /// panic（32 常不是 char boundary），并让整轮评审材料渲染失败。
+    #[test]
+    fn member_reality_truncation_is_char_boundary_safe_on_multibyte_fields() {
+        // role 超限路径：目录/入口为空 → 直接进入 role 裁剪分支（32 % 3 ≠ 0，
+        // 旧实现 `truncate(32)` 在此 panic）。
+        let mut role_heavy = rust_member();
+        role_heavy.key_directories = Vec::new();
+        role_heavy.entrypoints = Vec::new();
+        role_heavy.build_test_command = MEMBER_REALITY_UNKNOWN.to_string();
+        role_heavy.role = "界".repeat(800); // 2400 字节 > 2 KiB
+        role_heavy.baseline = "feature/branch".to_string();
+
+        // baseline 超限路径：role 未超限 → 进入 baseline 裁剪分支。
+        let mut baseline_heavy = rust_member();
+        baseline_heavy.key_directories = Vec::new();
+        baseline_heavy.entrypoints = Vec::new();
+        baseline_heavy.role = "后端".to_string();
+        baseline_heavy.baseline = "线".repeat(800);
+
+        let rendered = render_member_reality(&[role_heavy, baseline_heavy]);
+
+        assert_eq!(
+            rendered.lines().count(),
+            10,
+            "裁剪 MUST NOT 省略行或整仓：{rendered}"
+        );
+        assert!(
+            rendered.len() <= MEMBER_REALITY_MAX_BYTES,
+            "多字节裁剪后仍须 ≤ 2 KiB，实际 {} 字节",
+            rendered.len()
+        );
+        assert!(
+            rendered.contains("职责: 界"),
+            "多字节 role 必须按字符裁剪后正常渲染：{rendered}"
+        );
+        assert!(
+            rendered.contains("基线: 线"),
+            "多字节 baseline 必须按字符裁剪后正常渲染：{rendered}"
         );
     }
 }

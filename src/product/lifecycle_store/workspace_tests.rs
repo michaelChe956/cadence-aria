@@ -152,24 +152,8 @@ fn create_workspace_session_assigns_unique_review_identity() {
     );
 }
 
-/// REQ-ENV-13（设计 A 条目 17）：存量会话（旧 JSON 无 review_identity_id
-/// 字段）首次读取时 MUST 补生成一个身份并持久化；二次读取 MUST 复用
-/// 同一持久值，MUST NOT 重新生成。
-#[test]
-fn legacy_session_without_review_identity_gets_one_persisted_once() {
-    fn find_session_json(dir: &std::path::Path, file_name: &str) -> std::path::PathBuf {
-        for entry in std::fs::read_dir(dir).expect("read dir") {
-            let path = entry.expect("dir entry").path();
-            if path.is_dir() {
-                if let Some(found) = find_session_json_opt(&path, file_name) {
-                    return found;
-                }
-            } else if path.file_name().is_some_and(|name| name == file_name) {
-                return path;
-            }
-        }
-        panic!("session json {file_name} not found");
-    }
+/// 定位会话 JSON 的测试辅助（会话目录按 issue 分层）。
+fn find_session_json(dir: &std::path::Path, file_name: &str) -> std::path::PathBuf {
     fn find_session_json_opt(dir: &std::path::Path, file_name: &str) -> Option<std::path::PathBuf> {
         for entry in std::fs::read_dir(dir).expect("read dir") {
             let path = entry.expect("dir entry").path();
@@ -183,17 +167,15 @@ fn legacy_session_without_review_identity_gets_one_persisted_once() {
         }
         None
     }
+    find_session_json_opt(dir, file_name)
+        .unwrap_or_else(|| panic!("session json {file_name} not found"))
+}
 
-    let temp = tempdir().unwrap();
-    let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
-    let created = store
-        .create_workspace_session(create_input(WorkspaceType::Story, None))
-        .unwrap();
-
-    // 还原存量旧 JSON 形态：剥掉 review_identity_id 字段再落盘。
-    let session_path = find_session_json(temp.path(), &format!("{}.json", created.id));
+/// 还原存量旧 JSON 形态：剥掉 `review_identity_id` 字段再落盘。前置断言该字段
+/// 由创建写入，剥除后才构成存量形态。
+fn strip_review_identity_field(session_path: &std::path::Path) {
     let mut raw: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&session_path).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(session_path).unwrap()).unwrap();
     assert!(
         raw.as_object_mut()
             .unwrap()
@@ -201,13 +183,57 @@ fn legacy_session_without_review_identity_gets_one_persisted_once() {
             .is_some(),
         "前置：创建即写入的字段应存在，剥除后才构成存量形态"
     );
-    std::fs::write(&session_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+    std::fs::write(session_path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+}
+
+/// 建一个多仓（lc）issue 并返回其 id：形态判据是
+/// `IssueRecord.logical_codebase_id == Some(_)`。
+fn create_logical_codebase_issue(paths: &ProductAppPaths) -> String {
+    crate::product::issue_store::IssueStore::new(paths.clone())
+        .create(crate::product::issue_store::CreateProductIssueInput {
+            project_id: "project_0001".to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: Some("logical_codebase_0001".to_string()),
+            base_branch: None,
+            title: "logical issue".to_string(),
+            description: None,
+            change_id: None,
+        })
+        .expect("create logical codebase issue")
+        .id
+}
+
+fn create_input_for_issue(
+    workspace_type: WorkspaceType,
+    issue_id: &str,
+) -> CreateWorkspaceSessionInput {
+    CreateWorkspaceSessionInput {
+        issue_id: issue_id.to_string(),
+        ..create_input(workspace_type, None)
+    }
+}
+
+/// REQ-ENV-13（设计 A 条目 17）+ P2-4：多仓（lc）issue 的存量会话（旧 JSON
+/// 无 review_identity_id 字段）首次读取时 MUST 补生成一个身份并持久化；二次
+/// 读取 MUST 复用同一持久值，MUST NOT 重新生成。
+#[test]
+fn legacy_logical_codebase_session_gets_one_identity_persisted_once() {
+    let temp = tempdir().unwrap();
+    let paths = ProductAppPaths::new(temp.path());
+    let store = LifecycleStore::new(paths.clone());
+    let issue_id = create_logical_codebase_issue(&paths);
+    let created = store
+        .create_workspace_session(create_input_for_issue(WorkspaceType::Story, &issue_id))
+        .unwrap();
+
+    let session_path = find_session_json(temp.path(), &format!("{}.json", created.id));
+    strip_review_identity_field(&session_path);
 
     // 首次读取：补生成身份并持久化。
     let first = store.get_workspace_session(&created.id).unwrap();
     assert!(
         !first.review_identity_id.is_empty(),
-        "存量会话首读必须补生成评审身份"
+        "多仓存量会话首读必须补生成评审身份"
     );
     let persisted: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&session_path).unwrap()).unwrap();
@@ -222,5 +248,80 @@ fn legacy_session_without_review_identity_gets_one_persisted_once() {
     assert_eq!(
         first.review_identity_id, second.review_identity_id,
         "二次读取必须复用持久化的评审身份"
+    );
+}
+
+/// P2-4：单仓 issue（无 issue 记录 / `logical_codebase_id` 为 None）的存量会话
+/// 首读 MUST 保持只读——不补写身份、不刷新 updated_at、会话 JSON 字节不变。
+#[test]
+fn legacy_single_repo_session_read_does_not_write_back_identity() {
+    let temp = tempdir().unwrap();
+    let store = LifecycleStore::new(ProductAppPaths::new(temp.path()));
+    let created = store
+        .create_workspace_session(create_input(WorkspaceType::Story, None))
+        .unwrap();
+
+    let session_path = find_session_json(temp.path(), &format!("{}.json", created.id));
+    strip_review_identity_field(&session_path);
+    let before = std::fs::read(&session_path).unwrap();
+
+    let read = store.get_workspace_session(&created.id).unwrap();
+
+    assert!(
+        read.review_identity_id.is_empty(),
+        "单仓会话不消费该身份，读路径不得补写：{}",
+        read.review_identity_id
+    );
+    assert_eq!(
+        std::fs::read(&session_path).unwrap(),
+        before,
+        "单仓会话读取 MUST NOT 写盘（含 updated_at 刷新）"
+    );
+}
+
+/// P2-4：多仓（lc）会话的补写失败 MUST 降级为「本次返回记录、不阻断读」——
+/// 非 live scope（entity 删除中）由 `with_entity_live_write` 拒绝写，读仍成功，
+/// 且不返回未持久化的随机身份。
+#[test]
+fn legacy_logical_codebase_session_read_degrades_when_backfill_write_fails() {
+    let temp = tempdir().unwrap();
+    let paths = ProductAppPaths::new(temp.path());
+    let store = LifecycleStore::new(paths.clone());
+    let issue_id = create_logical_codebase_issue(&paths);
+    let created = store
+        .create_workspace_session(create_input_for_issue(WorkspaceType::Story, &issue_id))
+        .unwrap();
+
+    let session_path = find_session_json(temp.path(), &format!("{}.json", created.id));
+    strip_review_identity_field(&session_path);
+    let before = std::fs::read(&session_path).unwrap();
+
+    // 非 live scope：先起 purge 墓碑（记录保留），写准入即拒绝。
+    let scope = crate::product::entity_deletion_store::EntityScope::new(
+        "project_0001",
+        &issue_id,
+        crate::product::entity_deletion_store::DeletionEntityKind::Story,
+        "entity_0001",
+    );
+    let lease = crate::product::entity_operation_store::EntityOperationStore::new(paths.clone())
+        .try_acquire_delete(&scope)
+        .expect("acquire delete lease");
+    crate::product::entity_deletion_store::EntityDeletionStore::new(paths.clone())
+        .begin(&lease)
+        .expect("begin purging tombstone");
+    drop(lease);
+
+    let read = store
+        .get_workspace_session(&created.id)
+        .expect("补写失败不得上浮为读错误");
+    assert!(
+        read.review_identity_id.is_empty(),
+        "补写失败不得返回未持久化的随机身份：{}",
+        read.review_identity_id
+    );
+    assert_eq!(
+        std::fs::read(&session_path).unwrap(),
+        before,
+        "补写被拒时会话 JSON 必须保持原样"
     );
 }

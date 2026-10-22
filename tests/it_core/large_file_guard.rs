@@ -14,6 +14,11 @@ const CODE_EXTENSIONS: &[&str] = &["rs", "ts", "tsx"];
 /// 侧自行放宽。本次因 B1-1 接线越线的
 /// `src/cross_cutting/claude_code_provider/mod.rs` 已按先例拆分
 /// （`direct_start.rs` + `validated_start.rs`，纯移动），因此不在本表内。
+///
+/// 2026-10-23 批次登记（用户裁决）：`review-scope-and-cross-repo-review` 批次
+/// 推高的文件按登记时行数逐文件更新上限（含新登记项）；同批次基线已超且
+/// 行数未变的 `reviewer_snapshot.rs` / `reviewer_window.rs` /
+/// `reviewer_window_store.rs` 属既有债务，登记值保持不动。
 const GRANDFATHERED: &[(&str, usize)] = &[
     (
         "src/cross_cutting/claude_code_provider/tests/policy_session.rs",
@@ -116,7 +121,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/product/lifecycle_store/tests/tool_policy_audit.rs",
         1431,
     ),
-    ("src/product/lifecycle_store/workspace.rs", 1667),
+    ("src/product/lifecycle_store/workspace.rs", 1730),
     (
         "src/product/lifecycle_store/workspace_single_candidate.rs",
         1621,
@@ -160,7 +165,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/product/logical_codebase/registration_tests.inc.rs",
         1315,
     ),
-    ("src/product/models/tests.rs", 1521),
+    ("src/product/models/tests.rs", 1523),
     ("src/product/reviewer_reconciliation.rs", 2471),
     ("src/product/reviewer_snapshot.rs", 3322),
     ("src/product/reviewer_window.rs", 3893),
@@ -188,14 +193,15 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         2310,
     ),
     ("src/product/workspace_engine/lifecycle.rs", 2167),
-    ("src/product/workspace_engine/prompts.rs", 1224),
+    ("src/product/workspace_engine/prompts.rs", 1665),
     (
         "src/product/workspace_engine/prompts/human_gate_revision.rs",
         1464,
     ),
-    ("src/product/workspace_engine/review/drive.rs", 2319),
+    ("src/product/workspace_engine/review/drive.rs", 2559),
+    ("src/product/workspace_engine/review/drive_tests.rs", 1379),
     ("src/product/workspace_engine/review/routing.rs", 1391),
-    ("src/product/workspace_engine/session_state.rs", 1456),
+    ("src/product/workspace_engine/session_state.rs", 1457),
     (
         "src/product/workspace_engine/tests/advance_handler.rs",
         1342,
@@ -220,6 +226,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/product/workspace_engine/tests/conversational_gate_revision/part_02.rs",
         1440,
     ),
+    ("src/product/workspace_engine/tests/part_31.rs", 1233),
     ("src/product/workspace_engine/tests/recovery_task7.rs", 1295),
     (
         "src/product/workspace_engine/tests/single_candidate.rs",
@@ -230,7 +237,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("src/web/autopilot_orchestrator.rs", 1737),
     ("src/web/coding_start.rs", 1256),
     ("src/web/coding_start_parts/tests.inc.rs", 1299),
-    ("src/web/coding_ws_handler/runner.rs", 2422),
+    ("src/web/coding_ws_handler/runner.rs", 2817),
     ("src/web/coding_ws_handler/socket.rs", 1295),
     (
         "src/web/coding_ws_handler/tests/failed_review_recovery/runner.rs",
@@ -249,8 +256,8 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("src/web/handlers/support.rs", 1204),
     ("src/web/handlers/support_parts/coding_cleanup.inc.rs", 1572),
     ("src/web/handlers/workspace_sc_recovery.rs", 2073),
-    ("src/web/types.rs", 1550),
-    ("src/web/wiga_gate_fixture.rs", 1761),
+    ("src/web/types.rs", 1574),
+    ("src/web/wiga_gate_fixture.rs", 1764),
     (
         "src/web/workspace_session/manager/durable_projection.rs",
         1329,
@@ -259,7 +266,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("src/web/workspace_session/tests/part_07.rs", 1272),
     ("src/web/workspace_ws_handler/run/gateway_start.rs", 1858),
     ("src/web/workspace_ws_handler/run/provider_run.rs", 1678),
-    ("src/web/workspace_ws_handler/run/single_candidate.rs", 1657),
+    ("src/web/workspace_ws_handler/run/single_candidate.rs", 1658),
     ("src/web/workspace_ws_handler/socket.rs", 1893),
     (
         "src/web/workspace_ws_handler/tests/campaign_stage3_interactive/cases.rs",
@@ -269,7 +276,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/web/workspace_ws_handler/tests/conversational_gate_protocol.rs",
         2050,
     ),
-    ("src/web/workspace_ws_handler/tests/gateway_start.rs", 1699),
+    ("src/web/workspace_ws_handler/tests/gateway_start.rs", 1700),
     (
         "src/web/workspace_ws_handler/tests/planning_resume.rs",
         2444,

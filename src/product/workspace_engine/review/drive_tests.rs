@@ -1330,10 +1330,10 @@ mod t3_primary_concept_removed {
 
         let mut offending = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            if let Some(text) = event_text(event) {
-                if text.contains("plan_review_window_target_unresolved") {
-                    offending.push(text);
-                }
+            if let Some(text) = event_text(event)
+                && text.contains("plan_review_window_target_unresolved")
+            {
+                offending.push(text);
             }
         }
         assert!(

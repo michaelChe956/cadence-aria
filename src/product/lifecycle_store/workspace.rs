@@ -588,18 +588,46 @@ impl LifecycleStore {
             super::workspace_session_read_spy::record_workspace_session_read();
         }
         validate_relative_id(session_id)?;
-        let record: WorkspaceSessionRecord =
-            read_json(&self.find_workspace_session_path(session_id)?)?;
-        // REQ-ENV-13（设计 A 条目 17）：存量会话（旧 JSON 无身份字段）
+        let session_path = self.find_workspace_session_path(session_id)?;
+        let record: WorkspaceSessionRecord = read_json(&session_path)?;
+        // REQ-ENV-13（设计 A 条目 17）+ P2-4：存量会话（旧 JSON 无身份字段）
         // 首读补生成一个身份并持久化一次（set 幂等不覆盖已有值）；后续
-        // 读取复用持久值，MUST NOT 每次重新生成。写失败 fail-closed，
-        // 绝不以未持久化的随机身份继续。
-        if record.review_identity_id.is_empty() {
+        // 读取复用持久值，MUST NOT 每次重新生成。
+        //
+        // P2-4 两条约束：
+        // ① 补写门禁到多仓（lc）形态——单仓不消费该身份
+        //    （`reviewer_verify_policy` 单仓恒 `None`），会话读取必须保持只读：
+        //    不写盘、不刷新 `updated_at`（避免会话列表按 updated_at 重排）。
+        // ② 补写是读路径的附带动作——写失败（只读盘 / 非 live scope）只降级为
+        //    「本次返回记录」，绝不上浮成读错误，也不返回未持久化的随机身份。
+        if record.review_identity_id.is_empty() && self.is_logical_codebase_session(&record) {
             let identity_id = uuid::Uuid::new_v4().simple().to_string();
-            self.set_workspace_session_review_identity(session_id, &identity_id)?;
-            return read_json(&self.find_workspace_session_path(session_id)?);
+            match self.set_workspace_session_review_identity(session_id, &identity_id) {
+                Ok(()) => return read_json(&session_path),
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        error = %error,
+                        "workspace session review identity backfill failed; serving record as read"
+                    );
+                }
+            }
         }
         Ok(record)
+    }
+
+    /// P2-4：会话所属 issue 是否为多仓（lc）形态——判据是
+    /// `IssueRecord.logical_codebase_id == Some(_)`。issue 记录缺失或不可判定
+    /// 一律按单仓处理（单仓不需该身份，读路径保持只读）。
+    fn is_logical_codebase_session(&self, session: &WorkspaceSessionRecord) -> bool {
+        matches!(
+            crate::product::logical_codebase::resolve_issue_logical_codebase_id(
+                &self.paths,
+                &session.project_id,
+                &session.issue_id,
+            ),
+            Ok(Some(_))
+        )
     }
 
     pub fn ensure_work_item_runtime_binding(
