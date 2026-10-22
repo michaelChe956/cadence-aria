@@ -19,6 +19,10 @@ pub(super) struct HistoryCompactionInput<'a> {
     pub(super) timeline_nodes: &'a [TimelineNode],
     pub(super) latest_review_verdict: Option<&'a ReviewVerdict>,
     pub(super) mode: HistoryCompactionMode,
+    /// REQ-PLN-16：多仓（`is_logical_codebase_issue()`）旧轮摘要必须保留每个
+    /// finding 的 `message` 与 `evidence`；单仓必须与改造前逐字一致，故该开关
+    /// 为 `false` 时渲染走原格式（不追加这两行）。
+    pub(super) detail_findings: bool,
 }
 
 pub(super) struct CompactedHistory {
@@ -157,6 +161,7 @@ fn render_compacted_history(
                 boundary,
                 round_messages,
                 input.timeline_nodes,
+                input.detail_findings,
             )?);
             for message in round_messages {
                 if must_replay_raw(message, input.mode, latest_artifact) {
@@ -251,6 +256,7 @@ fn render_round_summary(
     boundary: &RoundBoundary,
     messages: &[SessionMessage],
     timeline_nodes: &[TimelineNode],
+    detail_findings: bool,
 ) -> Result<String, ()> {
     let mut summary = String::new();
     summary.push_str(&format!("[历史压缩摘要 round={}]\n", boundary.round_index));
@@ -281,13 +287,27 @@ fn render_round_summary(
         summary.push_str("- findings: none_recorded\n");
     } else {
         for (index, finding) in findings.iter().enumerate() {
-            summary.push_str(&format!(
-                "- finding_id: round-{}-finding-{}\n  severity: {}\n  required_action: {}\n",
-                boundary.round_index,
-                index + 1,
-                finding.severity,
-                finding.required_action,
-            ));
+            // 单仓（`detail_findings == false`）必须与改造前逐字一致：只保留
+            // severity 与 required_action，绝不追加新行（REQ-PLN-16）。
+            if detail_findings {
+                summary.push_str(&format!(
+                    "- finding_id: round-{}-finding-{}\n  severity: {}\n  message: {}\n  evidence: {}\n  required_action: {}\n",
+                    boundary.round_index,
+                    index + 1,
+                    finding.severity,
+                    finding.message,
+                    finding.evidence,
+                    finding.required_action,
+                ));
+            } else {
+                summary.push_str(&format!(
+                    "- finding_id: round-{}-finding-{}\n  severity: {}\n  required_action: {}\n",
+                    boundary.round_index,
+                    index + 1,
+                    finding.severity,
+                    finding.required_action,
+                ));
+            }
         }
     }
 
@@ -349,6 +369,11 @@ fn extract_review_summary(content: &str) -> Option<String> {
 struct FindingSummary {
     severity: String,
     required_action: String,
+    /// REQ-PLN-16：多仓旧轮摘要保留 finding 原始 `message`；缺失时显式占位
+    /// `(not recorded)`，绝不静默丢弃。
+    message: String,
+    /// REQ-PLN-16：多仓旧轮摘要保留 finding 原始 `evidence`；缺失时显式占位。
+    evidence: String,
 }
 
 fn extract_findings(content: &str) -> Vec<FindingSummary> {
@@ -359,6 +384,8 @@ fn extract_findings(content: &str) -> Vec<FindingSummary> {
     let mut findings = Vec::new();
     let mut severity = None;
     let mut action = None;
+    let mut message = None;
+    let mut evidence = None;
     for line in section.lines() {
         let trimmed = line.trim();
         if let Some(value) = trimmed
@@ -371,17 +398,29 @@ fn extract_findings(content: &str) -> Vec<FindingSummary> {
                     required_action: action
                         .take()
                         .unwrap_or_else(|| "(not recorded)".to_string()),
+                    message: message
+                        .take()
+                        .unwrap_or_else(|| "(not recorded)".to_string()),
+                    evidence: evidence
+                        .take()
+                        .unwrap_or_else(|| "(not recorded)".to_string()),
                 });
             }
             severity = Some(one_line(value));
         } else if let Some(value) = trimmed.strip_prefix("required_action:") {
             action = Some(one_line(value));
+        } else if let Some(value) = trimmed.strip_prefix("message:") {
+            message = Some(one_line(value));
+        } else if let Some(value) = trimmed.strip_prefix("evidence:") {
+            evidence = Some(one_line(value));
         }
     }
     if let Some(severity) = severity {
         findings.push(FindingSummary {
             severity,
             required_action: action.unwrap_or_else(|| "(not recorded)".to_string()),
+            message: message.unwrap_or_else(|| "(not recorded)".to_string()),
+            evidence: evidence.unwrap_or_else(|| "(not recorded)".to_string()),
         });
     }
     findings
@@ -687,6 +726,7 @@ mod tests {
             timeline_nodes: &[],
             latest_review_verdict: Some(&open_must_fix()),
             mode: HistoryCompactionMode::Author,
+            detail_findings: false,
         });
 
         assert!(
@@ -728,6 +768,7 @@ mod tests {
             timeline_nodes: &[],
             latest_review_verdict: None,
             mode: HistoryCompactionMode::Author,
+            detail_findings: false,
         });
 
         assert!(compacted.used_full_replay_fallback);
@@ -744,6 +785,7 @@ mod tests {
             timeline_nodes: &[],
             latest_review_verdict: Some(&verdict),
             mode: HistoryCompactionMode::Reviewer,
+            detail_findings: false,
         });
         let open_findings = render_open_required_findings(Some(&verdict));
         let diffs = render_intermediate_artifact_diffs(&artifacts);
@@ -800,6 +842,7 @@ mod tests {
             timeline_nodes: &[retry_node],
             latest_review_verdict: None,
             mode: HistoryCompactionMode::Author,
+            detail_findings: false,
         });
 
         assert!(
@@ -818,6 +861,7 @@ mod tests {
             timeline_nodes: &[],
             latest_review_verdict: None,
             mode: HistoryCompactionMode::Reviewer,
+            detail_findings: false,
         });
 
         assert!(
@@ -885,5 +929,105 @@ mod tests {
         assert!(rendered.contains("diff 生成失败；保留全文"));
         assert!(rendered.contains("# v1\0"));
         assert!(rendered.contains("# v2"));
+    }
+
+    /// REQ-PLN-16：多仓旧轮摘要 MUST 保留每个 finding 的 `message` 与 `evidence`。
+    #[test]
+    fn lc_round_summary_keeps_message_and_evidence() {
+        let (messages, artifacts) = four_round_history();
+        let compacted = compact_history(HistoryCompactionInput {
+            messages: &messages,
+            artifact_versions: &artifacts,
+            timeline_nodes: &[],
+            latest_review_verdict: None,
+            mode: HistoryCompactionMode::Author,
+            detail_findings: true,
+        });
+
+        assert!(
+            compacted.rendered.contains(
+                "- finding_id: round-1-finding-1\n  severity: suggestion\n  message: 仅作建议\n  evidence: evidence\n  required_action: optional\n"
+            ),
+            "多仓旧轮摘要必须保留 finding 的 message 与 evidence：{}",
+            compacted.rendered
+        );
+    }
+
+    /// REQ-PLN-16：多仓旧记录缺 `message` / `evidence` 时 MUST 以显式占位呈现
+    ///（不得静默丢弃），且相邻 finding 的字段不得互相串用。
+    #[test]
+    fn lc_round_summary_marks_missing_message_and_evidence_with_placeholder() {
+        let (mut messages, artifacts) = four_round_history();
+        for reviewer in messages
+            .iter_mut()
+            .filter(|message| message.role == "reviewer")
+        {
+            reviewer.content = "[review_summary]\n旧轮评审\n\n[review_findings]\n\
+                 1. severity: must_fix\n   required_action: 补齐 REQ-001 追踪\n\
+                 2. severity: suggestion\n   message: 第二条例行建议\n   evidence: 见 REQ-002\n   required_action: optional"
+                .to_string();
+        }
+        let compacted = compact_history(HistoryCompactionInput {
+            messages: &messages,
+            artifact_versions: &artifacts,
+            timeline_nodes: &[],
+            latest_review_verdict: None,
+            mode: HistoryCompactionMode::Author,
+            detail_findings: true,
+        });
+
+        assert!(
+            compacted.rendered.contains(
+                "- finding_id: round-1-finding-1\n  severity: must_fix\n  message: (not recorded)\n  evidence: (not recorded)\n  required_action: 补齐 REQ-001 追踪\n"
+            ),
+            "缺 message/evidence 的旧记录必须以显式占位呈现：{}",
+            compacted.rendered
+        );
+        assert!(
+            compacted.rendered.contains(
+                "- finding_id: round-1-finding-2\n  severity: suggestion\n  message: 第二条例行建议\n  evidence: 见 REQ-002\n  required_action: optional\n"
+            ),
+            "相邻 finding 必须各带自己的 message/evidence，不得串用：{}",
+            compacted.rendered
+        );
+    }
+
+    /// REQ-PLN-16：单仓（`detail_findings == false`）旧轮摘要 MUST 与改造前逐字一致
+    ///（快照钉死；finding 行不得追加 message/evidence）。
+    #[test]
+    fn single_repo_round_summary_unchanged() {
+        const LEGACY_ROUND_1_SUMMARY: &str = "[历史压缩摘要 round=1]\n- artifact_version: v1\n- review_verdict: revise\n- review_summary: ROUND-1-REVIEW 原文\n- finding_id: round-1-finding-1\n  severity: suggestion\n  required_action: optional\n";
+
+        let (messages, artifacts) = four_round_history();
+        let boundaries = round_boundaries(&messages, &artifacts).unwrap();
+        let round_one_messages = &messages[..boundaries[0].next_start];
+        assert_eq!(
+            render_round_summary(&boundaries[0], round_one_messages, &[], false).unwrap(),
+            LEGACY_ROUND_1_SUMMARY
+        );
+
+        let compacted = compact_history(HistoryCompactionInput {
+            messages: &messages,
+            artifact_versions: &artifacts,
+            timeline_nodes: &[],
+            latest_review_verdict: None,
+            mode: HistoryCompactionMode::Author,
+            detail_findings: false,
+        });
+        assert!(
+            compacted.rendered.contains(LEGACY_ROUND_1_SUMMARY),
+            "单仓渲染必须包含与改造前逐字相同的旧轮摘要：{}",
+            compacted.rendered
+        );
+        assert!(
+            !compacted.rendered.contains("\n  message: "),
+            "单仓渲染不得出现 message 行：{}",
+            compacted.rendered
+        );
+        assert!(
+            !compacted.rendered.contains("\n  evidence: "),
+            "单仓渲染不得出现 evidence 行：{}",
+            compacted.rendered
+        );
     }
 }

@@ -558,6 +558,7 @@ impl WorkspaceEngine {
             timeline_nodes: &self.timeline_nodes,
             latest_review_verdict: self.latest_review_verdict.as_ref(),
             mode: HistoryCompactionMode::Author,
+            detail_findings: self.is_logical_codebase_issue(),
         });
         let history = if let Some(index) = last_current_user_message_index {
             let current = &self.session.messages[index];

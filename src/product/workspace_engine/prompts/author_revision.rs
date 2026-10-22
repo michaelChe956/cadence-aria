@@ -60,6 +60,7 @@ impl WorkspaceEngine {
                     timeline_nodes: &self.timeline_nodes,
                     latest_review_verdict: self.latest_review_verdict.as_ref(),
                     mode: super::HistoryCompactionMode::Author,
+                    detail_findings: self.is_logical_codebase_issue(),
                 })
                 .rendered,
             );
