@@ -436,6 +436,16 @@ impl WorkspaceEngine {
         ) && self.has_aggregate_scope_system_context()
     }
 
+    /// 多仓形态门禁（REQ-PLN-11）：`logical_provider_gateway` 非空即逻辑
+    /// 代码库 issue（`IssueRecord.logical_codebase_id == Some(_)` 的运行期
+    /// 信号，Web 接入 task 注入 gateway）；未注入即单仓形态。这是后续所有
+    /// 多仓分支的唯一判据。注意与 `is_aggregate_story_or_design` /
+    /// `is_aggregate_planning_session`（聚合视野判据：workspace_type ×
+    /// aggregate scope marker）区分——形态判据只看 gateway 注入，不看视野。
+    pub(crate) fn is_logical_codebase_issue(&self) -> bool {
+        self.logical_provider_gateway().is_some()
+    }
+
     pub fn build_work_item_plan_streaming_input(
         &self,
         provider_type: ProviderType,
@@ -1220,5 +1230,231 @@ mod reredrive_prompt_tests {
         let reasons = vec!["missing_section:0:缺 Identity".to_string()];
         let prompt = build_work_item_plan_compile_reredrive_prompt(&reasons, &[]);
         assert!(!prompt.contains("[design_requirements]"));
+    }
+}
+
+/// REQ-PLN-11 形态门禁单测：`logical_provider_gateway` 非空即多仓逻辑代码库
+/// issue（`IssueRecord.logical_codebase_id == Some(_)` 的运行期信号——Web 接入
+/// task 为逻辑代码库 issue 注入 gateway；未注入即单仓 `None` 形态）。
+/// 只测门禁本身两分支；「单仓行为逐字不变」由既有 part_* / drive_tests 回归覆盖。
+#[cfg(test)]
+mod is_logical_codebase_issue_tests {
+    use super::*;
+    use crate::cross_cutting::provider_adapter::ProviderAdapter;
+    use crate::cross_cutting::provider_availability_gate::{
+        ProviderAvailabilityGate, ProviderHealthSource,
+    };
+    use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::checkpoint_store::CheckpointStore;
+    use crate::product::logical_codebase::{
+        AggregatePolicyArtifactStore, LogicalCodebaseProviderGateway, PolicyTarget,
+        PolicyTargetResolver, ProviderCapability, ProviderCapabilitySource, ProviderGatewayError,
+        ProviderRef, SessionLaunchRequest, SessionPolicyAction,
+    };
+    use crate::protocol::contracts::{AdapterOutput, TimeoutStatus};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    /// 未注入 gateway 的最小 engine（单仓形态基线）。
+    fn engine_without_logical_gateway() -> WorkspaceEngine {
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let store = Arc::new(CheckpointStore::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let session = WorkspaceSession {
+            session_id: "sess_logical_codebase_gate".to_string(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "story_spec_0001".to_string(),
+            workspace_type: WorkspaceType::Story,
+            stage: WorkspaceStage::Revision,
+            messages: Vec::new(),
+            artifact: None,
+            author_provider: ProviderName::ClaudeCode,
+            reviewer_provider: Some(ProviderName::Codex),
+            review_rounds: 1,
+            permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+            provisional_reviewer_provider: None,
+            reviewer_enabled_at_start: None,
+            superpowers_enabled: true,
+            openspec_enabled: true,
+            session_status: WorkspaceSessionStatus::Open,
+            flow_kind: crate::product::work_item_plan_policy::WorkItemPlanFlowKind::Legacy,
+            run_policy: crate::product::work_item_plan_policy::RunPolicy::Interactive,
+            run_history: Default::default(),
+            review_invocation_scope: None,
+            human_gate_snapshot: None,
+            repair_reservation: None,
+            policy_diagnostics: Vec::new(),
+            provider_start_ledger: Vec::new(),
+            single_candidate_phase: None,
+            work_item_plan_source_revision_ref: None,
+            plan_candidate_ir_ref: None,
+            mechanical_report_ref: None,
+            publication_provenance_ref: None,
+            approval_attempt_id: None,
+            approved_at: None,
+            compile_reservation: None,
+            provider_conversations: Vec::new(),
+            logical_launch_fingerprints: Vec::new(),
+            superseded_native_sessions: Vec::new(),
+            lc_resume_recovery: None,
+            structural_governance_state: None,
+            repository_path: None,
+        };
+        WorkspaceEngine::new(store, event_tx, session)
+    }
+
+    /// 占位 capability source：门禁只读 `Option::is_some()`，不触任何 capability
+    /// 相位；恒拒即可（与生产 fail-closed 语义一致）。
+    struct UnusedCapabilitySource;
+
+    impl ProviderCapabilitySource for UnusedCapabilitySource {
+        fn require_supported(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "gate fixture capability source is never queried".to_string(),
+            ))
+        }
+
+        fn require_resume_supported(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "gate fixture capability source is never queried".to_string(),
+            ))
+        }
+
+        fn require_write_boundary(
+            &self,
+            _provider: &ProviderRef,
+            _action: SessionPolicyAction,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "gate fixture capability source is never queried".to_string(),
+            ))
+        }
+
+        fn require_root_recipe_supported(
+            &self,
+            _provider: &ProviderRef,
+            _credential: &crate::product::logical_codebase::provider_admission_preflight::BootstrapPhaseCredential,
+        ) -> Result<ProviderCapability, ProviderGatewayError> {
+            Err(ProviderGatewayError::UnsupportedCapability(
+                "gate fixture capability source is never queried".to_string(),
+            ))
+        }
+    }
+
+    /// 占位 target resolver：透传请求 target（不会被调用）。
+    struct UnusedTargetResolver;
+
+    impl PolicyTargetResolver for UnusedTargetResolver {
+        fn resolve_and_revalidate(
+            &self,
+            request: &SessionLaunchRequest,
+        ) -> Result<PolicyTarget, ProviderGatewayError> {
+            Ok(request.target.clone())
+        }
+    }
+
+    /// 占位同步 adapter：gateway 构造参数，不会被调用。
+    struct UnusedSyncAdapter;
+
+    impl ProviderAdapter for UnusedSyncAdapter {
+        fn run(
+            &self,
+            _input: &crate::protocol::contracts::AdapterInput,
+        ) -> Result<AdapterOutput, crate::cross_cutting::provider_adapter::ProviderAdapterError>
+        {
+            Ok(AdapterOutput {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                structured_output: None,
+                files_modified: Vec::new(),
+                duration_ms: 0,
+                timeout_status: TimeoutStatus::NotTimedOut,
+            })
+        }
+    }
+
+    fn always_available_gate() -> Arc<ProviderAvailabilityGate> {
+        struct AlwaysHealthy(Arc<ProviderHealthSnapshot>);
+
+        impl ProviderHealthSource for AlwaysHealthy {
+            fn snapshot(&self) -> Arc<ProviderHealthSnapshot> {
+                self.0.clone()
+            }
+
+            fn degraded(&self) -> bool {
+                false
+            }
+        }
+
+        let checked_at = chrono::Utc::now();
+        let snapshot = Arc::new(ProviderHealthSnapshot {
+            schema_version: 1,
+            generation: 1,
+            checked_at,
+            providers: [ProviderName::ClaudeCode]
+                .into_iter()
+                .map(|provider| ProviderHealthEntry {
+                    provider,
+                    command: "stub".to_string(),
+                    available: true,
+                    version: Some("1.0".to_string()),
+                    reason_code: None,
+                    reason: None,
+                    checked_at,
+                })
+                .collect(),
+        });
+        Arc::new(ProviderAvailabilityGate::new(Arc::new(AlwaysHealthy(
+            snapshot,
+        ))))
+    }
+
+    /// 构造仅满足形态判据的最小 gateway（不 bootstrap 政策：门禁只读
+    /// `Option::is_some()`，不触 validate 链）。
+    fn stub_logical_gateway() -> Arc<LogicalCodebaseProviderGateway> {
+        let root = tempfile::tempdir().expect("gateway fixture root under /tmp");
+        let authority_root = root.path().join("authority");
+        std::fs::create_dir_all(&authority_root).expect("create authority root");
+        Arc::new(LogicalCodebaseProviderGateway::new(
+            AggregatePolicyArtifactStore::new(ProductAppPaths::new(root.path().join(".aria"))),
+            Arc::new(UnusedCapabilitySource),
+            Arc::new(UnusedTargetResolver),
+            Arc::new(ProviderRegistry::new()),
+            Arc::new(UnusedSyncAdapter),
+            always_available_gate(),
+            authority_root,
+        ))
+    }
+
+    #[test]
+    fn is_logical_codebase_issue_is_false_without_logical_gateway() {
+        let engine = engine_without_logical_gateway();
+        assert!(
+            !engine.is_logical_codebase_issue(),
+            "未注入 logical gateway(单仓形态)必须判 false"
+        );
+    }
+
+    #[test]
+    fn is_logical_codebase_issue_is_true_with_logical_gateway() {
+        let engine =
+            engine_without_logical_gateway().with_logical_provider_gateway(stub_logical_gateway());
+        assert!(
+            engine.is_logical_codebase_issue(),
+            "注入 logical gateway(多仓逻辑代码库形态)必须判 true"
+        );
     }
 }
