@@ -47,6 +47,11 @@ impl CountingFakeProvider {
     fn first_prompt(&self) -> String {
         self.prompts.lock().unwrap()[0].clone()
     }
+
+    /// 计数句柄（provider 被移入 `Arc<dyn StreamingProviderAdapter>` 后仍可观测）。
+    fn counters(&self) -> (Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
+        (self.starts.clone(), self.prompts.clone())
+    }
 }
 
 #[async_trait::async_trait]
@@ -272,4 +277,317 @@ async fn cross_repo_review_marks_every_finding_source_stage() {
             "findings without source_stage must default to issue_cross_repo_review"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task 17：触发接线（REQ-GFR-CR-03「issue 级跨仓最终评审恰好一次」，
+// 设计 B §七 E）。
+// ---------------------------------------------------------------------------
+
+/// 逻辑仓 id：固定 UUID 串（可控升序），`index` 越大 id **越小**——刻意让
+/// 「按 logical_repository_id 升序」与「按 attempt 创建顺序」相反，使排序断言
+/// 真实生效。
+fn logical_repository_id(index: usize, repo_count: usize) -> Uuid {
+    Uuid::parse_str(&format!(
+        "00000000-0000-0000-0000-{:012}",
+        repo_count - index
+    ))
+    .expect("logical repository id")
+}
+
+fn target_snapshot_with_logical_id(index: usize, repo_count: usize) -> AttemptTargetSnapshot {
+    AttemptTargetSnapshot {
+        logical_repository_id: LogicalRepositoryId(logical_repository_id(index, repo_count)),
+        checkout_id: RepositoryCheckoutId(Uuid::new_v4()),
+        physical_repository_id: format!("repository_{index:04}"),
+        canonical_path: PathBuf::from(format!("/tmp/repository_{index:04}")),
+        git_dir_identity: "sha256:test".to_string(),
+        revision: Some("abcdef".to_string()),
+        policy_digest: "policy_digest".to_string(),
+        membership_revision: 1,
+        captured_at: "2026-10-23T00:00:00Z".to_string(),
+        capture_source: "test".to_string(),
+    }
+}
+
+/// 「全部开发完成」的多仓 issue 夹具：issue + `repo_count` 个 work item +
+/// `repo_count` 个已完成 attempt（每仓一个真实 git worktree，diff 非空）。
+fn cross_repo_trigger_fixture(
+    repo_count: usize,
+) -> (
+    tempfile::TempDir,
+    CodingAttemptStore,
+    CodingWorkspaceEngine,
+    Vec<CodingExecutionAttempt>,
+) {
+    cross_repo_trigger_fixture_with_states(repo_count, &[])
+}
+
+/// 同上，但可指定每仓 attempt 的收尾形态：`true` = 停在「人工最终确认前」
+/// （`WaitingForHuman` + `stage == FinalConfirm`，group 形态收口钩子的真实落点），
+/// `false` / 缺省 = `Completed`。
+fn cross_repo_trigger_fixture_with_states(
+    repo_count: usize,
+    awaiting_final_confirm: &[bool],
+) -> (
+    tempfile::TempDir,
+    CodingAttemptStore,
+    CodingWorkspaceEngine,
+    Vec<CodingExecutionAttempt>,
+) {
+    let root = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    IssueStore::new(paths.clone())
+        .create(CreateProductIssueInput {
+            project_id: PROJECT_ID.to_string(),
+            repo_id: Some("repository_0001".to_string()),
+            logical_codebase_id: None,
+            title: "issue".to_string(),
+            description: None,
+            change_id: None,
+            base_branch: None,
+        })
+        .expect("issue");
+    let store = CodingAttemptStore::new(paths.clone());
+    let mut attempts = Vec::new();
+    for index in 0..repo_count {
+        let work_item_id = format!("work_item_{index:04}");
+        LifecycleStore::new(paths.clone())
+            .create_work_item(CreateWorkItemInput {
+                id: Some(work_item_id.clone()),
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: format!("repository_{index:04}"),
+                title: format!("work item {work_item_id}"),
+                plan_status: WorkItemPlanStatus::Confirmed,
+                ..Default::default()
+            })
+            .expect("work item");
+        let worktree = root.path().join(format!("worktree_{index}"));
+        fs::create_dir_all(&worktree).expect("worktree dir");
+        super::init_test_git_repo(&worktree);
+        let base_head = super::git_stdout(&worktree, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        fs::write(
+            worktree.join(format!("repo_{index}.txt")),
+            format!("change {index}\n"),
+        )
+        .expect("change file");
+        super::run_test_git(&worktree, &["add", "."]);
+        super::run_test_git(&worktree, &["commit", "-m", &format!("change {index}")]);
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id,
+                base_branch: base_head,
+                branch_name: format!("aria/issues/issue_0001/repo_{index}"),
+                worktree_path: Some(worktree),
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: Some(target_snapshot_with_logical_id(index, repo_count)),
+                max_auto_rework: 1,
+            })
+            .expect("create attempt");
+        store
+            .seed_running_attempt_for_test(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .expect("seed running attempt");
+        let parked = awaiting_final_confirm.get(index).copied().unwrap_or(false);
+        let settled = if parked {
+            store
+                .update_attempt_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    CodingAttemptStatus::WaitingForHuman,
+                )
+                .expect("park attempt at final confirm");
+            store
+                .update_attempt_stage(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    CodingExecutionStage::FinalConfirm,
+                )
+                .expect("stage final confirm")
+        } else {
+            store
+                .update_attempt_status(
+                    &attempt.project_id,
+                    &attempt.issue_id,
+                    &attempt.id,
+                    CodingAttemptStatus::Completed,
+                )
+                .expect("complete attempt")
+        };
+        attempts.push(settled);
+    }
+    // 评审 provider 在场（`.internal_reviewer`）。
+    seed_role_provider_config(&store, &attempts, Some(ProviderName::ClaudeCode), None);
+    let (tx, _rx) = mpsc::channel(8);
+    let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
+    (root, store, engine, attempts)
+}
+
+/// 跨仓评审的 provider 边界（调用边界注入 adapter）：无论引擎选中哪个 provider
+/// 名称，都返回同一个假 provider。
+fn fake_review_provider(
+    output: &str,
+) -> (
+    IssueCrossRepoReviewProviderResolver<'static>,
+    Arc<AtomicUsize>,
+    Arc<Mutex<Vec<String>>>,
+) {
+    let provider = CountingFakeProvider::new(output);
+    let (starts, prompts) = provider.counters();
+    let adapter: Arc<dyn StreamingProviderAdapter> = Arc::new(provider);
+    let resolver =
+        IssueCrossRepoReviewProviderResolver::new(move |_: &ProviderName| Some(adapter.clone()));
+    (resolver, starts, prompts)
+}
+
+#[tokio::test]
+async fn cross_repo_review_triggers_exactly_once_after_all_work_items_completed() {
+    let (_root, store, engine, attempts) = cross_repo_trigger_fixture(3);
+    let (resolver, starts, prompts) = fake_review_provider(
+        "{\"verdict\":\"approve\",\"summary\":\"跨仓一致性检查通过\",\"findings\":[]}",
+    );
+
+    // 收口钩子（WorkItem scope 形态）尾部触发 issue 级跨仓最终评审。
+    engine
+        .maybe_complete_issue_delivery(&attempts[2], &resolver)
+        .await
+        .expect("issue delivery completion");
+
+    assert_eq!(starts.load(Ordering::SeqCst), 1, "跨仓评审必须恰好执行一次");
+    let review = store
+        .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
+        .expect("load persisted review")
+        .expect("cross repo review record");
+    assert_eq!(review.status, IssueCrossRepoReviewStatus::Completed);
+    assert_eq!(
+        review.repository_sections.len(),
+        3,
+        "材料必须覆盖全部 3 个仓"
+    );
+    let logical_ids = review
+        .repository_sections
+        .iter()
+        .map(|section| section.logical_repository_id.clone())
+        .collect::<Vec<String>>();
+    let mut ascending = logical_ids.clone();
+    ascending.sort();
+    assert_eq!(
+        logical_ids, ascending,
+        "跨仓材料分段必须按 logical_repository_id 升序"
+    );
+    assert_ne!(
+        logical_ids[0], logical_ids[2],
+        "分段顺序不得退化为 attempt 创建顺序"
+    );
+    let prompt = prompts.lock().unwrap()[0].clone();
+    assert_eq!(
+        prompt.matches("Repository #").count(),
+        3,
+        "材料必须含 3 段逐仓 diff"
+    );
+    for index in 0..3 {
+        assert!(
+            prompt.contains(&format!("repo_{index}.txt")),
+            "材料缺少第 {index} 仓的 diff"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cross_repo_review_is_not_triggered_twice() {
+    let (_root, store, engine, attempts) = cross_repo_trigger_fixture(3);
+    let (resolver, starts, prompts) = fake_review_provider(
+        "{\"verdict\":\"approve\",\"summary\":\"跨仓一致性检查通过\",\"findings\":[]}",
+    );
+
+    engine
+        .maybe_complete_issue_delivery(&attempts[2], &resolver)
+        .await
+        .expect("first issue delivery completion");
+    let first = store
+        .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
+        .expect("load persisted review")
+        .expect("cross repo review record");
+
+    // 重复进入收口钩子 → 不得重复评审、不得新增工件。
+    engine
+        .maybe_complete_issue_delivery(&attempts[2], &resolver)
+        .await
+        .expect("second issue delivery completion");
+    let second = store
+        .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
+        .expect("load persisted review")
+        .expect("cross repo review record");
+
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        1,
+        "重复进入收口钩子不得重复评审"
+    );
+    assert_eq!(prompts.lock().unwrap().len(), 1);
+    assert_eq!(first.id, second.id, "评审记录按 issue 唯一");
+    assert_eq!(
+        first.created_at, second.created_at,
+        "评审记录不得被覆盖重写"
+    );
+    assert!(
+        store
+            .list_issue_cross_repo_acknowledgements(PROJECT_ID, ISSUE_ID)
+            .expect("acknowledgements")
+            .is_empty(),
+        "重复触发不得新增留痕"
+    );
+    let review_root = store
+        .paths()
+        .issue_root(PROJECT_ID, ISSUE_ID)
+        .join("coding-cross-repo-reviews");
+    let review_files = fs::read_dir(&review_root)
+        .expect("cross repo review root")
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+        .count();
+    assert_eq!(review_files, 1, "评审本体按 issue 唯一，不得新增第二份");
+}
+
+#[tokio::test]
+async fn cross_repo_review_material_covers_attempt_awaiting_final_confirm() {
+    // group 形态的收口钩子落在 attempt「已到人工最终确认、尚未 Completed」的时刻：
+    // 该仓开发已定稿，必须进入跨仓材料——否则该仓缺段（甚至整份材料为空 → 评审
+    // 永不执行，多仓形态形同虚设）。
+    let (_root, store, engine, attempts) =
+        cross_repo_trigger_fixture_with_states(2, &[false, true]);
+    let (resolver, starts, prompts) = fake_review_provider(
+        "{\"verdict\":\"approve\",\"summary\":\"跨仓一致性检查通过\",\"findings\":[]}",
+    );
+
+    engine
+        .maybe_complete_issue_delivery(&attempts[1], &resolver)
+        .await
+        .expect("issue delivery completion");
+
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    let review = store
+        .load_issue_cross_repo_review(PROJECT_ID, ISSUE_ID)
+        .expect("load persisted review")
+        .expect("cross repo review record");
+    assert_eq!(review.status, IssueCrossRepoReviewStatus::Completed);
+    assert_eq!(
+        review.repository_sections.len(),
+        2,
+        "停在人工最终确认的仓也必须进入跨仓材料"
+    );
+    let prompt = prompts.lock().unwrap()[0].clone();
+    assert!(prompt.contains("repo_0.txt"));
+    assert!(prompt.contains("repo_1.txt"));
 }

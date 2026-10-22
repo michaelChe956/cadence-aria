@@ -1390,7 +1390,10 @@ impl EnrolledGateFixture {
             event_tx,
         );
         engine
-            .prepare_group_final_confirm_from_readiness(&attempt)
+            .prepare_group_final_confirm_from_readiness(
+                &attempt,
+                &crate::product::coding_workspace_engine::IssueCrossRepoReviewProviderResolver::unavailable(),
+            )
             .await
             .expect("repeat group final confirm preparation");
     }

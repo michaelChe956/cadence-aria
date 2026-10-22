@@ -146,7 +146,11 @@ impl super::CodingAttemptStore {
     /// 仅按 `work_item_id` 过滤的 `list_attempts_for_work_item` 在 group 形态下
     /// 会漏掉承载该 WI 的 target-attempt，导致 issue 级交付聚合永远 `Partial`、
     /// 完成门（`maybe_complete_issue_delivery`）永不触发。
-    fn list_attempts_covering_work_item(
+    ///
+    /// REQ-GFR-CR-03（跨仓最终评审触发接线）：可见性由私有 `fn` 改为
+    /// `pub(crate) fn` 供 `CodingWorkspaceEngine` 复用「每个 work item 的最新
+    /// attempt」判定；**实现一行不改**。
+    pub(crate) fn list_attempts_covering_work_item(
         &self,
         project_id: &str,
         issue_id: &str,

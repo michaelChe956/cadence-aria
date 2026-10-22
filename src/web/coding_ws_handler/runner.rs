@@ -10,8 +10,11 @@ use crate::product::coding_models::{
 pub(crate) use crate::product::coding_workspace_engine::{
     CodeReviewFlowDecision, code_review_flow_decision,
 };
-use crate::product::coding_workspace_engine::{CodingWorkspaceEngine, CodingWorkspaceEngineError};
+use crate::product::coding_workspace_engine::{
+    CodingWorkspaceEngine, CodingWorkspaceEngineError, IssueCrossRepoReviewProviderResolver,
+};
 use crate::product::coding_workspace_runner::CodingRunnerCommand;
+use crate::product::models::ProviderName;
 use crate::web::state::{CodingAttemptRunKey, CodingRunReservation, WebAppState};
 
 use super::runner_support::{
@@ -517,6 +520,13 @@ pub(crate) async fn execute_start_coding_flow(
 ) -> Result<(), CodingWorkspaceEngineError> {
     let app_paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
 
+    // REQ-GFR-CR-03：issue 级跨仓最终评审的 provider adapter 由**调用边界**
+    // （web 层）按引擎选定的 provider 名称解析后注入——引擎层不自建 adapter。
+    let cross_repo_review_provider =
+        IssueCrossRepoReviewProviderResolver::new(|provider_name: &ProviderName| {
+            provider_for(state, provider_name, "cross repo final review provider").ok()
+        });
+
     let current = coding_store.get_attempt(&attempt.project_id, &attempt.issue_id, &attempt.id)?;
     let (mut current, current_child_session_id) =
         recover_plan_amendment_if_needed(engine, &current).await?;
@@ -664,7 +674,7 @@ pub(crate) async fn execute_start_coding_flow(
             && current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup
         {
             current = engine
-                .prepare_group_final_confirm_from_readiness(&current)
+                .prepare_group_final_confirm_from_readiness(&current, &cross_repo_review_provider)
                 .await?;
             return emit_current_session_state(
                 event_tx,
@@ -1119,7 +1129,7 @@ pub(crate) async fn execute_start_coding_flow(
             // 后续流转（WorkItem 直接完成 / Group 经 stage gate 进 GroupFinalReview）照常推进。
             if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItem {
                 current = engine
-                    .complete_attempt_after_review_request(&current)
+                    .complete_attempt_after_review_request(&current, &cross_repo_review_provider)
                     .await?;
                 return emit_current_session_state(
                     event_tx,
@@ -1133,7 +1143,7 @@ pub(crate) async fn execute_start_coding_flow(
 
         if current.scope == crate::product::coding_models::CodingAttemptScope::WorkItemGroup {
             current = engine
-                .prepare_group_final_confirm_from_readiness(&current)
+                .prepare_group_final_confirm_from_readiness(&current, &cross_repo_review_provider)
                 .await?;
             return emit_current_session_state(
                 event_tx,

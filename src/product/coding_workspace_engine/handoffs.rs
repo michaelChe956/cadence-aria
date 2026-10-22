@@ -555,6 +555,7 @@ impl CodingWorkspaceEngine {
     pub(crate) async fn complete_attempt_after_review_request(
         &self,
         attempt: &CodingExecutionAttempt,
+        review_provider: &IssueCrossRepoReviewProviderResolver<'_>,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         self.validate_attempt_issue_shared_worktree_lock_if_present(attempt)?;
         self.record_work_item_completion_commit_if_present(attempt)?;
@@ -572,16 +573,21 @@ impl CodingWorkspaceEngine {
             self.active_work_item_id_for_attempt(&completed),
             &completed.id,
         )?;
-        self.maybe_complete_issue_delivery(&completed)?;
+        self.maybe_complete_issue_delivery(&completed, review_provider)
+            .await?;
         Ok(completed)
     }
 
     /// 落盘判定接线：issue 下所有 Work Item 均已推送（`AllPushed`）时把 issue 标记
     /// 为 `Completed`；否则不动。单仓/多仓共用，Legacy 单仓走同一路径（纯增量追加
     /// 一次 Completed 落盘）。幂等由 `IssueStore::update_status` 保证。
-    pub(crate) fn maybe_complete_issue_delivery(
+    ///
+    /// REQ-GFR-CR-03（跨仓最终评审触发接线）：收口尾部并行触发 issue 级跨仓
+    /// 最终评审——**旁路**，不参与交付判定、不改 issue `Completed` 判定。
+    pub(crate) async fn maybe_complete_issue_delivery(
         &self,
         attempt: &CodingExecutionAttempt,
+        review_provider: &IssueCrossRepoReviewProviderResolver<'_>,
     ) -> Result<(), CodingWorkspaceEngineError> {
         let summary = self
             .store
@@ -593,7 +599,33 @@ impl CodingWorkspaceEngine {
                 IssueStatus::Completed,
             )?;
         }
+        self.trigger_issue_cross_repo_final_review(attempt, review_provider)
+            .await;
         Ok(())
+    }
+
+    /// 跨仓最终评审触发的**旁路**调用（REQ-GFR-CR-03）：advisory 语义——任何失败
+    /// 都不得阻断 per-attempt 收口（不抛错、不改 attempt / issue 状态）。
+    async fn trigger_issue_cross_repo_final_review(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        review_provider: &IssueCrossRepoReviewProviderResolver<'_>,
+    ) {
+        if let Err(error) = self
+            .maybe_trigger_issue_cross_repo_final_review(
+                &attempt.project_id,
+                &attempt.issue_id,
+                review_provider,
+            )
+            .await
+        {
+            tracing::warn!(
+                project_id = %attempt.project_id,
+                issue_id = %attempt.issue_id,
+                error = %error,
+                "issue 级跨仓最终评审触发失败（advisory，不阻断收口）"
+            );
+        }
     }
 
     /// 将已完成独立审查的 group attempt 交给人工最终确认。
@@ -604,6 +636,7 @@ impl CodingWorkspaceEngine {
     pub(crate) async fn prepare_group_final_confirm_from_readiness(
         &self,
         attempt: &CodingExecutionAttempt,
+        review_provider: &IssueCrossRepoReviewProviderResolver<'_>,
     ) -> Result<CodingExecutionAttempt, CodingWorkspaceEngineError> {
         if attempt.scope != CodingAttemptScope::WorkItemGroup
             || !self.group_attempt_ready_for_final_review(attempt)?
@@ -630,6 +663,10 @@ impl CodingWorkspaceEngine {
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingTimelineNodeCreated { node })
+            .await;
+        // REQ-GFR-CR-03（跨仓最终评审触发接线）：group 形态的收口尾部并行触发
+        // issue 级跨仓最终评审——**旁路**，不参与交付判定、不阻断人工确认。
+        self.trigger_issue_cross_repo_final_review(&updated, review_provider)
             .await;
         Ok(updated)
     }

@@ -61,8 +61,8 @@ pub(crate) use code_review::AttemptWindowCloseMode;
 pub(crate) use code_review::StartupWindowCompensation;
 mod coding;
 mod cross_attempt_handoff;
-mod cross_target_check;
 mod cross_repo_review_prompts;
+mod cross_target_check;
 mod failed_review_recovery;
 mod gates;
 mod git_operation;
@@ -107,6 +107,7 @@ mod types;
 mod ws_event_mapper;
 
 pub(crate) use group_final_readiness::handoff_matches_unit_run;
+pub(crate) use issue_cross_repo_review::IssueCrossRepoReviewProviderResolver;
 #[cfg(test)]
 pub(crate) use mutation_test_pause::{
     CodingMutationTestPoint, register_coding_mutation_test_pause,

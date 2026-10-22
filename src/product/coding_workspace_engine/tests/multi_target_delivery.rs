@@ -279,7 +279,8 @@ async fn multi_target_delivery_chains_are_independent_per_repo() {
         .expect("delivery summary after retry");
     assert_eq!(summary.overall, IssueDeliveryOverall::AllPushed);
     engine
-        .maybe_complete_issue_delivery(&prepared_web)
+        .maybe_complete_issue_delivery(&prepared_web, &no_cross_repo_review_provider())
+        .await
         .expect("complete issue delivery");
     let issue = IssueStore::new(store.paths())
         .get(DELIVERY_PROJECT_ID, DELIVERY_ISSUE_ID)

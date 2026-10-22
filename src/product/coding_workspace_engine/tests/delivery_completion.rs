@@ -12,7 +12,8 @@ async fn maybe_complete_issue_delivery_keeps_status_when_partial() {
     );
 
     engine
-        .maybe_complete_issue_delivery(&attempt2)
+        .maybe_complete_issue_delivery(&attempt2, &no_cross_repo_review_provider())
+        .await
         .expect("complete issue delivery");
 
     let issue = IssueStore::new(store.paths())
@@ -30,7 +31,8 @@ async fn maybe_complete_issue_delivery_marks_completed_for_pushed_plus_skipped_l
     seed_delivery_review_request(&store, &attempt2, PushStatus::SkippedNotConfigured, None);
 
     engine
-        .maybe_complete_issue_delivery(&attempt2)
+        .maybe_complete_issue_delivery(&attempt2, &no_cross_repo_review_provider())
+        .await
         .expect("complete issue delivery");
 
     let issue = IssueStore::new(store.paths())

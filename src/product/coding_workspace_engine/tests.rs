@@ -39,6 +39,13 @@ use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
+
+/// 跨仓最终评审的**无 provider 边界**解析器（单仓 / 存量单 WI 夹具）：
+/// 跨仓评审不执行、不落任何工件。
+pub(super) fn no_cross_repo_review_provider() -> IssueCrossRepoReviewProviderResolver<'static> {
+    IssueCrossRepoReviewProviderResolver::unavailable()
+}
+
 pub(super) fn seed_group_attempt_fixture(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
@@ -767,7 +774,7 @@ async fn single_attempt_completes_after_review_request_without_internal_review_n
     let engine = CodingWorkspaceEngine::new(store.clone(), GitWorkspaceService::new(), tx);
 
     let completed = engine
-        .complete_attempt_after_review_request(&attempt)
+        .complete_attempt_after_review_request(&attempt, &no_cross_repo_review_provider())
         .await
         .expect("complete after review request");
 
@@ -1018,7 +1025,8 @@ async fn maybe_complete_issue_delivery_marks_issue_completed_when_all_pushed() {
     seed_delivery_review_request(&store, &attempt2, PushStatus::Pushed, None);
 
     engine
-        .maybe_complete_issue_delivery(&attempt2)
+        .maybe_complete_issue_delivery(&attempt2, &no_cross_repo_review_provider())
+        .await
         .expect("complete issue delivery");
 
     let issue = IssueStore::new(store.paths())

@@ -352,6 +352,7 @@ async fn drive_target_to_final_confirm_with_evidence(
     engine
         .prepare_group_final_confirm_from_readiness(
             &store.get_attempt(PROJECT_ID, ISSUE_ID, &stored.id).unwrap(),
+            &crate::product::coding_workspace_engine::IssueCrossRepoReviewProviderResolver::unavailable(),
         )
         .await
         .expect("prepare group final confirm")

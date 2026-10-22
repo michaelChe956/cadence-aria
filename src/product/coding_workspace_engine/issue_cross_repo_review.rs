@@ -6,22 +6,89 @@
 //! `review_window_id`、不改任何 attempt 的 status / stage、不跑 plan-defect
 //! 路由（REQ-GFR-CR-05 advisory 红线）。
 //!
-//! provider 取值顺序（设计 B §四 B5，回退不是跳过）：最新已完成 attempt 快照的
+//! provider 取值顺序（设计 B §四 B5，回退不是跳过）：最新「开发完成」attempt 快照的
 //! `.internal_reviewer` → 缺失回退同一快照的 `.code_reviewer` → 两者皆缺 →
 //! 不执行、`status=Skipped`。
+//!
+//! 触发接线（REQ-GFR-CR-03「issue 级跨仓最终评审恰好一次」，设计 B §七 E）：
+//! `maybe_trigger_issue_cross_repo_final_review` 是**触发层**入口——幂等 +
+//! 「全部开发完成」门禁 + provider adapter 由调用边界注入。
 
 use super::*;
 use crate::product::coding_models::{
-    CodingAttemptScope, CodingRoleProviderConfigSnapshot, CrossRepoRepositorySection,
-    IssueCrossRepoReview, IssueCrossRepoReviewStatus,
+    CodingAttemptScope, CodingExecutionUnitStatus, CodingRoleProviderConfigSnapshot,
+    CrossRepoRepositorySection, IssueCrossRepoReview, IssueCrossRepoReviewStatus,
 };
 use crate::product::id::next_sequential_id;
 use crate::product::repository_store::RepositoryStore;
+use std::sync::Arc;
 
 use super::cross_repo_review_prompts::{
     CROSS_REPO_DIFF_SECTION_MAX_CHARS, CROSS_REPO_MATERIAL_MAX_BYTES,
     ISSUE_CROSS_REPO_REVIEW_OUTPUT_SCHEMA, build_issue_cross_repo_review_prompt,
 };
+
+/// 跨仓最终评审的 provider adapter 解析器（**调用边界注入**）。
+///
+/// 引擎只决定 provider **名称**（角色快照 `.internal_reviewer` → 回退
+/// `.code_reviewer`）；adapter 由调用边界（web 层）按该名称解析后注入——引擎层
+/// **不自建 adapter**（设计 B §七 E）。
+#[derive(Clone)]
+pub(crate) struct IssueCrossRepoReviewProviderResolver<'a> {
+    inner:
+        Arc<dyn Fn(&ProviderName) -> Option<Arc<dyn StreamingProviderAdapter>> + Send + Sync + 'a>,
+}
+
+impl<'a> IssueCrossRepoReviewProviderResolver<'a> {
+    pub(crate) fn new<F>(resolver: F) -> Self
+    where
+        F: Fn(&ProviderName) -> Option<Arc<dyn StreamingProviderAdapter>> + Send + Sync + 'a,
+    {
+        Self {
+            inner: Arc::new(resolver),
+        }
+    }
+
+    /// 无 provider 边界（单仓 issue / 测试夹具）：跨仓评审不执行、不落任何工件。
+    pub(crate) fn unavailable() -> Self {
+        Self::new(|_| None)
+    }
+
+    fn resolve(&self, provider_name: &ProviderName) -> Option<Arc<dyn StreamingProviderAdapter>> {
+        (self.inner)(provider_name)
+    }
+}
+
+impl<'a> Default for IssueCrossRepoReviewProviderResolver<'a> {
+    fn default() -> Self {
+        Self::unavailable()
+    }
+}
+
+/// attempt 的「开发完成」判定（设计 B §七 E 的触发门禁口径）：`Completed`，或
+/// `WaitingForHuman && stage == FinalConfirm`——后者表示开发已收尾、只等人工最终
+/// 确认（group 形态的收口钩子正落在此刻）。
+///
+/// 材料装配与触发门禁共用同一口径：否则 group 形态在收口钩子触发时，该仓的
+/// attempt 尚未 `Completed`，跨仓材料会缺该仓（甚至整份材料为空 → 评审不执行）。
+fn attempt_development_finished(attempt: &CodingExecutionAttempt) -> bool {
+    match attempt.status {
+        CodingAttemptStatus::Completed => true,
+        CodingAttemptStatus::WaitingForHuman => attempt.stage == CodingExecutionStage::FinalConfirm,
+        _ => false,
+    }
+}
+
+/// 最新「开发完成」的 attempt（材料装配的 provider / raw 输出锚点与触发层同一口径）。
+fn latest_development_finished_attempt(
+    attempts: &[CodingExecutionAttempt],
+) -> Option<CodingExecutionAttempt> {
+    attempts
+        .iter()
+        .filter(|attempt| attempt_development_finished(attempt))
+        .last()
+        .cloned()
+}
 
 /// 分段排序键：`target_snapshot.logical_repository_id` 升序；快照缺失（旧单仓
 /// 记录）时退回 `attempt.id` 参与稳定排序（设计 B §四 B4）。
@@ -81,7 +148,7 @@ fn cross_repo_section_work_item_ids(
 struct CrossRepoReviewMaterial {
     sections: Vec<CrossRepoRepositorySection>,
     diffs: Vec<String>,
-    /// 快照在场的最新已完成 attempt（provider 配置与 raw 输出锚点）。
+    /// 快照在场的最新「开发完成」attempt（provider 配置与 raw 输出锚点）。
     latest_attempt: Option<CodingExecutionAttempt>,
     plan_id: String,
     /// 材料装配失败原因：非空时评审记录落 `Failed`（不静默省略任何仓）。
@@ -109,6 +176,68 @@ impl CodingWorkspaceEngine {
         issue_id: &str,
         provider: &dyn StreamingProviderAdapter,
     ) -> Result<Option<IssueCrossRepoReview>, ProductStoreError> {
+        self.run_issue_cross_repo_final_review(project_id, issue_id, Some(provider))
+            .await
+    }
+
+    /// 触发 issue 级跨仓最终评审（REQ-GFR-CR-03「issue 级跨仓最终评审恰好一次」，
+    /// 设计 B §七 E）。
+    ///
+    /// 调用点：两个既有收口钩子的尾部（`handoffs.rs` 的
+    /// `maybe_complete_issue_delivery` 与 `prepare_group_final_confirm_from_readiness`）。
+    ///
+    /// - **幂等**：issue 级评审记录已存在 → 直接返回，不重复触发、不重试。
+    /// - **门禁**：「全部开发完成」不满足 → 不触发、**不落任何工件**（不得让
+    ///   半成品 issue 提前消费掉唯一一次评审机会）。
+    /// - **provider 注入**：引擎只定 provider **名称**，adapter 由调用边界按该
+    ///   名称解析后注入；调用边界解析不出 adapter → 评审不执行、**不落工件**
+    ///   （既不 `Completed` 也不 `Skipped`），下一次进入收口钩子仍可触发。
+    pub(crate) async fn maybe_trigger_issue_cross_repo_final_review(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        review_provider: &IssueCrossRepoReviewProviderResolver<'_>,
+    ) -> Result<Option<IssueCrossRepoReview>, ProductStoreError> {
+        if self
+            .store
+            .load_issue_cross_repo_review(project_id, issue_id)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        if !self.issue_development_finished(project_id, issue_id)? {
+            return Ok(None);
+        }
+        let provider_name =
+            self.resolve_issue_cross_repo_review_provider_name(project_id, issue_id)?;
+        let adapter = match provider_name.as_ref() {
+            Some(name) => match review_provider.resolve(name) {
+                Some(adapter) => Some(adapter),
+                None => {
+                    tracing::warn!(
+                        project_id = %project_id,
+                        issue_id = %issue_id,
+                        provider = ?name,
+                        "跨仓最终评审的 provider adapter 无法由调用边界解析：评审不执行、不落工件"
+                    );
+                    return Ok(None);
+                }
+            },
+            // 两个 reviewer 都未配置 → 落 `Skipped` 记录（与显式执行入口同语义）。
+            None => None,
+        };
+        self.run_issue_cross_repo_final_review(project_id, issue_id, adapter.as_deref())
+            .await
+    }
+
+    /// 评审执行核心。`provider == None` 表示两个 reviewer 都未配置 → 落
+    /// `Skipped` 记录（不启动 provider）。
+    async fn run_issue_cross_repo_final_review(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        provider: Option<&dyn StreamingProviderAdapter>,
+    ) -> Result<Option<IssueCrossRepoReview>, ProductStoreError> {
         if let Some(existing) = self
             .store
             .load_issue_cross_repo_review(project_id, issue_id)?
@@ -135,35 +264,35 @@ impl CodingWorkspaceEngine {
                 issue_id,
                 &latest_attempt,
             )? {
-                Some(provider_name) => {
-                    self.run_issue_cross_repo_review_provider(
+                Some(provider_name) => match provider {
+                    Some(provider) => {
+                        self.run_issue_cross_repo_review_provider(
+                            project_id,
+                            issue_id,
+                            &material,
+                            &latest_attempt,
+                            &provider_name,
+                            provider,
+                        )
+                        .await
+                    }
+                    None => self.build_skipped_cross_repo_review(
                         project_id,
                         issue_id,
                         &material,
-                        &latest_attempt,
-                        &provider_name,
-                        provider,
-                    )
-                    .await
-                }
-                None => IssueCrossRepoReview {
-                    id: next_sequential_id("cross_repo_review", 0),
-                    project_id: project_id.to_string(),
-                    issue_id: issue_id.to_string(),
-                    plan_id: material.plan_id.clone(),
-                    verdict: ReviewVerdict::Approve,
-                    summary: "未执行：internal_reviewer 与 code_reviewer 均未配置".to_string(),
-                    findings: Vec::new(),
-                    repository_sections: material.sections.clone(),
-                    status: IssueCrossRepoReviewStatus::Skipped,
-                    failure_reason: Some(
-                        "internal_reviewer 与 code_reviewer provider 配置均缺失，\
-                         跨仓最终评审跳过（advisory，不阻断交付）"
-                            .to_string(),
+                        "未执行：provider adapter 不可用",
+                        "跨仓最终评审所需的 provider adapter 不可用（调用边界未解析出该 \
+                         provider），评审未执行（advisory，不阻断交付）",
                     ),
-                    raw_provider_output_ref: None,
-                    created_at: Utc::now().to_rfc3339(),
                 },
+                None => self.build_skipped_cross_repo_review(
+                    project_id,
+                    issue_id,
+                    &material,
+                    "未执行：internal_reviewer 与 code_reviewer 均未配置",
+                    "internal_reviewer 与 code_reviewer provider 配置均缺失，\
+                     跨仓最终评审跳过（advisory，不阻断交付）",
+                ),
             }
         };
         if review.summary.trim().is_empty() {
@@ -173,22 +302,98 @@ impl CodingWorkspaceEngine {
         Ok(Some(review))
     }
 
-    /// 材料装配：该 issue 下每个已完成 attempt 一段，按逻辑仓升序；diff 区间与
-    /// code reviewer 同源同口径（`git_diff(worktree, code_review_diff_base)`）。
+    /// 跨仓评审将使用的 provider 名称（最新已完成 attempt 的角色快照：
+    /// `.internal_reviewer` → 回退 `.code_reviewer` → 皆缺 `None`）。
+    fn resolve_issue_cross_repo_review_provider_name(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Option<ProviderName>, ProductStoreError> {
+        let attempts = self.store.list_attempts_for_issue(project_id, issue_id)?;
+        let Some(latest_attempt) = latest_development_finished_attempt(&attempts) else {
+            return Ok(None);
+        };
+        self.resolve_issue_cross_repo_review_provider(project_id, issue_id, &latest_attempt)
+    }
+
+    /// 「全部开发完成」判定（触发前置，设计 B §七 E + controller 裁定）。
+    ///
+    /// - work item 集合 = issue 下**当前有效**的 work item（已删除的不计入）；
+    /// - 每个 work item 取 `list_attempts_covering_work_item` 的**最新** attempt；
+    /// - 最新 attempt 满足 `Completed`，或 `WaitingForHuman && stage == FinalConfirm`
+    ///   → 该 work item 已开发完成；
+    /// - **跳过 / 取消按已终结处理**（attempt `Aborted`、group unit `Skipped`）——
+    ///   已终结的 work item 不阻塞触发；
+    /// - issue 下无 work item → 不触发（无开发可评审）。
+    fn issue_development_finished(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<bool, ProductStoreError> {
+        let work_item_ids = LifecycleStore::new(self.store.paths())
+            .list_work_items(project_id, issue_id)?
+            .into_iter()
+            .map(|work_item| work_item.id)
+            .collect::<Vec<String>>();
+        if work_item_ids.is_empty() {
+            return Ok(false);
+        }
+        for work_item_id in work_item_ids {
+            let attempts =
+                self.store
+                    .list_attempts_covering_work_item(project_id, issue_id, &work_item_id)?;
+            let Some(latest) = attempts.last() else {
+                // 无 attempt → 该 work item 尚未开发完成。
+                return Ok(false);
+            };
+            if !self.work_item_development_finished(latest, &work_item_id)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// 单个 work item 的开发完成判定（跳过 / 取消按已终结处理）。
+    fn work_item_development_finished(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        work_item_id: &str,
+    ) -> Result<bool, ProductStoreError> {
+        // 取消：attempt 终态 `Aborted` → 按已终结处理。
+        if attempt.status == CodingAttemptStatus::Aborted {
+            return Ok(true);
+        }
+        // 跳过：group attempt 的对应 unit 被归一为 `Skipped` → 按已终结处理。
+        if attempt.scope == CodingAttemptScope::WorkItemGroup {
+            let skipped = self
+                .store
+                .list_coding_units(&attempt.project_id, &attempt.issue_id, &attempt.id)?
+                .iter()
+                .any(|unit| {
+                    unit.logical_work_item_id == work_item_id
+                        && unit.status == CodingExecutionUnitStatus::Skipped
+                });
+            if skipped {
+                return Ok(true);
+            }
+        }
+        Ok(attempt_development_finished(attempt))
+    }
+
+    /// 材料装配：该 issue 下每个「开发完成」的 attempt 一段（`Completed`，或
+    /// `WaitingForHuman && stage == FinalConfirm`——group 形态的收口钩子落在后
+    /// 一者），按逻辑仓升序；diff 区间与 code reviewer 同源同口径
+    /// （`git_diff(worktree, code_review_diff_base)`）。
     async fn assemble_issue_cross_repo_review_material(
         &self,
         project_id: &str,
         issue_id: &str,
     ) -> Result<CrossRepoReviewMaterial, ProductStoreError> {
         let attempts = self.store.list_attempts_for_issue(project_id, issue_id)?;
-        let latest_attempt = attempts
-            .iter()
-            .filter(|attempt| attempt.status == CodingAttemptStatus::Completed)
-            .map(|attempt| attempt.clone())
-            .last();
+        let latest_attempt = latest_development_finished_attempt(&attempts);
         let mut completed: Vec<CodingExecutionAttempt> = attempts
             .into_iter()
-            .filter(|attempt| attempt.status == CodingAttemptStatus::Completed)
+            .filter(attempt_development_finished)
             .collect();
         if completed.is_empty() {
             return Ok(CrossRepoReviewMaterial {
@@ -498,6 +703,32 @@ impl CodingWorkspaceEngine {
             findings: Vec::new(),
             repository_sections: material.sections.clone(),
             status: IssueCrossRepoReviewStatus::Failed,
+            failure_reason: Some(reason.to_string()),
+            raw_provider_output_ref: None,
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// `Skipped` 记录：评审未执行（provider 未配置 / adapter 不可用）。
+    /// advisory 语义——不阻断交付、不重试。
+    fn build_skipped_cross_repo_review(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        material: &CrossRepoReviewMaterial,
+        summary: &str,
+        reason: &str,
+    ) -> IssueCrossRepoReview {
+        IssueCrossRepoReview {
+            id: next_sequential_id("cross_repo_review", 0),
+            project_id: project_id.to_string(),
+            issue_id: issue_id.to_string(),
+            plan_id: material.plan_id.clone(),
+            verdict: ReviewVerdict::Approve,
+            summary: summary.to_string(),
+            findings: Vec::new(),
+            repository_sections: material.sections.clone(),
+            status: IssueCrossRepoReviewStatus::Skipped,
             failure_reason: Some(reason.to_string()),
             raw_provider_output_ref: None,
             created_at: Utc::now().to_rfc3339(),
