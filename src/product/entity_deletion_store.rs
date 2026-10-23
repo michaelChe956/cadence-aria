@@ -331,6 +331,7 @@ impl EntityDeletionStore {
     /// - Plan 保留 `work_item_ids`/`target_repository_ids`（D1.0 child owner
     ///   索引：worktree 墓碑 claim 的长期准入事实，不删现有墓碑语义），
     ///   其余集合清空；两个 claim 集均为空时整条删除（与空 manifest 等价）。
+    ///
     /// 幂等：索引文件缺失=已清。崩溃窗口（prune 后、complete 前中断）由
     /// purging 重入的 `index_owned_artifact_ids` 并集重建 + 再次 prune 收敛。
     pub fn prune_owned_artifact_ids_for_completion(

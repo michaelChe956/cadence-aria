@@ -289,9 +289,8 @@ pub fn list_c1_waiting_items(
     };
     if let (Some(bound_session_id), Some(bound_session)) =
         (session_id.as_deref(), bound_session.as_ref())
-    {
-        if bound_session.workspace_type == crate::product::models::WorkspaceType::WorkItemPlan
-            && let Some(recovery) = bound_session
+        && bound_session.workspace_type == crate::product::models::WorkspaceType::WorkItemPlan
+        && let Some(recovery) = bound_session
                 .human_gate_snapshot
                 .as_ref()
                 .and_then(|snapshot| snapshot.candidate_recovery.as_ref())
@@ -307,41 +306,40 @@ pub fn list_c1_waiting_items(
                     bound_session_id,
                     &recovery.gate_id,
                 )
-        {
-            let reason = if recovery.complete {
-                "candidate snapshot complete; awaiting human recovery".to_string()
-            } else {
-                format!(
-                    "candidate snapshot incomplete: {}",
-                    recovery.missing.join(",")
-                )
-            };
-            items.push(C1WaitingItemDto {
-                id: format!(
-                    "c1:candidate_recovery:{}:{}",
-                    bound_session.id, recovery.gate_id
-                ),
-                kind: "candidate_recovery".to_string(),
-                reason,
-                completed_steps: recovery.completed_steps.clone(),
-                target: binding_target.clone(),
-                plan_id: plan_id.clone(),
-                session_id: Some(bound_session.id.clone()),
-                attempt_id: None,
-                gate_id: Some(recovery.gate_id.clone()),
-                possible_side_effect: None,
-                actions: vec!["recover_candidate".to_string()],
-                next_phase: Some("candidate_recovered".to_string()),
-                expected_version: None,
-                action_context: Vec::new(),
-                operation_id: None,
-                diagnostics: None,
-                project_id: None,
-                issue_id: None,
-                parent_operation_id: None,
-                superseded_by: None,
-            });
-        }
+    {
+        let reason = if recovery.complete {
+            "candidate snapshot complete; awaiting human recovery".to_string()
+        } else {
+            format!(
+                "candidate snapshot incomplete: {}",
+                recovery.missing.join(",")
+            )
+        };
+        items.push(C1WaitingItemDto {
+            id: format!(
+                "c1:candidate_recovery:{}:{}",
+                bound_session.id, recovery.gate_id
+            ),
+            kind: "candidate_recovery".to_string(),
+            reason,
+            completed_steps: recovery.completed_steps.clone(),
+            target: binding_target.clone(),
+            plan_id: plan_id.clone(),
+            session_id: Some(bound_session.id.clone()),
+            attempt_id: None,
+            gate_id: Some(recovery.gate_id.clone()),
+            possible_side_effect: None,
+            actions: vec!["recover_candidate".to_string()],
+            next_phase: Some("candidate_recovered".to_string()),
+            expected_version: None,
+            action_context: Vec::new(),
+            operation_id: None,
+            diagnostics: None,
+            project_id: None,
+            issue_id: None,
+            parent_operation_id: None,
+            superseded_by: None,
+        });
     }
 
     // A09：lease 三态（复用 Task 6 只读分类；链路未开始不制造噪声项）。
