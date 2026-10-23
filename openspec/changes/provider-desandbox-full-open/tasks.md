@@ -24,8 +24,8 @@
 
 ## 4. 四家 Reviewer B 档闭环
 
-- [ ] 4.1 交付可恢复基线与平台通道互斥的 durable 审查窗口，覆盖四家受支持的 Reviewer 入口并提供快照矩阵、并发通道测试与窗口说明；验收先锁并停 writer 再持久化基线/采材料，无有效窗口或未接线 provider 不启动（REQ-ENV-REVIEW-B、REQ-ENV-09、网关 admission）。
-- [ ] 4.2 完成恢复前违规落盘、三域对账与报告独立采信，交付构建残留、自提交/.git/.aria 越权、保留 Coder dirty、恢复成功仍作废的测试与风险说明；验收违规整轮不可用于交付、不可由恢复洗白，正常临时验证变化恢复且只在完整无违规时采信（REQ-ENV-REVIEW-B）。
+- [ ] 4.1 交付可恢复基线与平台通道互斥的 durable 审查窗口，覆盖四家受支持的 Reviewer 入口并提供快照矩阵、并发通道测试与窗口说明；验收先锁并停 writer 再持久化基线/采材料，基线范围恰为 tracked 与 untracked 非 ignored（ignored 产物不采集、不进基线），无有效窗口或未接线 provider 不启动（REQ-ENV-REVIEW-B、REQ-ENV-09、网关 admission）。
+- [ ] 4.2 完成恢复前违规落盘、三域对账与报告独立采信，交付对账域内构建残留、ignored 产物不触发违规且不被恢复删除、改写 `.gitignore` 不得缩小对账域、自提交/.git/.aria 越权、保留 Coder dirty、恢复成功仍作废的测试与风险说明；验收对账域内违规整轮不可用于交付、不可由恢复洗白，ignored 产物改动不入基线与违规判定且报告/审计面显式披露该边界，对账域内临时验证变化恢复且只在完整无违规时采信（REQ-ENV-REVIEW-B）。
 - [ ] 4.3 接通取消/超时/崩溃补偿、人工恢复与重试新轮，交付启动补偿、未知 writer、journal 不一致及技术重试测试与运维说明；验收恢复未完成不释放冲突写通道、不采污染基线，违规必须新轮，预算不因新窗口增加，不复活旧只读重试（REQ-ENV-REVIEW-B、coding-provider-transport-retry）。
 
 ## 5. Coder CHECK 主路径与真实集成验收

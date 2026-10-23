@@ -126,7 +126,7 @@ LC 会话 SHALL 以 manifest canonical provider_context_root 为进程 cwd，并
 
 ### Requirement: 四家真实 LC 会话验收证据
 
-四家支持结论 SHALL 按 Story、Design、Plan/split、Coding、Review 与 fresh/resume 分别建立真实证据，记录 CLI exact version、原生参数、cwd/target、角色/action、政策/能力/投影/trust、审批及 pre/post 结果。宿主写可达性 SHALL 如实标记为全开，不冒称只读/target-only。Reviewer 还须证明快照恢复、通道锁与对账违规作废；缺证据格保持 Unknown/Denied。
+四家支持结论 SHALL 按 Story、Design、Plan/split、Coding、Review 与 fresh/resume 分别建立真实证据，记录 CLI exact version、原生参数、cwd/target、角色/action、政策/能力/投影/trust、审批及 pre/post 结果。宿主写可达性 SHALL 如实标记为全开，不冒称只读/target-only。Reviewer 还须证明快照恢复、通道锁与对账违规作废，并在证据中声明对账域为 tracked 与 untracked 非 ignored 文件、ignored 产物不在对账域，不得声称零写覆盖全部文件；缺证据格保持 Unknown/Denied。
 
 #### Scenario: 单 provider/action E2E 通过
 - **WHEN** 对应 action 完成真实会话并有完整新语义证据

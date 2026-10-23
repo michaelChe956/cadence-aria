@@ -129,15 +129,27 @@ envelope SHALL 区分规划、编码、评审 action 的业务职责，保留历
 
 ### Requirement: Reviewer B 档快照恢复与对账采信（REQ-ENV-REVIEW-B）
 
-所有 Reviewer 运行 SHALL 采用能力全开与 B 档软铁律：可恢复基线快照、平台写入/提交通道锁、违规整轮作废。系统 SHALL 在平台记录未被篡改前提下持久化违规事实，恢复先前现场并独立判定报告可采信；无独立 UID，不承诺恶意同 UID 篡改必可检测或外部副作用可回滚。
+所有 Reviewer 运行 SHALL 采用能力全开与 B 档软铁律：可恢复基线快照、平台写入/提交通道锁、违规整轮作废。零写对账域 SHALL 限于 tracked 与 untracked 非 gitignore 忽略文件；ignored 产物不在域内，系统 SHALL 在报告与审计面显式披露该边界。系统 SHALL 在平台记录未被篡改前提下持久化违规事实，恢复先前现场并独立判定报告可采信；无独立 UID，不承诺恶意同 UID 篡改必可检测或外部副作用可回滚。
+
+#### Scenario: 对账域由基线冻结的 ignore 规则界定
+- **WHEN** 审查窗口建立可恢复基线
+- **THEN** 对账域 SHALL 恰为 tracked 文件 ∪ untracked 且当时未被 gitignore 忽略的文件（即 `git status` 常规口径）；被忽略产物（`node_modules/`、`target/`、构建输出）SHALL NOT 进入基线采集、恢复动作或违规判定
+- **AND** 对账域 SHALL 在基线时刻冻结：恢复与违规判定 MUST NOT 采用 Reviewer 期间被改写的 ignore 规则重新划域；worktree 内 `.gitignore` 属 tracked 域内文件，Reviewer 改动它本身 SHALL 按域内差异处理（证据落盘、恢复、本轮作废）
+- **AND** 报告、窗口记录与审计面 SHALL 显式披露「ignored 产物不在对账域（已知边界）」，MUST NOT 声称零写覆盖全部文件
 
 #### Scenario: 完整审查窗口
 - **WHEN** Reviewer 将读取材料并开始验证
-- **THEN** 系统 SHALL 先锁平台 stage/commit/push 与补偿通道并确认 writer 静止，再持久化包含既有 dirty/staged/untracked/ignored 的可恢复基线，之后采材料和启动；未知 writer、锁或快照失败停等，不采污染材料
+- **THEN** 系统 SHALL 先锁平台 stage/commit/push 与补偿通道并确认 writer 静止，再持久化可恢复基线（含既有 dirty/staged 与 untracked 非 ignored 文件；ignored 产物不采集、不进基线），之后采材料和启动；未知 writer、锁或快照失败停等，不采污染材料
+
+#### Scenario: ignored 产物不在对账域
+- **WHEN** Reviewer 的构建/测试在 `node_modules/`、`target/` 或其它 gitignore 忽略路径创建、修改或残留文件
+- **THEN** 系统 SHALL NOT 将 ignored 产物计入基线规模、恢复动作或违规判定；报告与窗口记录 SHALL 注明「ignored 产物不在对账域」，且 SHALL 如实声明已知代价——对 ignored 产物的评审修改不被发现、不被恢复、不构成违规
+- **AND** 恢复动作 SHALL NOT 删除、清空或改写 ignored 产物：域外条目不得当作 Reviewer 残留清除，Coder 既有 ignored 依赖/构建目录必须原样保留
+- **AND** 对账域内（tracked 与 untracked 非 ignored）仍为严格零写：任何差异 SHALL 先落证据、恢复后判违规并使本轮作废；对账域内临时验证产物按「正常验证恢复」处理，语义不变
 
 #### Scenario: 正常验证恢复
-- **WHEN** Reviewer 构建/测试产生临时文件且正常退出
-- **THEN** 系统 SHALL 停止登记 writer、恢复 worktree 基线并清理本轮私有资源，保留原有 Coder dirty；只有恢复完整、对账无违规与记录完整才接受报告，恢复成功本身不代表可采信
+- **WHEN** Reviewer 构建/测试在对账域内产生临时文件且正常退出
+- **THEN** 系统 SHALL 停止登记 writer、恢复 worktree 基线并清理本轮私有资源，保留原有 Coder dirty；只有对账域内恢复完整、对账无违规、边界已披露与记录完整才接受报告，恢复成功本身不代表可采信
 
 #### Scenario: Reviewer 自提交或元数据违规
 - **WHEN** 观察到 Reviewer 自行提交、写 Git/平台元数据、绕过平台通道或其它规定的违规
@@ -145,7 +157,7 @@ envelope SHALL 区分规划、编码、评审 action 的业务职责，保留历
 
 #### Scenario: 三个对账域不得混同
 - **WHEN** 审查结束执行恢复与采信核对
-- **THEN** 系统 SHALL 分开判定 worktree 恢复域、Git 观察域与平台合法写入域；平台合法写入域内报告/journal 写入不误判 Reviewer 违规，Reviewer 写元数据不冒充平台合法写入；单一 .git/.aria 摘要相等不足以采信
+- **THEN** 系统 SHALL 分开判定 worktree 恢复域、Git 观察域与平台合法写入域；worktree 恢复域的比对范围 SHALL 恰为 tracked 与 untracked 非 ignored 文件（ignored 产物不在域内，其改动不可见为已接受代价）；平台合法写入域内报告/journal 写入不误判 Reviewer 违规，Reviewer 写元数据不冒充平台合法写入；单一 .git/.aria 摘要相等不足以采信
 
 #### Scenario: 取消崩溃与人工恢复
 - **WHEN** 审查取消、超时、进程崩溃、恢复失败或 journal 不一致
