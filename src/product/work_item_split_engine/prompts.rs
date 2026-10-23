@@ -29,11 +29,15 @@ use super::types::{
 pub const WORK_ITEM_DRAFT_PROMPT_VERSION: &str = "work_item_draft_v2";
 /// Fail-closed 硬兜底：只拦截病态序列化回归（如整条持久化记录被注入 prompt）。
 /// 质量预算不由本常量承担，见 WORK_ITEM_DRAFT_PROMPT_QUALITY_BUDGET_BYTES 的预算测试。
-/// prompt 经 stdin JSON 发送给 Provider，无 OS ARG_MAX 约束；真实物理边界是模型上下文窗口。
-pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 65_536;
+/// prompt 经 stdin JSON 发送给 Provider，无 OS ARG_MAX 约束；真实物理边界是模型上下文窗口
+/// （owner 环境 1M）。本批 work item plan 的评审更充分后修订块变大，曾把修订轮 prompt 顶到
+/// 70 KB 并被旧的 64 KiB 兜底误拒，故与 markdown author 兜底同步抬到 256 KiB。
+pub(crate) const WORK_ITEM_DRAFT_PROMPT_MAX_BYTES: usize = 262_144;
 /// SingleCandidate markdown author 同样通过 stdin 传递，但必须为固定 grammar/few-shot
 /// 预留空间；超过硬兜底时拒绝 provider 启动，而不是静默丢失规范层内容。
-pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES: usize = 65_536;
+/// 与 draft 侧同源：硬兜底只拦病态序列化回归，真实边界是模型上下文窗口（owner 环境 1M）；
+/// 本批评审更充分后修订块变大（实测修订轮 prompt 70,326 字节）曾顶破旧 64 KiB，故抬到 256 KiB。
+pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES: usize = 262_144;
 const WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES: usize = 32_000;
 
 pub(crate) struct WorkItemPlanMarkdownAuthorContext<'a> {

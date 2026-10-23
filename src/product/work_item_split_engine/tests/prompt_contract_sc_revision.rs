@@ -542,3 +542,75 @@ fn sg_05_1_shared_grammar_template_keeps_plan_intent_optional_and_author_budget_
         );
     }
 }
+
+/// 硬兜底抬到 256 KiB（262_144）：真机 run 中修订轮 prompt 达 70,326 字节
+/// （59,460 基础 prompt + 10,866 修订块），被旧的 64 KiB 兜底拒绝后卡死自动化。
+/// 硬兜底的设计意图只是拦截病态序列化回归；真实物理边界是模型上下文窗口
+/// （prompt 经 stdin JSON 发送，无 OS ARG_MAX 约束）。本测试锁住两点：
+/// 70 KB 级修订 prompt 必须放行；超过 256 KiB 的仍 fail closed 且报告新上限。
+#[test]
+fn sc_revision_prompt_accepts_seventy_kilobyte_budget_and_still_caps_at_256kib() {
+    let (request, issue, repository) = split_prompt_fixture();
+    assert_eq!(
+        crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES,
+        262_144,
+        "markdown author hard backstop must be 256 KiB"
+    );
+
+    let base =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_prompt(
+            &request,
+            &issue,
+            &repository,
+            author_context(),
+        )
+        .expect("first-round markdown author prompt");
+    assert!(
+        base.len() < 65_536,
+        "fixture base prompt must sit below the legacy backstop: {} bytes",
+        base.len()
+    );
+
+    // 把修订 prompt 总量校准到 ~70 KB（旧 64 KiB 兜底之上、新 256 KiB 兜底之下）。
+    let padding = "x".repeat(70_000usize.saturating_sub(base.len()));
+    let verdict = revise_verdict_fixture(&padding, "返修", Vec::new());
+    let revision =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_revision_prompt(
+            &request,
+            &issue,
+            &repository,
+            author_context(),
+            &verdict,
+        )
+        .expect("70KB revision prompt must stay invocable under the 256KiB backstop");
+    assert!(
+        revision.len() > 65_536,
+        "fixture must actually exceed the legacy 64KiB limit: {} bytes",
+        revision.len()
+    );
+    assert!(
+        revision.len() < 262_144,
+        "fixture must stay below the raised 256KiB backstop: {} bytes",
+        revision.len()
+    );
+
+    // 病态回归拦截能力不丢：超过 256 KiB 的仍 fail closed，并报告新上限。
+    let oversized = revise_verdict_fixture(&"x".repeat(300_000), "返修", Vec::new());
+    let error =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_revision_prompt(
+            &request,
+            &issue,
+            &repository,
+            author_context(),
+            &oversized,
+        )
+        .expect_err("prompt above the 256KiB hard backstop must fail closed");
+    assert!(
+        error.contains("exceeds hard budget"),
+        "budget error must stay diagnosable, got: {error}"
+    );
+    assert!(
+        error.contains("262144"),
+        "budget error must report the raised 256KiB limit, got: {error}"
+    );
+}

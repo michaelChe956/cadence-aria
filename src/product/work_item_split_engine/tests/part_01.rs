@@ -848,7 +848,7 @@ fn realistic_chinese_serial_prompt_stays_within_quality_budget() {
     // rules (+516 bytes: mandatory operational_gate blocker when the trusted
     // catalog is empty; non-empty verbatim target_contract_refs for plan_repair
     // routes), under the raised quality budget 12_600.
-    // Runtime limits are untouched (hard backstop 65_536, quality budget 12_600).
+    // Runtime limits are untouched (hard backstop 262_144, quality budget 12_600).
     assert!(
         invocation.prompt.len() < 12_500,
         "realistic Chinese serial prompt must stay within the slimmed margin target: {} bytes",
@@ -961,7 +961,7 @@ fn serial_prompt_above_hard_backstop_is_rejected() {
         accepted_candidate,
     );
 
-    let feedback = "f".repeat(70_000);
+    let feedback = "f".repeat(300_000);
     let error = build_work_item_draft_invocation(
         &outline,
         "outline_frontend",
@@ -970,13 +970,75 @@ fn serial_prompt_above_hard_backstop_is_rejected() {
         Some(&feedback),
         &RoutingReferenceContext::Legacy,
     )
-    .expect_err("prompt above the 64KB hard backstop must fail closed");
+    .expect_err("prompt above the 256KiB hard backstop must fail closed");
     assert_eq!(error.code, "work_item_draft_prompt_too_large");
-    assert_eq!(error.details["max_prompt_bytes"], 65_536);
+    assert_eq!(error.details["max_prompt_bytes"], 262_144);
     assert!(
-        error.details["prompt_bytes"].as_u64().expect("prompt_bytes") >= 65_536,
+        error.details["prompt_bytes"].as_u64().expect("prompt_bytes") >= 262_144,
         "details must report the actual prompt size: {}",
         error.details
+    );
+}
+
+/// 硬兜底抬到 256 KiB（262_144）：真实机器的 model 上下文窗口远大于旧的
+/// 64 KiB 兜底，旧值曾把 70 KB 级（仍然健康的）draft prompt 误判为病态
+/// 序列化回归而 fail closed。这里锁住两点：超过旧 64 KiB 的 prompt 必须放行，
+/// 且上限常量同步抬到 262_144（病态回归拦截能力不丢）。
+#[test]
+fn serial_prompt_at_seventy_kilobytes_remains_invocable_under_256kib_backstop() {
+    let outline = parse_work_item_plan_outline_output(valid_outline_author_output())
+        .expect("outline output")
+        .outline
+        .expect("outline");
+    let mut accepted_candidate =
+        parse_work_item_draft_output(canonical_author_output("outline_backend", "wi_backend"))
+            .expect("canonical backend draft");
+    accepted_candidate
+        .canonical_contract_candidate
+        .output_contracts[0]
+        .contract_id = "SessionStatusDto".to_string();
+    accepted_candidate
+        .canonical_contract_candidate
+        .handoff_contract
+        .required_fields = vec!["handoff-required-field-sentinel".to_string()];
+    accepted_candidate
+        .canonical_contract_candidate
+        .tasks[0]
+        .statement = "task-must-not-leak-into-direct-dependency-sentinel".to_string();
+    accepted_candidate
+        .canonical_contract_candidate
+        .acceptance_criteria[0]
+        .statement = "acceptance-must-not-leak-into-direct-dependency-sentinel".to_string();
+    let accepted_backend = sample_draft_record(
+        "draft_backend",
+        "outline_backend",
+        accepted_candidate,
+    );
+
+    assert_eq!(
+        WORK_ITEM_DRAFT_PROMPT_MAX_BYTES, 262_144,
+        "draft hard backstop must be 256 KiB"
+    );
+    // 70,000 字节 feedback：总 prompt 必然超过旧 64 KiB 兜底，但远低于新 256 KiB 兜底。
+    let feedback = "f".repeat(70_000);
+    let invocation = build_work_item_draft_invocation(
+        &outline,
+        "outline_frontend",
+        WorkItemGenerationMode::Serial,
+        &[accepted_backend],
+        Some(&feedback),
+        &RoutingReferenceContext::Legacy,
+    )
+    .expect("prompt above the legacy 64KiB backstop must stay invocable under 256KiB");
+    assert!(
+        invocation.prompt.len() > 65_536,
+        "fixture must actually exceed the legacy 64KiB limit: {} bytes",
+        invocation.prompt.len()
+    );
+    assert!(
+        invocation.prompt.len() < WORK_ITEM_DRAFT_PROMPT_MAX_BYTES,
+        "fixture must stay below the raised 256KiB backstop: {} bytes",
+        invocation.prompt.len()
     );
 }
 
