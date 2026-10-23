@@ -690,6 +690,10 @@ mod tests {
                 phase: RestorePhase::Completed,
                 entry_index: 0,
             },
+            ignore_rules_freeze:
+                crate::product::reviewer_snapshot_domain::IgnoreRulesFreeze::synthetic(),
+            domain_boundary: crate::product::reviewer_snapshot_domain::DOMAIN_BOUNDARY_DISCLOSURE
+                .to_string(),
         }
     }
 

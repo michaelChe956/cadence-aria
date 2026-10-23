@@ -2832,11 +2832,11 @@ mod tests {
         let fx = window_fixture();
         let store = fx.store();
         let snapshot = fx.snapshot();
-        // 快照失败:FIFO 不支持项 → capture 整单拒绝 → 不采材料不 spawn
-        let fifo = fx.worktree.join("pipe.fifo");
-        let cstr = std::ffi::CString::new(fifo.as_os_str().to_string_lossy().as_bytes()).unwrap();
-        let rc = unsafe { libc::mkfifo(cstr.as_ptr(), 0o644) };
-        assert_eq!(rc, 0, "mkfifo fixture");
+        // 快照失败:非 UTF-8 文件名不支持项 → capture 整单拒绝 → 不采
+        // 材料不 spawn(裁定乙后 FIFO 属 git 不可见域外,不再触发拒绝)
+        use std::os::unix::ffi::OsStringExt as _;
+        let bad_name = std::ffi::OsString::from_vec(vec![0x88, 0x99, 0xaa]);
+        std::fs::write(fx.worktree.join(bad_name), "x\n").unwrap();
         let scope = open_scope(&fx.base, "coder", None);
         let targets: [&ProviderRunResourceScope; 1] = [&scope];
 

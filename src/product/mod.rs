@@ -36,6 +36,7 @@ pub mod repository_store;
 pub mod reviewer_reconciliation;
 pub mod reviewer_snapshot;
 pub mod reviewer_snapshot_cursor;
+pub mod reviewer_snapshot_domain;
 pub mod reviewer_window;
 pub mod reviewer_window_store;
 pub mod runtime_binding_store;

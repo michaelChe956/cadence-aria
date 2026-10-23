@@ -33,6 +33,12 @@
 //! (次数 = 阶段数)。二者均 `write_json` tmp+flush+sync+rename 原子;
 //! `load_manifest` 取较前者续接,恢复每步幂等,任一游标边界故障后重启都
 //! 能续接(见 `reviewer_snapshot_cursor`;测试以故障注入逐边界验收)。
+//!
+//! 对账域边界(owner 2026-10-23 裁定「乙」/REQ-ENV-REVIEW-B):域恰为
+//! tracked ∪ untracked 非 gitignore 忽略(`git status` 常规口径),基线
+//! 时刻冻结;ignored 产物不采集/不恢复/不删除/不判违规,报告与审计面
+//! 须显式披露该边界——枚举/冻结/判定与走查机器见
+//! [`crate::product::reviewer_snapshot_domain`]。
 // 生产消费链:T17(窗口)/T18(三域对账)/T21(恢复)接线;接线完成前仅
 // 合同测试消费(前瞻载体范式,同 provider_resource_store)。
 
@@ -52,9 +58,13 @@ use crate::cross_cutting::provider_resources::{
 };
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::reviewer_snapshot_cursor;
+use crate::product::reviewer_snapshot_domain::{
+    self, BlobSink, DOMAIN_BOUNDARY_DISCLOSURE, FrozenDomain, WalkPurpose, classify, walk_worktree,
+};
 
-/// 快照 schema 版本(域集合变化时递增,拒绝跨版本恢复)。
-pub(crate) const REVIEWER_BASELINE_SCHEMA: &str = "reviewer_baseline/1";
+/// 快照 schema 版本(域集合变化时递增,拒绝跨版本恢复)。v2:对账域改
+/// 为 tracked ∪ untracked 非 ignored(裁定乙),新增 ignore 冻结与域披露。
+pub(crate) const REVIEWER_BASELINE_SCHEMA: &str = "reviewer_baseline/2";
 
 /// 平台合法写入域基线的最大预枚举条目数(防御性上限)。
 const PLATFORM_WRITE_PATH_LIMIT: usize = 4096;
@@ -305,6 +315,11 @@ pub(crate) struct ReviewerBaselineManifest {
     pub(crate) quiesced_at: String,
     pub(crate) captured_at: String,
     pub(crate) restore_cursor: RestoreCursor,
+    /// 对账域 ignore 证据冻结(基线时刻;恢复期划域只认冻结内容,
+    /// Reviewer 期间改写 ignore 规则无法缩小对账域)。
+    pub(crate) ignore_rules_freeze: reviewer_snapshot_domain::IgnoreRulesFreeze,
+    /// 审计面披露:ignored 产物不在对账域(REQ-ENV-REVIEW-B)。
+    pub(crate) domain_boundary: String,
 }
 
 /// Git 观察域补充摘要(T18 F4:直写 `.git/config`/objects/reflog/
@@ -368,6 +383,8 @@ pub(crate) struct RestoreReport {
     /// 窗口内新增、恢复后仍保留取证的 ref(Reviewer 自提交对象同理不抹)。
     pub(crate) git_extra_refs_observed: Vec<String>,
     pub(crate) platform_verified: Vec<String>,
+    /// 域边界披露(REQ-ENV-REVIEW-B):如实声明 ignored 产物不在对账域。
+    pub(crate) domain_boundary: String,
 }
 
 /// 恢复结局:`Restored` ≠ Accepted——平台合法写入与 Reviewer 写入的
@@ -599,12 +616,26 @@ impl ReviewerSnapshotStore {
         std::fs::create_dir_all(&blob_dir)
             .map_err(|error| io_error_string("create blob dir", error))?;
         let mut sink = BlobSink { dir: blob_dir };
+        // 对账域(owner 2026-10-23 裁定乙):git 口径枚举 + 冻结 ignore 规则
+        let domain_files =
+            reviewer_snapshot_domain::enumerate_domain_files(&identity.canonical_worktree)?;
+        let ignored_paths =
+            reviewer_snapshot_domain::enumerate_ignored_paths(&identity.canonical_worktree)?;
+        let sources = reviewer_snapshot_domain::collect_ignore_sources(
+            &identity.canonical_worktree,
+            &identity.gitdir,
+        );
+        let capture_rules = reviewer_snapshot_domain::FrozenIgnoreRules::from_sources(&sources);
         let walked = {
             let mut purpose = WalkPurpose::Capture {
                 budget: &request.budget,
                 sink: &mut sink,
             };
-            walk_worktree(&identity.canonical_worktree, &mut purpose)?
+            let domain = reviewer_snapshot_domain::ReconciliationDomain::Captured {
+                files: &domain_files,
+                rules: &capture_rules,
+            };
+            walk_worktree(&identity.canonical_worktree, &mut purpose, Some(&domain))?
         };
         let entries: Vec<BaselineEntry> = walked
             .iter()
@@ -708,6 +739,11 @@ impl ReviewerSnapshotStore {
             quiesced_at: evidence.quiesced_at.clone(),
             captured_at: chrono::Utc::now().to_rfc3339(),
             restore_cursor: RestoreCursor::start(),
+            ignore_rules_freeze: reviewer_snapshot_domain::IgnoreRulesFreeze::capture(
+                &sources,
+                ignored_paths,
+            )?,
+            domain_boundary: DOMAIN_BOUNDARY_DISCLOSURE.to_string(),
         };
         let manifest_path = window_dir.join("manifest.json");
         // 原子发布:全部 blob 落盘并 sync 后才写 manifest(write_json
@@ -783,6 +819,7 @@ impl ReviewerSnapshotStore {
                 git_refs_restored: Vec::new(),
                 git_extra_refs_observed: Vec::new(),
                 platform_verified: Vec::new(),
+                domain_boundary: DOMAIN_BOUNDARY_DISCLOSURE.to_string(),
             },
         };
 
@@ -815,19 +852,17 @@ impl ReviewerSnapshotStore {
                 // 后有人在恢复窗口内再写入——重放 sweep 仍按 manifest 差异
                 // 清残留;游标只在尚未越过 Extra 时前进推进。
                 let mut removed = Vec::new();
-                let rels: HashSet<String> = ctx
-                    .manifest
-                    .entries
-                    .iter()
-                    .map(|entry| entry.rel_path.clone())
-                    .collect();
+                // 冻结域(裁定乙):manifest 条目恒在域内,基线 ignored
+                // 清单恒在域外,新增路径按冻结 ignore 规则裁决。
+                let frozen = FrozenDomain::from_manifest(&ctx.manifest);
                 {
+                    let domain = frozen.domain();
                     let mut purpose = WalkPurpose::Observe {
                         delete_extras: true,
-                        manifest_rels: Some(&rels),
+                        manifest_rels: Some(&frozen.rels),
                         removed: &mut removed,
                     };
-                    walk_worktree(&ctx.worktree, &mut purpose)?;
+                    walk_worktree(&ctx.worktree, &mut purpose, Some(&domain))?;
                 }
                 ctx.report.worktree_removed_extras.extend(removed);
                 if ctx.manifest.restore_cursor.phase.rank() < RestorePhase::WorktreeExtra.rank() {
@@ -896,11 +931,11 @@ impl ReviewerSnapshotStore {
 // manifest 校验与 blob 路径
 // ---------------------------------------------------------------------------
 
-fn io_error_string(context: &str, error: std::io::Error) -> ReviewerSnapshotError {
+pub(crate) fn io_error_string(context: &str, error: std::io::Error) -> ReviewerSnapshotError {
     ReviewerSnapshotError::Io(format!("{context}: {error}"))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))
 }
@@ -977,6 +1012,17 @@ fn validate_manifest(manifest: &ReviewerBaselineManifest) -> Result<(), Reviewer
             "schema 不符: {:?}",
             manifest.schema
         )));
+    }
+    if manifest.domain_boundary != DOMAIN_BOUNDARY_DISCLOSURE {
+        return Err(ReviewerSnapshotError::Integrity(format!(
+            "域边界披露不符: {:?}",
+            manifest.domain_boundary
+        )));
+    }
+    if manifest.ignore_rules_freeze.schema != reviewer_snapshot_domain::IGNORE_RULES_FREEZE_SCHEMA {
+        return Err(ReviewerSnapshotError::Integrity(
+            "ignore 规则冻结 schema 不符".to_string(),
+        ));
     }
     let mut rels: HashSet<String> = HashSet::new();
     let mut previous: Option<&str> = None;
@@ -1082,7 +1128,7 @@ fn invalid_input(error: ReviewerSnapshotError) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
 }
 
-fn open_root_dir_no_follow(path: &Path) -> std::io::Result<OwnedFd> {
+pub(crate) fn open_root_dir_no_follow(path: &Path) -> std::io::Result<OwnedFd> {
     let c = cstring_of(path.as_os_str()).map_err(invalid_input)?;
     let fd = unsafe {
         libc::open(
@@ -1096,7 +1142,7 @@ fn open_root_dir_no_follow(path: &Path) -> std::io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn openat_dir(parent: &OwnedFd, name: &OsStr) -> std::io::Result<OwnedFd> {
+pub(crate) fn openat_dir(parent: &OwnedFd, name: &OsStr) -> std::io::Result<OwnedFd> {
     let c = cstring_of(name).map_err(invalid_input)?;
     let fd = unsafe {
         libc::openat(
@@ -1111,7 +1157,10 @@ fn openat_dir(parent: &OwnedFd, name: &OsStr) -> std::io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn openat_read_no_follow(parent: &OwnedFd, name: &OsStr) -> std::io::Result<std::fs::File> {
+pub(crate) fn openat_read_no_follow(
+    parent: &OwnedFd,
+    name: &OsStr,
+) -> std::io::Result<std::fs::File> {
     let c = cstring_of(name).map_err(invalid_input)?;
     let fd = unsafe {
         libc::openat(
@@ -1126,7 +1175,7 @@ fn openat_read_no_follow(parent: &OwnedFd, name: &OsStr) -> std::io::Result<std:
     Ok(unsafe { std::fs::File::from_raw_fd(fd) })
 }
 
-fn fstatat_no_follow(parent: &OwnedFd, name: &OsStr) -> std::io::Result<libc::stat> {
+pub(crate) fn fstatat_no_follow(parent: &OwnedFd, name: &OsStr) -> std::io::Result<libc::stat> {
     let c = cstring_of(name).map_err(invalid_input)?;
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe {
@@ -1143,7 +1192,7 @@ fn fstatat_no_follow(parent: &OwnedFd, name: &OsStr) -> std::io::Result<libc::st
     Ok(stat)
 }
 
-fn readlinkat_target(parent: &OwnedFd, name: &OsStr) -> std::io::Result<OsString> {
+pub(crate) fn readlinkat_target(parent: &OwnedFd, name: &OsStr) -> std::io::Result<OsString> {
     let c = cstring_of(name).map_err(invalid_input)?;
     let mut buffer = vec![0u8; 256];
     loop {
@@ -1167,7 +1216,7 @@ fn readlinkat_target(parent: &OwnedFd, name: &OsStr) -> std::io::Result<OsString
     }
 }
 
-fn read_dir_sorted(dir: &OwnedFd) -> std::io::Result<Vec<OsString>> {
+pub(crate) fn read_dir_sorted(dir: &OwnedFd) -> std::io::Result<Vec<OsString>> {
     unsafe {
         let duplicate = libc::dup(dir.as_raw_fd());
         if duplicate < 0 {
@@ -1199,7 +1248,7 @@ fn read_dir_sorted(dir: &OwnedFd) -> std::io::Result<Vec<OsString>> {
     }
 }
 
-fn unlinkat_file(parent: &OwnedFd, name: &OsStr) -> std::io::Result<()> {
+pub(crate) fn unlinkat_file(parent: &OwnedFd, name: &OsStr) -> std::io::Result<()> {
     let c = cstring_of(name).map_err(invalid_input)?;
     if unsafe { libc::unlinkat(parent.as_raw_fd(), c.as_ptr(), 0) } != 0 {
         return Err(std::io::Error::last_os_error());
@@ -1207,7 +1256,7 @@ fn unlinkat_file(parent: &OwnedFd, name: &OsStr) -> std::io::Result<()> {
     Ok(())
 }
 
-fn unlinkat_dir(parent: &OwnedFd, name: &OsStr) -> std::io::Result<()> {
+pub(crate) fn unlinkat_dir(parent: &OwnedFd, name: &OsStr) -> std::io::Result<()> {
     let c = cstring_of(name).map_err(invalid_input)?;
     if unsafe { libc::unlinkat(parent.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
         return Err(std::io::Error::last_os_error());
@@ -1304,332 +1353,6 @@ fn write_bytes_atomic(
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// worktree 走查(fstatat AT_SYMLINK_NOFOLLOW + openat 锚定,不追随
-// symlink 到 owner 文件)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WalkedEntry {
-    rel_path: String,
-    kind: BaselineEntryKind,
-    mode: u32,
-    size: u64,
-    content_sha256: Option<String>,
-    symlink_target: Option<String>,
-    /// 套接字/FIFO/设备/非 UTF-8 名:capture 拒绝;restore 视作可删残留。
-    unsupported: bool,
-}
-
-#[derive(Default)]
-struct WalkStats {
-    entries: usize,
-    bytes: u64,
-}
-
-struct BlobSink {
-    dir: PathBuf,
-}
-
-impl BlobSink {
-    /// CAS 写入(create-new;同 sha 已存在=去重,hash 由 restore 预检兜底)。
-    fn store(&self, sha_hex: &str, bytes: &[u8]) -> Result<(), ReviewerSnapshotError> {
-        let path = self.dir.join(sha_hex);
-        let mut file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Ok(());
-            }
-            Err(error) => {
-                return Err(io_error_string(
-                    &format!("blob create {}", path.display()),
-                    error,
-                ));
-            }
-        };
-        file.write_all(bytes)
-            .map_err(|error| io_error_string("blob write", error))?;
-        file.sync_all()
-            .map_err(|error| io_error_string("blob sync", error))?;
-        Ok(())
-    }
-}
-
-enum WalkPurpose<'a> {
-    Capture {
-        budget: &'a SnapshotBudget,
-        sink: &'a mut BlobSink,
-    },
-    Observe {
-        delete_extras: bool,
-        manifest_rels: Option<&'a HashSet<String>>,
-        removed: &'a mut Vec<String>,
-    },
-}
-
-fn classify(stat_mode: u32) -> Option<BaselineEntryKind> {
-    match stat_mode & libc::S_IFMT {
-        libc::S_IFREG => Some(BaselineEntryKind::File),
-        libc::S_IFDIR => Some(BaselineEntryKind::Directory),
-        libc::S_IFLNK => Some(BaselineEntryKind::Symlink),
-        _ => None,
-    }
-}
-
-fn walk_worktree(
-    root: &Path,
-    purpose: &mut WalkPurpose<'_>,
-) -> Result<Vec<WalkedEntry>, ReviewerSnapshotError> {
-    let root_fd = open_root_dir_no_follow(root).map_err(|error| {
-        ReviewerSnapshotError::ReadFailure(format!(
-            "open worktree root {}: {error}",
-            root.display()
-        ))
-    })?;
-    let mut out = Vec::new();
-    let mut stats = WalkStats::default();
-    walk_dir(&root_fd, "", true, purpose, &mut out, &mut stats)?;
-    out.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
-    Ok(out)
-}
-
-fn raw_rel_name(name: &OsStr) -> String {
-    format!("raw:{}", hex::encode(name.as_bytes()))
-}
-
-fn walk_dir(
-    dir: &OwnedFd,
-    prefix: &str,
-    is_root: bool,
-    purpose: &mut WalkPurpose<'_>,
-    out: &mut Vec<WalkedEntry>,
-    stats: &mut WalkStats,
-) -> Result<(), ReviewerSnapshotError> {
-    let names = read_dir_sorted(dir).map_err(|error| {
-        ReviewerSnapshotError::ReadFailure(format!("readdir {prefix:?}: {error}"))
-    })?;
-    let delete_extras = matches!(
-        purpose,
-        WalkPurpose::Observe {
-            delete_extras: true,
-            ..
-        }
-    );
-    for name in names {
-        let name_str = name.to_str().map(str::to_string);
-        let rel = name_str.clone().map(|value| {
-            if prefix.is_empty() {
-                value
-            } else {
-                format!("{prefix}/{value}")
-            }
-        });
-        let stat = fstatat_no_follow(dir, &name).map_err(|error| {
-            ReviewerSnapshotError::ReadFailure(format!(
-                "fstatat {}: {error}",
-                name.to_string_lossy()
-            ))
-        })?;
-        let mode = stat.st_mode & 0o7777;
-        let size = stat.st_size.max(0) as u64;
-        let classified = classify(stat.st_mode);
-
-        // root `.git`:目录=Git 观察域另行冻结,不入 worktree 清单(恢复
-        // 也永不触碰);gitfile=身份锚点条目;symlink/特殊文件=不支持。
-        let effective_kind = if is_root && name == ".git" {
-            match classified {
-                Some(BaselineEntryKind::Directory) => {
-                    continue;
-                }
-                Some(BaselineEntryKind::File) => Some(BaselineEntryKind::Gitfile),
-                other => other,
-            }
-        } else {
-            classified
-        };
-
-        // Observe+delete:manifest 外多余项=Reviewer 残留,删除;Coder 原样
-        // 保留域全部在 manifest 内。root `.git`(任何形态)永不由 sweep 处置。
-        let in_manifest = rel.as_ref().is_some_and(|value| match purpose {
-            WalkPurpose::Observe {
-                manifest_rels: Some(set),
-                ..
-            } => set.contains(value),
-            _ => false,
-        });
-        if delete_extras && !in_manifest && !(is_root && name == ".git") {
-            let label = rel.clone().unwrap_or_else(|| raw_rel_name(&name));
-            match effective_kind {
-                Some(BaselineEntryKind::Directory) => {
-                    let child = openat_dir(dir, &name).map_err(|error| {
-                        ReviewerSnapshotError::ReadFailure(format!("openat dir {label}: {error}"))
-                    })?;
-                    walk_dir(&child, &label, false, purpose, out, stats)?;
-                    unlinkat_dir(dir, &name)
-                        .map_err(|error| io_error_string("rmdir extra", error))?;
-                }
-                _ => {
-                    unlinkat_file(dir, &name)
-                        .or_else(|_| unlinkat_dir(dir, &name))
-                        .map_err(|error| io_error_string("unlink extra", error))?;
-                }
-            }
-            if let WalkPurpose::Observe { removed, .. } = purpose {
-                removed.push(label);
-            }
-            continue;
-        }
-
-        // 不支持项/非 UTF-8 名:capture 整单拒绝;observe 记为可删残留
-        if effective_kind.is_none() || rel.is_none() {
-            let label = rel.clone().unwrap_or_else(|| raw_rel_name(&name));
-            match purpose {
-                WalkPurpose::Capture { .. } => {
-                    return Err(ReviewerSnapshotError::UnsupportedEntry(format!(
-                        "{label}: 不支持项(非 UTF-8 名或 socket/FIFO/设备)"
-                    )));
-                }
-                WalkPurpose::Observe { .. } => {
-                    out.push(WalkedEntry {
-                        rel_path: label,
-                        kind: BaselineEntryKind::File,
-                        mode,
-                        size,
-                        content_sha256: None,
-                        symlink_target: None,
-                        unsupported: true,
-                    });
-                    continue;
-                }
-            }
-        }
-        let kind = effective_kind.expect("上方已判空");
-        let rel = rel.expect("上方已判空");
-
-        // 预算先行:超限整单拒绝,不截断称完整
-        if let WalkPurpose::Capture { budget, .. } = purpose {
-            if stats.entries + 1 > budget.max_entries {
-                return Err(ReviewerSnapshotError::BudgetExceeded(format!(
-                    "目录项数 {} 超预算 {}",
-                    stats.entries + 1,
-                    budget.max_entries
-                )));
-            }
-            if stats.bytes + size > budget.max_total_bytes {
-                return Err(ReviewerSnapshotError::BudgetExceeded(format!(
-                    "字节 {} + {size} 超预算 {}",
-                    stats.bytes, budget.max_total_bytes
-                )));
-            }
-        }
-
-        match kind {
-            BaselineEntryKind::Directory => {
-                stats.entries += 1;
-                out.push(WalkedEntry {
-                    rel_path: rel.clone(),
-                    kind,
-                    mode,
-                    size: 0,
-                    content_sha256: None,
-                    symlink_target: None,
-                    unsupported: false,
-                });
-                let child = openat_dir(dir, &name).map_err(|error| {
-                    ReviewerSnapshotError::ReadFailure(format!("openat dir {rel}: {error}"))
-                })?;
-                walk_dir(&child, &rel, false, purpose, out, stats)?;
-            }
-            BaselineEntryKind::File | BaselineEntryKind::Gitfile => {
-                let mut file = openat_read_no_follow(dir, &name).map_err(|error| {
-                    ReviewerSnapshotError::ReadFailure(format!("open {rel}: {error}"))
-                })?;
-                let open_stat: libc::stat = {
-                    let mut value: libc::stat = unsafe { std::mem::zeroed() };
-                    if unsafe { libc::fstat(file.as_raw_fd(), &mut value) } != 0 {
-                        return Err(ReviewerSnapshotError::ReadFailure(format!(
-                            "fstat {rel}: {}",
-                            std::io::Error::last_os_error()
-                        )));
-                    }
-                    value
-                };
-                if open_stat.st_mode & libc::S_IFMT != libc::S_IFREG {
-                    return Err(ReviewerSnapshotError::ReadFailure(format!(
-                        "{rel}: 打开后类型漂移"
-                    )));
-                }
-                let mut bytes = Vec::with_capacity(open_stat.st_size.max(0) as usize);
-                file.read_to_end(&mut bytes).map_err(|error| {
-                    ReviewerSnapshotError::ReadFailure(format!("read {rel}: {error}"))
-                })?;
-                if bytes.len() as i64 != open_stat.st_size {
-                    return Err(ReviewerSnapshotError::ReadFailure(format!(
-                        "{rel}: 读取期间大小漂移"
-                    )));
-                }
-                let sha = sha256_hex(&bytes);
-                if let WalkPurpose::Capture { sink, .. } = purpose {
-                    sink.store(&sha, &bytes)?;
-                }
-                stats.entries += 1;
-                stats.bytes += bytes.len() as u64;
-                out.push(WalkedEntry {
-                    rel_path: rel,
-                    kind,
-                    mode: open_stat.st_mode & 0o7777,
-                    size: bytes.len() as u64,
-                    content_sha256: Some(sha),
-                    symlink_target: None,
-                    unsupported: false,
-                });
-            }
-            BaselineEntryKind::Symlink => {
-                let target_os = readlinkat_target(dir, &name).map_err(|error| {
-                    ReviewerSnapshotError::ReadFailure(format!("readlink {rel}: {error}"))
-                })?;
-                let Some(target) = target_os.to_str().map(str::to_string) else {
-                    match purpose {
-                        WalkPurpose::Capture { .. } => {
-                            return Err(ReviewerSnapshotError::UnsupportedEntry(format!(
-                                "{rel}: symlink target 非 UTF-8"
-                            )));
-                        }
-                        WalkPurpose::Observe { .. } => {
-                            out.push(WalkedEntry {
-                                rel_path: rel,
-                                kind,
-                                mode: 0o777,
-                                size: 0,
-                                content_sha256: None,
-                                symlink_target: None,
-                                unsupported: true,
-                            });
-                            continue;
-                        }
-                    }
-                };
-                stats.entries += 1;
-                out.push(WalkedEntry {
-                    rel_path: rel,
-                    kind,
-                    mode: 0o777,
-                    size: 0,
-                    content_sha256: None,
-                    symlink_target: Some(target),
-                    unsupported: false,
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Git 身份解析(capture/restore 共用;解析失败一律按身份漂移拒绝)
 // ---------------------------------------------------------------------------
@@ -1716,7 +1439,7 @@ fn is_object_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn map_git_error(error: GitCommandError) -> ReviewerSnapshotError {
+pub(crate) fn map_git_error(error: GitCommandError) -> ReviewerSnapshotError {
     ReviewerSnapshotError::Git(error.to_string())
 }
 
@@ -2308,13 +2031,16 @@ fn verify_all(
 ) -> Result<Result<(), (String, String)>, ReviewerSnapshotError> {
     // worktree 域
     let mut removed = Vec::new();
+    // 冻结域(裁定乙):终验与清扫同口径,ignored 产物不参与比对。
+    let frozen = FrozenDomain::from_manifest(&ctx.manifest);
     let walked = {
+        let domain = frozen.domain();
         let mut purpose = WalkPurpose::Observe {
             delete_extras: false,
-            manifest_rels: None,
+            manifest_rels: Some(&frozen.rels),
             removed: &mut removed,
         };
-        walk_worktree(&ctx.worktree, &mut purpose)?
+        walk_worktree(&ctx.worktree, &mut purpose, Some(&domain))?
     };
     if walked.len() != ctx.manifest.entries.len() {
         let walked_rels: Vec<&str> = walked.iter().map(|entry| entry.rel_path.as_str()).collect();
@@ -2941,14 +2667,23 @@ mod tests {
             assert_dirty_matrix_restored(&fixture);
 
             // staged+unstaged/删除/ignored 全保留:porcelain 与基线一致
-            assert_eq!(
-                git_text(
-                    &fixture.worktree,
-                    &["--no-optional-locks", "status", "--porcelain"]
-                ),
-                pre_porcelain,
-                "layout={layout:?} dirty 状态必须逐项保留"
+            let post_porcelain = git_text(
+                &fixture.worktree,
+                &["--no-optional-locks", "status", "--porcelain"],
             );
+            if layout == Layout::Submodule {
+                // 子仓内部内容域外(已知边界):其脏污在父仓 porcelain
+                // 如实可见(` M sub`),不再与基线逐项相等。
+                assert!(
+                    post_porcelain.lines().any(|line| line.ends_with(" sub")),
+                    "layout={layout:?} 子仓域外脏须如实可见: {post_porcelain}"
+                );
+            } else {
+                assert_eq!(
+                    post_porcelain, pre_porcelain,
+                    "layout={layout:?} dirty 状态必须逐项保留"
+                );
+            }
             // Git 观察域:HEAD/index/受管 ref 恢复
             assert_eq!(
                 git_text(&fixture.worktree, &["rev-parse", "HEAD"]),
@@ -2986,11 +2721,14 @@ mod tests {
                 assert_eq!(
                     fs::read_to_string(fixture.worktree.join("sub/.git")).unwrap(),
                     "gitdir: ../.git/modules/sub\n",
-                    "submodule gitfile 逐字节恢复"
+                    "submodule gitfile 域外不动,逐字节保留"
                 );
+                // 子仓内部内容在父仓 gitlink 口径不可见 → 不在对账域
+                // (已知边界,裁定乙):Reviewer 的改动不被发现、不被恢复。
                 assert_eq!(
                     fs::read_to_string(fixture.worktree.join("sub/c.txt")).unwrap(),
-                    "child-content\n"
+                    "reviewer touched child\n",
+                    "子仓内容域外:改动按已知边界保留"
                 );
             }
 
@@ -3077,17 +2815,25 @@ mod tests {
         assert!(matches!(err, ReviewerSnapshotError::BudgetExceeded(_)));
         assert!(!store.manifest_path("win-bytes").exists());
 
-        // 不支持项:FIFO
+        // git 不可见特殊文件(FIFO):不入对账域(ls-files 不枚举、porcelain
+        // 不可见)——capture 不再拒绝,也不进基线(裁定乙)。
         let fifo = fixture.worktree.join("pipe");
         unsafe {
             let c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
             assert_eq!(libc::mkfifo(c.as_ptr(), 0o644), 0);
         }
-        let err = store
+        store
             .capture_baseline(capture_request(&fixture, "win-fifo", &identity, &evidence))
-            .expect_err("FIFO 必须作为不支持项拒绝");
-        assert!(matches!(err, ReviewerSnapshotError::UnsupportedEntry(_)));
-        assert!(!store.manifest_path("win-fifo").exists());
+            .expect("FIFO 域外:capture 不得拒绝");
+        let fifo_manifest = store.load_manifest("win-fifo").expect("load manifest");
+        assert!(
+            !fifo_manifest
+                .entries
+                .iter()
+                .any(|entry| entry.rel_path == "pipe"),
+            "FIFO 不入基线"
+        );
+        drop(fifo_manifest);
         fs::remove_file(&fifo).unwrap();
 
         // 路径漂移:identity 的 canonical worktree 与实际树不一致 → 拒绝
@@ -3357,4 +3103,5 @@ mod tests {
     }
     // 游标写放大 / 崩溃续跑用例(拆出以满足 large_file_guard 行数门禁)。
     include!("reviewer_snapshot_restore_cursor_tests.inc.rs");
+    include!("reviewer_snapshot_domain_tests.inc.rs");
 }

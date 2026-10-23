@@ -27,7 +27,7 @@
 
 /// 单条 gitignore 模式(解析后的规范形态)。
 #[derive(Debug, Clone)]
-struct GitignorePattern {
+pub(crate) struct GitignorePattern {
     negated: bool,
     /// 尾缀 `/`:仅匹配目录。
     dir_only: bool,
@@ -53,7 +53,13 @@ impl GitignorePattern {
     }
 }
 
-/// 解析一行 gitignore 规则;空行/注释/退化模式返回 None。
+/// 逐行解析 ignore 规则文本(空行/注释/退化模式跳过)。供快照侧把
+/// **冻结内容**(而非磁盘)解析回规则(reviewer 对账域,owner
+/// 2026-10-23 裁定乙);磁盘版 [`parse_ignore_file`] 亦经此复用。
+pub(crate) fn parse_ignore_rules_from_str(content: &str) -> Vec<GitignorePattern> {
+    content.lines().filter_map(parse_gitignore_line).collect()
+}
+
 fn parse_gitignore_line(line: &str) -> Option<GitignorePattern> {
     let mut text = line.trim_end_matches([' ', '\t', '\r']);
     if text.is_empty() || text.starts_with('#') {
@@ -189,24 +195,25 @@ fn parse_ignore_file(path: &Path, sink: &mut Vec<GitignorePattern>) {
     let Ok(bytes) = std::fs::read(path) else {
         return;
     };
-    for line in String::from_utf8_lossy(&bytes).lines() {
-        if let Some(pattern) = parse_gitignore_line(line) {
-            sink.push(pattern);
-        }
-    }
+    sink.extend(parse_ignore_rules_from_str(&String::from_utf8_lossy(
+        &bytes,
+    )));
 }
 
 /// 一个作用域目录(其 `.gitignore` 或 `.git/info/exclude`)的全部规则。
-struct GitignoreLevel {
+pub(crate) struct GitignoreLevel {
     /// 作用域目录相对审计根的正斜杠路径;审计根自身为空串。
-    scope: String,
+    pub(crate) scope: String,
     patterns: Vec<GitignorePattern>,
 }
 
 impl GitignoreLevel {
-    /// 相对审计根的 `relative` 是否被本层规则裁决;不在作用域之下或本层
-    /// 无命中返回 None(交由更浅层继续裁决)。
-    fn verdict(&self, relative: &str, is_dir: bool) -> Option<bool> {
+    /// 由已解析规则构造(reviewer 对账域冻结匹配复用;scope 语义同上)。
+    pub(crate) fn from_patterns(scope: String, patterns: Vec<GitignorePattern>) -> Self {
+        Self { scope, patterns }
+    }
+
+    pub(crate) fn verdict(&self, relative: &str, is_dir: bool) -> Option<bool> {
         let scoped: &str = if self.scope.is_empty() {
             relative
         } else {

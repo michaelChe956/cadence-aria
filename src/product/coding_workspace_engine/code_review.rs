@@ -1978,6 +1978,10 @@ mod hygiene_tests {
                 quiesced_at: "2026-10-19T00:00:00Z".to_string(),
                 captured_at: "2026-10-19T00:00:00Z".to_string(),
                 restore_cursor: RestoreCursor::start(),
+                ignore_rules_freeze:
+                    crate::product::reviewer_snapshot_domain::IgnoreRulesFreeze::synthetic(),
+                domain_boundary:
+                    crate::product::reviewer_snapshot_domain::DOMAIN_BOUNDARY_DISCLOSURE.to_string(),
             };
             let dir = snap.join("windows").join("w-f12-pin");
             std::fs::create_dir_all(&dir).expect("pin dir");
