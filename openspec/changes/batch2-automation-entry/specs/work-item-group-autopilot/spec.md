@@ -299,6 +299,7 @@
 - **WHEN** enrollment 已 terminated（`terminated_at` 非空、`policy_revision=n`），用户在人工入口提交 Enable（携带稳定 `command_id`、`expected_revision=n`，`source`/`options`/`target` 与终止记录逐字段相等）
 - **THEN** 系统以同 `enrollment_id`、`policy_revision=n+1` 取代落盘：`terminated_at` 清空、`enabled=true`、`plan_id`/`session_id` 为空、`binding_history` 新代（旧代进 `previous`、`binding_version` 递增、plan/session 空串占位）、命令账本追加该 `command_id` 条目（`state=Accepted`）；响应 200 返回 enabled 记录
 - **AND** 随后既有 prepare 路径建立全新 plan/session 并绑定；被终止 plan 与既有 attempt 不复活、不复用，单次请求不重复生成
+- **AND** 同 `enrollment_id` 取代**必须轮换 `prepare_intent_id`**（`plan_id`/`session_id` 由其派生；沿用会让 prepare 幂等复用被终止的旧 plan 实体）
 
 #### Scenario: 重新开启的命令身份幂等与异负载拒绝
 
@@ -310,10 +311,11 @@
 - **WHEN** 对 terminated 记录提交 Enable 时 `source`/`options`/`target` 与终止记录不等、或提交 Disable、或 `expected_revision` 不等于当前 `policy_revision`
 - **THEN** 返回 409 Conflict 零副作用；改授权 payload 须先成功重新开启，再走既有 Disable→Enable 路径
 
-#### Scenario: 收口未完成时不可重新开启
+#### Scenario: 存在未终结 attempt 时不可重新开启
 
-- **WHEN** terminated 记录仍持有未收口的 `stage=termination` 清理失败事实，用户提交重新开启
+- **WHEN** terminated 记录仍持有**未终结的 attempt 或未收口的运行事实**（含 `stage=termination` 未收口），用户提交重新开启
 - **THEN** 返回 409 `automation_plan_cleanup_required` 且零副作用；以原 `command_id` 重提终止完成收口、该事实消失后方可重新开启
+- **AND** 绑定实体**已被删除**（墓碑）且**无未终结 attempt** 时视为无可收口之物，**允许**人工重新开启（不因"清理任务失败"本身而永久阻断）
 
 #### Scenario: 非 terminated 记录的并发语义不变
 
