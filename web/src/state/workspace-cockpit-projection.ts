@@ -1,4 +1,8 @@
 import { gateIdentityFromState } from "./cockpit-action-routing";
+import {
+  enrollmentTargetMemberCountText,
+  enrollmentTargetPlaceholder,
+} from "./enrollment-target-labels";
 import { protocolErrorCopy, STALE_DRIVER_LEASE_CODE } from "./protocol-error-copy";
 import type {
   CodingAttentionItemDto,
@@ -743,9 +747,16 @@ export function c1TargetLabel(target: C1WaitingItem["target"]): string {
   if (!target) {
     return "target 未知";
   }
-  return target.kind === "single_repository"
-    ? `单仓 ${target.repository_id}`
-    : `逻辑代码库 ${target.logical_codebase_id}/${target.logical_repository_id}`;
+  switch (target.kind) {
+    case "single_repository":
+      return `单仓 ${enrollmentTargetPlaceholder(target.repository_id)}`;
+    case "logical_codebase":
+      return `逻辑代码库 ${enrollmentTargetPlaceholder(target.logical_codebase_id)}/${enrollmentTargetPlaceholder(target.logical_repository_id)}`;
+    case "logical_codebase_members":
+      return `逻辑代码库 ${enrollmentTargetPlaceholder(target.logical_codebase_id)}[${enrollmentTargetMemberCountText(target.logical_repository_ids)}]`;
+    default:
+      return "target 未知";
+  }
 }
 
 /** durable C1WaitingItem → 收件箱条目（不进 countedInbox；动作走 C1 REST）。

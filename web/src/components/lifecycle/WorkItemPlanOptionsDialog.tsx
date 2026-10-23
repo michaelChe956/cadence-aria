@@ -12,6 +12,10 @@ import {
   type ProviderOption,
 } from "../../state/provider-options";
 import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
+import {
+  enrollmentTargetMemberCountText,
+  enrollmentTargetPlaceholder,
+} from "../../state/enrollment-target-labels";
 import { DialogShell } from "../shared/DialogShell";
 
 export type AutomationMode = "manual" | "automatic";
@@ -394,11 +398,19 @@ function roleChainViolationsOf(reason: unknown): RoleChainViolation[] | null {
 }
 
 /** C5 Task 1：双载体 enrollment target 的展示身份（单仓=物理仓，
- * LC=双级身份）。 */
+ * LC=双级身份）；多成员 LC 展示成员数量。任何分支都不得输出
+ * undefined/null/[object Object]，缺字段用「—」占位。 */
 function enrollmentTargetLabel(target: EnrollmentTarget): string {
-  return target.kind === "single_repository"
-    ? `single_repository ${target.repository_id}`
-    : `logical_codebase ${target.logical_codebase_id}/${target.logical_repository_id}`;
+  switch (target.kind) {
+    case "single_repository":
+      return `single_repository ${enrollmentTargetPlaceholder(target.repository_id)}`;
+    case "logical_codebase":
+      return `logical_codebase ${enrollmentTargetPlaceholder(target.logical_codebase_id)}/${enrollmentTargetPlaceholder(target.logical_repository_id)}`;
+    case "logical_codebase_members":
+      return `logical_codebase ${enrollmentTargetPlaceholder(target.logical_codebase_id)}[${enrollmentTargetMemberCountText(target.logical_repository_ids)}]`;
+    default:
+      return "—";
+  }
 }
 
 function ProviderSelect({

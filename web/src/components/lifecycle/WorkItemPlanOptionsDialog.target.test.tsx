@@ -287,3 +287,80 @@ describe("WorkItemPlanOptionsDialog automation target projection", () => {
     expect(alert).toHaveTextContent(/更换 provider 配置或更换目标/);
   });
 });
+
+// C5：多成员逻辑代码库（logical_codebase_members）target 的展示身份。
+// 后端 EnrollmentTarget 有三个变体，投影回传第三个变体时前端必须渲染成员
+// 数量，不得打印 undefined/null/[object Object]。
+describe("WorkItemPlanOptionsDialog enrollment target label variants", () => {
+  const LC_ID = "11111111-1111-1111-1111-111111111111";
+
+  async function renderProjection(target: unknown): Promise<HTMLElement> {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(targetResponse(target))),
+    );
+    renderDialog();
+    const dialog = screen.getByRole("dialog", { name: "Work Item Plan 配置" });
+    await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
+    return within(dialog).findByTestId("automation-target-projection");
+  }
+
+  it("labels a single-repository target", async () => {
+    const projection = await renderProjection({
+      kind: "single_repository",
+      repository_id: "repo_physical_c5",
+    });
+    expect(projection).toHaveTextContent("single_repository repo_physical_c5");
+    expect(projection.textContent).not.toContain("undefined");
+  });
+
+  it("labels a single-member logical-codebase target", async () => {
+    const projection = await renderProjection({
+      kind: "logical_codebase",
+      logical_codebase_id: LC_ID,
+      logical_repository_id: "00000000-0000-0000-0000-000000000001",
+    });
+    expect(projection).toHaveTextContent(
+      `logical_codebase ${LC_ID}/00000000-0000-0000-0000-000000000001`,
+    );
+    expect(projection.textContent).not.toContain("undefined");
+  });
+
+  it("labels a multi-member logical-codebase target with its member count", async () => {
+    const projection = await renderProjection({
+      kind: "logical_codebase_members",
+      logical_codebase_id: LC_ID,
+      logical_repository_ids: [
+        "00000000-0000-0000-0000-000000000001",
+        "00000000-0000-0000-0000-000000000002",
+        "00000000-0000-0000-0000-000000000003",
+      ],
+    });
+    expect(projection).toHaveTextContent(
+      `logical_codebase ${LC_ID}[3 个成员]`,
+    );
+    expect(projection.textContent).not.toContain("undefined");
+    expect(projection.textContent).not.toContain("null");
+  });
+
+  it("labels a multi-member logical-codebase target without members", async () => {
+    const projection = await renderProjection({
+      kind: "logical_codebase_members",
+      logical_codebase_id: LC_ID,
+      logical_repository_ids: [],
+    });
+    expect(projection).toHaveTextContent(`logical_codebase ${LC_ID}[无成员]`);
+    expect(projection.textContent).not.toContain("undefined");
+  });
+
+  it("never renders undefined for a target with missing fields", async () => {
+    const projection = await renderProjection({
+      kind: "logical_codebase_members",
+    });
+    expect(projection.textContent).not.toContain("undefined");
+    expect(projection.textContent).not.toContain("null");
+    expect(projection.textContent).not.toContain("[object Object]");
+    expect(projection).toHaveTextContent("—");
+  });
+});

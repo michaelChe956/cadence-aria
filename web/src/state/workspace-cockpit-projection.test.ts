@@ -3,6 +3,7 @@ import type { WorkspaceWsState } from "./workspace-ws-store-types";
 import { useWorkspaceStore, type TimelineNode } from "./workspace-ws-store";
 import { installWorkspaceStoreTestHooks } from "./workspace-ws-store.test-utils";
 import {
+  c1TargetLabel,
   c1WaitingItem,
   codingAttentionIdentity,
   codingAttentionItem,
@@ -1536,5 +1537,53 @@ describe("P4-d coding attention inbox projection", () => {
       }),
     );
     expect(choiceItem.attentionInfo?.focus).toEqual({ choice_id: "choice_0001" });
+  });
+});
+
+// C5：多成员逻辑代码库 target 的收件箱展示身份（第三变体不得打印 undefined）。
+describe("c1TargetLabel", () => {
+  it("labels a single-repository target", () => {
+    expect(
+      c1TargetLabel({ kind: "single_repository", repository_id: "repo_0001" }),
+    ).toBe("单仓 repo_0001");
+  });
+
+  it("labels a single-member logical-codebase target", () => {
+    expect(
+      c1TargetLabel({
+        kind: "logical_codebase",
+        logical_codebase_id: "lc_0001",
+        logical_repository_id: "lr_0001",
+      }),
+    ).toBe("逻辑代码库 lc_0001/lr_0001");
+  });
+
+  it("labels a multi-member logical-codebase target with its member count", () => {
+    expect(
+      c1TargetLabel({
+        kind: "logical_codebase_members",
+        logical_codebase_id: "lc_0001",
+        logical_repository_ids: ["lr_0001", "lr_0002", "lr_0003"],
+      }),
+    ).toBe("逻辑代码库 lc_0001[3 个成员]");
+  });
+
+  it("labels a multi-member target without members", () => {
+    expect(
+      c1TargetLabel({
+        kind: "logical_codebase_members",
+        logical_codebase_id: "lc_0001",
+        logical_repository_ids: [],
+      }),
+    ).toBe("逻辑代码库 lc_0001[无成员]");
+  });
+
+  it("never renders undefined for a target with missing fields", () => {
+    const label = c1TargetLabel({
+      kind: "logical_codebase_members",
+    } as unknown as C1WaitingItem["target"]);
+    expect(label).not.toContain("undefined");
+    expect(label).not.toContain("null");
+    expect(label).toContain("—");
   });
 });

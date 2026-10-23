@@ -681,6 +681,13 @@ export type EnrollmentTargetDto =
       kind: 'logical_codebase';
       logical_codebase_id: string;
       logical_repository_id: string;
+    }
+  // 多成员逻辑代码库：与后端 EnrollmentTarget 第三变体对齐（wire kind =
+  // logical_codebase_members）。
+  | {
+      kind: 'logical_codebase_members';
+      logical_codebase_id: string;
+      logical_repository_ids: string[];
     };
 
 export type WorkItemIntentContractDto = {
