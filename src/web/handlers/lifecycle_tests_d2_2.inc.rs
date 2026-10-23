@@ -1367,3 +1367,304 @@ async fn cascade_d2_2_owned_index_pruned_after_completion() {
         .session_ids
         .is_empty());
 }
+
+// ==== F3（fix-delete-automation-guard）：删除被自动化 enrollment 占用的实体 ====
+//
+// 真机缺陷：enabled enrollment 让 autopilot 每 tick ensure/reconcile/生成写该
+// plan（scope 共享锁），DELETE 永远抢不到独占锁 → entity_busy 删不掉。修复：
+// 取删除锁前先同源 CAS 终止绑定该实体的 enrollment，再继续删除；终止失败
+// 明确报错且删除不执行；entity_busy details 补占用者信息。
+
+/// 直写最小 enrollment JSON（durable 事实与真实 Enable 同构；删除路径只消费
+/// enabled/terminated_at/plan_id/session_id 字段）。
+fn f3_enable_automation(
+    paths: &ProductAppPaths,
+    plan_id: Option<&str>,
+) -> crate::product::models::automation::IssueAutomationEnrollment {
+    use crate::product::models::automation::{
+        EnrollmentOptions, EnrollmentSource, IssueAutomationEnrollment, PlanApprovalPolicy,
+    };
+    let enrollment = IssueAutomationEnrollment {
+        enrollment_id: "enr_f3_0001".to_string(),
+        selection_key: "issue:0001".to_string(),
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        enabled: true,
+        policy_revision: 3,
+        source: EnrollmentSource {
+            stories: Vec::new(),
+            designs: Vec::new(),
+        },
+        options: EnrollmentOptions {
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            plan_approval: PlanApprovalPolicy::Manual,
+            plan_options: crate::product::models::lifecycle::IssueWorkItemPlanOptions {
+                include_integration_tests: true,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+        },
+        target: None,
+        prepare_intent_id: "prep_f3_0001".to_string(),
+        plan_id: plan_id.map(str::to_string),
+        session_id: None,
+        created_at: "2026-10-23T00:00:00Z".to_string(),
+        updated_at: "2026-10-23T00:00:00Z".to_string(),
+        binding_history: None,
+        command_ledger: Vec::new(),
+        terminated_at: None,
+        attention_facts: Vec::new(),
+    };
+    crate::product::json_store::write_json(
+        &paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("automation-enrollment.json"),
+        &enrollment,
+    )
+    .expect("seed enrollment");
+    enrollment
+}
+
+fn f3_read_enrollment(
+    paths: &ProductAppPaths,
+) -> crate::product::models::automation::IssueAutomationEnrollment {
+    crate::product::issue_automation_store::IssueAutomationStore::new(paths.clone())
+        .get(PROJECT_ID, ISSUE_ID)
+        .expect("read enrollment")
+        .expect("enrollment exists")
+}
+
+/// F3 ①：存在绑定该 Plan 且 enabled 的自动化 enrollment 时，删除先终止
+/// enrollment（同源 terminate CAS、稳定命令 id 入账本）再删除成功——这是
+/// 真机「永远删不掉」的根因面。红：现状删除 200 但 enrollment 仍 enabled，
+/// autopilot 下一 tick 继续 ensure/重建。
+#[tokio::test]
+async fn cascade_f3_terminates_bound_automation_before_delete() {
+    let root = TempDir::new().expect("root");
+    let app = build_test_router(root.path());
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = d2_2_seed_project_issue(&paths);
+    d2_2_seed_plan(
+        &lifecycle,
+        D2_2_PLAN_A,
+        Vec::new(),
+        None,
+        None,
+        Vec::new(),
+        crate::product::models::IssueWorkItemPlanStatus::Draft,
+    );
+    let seeded = f3_enable_automation(&paths, Some(D2_2_PLAN_A));
+
+    let (status, body) = d2_2_delete(&app, "work-item-plans", D2_2_PLAN_A, None).await;
+    assert_eq!(status, StatusCode::OK, "delete body: {body}");
+
+    let enrollment = f3_read_enrollment(&paths);
+    assert!(
+        enrollment.terminated_at.is_some(),
+        "删除必须先终止绑定该实体的自动化 enrollment"
+    );
+    assert!(!enrollment.enabled);
+    // 终止走与人工终止/autopilot 自愈同源的 terminate CAS：稳定命令 id 入账本。
+    assert!(
+        enrollment
+            .command_ledger
+            .iter()
+            .any(|entry| entry.command_id
+                == format!(
+                    "entity-delete-terminate-{}-r{}",
+                    seeded.enrollment_id, seeded.policy_revision
+                )),
+        "termination must go through the same-source CAS ledger: {:?}",
+        enrollment.command_ledger
+    );
+    assert!(
+        lifecycle
+            .get_issue_work_item_plan(PROJECT_ID, ISSUE_ID, D2_2_PLAN_A)
+            .is_err(),
+        "plan 记录随删除消失"
+    );
+}
+
+/// F3 ②：无 enrollment / enrollment 未绑定该实体时删除行为不变，且不误终止
+/// 无关 enrollment（幂等重入语义与单仓路径不受影响）。
+#[tokio::test]
+async fn cascade_f3_delete_without_bound_automation_is_unchanged() {
+    // A) 完全无 enrollment：原语义删除成功。
+    {
+        let root = TempDir::new().expect("root");
+        let app = build_test_router(root.path());
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let lifecycle = d2_2_seed_project_issue(&paths);
+        d2_2_seed_plan(
+            &lifecycle,
+            D2_2_PLAN_A,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            crate::product::models::IssueWorkItemPlanStatus::Draft,
+        );
+        let (status, body) = d2_2_delete(&app, "work-item-plans", D2_2_PLAN_A, None).await;
+        assert_eq!(status, StatusCode::OK, "delete body: {body}");
+        assert!(
+            lifecycle
+                .get_issue_work_item_plan(PROJECT_ID, ISSUE_ID, D2_2_PLAN_A)
+                .is_err()
+        );
+    }
+    // B) enrollment enabled 但绑定其他 plan：删除照常成功，enrollment 原样。
+    {
+        let root = TempDir::new().expect("root");
+        let app = build_test_router(root.path());
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let lifecycle = d2_2_seed_project_issue(&paths);
+        d2_2_seed_plan(
+            &lifecycle,
+            D2_2_PLAN_A,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            crate::product::models::IssueWorkItemPlanStatus::Draft,
+        );
+        let seeded = f3_enable_automation(&paths, Some("work_item_plan_other"));
+        let (status, body) = d2_2_delete(&app, "work-item-plans", D2_2_PLAN_A, None).await;
+        assert_eq!(status, StatusCode::OK, "delete body: {body}");
+        let enrollment = f3_read_enrollment(&paths);
+        assert!(enrollment.enabled, "未绑定该实体的 enrollment 不得被终止");
+        assert!(enrollment.terminated_at.is_none());
+        assert_eq!(enrollment.policy_revision, seeded.policy_revision);
+        assert!(enrollment.command_ledger.is_empty());
+    }
+}
+
+/// F3 ③：自动化终止失败 → 删除不执行、明确 `automation_termination_failed`
+/// （绝不笼统 entity_busy），现场零破坏；恢复可写后重试收敛（终止→删除成功）。
+#[tokio::test]
+async fn cascade_f3_delete_fails_closed_when_termination_fails() {
+    let root = TempDir::new().expect("root");
+    let app = build_test_router(root.path());
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = d2_2_seed_project_issue(&paths);
+    d2_2_seed_plan(
+        &lifecycle,
+        D2_2_PLAN_A,
+        Vec::new(),
+        None,
+        None,
+        Vec::new(),
+        crate::product::models::IssueWorkItemPlanStatus::Draft,
+    );
+    let seeded = f3_enable_automation(&paths, Some(D2_2_PLAN_A));
+    // 终止 CAS 不可用：预占 enrollment 的伴生锁路径（目录形态 → 锁文件
+    // open 失败）。issue 目录保持可写，精确只让 terminate_plan 落不了锁。
+    let enrollment_lock = paths
+        .issue_root(PROJECT_ID, ISSUE_ID)
+        .join(".automation-enrollment.json.lock");
+    std::fs::create_dir_all(&enrollment_lock).expect("block enrollment lock");
+
+    let (status, body) = d2_2_delete(&app, "work-item-plans", D2_2_PLAN_A, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "fail-closed body: {body}");
+    assert_eq!(body["code"], "automation_termination_failed");
+    assert_eq!(body["message"], "该实体的自动化未能停用，删除未执行");
+    assert_eq!(
+        body["details"]["automation_enrollment_id"],
+        seeded.enrollment_id.clone(),
+        "details 带上未能停用的 enrollment id"
+    );
+
+    // 解除注入后断言零破坏（plan/墓碑/enrollment 全部原样）。
+    std::fs::remove_dir_all(&enrollment_lock).expect("unblock enrollment lock");
+    assert!(
+        lifecycle
+            .get_issue_work_item_plan(PROJECT_ID, ISSUE_ID, D2_2_PLAN_A)
+            .is_ok(),
+        "终止失败时 plan 不得被删"
+    );
+    let enrollment = f3_read_enrollment(&paths);
+    assert!(enrollment.enabled);
+    assert!(enrollment.terminated_at.is_none());
+    assert_eq!(enrollment.policy_revision, seeded.policy_revision);
+    assert!(
+        EntityDeletionStore::new(paths.clone())
+            .get(&EntityScope::new(
+                PROJECT_ID,
+                ISSUE_ID,
+                crate::product::entity_deletion_store::DeletionEntityKind::Plan,
+                D2_2_PLAN_A
+            ))
+            .unwrap()
+            .is_none(),
+        "终止失败不立墓碑"
+    );
+
+    // 同一现场恢复后重试：先终止后删除，收敛成功。
+    let (status, body) = d2_2_delete(&app, "work-item-plans", D2_2_PLAN_A, None).await;
+    assert_eq!(status, StatusCode::OK, "retry body: {body}");
+    assert!(f3_read_enrollment(&paths).terminated_at.is_some());
+}
+
+/// F3 ④：终止自动化后删除独占仍争用（在途 run/写者持 scope 共享锁）→
+/// entity_busy 保持稳定码，details 补占用者信息（scope kind/id＋刚停用的
+/// enrollment id）便于判断该等还是该先停自动化；占用期间删除零破坏，释放
+/// 后重删成功。
+#[tokio::test]
+async fn cascade_f3_busy_error_reports_automation_occupant() {
+    let root = TempDir::new().expect("root");
+    let app = build_test_router(root.path());
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = d2_2_seed_project_issue(&paths);
+    d2_2_seed_plan(
+        &lifecycle,
+        D2_2_PLAN_A,
+        Vec::new(),
+        None,
+        None,
+        Vec::new(),
+        crate::product::models::IssueWorkItemPlanStatus::Draft,
+    );
+    let seeded = f3_enable_automation(&paths, Some(D2_2_PLAN_A));
+    // 在途运行者：持 scope 共享 run lease（autopilot 生成链的持有形态）。
+    let scope = EntityScope::new(
+        PROJECT_ID,
+        ISSUE_ID,
+        crate::product::entity_deletion_store::DeletionEntityKind::Plan,
+        D2_2_PLAN_A,
+    );
+    let run_lease = EntityOperationStore::new(paths.clone())
+        .acquire_run(&scope)
+        .expect("hold run lease");
+
+    let (status, body) = d2_2_delete(&app, "work-item-plans", D2_2_PLAN_A, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "busy body: {body}");
+    assert_eq!(body["code"], "entity_busy");
+    assert_eq!(body["details"]["entity_kind"], "plan");
+    assert_eq!(body["details"]["entity_id"], D2_2_PLAN_A);
+    assert_eq!(
+        body["details"]["automation_enrollment_id"],
+        seeded.enrollment_id.clone(),
+        "占用者信息：识别到绑定该实体的自动化 enrollment"
+    );
+    // 先终止语义同样成立；占用期间删除零破坏。
+    assert!(f3_read_enrollment(&paths).terminated_at.is_some());
+    assert!(
+        lifecycle
+            .get_issue_work_item_plan(PROJECT_ID, ISSUE_ID, D2_2_PLAN_A)
+            .is_ok()
+    );
+    assert!(
+        EntityDeletionStore::new(paths.clone())
+            .get(&scope)
+            .unwrap()
+            .is_none()
+    );
+
+    drop(run_lease);
+    let (status, body) = d2_2_delete(&app, "work-item-plans", D2_2_PLAN_A, None).await;
+    assert_eq!(status, StatusCode::OK, "release body: {body}");
+}

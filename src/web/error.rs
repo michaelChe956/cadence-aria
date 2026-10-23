@@ -284,7 +284,10 @@ impl IntoResponse for ApiError {
             | "automation_continue_binding_mismatch"
             | "automation_continue_stop_key_mismatch"
             | "automation_continue_command_conflict"
-            | "automation_continue_gate_reopen_conflict" => StatusCode::CONFLICT,
+            | "automation_continue_gate_reopen_conflict"
+            // F3（fix-delete-automation-guard）：删除前自动化停用失败——
+            // 状态冲突 409（区别于笼统 entity_busy，可诊断）。
+            | "automation_termination_failed" => StatusCode::CONFLICT,
             "automation_continue_rejected"
             | "automation_continue_not_stopped"
             | "automation_continue_context_required" => StatusCode::UNPROCESSABLE_ENTITY,

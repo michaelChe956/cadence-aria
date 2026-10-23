@@ -127,15 +127,38 @@ async fn cascade_delete_entity(
         None => false,
     };
 
+    // ①.5 F3：自动化占用预解除——绑定该实体的 enabled enrollment 会让
+    //     autopilot 每 tick ensure/reconcile/生成写该实体（scope 共享锁），
+    //     删除独占永远抢不到（真机 entity_busy 删不掉的根因）；且被删实体
+    //     一旦消失该 enrollment 本身不可继续（Y 已证同向），终止是语义必然。
+    //     复用与人工终止/autopilot 自愈同源的 terminate CAS；失败 → 明确
+    //     automation_termination_failed，删除不执行（未取锁、零落盘）。
+    let terminated_automation = terminate_automation_bound_to_entity(&app_paths, &store, &scope)?;
+
     // ② try 删除独占（非阻塞）：争用/同 scope 运行 writer → entity_busy；
-    //    已删竞态 → 幂等成功。
-    let lease = match operations.try_acquire_delete(&scope) {
-        Ok(lease) => lease,
-        Err(EntityOperationError::Deleted) => return Ok(()),
-        Err(EntityOperationError::Busy | EntityOperationError::Deleting) => {
-            return Err(deletion_busy_error(&scope));
+    //    已删竞态 → 幂等成功。刚终止过自动化时给在途短写一个有限排空窗口
+    //    （tick 写是毫秒级；长 run 不在此等，仍按 entity_busy 报占用者）。
+    let mut delete_attempts = if terminated_automation.is_some() {
+        10
+    } else {
+        1
+    };
+    let lease = loop {
+        match operations.try_acquire_delete(&scope) {
+            Ok(lease) => break lease,
+            Err(EntityOperationError::Deleted) => return Ok(()),
+            Err(EntityOperationError::Busy | EntityOperationError::Deleting) => {
+                delete_attempts -= 1;
+                if delete_attempts > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+                let occupant = automation_enrollment_bound_to_entity(&app_paths, &store, &scope)
+                    .or_else(|| terminated_automation.clone());
+                return Err(deletion_busy_error(&scope, occupant.as_ref()));
+            }
+            Err(EntityOperationError::Store(error)) => return Err(product_store_api_error(error)),
         }
-        Err(EntityOperationError::Store(error)) => return Err(product_store_api_error(error)),
     };
 
     // ③ Plan：闭包前捕获 plan run（N7/REQ-CS-07：冻结 target 集合，purge 后不可
@@ -151,8 +174,13 @@ async fn cascade_delete_entity(
     // ④ 固定 resource keys（manifest 目标仓 ∪ run 冻结 target ∪ legacy issue 布局）
     //    排序 try cleanup lease（§0.2 锁序 scope → resource → 关系短锁）：任何
     //    key 争用即 entity_busy，此时尚未立墓碑/pending——零破坏拒绝。
-    let resource_leases =
-        cascade_resource_cleanup_leases(&app_paths, &store, &scope, plan_run.as_ref())?;
+    let resource_leases = cascade_resource_cleanup_leases(
+        &app_paths,
+        &store,
+        &scope,
+        plan_run.as_ref(),
+        terminated_automation.as_ref(),
+    )?;
 
     // ⑤ 关系短锁内：权威 manifest 采集＋coding/引用/分类门禁 → pending →
     //    owned-index → purging 墓碑。门禁拒绝时墓碑尚未立起，零破坏。
@@ -425,6 +453,7 @@ fn cascade_resource_cleanup_leases(
     store: &LifecycleStore,
     scope: &EntityScope,
     plan_run: Option<&crate::product::coding_plan_run::CodingPlanRun>,
+    terminated_automation: Option<&crate::product::models::automation::IssueAutomationEnrollment>,
 ) -> ApiResult<Vec<(SharedResourceKey, SharedResourceCleanupLease)>> {
     if scope.kind != DeletionEntityKind::Plan {
         return Ok(Vec::new());
@@ -482,7 +511,15 @@ fn cascade_resource_cleanup_leases(
             .map_err(|error| match error {
                 EntityOperationError::Busy
                 | EntityOperationError::Deleting
-                | EntityOperationError::Deleted => deletion_busy_error(scope),
+                | EntityOperationError::Deleted => {
+                    // F3：key 争用仍是稳定 entity_busy，但 details 带占用者
+                    // 信息——现场识别仍 enabled 且绑定该实体的自动化；否则
+                    // 带上本次删除刚终止的 enrollment（其生成的在途 run/写
+                    // 是残余占用者的最可能来源）。
+                    let occupant = automation_enrollment_bound_to_entity(app_paths, store, scope)
+                        .or_else(|| terminated_automation.cloned());
+                    deletion_busy_error(scope, occupant.as_ref())
+                }
                 EntityOperationError::Store(inner) => product_store_api_error(inner),
             })?;
         leases.push((key, lease));
@@ -504,13 +541,138 @@ fn entity_manifest_sets_empty(manifest: &EntityDeletionManifest) -> bool {
 }
 
 /// 同 scope 仍有可落盘 writer / 删除准入争用 → 稳定 `entity_busy`（REQ-DEL-06）。
-fn deletion_busy_error(scope: &EntityScope) -> ApiError {
+/// F3：details 补占用者信息——优先现场识别仍 enabled 且绑定该实体的自动化
+/// enrollment；否则带上本次删除刚终止的 enrollment（其 ensure/生成的在途
+/// 写/run 是残余占用者的最可能来源），便于判断该等还是该先停自动化。
+fn deletion_busy_error(
+    scope: &EntityScope,
+    occupant: Option<&crate::product::models::automation::IssueAutomationEnrollment>,
+) -> ApiError {
+    let mut details = json!({
+        "entity_kind": scope.kind.path_segment(),
+        "entity_id": scope.entity_id,
+    });
+    if let Some(enrollment) = occupant {
+        details["automation_enrollment_id"] = json!(enrollment.enrollment_id);
+    }
     ApiError::runtime(
         "entity_busy",
         "实体存在进行中的运行或并发写入，请等待收口后重试删除",
+        details,
+    )
+}
+
+/// F3：识别仍占用该实体的自动化 enrollment——enabled 且未 terminated，且其
+/// durable 绑定指向该实体（Plan 直绑 `plan_id`，或 session 记录的 `entity_id`
+/// 即该实体）。enrollment 文件缺失/不可读/未启用/已终止/未绑定一律 None：
+/// 不可证明占用不误报（不可读的 enrollment 驱动不了 autopilot，不会是占用者）。
+fn automation_enrollment_bound_to_entity(
+    app_paths: &ProductAppPaths,
+    lifecycle: &LifecycleStore,
+    scope: &EntityScope,
+) -> Option<crate::product::models::automation::IssueAutomationEnrollment> {
+    let enrollment =
+        crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone())
+            .get(&scope.project_id, &scope.issue_id)
+            .ok()??;
+    if !enrollment.enabled || enrollment.terminated_at.is_some() {
+        return None;
+    }
+    if scope.kind == DeletionEntityKind::Plan
+        && enrollment.plan_id.as_deref() == Some(scope.entity_id.as_str())
+    {
+        return Some(enrollment);
+    }
+    if let Some(session_id) = enrollment.session_id.as_deref()
+        && lifecycle
+            .list_workspace_sessions(&scope.project_id, &scope.issue_id)
+            .ok()?
+            .iter()
+            .any(|session| session.id == session_id && session.entity_id == scope.entity_id)
+    {
+        return Some(enrollment);
+    }
+    None
+}
+
+/// F3：取删除独占锁之前，先终止绑定该实体的自动化 enrollment（真机缺陷：
+/// autopilot 每 tick 写该实体，删除独占永远抢不到；实体删除后 enrollment
+/// 本身不可继续，终止是语义必然）。复用 82d8d470 同一终止 CAS
+/// （`IssueAutomationStore::terminate_plan`：`terminated_at`＋`enabled=false`
+/// 同锁落盘，同 revision 命令 id 稳定、重放幂等）。CAS 竞态（revision 前移/
+/// 被并行终止）重读收敛后带新 revision 有限重试；终止失败返回明确
+/// `automation_termination_failed`（删除未执行、零落盘），绝不退化成笼统
+/// entity_busy。
+fn terminate_automation_bound_to_entity(
+    app_paths: &ProductAppPaths,
+    lifecycle: &LifecycleStore,
+    scope: &EntityScope,
+) -> ApiResult<Option<crate::product::models::automation::IssueAutomationEnrollment>> {
+    let mut last_conflict: Option<(
+        crate::product::models::automation::IssueAutomationEnrollment,
+        crate::product::models::automation::EnrollmentError,
+    )> = None;
+    for _ in 0..3 {
+        let Some(enrollment) = automation_enrollment_bound_to_entity(app_paths, lifecycle, scope)
+        else {
+            return Ok(None);
+        };
+        let request = crate::product::models::automation::EnrollmentTerminationRequest {
+            command_id: format!(
+                "entity-delete-terminate-{}-r{}",
+                enrollment.enrollment_id, enrollment.policy_revision
+            ),
+            expected_enrollment_id: enrollment.enrollment_id.clone(),
+            expected_policy_revision: enrollment.policy_revision,
+            reason: format!(
+                "bound entity deleted: {}/{}",
+                scope.kind.path_segment(),
+                scope.entity_id
+            ),
+        };
+        match crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone())
+            .terminate_plan(&scope.project_id, &scope.issue_id, request)
+        {
+            Ok(_) => return Ok(Some(enrollment)),
+            // enrollment 文件已消失：无自动化可终止（目标已达成）。
+            Err(crate::product::models::automation::EnrollmentError::NotFound) => return Ok(None),
+            // CAS 竞态：重读收敛——已终止/禁用即 None，仍 enabled 带新
+            // revision 重试。
+            Err(error @ crate::product::models::automation::EnrollmentError::Conflict { .. }) => {
+                last_conflict = Some((enrollment, error));
+                continue;
+            }
+            Err(error) => {
+                return Err(automation_termination_failed_error(
+                    scope,
+                    &enrollment,
+                    &error.to_string(),
+                ));
+            }
+        }
+    }
+    let (enrollment, error) = last_conflict.expect("conflict path always records enrollment");
+    Err(automation_termination_failed_error(
+        scope,
+        &enrollment,
+        &error.to_string(),
+    ))
+}
+
+/// F3：自动化停用失败 → 稳定可诊断错误（409），删除不执行。
+fn automation_termination_failed_error(
+    scope: &EntityScope,
+    enrollment: &crate::product::models::automation::IssueAutomationEnrollment,
+    message: &str,
+) -> ApiError {
+    ApiError::runtime(
+        "automation_termination_failed",
+        "该实体的自动化未能停用，删除未执行",
         json!({
             "entity_kind": scope.kind.path_segment(),
             "entity_id": scope.entity_id,
+            "automation_enrollment_id": enrollment.enrollment_id,
+            "message": message,
         }),
     )
 }
