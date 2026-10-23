@@ -163,6 +163,7 @@ fn enable_c1_child_enrollment(
             "issue_0001",
             None,
             crate::product::models::automation::EnrollmentWriteCommand::Enable {
+                command_id: None,
                 selection_key: "c1_child_binding_fixture".to_string(),
                 source: c1_child_enrollment_source(),
                 options: c1_child_enrollment_options(),

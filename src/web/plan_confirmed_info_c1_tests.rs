@@ -110,6 +110,7 @@ fn enable_enrollment_only(paths: &ProductAppPaths) {
             ISSUE_ID,
             None,
             EnrollmentWriteCommand::Enable {
+                command_id: None,
                 selection_key: "c1_waiting_fixture".to_string(),
                 source: enrollment_source(),
                 options: enrollment_options(),

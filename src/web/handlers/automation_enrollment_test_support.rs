@@ -756,6 +756,7 @@ pub(crate) fn seed_terminated_plan_enrollment(
             issue_id,
             None,
             EnrollmentWriteCommand::Enable {
+                command_id: None,
                 selection_key: "t3-termination".into(),
                 source: EnrollmentSource {
                     stories: vec![SourceRevisionRef {

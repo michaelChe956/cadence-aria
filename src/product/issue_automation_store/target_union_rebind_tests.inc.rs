@@ -15,6 +15,7 @@ fn target_logical() -> EnrollmentTarget {
 
 fn enable_with_target(selection_key: &str, target: EnrollmentTarget) -> EnrollmentWriteCommand {
     EnrollmentWriteCommand::Enable {
+    command_id: None,
         selection_key: selection_key.into(),
         source: source(),
         options: options(),

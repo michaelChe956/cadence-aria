@@ -928,6 +928,7 @@ mod n1_tests {
                 N1_ISSUE,
                 None,
                 EnrollmentWriteCommand::Enable {
+                    command_id: None,
                     selection_key: "n1-router".to_string(),
                     source: EnrollmentSource {
                         stories: Vec::new(),

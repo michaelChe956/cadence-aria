@@ -382,6 +382,7 @@ mod tests {
                     PlanApprovalPolicy, SourceRevisionRef,
                 };
                 EnrollmentWriteCommand::Enable {
+                    command_id: None,
                     selection_key: "t3-termination".into(),
                     source: EnrollmentSource {
                         stories: vec![SourceRevisionRef {

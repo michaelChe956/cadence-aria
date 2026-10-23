@@ -202,6 +202,7 @@ fn automation_enable_command() -> crate::product::models::automation::Enrollment
     use crate::product::models::provider::ProviderName;
 
     EnrollmentWriteCommand::Enable {
+        command_id: None,
         selection_key: "human-choice-auto".into(),
         source: EnrollmentSource {
             stories: vec![SourceRevisionRef {

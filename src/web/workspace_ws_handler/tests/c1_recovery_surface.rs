@@ -299,6 +299,7 @@ async fn a09_lease_three_states_and_confirmed_takeover_chain() {
             ISSUE_ID,
             None,
             EnrollmentWriteCommand::Enable {
+                command_id: None,
                 selection_key: "c1-serial-lease".to_string(),
                 source: EnrollmentSource {
                     stories: vec![SourceRevisionRef {
@@ -630,6 +631,7 @@ async fn a09_failed_advance_explicit_retry_chain() {
             ISSUE_ID,
             None,
             EnrollmentWriteCommand::Enable {
+                command_id: None,
                 selection_key: "c1-serial-retry".to_string(),
                 source: EnrollmentSource {
                     stories: vec![SourceRevisionRef {

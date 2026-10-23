@@ -138,6 +138,7 @@
                 ISSUE_ID,
                 None,
                 EnrollmentWriteCommand::Enable {
+                    command_id: None,
                     selection_key: "selection_0001".to_string(),
                     source: EnrollmentSource {
                         stories: vec![SourceRevisionRef {

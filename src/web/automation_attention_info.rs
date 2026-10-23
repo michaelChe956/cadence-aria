@@ -214,6 +214,7 @@ mod tests {
                 N1_ISSUE,
                 None,
                 EnrollmentWriteCommand::Enable {
+                    command_id: None,
                     selection_key: "n1-mapper".to_string(),
                     source: EnrollmentSource {
                         stories: Vec::new(),

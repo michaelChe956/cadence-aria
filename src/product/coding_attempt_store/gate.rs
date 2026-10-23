@@ -1803,6 +1803,7 @@ mod tests {
                     "issue_0001",
                     None,
                     crate::product::models::automation::EnrollmentWriteCommand::Enable {
+                        command_id: None,
                         selection_key: "human-choice-1".to_string(),
                         source: automation_source(),
                         options: automation_options(),

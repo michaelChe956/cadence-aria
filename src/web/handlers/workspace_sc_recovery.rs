@@ -1178,6 +1178,7 @@ mod tests {
                     ISSUE_ID,
                     None,
                     EnrollmentWriteCommand::Enable {
+                        command_id: None,
                         selection_key: "continue-fixture".to_string(),
                         source: EnrollmentSource {
                             stories: Vec::new(),

@@ -625,6 +625,7 @@ mod tests {
                 ISSUE,
                 None,
                 EnrollmentWriteCommand::Enable {
+                    command_id: None,
                     selection_key: "takeover-reject".to_string(),
                     source: EnrollmentSource {
                         stories: Vec::new(),

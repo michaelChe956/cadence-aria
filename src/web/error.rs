@@ -246,7 +246,7 @@ impl IntoResponse for ApiError {
             {
                 StatusCode::CONFLICT
             }
-            // T11 gateway 稳定码表收口：政策门/复验拒绝为 4xx 业务阻断，禁止回退 500。
+            // T11 gateway 稳定码表收口：政策门/复验拒绝为 4xx 业务阻断，禁止回退到 500。
             // policy/target/registry/drift/resume/managed_settings 一律 409；capability 与
             // Codex danger-full-access 为 403；provider 不可用为 503；系统未接线为 500(防御)。
             "provider_gateway_policy_missing"
@@ -274,6 +274,10 @@ impl IntoResponse for ApiError {
             "pointer_not_found" => StatusCode::NOT_FOUND,
             // WIG Autopilot P0 enrollment 稳定码：冲突 409、缺失 404、作用域 422。
             "automation_enrollment_conflict" => StatusCode::CONFLICT,
+            // REQ-WIGA-09 修订：terminated 重新开启的收口门——存在未终结
+            // attempt（未收口运行事实）→ 409 零副作用；绑定实体已删（墓碑）
+            // 且无未终结 attempt 不触发本码（放行取代）。
+            "automation_plan_cleanup_required" => StatusCode::CONFLICT,
             "automation_enrollment_not_found" => StatusCode::NOT_FOUND,
             "automation_enrollment_invalid_scope" => StatusCode::UNPROCESSABLE_ENTITY,
             "automation_role_chain_unsupported" => StatusCode::UNPROCESSABLE_ENTITY,

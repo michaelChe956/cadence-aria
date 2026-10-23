@@ -27,6 +27,7 @@ fn n1_bound_enrollment(
             ISSUE_ID,
             None,
             EnrollmentWriteCommand::Enable {
+                command_id: None,
                 selection_key: "n1-lifecycle".to_string(),
                 source: EnrollmentSource {
                     stories: Vec::new(),

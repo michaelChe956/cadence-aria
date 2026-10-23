@@ -173,6 +173,13 @@ pub enum EnrollmentWriteCommand {
     /// 唯一权威——冗余的顶层 `logical_repository_id` 已删除；缺 `target`
     /// 的请求在反序列化层即被拒绝（HTTP 422、零写入）。
     Enable {
+        /// REQ-WIGA-09 修订：terminated 记录人工重新开启（取代）的稳定
+        /// 命令身份——命令账本按 `command_id` 幂等重放（同 id 同 payload
+        /// 返回首次 durable 结果、异 payload fail-closed）。仅 terminated
+        /// 取代路径消费：缺失 → 422 零副作用；非 terminated 的首次
+        /// Enable/常规重开不消费（`None` 兼容旧 wire）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
         selection_key: String,
         source: EnrollmentSource,
         options: EnrollmentOptions,

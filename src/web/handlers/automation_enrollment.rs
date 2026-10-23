@@ -38,6 +38,7 @@ pub async fn put_automation_enrollment(
 ) -> ApiResult<Json<IssueAutomationEnrollment>> {
     validate_request_ids(&project_id, &issue_id)?;
     validate_enrollment_scope(&state, &project_id, &issue_id, &request.command)?;
+    ensure_terminated_reenable_cleanup_closed(&state, &project_id, &issue_id, &request.command)?;
     let enrollment = IssueAutomationStore::new(product_app_paths(&state))
         .compare_and_set(
             &project_id,
@@ -52,6 +53,78 @@ pub async fn put_automation_enrollment(
         let _ = state.autopilot_wake.send(true);
     }
     Ok(Json(enrollment))
+}
+
+/// REQ-WIGA-09 修订：terminated 人工重新开启（Enable）的收口门。判据（顺序
+/// 固定）：①绑定 plan 存在未终结 attempt → 409；②绑定实体已删（墓碑，plan
+/// 记录已不存在）且无未终结 attempt → 无可收口之物，放行取代（不因清理任务
+/// 失败本身永久阻断）；③绑定实体仍在，但 terminated 记录仍持有未收口运行
+/// 事实（终止清理失败写入的 `automation_failed(stage=termination)` 等，
+/// resolve 后即消失）→ 409。全部 409 零副作用（store CAS 在其后才执行）。
+/// 预检与 CAS 之间无写入者：terminated 已阻断全部自动路径（reconcile/
+/// ensure/provider run），人工 attempt 认领同样要求 enabled enrollment。
+fn ensure_terminated_reenable_cleanup_closed(
+    state: &WebAppState,
+    project_id: &str,
+    issue_id: &str,
+    command: &EnrollmentWriteCommand,
+) -> ApiResult<()> {
+    if !matches!(command, EnrollmentWriteCommand::Enable { .. }) {
+        return Ok(());
+    }
+    let paths = product_app_paths(state);
+    let Some(enrollment) = IssueAutomationStore::new(paths.clone())
+        .get(project_id, issue_id)
+        .map_err(product_store_api_error)?
+    else {
+        return Ok(());
+    };
+    if enrollment.terminated_at.is_none() {
+        return Ok(());
+    }
+    let Some(plan_id) = enrollment.plan_id.clone() else {
+        // 从未绑定 plan → 无可收口之物（直接放行取代）。
+        return Ok(());
+    };
+    let unfinished_attempt =
+        crate::product::coding_attempt_store::CodingAttemptStore::new(paths.clone())
+            .list_attempts_for_plan(project_id, issue_id, &plan_id)
+            .map_err(product_store_api_error)?
+            .into_iter()
+            .any(|attempt| {
+                !matches!(
+                    attempt.status,
+                    crate::product::coding_models::CodingAttemptStatus::Completed
+                        | crate::product::coding_models::CodingAttemptStatus::Failed
+                        | crate::product::coding_models::CodingAttemptStatus::Aborted
+                )
+            });
+    if unfinished_attempt {
+        return Err(cleanup_required_error(&plan_id, "unfinished_attempts"));
+    }
+    // 绑定实体已删（墓碑）：plan 记录不在 → 无可收口之物，放行取代。
+    let bound_entity_present = crate::product::lifecycle_store::LifecycleStore::new(paths)
+        .list_issue_work_item_plans(project_id, issue_id)
+        .map_err(product_store_api_error)?
+        .iter()
+        .any(|plan| plan.id == plan_id);
+    if !bound_entity_present {
+        return Ok(());
+    }
+    // 未收口的运行事实（terminated 记录上仍挂着待处理事实＝终止清理未收口）。
+    if !enrollment.attention_facts.is_empty() {
+        return Err(cleanup_required_error(&plan_id, "unclosed_run_facts"));
+    }
+    Ok(())
+}
+
+fn cleanup_required_error(plan_id: &str, reason: &str) -> ApiError {
+    ApiError::validation_with_details(
+        "automation_plan_cleanup_required",
+        "automation plan still holds unfinished attempts or unclosed run facts; retry the \
+         termination to finish cleanup before re-enabling the automation",
+        serde_json::json!({ "plan_id": plan_id, "reason": reason }),
+    )
 }
 
 pub async fn get_automation_enrollment(
@@ -2489,5 +2562,381 @@ mod tests {
         let terminated = ws_automation(&coding_store).expect("bound projection present");
         assert_eq!(terminated.owner, AutomationOwner::Server);
         assert!(terminated.terminated_at.is_some());
+    }
+
+    // ─── REQ-WIGA-09 修订：terminated 人工重新开启的收口门 ───
+
+    /// 收口门红测：绑定 plan 仍有未终结 attempt（未收口运行事实）→ 409
+    /// `automation_plan_cleanup_required` 零副作用（enrollment 仍 terminated、
+    /// revision 不变、plan 绑定不被解绑）。
+    #[tokio::test]
+    async fn terminated_reenable_blocks_on_unfinished_attempts() {
+        use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+        use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        let enabled =
+            response_json(put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await).await;
+        let revision = enabled["policy_revision"].as_u64().unwrap();
+        let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let bound = response_json(
+            post_binding(
+                &app,
+                serde_json::json!({
+                    "expected_revision": revision,
+                    "plan_id": plan_id,
+                    "session_id": session_id,
+                }),
+            )
+            .await,
+        )
+        .await;
+        let bound_revision = bound["policy_revision"].as_u64().unwrap();
+
+        // 活跃 attempt（Created）归属该 plan：未收口运行事实。
+        let coding_store = CodingAttemptStore::new(fixture.paths.clone());
+        let attempt = coding_store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: crate::product::models::provider::ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+            })
+            .unwrap();
+        let mut linked = attempt.clone();
+        linked.work_item_group_id = Some(plan_id.clone());
+        coding_store.write_coding_attempt_for_test(&linked).unwrap();
+
+        // 只走 T1 store CAS 终止（模拟引擎侧收口失败的真实 durable 状态：
+        // terminated 落盘但活跃 attempt 未被收口）。REST 终止的成功路径会把
+        // 每个 attempt 终结，本用例专测收口门对「未终结运行事实」的拦截。
+        let store = IssueAutomationStore::new(fixture.paths.clone());
+        store
+            .terminate_plan(
+                PROJECT_ID,
+                ISSUE_ID,
+                crate::product::models::automation::EnrollmentTerminationRequest {
+                    command_id: "cmd-reenable-gate-terminate".to_string(),
+                    expected_enrollment_id: enabled["enrollment_id"].as_str().unwrap().to_string(),
+                    expected_policy_revision: bound_revision,
+                    reason: "termination cleanup not finished".to_string(),
+                },
+            )
+            .unwrap();
+        let terminated = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+        assert!(terminated.terminated_at.is_some());
+        let terminated_revision = terminated.policy_revision;
+
+        let mut reenable = enrollment_body(&fixture, 1, 1);
+        reenable["expected_revision"] = serde_json::json!(terminated_revision);
+        reenable["command"]["command_id"] = serde_json::json!("cmd-reenable-gate-1");
+        let response = put_enrollment(&app, reenable).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let payload = response_json(response).await;
+        assert_eq!(payload["code"], "automation_plan_cleanup_required");
+        assert_eq!(payload["details"]["plan_id"], plan_id);
+
+        // 零副作用：durable 记录仍是终止态，plan 绑定未被解绑、revision 未动。
+        let current = IssueAutomationStore::new(fixture.paths.clone())
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap();
+        assert!(current.terminated_at.is_some());
+        assert!(!current.enabled);
+        assert_eq!(current.policy_revision, terminated_revision);
+        assert_eq!(current.plan_id.as_deref(), Some(plan_id.as_str()));
+    }
+
+    /// 收口门放行红测：绑定实体已删（墓碑）且无未终结 attempt（仅终态
+    /// attempt）→ 允许人工显式取代，取代后 terminated_at 清空、revision+1、
+    /// plan/session 解绑。
+    #[tokio::test]
+    async fn terminated_reenable_succeeds_when_bound_entity_is_tombstoned() {
+        use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+        use crate::product::coding_models::CodingAttemptStatus;
+        use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        let enabled =
+            response_json(put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await).await;
+        let revision = enabled["policy_revision"].as_u64().unwrap();
+        let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let bound = response_json(
+            post_binding(
+                &app,
+                serde_json::json!({
+                    "expected_revision": revision,
+                    "plan_id": plan_id,
+                    "session_id": session_id,
+                }),
+            )
+            .await,
+        )
+        .await;
+        let bound_revision = bound["policy_revision"].as_u64().unwrap();
+
+        // 终态 attempt（Completed）不构成未收口运行事实。
+        let coding_store = CodingAttemptStore::new(fixture.paths.clone());
+        let attempt = coding_store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_0001".to_string(),
+                base_branch: "HEAD".to_string(),
+                branch_name: "aria/work-items/work_item_0001/attempt-1".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: crate::product::models::provider::ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 1,
+            })
+            .unwrap();
+        let mut linked = attempt.clone();
+        linked.work_item_group_id = Some(plan_id.clone());
+        linked.status = CodingAttemptStatus::Completed;
+        coding_store.write_coding_attempt_for_test(&linked).unwrap();
+
+        let terminate = post_terminate(
+            &app,
+            &serde_json::json!({
+                "command_id": "cmd-reenable-tombstone-terminate",
+                "expected_enrollment_id": enabled["enrollment_id"],
+                "expected_policy_revision": bound_revision,
+                "confirmed": true,
+            }),
+        )
+        .await;
+        assert_eq!(terminate.status(), StatusCode::OK);
+        let terminated = IssueAutomationStore::new(fixture.paths.clone())
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap();
+        assert!(terminated.terminated_at.is_some());
+        let terminated_revision = terminated.policy_revision;
+
+        // 绑定实体删除（墓碑）：plan/session 记录消失，attempt 仍是终态。
+        fixture
+            .lifecycle
+            .delete_issue_work_item_plan(PROJECT_ID, ISSUE_ID, &plan_id)
+            .unwrap();
+
+        let mut reenable = enrollment_body(&fixture, 1, 1);
+        reenable["expected_revision"] = serde_json::json!(terminated_revision);
+        reenable["command"]["command_id"] = serde_json::json!("cmd-reenable-tombstone-1");
+        let response = put_enrollment(&app, reenable).await;
+        let status = response.status();
+        let payload = response_json(response).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "tombstoned binding without unfinished attempts must allow re-enable: {payload:?}"
+        );
+        assert!(payload["enabled"].as_bool().unwrap());
+        assert!(payload["terminated_at"].is_null());
+        assert_eq!(
+            payload["policy_revision"].as_u64().unwrap(),
+            terminated_revision + 1
+        );
+        assert!(
+            payload["plan_id"].is_null(),
+            "supersede unbinds the old plan"
+        );
+        assert!(payload["session_id"].is_null());
+    }
+
+    /// 主路径红测：REST 终止（收口成功）后，人工携带稳定 command_id 的
+    /// Enable 以同 enrollment_id 取代重开——200、terminated_at 清空、
+    /// revision+1、plan/session 解绑、binding 换代、账本留痕；同命令同
+    /// payload 重放返回首个 durable 结果（revision 不再 +1、账本不新增）。
+    #[tokio::test]
+    async fn terminated_reenable_after_clean_termination_succeeds_and_replays() {
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        let enabled =
+            response_json(put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await).await;
+        let revision = enabled["policy_revision"].as_u64().unwrap();
+        let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let bound = response_json(
+            post_binding(
+                &app,
+                serde_json::json!({
+                    "expected_revision": revision,
+                    "plan_id": plan_id,
+                    "session_id": session_id,
+                }),
+            )
+            .await,
+        )
+        .await;
+        let bound_revision = bound["policy_revision"].as_u64().unwrap();
+
+        let terminate = post_terminate(
+            &app,
+            &serde_json::json!({
+                "command_id": "cmd-reenable-clean-terminate",
+                "expected_enrollment_id": enabled["enrollment_id"],
+                "expected_policy_revision": bound_revision,
+                "confirmed": true,
+            }),
+        )
+        .await;
+        assert_eq!(terminate.status(), StatusCode::OK);
+        let terminate_payload = response_json(terminate).await;
+        assert_eq!(terminate_payload["outcome"], "terminated");
+
+        let store = IssueAutomationStore::new(fixture.paths.clone());
+        let terminated = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+        let terminated_revision = terminated.policy_revision;
+
+        let mut reenable = enrollment_body(&fixture, 1, 1);
+        reenable["expected_revision"] = serde_json::json!(terminated_revision);
+        reenable["command"]["command_id"] = serde_json::json!("cmd-reenable-clean-1");
+        let response = put_enrollment(&app, reenable.clone()).await;
+        let status = response.status();
+        let payload = response_json(response).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "clean termination allows re-enable: {payload:?}"
+        );
+        assert!(payload["enabled"].as_bool().unwrap());
+        assert!(payload["terminated_at"].is_null());
+        assert_eq!(
+            payload["policy_revision"].as_u64().unwrap(),
+            terminated_revision + 1
+        );
+        assert_eq!(payload["enrollment_id"], enabled["enrollment_id"]);
+        assert!(payload["plan_id"].is_null());
+        assert!(payload["session_id"].is_null());
+        assert_eq!(
+            payload["binding_history"]["current"]["binding_version"]
+                .as_u64()
+                .unwrap(),
+            2
+        );
+        let ledger_entries: Vec<_> = payload["command_ledger"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["command_id"] == "cmd-reenable-clean-1")
+            .collect();
+        assert_eq!(ledger_entries.len(), 1);
+        assert_eq!(ledger_entries[0]["state"], "accepted");
+
+        // 同命令同 payload 重放：200 首个 durable 结果，零写入。
+        let replay = put_enrollment(&app, reenable).await;
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay_payload = response_json(replay).await;
+        assert_eq!(
+            replay_payload, payload,
+            "replay returns the durable record unchanged"
+        );
+    }
+
+    /// 未收口运行事实红测：terminated 记录仍挂着 `stage=termination` 的
+    /// 未收口事实（终止清理失败的真实产物）→ 409
+    /// `automation_plan_cleanup_required` 零副作用；该事实 resolve 后即可
+    /// 重新开启。
+    #[tokio::test]
+    async fn terminated_reenable_blocks_on_unclosed_run_facts() {
+        use crate::product::models::automation::{
+            AutomationAttentionFact, AutomationAttentionKind, AutomationAttentionStage,
+        };
+
+        let fixture = seed_fixture(1, true);
+        let app = fixture.router();
+        let enabled =
+            response_json(put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await).await;
+        let revision = enabled["policy_revision"].as_u64().unwrap();
+        let (plan_id, session_id) = create_plan_and_session(&fixture, RunPolicy::Interactive);
+        let bound = response_json(
+            post_binding(
+                &app,
+                serde_json::json!({
+                    "expected_revision": revision,
+                    "plan_id": plan_id,
+                    "session_id": session_id,
+                }),
+            )
+            .await,
+        )
+        .await;
+        let bound_revision = bound["policy_revision"].as_u64().unwrap();
+
+        let terminate = post_terminate(
+            &app,
+            &serde_json::json!({
+                "command_id": "cmd-reenable-fact-terminate",
+                "expected_enrollment_id": enabled["enrollment_id"],
+                "expected_policy_revision": bound_revision,
+                "confirmed": true,
+            }),
+        )
+        .await;
+        assert_eq!(terminate.status(), StatusCode::OK);
+
+        // 终止清理失败的真实产物：绑定实体仍在，挂着 stage=termination 事实。
+        let store = IssueAutomationStore::new(fixture.paths.clone());
+        let terminated = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+        let binding = terminated.binding_history.as_ref().unwrap().current.clone();
+        let fact_key = format!("{plan_id}:cmd-reenable-fact-terminate:termination_cleanup_failed");
+        store
+            .upsert_automation_attention_fact(
+                PROJECT_ID,
+                ISSUE_ID,
+                &binding,
+                AutomationAttentionFact {
+                    key: fact_key.clone(),
+                    kind: AutomationAttentionKind::AutomationFailed,
+                    stage: AutomationAttentionStage::Termination,
+                    plan_id: Some(plan_id.clone()),
+                    session_id: Some(session_id.clone()),
+                    attempt_id: None,
+                    reason_code: "termination_cleanup_failed".to_string(),
+                    occurred_at: "2026-10-16T00:00:00Z".to_string(),
+                    choice_id: None,
+                    gate_id: None,
+                },
+            )
+            .unwrap();
+        let terminated_revision = terminated.policy_revision;
+
+        let mut reenable = enrollment_body(&fixture, 1, 1);
+        reenable["expected_revision"] = serde_json::json!(terminated_revision);
+        reenable["command"]["command_id"] = serde_json::json!("cmd-reenable-fact-1");
+        let response = put_enrollment(&app, reenable.clone()).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let payload = response_json(response).await;
+        assert_eq!(payload["code"], "automation_plan_cleanup_required");
+        assert_eq!(payload["details"]["reason"], "unclosed_run_facts");
+        let current = store.get(PROJECT_ID, ISSUE_ID).unwrap().unwrap();
+        assert!(current.terminated_at.is_some());
+        assert_eq!(current.policy_revision, terminated_revision);
+
+        // 收口后即可重新开启。
+        store
+            .resolve_automation_attention_fact(PROJECT_ID, ISSUE_ID, &binding, &fact_key)
+            .unwrap();
+        let response = put_enrollment(&app, reenable).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert!(payload["enabled"].as_bool().unwrap());
+        assert!(payload["terminated_at"].is_null());
     }
 }

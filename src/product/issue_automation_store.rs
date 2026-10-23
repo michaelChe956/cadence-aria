@@ -7,17 +7,19 @@
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
+use crate::product::logical_codebase::EnrollmentTarget;
 use crate::product::models::automation::{
     AutomationAttentionFact, EnrollmentBindingHistory, EnrollmentBindingIdentity,
-    EnrollmentCommandResult, EnrollmentError, EnrollmentRebindRequest, EnrollmentRebindResult,
-    EnrollmentTerminationRequest, EnrollmentTerminationResult, EnrollmentWriteCommand,
-    IssueAutomationEnrollment, OperationState, PlanGenerationIntent, PlanGenerationPhase,
-    PreparedPlanIntent,
+    EnrollmentCommandResult, EnrollmentError, EnrollmentOptions, EnrollmentRebindRequest,
+    EnrollmentRebindResult, EnrollmentSource, EnrollmentTerminationRequest,
+    EnrollmentTerminationResult, EnrollmentWriteCommand, IssueAutomationEnrollment, OperationState,
+    PlanGenerationIntent, PlanGenerationPhase, PreparedPlanIntent,
 };
 
 /// issue 级 enrollment 的唯一持久入口；所有写路径都在目标 JSON 的伴生文件锁内
@@ -37,6 +39,9 @@ enum CasResolution {
     Conflict { current_revision: Option<u64> },
     /// 目标 enrollment 不存在（Disable/绑定的前置失败）。
     Missing,
+    /// REQ-WIGA-09 修订：terminated 人工重新开启缺稳定 command_id（422 面，
+    /// 其余门禁不满足仍走 Conflict）。
+    InvalidScope(String),
 }
 
 impl IssueAutomationStore {
@@ -89,11 +94,13 @@ impl IssueAutomationStore {
         // 原样通过。
         let command = match command {
             EnrollmentWriteCommand::Enable {
+                command_id,
                 selection_key,
                 source,
                 options,
                 target,
             } => EnrollmentWriteCommand::Enable {
+                command_id,
                 selection_key,
                 source,
                 options: options.normalized_for_enrollment_freeze(),
@@ -104,15 +111,83 @@ impl IssueAutomationStore {
         let resolution = with_exclusive_lock(&path, || {
             let existing = read_optional_enrollment(&path)?;
             let resolution = match (&existing, &command) {
-                // 批 2 T1（REQ-WIGA-09）：terminated 是不可恢复终态——
-                // Enable（含同 payload 幂等面）/Disable 一律 Conflict 零副
+                // REQ-WIGA-09 修订：terminated 的人工显式 Enable 取代——
+                // 判定与落盘见 `supersede_terminated_enrollment`（命令账本
+                // 先判、稳定 command_id、revision 线性化、授权 payload
+                // 逐字段相等）。自动路径无从构造显式 revision＋command_id
+                // 的 Enable，本分支只可能由人工入口触达。
+                (
+                    Some(saved),
+                    EnrollmentWriteCommand::Enable {
+                        command_id,
+                        selection_key,
+                        source,
+                        options,
+                        target,
+                    },
+                ) if saved.terminated_at.is_some() => supersede_terminated_enrollment(
+                    &path,
+                    saved,
+                    SupersedeEnableRequest {
+                        command_id: command_id.as_deref(),
+                        selection_key,
+                        source,
+                        options,
+                        target,
+                        expected_revision,
+                    },
+                )?,
+                // 批 2 T1（REQ-WIGA-09）：terminated 对其余写命令（含缺
+                // 门禁的 Enable——由取代分支内部拒绝）一律 Conflict 零副
                 // 作用；终止命令重放只走 terminate_plan 的账本分支。
                 (Some(saved), _) if saved.terminated_at.is_some() => CasResolution::Conflict {
                     current_revision: Some(saved.policy_revision),
                 },
+                // REQ-WIGA-09 修订：Enable 命令身份的账本重放面——同
+                // command_id 命中命令账本时先判：同 payload（含
+                // expected_revision）返回首次 durable 结果的当前投影
+                //（零写入），异 payload fail-closed（不猜哪个是"真的"）。
+                // 先于幂等/revision 分支：取代落盘后的重放携带的是取代
+                // 时的旧 revision。
                 (
                     Some(saved),
                     EnrollmentWriteCommand::Enable {
+                        command_id: Some(command_id),
+                        selection_key,
+                        source,
+                        options,
+                        target,
+                    },
+                ) if saved
+                    .command_ledger
+                    .iter()
+                    .any(|entry| entry.command_id == *command_id) =>
+                {
+                    let digest = enable_command_payload_digest(
+                        command_id,
+                        selection_key,
+                        source,
+                        options,
+                        target,
+                        expected_revision,
+                    );
+                    let first = saved
+                        .command_ledger
+                        .iter()
+                        .find(|entry| entry.command_id == *command_id)
+                        .expect("ledger hit is guaranteed by the arm guard");
+                    if first.payload_digest == digest {
+                        CasResolution::Unchanged(saved.clone())
+                    } else {
+                        CasResolution::Conflict {
+                            current_revision: Some(saved.policy_revision),
+                        }
+                    }
+                }
+                (
+                    Some(saved),
+                    EnrollmentWriteCommand::Enable {
+                        command_id: _,
                         selection_key,
                         source,
                         options,
@@ -135,6 +210,7 @@ impl IssueAutomationStore {
                 (
                     Some(saved),
                     EnrollmentWriteCommand::Enable {
+                        command_id: _,
                         selection_key,
                         source,
                         options,
@@ -159,7 +235,7 @@ impl IssueAutomationStore {
                     CasResolution::Unchanged(saved.clone())
                 }
                 (None, EnrollmentWriteCommand::Disable) => CasResolution::Missing,
-                _ => apply_revision_and_write(&path, existing, command)?,
+                _ => apply_revision_and_write(&path, existing, command, expected_revision)?,
             };
             Ok(resolution)
         })?;
@@ -913,6 +989,7 @@ fn resolve(resolution: CasResolution) -> Result<IssueAutomationEnrollment, Enrol
             Err(EnrollmentError::Conflict { current_revision })
         }
         CasResolution::Missing => Err(EnrollmentError::NotFound),
+        CasResolution::InvalidScope(reason) => Err(EnrollmentError::InvalidScope(reason)),
     }
 }
 
@@ -971,6 +1048,8 @@ fn ensure_resolution_from_cas(resolution: CasResolution) -> EnsurePlanResolution
             EnsurePlanResolution::Conflict { current_revision }
         }
         CasResolution::Missing => EnsurePlanResolution::Missing,
+        // bind_plan_ids_locked 不产生 InvalidScope；此处仅保持穷尽映射。
+        CasResolution::InvalidScope(reason) => EnsurePlanResolution::InvalidScope(reason),
     }
 }
 
@@ -1270,12 +1349,14 @@ fn apply_revision_and_write(
     path: &Path,
     existing: Option<IssueAutomationEnrollment>,
     command: EnrollmentWriteCommand,
+    expected_revision: Option<u64>,
 ) -> Result<CasResolution, ProductStoreError> {
     let now = now_rfc3339();
     let next = match (existing, command) {
         (
             None,
             EnrollmentWriteCommand::Enable {
+                command_id,
                 selection_key,
                 source,
                 options,
@@ -1289,6 +1370,19 @@ fn apply_revision_and_write(
             // plan/session 尚未绑定（绑定写入时补全 current 身份）。
             let binding_history =
                 initial_binding_history(&enrollment_id, None, None, &source, &target, &options);
+            // REQ-WIGA-09 修订：显式 command_id 的 Enable 进命令账本
+            //（人工动作留痕＋同命令重放面）；缺省不进（旧客户端行为）。
+            let command_ledger = enable_ledger_entry(
+                command_id.as_deref(),
+                &selection_key,
+                &source,
+                &options,
+                &target,
+                expected_revision,
+                1,
+            )
+            .into_iter()
+            .collect();
             IssueAutomationEnrollment {
                 enrollment_id,
                 selection_key,
@@ -1305,7 +1399,7 @@ fn apply_revision_and_write(
                 updated_at: now,
                 target: Some(target),
                 binding_history: Some(binding_history),
-                command_ledger: Vec::new(),
+                command_ledger,
                 // 批 2 N0：首次 Enable 无终止、无待处理事实；terminated_at
                 // 写入归 T1 终止 CAS。
                 terminated_at: None,
@@ -1318,6 +1412,7 @@ fn apply_revision_and_write(
         (
             Some(mut saved),
             EnrollmentWriteCommand::Enable {
+                command_id,
                 selection_key,
                 source,
                 options,
@@ -1345,6 +1440,23 @@ fn apply_revision_and_write(
                     &target,
                     &options,
                 ));
+            }
+            // REQ-WIGA-09 修订：显式 command_id 的重开同样进命令账本
+            //（binding_version 沿当前代，重开不换代）。
+            if let Some(entry) = enable_ledger_entry(
+                command_id.as_deref(),
+                &selection_key,
+                &source,
+                &options,
+                &target,
+                expected_revision,
+                saved
+                    .binding_history
+                    .as_ref()
+                    .map(|history| history.current.binding_version)
+                    .unwrap_or_default(),
+            ) {
+                saved.command_ledger.push(entry);
             }
             saved.selection_key = selection_key;
             saved.source = source;
@@ -1390,6 +1502,211 @@ fn initial_binding_history(
         },
         previous: Vec::new(),
     }
+}
+
+/// REQ-WIGA-09 修订：Enable 命令（人工入口）的稳定 payload 摘要——
+/// `command_id`＋selection_key＋source＋options＋target＋expected_revision
+/// 全部参与；同一命令的异 payload/异 revision 必然产生不同 digest
+///（命令账本按此 fail-closed）。取代与常规 Enable 留痕共用同一口径。
+fn enable_command_payload_digest(
+    command_id: &str,
+    selection_key: &str,
+    source: &EnrollmentSource,
+    options: &EnrollmentOptions,
+    target: &EnrollmentTarget,
+    expected_revision: Option<u64>,
+) -> String {
+    let payload = serde_json::json!({
+        "command_id": command_id,
+        "selection_key": selection_key,
+        "source": source,
+        "options": options,
+        "target": target,
+        "expected_revision": expected_revision,
+    });
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(payload.to_string().as_bytes())
+    )
+}
+
+/// REQ-WIGA-09 修订：显式 `command_id` 的 Enable 账目（Accepted＋提交时
+/// 的 binding_version）；缺省 `None` 返回 `None`（旧客户端不进账本）。
+fn enable_ledger_entry(
+    command_id: Option<&str>,
+    selection_key: &str,
+    source: &EnrollmentSource,
+    options: &EnrollmentOptions,
+    target: &EnrollmentTarget,
+    expected_revision: Option<u64>,
+    binding_version: u64,
+) -> Option<EnrollmentCommandResult> {
+    let command_id = command_id?;
+    Some(EnrollmentCommandResult {
+        command_id: command_id.to_string(),
+        payload_digest: enable_command_payload_digest(
+            command_id,
+            selection_key,
+            source,
+            options,
+            target,
+            expected_revision,
+        ),
+        state: OperationState::Accepted,
+        binding_version,
+    })
+}
+
+/// terminated 人工取代的 Enable 载荷（锁内传参分组）。
+struct SupersedeEnableRequest<'a> {
+    command_id: Option<&'a str>,
+    selection_key: &'a str,
+    source: &'a EnrollmentSource,
+    options: &'a EnrollmentOptions,
+    target: &'a EnrollmentTarget,
+    expected_revision: Option<u64>,
+}
+
+/// REQ-WIGA-09 修订：terminated 的人工显式 Enable 取代（compare_and_set
+/// 锁内）。判定顺序：命令账本先判（同 command 同 payload 幂等重放首次
+/// durable 结果的当前投影、异 payload fail-closed）→ 稳定 command_id
+///（缺 → InvalidScope，人工重新开启必须可留痕、可重放）→ revision 线性化
+///（必须显式等于当前 policy_revision）→ 授权不改写（source/options/target
+/// 与终止记录逐字段相等；selection_key 是新会话身份不比对；旧代无
+/// target 声明时按本次提交显式升级）。取代落盘：同 enrollment_id＋
+/// revision+1＋terminated_at 清空＋enabled=true＋plan/session 解绑＋
+/// prepare_intent_id 轮换（plan/session id 由它派生，沿用会让 ensure
+/// 幂等复用被终止的旧 plan 实体）＋binding 换代（旧代 current 进
+/// previous、binding_version+1、plan/session 空串占位）＋账本 Accepted
+/// 留痕＋attention 事实随旧授权退役＋旧代伴生意图/生成检查点删除（新链
+/// 由 ensure 重新派生，身份比对不再 fail-closed 卡死）。自动路径无从
+/// 构造本入口（生产唯一 Enable 调用方是人工 REST PUT）。
+fn supersede_terminated_enrollment(
+    path: &Path,
+    saved: &IssueAutomationEnrollment,
+    request: SupersedeEnableRequest<'_>,
+) -> Result<CasResolution, ProductStoreError> {
+    let SupersedeEnableRequest {
+        command_id,
+        selection_key,
+        source,
+        options,
+        target,
+        expected_revision,
+    } = request;
+    let Some(command_id) = command_id else {
+        return Ok(CasResolution::InvalidScope(
+            "re-enabling a terminated enrollment requires a stable command_id".to_string(),
+        ));
+    };
+    let digest = enable_command_payload_digest(
+        command_id,
+        selection_key,
+        source,
+        options,
+        target,
+        expected_revision,
+    );
+    if let Some(ledger) = saved
+        .command_ledger
+        .iter()
+        .find(|entry| entry.command_id == command_id)
+    {
+        return Ok(if ledger.payload_digest == digest {
+            CasResolution::Unchanged(saved.clone())
+        } else {
+            CasResolution::Conflict {
+                current_revision: Some(saved.policy_revision),
+            }
+        });
+    }
+    if expected_revision != Some(saved.policy_revision) {
+        return Ok(CasResolution::Conflict {
+            current_revision: Some(saved.policy_revision),
+        });
+    }
+    // 授权不改写：与终止记录逐字段相等；旧代无声明（legacy）按本次提交
+    // 显式升级（与既有"旧 enrollment 重开时显式升级 target"语义连续）。
+    let payload_drifted = &saved.source != source
+        || &saved.options != options
+        || saved
+            .target
+            .as_ref()
+            .is_some_and(|declared| *declared != *target);
+    if payload_drifted {
+        return Ok(CasResolution::Conflict {
+            current_revision: Some(saved.policy_revision),
+        });
+    }
+
+    let now = now_rfc3339();
+    let mut next = saved.clone();
+    // 新链身份：prepare_intent_id 轮换（ensure 派生 plan/session 的唯一
+    // 源）；enrollment 身份与 created_at 保留（同记录取代）。
+    next.prepare_intent_id = Uuid::new_v4().to_string();
+    next.selection_key = selection_key.to_string();
+    next.source = source.clone();
+    next.options = options.clone();
+    next.target = Some(target.clone());
+    next.enabled = true;
+    next.terminated_at = None;
+    next.policy_revision += 1;
+    next.updated_at = now;
+    next.plan_id = None;
+    next.session_id = None;
+    next.attention_facts = Vec::new();
+    // binding 换代：旧代 current 追加 previous（只读可追溯）；新代以本次
+    // 授权重建（plan/session 空串占位，绑定写入时补全）。
+    let mut previous = saved
+        .binding_history
+        .as_ref()
+        .map(|history| history.previous.clone())
+        .unwrap_or_default();
+    let binding_version = saved
+        .binding_history
+        .as_ref()
+        .map(|history| history.current.binding_version + 1)
+        .unwrap_or(1);
+    if let Some(history) = saved.binding_history.as_ref() {
+        previous.push(history.current.clone());
+    }
+    next.binding_history = Some(EnrollmentBindingHistory {
+        current: EnrollmentBindingIdentity {
+            binding_version,
+            enrollment_id: saved.enrollment_id.clone(),
+            plan_id: String::new(),
+            session_id: String::new(),
+            source: source.clone(),
+            target: target.clone(),
+            author_provider: options.author_provider.clone(),
+            reviewer_provider: options.reviewer_provider.clone(),
+        },
+        previous,
+    });
+    next.command_ledger.push(EnrollmentCommandResult {
+        command_id: command_id.to_string(),
+        payload_digest: digest,
+        state: OperationState::Accepted,
+        binding_version,
+    });
+    // 旧代伴生意图/生成检查点随旧授权退役：先删后写（崩溃窗口最多留下
+    // "无意图文件的 terminated 记录"，重试取代幂等收敛；反向窗口被
+    // write_json 的原子 rename 消除）。
+    for stale in [
+        path.with_file_name("automation-plan-intent.json"),
+        path.with_file_name("automation-generation-intent.json"),
+    ] {
+        if stale.metadata().is_ok() {
+            std::fs::remove_file(&stale).map_err(|error| {
+                ProductStoreError::Io(format!(
+                    "remove superseded automation intent {}: {error}",
+                    stale.display()
+                ))
+            })?;
+        }
+    }
+    write_json(path, &next)?;
+    Ok(CasResolution::Applied(next))
 }
 
 fn now_rfc3339() -> String {

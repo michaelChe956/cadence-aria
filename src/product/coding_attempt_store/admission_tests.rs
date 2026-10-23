@@ -1220,6 +1220,7 @@
                 TERMINATED_ISSUE_ID,
                 None,
                 crate::product::models::automation::EnrollmentWriteCommand::Enable {
+                    command_id: None,
                     selection_key: "human-choice-1".to_string(),
                     source: crate::product::models::automation::EnrollmentSource {
                         stories: vec![crate::product::models::automation::SourceRevisionRef {

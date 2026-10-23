@@ -63,11 +63,26 @@ fn enable_with_options(
 ) -> EnrollmentWriteCommand {
     let target = target_logical_at(repository);
     EnrollmentWriteCommand::Enable {
+        command_id: None,
         selection_key: selection_key.into(),
         source: source(),
         options,
         target,
     }
+}
+
+/// REQ-WIGA-09 修订：terminated 人工重新开启（取代）命令——稳定
+/// `command_id`＋新 selection_key；授权 payload 与 `enable` 同源
+///（source/options/target 与首启一致，满足逐字段相等约束）。
+fn reenable(command_id: &str, selection_key: &str) -> EnrollmentWriteCommand {
+    let mut command = enable(selection_key, logical_repo(1));
+    if let EnrollmentWriteCommand::Enable {
+        command_id: slot, ..
+    } = &mut command
+    {
+        *slot = Some(command_id.to_string());
+    }
+    command
 }
 
 fn assert_conflict(error: crate::product::models::automation::EnrollmentError, expected: u64) {
@@ -1368,8 +1383,9 @@ fn issue_automation_store_terminated_enrollment_is_irrecoverable() {
         .unwrap();
     let terminated = store.get("project_1", "issue_1").unwrap().unwrap();
 
-    // Enable（与原 payload 完全一致也不可重开）→ Conflict 零副作用。
-    assert_conflict(
+    // 缺稳定 command_id 的隐式 Enable → InvalidScope（422 面）零副作用；
+    // 人工显式取代（带 command_id）见取代专项红测。
+    assert_invalid_scope(
         store
             .compare_and_set(
                 "project_1",
@@ -1378,7 +1394,6 @@ fn issue_automation_store_terminated_enrollment_is_irrecoverable() {
                 enable("human-choice-1", logical_repo(1)),
             )
             .unwrap_err(),
-        terminated.policy_revision,
     );
     // Disable 也拒（terminated 即终态，不再接受任何写命令）。
     assert_conflict(
@@ -1468,6 +1483,386 @@ fn issue_automation_store_terminated_enrollment_is_irrecoverable() {
     store
         .resolve_automation_attention_fact("project_1", "issue_1", &binding, "termination_cleanup")
         .expect("terminated binding may still resolve facts");
+}
+
+/// 红测⑧（REQ-WIGA-09 修订）：自动路径（`ensure_plan_binding`＝reconcile
+/// 派生 plan/session 的唯一入口）不得复活 terminated enrollment——即使
+/// 人工取代入口已放开，自动链仍 Conflict 零副作用：create 回调不被调用
+///（无自愈循环）、不落绑定、revision 不动。
+#[test]
+fn issue_automation_store_terminated_enrollment_blocks_automatic_chain() {
+    let (_tmp, store, _binding, revision) = bound_enrollment_with_binding();
+    let enrollment = store.get("project_1", "issue_1").unwrap().unwrap();
+    store
+        .terminate_plan(
+            "project_1",
+            "issue_1",
+            EnrollmentTerminationRequest {
+                command_id: "terminate-command-auto".to_string(),
+                expected_enrollment_id: enrollment.enrollment_id.clone(),
+                expected_policy_revision: revision,
+                reason: "user requested termination".to_string(),
+            },
+        )
+        .unwrap();
+    let terminated = store.get("project_1", "issue_1").unwrap().unwrap();
+
+    let creates = std::sync::atomic::AtomicUsize::new(0);
+    assert_conflict(
+        store
+            .ensure_plan_binding("project_1", "issue_1", &terminated.enrollment_id, |_, _| {
+                creates.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap_err(),
+        terminated.policy_revision,
+    );
+    assert_eq!(
+        creates.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "automatic chain must not derive a fresh plan for a terminated enrollment"
+    );
+    assert_eq!(
+        store.get("project_1", "issue_1").unwrap().unwrap(),
+        terminated,
+        "automatic reconcile leaves the terminated record untouched"
+    );
+}
+
+/// 红测⑤（REQ-WIGA-09 修订）：terminated 的人工显式 Enable 取代——同
+/// enrollment_id、policy_revision+1、terminated_at 清空、plan/session 解绑、
+/// prepare_intent_id 轮换（新链绝不复用被终止 plan）、binding 换代（旧代
+/// current 进 previous、binding_version+1、plan/session 空串占位）、命令
+/// 账本 Accepted 留痕；旧代伴生意图文件随旧授权退役。
+#[test]
+fn issue_automation_store_terminated_human_enable_supersedes_and_ledgers() {
+    let (tmp, store, binding, revision) = bound_enrollment_with_binding();
+    let enrollment = store.get("project_1", "issue_1").unwrap().unwrap();
+    // 终止前留一个旧代伴生意图文件：取代后必须退役（否则 ensure 身份
+    // 比对 fail-closed 卡死新链）。
+    let issue_root = ProductAppPaths::new(tmp.path()).issue_root("project_1", "issue_1");
+    let target = enrollment.target.clone().expect("fixture declares target");
+    write_json(
+        &issue_root.join("automation-plan-intent.json"),
+        &crate::product::models::automation::PreparedPlanIntent::from_enrollment(
+            &enrollment,
+            &target,
+        ),
+    )
+    .unwrap();
+    write_json(
+        &issue_root.join("automation-generation-intent.json"),
+        &crate::product::models::automation::PlanGenerationIntent {
+            enrollment_id: enrollment.enrollment_id.clone(),
+            action_key: crate::product::models::automation::PlanGenerationIntent::action_key_for(
+                &enrollment.enrollment_id,
+                "plan_0001",
+            ),
+            plan_id: "plan_0001".to_string(),
+            session_id: "session_0001".to_string(),
+            source: enrollment.source.clone(),
+            options: enrollment.options.clone(),
+            target: target.clone(),
+            phase: crate::product::models::automation::PlanGenerationPhase::Claimed,
+        },
+    )
+    .unwrap();
+    store
+        .terminate_plan(
+            "project_1",
+            "issue_1",
+            EnrollmentTerminationRequest {
+                command_id: "terminate-command-1".to_string(),
+                expected_enrollment_id: enrollment.enrollment_id.clone(),
+                expected_policy_revision: revision,
+                reason: "user requested termination".to_string(),
+            },
+        )
+        .unwrap();
+    let terminated = store.get("project_1", "issue_1").unwrap().unwrap();
+    assert!(terminated.terminated_at.is_some());
+
+    // 人工显式取代：稳定 command_id＋新 selection_key＋当前 revision＋
+    // 与终止记录逐字段相等的 source/options/target。
+    let replaced = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            Some(terminated.policy_revision),
+            reenable("reenable-command-1", "human-choice-2"),
+        )
+        .expect("human enable supersedes the terminated enrollment");
+    assert!(replaced.enabled);
+    assert_eq!(replaced.terminated_at, None);
+    assert_eq!(replaced.policy_revision, terminated.policy_revision + 1);
+    assert_eq!(
+        replaced.enrollment_id, terminated.enrollment_id,
+        "supersede keeps the enrollment identity"
+    );
+    assert_ne!(
+        replaced.prepare_intent_id, terminated.prepare_intent_id,
+        "prepare intent must rotate so the fresh chain never reuses the terminated plan"
+    );
+    assert_eq!(replaced.plan_id, None, "superseded plan binding is cleared");
+    assert_eq!(replaced.session_id, None);
+    assert!(
+        replaced.attention_facts.is_empty(),
+        "superseded attention facts are retired with the old authorization"
+    );
+    let history = replaced
+        .binding_history
+        .as_ref()
+        .expect("binding history survives the supersede");
+    assert_eq!(history.current.binding_version, binding.binding_version + 1);
+    assert_eq!(history.current.enrollment_id, terminated.enrollment_id);
+    assert_eq!(history.current.plan_id, "");
+    assert_eq!(history.current.session_id, "");
+    assert!(
+        history
+            .previous
+            .iter()
+            .any(|old| old.binding_version == binding.binding_version
+                && old.plan_id == binding.plan_id),
+        "the superseded generation stays read-only in previous"
+    );
+    let ledger = replaced
+        .command_ledger
+        .iter()
+        .find(|entry| entry.command_id == "reenable-command-1")
+        .expect("the re-enable is ledgered");
+    assert_eq!(ledger.state, OperationState::Accepted);
+    assert_eq!(ledger.binding_version, binding.binding_version + 1);
+    // 旧代伴生意图/生成检查点退役：新链由 ensure 重新派生。
+    assert!(!issue_root.join("automation-plan-intent.json").exists());
+    assert!(
+        !issue_root
+            .join("automation-generation-intent.json")
+            .exists()
+    );
+    // durable 落盘核对。
+    assert_eq!(
+        store.get("project_1", "issue_1").unwrap().unwrap(),
+        replaced
+    );
+}
+
+/// 红测⑥（REQ-WIGA-09 修订）：取代的命令身份幂等与拒绝面——同
+/// command_id＋同 payload 重放返回首次 durable 结果（零写入、revision
+/// 不再 +1、账本不新增）；同 command_id 异 payload/异 expected_revision
+/// → Conflict；缺 command_id → InvalidScope；expected_revision None/stale
+/// 或 source/options/target 不等或 Disable → Conflict 零副作用。
+#[test]
+fn issue_automation_store_terminated_reenable_replay_and_rejections() {
+    let (_tmp, store, _binding, revision) = bound_enrollment_with_binding();
+    let enrollment = store.get("project_1", "issue_1").unwrap().unwrap();
+    store
+        .terminate_plan(
+            "project_1",
+            "issue_1",
+            EnrollmentTerminationRequest {
+                command_id: "terminate-command-1".to_string(),
+                expected_enrollment_id: enrollment.enrollment_id.clone(),
+                expected_policy_revision: revision,
+                reason: "user requested termination".to_string(),
+            },
+        )
+        .unwrap();
+    let terminated = store.get("project_1", "issue_1").unwrap().unwrap();
+
+    // expected_revision=None → Conflict（人工显式必须携带当前 revision）。
+    assert_conflict(
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                None,
+                reenable("reenable-command-1", "human-choice-2"),
+            )
+            .unwrap_err(),
+        terminated.policy_revision,
+    );
+    // stale revision → Conflict。
+    assert_conflict(
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(terminated.policy_revision - 1),
+                reenable("reenable-command-1", "human-choice-2"),
+            )
+            .unwrap_err(),
+        terminated.policy_revision,
+    );
+    // source 漂移 → Conflict（改授权须先同 payload 取代再 Disable→Enable）。
+    let mut drifted_source = reenable("reenable-command-1", "human-choice-2");
+    if let EnrollmentWriteCommand::Enable { source, .. } = &mut drifted_source {
+        source.stories.push(SourceRevisionRef {
+            id: "story_spec_0002".into(),
+            version: 1,
+        });
+    }
+    assert_conflict(
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(terminated.policy_revision),
+                drifted_source,
+            )
+            .unwrap_err(),
+        terminated.policy_revision,
+    );
+    // options 漂移 → Conflict。
+    let mut drifted_options = reenable("reenable-command-1", "human-choice-2");
+    if let EnrollmentWriteCommand::Enable { options, .. } = &mut drifted_options {
+        options.review_rounds = 9;
+    }
+    assert_conflict(
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(terminated.policy_revision),
+                drifted_options,
+            )
+            .unwrap_err(),
+        terminated.policy_revision,
+    );
+    // target 漂移 → Conflict。
+    let mut drifted_target = reenable("reenable-command-1", "human-choice-2");
+    if let EnrollmentWriteCommand::Enable { target, .. } = &mut drifted_target {
+        *target = target_logical_at(logical_repo(2));
+    }
+    assert_conflict(
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(terminated.policy_revision),
+                drifted_target,
+            )
+            .unwrap_err(),
+        terminated.policy_revision,
+    );
+    // 上述拒绝全部零副作用。
+    assert_eq!(
+        store.get("project_1", "issue_1").unwrap().unwrap(),
+        terminated
+    );
+
+    // 首次取代成功。
+    let replaced = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            Some(terminated.policy_revision),
+            reenable("reenable-command-1", "human-choice-2"),
+        )
+        .expect("first supersede applies");
+    // 同 command_id＋同 payload＋同 expected_revision 重放 → 首次 durable
+    // 结果的当前投影（零写入；不再 +1、账本不新增）。
+    let replay = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            Some(terminated.policy_revision),
+            reenable("reenable-command-1", "human-choice-2"),
+        )
+        .expect("same-command replay is idempotent");
+    assert_eq!(replay, replaced);
+    assert_eq!(
+        store.get("project_1", "issue_1").unwrap().unwrap(),
+        replaced,
+        "replay must not mutate the durable record"
+    );
+    // 同 command_id 异 payload（selection_key 属 payload）→ Conflict。
+    assert_conflict(
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(terminated.policy_revision),
+                reenable("reenable-command-1", "human-choice-3"),
+            )
+            .unwrap_err(),
+        replaced.policy_revision,
+    );
+    // 同 command_id 异 expected_revision → Conflict。
+    assert_conflict(
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(replaced.policy_revision),
+                reenable("reenable-command-1", "human-choice-2"),
+            )
+            .unwrap_err(),
+        replaced.policy_revision,
+    );
+    // durable 仍未被改写。
+    assert_eq!(
+        store.get("project_1", "issue_1").unwrap().unwrap(),
+        replaced
+    );
+}
+
+/// 红测⑦（REQ-WIGA-09 修订）：非 terminated 的 Enable 携带稳定
+/// command_id → 命令账本留痕且同命令同 payload 重放幂等（零写入）；
+/// 缺 command_id → 旧行为（成功、不进账本），旧客户端不受影响。
+#[test]
+fn issue_automation_store_enable_with_command_id_ledgers_outside_terminated() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 首次 Enable（另一 issue）携带 command_id → 成功且账本留痕。
+    let fresh = IssueAutomationStore::new(ProductAppPaths::new(tmp.path()));
+    let created = fresh
+        .compare_and_set(
+            "project_1",
+            "issue_2",
+            None,
+            reenable("enable-command-2", "human-choice-9"),
+        )
+        .expect("plain enable with a command_id still succeeds");
+    assert!(created.enabled);
+    assert!(
+        created
+            .command_ledger
+            .iter()
+            .any(|entry| entry.command_id == "enable-command-2"
+                && entry.state == OperationState::Accepted),
+        "explicit command_id is ledgered outside the terminated path"
+    );
+    // 同命令同 payload 重放 → 幂等返回首次 durable 结果，零写入。
+    let replay = fresh
+        .compare_and_set(
+            "project_1",
+            "issue_2",
+            None,
+            reenable("enable-command-2", "human-choice-9"),
+        )
+        .expect("same-command replay is idempotent");
+    assert_eq!(replay, created);
+    // 同命令异 payload → Conflict。
+    assert_conflict(
+        fresh
+            .compare_and_set(
+                "project_1",
+                "issue_2",
+                None,
+                reenable("enable-command-2", "human-choice-10"),
+            )
+            .unwrap_err(),
+        created.policy_revision,
+    );
+    // 缺 command_id 的既有路径（另一 issue）→ 成功且账本为空。
+    let legacy = fresh
+        .compare_and_set(
+            "project_1",
+            "issue_3",
+            None,
+            enable("human-choice-11", logical_repo(1)),
+        )
+        .expect("enable without command_id keeps the legacy behavior");
+    assert!(legacy.command_ledger.is_empty());
 }
 
 /// 红测③：缺失 enrollment 的终止 NotFound；普通 Disable→Enable 重开回归

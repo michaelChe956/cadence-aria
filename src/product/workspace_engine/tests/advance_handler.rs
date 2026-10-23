@@ -741,6 +741,7 @@ async fn retry_initialization_preserves_failed_record_and_attempt() {
             "issue_plan_0001",
             None,
             EnrollmentWriteCommand::Enable {
+                command_id: None,
                 selection_key: "selection_retry".to_string(),
                 source: EnrollmentSource {
                     stories: vec![SourceRevisionRef {

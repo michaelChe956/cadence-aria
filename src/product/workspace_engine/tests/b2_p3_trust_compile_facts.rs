@@ -212,6 +212,7 @@ fn b2_p3_enable_and_bind(
 ) -> IssueAutomationStore {
     let store = IssueAutomationStore::new(app_paths.clone());
     let command = EnrollmentWriteCommand::Enable {
+        command_id: None,
         selection_key: "b2-p3-selection".to_string(),
         source: EnrollmentSource {
             stories: vec![SourceRevisionRef {

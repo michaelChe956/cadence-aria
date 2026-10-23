@@ -460,6 +460,7 @@ async fn enrolled_start_coding_rejects_stale_identity_after_reopen() {
             ISSUE_ID,
             Some(before.policy_revision + 1),
             EnrollmentWriteCommand::Enable {
+                command_id: None,
                 selection_key: before.selection_key.clone(),
                 source: before.source.clone(),
                 options: before.options.clone(),

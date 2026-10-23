@@ -519,6 +519,7 @@ mod n1_tests {
                 N1_ISSUE,
                 None,
                 EnrollmentWriteCommand::Enable {
+                    command_id: None,
                     selection_key: format!("n1-runs-{session_id}"),
                     source: EnrollmentSource {
                         stories: Vec::new(),
