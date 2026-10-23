@@ -10,6 +10,10 @@ use std::collections::BTreeMap;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::issue_store::IssueStore;
+use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::models::automation::{
+    EnrollmentError, EnrollmentTerminationRequest, IssueAutomationEnrollment,
+};
 use crate::product::project_store::ProjectStore;
 use crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan;
 use crate::web::plan_generation::{PlanGenerationOutcome, start_plan_generation_once};
@@ -64,6 +68,28 @@ pub struct AutopilotOrchestrator {
     config: OrchestratorConfig,
     /// 公平游标：上一轮处理到的 (project_id, issue_id)；满轮后归零重扫。
     cursor: tokio::sync::Mutex<Option<(String, String)>>,
+    /// 单 issue 失败退避（进程级内存态，只用于节流重试）：Err 轮累积、
+    /// 窗口内跳过；成功轮清零。条目规模上界 = issue 数。
+    backoff: tokio::sync::Mutex<BTreeMap<(String, String), ReconcileBackoff>>,
+}
+
+/// 单 issue 失败退避状态：`next_attempt_at` 之前不再重试该 issue。
+#[derive(Debug, Clone, Copy)]
+struct ReconcileBackoff {
+    failures: u32,
+    next_attempt_at: std::time::Instant,
+}
+
+/// 首败退避 2s，此后每败翻倍，最长 5 分钟；避免不可自愈/瞬时错误按
+/// tick 间隔（缺省 2s）高频刷屏。
+const RECONCILE_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
+const RECONCILE_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn reconcile_backoff_delay(failures: u32) -> std::time::Duration {
+    let exponent = failures.saturating_sub(1).min(8);
+    RECONCILE_BACKOFF_BASE
+        .saturating_mul(1u32 << exponent)
+        .min(RECONCILE_BACKOFF_MAX)
 }
 
 impl AutopilotOrchestrator {
@@ -72,6 +98,7 @@ impl AutopilotOrchestrator {
             state,
             config,
             cursor: tokio::sync::Mutex::new(None),
+            backoff: tokio::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -102,17 +129,24 @@ impl AutopilotOrchestrator {
         // EnsurePreparedPlan（幂等）：锁内唯一创建/绑定；源/目标/意图漂移由
         // web 回调与冻结 intent fail-closed（不在此重复校验）。
         if let Err(error) = ensure_enrolled_plan(state, &enrollment).await {
-            return Ok(match error.code.as_str() {
+            let failure = format!(
+                "ensure enrolled plan failed: {}: {}",
+                error.code, error.message
+            );
+            match error.code.as_str() {
                 "automation_enrollment_conflict" | "automation_enrollment_invalid_scope" => {
-                    ReconcileOutcome::NeedsHuman
+                    return Ok(ReconcileOutcome::NeedsHuman);
                 }
-                _ => {
-                    return Err(format!(
-                        "ensure enrolled plan failed: {}: {}",
-                        error.code, error.message
-                    ));
-                }
-            });
+                _ => {}
+            }
+            // 绑定实体（plan/session）已被删除是不可自愈事实：同源 CAS 置
+            // terminated（与人工终止同一 durable 事实），本轮停在 NeedsHuman；
+            // 之后每轮在 terminated 显式跳过，绝不再 Err 无限重试。
+            if bound_entity_missing(state, &enrollment)? {
+                terminate_deleted_binding(state, &enrollment, &failure)?;
+                return Ok(ReconcileOutcome::NeedsHuman);
+            }
+            return Err(failure);
         }
 
         // 真正发起前重读 fresh enrollment（bind revision+1；Disable 竞态收口）。
@@ -183,8 +217,20 @@ impl AutopilotOrchestrator {
         for offset in 0..budget {
             let index = (start_index + offset) % ordered.len();
             let (project_id, issue_id) = &ordered[index];
-            if let Err(message) = self.reconcile(&self.state, project_id, issue_id).await {
-                eprintln!("wiga autopilot reconcile failed for {project_id}/{issue_id}: {message}");
+            if self.reconcile_in_backoff(project_id, issue_id).await {
+                // 退避窗口内：本轮跳过重试（不打印、不累积），游标照常推进，
+                // 避免同一不可自愈错误按 tick 间隔刷屏。
+                last = Some((project_id.clone(), issue_id.clone()));
+                continue;
+            }
+            match self.reconcile(&self.state, project_id, issue_id).await {
+                Ok(_) => self.clear_reconcile_backoff(project_id, issue_id).await,
+                Err(message) => {
+                    eprintln!(
+                        "wiga autopilot reconcile failed for {project_id}/{issue_id}: {message}"
+                    );
+                    self.record_reconcile_failure(project_id, issue_id).await;
+                }
             }
             processed += 1;
             last = Some((project_id.clone(), issue_id.clone()));
@@ -195,6 +241,34 @@ impl AutopilotOrchestrator {
             budget < self.config.max_issues_per_tick || start_index + budget >= ordered.len();
         *cursor = if wrapped { None } else { last };
         Ok(processed)
+    }
+
+    /// 该 issue 是否仍在失败退避窗口内。
+    async fn reconcile_in_backoff(&self, project_id: &str, issue_id: &str) -> bool {
+        let backoff = self.backoff.lock().await;
+        backoff
+            .get(&(project_id.to_string(), issue_id.to_string()))
+            .is_some_and(|entry| entry.next_attempt_at > std::time::Instant::now())
+    }
+
+    /// 记录一次失败并推进指数退避（2s → 4s → … → 5 分钟封顶）。
+    async fn record_reconcile_failure(&self, project_id: &str, issue_id: &str) {
+        let key = (project_id.to_string(), issue_id.to_string());
+        let mut backoff = self.backoff.lock().await;
+        let entry = backoff.entry(key).or_insert(ReconcileBackoff {
+            failures: 0,
+            next_attempt_at: std::time::Instant::now(),
+        });
+        entry.failures = entry.failures.saturating_add(1);
+        entry.next_attempt_at = std::time::Instant::now() + reconcile_backoff_delay(entry.failures);
+    }
+
+    /// 成功一轮即清零：错误消失后立即恢复正常 tick 节律。
+    async fn clear_reconcile_backoff(&self, project_id: &str, issue_id: &str) {
+        self.backoff
+            .lock()
+            .await
+            .remove(&(project_id.to_string(), issue_id.to_string()));
     }
 
     /// 后台有界 tick：由 `serve_web` 持有，随服务器生命周期运行；PUT 成功的
@@ -210,6 +284,70 @@ impl AutopilotOrchestrator {
                 eprintln!("wiga autopilot scan round failed: {message}");
             }
         }
+    }
+}
+
+/// 绑定实体被删除的可证明判定：enrollment 的 durable plan/session 在其
+/// issue 作用域内已不可见（列表里没有该 id）。只在 ensure 失败后调用：
+/// 仅「可证明缺失」成立；列表自身读失败返回 Err（落退避），绝不误终止。
+fn bound_entity_missing(
+    state: &WebAppState,
+    enrollment: &IssueAutomationEnrollment,
+) -> Result<bool, String> {
+    let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
+    let lifecycle = LifecycleStore::new(paths);
+    if let Some(plan_id) = enrollment.plan_id.as_deref() {
+        let plans = lifecycle
+            .list_issue_work_item_plans(&enrollment.project_id, &enrollment.issue_id)
+            .map_err(|error| format!("bound plan list unreadable: {error}"))?;
+        if !plans.iter().any(|plan| plan.id == plan_id) {
+            return Ok(true);
+        }
+    }
+    if let Some(session_id) = enrollment.session_id.as_deref() {
+        let sessions = lifecycle
+            .list_workspace_sessions(&enrollment.project_id, &enrollment.issue_id)
+            .map_err(|error| format!("bound session list unreadable: {error}"))?;
+        if !sessions.iter().any(|session| session.id == session_id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// 绑定实体被删除是不可自愈事实：走与人工终止同源的 CAS 把 enrollment 置
+/// terminated（`terminated_at` + `enabled=false` 同锁落盘），此后 reconcile
+/// 显式跳过，绝不再逐 tick 重试 ensure。同 revision 上的命令 id 稳定 →
+/// 重放幂等；CAS 竞态/存储失败以 Err 交回调用方（由 tick 退避节流）。
+fn terminate_deleted_binding(
+    state: &WebAppState,
+    enrollment: &IssueAutomationEnrollment,
+    observed: &str,
+) -> Result<(), String> {
+    let paths = ProductAppPaths::new(state.workspace_root.join(".aria"));
+    let store = IssueAutomationStore::new(paths);
+    let request = EnrollmentTerminationRequest {
+        command_id: format!(
+            "wiga-reconcile-terminate-{}-r{}",
+            enrollment.enrollment_id, enrollment.policy_revision
+        ),
+        expected_enrollment_id: enrollment.enrollment_id.clone(),
+        expected_policy_revision: enrollment.policy_revision,
+        reason: format!("bound entity deleted: {observed}"),
+    };
+    match store.terminate_plan(&enrollment.project_id, &enrollment.issue_id, request) {
+        Ok(_) => {
+            eprintln!(
+                "wiga autopilot terminated enrollment {}/{}: bound entity deleted ({observed})",
+                enrollment.project_id, enrollment.issue_id
+            );
+            Ok(())
+        }
+        // enrollment 已消失：无可终止，下一轮自然 NoEnrollment。
+        Err(EnrollmentError::NotFound) => Ok(()),
+        Err(error) => Err(format!(
+            "terminate enrollment after bound entity deletion failed: {error}"
+        )),
     }
 }
 
@@ -1730,6 +1868,166 @@ mod tests {
                 )),
             "restored write path must persist the advance failure fact: {:?}",
             saved.attention_facts
+        );
+    }
+
+    /// Y（真机缺陷）：enrollment 的 durable 绑定 plan 被删除后，reconcile 不得
+    /// 继续 Err 无限重试——判 NeedsHuman 停点，并同源 CAS 把 enrollment 置
+    /// terminated；此后显式跳过（自愈为 NoEnrollment，服务重启也不再重试）。
+    #[tokio::test]
+    async fn reconcile_terminates_enrollment_when_bound_plan_was_deleted() {
+        let fixture = OrchestratorFixture::new().await;
+        let worker = fixture.worker();
+        let enrollment = fixture
+            .automation_store()
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap();
+        crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan(
+            &fixture.state,
+            &enrollment,
+        )
+        .await
+        .unwrap();
+        let bound = fixture
+            .automation_store()
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap();
+        let plan_id = bound.plan_id.clone().expect("bound plan");
+        fixture
+            .lifecycle()
+            .delete_issue_work_item_plan(PROJECT_ID, ISSUE_ID, &plan_id)
+            .unwrap();
+        assert!(
+            fixture.bound_plans().is_empty(),
+            "bound plan must really be deleted"
+        );
+
+        assert_eq!(
+            worker
+                .reconcile(&fixture.state, PROJECT_ID, ISSUE_ID)
+                .await
+                .unwrap(),
+            ReconcileOutcome::NeedsHuman,
+            "deleted binding must be a human stop point, not an endless Err"
+        );
+        let terminated = fixture
+            .automation_store()
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap();
+        assert!(
+            terminated.terminated_at.is_some(),
+            "deleted binding must terminate the enrollment"
+        );
+        assert!(!terminated.enabled);
+        // 自愈：terminated 是显式跳过，不再每 tick 重试 ensure。
+        assert_eq!(
+            worker
+                .reconcile(&fixture.state, PROJECT_ID, ISSUE_ID)
+                .await
+                .unwrap(),
+            ReconcileOutcome::NoEnrollment
+        );
+    }
+
+    /// Y：绑定会话（plan 仍在）被删除同样不可自愈——与 plan 删除同源收口。
+    #[tokio::test]
+    async fn reconcile_terminates_enrollment_when_bound_session_was_deleted() {
+        let fixture = OrchestratorFixture::new().await;
+        let worker = fixture.worker();
+        let enrollment = fixture
+            .automation_store()
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap();
+        crate::web::handlers::lifecycle::plan_preparation::ensure_enrolled_plan(
+            &fixture.state,
+            &enrollment,
+        )
+        .await
+        .unwrap();
+        let bound = fixture
+            .automation_store()
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap();
+        let session_id = bound.session_id.clone().expect("bound session");
+        std::fs::remove_file(
+            fixture
+                .inner
+                .paths
+                .issue_root(PROJECT_ID, ISSUE_ID)
+                .join("workspace-sessions")
+                .join(format!("{session_id}.json")),
+        )
+        .unwrap();
+
+        assert_eq!(
+            worker
+                .reconcile(&fixture.state, PROJECT_ID, ISSUE_ID)
+                .await
+                .unwrap(),
+            ReconcileOutcome::NeedsHuman
+        );
+        let terminated = fixture
+            .automation_store()
+            .get(PROJECT_ID, ISSUE_ID)
+            .unwrap()
+            .unwrap();
+        assert!(terminated.terminated_at.is_some());
+        assert_eq!(
+            worker
+                .reconcile(&fixture.state, PROJECT_ID, ISSUE_ID)
+                .await
+                .unwrap(),
+            ReconcileOutcome::NoEnrollment
+        );
+    }
+
+    /// Y：普通错误（enrollment 不可读）不得每 tick 重试——首轮尝试、第二轮
+    /// 在退避窗口内跳过（本轮只处理另一个 issue），避免高频刷屏。
+    #[tokio::test]
+    async fn reconcile_all_once_backs_off_repeated_errors() {
+        let fixture = OrchestratorFixture::new().await;
+        let worker = fixture.worker();
+        std::fs::write(
+            fixture
+                .inner
+                .paths
+                .issue_root(PROJECT_ID, ISSUE_ID)
+                .join("automation-enrollment.json"),
+            "{not json",
+        )
+        .unwrap();
+
+        assert_eq!(worker.reconcile_all_once().await.unwrap(), 2);
+        assert_eq!(
+            worker.reconcile_all_once().await.unwrap(),
+            1,
+            "failing issue must be skipped inside the backoff window"
+        );
+    }
+
+    /// Y：退避时长指数增长并封顶（2s → 4s → 8s … 上限 5 分钟）。
+    #[test]
+    fn reconcile_backoff_delay_grows_exponentially_with_cap() {
+        assert_eq!(
+            reconcile_backoff_delay(1),
+            std::time::Duration::from_secs(2)
+        );
+        assert_eq!(
+            reconcile_backoff_delay(2),
+            std::time::Duration::from_secs(4)
+        );
+        assert_eq!(
+            reconcile_backoff_delay(3),
+            std::time::Duration::from_secs(8)
+        );
+        assert_eq!(
+            reconcile_backoff_delay(u32::MAX),
+            std::time::Duration::from_secs(300)
         );
     }
 }
