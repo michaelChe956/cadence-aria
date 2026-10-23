@@ -1,7 +1,5 @@
 # Spec Delta
 
-> 基线：`openspec/specs/multi-target-group-coding/spec.md` REQ-MTG-03（及 REQ-MTG-01/02/04/05 不变；REQ-MTG-06~13 归属见各 change，编号不重叠）。本 delta 按 owner 2026-10-15 15:00（多仓授权＝A）与总览 §6 规格修订登记，把 REQ-MTG-03 的「一期无自动跨 target 启动」修订为：仅 `work-item-group-autopilot` 精确授权集合（AutoStartOnce/Enrolled）下允许共享 plan-run 驱动自动启动全部实际桶；手动与无授权场景仍为人工显式。配套修订见 `work-item-group-autopilot` delta（REQ-WIGA-01/02/03/06/08/C5-CHAIN 与新增 REQ-WIGA-09~13）。
-
 ## MODIFIED Requirements
 
 ### Requirement: 手动推进与启动门（REQ-MTG-03）

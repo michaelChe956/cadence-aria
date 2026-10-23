@@ -28,7 +28,8 @@
 - **失败接管＝A**（15:00）：provider 不可用修好点继续；评审超限用户在窗口填新上下文点继续；两类都不转手动、不丢自动化模式。
 - **对话窗口 vs 门**（15:20）：plan 阶段出错走【对话窗口】补上下文；coder 阶段出错走【门】（批 1 A4）；不得混为一谈。
 - **自动批准语义**（14:00/14:40）：自动化模式 plan 自动批准，不受弹窗「子 Work Item 执行前需要确认 Plan」约束；无提问/门时 outline、draft、batch 及最终批准全部自动通过；AI 主动提问或开人工门才叫用户。
-- **终止语义**（13:10）：终止可在 plan 编写阶段与 coding 过程中两阶段发生；终止＝整个自动化结束、不可恢复；并行 WI 时任意工作台终止＝终止全部（整个 plan 所有 attempt）；批 2 自动化模式下改 plan 级终止＋二次确认，单仓/手动保持原样。
+- **终止语义**（13:10）：终止可在 plan 编写阶段与 coding 过程中两阶段发生；终止＝整个自动化运行结束、plan 与 attempt 不可恢复；并行 WI 时任意工作台终止＝终止全部（整个 plan 所有 attempt）；批 2 自动化模式下改 plan 级终止＋二次确认，单仓/手动保持原样。**2026-10-23 owner 裁定补充**：不可恢复限于 plan/attempt 层——enrollment 的 terminated 仍阻断全部自动路径，但可由人工显式 Enable 取代重新开启（见下「terminated 可人工重开」）。
+- **terminated 可人工重开**（2026-10-23 owner）：`terminated_at` 非空只阻断**自动路径**（reconcile/自动首启/续驱/重启补偿/实体删除触发的自动终止一律零副作用，不复活 attempt）；人工 `PUT …/automation-enrollment`（Enable）SHALL 以同 `enrollment_id`、`policy_revision+1` 取代落盘：清空 `terminated_at`、`enabled=true`、`plan_id`/`session_id` 解绑为空、`binding_history` 换代（旧代进 `previous`、`binding_version+1`、plan/session 空串占位）、命令账本追加 `command_id` 条目留痕，随后由既有 prepare 路径建立全新 plan/session。请求须带稳定 `command_id`（缺失 422、异 payload 409），`source`/`options`/`target` 必须与终止记录逐字段相等（变更仍 Conflict，先重开再走 Disable→Enable），`stage=termination` 清理失败事实未收口时 409 `automation_plan_cleanup_required`。本轮仅改 openspec 契约；`cadence/designs/2026-10-15_方案设计_批量2块3_...` 与实施计划中的「terminated 不可恢复」表述需后续按本裁定同步（不在本 change 写入范围）。
 - **无暂停**（13:05）：没有「暂停自动化」概念；用户只通过系统主动叫他的接入点介入；可看全过程、可终止。
 - **预算耗尽＝A**（2026-10-16 04:20）：manual 预算为零时，每次用户显式补新说明并继续只开放一个新人工说明回合，非后台无限重试。
 - **双审五冲突全部按推荐**（2026-10-16 05:00）：C1 服务端拒绝 takeover＋隐藏按钮；C2 Abort 路由成 plan 终止（统一二次确认）；C3 `terminated_at` 纯模型字段前移 N0；C4 包显式写通知事实（与批 1 A1 同构）；C5 终止收口关闭全部 open 门。

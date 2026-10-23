@@ -8,10 +8,10 @@ store 串行链（红线）：`models/automation.rs`+`issue_automation_store.rs`
 
 ### B2-P1 approval 冻结与 binding/rebind 放行（M，波 1；REQ-WIGA-02）
 
-- **目标**：`EnrollmentOptions` 加 `plan_approval` 枚举（缺省 manual、冻结/幂等比较含选项）；P1 一并完成 `automation_enrollment.rs` binding/rebind 的期望 run_policy 校验与 auto 放行（不再交 P2 越独占文件）；FE 入口提交 auto 并禁用旧确认复选框。**包内分段**：P1 后端完成→R3 前置类型子提交（见 R3）→P1 才改前端入口/弹窗。
+- **目标**：`EnrollmentOptions` 加 `plan_approval` 枚举（缺省 manual、冻结/幂等比较含选项）；P1 一并完成 `automation_enrollment.rs` binding/rebind 的期望 run_policy 校验与 auto 放行（不再交 P2 越独占文件）；FE 入口提交 auto 并禁用旧确认复选框。**包内分段**：P1 后端完成→R3 前置类型子提交（见 R3）→P1 才改前端入口/弹窗。**2026-10-23 增补（入口段）**：terminated 记录的人工重新开启沿用本包入口段——从 GET 取当前 `policy_revision` 与终止记录，并以稳定 `command_id` 提交同一个 Enable（REQ-WIGA-09）。
 - **独占文件**：`src/product/models/automation.rs`、`src/product/issue_automation_store.rs`、`src/web/handlers/automation_enrollment.rs`；前端 `web/src/hooks/useIssueLifecycleGeneration.ts`、`web/src/components/lifecycle/WorkItemPlanOptionsDialog.tsx`（本包仅 approval 入口段；`lifecycle.ts` 类型归 R3）。
 - **禁碰**：`plan_preparation.rs`/`lifecycle_store/workspace.rs`（P2）、块 1 advance/start、块 3 终止；不提交引用未定义类型的前端。
-- **TDD 验收**：①新授权冻结 auto、旧缺省 manual、同 payload 幂等（红：现无选项字段）；②binding/rebind 只放行与当前 enabled 精确绑定且冻结策略一致的 AutoIfValid，错绑/降级绑定拒绝；③手动复选框行为不变；④`require_execution_plan_confirm` 在 auto 授权物化 WI 内压 false。
+- **TDD 验收**：①新授权冻结 auto、旧缺省 manual、同 payload 幂等（红：现无选项字段）；②binding/rebind 只放行与当前 enabled 精确绑定且冻结策略一致的 AutoIfValid，错绑/降级绑定拒绝；③手动复选框行为不变；④`require_execution_plan_confirm` 在 auto 授权物化 WI 内压 false；⑤terminated 记录入口以当前 revision＋稳定 `command_id` 重开（红：现 Conflict 并卡死入口），重开后入口显示 enabled 并可重新启动。
 
 ### B2-R3 前端类型与集合 UI（S，波 1+2 分段；REQ-WIGA-01/02）
 
@@ -74,10 +74,10 @@ store 串行链（红线）：`models/automation.rs`+`issue_automation_store.rs`
 
 ### B2-T1 终止 CAS 与准入（M，波 4，P4 后；REQ-WIGA-09）
 
-- **目标**：N0/P4 移交后加终止结果与 `issue_automation_store.rs` 终止 CAS/命令账本及 Enable/rebind/continue 拒绝（不再首次引入 terminated_at）；`coding_plan_run.rs` 按 plan 失效入口复用现有核体；`coding_attempt_store/{admission.rs,gate.rs}` 对精确绑定已 terminated 计划拒绝执行。
+- **目标**：N0/P4 移交后加终止结果与 `issue_automation_store.rs` 终止 CAS/命令账本，并落实 terminated 的两面语义（2026-10-23 裁定）：**自动路径拒绝**（Enable 自动代发/rebind/continue/启动准入一律拒，不复活 attempt）与**人工重开取代**（同 `enrollment_id`、`policy_revision+1`、清 `terminated_at`、`enabled=true`、解绑 `plan_id`/`session_id`、`binding_history` 换代、账本追加 `command_id` 条目、`source`/`options`/`target` 逐字段相等、`stage=termination` 未收口时 `CleanupRequired`）（不再首次引入 terminated_at）；`coding_plan_run.rs` 按 plan 失效入口复用现有核体；`coding_attempt_store/{admission.rs,gate.rs}` 对精确绑定已 terminated 计划拒绝执行。
 - **独占文件**：`src/product/coding_plan_run.rs`、`src/product/coding_attempt_store/admission.rs`、`src/product/coding_attempt_store/gate.rs`（T1 后交 T2）及现有测试；store 终止段（P4→T1 接手）。
 - **禁碰**：runner 取消/收口（T2）；REST/WS 路由（T3）；手动无绑定路径。
-- **TDD 验收**：①terminated 不可 Enable/rebind/继续（红：现 Disable 后可 Enable 重开）；②无 run 也关闸；③manual 不拦；④Invalidated 拒 provider 驱动。
+- **TDD 验收**：①terminated 记录人工 Enable 取代成功进入 enabled（同 id、revision+1、`terminated_at` 清空、plan/session 解绑、`binding_history` 换代、账本留痕；红：现一律 Conflict）；②terminated 的 rebind/continue/启动准入与自动代理路径拒绝且零副作用、不复活 attempt；③重开同 `command_id` 同 payload 重放 `Replayed`、异 payload 409、缺 `command_id` 422；④重开 payload 漂移（source/options/target）与 Disable 仍 Conflict；⑤`stage=termination` 清理失败事实未收口时 `CleanupRequired`；⑥无 run 也关闸；⑦manual 不拦；⑧Invalidated 拒 provider 驱动。
 
 ### B2-T2 completion/专用收口/关全部门（M，波 4，T1 后；REQ-WIGA-09）
 
@@ -97,10 +97,10 @@ store 串行链（红线）：`models/automation.rs`+`issue_automation_store.rs`
 
 ### B2-T3 统一终止路由/投影/continue-chain（M，波 5，T2+R2 后；REQ-WIGA-09/11、REQ-WIGA-08/12）
 
-- **目标**：`automation_enrollment.rs` 抽取 crate 内统一 plan 终止服务供新 terminate REST、原 abort REST、gate-responses REST 与 WS 共用；未确认返回 `automation_plan_termination_required`（details 含 confirm_required/plan/enrollment/binding 身份、零副作用），确认后沿原 command_id 重放；`app.rs/types.rs` 路由/DTO；`autopilot_orchestrator.rs` 跳 terminated/未解除失败；接 T2 `manager/mod.rs::project_automation_ownership` 同源管理投影；REST `coding.rs::{abort_coding_attempt,post_coding_gate_response}` 与 WS `coding_ws_handler/{protocol,state,socket}.rs` Abort 路由；终止批量清当前绑定 plan 三类旧事实、清理失败写 `automation_failed(stage=termination)`；continue-chain REST（advance 用 R1 冻结 policy、start 仅重放原 claim、成功 resolve+wake）；借 R1 `advance_plan.rs`/`coding_start.rs` 与 P4 `workspace_sc_recovery.rs`；仅调用 T2 专用取消契约，不并写其文件。
+- **目标**：`automation_enrollment.rs` 抽取 crate 内统一 plan 终止服务供新 terminate REST、原 abort REST、gate-responses REST 与 WS 共用；未确认返回 `automation_plan_termination_required`（details 含 confirm_required/plan/enrollment/binding 身份、零副作用），确认后沿原 command_id 重放；`app.rs/types.rs` 路由/DTO（含 2026-10-23 重开契约：`EnrollmentPutRequest` 加可选 `command_id`、terminated 重开缺 `command_id` 422、`CleanupRequired` 映射 409 `automation_plan_cleanup_required`，PUT 重开沿用 `validate_enrollment_scope` 前置校验）；`autopilot_orchestrator.rs` 跳 terminated/未解除失败；接 T2 `manager/mod.rs::project_automation_ownership` 同源管理投影；REST `coding.rs::{abort_coding_attempt,post_coding_gate_response}` 与 WS `coding_ws_handler/{protocol,state,socket}.rs` Abort 路由；终止批量清当前绑定 plan 三类旧事实、清理失败写 `automation_failed(stage=termination)`；continue-chain REST（advance 用 R1 冻结 policy、start 仅重放原 claim、成功 resolve+wake）；借 R1 `advance_plan.rs`/`coding_start.rs` 与 P4 `workspace_sc_recovery.rs`；仅调用 T2 专用取消契约，不并写其文件。
 - **独占文件**：`src/web/handlers/automation_enrollment.rs`（R1 接手）、`src/web/{app.rs,types.rs}`（终止/确认段）、`src/web/handlers/coding.rs`、`src/web/coding_ws_handler/{protocol.rs,state.rs,socket.rs}`、`src/web/autopilot_orchestrator.rs`（R2 接手）。
 - **禁碰**：T2 独占的 registry/runner_support/gates；R1 `advance_plan.rs`/`coding_start.rs`（只调用）；P4 `workspace_sc_recovery.rs`（只调用）；A2 `plan_final_confirm.rs` 不改。
-- **TDD 验收**：①原 abort/gate REST/WS 在 auto 单/多仓同 plan 二次确认，未确认零副作用（红：现直接单 attempt abort）；②步骤④复用 T2 干净退出分支，脏树/stage 等门均终止成功、无旧 handle_abort；③全停/同源投影（REST/WS 一致、terminated 仍 managed）；④清旧事实＋termination 失败重清后消失；⑤continue-chain 保留 auto/claim、重启不复活；⑥repeated terminate 幂等。
+- **TDD 验收**：①原 abort/gate REST/WS 在 auto 单/多仓同 plan 二次确认，未确认零副作用（红：现直接单 attempt abort）；②步骤④复用 T2 干净退出分支，脏树/stage 等门均终止成功、无旧 handle_abort；③全停/同源投影（REST/WS 一致、terminated 仍 managed）；④清旧事实＋termination 失败重清后消失；⑤continue-chain 保留 auto/claim、重启不复活；⑥repeated terminate 幂等；⑦terminated 记录经 PUT 人工重开 200 进入 enabled（同 id、revision+1、plan/session 解绑），缺 `command_id` 422、payload 漂移/Disable 409、清理失败事实未收口 409 `automation_plan_cleanup_required`、同 command_id 重放 `Replayed`。
 
 ### B2-T4 前端统一终止与隐藏（M，波 5，T3+P5 后；REQ-WIGA-09、REQ-WIGA-08）
 

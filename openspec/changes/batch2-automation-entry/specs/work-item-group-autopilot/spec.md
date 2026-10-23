@@ -1,7 +1,5 @@
 # Spec Delta
 
-> 基线：`openspec/specs/work-item-group-autopilot/spec.md`（REQ-WIGA-01~08、REQ-WIGA-C5-PREFLIGHT、REQ-WIGA-C5-CHAIN）。本 delta 修订 REQ-WIGA-01/02/03/06/08/C5-CHAIN 六项（owner 2026-10-16 05:00 双审裁决与 phase-ledger 批 2 裁定），新增 REQ-WIGA-09~13 五项；REQ-WIGA-04/05/07、REQ-WIGA-C5-PREFLIGHT 不变。规格修订登记依据总览 §6 规格修订完整登记。
-
 ## MODIFIED Requirements
 
 ### Requirement: 人工 design 确认后的显式授权与范围（REQ-WIGA-01）
@@ -117,10 +115,10 @@
 - **WHEN** 自动启动已原子认领并开始运行，用户随后关闭 enrollment 或再开启
 - **THEN** 已运行 provider 不被开关隐式中止；重新开启不再次消费该 attempt 的启动许可，不自动重启 Failed/Aborted attempt
 
-#### Scenario: 终止后不可重开
+#### Scenario: 终止后自动重开被拒、人工重新开启受控
 
 - **WHEN** enrollment 已写 terminated_at 后提交 Enable/rebind/继续
-- **THEN** 系统拒绝且零副作用（REQ-WIGA-09），不降级为手动轮
+- **THEN** rebind 与继续一律拒绝且零副作用；Enable 仅当由人工入口携带稳定 command_id、payload 与终止记录逐字段相等且收口已完成时，以同 id 新 revision 取代并清空 terminated_at（REQ-WIGA-09）；任何自动路径不得重新开启，不降级为手动轮
 
 ### Requirement: 无页面的确定性后端推进与人工停点（REQ-WIGA-03）
 
@@ -255,9 +253,9 @@
 
 ## ADDED Requirements
 
-### Requirement: 整 plan 不可恢复终止与统一 Abort 语义（REQ-WIGA-09）
+### Requirement: 整 plan 终止与统一 Abort 语义（REQ-WIGA-09）
 
-系统 SHALL 提供 `POST …/automation-enrollment/terminate`（`{command_id, expected_enrollment_id, expected_policy_revision, expected_binding?, confirmed:true}`）。自动化绑定 plan 的门 Abort、原 abort REST、gate-responses REST、WS 与收件箱中止入口 SHALL 统一进入同一整 plan 终止与二次确认：未确认仅返回 `automation_plan_termination_required` 零副作用，确认后按原 command_id 重放整 plan 命令；auto 单仓同样覆盖，手动单 attempt 保持原样。终止不可恢复：收口失败整体 `cleanup_required` 仍不可继续；terminated 后 Enable/rebind/继续/新首启一律拒绝；迟到 Failed/Open MUST NOT 覆盖 Terminated；无 attempt 也关闸/清事实。
+系统 SHALL 提供 `POST …/automation-enrollment/terminate`（`{command_id, expected_enrollment_id, expected_policy_revision, expected_binding?, confirmed:true}`）；门 Abort/原 abort REST/gate-responses REST/WS/收件箱 SHALL 统一进入同一整 plan 终止与二次确认（未确认 `automation_plan_termination_required` 零副作用），auto 单仓同覆盖。plan 与 attempt 终止不可恢复。terminated SHALL 阻断全部自动路径，且 SHALL 只可由人工显式 Enable 以同 `enrollment_id` 新 `policy_revision` 取代重开（清 `terminated_at`、解绑旧 plan/session、账本留痕）；被终止 plan 与 attempt 不复活。字段与错误码见下各场景。
 
 #### Scenario: 未确认零副作用返回确认要求
 
@@ -282,18 +280,45 @@
 
 #### Scenario: 全部 open 门关闭与事实清空
 
-- **WHEN** 终止收口执行完成（含 blocked/choice/stage 各类 open 门与三类通知事实）
+- **WHEN** 终止收口执行完成（含 blocked/choice/stage 各类 open 门与三类通知事实，也含尚无 attempt 的 plan）
 - **THEN** 全部 open 门关闭、旧事实清空；刷新后无幽灵门通知，收件箱不再出现该 plan 待办
 
 #### Scenario: 清理失败可见且重清后消失
 
 - **WHEN** 某仓收口异常
-- **THEN** 整体返回 cleanup_required 并写 stage=termination 的 automation_failed（可点回该 plan）；重提同命令重做收口成功后该事实消失，仍不可恢复
+- **THEN** 整体返回 cleanup_required 并写 stage=termination 的 automation_failed（可点回该 plan）；重提同命令重做收口成功后该事实消失；attempt 终态仍不可恢复（enrollment 的人工重新开启见「terminated 记录经人工 Enable 重新开启」）
 
-#### Scenario: terminated 不可恢复且重启不复活
+#### Scenario: terminated 记录阻断一切自动路径
 
-- **WHEN** enrollment terminated 后提交 Enable/rebind/continue，或服务重启触发补偿扫描
-- **THEN** 一律拒绝/零动作，不降级 Manual、不复活任何 attempt
+- **WHEN** enrollment 已 terminated 后 reconcile/自动生成/自动首启/续驱/重启补偿扫描运行，或绑定实体删除流程再次运行
+- **THEN** 一律零副作用：不写 enrollment、不建 plan/session、不启动 provider、不把已 Aborted attempt 改回非终态、不复活被终止 plan；MUST NOT 代发 Enable（重新开启唯一入口为人工 `PUT`）
+- **AND** 不降级 Manual；管理投影保持 terminated（owner=server、`terminated_at` 非空）
+
+#### Scenario: terminated 记录经人工 Enable 重新开启（取代并留痕）
+
+- **WHEN** enrollment 已 terminated（`terminated_at` 非空、`policy_revision=n`），用户在人工入口提交 Enable（携带稳定 `command_id`、`expected_revision=n`，`source`/`options`/`target` 与终止记录逐字段相等）
+- **THEN** 系统以同 `enrollment_id`、`policy_revision=n+1` 取代落盘：`terminated_at` 清空、`enabled=true`、`plan_id`/`session_id` 为空、`binding_history` 新代（旧代进 `previous`、`binding_version` 递增、plan/session 空串占位）、命令账本追加该 `command_id` 条目（`state=Accepted`）；响应 200 返回 enabled 记录
+- **AND** 随后既有 prepare 路径建立全新 plan/session 并绑定；被终止 plan 与既有 attempt 不复活、不复用，单次请求不重复生成
+
+#### Scenario: 重新开启的命令身份幂等与异负载拒绝
+
+- **WHEN** 以相同 `command_id`＋相同 payload 重放重新开启，或以相同 `command_id` 配不同 payload/`expected_revision`，或 terminated 重开请求缺 `command_id`
+- **THEN** 同 payload 返回首次 durable 结果（`Replayed`，不再递增 `policy_revision`、不新增账本条目）；异 payload 返回 409 零副作用；缺 `command_id` 返回 422 零副作用
+
+#### Scenario: 重新开启不改写授权并保留墓碑语义
+
+- **WHEN** 对 terminated 记录提交 Enable 时 `source`/`options`/`target` 与终止记录不等、或提交 Disable、或 `expected_revision` 不等于当前 `policy_revision`
+- **THEN** 返回 409 Conflict 零副作用；改授权 payload 须先成功重新开启，再走既有 Disable→Enable 路径
+
+#### Scenario: 收口未完成时不可重新开启
+
+- **WHEN** terminated 记录仍持有未收口的 `stage=termination` 清理失败事实，用户提交重新开启
+- **THEN** 返回 409 `automation_plan_cleanup_required` 且零副作用；以原 `command_id` 重提终止完成收口、该事实消失后方可重新开启
+
+#### Scenario: 非 terminated 记录的并发语义不变
+
+- **WHEN** 未 terminated 的 enrollment 提交 Enable：enabled 状态下 `source`/`options`/`target` 与当前绑定不等或 `expected_revision` 过期（失效），或已 disabled 记录换 payload 重开
+- **THEN** 前者返回 409 Conflict 零副作用；disabled 记录的 Disable→Enable 换 payload 重开与 `policy_revision` 线性化行为与本 change 前一致
 
 #### Scenario: 迟到写入不覆盖终态
 
