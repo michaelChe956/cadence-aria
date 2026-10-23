@@ -138,8 +138,8 @@ async fn generate_story_specs_logical_branch_injects_aggregate_prompt() {
         "缺聚合指令：{content}"
     );
     assert!(
-        content.contains("禁止回落到任意单一 primary 仓库"),
-        "缺禁止 primary 回落指令：{content}"
+        content.contains("禁止回落到任意单一仓库"),
+        "缺禁止单一仓库回落指令：{content}"
     );
 }
 
@@ -327,8 +327,8 @@ async fn generate_design_specs_logical_branch_injects_aggregate_prompt() {
         "缺聚合指令：{content}"
     );
     assert!(
-        content.contains("禁止回落到任意单一 primary 仓库"),
-        "缺禁止 primary 回落指令：{content}"
+        content.contains("禁止回落到任意单一仓库"),
+        "缺禁止单一仓库回落指令：{content}"
     );
     assert!(
         content.contains("change_order"),
