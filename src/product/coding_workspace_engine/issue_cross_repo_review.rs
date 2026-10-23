@@ -20,8 +20,9 @@ use super::*;
 use crate::product::coding_models::{
     CodingAttemptScope, CodingExecutionUnitStatus, CodingRoleProviderConfigSnapshot,
     CrossRepoRepositorySection, IssueCrossRepoReview, IssueCrossRepoReviewStatus,
+    IssueCrossRepoRiskAcknowledgement,
 };
-use crate::product::id::next_sequential_id;
+use crate::product::id::{next_sequential_id, next_sequential_id_from_existing};
 use crate::product::repository_store::RepositoryStore;
 use std::sync::Arc;
 
@@ -229,6 +230,46 @@ struct CrossRepoReviewMaterial {
 enum CrossRepoProviderRun {
     Completed(String),
     Failed(String),
+}
+
+// ---------------------------------------------------------------------------
+// T18（REQ-GFR-CR-06）：跨仓评审已知风险留痕的 findings 摘要。
+// ---------------------------------------------------------------------------
+
+/// 留痕 findings 摘要最多摘录的 message 条数。
+const CROSS_REPO_ACK_FINDINGS_MAX_MESSAGES: usize = 5;
+/// 留痕 findings 摘要整体截断上限（防超长 findings 撑爆留痕 JSON）。
+const CROSS_REPO_ACK_FINDINGS_SUMMARY_LIMIT: usize = 500;
+
+/// 留痕 findings 摘要：severity 计数 + 前 N 条 finding 的 `message`，整体
+/// 截断到固定上限（REQ-GFR-CR-06：内容 = 时间 + 评审 id + 结论 + 摘要）。
+fn cross_repo_ack_findings_summary(findings: &[ReviewFinding]) -> String {
+    let count_severity = |severity: FindingSeverity| {
+        findings
+            .iter()
+            .filter(|finding| finding.severity == severity)
+            .count()
+    };
+    let mut summary = format!(
+        "error={}, warning={}, info={}",
+        count_severity(FindingSeverity::Error),
+        count_severity(FindingSeverity::Warning),
+        count_severity(FindingSeverity::Info),
+    );
+    let messages = findings
+        .iter()
+        .take(CROSS_REPO_ACK_FINDINGS_MAX_MESSAGES)
+        .map(|finding| finding.message.as_str())
+        .collect::<Vec<_>>()
+        .join("；");
+    if !messages.is_empty() {
+        summary.push('；');
+        summary.push_str(&messages);
+    }
+    summary
+        .chars()
+        .take(CROSS_REPO_ACK_FINDINGS_SUMMARY_LIMIT)
+        .collect()
 }
 
 impl CodingWorkspaceEngine {
@@ -934,6 +975,121 @@ impl CodingWorkspaceEngine {
             failure_reason: Some(reason.to_string()),
             raw_provider_output_ref: None,
             created_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// REQ-GFR-CR-06：「已知风险，仍然确认」留痕（advisory 旁路）。
+    ///
+    /// 该 issue 存在跨仓最终评审且结论为 `request_changes`/`blocked`、且尚无
+    /// 同一 `(cross_repo_review_id, attempt_id)` 的留痕时追加一条。内容只有
+    /// 「确认时间 + 评审记录 id + 结论 + findings 摘要」——不记确认人、不记
+    /// 通道（owner 裁定）。结论为通过（含 Failed/Skipped 记录，verdict 恒为
+    /// approve）不留痕。同一 `(cross_repo_review_id, attempt_id)` 至多一条：
+    /// 引擎前置判定 + store 幂等双保险。
+    pub(crate) fn record_cross_repo_risk_acknowledgement_if_needed(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Result<(), ProductStoreError> {
+        let Some(review) = self
+            .store
+            .load_issue_cross_repo_review(&attempt.project_id, &attempt.issue_id)?
+        else {
+            return Ok(());
+        };
+        if !matches!(
+            review.verdict,
+            ReviewVerdict::RequestChanges | ReviewVerdict::Blocked
+        ) {
+            return Ok(());
+        }
+        if self.store.has_issue_cross_repo_acknowledgement(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &review.id,
+            &attempt.id,
+        )? {
+            return Ok(());
+        }
+        let existing = self
+            .store
+            .list_issue_cross_repo_acknowledgements(&attempt.project_id, &attempt.issue_id)?;
+        let acknowledgement = IssueCrossRepoRiskAcknowledgement {
+            id: next_sequential_id_from_existing(
+                "cross_repo_review_ack",
+                existing.iter().map(|record| record.id.as_str()),
+            ),
+            project_id: attempt.project_id.clone(),
+            issue_id: attempt.issue_id.clone(),
+            plan_id: review.plan_id.clone(),
+            attempt_id: attempt.id.clone(),
+            cross_repo_review_id: review.id.clone(),
+            verdict: review.verdict.clone(),
+            findings_summary: cross_repo_ack_findings_summary(&review.findings),
+            acknowledged_at: Utc::now().to_rfc3339(),
+        };
+        self.store
+            .append_issue_cross_repo_acknowledgement(&acknowledgement)?;
+        Ok(())
+    }
+
+    /// P2-1（REQ-GFR-CR-06「确认 + 评审完成」双触发的评审侧触发点）：评审
+    /// 异步落盘后，若评审所依据的 attempt 已被用户最终确认，立即补写
+    /// 「已知风险，仍然确认」留痕。
+    ///
+    /// 异步化（P1-2）前触发同步 await 评审落盘，「记录先于确认」隐式成立；
+    /// 异步化后用户确认可能早于评审落盘——确认时刻
+    /// `record_cross_repo_risk_acknowledgement_if_needed` 读不到记录直接
+    /// 返回，而重复确认被状态机拒绝 → 留痕永久缺失、advisory 提醒永久
+    /// 悬空（全树原本只有确认侧一个 append 点）。本补写与确认侧共用
+    /// `(cross_repo_review_id, attempt_id)` 幂等键（引擎前置判定 + store
+    /// 双保险），两侧无论先后至多一条。
+    ///
+    /// 只对 `WorkItemGroup` 且 `Completed` 的 attempt 补写：group attempt
+    /// 进入 `Completed` 的唯一路径是最终确认（见上方
+    /// `prepare_group_final_confirm_from_readiness` 路径），故 `Completed`
+    /// 即「用户已确认」；WorkItem scope 的 `Completed` 不经用户确认（如
+    /// `complete_attempt_after_review_request` 生产收口直接完成），对其
+    /// 补写会在「评审先落盘、用户未确认」时凭空关掉 advisory 提醒。同理，
+    /// 停在 `WaitingForHuman@FinalConfirm`（尚未确认）的 attempt 不补写
+    /// ——那时的 request_changes 提醒必须呈现给确认界面的用户（REQ-GFR-CR-05
+    /// 的 advisory 呈现），留痕由确认侧触发点在用户点击确认时写入。
+    ///
+    /// advisory：读取/写失败仅告警，不影响已落盘的评审记录。
+    pub(crate) fn backfill_cross_repo_risk_acknowledgement_after_review_landing(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        reviewed_attempt_id: &str,
+    ) {
+        let attempt = match self
+            .store
+            .get_attempt(project_id, issue_id, reviewed_attempt_id)
+        {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                tracing::warn!(
+                    project_id = %project_id,
+                    issue_id = %issue_id,
+                    attempt_id = %reviewed_attempt_id,
+                    error = %error,
+                    "跨仓评审留痕补写读取 attempt 失败（advisory，不影响评审记录）"
+                );
+                return;
+            }
+        };
+        if attempt.scope != CodingAttemptScope::WorkItemGroup
+            || attempt.status != CodingAttemptStatus::Completed
+        {
+            return;
+        }
+        if let Err(error) = self.record_cross_repo_risk_acknowledgement_if_needed(&attempt) {
+            tracing::warn!(
+                project_id = %project_id,
+                issue_id = %issue_id,
+                attempt_id = %reviewed_attempt_id,
+                error = %error,
+                "跨仓评审留痕补写失败（advisory，不影响已落盘的评审记录）"
+            );
         }
     }
 }
