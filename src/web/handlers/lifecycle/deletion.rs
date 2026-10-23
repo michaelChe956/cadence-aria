@@ -96,7 +96,9 @@ pub async fn delete_design_spec(
 /// manager 失效 → 子依赖 purge（D1.1 children → source（D1.2a 原语）→
 /// plan-store 产物 → revisions/publications → attempt 残留锁 → 目标仓资源 →
 /// run 本体 → advance 独立 checkpoint）→ 根最后 → `list_entity_owned_residue`
-/// 及 AdvanceStore list 复核目标独占内容为空 → remove pending → complete。
+/// 及 AdvanceStore list 复核目标独占内容为空 → remove pending → prune
+/// owned-index（已 purge 集合清出索引；Plan 保留 worktree 墓碑 claim 集）
+/// → complete。
 ///
 /// 重入（purging 墓碑在位）先 pending＋owner 索引（§0.5 固定来源），不重复
 /// 门禁；根缺不 404；Deleted 幂等 200；任何实际 IO/JSON 错误不当空（fail-closed），
@@ -284,9 +286,15 @@ async fn cascade_delete_entity(
         }
     }
 
-    // ⑩ 收口：remove pending → complete（单条无内容事实；完成时间不因重试覆盖）。
+    // ⑩ 收口：remove pending → prune owned-index（已 purge 集合不得残留成
+    //    list-by-owner 的已删会话反查来源）→ complete（单条无内容事实；
+    //    完成时间不因重试覆盖）。prune 在 complete 前：崩溃窗口由 purging
+    //    重入的并集重建＋再次 prune 幂等收敛。
     deletion_store
         .remove_pending_manifest(&lease)
+        .map_err(product_store_api_error)?;
+    deletion_store
+        .prune_owned_artifact_ids_for_completion(&lease)
         .map_err(product_store_api_error)?;
     deletion_store
         .complete(&lease)

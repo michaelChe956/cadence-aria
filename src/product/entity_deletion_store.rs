@@ -321,6 +321,38 @@ impl EntityDeletionStore {
         Ok(read_json_if_exists::<EntityDeletionManifest>(&path)?
             .unwrap_or_else(|| EntityDeletionManifest::empty(scope.clone())))
     }
+
+    /// 完成前清理 owned-index 中已 purge 的内容集合（X 修复，在 residue
+    /// 复核通过、`remove_pending_manifest` 之后、`complete` 之前调用）：
+    /// session/review/run/VP/profile/advance 等集合描述的实体内容已全部
+    /// 清盘，残留会让 list-by-owner 反查（`list_owned_artifact_ids`）把已删
+    /// 会话 ID 抛给读取方。语义收口为「索引只描述仍存在的准入事实」：
+    /// - Story/Design 的索引只描述已删内容 → 整条删除；
+    /// - Plan 保留 `work_item_ids`/`target_repository_ids`（D1.0 child owner
+    ///   索引：worktree 墓碑 claim 的长期准入事实，不删现有墓碑语义），
+    ///   其余集合清空；两个 claim 集均为空时整条删除（与空 manifest 等价）。
+    /// 幂等：索引文件缺失=已清。崩溃窗口（prune 后、complete 前中断）由
+    /// purging 重入的 `index_owned_artifact_ids` 并集重建 + 再次 prune 收敛。
+    pub fn prune_owned_artifact_ids_for_completion(
+        &self,
+        lease: &EntityDeletionLease,
+    ) -> Result<(), ProductStoreError> {
+        let scope = lease.scope();
+        let path = owned_artifact_index_path(&self.paths, scope)?;
+        let Some(indexed) = read_json_if_exists::<EntityDeletionManifest>(&path)? else {
+            return Ok(());
+        };
+        if scope.kind != DeletionEntityKind::Plan {
+            return remove_owned_artifact_index(&path);
+        }
+        let mut retained = EntityDeletionManifest::empty(scope.clone());
+        retained.work_item_ids = indexed.work_item_ids;
+        retained.target_repository_ids = indexed.target_repository_ids;
+        if retained.work_item_ids.is_empty() && retained.target_repository_ids.is_empty() {
+            return remove_owned_artifact_index(&path);
+        }
+        write_json(&path, &retained)
+    }
 }
 
 /// 记录既存 scope 与请求 scope 一致性（同条幂等前提；路径已定 scope，防错档）。
@@ -381,6 +413,18 @@ fn owned_artifact_index_path(
         .join("owned-index")
         .join(scope.kind.path_segment())
         .join(format!("{}.json", scope.entity_id)))
+}
+
+/// 幂等删除 owned-index 文件；NotFound=已清。
+fn remove_owned_artifact_index(path: &Path) -> Result<(), ProductStoreError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ProductStoreError::Io(format!(
+            "remove {}: {error}",
+            path.display()
+        ))),
+    }
 }
 
 /// NotFound=None；其余 IO 错误与 JSON 解析错误必报（读取错误不当 None）。
@@ -622,6 +666,135 @@ mod tests {
                     )
                 )
             ));
+        }
+    }
+
+    /// 完成前 owned-index 清理（X 修复）：purge 已清空的内容集合不得残留
+    /// 在索引里——session/review/run 等集合描述的实体内容已不存在，残留会让
+    /// list-by-owner 反查把已删会话 ID 抛给读取方。Plan 保留
+    /// work_item_ids/target_repository_ids（worktree 墓碑 claim 的长期准入
+    /// 事实）；其余 kind 整条删除；幂等（文件缺失=已清）。
+    #[test]
+    fn owned_index_completion_prune_keeps_plan_claims_and_drops_purged_sets() {
+        let (_temp, paths) = test_paths();
+        let operations =
+            crate::product::entity_operation_store::EntityOperationStore::new(paths.clone());
+        let deletions = EntityDeletionStore::new(paths.clone());
+        let scope = EntityScope::new(
+            "project_0001",
+            "issue_0001",
+            DeletionEntityKind::Plan,
+            "plan_0031",
+        );
+
+        let lease = operations.try_acquire_delete(&scope).expect("delete lease");
+        deletions.begin(&lease).expect("begin");
+        let mut manifest = manifest_for(&scope);
+        manifest.target_repository_ids = vec!["11111111-1111-1111-1111-111111111111".to_string()];
+        deletions
+            .index_owned_artifact_ids(&lease, &manifest)
+            .expect("index owned artifacts");
+
+        deletions
+            .prune_owned_artifact_ids_for_completion(&lease)
+            .expect("prune owned index for completion");
+
+        let pruned = deletions
+            .list_owned_artifact_ids(&scope)
+            .expect("list pruned owned index");
+        assert!(
+            pruned.session_ids.is_empty(),
+            "已删 session 不得残留: {:?}",
+            pruned.session_ids
+        );
+        assert!(pruned.review_ids.is_empty());
+        assert!(pruned.provider_run_ids.is_empty());
+        assert!(pruned.verification_plan_ids.is_empty());
+        assert!(pruned.repository_profile_ids.is_empty());
+        assert!(pruned.advance_ids.is_empty());
+        assert!(pruned.advance_retry_command_ids.is_empty());
+        // 墓碑 claim 事实保留（不删现有墓碑语义）。
+        assert_eq!(
+            pruned.work_item_ids,
+            vec!["work_item_a".to_string(), "work_item_b".to_string()]
+        );
+        assert_eq!(
+            pruned.target_repository_ids,
+            vec!["11111111-1111-1111-1111-111111111111".to_string()]
+        );
+        assert_eq!(pruned.scope, scope);
+
+        // 幂等：重复 prune 结果不变。
+        deletions
+            .prune_owned_artifact_ids_for_completion(&lease)
+            .expect("prune again");
+        assert_eq!(
+            deletions.list_owned_artifact_ids(&scope).unwrap(),
+            pruned,
+            "prune 幂等"
+        );
+    }
+
+    /// Plan 无可保留 claim 集时整条删除（空 manifest 与缺文件等价）；
+    /// Story/Design 的 owned-index 只描述已删内容 → 整条删除；缺文件=已清。
+    #[test]
+    fn owned_index_completion_prune_removes_entries_without_plan_claims() {
+        let (_temp, paths) = test_paths();
+        let operations =
+            crate::product::entity_operation_store::EntityOperationStore::new(paths.clone());
+        let deletions = EntityDeletionStore::new(paths.clone());
+
+        let plan_no_claims = EntityScope::new(
+            "project_0001",
+            "issue_0001",
+            DeletionEntityKind::Plan,
+            "plan_0032",
+        );
+        let story_scope = EntityScope::new(
+            "project_0001",
+            "issue_0001",
+            DeletionEntityKind::Story,
+            "story_0032",
+        );
+
+        // plan_no_claims：只索引已删 session/review（无 work_item/target claim）。
+        let mut no_claims_manifest = manifest_for(&plan_no_claims);
+        no_claims_manifest.work_item_ids = Vec::new();
+        let plan_lease = operations
+            .try_acquire_delete(&plan_no_claims)
+            .expect("delete lease");
+        deletions.begin(&plan_lease).expect("begin");
+        deletions
+            .index_owned_artifact_ids(&plan_lease, &no_claims_manifest)
+            .expect("index owned artifacts");
+        let story_lease = operations
+            .try_acquire_delete(&story_scope)
+            .expect("delete lease");
+        deletions.begin(&story_lease).expect("begin");
+        deletions
+            .index_owned_artifact_ids(&story_lease, &manifest_for(&story_scope))
+            .expect("index owned artifacts");
+
+        for (scope, lease) in [(&plan_no_claims, &plan_lease), (&story_scope, &story_lease)] {
+            deletions
+                .prune_owned_artifact_ids_for_completion(lease)
+                .expect("prune owned index for completion");
+            let path = owned_artifact_index_path(&paths, scope).expect("owned index path");
+            assert!(
+                !path.exists(),
+                "整条索引只描述已删实体 → 整条删除: {path:?}"
+            );
+            // 缺文件=已清：再次 prune 幂等成功。
+            deletions
+                .prune_owned_artifact_ids_for_completion(lease)
+                .expect("prune idempotent on missing file");
+            assert!(
+                deletions
+                    .list_owned_artifact_ids(scope)
+                    .unwrap()
+                    .session_ids
+                    .is_empty()
+            );
         }
     }
 }

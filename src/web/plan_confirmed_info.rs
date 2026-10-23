@@ -34,7 +34,10 @@ pub struct PlanConfirmedInfoDto {
 }
 
 /// 从 durable 事实派生绑定 plan 的成功确认信息；任一成功判据不满足返回
-/// `None`，读取失败原样上抛（不吞为 off）。
+/// `None`，真实 IO/JSON 读取失败原样上抛（不吞为 off）。绑定 plan/session
+/// 已被删除（NotFound：实体级联删除清盘后 enrollment 仍指向旧身份）时降级
+/// 为 `None`——已删会话不是成功事实，也不得把已删 id 抛成 NotFound 让
+/// 首页报错。
 pub fn plan_confirmed_info(
     paths: &ProductAppPaths,
     enrollment: &IssueAutomationEnrollment,
@@ -47,7 +50,11 @@ pub fn plan_confirmed_info(
         return Ok(None);
     };
     let lifecycle = LifecycleStore::new(paths.clone());
-    let session = lifecycle.get_workspace_session(session_id)?;
+    let session = match lifecycle.get_workspace_session(session_id) {
+        Ok(session) => session,
+        Err(ProductStoreError::NotFound { .. }) => return Ok(None),
+        Err(other) => return Err(other),
+    };
     if session.project_id != enrollment.project_id
         || session.issue_id != enrollment.issue_id
         // 批 2 P2（REQ-WIGA-02 修订）：按冻结 plan_approval 期望互证——auto
@@ -58,11 +65,15 @@ pub fn plan_confirmed_info(
     {
         return Ok(None);
     }
-    let plan = lifecycle.get_issue_work_item_plan(
+    let plan = match lifecycle.get_issue_work_item_plan(
         &enrollment.project_id,
         &enrollment.issue_id,
         plan_id,
-    )?;
+    ) {
+        Ok(plan) => plan,
+        Err(ProductStoreError::NotFound { .. }) => return Ok(None),
+        Err(other) => return Err(other),
+    };
     if plan.status != IssueWorkItemPlanStatus::Confirmed {
         return Ok(None);
     }
@@ -262,10 +273,23 @@ pub fn list_c1_waiting_items(
     let mut items: Vec<C1WaitingItemDto> = Vec::new();
 
     // A07：当前 binding 指向的 plan session 上的孤儿候选快照（不猜最新
-    // session）；快照不完整时 reason 逐项列出缺失事实。
+    // session）；快照不完整时 reason 逐项列出缺失事实。绑定会话已被删除
+    //（实体级联删除清盘，NotFound）→ 降级为跳过本段，不把已删 id 抛成
+    // NotFound 让首页报错；真实 IO/JSON 错误仍上抛。
     let lifecycle = LifecycleStore::new(paths.clone());
-    if let Some(bound_session_id) = session_id.as_deref() {
-        let bound_session = lifecycle.get_workspace_session(bound_session_id)?;
+    let bound_session = match session_id.as_deref() {
+        None => None,
+        Some(bound_session_id) => match lifecycle.get_workspace_session(bound_session_id) {
+            Ok(session) => Some(session),
+            // 绑定会话已被删除（实体级联删除清盘）→ 降级为没有会话，
+            // 跳过本段派生；真实 IO/JSON 错误仍上抛。
+            Err(ProductStoreError::NotFound { .. }) => None,
+            Err(other) => return Err(other),
+        },
+    };
+    if let (Some(bound_session_id), Some(bound_session)) =
+        (session_id.as_deref(), bound_session.as_ref())
+    {
         if bound_session.workspace_type == crate::product::models::WorkspaceType::WorkItemPlan
             && let Some(recovery) = bound_session
                 .human_gate_snapshot

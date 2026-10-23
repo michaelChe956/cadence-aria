@@ -778,9 +778,15 @@ pub async fn get_automation_enrollment_control(
         return Ok(Json(unmanaged()));
     };
     let lifecycle = LifecycleStore::new(paths.clone());
-    let record = lifecycle
-        .get_workspace_session(&binding.session_id)
-        .map_err(product_store_api_error)?;
+    // 绑定会话已被删除（实体级联删除清盘，NotFound）→ 降级为 unmanaged
+    // 投影，不把已删 id 抛成 404；真实 IO/JSON 错误仍上抛。
+    let record = match lifecycle.get_workspace_session(&binding.session_id) {
+        Ok(record) => record,
+        Err(crate::product::json_store::ProductStoreError::NotFound { .. }) => {
+            return Ok(Json(unmanaged()));
+        }
+        Err(other) => return Err(product_store_api_error(other)),
+    };
     let intent_phase = crate::web::plan_generation::generation_intent(&state, &enrollment)
         .ok()
         .flatten()
@@ -2068,6 +2074,41 @@ mod tests {
             assert_eq!(payload["stage"], "unmanaged", "{payload}");
             assert!(payload["stop_key"].is_null(), "{payload}");
             assert!(payload["allowed_actions"].as_array().unwrap().is_empty());
+        }
+
+        /// X 修复（读取方降级）：绑定会话已被删除（实体级联删除清盘）时，
+        /// control 投影降级为 unmanaged，不得把已删 id 抛成 404/500。
+        #[tokio::test]
+        async fn control_degrades_when_bound_session_deleted() {
+            let fixture = continue_fixture(
+                PlanApprovalPolicy::Auto,
+                crate::product::models::WorkspaceSessionStatus::Open,
+                crate::product::models::SingleCandidatePhase::Prepare,
+                None,
+                false,
+            )
+            .await;
+            let root_path = fixture._root.path().to_path_buf();
+            let state = WebAppState::new(
+                root_path.clone(),
+                crate::web::runtime::WebRuntime::new_fake(root_path.clone()),
+            );
+            let app = crate::web::app::build_web_router(state);
+            // 模拟级联删除后的磁盘状态：会话文件已清、enrollment 仍指向它。
+            std::fs::remove_file(
+                fixture
+                    .lifecycle
+                    .app_paths()
+                    .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+                    .join("workspace-sessions")
+                    .join(format!("{}.json", fixture.session_id)),
+            )
+            .expect("remove bound session file");
+
+            let (status, payload) = get_json(&app, control_uri()).await;
+            assert_eq!(status, StatusCode::OK, "control degrade: {payload}");
+            assert_eq!(payload["managed"], false, "{payload}");
+            assert_eq!(payload["stage"], "unmanaged", "{payload}");
         }
     }
 }

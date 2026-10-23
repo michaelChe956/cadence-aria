@@ -806,4 +806,58 @@ fn c2_waiting_items_project_coding_run_facts() {
     );
 }
 
+/// X 修复（读取方降级）：enrollment 绑定的会话已被删除（实体级联删除清盘）
+/// 时，成功信息投影降级为 None，不得把已删 id 抛成 NotFound 让首页报错。
+#[test]
+fn plan_confirmed_info_degrades_when_bound_session_missing() {
+    let (_tmp, paths, lifecycle) = fixture_root();
+    let plan_id = "plan_gone_session";
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            entity_id: plan_id.to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .unwrap();
+    enable_enrollment(&paths, plan_id, &session.id);
+    // 模拟级联删除后的磁盘状态：会话文件已清、enrollment 仍指向它。
+    std::fs::remove_file(
+        paths
+            .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+            .join("workspace-sessions")
+            .join(format!("{}.json", session.id)),
+    )
+    .unwrap();
+    let enrollment = IssueAutomationStore::new(paths.clone())
+        .get(PROJECT_ID, ISSUE_ID)
+        .unwrap()
+        .expect("enrollment present");
+
+    let info = crate::web::plan_confirmed_info::plan_confirmed_info(&paths, &enrollment)
+        .expect("已删会话必须降级为 None，而不是 NotFound 上抛");
+    assert!(info.is_none(), "绑定会话已删 → 无成功事实可投影: {info:?}");
+}
+
+/// X 修复（读取方降级）：绑定会话已删时 C1 等待项投影跳过会话派生段，
+/// 不再把已删 id 抛成 NotFound 让首页报错。
+#[test]
+fn c1_waiting_items_degrade_when_bound_session_missing() {
+    let (_tmp, paths, _lifecycle) = fixture_root();
+    enable_enrollment(&paths, "plan_gone_session", "workspace_session_gone_0001");
+
+    let items = list_c1_waiting_items(&paths, PROJECT_ID, ISSUE_ID)
+        .expect("绑定会话已删必须降级为空投影，而不是 NotFound 上抛");
+    assert!(
+        !items.iter().any(|item| item.kind == "candidate_recovery"),
+        "会话不存在则无孤儿候选等待项: {items:?}"
+    );
+}
+
 include!("plan_confirmed_info_c1_tests_parts/project_surface.inc.rs");

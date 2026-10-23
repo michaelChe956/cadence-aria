@@ -1287,3 +1287,83 @@ async fn cascade_d2_2_failure_reentry() {
         assert_eq!(record.phase, DeletionPhase::Deleted);
     }
 }
+
+fn d2_2_owned_index_path(paths: &ProductAppPaths, kind: &str, id: &str) -> std::path::PathBuf {
+    paths
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("entity-operations")
+        .join("owned-index")
+        .join(kind)
+        .join(format!("{id}.json"))
+}
+
+/// X 修复：cascade 完成后 owned-index 不再指向已删会话。Plan 的 owned-index
+/// 只保留 worktree 墓碑 claim 事实（work_item_ids/target_repository_ids），
+/// session/review/run 等已 purge 集合整段清空；身分绑定（D1.0 纯 ID 准入
+/// 事实）不受影响，list-by-owner 仍可反查（墓碑语义保持）。
+#[tokio::test]
+async fn cascade_d2_2_owned_index_pruned_after_completion() {
+    let root = TempDir::new().expect("root");
+    let app = build_test_router(root.path());
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = d2_2_seed_project_issue(&paths);
+    d2_2_seed_plan(
+        &lifecycle,
+        D2_2_PLAN_A,
+        Vec::new(),
+        None,
+        None,
+        vec!["wi-x-prune-1".to_string()],
+        crate::product::models::IssueWorkItemPlanStatus::Confirmed,
+    );
+    d2_2_wi(&lifecycle, "wi-x-prune-1", D2_2_PLAN_A);
+    let plan_session = d2_2_session(&lifecycle, D2_2_PLAN_A, WorkspaceType::WorkItemPlan);
+    // 显式 id 会话的等价现场：删除前已写身分绑定（D1.0 纯 ID 准入事实）。
+    let scope = EntityScope::new(
+        PROJECT_ID,
+        ISSUE_ID,
+        crate::product::entity_deletion_store::DeletionEntityKind::Plan,
+        D2_2_PLAN_A,
+    );
+    EntityOperationStore::new(paths.clone())
+        .bind_workspace_session_identity(&plan_session.id, &scope)
+        .expect("bind session identity");
+
+
+    let (status, body) = d2_2_delete(&app, "work-item-plans", D2_2_PLAN_A, Some(true)).await;
+    assert_eq!(status, StatusCode::OK, "delete body: {body}");
+
+    // 墓碑已完成。
+    let record: EntityDeletionRecord = crate::product::json_store::read_json(
+        &d2_2_deletion_dir(&paths, "plan").join(format!("{D2_2_PLAN_A}.json")),
+    )
+    .unwrap();
+    assert_eq!(record.phase, DeletionPhase::Deleted);
+
+    // owned-index：不指向已删会话（红：当前残留 session_ids/review_ids）。
+    let owned_index = d2_2_owned_index_path(&paths, "plan", D2_2_PLAN_A);
+    let indexed: crate::product::entity_deletion_store::EntityDeletionManifest =
+        crate::product::json_store::read_json(&owned_index).unwrap();
+    assert!(
+        indexed.session_ids.is_empty(),
+        "完成后 owned-index 不得指向已删会话: {:?}",
+        indexed.session_ids
+    );
+    assert!(indexed.review_ids.is_empty());
+    assert!(indexed.provider_run_ids.is_empty());
+    // 墓碑 claim 事实保留：WI 反查/资源 claim 不受清理影响。
+    assert_eq!(indexed.work_item_ids, vec!["wi-x-prune-1".to_string()]);
+
+    // 身分绑定是长期准入事实：list-by-owner 仍反查得到已删会话（语义保持），
+    // 但 owned-index 读取方（list_owned_artifact_ids）不再返回已删会话。
+    let operations = EntityOperationStore::new(paths.clone());
+    assert!(operations
+        .list_workspace_session_ids_by_owner(&scope)
+        .unwrap()
+        .contains(&plan_session.id));
+    assert!(EntityDeletionStore::new(paths.clone())
+        .list_owned_artifact_ids(&scope)
+        .unwrap()
+        .session_ids
+        .is_empty());
+}
