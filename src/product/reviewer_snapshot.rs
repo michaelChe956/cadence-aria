@@ -28,9 +28,17 @@
 //!   三域全通过;平台合法写入与 Reviewer 写入的判定归 T18,`Restored`
 //!   不等于 Accepted。
 //!
-//! 恢复游标 [`RestoreCursor`] 持久化在 manifest 内,经 `write_json`
-//! tmp+flush+sync+rename 原子推进;恢复每步幂等,任一游标边界故障后重启
-//! 都能从原 manifest 续接(测试以故障注入逐边界验收)。
+//! 恢复游标 [`RestoreCursor`] 分两层持久化,均经 `write_json`
+//! tmp+flush+sync+rename 原子推进,恢复每步幂等,任一游标边界故障后重启
+//! 都能续接(测试以故障注入逐边界验收):
+//! - 条目级进度写**增量 sidecar**
+//!   (`<window>/restore-cursor.json`,几十字节,O(1) 字节/次);
+//! - 整份 manifest 只在**阶段边界**重写一次(次数=阶段数,常数)。
+//!
+//! 旧实现每推进一条就重写整份 manifest,在大快照下退化 O(n²) I/O
+//! (12k 条目 / 4.3 MB 基线实测 ≈13 GB 写、恢复耗时小时级);
+//! [`ReviewerSnapshotStore::load_manifest`] 取 manifest 与 sidecar 中较前
+//! 的游标,故崩溃后最坏只回退到本阶段起点,sidecar 正常时回退一条条目。
 // 生产消费链:T17(窗口)/T18(三域对账)/T21(恢复)接线;接线完成前仅
 // 合同测试消费(前瞻载体范式,同 provider_resource_store)。
 
@@ -52,6 +60,18 @@ use crate::product::json_store::{ProductStoreError, read_json, validate_relative
 
 /// 快照 schema 版本(域集合变化时递增,拒绝跨版本恢复)。
 pub(crate) const REVIEWER_BASELINE_SCHEMA: &str = "reviewer_baseline/1";
+
+/// 恢复游标的**增量**持久化 sidecar(capture 初值之后的条目级进度)。
+///
+/// 与窗口目录内 `manifest.json` 同目录:manifest 在 12k 条目规模下是
+/// MB 级文档,恢复逐条推进时整体重写 = O(n²) I/O(实测 4.3 MB × 每
+/// 条一次 ≈ 13 GB);游标本身只有几十字节,单独落盘把写放大压到 O(n)。
+/// manifest 仍在**阶段边界**整体落盘一次(阶段数常数),因此丢失
+/// sidecar 的最坏回退粒度是「一个阶段」,不丢失已完成阶段进度。
+pub(crate) const RESTORE_CURSOR_SIDECAR_FILE: &str = "restore-cursor.json";
+
+/// 游标 sidecar 的 schema(独立版本;sidecar 与 manifest 同窗号绑定)。
+pub(crate) const RESTORE_CURSOR_SIDECAR_SCHEMA: &str = "reviewer_restore_cursor/1";
 
 /// 平台合法写入域基线的最大预枚举条目数(防御性上限)。
 const PLATFORM_WRITE_PATH_LIMIT: usize = 4096;
@@ -278,6 +298,22 @@ impl RestoreCursor {
             entry_index: 0,
         }
     }
+
+    /// 游标单调序(阶段优先,同阶段比条目下标)。
+    pub(crate) fn is_ahead_of(&self, other: &Self) -> bool {
+        self.phase.rank() > other.phase.rank()
+            || (self.phase == other.phase && self.entry_index > other.entry_index)
+    }
+}
+
+/// 恢复游标的增量持久化载体(独立小文件;崩溃后与 manifest 内的游标
+/// 取**较前者**续接)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RestoreCursorSidecar {
+    pub(crate) schema: String,
+    /// 窗口号绑定(防止归档/复用目录里的陈旧 sidecar 被误用)。
+    pub(crate) window_id: String,
+    pub(crate) cursor: RestoreCursor,
 }
 
 /// Reviewer B 档基线 manifest(新私有合同;持久化在平台受信数据目录)。
@@ -389,6 +425,13 @@ pub(crate) struct ReviewerSnapshotStore {
     /// 边界故障后重启可从原 manifest 续接)。usize::MAX = 禁用。
     #[cfg(test)]
     restore_failpoint_after_writes: std::sync::atomic::AtomicUsize,
+    /// 仅测试:游标持久化写放大观测——整份 manifest 的重写次数(必须
+    /// 是阶段数常数,与条目数无关)。
+    #[cfg(test)]
+    restore_manifest_rewrites: std::sync::atomic::AtomicUsize,
+    /// 仅测试:游标 sidecar 的写次数(条目级增量写)。
+    #[cfg(test)]
+    restore_sidecar_writes: std::sync::atomic::AtomicUsize,
 }
 
 impl ReviewerSnapshotStore {
@@ -397,7 +440,33 @@ impl ReviewerSnapshotStore {
             root: root.into(),
             #[cfg(test)]
             restore_failpoint_after_writes: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            #[cfg(test)]
+            restore_manifest_rewrites: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            restore_sidecar_writes: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// 仅测试:游标持久化写放大观测(整份 manifest 重写次数, sidecar 写次数)。
+    #[cfg(test)]
+    pub(crate) fn restore_cursor_write_stats(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.restore_manifest_rewrites.load(Relaxed),
+            self.restore_sidecar_writes.load(Relaxed),
+        )
+    }
+
+    #[cfg(test)]
+    fn note_restore_manifest_rewrite(&self) {
+        self.restore_manifest_rewrites
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn note_restore_sidecar_write(&self) {
+        self.restore_sidecar_writes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// 仅测试:注入第 N 次游标写之后的故障。
@@ -415,6 +484,18 @@ impl ReviewerSnapshotStore {
         self.window_dir(window_id).join("manifest.json")
     }
 
+    /// 增量游标 sidecar 路径(与 manifest 同目录)。
+    fn cursor_sidecar_path(&self, window_id: &str) -> PathBuf {
+        self.window_dir(window_id).join(RESTORE_CURSOR_SIDECAR_FILE)
+    }
+
+    /// 载入 manifest,并叠加**增量游标**(sidecar 与 manifest 内游标取较
+    /// 前者)。
+    ///
+    /// 恢复推进把条目级进度写在 sidecar、只在阶段边界整体落盘 manifest;
+    /// 因此恢复续接位置、journal 游标快照、T18 对账读数都必须经本方法
+    /// (sidecar 是 manifest 的**进度覆盖层**,基线与域内容仍以 manifest
+    /// 为准)。
     pub(crate) fn load_manifest(
         &self,
         window_id: &str,
@@ -428,7 +509,45 @@ impl ReviewerSnapshotStore {
             }
             .into());
         }
-        Ok(read_json(&path)?)
+        let mut manifest: ReviewerBaselineManifest = read_json(&path)?;
+        if let Some(cursor) = self.load_restore_cursor_sidecar(window_id, &manifest)? {
+            if cursor.is_ahead_of(&manifest.restore_cursor) {
+                manifest.restore_cursor = cursor;
+            }
+        }
+        Ok(manifest)
+    }
+
+    /// 读增量游标 sidecar:不存在 → None;损坏/schema 不符/窗号不符 →
+    /// fail-closed(原子写保证崩溃不会产出半篇,损坏即篡改)。
+    fn load_restore_cursor_sidecar(
+        &self,
+        window_id: &str,
+        manifest: &ReviewerBaselineManifest,
+    ) -> Result<Option<RestoreCursor>, ReviewerSnapshotError> {
+        let path = self.cursor_sidecar_path(window_id);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let sidecar: RestoreCursorSidecar = read_json(&path).map_err(|error| {
+            ReviewerSnapshotError::Integrity(format!(
+                "游标 sidecar 不可读 {}: {error}",
+                path.display()
+            ))
+        })?;
+        if sidecar.schema != RESTORE_CURSOR_SIDECAR_SCHEMA {
+            return Err(ReviewerSnapshotError::Integrity(format!(
+                "游标 sidecar schema 不符: {:?}",
+                sidecar.schema
+            )));
+        }
+        if sidecar.window_id != window_id || manifest.window_id != window_id {
+            return Err(ReviewerSnapshotError::Integrity(format!(
+                "游标 sidecar 窗号不符: sidecar={} dir={} manifest={}",
+                sidecar.window_id, window_id, manifest.window_id
+            )));
+        }
+        Ok(Some(sidecar.cursor))
     }
 
     /// T17 采用路径消费(修复轮 2):加载 manifest 并核验其引用的全部
@@ -758,6 +877,7 @@ impl ReviewerSnapshotStore {
         let mut ctx = RestoreCtx {
             store: self,
             window_dir: window_dir.clone(),
+            window_id: window_id.to_string(),
             manifest_path: self.manifest_path(window_id),
             manifest,
             identity: identity.clone(),
@@ -1997,6 +2117,7 @@ struct RestoreCtx<'a> {
     // 仅恢复 failpoint 注入(测试)读取;生产恢复链不直接读该引用
     store: &'a ReviewerSnapshotStore,
     window_dir: PathBuf,
+    window_id: String,
     manifest_path: PathBuf,
     manifest: ReviewerBaselineManifest,
     identity: ReviewWorktreeLockIdentity,
@@ -2005,7 +2126,22 @@ struct RestoreCtx<'a> {
 }
 
 impl RestoreCtx<'_> {
-    /// 游标原子推进(tmp+flush+sync+rename;故障注入挂点=写成功之后)。
+    /// 增量游标 sidecar 路径(与 manifest 同目录)。
+    fn cursor_sidecar_path(&self) -> PathBuf {
+        self.window_dir.join(RESTORE_CURSOR_SIDECAR_FILE)
+    }
+
+    /// 游标原子推进。
+    ///
+    /// 持久化分两层(恢复语义不变:仍是逐条比对、只恢复差异、幂等可入):
+    /// 1. **条目级增量**:几十字节的 sidecar 原子写(O(1) 字节/次)。旧实现
+    ///    每推进一条就把整份 manifest 重写一遍——12k 条目 / 4.3 MB 的
+    ///    现场基线约 13 GB 写、小时级耗时(O(n²) 写放大)。
+    /// 2. **阶段边界**:整份 manifest 落盘一次(次数=阶段数,常数)。因此
+    ///    进程崩溃后最坏只回退到本阶段起点,已完成阶段的进度不会丢;
+    ///    sidecar 正常时回退粒度是一条条目。
+    /// sidecar 先写、manifest 后写:任一处崩溃后 `load_manifest` 取二者
+    /// 较前者续接,游标永不倒退。
     fn advance(
         &mut self,
         phase: RestorePhase,
@@ -2023,8 +2159,23 @@ impl RestoreCtx<'_> {
                 "游标回退: {current:?} -> {target:?}"
             )));
         }
-        self.manifest.restore_cursor = target;
-        write_json(&self.manifest_path, &self.manifest)?;
+        let phase_changed = target.phase != current.phase;
+        self.manifest.restore_cursor = target.clone();
+        write_json(
+            &self.cursor_sidecar_path(),
+            &RestoreCursorSidecar {
+                schema: RESTORE_CURSOR_SIDECAR_SCHEMA.to_string(),
+                window_id: self.window_id.clone(),
+                cursor: target,
+            },
+        )?;
+        #[cfg(test)]
+        self.store.note_restore_sidecar_write();
+        if phase_changed {
+            write_json(&self.manifest_path, &self.manifest)?;
+            #[cfg(test)]
+            self.store.note_restore_manifest_rewrite();
+        }
         #[cfg(test)]
         {
             let tripped = self.store.restore_failpoint_after_writes.fetch_update(
@@ -3358,5 +3509,223 @@ mod tests {
             "gitdir: /tmp/aria-bug45/t16/evil",
             "拒绝路径上不得改写身份锚点"
         );
+    }
+
+    // ---------- 红测⑧:游标持久化写放大有界(不随基线条目数增长) ----------
+
+    /// 在 worktree 里铺 N 个普通文件(捕获为基线条目;恢复时每条都走
+    /// 「比对 + 跳过」路径)。
+    fn seed_bulk_files(worktree: &Path, count: usize) {
+        let dir = worktree.join("bulk");
+        fs::create_dir_all(&dir).expect("bulk dir");
+        for index in 0..count {
+            fs::write(
+                dir.join(format!("f{index:05}.txt")),
+                format!("bulk-{index}\n"),
+            )
+            .expect("bulk file");
+        }
+    }
+
+    fn cursor_sidecar_path(store: &ReviewerSnapshotStore, window_id: &str) -> PathBuf {
+        store
+            .window_dir(window_id)
+            .join(RESTORE_CURSOR_SIDECAR_FILE)
+    }
+
+    #[tokio::test]
+    async fn restore_cursor_persistence_write_amplification_is_bounded() {
+        let bulk = 2000usize;
+        let fixture = build_fixture(Layout::Plain);
+        seed_bulk_files(&fixture.worktree, bulk);
+        let identity = lock_identity(&fixture.worktree, "lease-wa");
+        let evidence = quiescence_evidence("win-wa").await;
+        let store = ReviewerSnapshotStore::new(&fixture.store_root);
+        store
+            .capture_baseline(capture_request(&fixture, "win-wa", &identity, &evidence))
+            .expect("capture");
+        let manifest = store.load_manifest("win-wa").expect("manifest");
+        let entry_count = manifest.entries.len();
+        assert!(entry_count >= bulk, "基线规模应含 bulk 条目: {entry_count}");
+        let manifest_len = fs::metadata(store.manifest_path("win-wa"))
+            .expect("manifest stat")
+            .len();
+        assert!(
+            manifest_len > 100_000,
+            "大快照 manifest 应为 MB 级文档: {manifest_len}"
+        );
+
+        // 只制造少量差异:其余条目走「比对 → 跳过」
+        let targets: Vec<BaselineEntry> = manifest
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.kind,
+                    BaselineEntryKind::File | BaselineEntryKind::Gitfile
+                ) && entry.rel_path != ".git"
+            })
+            .take(3)
+            .cloned()
+            .collect();
+        assert_eq!(targets.len(), 3);
+        for entry in &targets {
+            fs::write(
+                fixture.worktree.join(&entry.rel_path),
+                b"reviewer-mangled\n",
+            )
+            .expect("mangle");
+        }
+
+        // 用新实例计量(计数器随实例归零)
+        let restoring = ReviewerSnapshotStore::new(&fixture.store_root);
+        let report = restore_report(
+            restoring
+                .restore_baseline("win-wa", &identity)
+                .expect("restore"),
+        );
+        assert_eq!(
+            report.worktree_fixed_entries.len(),
+            3,
+            "只恢复差异条目: {:?}",
+            report.worktree_fixed_entries
+        );
+
+        let (manifest_rewrites, sidecar_writes) = restoring.restore_cursor_write_stats();
+        let sidecar_len = fs::metadata(cursor_sidecar_path(&restoring, "win-wa"))
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let written =
+            manifest_rewrites as u64 * manifest_len + sidecar_writes as u64 * sidecar_len.max(1);
+        eprintln!(
+            "write-amplification: entries={entry_count} manifest_len={manifest_len} \
+             manifest_rewrites={manifest_rewrites} sidecar_writes={sidecar_writes} \
+             sidecar_len={sidecar_len} total_written={written}"
+        );
+        // 整份 manifest 的重写次数 = 阶段边界数(常数),与条目数无关。
+        // 红态(逐条重写整份 manifest)= entry_count + 1,随 N 线性增长。
+        assert!(
+            manifest_rewrites <= 8,
+            "manifest 整体重写次数必须为阶段数常数,实测 {manifest_rewrites}(entries={entry_count})"
+        );
+        // 游标持久化总写入字节 < 基线 manifest 大小的常数倍(旧实现 ≈ N × manifest_len)
+        assert!(
+            written <= 20 * manifest_len,
+            "游标持久化总写入字节超界: {written} vs 20×{manifest_len}"
+        );
+        // 增量写确实发生了(条目级进度落 sidecar,而非完全不持久化)
+        assert!(
+            sidecar_writes >= entry_count,
+            "每条推进都必须落 sidecar: {sidecar_writes} < {entry_count}"
+        );
+    }
+
+    // ---------- 红测⑨:条目级进度在 sidecar,崩溃后从中途续跑 ----------
+
+    #[tokio::test]
+    async fn restore_resumes_from_sidecar_cursor_after_crash() {
+        let fixture = build_fixture(Layout::Plain);
+        seed_bulk_files(&fixture.worktree, 64);
+        let identity = lock_identity(&fixture.worktree, "lease-crash");
+        let evidence = quiescence_evidence("win-crash").await;
+        let store = ReviewerSnapshotStore::new(&fixture.store_root);
+        store
+            .capture_baseline(capture_request(&fixture, "win-crash", &identity, &evidence))
+            .expect("capture");
+        let manifest = store.load_manifest("win-crash").expect("manifest");
+
+        // 每条文件条目都漂移:每条都必须恢复 → 可用「剩余差异数」证明
+        // 续跑没有从头重做。
+        let mutable: Vec<BaselineEntry> = manifest
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.kind,
+                    BaselineEntryKind::File | BaselineEntryKind::Gitfile
+                ) && entry.rel_path != ".git"
+            })
+            .cloned()
+            .collect();
+        assert!(mutable.len() > 50, "fixture 不足: {}", mutable.len());
+        for entry in &mutable {
+            fs::write(
+                fixture.worktree.join(&entry.rel_path),
+                b"reviewer-mangled-bulk\n",
+            )
+            .expect("mangle");
+        }
+
+        // 中断:第 40 次游标持久化后注入故障(仍在中途,未到阶段边界)
+        let faulted = ReviewerSnapshotStore::new(&fixture.store_root);
+        faulted.set_restore_failpoint_after_cursor_writes(40);
+        let err = faulted
+            .restore_baseline("win-crash", &identity)
+            .expect_err("必须注入中断");
+        assert!(
+            matches!(&err, ReviewerSnapshotError::Io(detail)
+                if detail.contains("reviewer_snapshot_injected_failure")),
+            "{err:?}"
+        );
+
+        // ① 条目级进度必须已落 sidecar(崩溃续跑的载体)
+        let sidecar_file = cursor_sidecar_path(&faulted, "win-crash");
+        assert!(
+            sidecar_file.is_file(),
+            "条目级游标必须增量落盘 sidecar: {} 缺失",
+            sidecar_file.display()
+        );
+        let sidecar: RestoreCursorSidecar = read_json(&sidecar_file).expect("read sidecar");
+        assert_eq!(sidecar.schema, RESTORE_CURSOR_SIDECAR_SCHEMA);
+        assert_eq!(sidecar.window_id, "win-crash");
+        assert_eq!(sidecar.cursor.phase, RestorePhase::WorktreeRestore);
+        assert!(
+            sidecar.cursor.entry_index > 1,
+            "sidecar 必须携带推进后的游标: {:?}",
+            sidecar.cursor
+        );
+
+        // ② 整份 manifest 仍停在阶段边界 —— 续跑位置只能来自 sidecar
+        let on_disk: ReviewerBaselineManifest =
+            read_json(&faulted.manifest_path("win-crash")).expect("raw manifest");
+        assert_eq!(on_disk.restore_cursor.phase, RestorePhase::WorktreeRestore);
+        assert_eq!(
+            on_disk.restore_cursor.entry_index, 0,
+            "整份 manifest 只在阶段边界落盘;条目级进度在 sidecar"
+        );
+
+        // 故障时刻还剩多少条目需要恢复
+        let mut remaining = 0usize;
+        for entry in &mutable {
+            let bytes = fs::read(fixture.worktree.join(&entry.rel_path)).expect("read");
+            if Some(sha256_hex(&bytes)) != entry.content_sha256 {
+                remaining += 1;
+            }
+        }
+        assert!(
+            remaining > 0 && remaining < mutable.len(),
+            "中断必须发生在条目中途: remaining={remaining} 总={}",
+            mutable.len()
+        );
+
+        // ③ 重启:从 sidecar 游标续接,只修剩余差异(不从头重做)
+        let resumed_store = ReviewerSnapshotStore::new(&fixture.store_root);
+        let report = restore_report(
+            resumed_store
+                .restore_baseline("win-crash", &identity)
+                .expect("resume"),
+        );
+        assert_eq!(
+            report.resumed_from, sidecar.cursor,
+            "续跑必须从 sidecar 游标接续(而非阶段边界)"
+        );
+        assert_eq!(
+            report.worktree_fixed_entries.len(),
+            remaining,
+            "续跑只恢复剩余差异,不重做已完成条目"
+        );
+        assert_dirty_matrix_restored(&fixture);
+        let final_manifest = resumed_store.load_manifest("win-crash").expect("final");
+        assert_eq!(final_manifest.restore_cursor.phase, RestorePhase::Completed);
     }
 }
