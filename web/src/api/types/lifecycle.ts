@@ -396,10 +396,18 @@ export type IssueAutomationEnrollment = {
    * 旧代无绑定解释，前端不回填替身身份）。 */
   target?: EnrollmentTarget;
   binding_history?: EnrollmentBindingHistory;
+  /** 批 2 T4（REQ-WIGA-09）：整 plan 自动化终止时间（RFC3339）。非空即
+   * 该 enrollment 已被终止——人工可显式重新开启（Enable 取代），自动路径
+   * 不得复活。旧投影缺字段按未终止读。 */
+  terminated_at?: string | null;
 };
 
 export type AutomationEnrollmentEnableCommand = {
   type: "enable";
+  /** 批 2 T4（REQ-WIGA-09 修订）：稳定命令身份——同一次用户动作（同一
+   * payload）的重试复用同一个 command_id，服务端据此幂等重放（缺此字段
+   * 后端 422；同 command_id 配异 payload 判 409）。 */
+  command_id: string;
   selection_key: string;
   source: EnrollmentSource;
   options: EnrollmentOptions;

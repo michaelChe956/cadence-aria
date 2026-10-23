@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ApiRequestError, getAutomationTarget } from "../../api/client";
+import {
+  ApiRequestError,
+  getAutomationEnrollment,
+  getAutomationTarget,
+} from "../../api/client";
 import type {
   AutomationTarget,
   EnrollmentTarget,
+  IssueAutomationEnrollment,
 } from "../../api/types";
 import type { WorkspaceProviderName } from "../../api/types";
 import {
@@ -62,6 +67,8 @@ export function WorkItemPlanOptionsDialog({
   const submittingRef = useRef(false);
   const [targetProjection, setTargetProjection] =
     useState<AutomationTargetProjectionState>({ status: "idle" });
+  const [enrollmentProjection, setEnrollmentProjection] =
+    useState<AutomationEnrollmentProjectionState>({ status: "idle" });
   const [targetRetryTick, setTargetRetryTick] = useState(0);
   const providerSnapshot = useProviderAvailabilityStore(
     (state) => state.snapshot,
@@ -70,11 +77,22 @@ export function WorkItemPlanOptionsDialog({
 
   const automatic = options.automation_mode === "automatic";
   const targetScope = automationAvailable && automatic ? automationTargetScope : null;
+  // 批 2 T4（REQ-WIGA-09 修订）：已终止的 enrollment 上，本次提交是「重新
+  // 开启」——payload 原样回传终止记录（不顺便改写授权），因此不依赖新的
+  // target 投影：入口不被终止态阻断，表单里的参数改动也不生效（置灰）。
+  const terminatedEnrollment =
+    enrollmentProjection.status === "ready" &&
+    enrollmentProjection.enrollment?.terminated_at
+      ? enrollmentProjection.enrollment
+      : null;
+  const reenablePending = automatic && terminatedEnrollment !== null;
   // C5 Task 7：automatic 提交必须有就绪的 target 投影——loading/GET 失败/
   // 身份（scope）缺失都禁止 stale automatic submit；manual 分支不受影响。
+  // 重新开启（terminated）例外：payload 取终止记录，投影只用于展示。
   const automaticSubmitBlocked =
     automatic &&
     automationAvailable &&
+    !reenablePending &&
     (targetScope === null || targetProjection.status !== "ready");
 
   // C5 Task 7：打开自动模式先取 automation-target 投影（无 query：身份
@@ -111,6 +129,33 @@ export function WorkItemPlanOptionsDialog({
     targetRetryTick,
     targetScope === null,
   ]);
+
+  // 批 2 T4（REQ-WIGA-09 修订）：自动模式补读当前 enrollment 投影——只读
+  // 展示，用于告知用户该 issue 的自动化已被终止（人工点「启用自动化」即
+  // 显式重新开启）。读取失败不阻塞提交：提交链路自带权威 GET 与错误呈现，
+  // 此处投影缺失只是少一句说明，不猜状态、不阻断入口。manual 模式不请求。
+  useEffect(() => {
+    if (targetScope === null) {
+      setEnrollmentProjection({ status: "idle" });
+      return;
+    }
+    let alive = true;
+    setEnrollmentProjection({ status: "loading" });
+    getAutomationEnrollment(targetScope.projectId, targetScope.issueId)
+      .then((enrollment: IssueAutomationEnrollment | null) => {
+        if (alive) {
+          setEnrollmentProjection({ status: "ready", enrollment });
+        }
+      })
+      .catch(() => {
+        if (alive) {
+          setEnrollmentProjection({ status: "error" });
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [targetScope?.projectId, targetScope?.issueId, targetScope === null]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -173,19 +218,19 @@ export function WorkItemPlanOptionsDialog({
           <OptionCheckbox
             label="包含贯通/集成测试 Work Item"
             checked={options.include_integration_tests}
-            disabled={submitting}
+            disabled={submitting || reenablePending}
             onChange={() => updateOption("include_integration_tests")}
           />
           <OptionCheckbox
             label="包含 E2E 测试 Work Item"
             checked={options.include_e2e_tests}
-            disabled={submitting}
+            disabled={submitting || reenablePending}
             onChange={() => updateOption("include_e2e_tests")}
           />
           <OptionCheckbox
             label="强制前后端拆分"
             checked={options.force_frontend_backend_split}
-            disabled={submitting}
+            disabled={submitting || reenablePending}
             onChange={() => updateOption("force_frontend_backend_split")}
           />
           <OptionCheckbox
@@ -211,14 +256,14 @@ export function WorkItemPlanOptionsDialog({
             label="Author Provider"
             value={options.author_provider}
             options={providerOptions}
-            disabled={submitting}
+            disabled={submitting || reenablePending}
             onChange={(value) => updateProvider("author_provider", value)}
           />
           <ProviderSelect
             label="Reviewer Provider"
             value={options.reviewer_provider}
             options={providerOptions}
-            disabled={submitting}
+            disabled={submitting || reenablePending}
             onChange={(value) => updateProvider("reviewer_provider", value)}
           />
           {/* P1 WIGA：仅已确认 Design 提供显式自动化选择；缺省手动，人工链路原样。 */}
@@ -253,37 +298,71 @@ export function WorkItemPlanOptionsDialog({
           ) : null}
         {automatic ? (
           <div className="mt-1">
-            {targetProjection.status === "loading" ? (
-              <p role="status" className="text-xs text-[var(--aria-ink-muted)]">
-                自动化目标加载中…（提交暂不可用）
-              </p>
-            ) : null}
-            {targetProjection.status === "error" ? (
-              <div>
-                <p
-                  role="alert"
-                  className="text-xs text-[var(--aria-danger)]"
-                >
-                  自动化目标加载失败：{targetProjection.message}
-                </p>
-                <button
-                  type="button"
-                  data-testid="automation-target-retry"
-                  disabled={submitting}
-                  onClick={() => setTargetRetryTick((tick) => tick + 1)}
-                  className="mt-1 rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)]"
-                >
-                  重试
-                </button>
-              </div>
-            ) : null}
-            {targetProjection.status === "ready" ? (
+            {/* 重新开启（terminated）：目标取终止记录（新投影用不上，也不
+                呈现其 loading/失败——重新开启不依赖新目标投影）。 */}
+            {reenablePending ? (
               <p
                 data-testid="automation-target-projection"
                 className="text-xs text-[var(--aria-ink-muted)]"
               >
                 自动化目标：
-                {enrollmentTargetLabel(targetProjection.target.enrollment_target)}
+                {terminatedEnrollment?.target
+                  ? enrollmentTargetLabel(terminatedEnrollment.target)
+                  : "—"}
+              </p>
+            ) : (
+              <>
+                {targetProjection.status === "loading" ? (
+                  <p
+                    role="status"
+                    className="text-xs text-[var(--aria-ink-muted)]"
+                  >
+                    自动化目标加载中…（提交暂不可用）
+                  </p>
+                ) : null}
+                {targetProjection.status === "error" ? (
+                  <div>
+                    <p
+                      role="alert"
+                      className="text-xs text-[var(--aria-danger)]"
+                    >
+                      自动化目标加载失败：{targetProjection.message}
+                    </p>
+                    <button
+                      type="button"
+                      data-testid="automation-target-retry"
+                      disabled={submitting}
+                      onClick={() => setTargetRetryTick((tick) => tick + 1)}
+                      className="mt-1 rounded-md border border-[var(--aria-line)] px-2 py-1 text-xs font-semibold text-[var(--aria-ink-muted)]"
+                    >
+                      重试
+                    </button>
+                  </div>
+                ) : null}
+                {targetProjection.status === "ready" ? (
+                  <p
+                    data-testid="automation-target-projection"
+                    className="text-xs text-[var(--aria-ink-muted)]"
+                  >
+                    自动化目标：
+                    {enrollmentTargetLabel(
+                      targetProjection.target.enrollment_target,
+                    )}
+                  </p>
+                ) : null}
+              </>
+            )}
+            {/* 批 2 T4（REQ-WIGA-09 修订）：terminated 态入口仍可用——人工
+                点「启用自动化」即显式重新开启（生成新的自动化授权）；此处
+                只说明事实，不阻断提交，也不代替服务端的最终判定。 */}
+            {terminatedEnrollment ? (
+              <p
+                role="status"
+                data-testid="automation-terminated-notice"
+                className="text-xs text-[var(--aria-ink-muted)]"
+              >
+                该 issue 的自动化已于 {terminatedEnrollment.terminated_at} 终止；
+                确认「启用自动化」将按原授权重新开启（生成新的自动化授权，原自动化不恢复）。
               </p>
             ) : null}
             {automationTargetScope === null ? (
@@ -349,6 +428,14 @@ type AutomationTargetProjectionState =
   | { status: "loading" }
   | { status: "error"; message: string }
   | { status: "ready"; target: AutomationTarget };
+
+/** 批 2 T4：当前 enrollment 只读投影（terminated 事实展示用）。读取失败
+ * 不阻断提交——提交链路自带权威 GET 与错误呈现。 */
+type AutomationEnrollmentProjectionState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "ready"; enrollment: IssueAutomationEnrollment | null };
 
 type SubmitErrorState = {
   message: string;

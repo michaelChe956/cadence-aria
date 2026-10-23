@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from "react";
+import { useRef, type Dispatch, type SetStateAction } from "react";
 import {
   generateDesignSpecs,
   generateStorySpecs,
@@ -56,6 +56,13 @@ const LAUNCH_FAILURE_MESSAGES: Record<ProviderWorkspaceLaunchTarget, string> = {
 
 const AUTOMATION_ENROLL_FAILURE_MESSAGE = "启用自动化失败";
 
+// 批 2 T4（REQ-WIGA-09 修订）：终止收口未完成时不可重新开启——服务端回
+// 409 automation_plan_cleanup_required；该错误有明确的下一步（先重试终止
+// 完成清理），不降级为通用冲突文案。
+const AUTOMATION_CLEANUP_REQUIRED_CODE = "automation_plan_cleanup_required";
+const AUTOMATION_CLEANUP_REQUIRED_MESSAGE =
+  "自动化的终止收口尚未完成：请先重试终止完成清理，再重新开启自动化";
+
 export interface IssueLifecycleGenerationOptions {
   selectedProjectId: string | null;
   selectedColumns: LifecycleColumns;
@@ -85,12 +92,12 @@ export interface IssueLifecycleGenerationActions {
   ) => Promise<void>;
 }
 
-/** P1 WIGA：一次弹窗实例的稳定选择键（重试间不变，弹窗重开才换新）。 */
-function newAutomationSelectionKey(): string {
+/** 随机标识：弹窗实例的 selection_key 与用户动作的 command_id 共用同一生成器。 */
+function newRandomId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
   }
-  return `selection-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /**
@@ -109,6 +116,47 @@ export function useIssueLifecycleGeneration({
   openDrawer,
   onOpenWorkspace,
 }: IssueLifecycleGenerationOptions): IssueLifecycleGenerationActions {
+  // 重新开启（terminated enrollment 上的人工 Enable）的命令身份：一次
+  // 「重新开启」是新的显式命令，命令身份必须与被终止记录那次 Enable 不同，
+  // 否则服务端命令账本无法把它单独留痕（可能被判成旧命令重放而静默不生效）。
+  // 同一弹窗实例内重试复用同一身份（幂等），弹窗重开即换新。
+  const reenableSelectionKeyRef = useRef<{
+    dialogKey: string;
+    value: string;
+  } | null>(null);
+
+  function reenableSelectionKey(dialogSelectionKey: string): string {
+    const current = reenableSelectionKeyRef.current;
+    if (current && current.dialogKey === dialogSelectionKey) {
+      return current.value;
+    }
+    const value = newRandomId();
+    reenableSelectionKeyRef.current = {
+      dialogKey: dialogSelectionKey,
+      value,
+    };
+    return value;
+  }
+
+  // 稳定 command_id（REQ-WIGA-09 修订）：同一次用户动作（同一 payload）的
+  // 重试必须复用同一个 command_id，服务端据此幂等重放首次 durable 结果；
+  // 载荷变了就是另一次动作，换新 command_id（否则同 command_id 配异
+  // payload 会被服务端判 409）。
+  const enableCommandIdRef = useRef<{
+    digest: string;
+    commandId: string;
+  } | null>(null);
+
+  function enableCommandId(payloadDigest: string): string {
+    const current = enableCommandIdRef.current;
+    if (current && current.digest === payloadDigest) {
+      return current.commandId;
+    }
+    const commandId = newRandomId();
+    enableCommandIdRef.current = { digest: payloadDigest, commandId };
+    return commandId;
+  }
+
   function openWorkItemPlanOptions(card: LifecycleCard) {
     setPendingWorkItemPlanLaunch({
       card,
@@ -117,7 +165,7 @@ export function useIssueLifecycleGeneration({
         ...readWorkspaceProviderDefaultsSnapshot(),
         automation_mode: "manual" as AutomationMode,
       },
-      selectionKey: newAutomationSelectionKey(),
+      selectionKey: newRandomId(),
     });
   }
 
@@ -269,6 +317,9 @@ export function useIssueLifecycleGeneration({
    * 服务端只读 target 投影的已解析值（前端不猜默认）；Story/Design 引用取
    * 当前已确认版本的精确 id+version。相同 selection_key 的失败重试传 GET
    * 到的现行 revision；异 payload 409 由弹窗展示，不自动 Disable/重开。
+   * 批 2 T4（REQ-WIGA-09 修订）：terminated 记录上的人工 Enable 是
+   * 「重新开启」——同一条 Enable 命令、同样的线性化 revision，命令身份
+   * 换新，payload 原样回传终止记录（不顺便改写授权）。
    */
   async function enrollConfirmedDesignAutomation(
     projectId: string,
@@ -276,6 +327,43 @@ export function useIssueLifecycleGeneration({
     selectionKey: string,
     options: WorkItemPlanOptionsFormValue,
   ) {
+    const enrollment = await getAutomationEnrollment(projectId, card.issueId);
+    // 批 2 T4（REQ-WIGA-09 修订）：terminated 的 enrollment 可被人工显式
+    // 重新开启——仍是同一条 Enable 命令，入口（人工点「启用自动化」）即
+    // 显式动作，自动路径不触发。并发语义不变：expected_revision 按线性化
+    // 带当前 revision；payload 与终止记录逐字段相等（服务端比对，改了即
+    // 409）；命令身份（command_id/selection_key）换新——重新开启是新命令，
+    // 须能被命令账本单独留痕。
+    if (enrollment?.terminated_at != null) {
+      const command = {
+        type: "enable" as const,
+        selection_key: reenableSelectionKey(selectionKey),
+        source: enrollment.source,
+        options: enrollment.options,
+        // 旧代 enrollment 可能没有声明 target（无绑定事实）——此时退回
+        // 服务端投影的原样 target，由服务端判定是否接受。
+        target:
+          enrollment.target ??
+          (await getAutomationTarget(projectId, card.issueId, {
+            author_provider: options.author_provider,
+            reviewer_provider: options.reviewer_provider,
+            include_integration_tests: options.include_integration_tests,
+            include_e2e_tests: options.include_e2e_tests,
+            force_frontend_backend_split: options.force_frontend_backend_split,
+            require_execution_plan_confirm:
+              options.require_execution_plan_confirm,
+          })).enrollment_target,
+      };
+      await putAutomationEnrollment(projectId, card.issueId, {
+        expected_revision: enrollment.policy_revision,
+        command: {
+          ...command,
+          command_id: enableCommandId(JSON.stringify(command)),
+        },
+      });
+      return;
+    }
+
     const target = await getAutomationTarget(projectId, card.issueId, {
       author_provider: options.author_provider,
       reviewer_provider: options.reviewer_provider,
@@ -297,40 +385,43 @@ export function useIssueLifecycleGeneration({
       throw new Error("自动化要求 Design Spec 已确认");
     }
 
-    const enrollment = await getAutomationEnrollment(projectId, card.issueId);
+    const command = {
+      type: "enable" as const,
+      selection_key: selectionKey,
+      source: {
+        stories: stories.map((story) => ({
+          id: story.id,
+          version: story.raw.current_version ?? 1,
+        })),
+        designs: [
+          {
+            id: card.id,
+            version: card.raw.current_version ?? 1,
+          },
+        ],
+      },
+      // B2-P1（REQ-WIGA-02）：自动化入口显式提交 auto——GET 投影与
+      // prepare 同源解析、plan_approval 恒为缺省 manual，Enable 的冻结
+      // 位由入口选择覆盖；F2 修复：require_execution_plan_confirm 显式
+      // 压 false（与后端 normalized_for_enrollment_freeze 同值），wire
+      // 与冻结值一致，投影解析的旧表单值不上 wire；手动链路不经本函数。
+      options: {
+        ...target.resolved_options,
+        plan_approval: "auto" as const,
+        plan_options: {
+          ...target.resolved_options.plan_options,
+          require_execution_plan_confirm: false,
+        },
+      },
+      // C5 Task 1：Enable 只回传服务端投影的 enrollment target（必带、
+      // 不再发送 logical_repository_id 冗余字段，不从前端拼凑）。
+      target: target.enrollment_target,
+    };
     await putAutomationEnrollment(projectId, card.issueId, {
       expected_revision: enrollment ? enrollment.policy_revision : null,
       command: {
-        type: "enable",
-        selection_key: selectionKey,
-        source: {
-          stories: stories.map((story) => ({
-            id: story.id,
-            version: story.raw.current_version ?? 1,
-          })),
-          designs: [
-            {
-              id: card.id,
-              version: card.raw.current_version ?? 1,
-            },
-          ],
-        },
-        // B2-P1（REQ-WIGA-02）：自动化入口显式提交 auto——GET 投影与
-        // prepare 同源解析、plan_approval 恒为缺省 manual，Enable 的冻结
-        // 位由入口选择覆盖；F2 修复：require_execution_plan_confirm 显式
-        // 压 false（与后端 normalized_for_enrollment_freeze 同值），wire
-        // 与冻结值一致，投影解析的旧表单值不上 wire；手动链路不经本函数。
-        options: {
-          ...target.resolved_options,
-          plan_approval: "auto",
-          plan_options: {
-            ...target.resolved_options.plan_options,
-            require_execution_plan_confirm: false,
-          },
-        },
-        // C5 Task 1：Enable 只回传服务端投影的 enrollment target（必带、
-        // 不再发送 logical_repository_id 冗余字段，不从前端拼凑）。
-        target: target.enrollment_target,
+        ...command,
+        command_id: enableCommandId(JSON.stringify(command)),
       },
     });
   }
@@ -363,6 +454,11 @@ export function useIssueLifecycleGeneration({
         // C5 Task 3：ApiRequestError（code/details）原样上抛——role-chain
         // 预检等结构化错误由弹窗逐角色渲染，不降级为普通 Error 语义。
         if (reason instanceof ApiRequestError) {
+          // 批 2 T4（REQ-WIGA-09 修订）：收口未完成有专门的下一步（先重试
+          // 终止完成清理），不按通用冲突呈现。
+          if (reason.code === AUTOMATION_CLEANUP_REQUIRED_CODE) {
+            throw new Error(AUTOMATION_CLEANUP_REQUIRED_MESSAGE);
+          }
           throw reason;
         }
         throw new Error(

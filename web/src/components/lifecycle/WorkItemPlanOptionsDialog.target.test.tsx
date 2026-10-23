@@ -172,19 +172,27 @@ describe("WorkItemPlanOptionsDialog automation target projection", () => {
 
   it("keeps automatic submit disabled with a retryable error when the target GET fails", async () => {
     const user = userEvent.setup();
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse(
+    // 按 URL 分派：自动模式还会读一次 enrollment 只读投影（terminated 事实
+    // 展示用），不能让它吃掉 target 的失败/成功序列。
+    let targetCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/automation-enrollment")) {
+        return jsonResponse(null);
+      }
+      targetCalls += 1;
+      if (targetCalls === 1) {
+        return jsonResponse(
           {
             code: "automation_enrollment_invalid_scope",
             message: "automation target requires exactly one logical repository",
             details: {},
           },
           422,
-        ),
-      )
-      .mockResolvedValueOnce(jsonResponse(targetResponse()));
+        );
+      }
+      return jsonResponse(targetResponse());
+    });
     vi.stubGlobal("fetch", fetchMock);
     renderDialog();
 
