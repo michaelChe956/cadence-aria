@@ -26,7 +26,6 @@ import {
 } from "../cockpit/CockpitShell";
 import { AutomationTerminationConfirmSurface } from "../chat-workspace/cockpit/CockpitInboxWaitingCards";
 import { ChoiceInboxCard } from "../chat-workspace/cockpit/CockpitInbox";
-import { ManagedStoppedContinueAction } from "../chat-workspace/cockpit/ManagedStoppedContinueAction";
 import { CoderTriageCard } from "../../pages/CoderTriageCard";
 import { isTriageCardGate } from "../../pages/CodingWorkspaceControls";
 import { useCockpitChoiceRespond } from "../../pages/useCockpitChoiceRespond";
@@ -39,7 +38,6 @@ import type { ChoiceResponsePayload } from "../../state/chat-entries";
 import { notifyLifecycleInvalidated } from "../../state/lifecycle-workbench-store";
 import { useCodingWorkspaceStore } from "../../state/coding-workspace-store";
 import {
-  cockpitInboxItemSessionId,
   dedupeCodingChoiceInboxItems,
   type CockpitInboxItem,
 } from "../../state/workspace-cockpit-projection";
@@ -356,13 +354,6 @@ function InboxDirectoryRow({
           ) : null}
           {item.createdAt ? (
             <p className="mt-0.5 text-[11px] text-slate-400">{item.createdAt}</p>
-          ) : null}
-          {/* 托管 stopped 卡（精确绑定 enabled enrollment）：接管被服务端排除，
-              原地补说明＋继续（与 CockpitInbox 行同一组件、同一 REST 语义）。 */}
-          {item.kind === "stopped" && item.automationManaged === true ? (
-            <ManagedStoppedContinueAction
-              sessionId={cockpitInboxItemSessionId(item.id)}
-            />
           ) : null}
           {item.kind === "coding_action" && item.attentionInfo ? (
             <button

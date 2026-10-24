@@ -4,14 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ApiClient from "../../api/client";
 import {
   ApiRequestError,
-  findWorkspaceSessionIssueAddress,
-  getAutomationEnrollmentControl,
   getCodingAttemptSnapshot,
   listVerificationTriageRecords,
-  postAutomationContinuePlan,
   postCodingChoiceResponse,
   postCodingGateResponse,
-  type AutomationControlStatus,
 } from "../../api/client";
 import type {
   CodingAttemptAddress,
@@ -49,9 +45,6 @@ vi.mock("../../api/client", async (importOriginal) => {
     postCodingGateResponse: vi.fn(),
     postCodingChoiceResponse: vi.fn(),
     getCodingChoiceResponseStatus: vi.fn(),
-    findWorkspaceSessionIssueAddress: vi.fn(),
-    getAutomationEnrollmentControl: vi.fn(),
-    postAutomationContinuePlan: vi.fn(),
   };
 });
 
@@ -112,38 +105,6 @@ function apiError(code: string, details: Record<string, unknown> = {}): ApiReque
   return new ApiRequestError({ code, message: code, details });
 }
 
-const STOPPED_BINDING: NonNullable<AutomationControlStatus["binding"]> = {
-  binding_version: 1,
-  enrollment_id: "enrollment_0001",
-  plan_id: "issue_work_item_plan_auto_1",
-  session_id: "session_001",
-  source: { stories: [], designs: [] },
-  target: {
-    kind: "logical_codebase",
-    logical_codebase_id: "11111111-1111-1111-1111-111111111111",
-    logical_repository_id: "00000000-0000-0000-0000-000000000001",
-  },
-  author_provider: "fake",
-  reviewer_provider: "fake",
-};
-
-function stoppedContinueControl(
-  overrides: Partial<AutomationControlStatus> = {},
-): AutomationControlStatus {
-  return {
-    managed: true,
-    binding: STOPPED_BINDING,
-    plan_id: STOPPED_BINDING.plan_id,
-    session_id: "session_001",
-    terminated_at: null,
-    stop_key: "plan_gate:session_001:human_confirm",
-    stage: "stopped_needs_human",
-    allowed_actions: ["continue_plan"],
-    context_required: true,
-    ...overrides,
-  };
-}
-
 function renderOverlay(focus: Parameters<typeof WorkbenchInboxOverlay>[0]["focus"]) {
   return render(
     <WorkbenchInboxOverlay focus={focus} open onClose={() => undefined} />,
@@ -169,16 +130,6 @@ describe("WorkbenchInboxOverlay（UI-3 待处理统一抽屉）", () => {
       choice_id: "choice_9",
       state: "delivered",
     });
-    vi.mocked(findWorkspaceSessionIssueAddress).mockReset();
-    vi.mocked(findWorkspaceSessionIssueAddress).mockResolvedValue({
-      projectId: "project_0001",
-      issueId: "issue_0001",
-    });
-    vi.mocked(getAutomationEnrollmentControl).mockReset();
-    vi.mocked(getAutomationEnrollmentControl).mockResolvedValue(
-      stoppedContinueControl(),
-    );
-    vi.mocked(postAutomationContinuePlan).mockReset();
   });
 
   afterEach(() => {
@@ -569,60 +520,5 @@ describe("WorkbenchInboxOverlay（UI-3 待处理统一抽屉）", () => {
     expect(
       screen.queryByTestId("workbench-inbox-item-coding_action"),
     ).toBeNull();
-  });
-
-  // 批 2 P5 补入口：托管 stopped 卡在共享抽屉内与 Cockpit 收件箱同源——
-  // control 允许 continue_plan 即出「补说明并继续」，提交走同一 REST。
-  it("托管 stopped 行提供补说明并继续（同一 control/continue-plan 通道）", async () => {
-    const user = userEvent.setup();
-    vi.mocked(postAutomationContinuePlan).mockResolvedValue({
-      command_id: "cmd-inbox-continue-1",
-      state: "accepted",
-      session_id: "session_001",
-    });
-    directoryHolder.items = [
-      {
-        id: "session_001:stopped:session_001",
-        kind: "stopped",
-        severity: 2,
-        title: "会话停在停点",
-        summary: "停点原因：stopped_needs_human · 自动化托管中——在对话窗口补说明继续",
-        triage: false,
-        source: "session_status",
-        createdAt: null,
-        gate: null,
-        inlineError: null,
-        choice: null,
-        automationManaged: true,
-      },
-    ];
-
-    renderOverlay({});
-    const row = screen.getByTestId("workbench-inbox-item-stopped");
-    await user.click(await within(row).findByRole("button", { name: "补说明并继续" }));
-
-    expect(getAutomationEnrollmentControl).toHaveBeenCalledWith(
-      "project_0001",
-      "issue_0001",
-    );
-    await user.type(
-      await within(row).findByTestId("stopped-managed-continue-context"),
-      "抽屉里补的说明",
-    );
-    await user.click(within(row).getByTestId("stopped-managed-continue-submit"));
-
-    await waitFor(() => {
-      expect(postAutomationContinuePlan).toHaveBeenCalledTimes(1);
-    });
-    expect(postAutomationContinuePlan).toHaveBeenCalledWith(
-      "project_0001",
-      "issue_0001",
-      {
-        command_id: expect.any(String),
-        expected_binding: STOPPED_BINDING,
-        expected_stop_key: "plan_gate:session_001:human_confirm",
-        context: "抽屉里补的说明",
-      },
-    );
   });
 });

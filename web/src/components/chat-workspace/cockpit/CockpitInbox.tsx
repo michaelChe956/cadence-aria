@@ -67,7 +67,6 @@ import {
   type WorkbenchInboxFocusTarget,
 } from "../../../state/workbench-inbox-focus";
 import { C1RecoveryCard, LcBootstrapCard } from "./CockpitInboxWaitingCards";
-import { ManagedStoppedContinueAction } from "./ManagedStoppedContinueAction";
 
 const KIND_GLYPH = {
   gate: ClipboardList,
@@ -564,17 +563,12 @@ function CockpitInboxRow({
           // workspace_session_takeover_not_allowed，隐藏仅同步呈现）；指引走
           // 原 plan 对话窗口补说明继续，不转手动。视觉与 P2-d 卡片体系同源
           //（琥珀指引底 + 中性弱化卡面）。
-          // 补入口（REQ-WIGA-10）：原地「补说明并继续」——control 允许时
-          // 出按钮，提交走同一 continue-plan REST（打开/提交各重读一次）。
-          <>
-            <p
-              data-testid="stopped-managed-hint"
-              className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs leading-4 text-amber-900"
-            >
-              自动化托管中——在原对话窗口补说明后「继续自动化」，不支持接管转手动
-            </p>
-            <ManagedStoppedContinueAction sessionId={sessionId} />
-          </>
+          <p
+            data-testid="stopped-managed-hint"
+            className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs leading-4 text-amber-900"
+          >
+            自动化托管中——在原对话窗口补说明后「继续自动化」，不支持接管转手动
+          </p>
         ) : null}
         {item.kind === "stopped" && item.automationManaged !== true && onTakeover ? (
           <div className="mt-2 flex flex-wrap gap-2">
