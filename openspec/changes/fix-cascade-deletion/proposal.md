@@ -11,6 +11,7 @@
 - 每个已删除实体只保留一条不含业务内容的删除记录；同请求重试收敛到同一条记录，不保审计内容、报告摘录或恢复副本。
 - 分级确认：可证从未确认的 Draft 无确认提示；当前或曾经 Confirmed 弹一次明确告知永久清内容的确认框；未知历史的旧 Draft 按 Main 追加兼容裁定保守弹一次，新路径单调保留 ever_confirmed 且不改确认 CAS；coding attempt 存在时先拒删并提示先删 coding workspace，不自动中止 coding。
 - 删除与生成/修订/compile 的启动及落盘互斥；所有门禁在破坏性动作前检查，子树先删、根最后删，部分 IO 失败可重入且不得报告成功后留残余。
+- **单 plan 不变量（owner 2026-10-24 裁定）**：同一 issue 任一时刻至多 1 个 plan；re-enable 轮换 `prepare_intent_id`、重新 prepare、重新编译确认三个触发点 MUST 先删旧 plan 再建新代，旧 plan 的 attempts/worktree/locks/reviewer 资源一并删除且不复用；删除失败 fail-closed（plan 根保留为 needs_human 入口，禁止「根已删产物还在」），重复请求幂等，只留 `entity-deletions/plan/<id>.json` 无内容事实。
 - R（FixReportId）是先行独立修复/写面移交门，不在本 change 重写报告身份算法；D1 为拥有者 purge/删除记录，D2 为协调、运行隔离、引用门禁及分级确认。
 
 ## Capabilities
@@ -18,6 +19,7 @@
 ### New Capabilities
 
 - `lifecycle-entity-deletion`：Story/Design 自有闭包清理，以及三类实体共用的无内容删除记录、引用/运行保护、分级确认和失败收敛。
+- `work-item-plan-single-instance`：单 plan 不变量与 plan 代际取代——同一 issue 至多一个 plan，re-enable 轮换 `prepare_intent_id`、重新 prepare、重新编译确认三个触发点必须先删旧 plan；删除覆盖 plan 完整从属闭包（含 attempts/runs/units/events、reviewer windows/snapshots/leases、advance/initialization、group-initializations、attempt locks、workspace lifecycle、worktree 与 shared-worktree 锁），失败 fail-closed 并可重入、重复请求幂等、只留无内容 tombstone。owner 于 2026-10-24 裁定「重新开启等于旧 plan 作废」。
 
 ### Modified Capabilities
 

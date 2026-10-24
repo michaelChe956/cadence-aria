@@ -39,3 +39,11 @@
     编辑两度打断（E0596/E0061 等，非本包面），P1/P2 红绿证据在隔离树 HEAD＋
     本包文件取证（D2.2 先例）。
 - [ ] 3.4 D2.4 Main 统一执行端到端与无误伤回归、独立终审、owner 审阅；仅在全部契约满足后更新主规格/归档，不把 strict 格式通过当实现已完成（REQ-GRP-01、REQ-DEL-01 至 REQ-DEL-07）。
+
+## 4. W：单 plan 不变量与代际取代（owner 2026-10-24 裁定）
+
+- [ ] 4.1 W1 建立路径先删旧：在 issue 级 plan 作用域互斥内把「旧 plan 完整删除」接到 prepare/编译确认的建立入口，删除成功后才允许建立新 plan；补存活 plan ≤1 的不变量断言与 owner-key 精确定位，禁止摘摘要/解绑/改引用代替删除（REQ-WPS-01）。
+- [ ] 4.2 W2 三个触发点接线：re-enable 轮换 `prepare_intent_id`、重新 prepare、重新编译确认 MUST 复用同一取代删除编排；同 `command_id` 重放不重复删、不递增代际，并记录触发原因与旧 plan 身份（REQ-WPS-02、REQ-WPS-07）。
+- [ ] 4.3 W3 闭包清单落地：把 REQ-WPS-03 逐项清单接入 owner manifest，先子树后根；补齐当前缺删除原语的项（attempt 的 runs/units/events 目录、reviewer windows/snapshots/leases、coding-plan-workspace-lifecycles、group-initializations、work-item-attempt-locks）（REQ-WPS-03）。
+- [ ] 4.4 W4 fail-closed、needs_human 与幂等：任一子树失败保留 plan 根为可达的 purging/needs_human 入口并持久记录失败清单，禁「根已删产物还在」；完成/进行中/失败并发重试收敛到同一事实，只落 1 条无内容墓碑（REQ-WPS-04、REQ-WPS-05、REQ-WPS-07）。
+- [ ] 4.5 W5 terminated 交互：re-enable 先走既有整 plan 终止收口语义，再级联删 attempts/worktree 实体/shared-worktree 记录与锁/attempt locks/reviewer leases，不复用旧 identity；普通 DELETE 维持既有 coding 拒删，不把该能力开放给用户面（REQ-WPS-06）。
