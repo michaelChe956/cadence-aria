@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::entity_deletion_cascade::CascadeDeleteError;
 use crate::product::entity_deletion_store::{
     DeletionEntityKind, DeletionPhase, EntityDeletionManifest, EntityDeletionStore, EntityScope,
 };
@@ -202,62 +203,21 @@ async fn cascade_delete_entity(
     // ⑥ manager 失效：磁盘清理与内存失效消费同一所属集合（manifest.session_ids）。
     evict_workspace_session_managers(state, &manifest.session_ids).await;
 
-    // ⑦ 子依赖 purge（依赖序：审计先于 refs 来源，子树先于根）。
-    store
-        .purge_entity_owned_children(&lease, &manifest)
-        .map_err(product_store_api_error)?;
-    if kind == DeletionEntityKind::Plan {
-        // source/IR/机械报告/provenance 子树（D1.2a 原语；缺失=已清，幂等重入）。
-        crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
-            app_paths.clone(),
-        )
-        .purge_plan_sources(project_id, issue_id, entity_id)
-        .map_err(source_purge_api_error)?;
-        // plan store drafts/compile transaction/outline context index。
-        purge_work_item_plan_store_artifacts(&app_paths, project_id, issue_id, entity_id)?;
-        // revisions + publications（D1.2b 既有 helper）。
-        WorkItemRevisionStore::new(app_paths.clone())
-            .purge_plan_revisions(project_id, issue_id, entity_id)
-            .map_err(product_store_api_error)?;
-        // coding attempt 初始化残留锁（门禁已证 attempt 记录不存在；孤儿清理）。
-        purge_attempt_lock_residue(
-            &app_paths,
-            project_id,
-            issue_id,
-            entity_id,
-            &manifest.work_item_ids,
-        )?;
-        // 目标仓资源（已持 cleanup lease，锁内复核 D1.3c 真实 owners；他 Plan
-        // 仍使用则保留，目标专属且无在途 writer 才清）。
-        cleanup_plan_shared_worktrees(
-            &app_paths,
-            &lease,
-            &manifest,
-            plan_run.as_ref(),
-            &resource_leases,
-        )?;
-        // run 本体（N7/N2：lease 保护的安全删除窗口，恒清 run 文件＋前导点锁）。
-        crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone())
-            .purge_plan_with_lease(&lease)
-            .map_err(product_store_api_error)?;
-        // H4（H2a 移交项，设计 A 节）：生命周期元数据（generation/退役围栏/
-        // clearing/回执）随真 Plan 删除清理——含稳定前导点锁（workspace 重置
-        // 闭包绝不删它，仅此安全删除窗口 unlink）。
-        crate::product::coding_plan_run::CodingPlanRunStore::new(app_paths.clone())
-            .purge_workspace_lifecycle_with_lease(&lease)
-            .map_err(product_store_api_error)?;
-    }
-    // advance 独立 engine checkpoint：纯 session 索引枚举（§0.5），不整删全局根。
-    let checkpoint_session_root = state
-        .workspace_root
-        .join("advance-engine-checkpoints")
-        .join("workspace-sessions");
-    for session_id in &manifest.session_ids {
-        crate::product::lifecycle_store::remove_dir_all_if_exists(
-            &checkpoint_session_root.join(session_id),
-        )
-        .map_err(product_store_api_error)?;
-    }
+    // ⑦ 子依赖 purge（依赖序：审计先于 refs 来源，子树先于根）。与 plan 代际
+    //    取代路径**共用同一闭包实现**（`entity_deletion_cascade::purge_entity_closure`）：
+    //    用户面删除走 `CodingGateMode::Refuse`（coding 门禁已在 ⑤ 拒删），
+    //    代际取代走 `Cascade`（级联删 attempts 及其运行资源）。
+    crate::product::entity_deletion_cascade::purge_entity_closure(
+        &app_paths,
+        &lease,
+        &manifest,
+        plan_run.as_ref(),
+        &resource_leases,
+        crate::product::entity_deletion_cascade::CodingGateMode::Refuse,
+        Some(state.workspace_root.as_path()),
+    )
+    .await
+    .map_err(product_store_api_error)?;
 
     // ⑧ 根最后（根缺=已清，不 404——REQ-DEL-07 重入）。
     store
@@ -716,17 +676,6 @@ fn deletion_confirmation_required_error(
     )
 }
 
-/// source purge 低层错误的稳定映射（persistence_failure 族 → 500 可定位）。
-fn source_purge_api_error(
-    error: crate::product::work_item_plan_source_store::SourceStoreError,
-) -> ApiError {
-    ApiError::runtime(
-        error.code(),
-        "work item plan source purge failed",
-        json!({ "message": format!("{error:?}") }),
-    )
-}
-
 /// 收集 issue 下绑定到指定实体集合的 workspace session id。必须在磁盘删除前调用：
 /// 删除后 `list_workspace_sessions` 已读不到这些记录。
 fn workspace_session_ids_for_entities(
@@ -748,26 +697,35 @@ fn workspace_session_ids_for_entities(
 /// （socket.rs `get_or_create_and_attach` 不回读磁盘）：不驱逐则重新生成复用同 id
 /// session 时，WS 会把删除前的旧 engine 状态（messages/artifact/stage）原样发给
 /// 前端（v37 反馈 #3：story spec 删不掉、重新生成仍旧错误态）。
-async fn evict_workspace_session_managers(state: &WebAppState, session_ids: &[String]) {
+pub(crate) async fn evict_workspace_session_managers(state: &WebAppState, session_ids: &[String]) {
     for session_id in session_ids {
         state.workspace_sessions.remove(session_id).await;
     }
 }
 
-/// 清理 plan store 中该 plan 的 draft、compile transaction 与 outline context index。
+/// 产品层级联/取代删除失败 → 稳定 ApiError 码。
 ///
-/// 两条删除路径（schema v2 与 legacy）都必须调用：这些产物不属于 LifecycleStore，
-/// 不随 plan 记录一起消失。
-fn purge_work_item_plan_store_artifacts(
-    app_paths: &ProductAppPaths,
-    project_id: &str,
-    issue_id: &str,
-    plan_id: &str,
-) -> ApiResult<()> {
-    crate::product::work_item_plan_store::WorkItemPlanStore::new(app_paths.clone())
-        .purge_plan_artifacts(project_id, issue_id, plan_id)
-        .map_err(product_store_api_error)?;
-    Ok(())
+/// - `Busy` → `entity_busy`（进行中或同 scope writer 争用；取代路径据此
+///   fail-closed：不建立新 plan）。
+/// - `ConfirmationRequired` → `deletion_confirmation_required`。
+/// - `CodingWorkspaceExists*` → `coding_workspace_exists`（用户面删除语义）。
+/// - `EntityReferenced` → `entity_referenced`。
+/// - `InvalidTargetRepository` → `entity_target_repository_invalid`。
+pub(crate) fn cascade_delete_api_error(error: CascadeDeleteError) -> ApiError {
+    use crate::product::entity_deletion_cascade::CascadeDeleteError;
+    match error {
+        CascadeDeleteError::Store(inner) => product_store_api_error(inner),
+        CascadeDeleteError::Busy => ApiError::runtime(
+            "entity_busy",
+            "实体存在进行中的运行或并发写入，请等待收口后重试删除",
+            json!({}),
+        ),
+        CascadeDeleteError::InvalidTargetRepository { target_repository_id } => ApiError::runtime(
+            "entity_target_repository_invalid",
+            "owned work item target repository is not a logical id",
+            json!({ "target_repository_id": target_repository_id }),
+        ),
+    }
 }
 
 pub(crate) async fn delete_work_item_with_cleanup(
@@ -873,77 +831,3 @@ fn schema_v2_plan_for_work_item(
     Ok(None)
 }
 
-/// 清理本 issue `coding-attempts/` 目录下与该 plan 相关的残留锁与初始化产物。
-///
-/// 删除路径在门禁放行后调用：此时 group attempt 的主体 json 已不存在，
-/// 但 arbitration 文件、group initialization journal、work item attempt 锁、
-/// attempt json 的 `.lock` 文件等可能残留（线上「半残」的典型形态）。
-/// 全程容错：文件不存在视为成功，单项失败不影响其余清理。
-///
-/// `work_item_ids` 限定 work-item-attempt-locks 的清理范围：只删本 plan 各 work_item
-/// 对应的锁文件，保留同 issue 其他 plan 共享目录里的锁（spec「删除不影响其他 plan」）。
-fn purge_attempt_lock_residue(
-    app_paths: &ProductAppPaths,
-    project_id: &str,
-    issue_id: &str,
-    plan_id: &str,
-    work_item_ids: &[String],
-) -> ApiResult<()> {
-    use crate::product::lifecycle_store::remove_file_if_exists;
-
-    let coding_attempts_root = app_paths
-        .issue_root(project_id, issue_id)
-        .join("coding-attempts");
-
-    // group-initialization-arbitration 文件 + lock（issue 级仲裁，group 删除时安全清理）
-    let _ = remove_file_if_exists(&coding_attempts_root.join("group-initialization-arbitration"));
-    let _ =
-        remove_file_if_exists(&coding_attempts_root.join(".group-initialization-arbitration.lock"));
-
-    // group-initializations/<plan_id>.json + 其 lock（本 plan 的初始化 journal）
-    let journal_dir = coding_attempts_root.join("group-initializations");
-    let _ = remove_file_if_exists(&journal_dir.join(format!("{plan_id}.json")));
-    let _ = remove_file_if_exists(&journal_dir.join(format!(".{plan_id}.json.lock")));
-    // group-initializations/{plan_id}/ 子目录（WP2 多 target per-target journal）
-    // 连同子目录内 lock 整目录清理，NotFound 视为成功。
-    let plan_journal_dir = journal_dir.join(plan_id);
-    if plan_journal_dir.is_dir() {
-        let _ = std::fs::remove_dir_all(&plan_journal_dir);
-    }
-
-    // work-item-attempt-locks/：single coding attempt 创建时按 work_item_id 命名的锁。
-    // 这是 issue 级共享目录，多 plan 共 issue 时其他 plan 的 work_item 锁也在此，
-    // 因此按本 plan 的 work_item_ids 精确删除（锁目标 <wi> + flock 副车锁 .<wi>.lock），
-    // 绝不整目录清空，避免误伤其他 plan（Task 3 review 发现的 spec 风险）。
-    let locks_dir = coding_attempts_root.join("work-item-attempt-locks");
-    for work_item_id in work_item_ids {
-        let _ = remove_file_if_exists(&locks_dir.join(work_item_id));
-        let _ = remove_file_if_exists(&locks_dir.join(format!(".{work_item_id}.lock")));
-    }
-    // 锁目录本身保留：其他 plan 的 work_item 锁可能仍在其中，不能整目录清空。
-
-    // 顶层 `.*.lock` 孤儿清理：lock 名由 `lock_path_for` 生成（`.<target>.lock`），
-    // 反推目标名 = 去前导 `.` 与尾部 `.lock`。只在目标文件已不存在时删锁（孤儿），
-    // 保留 active attempt 的运行时锁——多 plan 共 issue 时其他 plan 的 active attempt
-    // （json 在）的锁不能误删（spec「删除不得误伤其他 plan」，Task 5 精确化）。
-    if let Ok(entries) = std::fs::read_dir(&coding_attempts_root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            let Some(target_name) = name
-                .strip_prefix('.')
-                .and_then(|suffix| suffix.strip_suffix(".lock"))
-            else {
-                continue;
-            };
-            // 目标存在 → active（运行时锁保留）；目标不存在 → 孤儿锁，删除。
-            if !coding_attempts_root.join(target_name).exists() {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-    }
-
-    Ok(())
-}

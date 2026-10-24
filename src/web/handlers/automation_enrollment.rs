@@ -39,6 +39,19 @@ pub async fn put_automation_enrollment(
     validate_request_ids(&project_id, &issue_id)?;
     validate_enrollment_scope(&state, &project_id, &issue_id, &request.command)?;
     ensure_terminated_reenable_cleanup_closed(&state, &project_id, &issue_id, &request.command)?;
+    // 代际取代的旧身份：CAS 前记录 terminated 态（重开＝旧 plan 作废）。重放
+    // （同 command_id）时 enrollment 已非 terminated → 不重复执行取代删除。
+    let was_terminated = IssueAutomationStore::new(product_app_paths(&state))
+        .get(&project_id, &issue_id)
+        .map_err(product_store_api_error)?
+        .is_some_and(|enrollment| enrollment.terminated_at.is_some());
+    if was_terminated {
+        // 单 plan 不变量（REQ-WPS-01/REQ-WPS-02 Scenario「re-enable 轮换
+        // `prepare_intent_id` 时删除旧 plan」）：重新开启＝旧 plan 作废——旧 plan
+        // 及其完整闭包在 intent 轮换前删除。收口/删除失败 → 既有
+        // `automation_plan_cleanup_required` 语义且零副作用（CAS 未执行）。
+        supersede_terminated_plan_generation(&state, &project_id, &issue_id).await?;
+    }
     let enrollment = IssueAutomationStore::new(product_app_paths(&state))
         .compare_and_set(
             &project_id,
@@ -55,12 +68,64 @@ pub async fn put_automation_enrollment(
     Ok(Json(enrollment))
 }
 
+/// terminated 重新开启时的旧 plan 代际取代删除（REQ-WPS-01/REQ-WPS-02/REQ-WPS-06）。
+///
+/// 删除 issue 下全部存活 plan（re-enable 后新代 plan 由新 intent 派生，旧代
+/// 一律作废）：先收口未终结 attempt，再按同一闭包物理删除 attempts/worktree/
+/// shared-worktree/reviewer 资源与 plan 根，只留一条无内容删除事实。
+///
+/// 失败 → 既有 `automation_plan_cleanup_required` 语义（收口失败零副作用）。
+async fn supersede_terminated_plan_generation(
+    state: &WebAppState,
+    project_id: &str,
+    issue_id: &str,
+) -> ApiResult<()> {
+    let app_paths = product_app_paths(state);
+    let superseded_plan_id = IssueAutomationStore::new(app_paths.clone())
+        .get(project_id, issue_id)
+        .map_err(product_store_api_error)?
+        .and_then(|enrollment| enrollment.plan_id);
+    let report = crate::product::plan_generation_supersede::ensure_single_plan_generation(
+        &app_paths,
+        project_id,
+        issue_id,
+        &[],
+        crate::product::entity_deletion_cascade::PlanSupersedeReason::ReEnablePrepareIntentRotation,
+        Some(state.workspace_root.as_path()),
+    )
+    .await
+    .map_err(|error| {
+        ApiError::validation_with_details(
+            "automation_plan_cleanup_required",
+            "automation plan still holds unfinished attempts or unclosed run facts; retry the \
+             termination to finish cleanup before re-enabling the automation",
+            serde_json::json!({
+                "plan_id": superseded_plan_id.unwrap_or_default(),
+                "reason": "plan_generation_supersede_failed",
+                "message": format!("{error:?}"),
+            }),
+        )
+    })?;
+    crate::web::handlers::lifecycle::deletion::evict_workspace_session_managers(
+        state,
+        &report.evicted_session_ids,
+    )
+    .await;
+    Ok(())
+}
+
 /// REQ-WIGA-09 修订：terminated 人工重新开启（Enable）的收口门。判据（顺序
-/// 固定）：①绑定 plan 存在未终结 attempt → 409；②绑定实体已删（墓碑，plan
-/// 记录已不存在）且无未终结 attempt → 无可收口之物，放行取代（不因清理任务
-/// 失败本身永久阻断）；③绑定实体仍在，但 terminated 记录仍持有未收口运行
-/// 事实（终止清理失败写入的 `automation_failed(stage=termination)` 等，
-/// resolve 后即消失）→ 409。全部 409 零副作用（store CAS 在其后才执行）。
+/// 固定）：①绑定实体已删（墓碑，plan 记录已不存在）→ 无可收口之物，放行取代
+/// （不因清理任务失败本身永久阻断）；②绑定实体仍在，但 terminated 记录仍持有
+/// 未收口运行事实（终止清理失败写入的 `automation_failed(stage=termination)`
+/// 等，resolve 后即消失）→ 409。
+///
+/// REQ-WPS-06 修订：绑定 plan 存在**未终结 attempt** 不再在此阻断——取代删除
+/// 路径（`supersede_terminated_plan_generation`）先按既有终止收口语义把 attempt
+/// 收口到终态，收口失败返回既有 `automation_plan_cleanup_required` 语义且零
+/// 副作用（不得以「仍有 attempt」永久阻断取代）。全部 409 零副作用（store CAS
+/// 在其后才执行）。
+///
 /// 预检与 CAS 之间无写入者：terminated 已阻断全部自动路径（reconcile/
 /// ensure/provider run），人工 attempt 认领同样要求 enabled enrollment。
 fn ensure_terminated_reenable_cleanup_closed(
@@ -86,22 +151,6 @@ fn ensure_terminated_reenable_cleanup_closed(
         // 从未绑定 plan → 无可收口之物（直接放行取代）。
         return Ok(());
     };
-    let unfinished_attempt =
-        crate::product::coding_attempt_store::CodingAttemptStore::new(paths.clone())
-            .list_attempts_for_plan(project_id, issue_id, &plan_id)
-            .map_err(product_store_api_error)?
-            .into_iter()
-            .any(|attempt| {
-                !matches!(
-                    attempt.status,
-                    crate::product::coding_models::CodingAttemptStatus::Completed
-                        | crate::product::coding_models::CodingAttemptStatus::Failed
-                        | crate::product::coding_models::CodingAttemptStatus::Aborted
-                )
-            });
-    if unfinished_attempt {
-        return Err(cleanup_required_error(&plan_id, "unfinished_attempts"));
-    }
     // 绑定实体已删（墓碑）：plan 记录不在 → 无可收口之物，放行取代。
     let bound_entity_present = crate::product::lifecycle_store::LifecycleStore::new(paths)
         .list_issue_work_item_plans(project_id, issue_id)
@@ -2568,9 +2617,12 @@ mod tests {
 
     /// 收口门红测：绑定 plan 仍有未终结 attempt（未收口运行事实）→ 409
     /// `automation_plan_cleanup_required` 零副作用（enrollment 仍 terminated、
-    /// revision 不变、plan 绑定不被解绑）。
+    /// REQ-WPS-06 修订：terminated 人工重新开启**不再**因「仍有未终结
+    /// attempt」永久阻断——取代删除路径先按既有终止收口语义把 attempt 收口
+    /// 到终态，再随旧 plan 一并删除；旧 plan 消失、intent 轮换、新代不复用
+    /// 旧资源（旧 plan 只留一条无内容删除事实）。
     #[tokio::test]
-    async fn terminated_reenable_blocks_on_unfinished_attempts() {
+    async fn terminated_reenable_closes_and_supersedes_unfinished_attempts() {
         use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
         use crate::web::workspace_ws_types::ProviderConfigSnapshot;
 
@@ -2642,20 +2694,63 @@ mod tests {
         reenable["expected_revision"] = serde_json::json!(terminated_revision);
         reenable["command"]["command_id"] = serde_json::json!("cmd-reenable-gate-1");
         let response = put_enrollment(&app, reenable).await;
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "未终结 attempt 不得永久阻断取代（REQ-WPS-06）"
+        );
         let payload = response_json(response).await;
-        assert_eq!(payload["code"], "automation_plan_cleanup_required");
-        assert_eq!(payload["details"]["plan_id"], plan_id);
+        assert!(payload["terminated_at"].is_null());
 
-        // 零副作用：durable 记录仍是终止态，plan 绑定未被解绑、revision 未动。
+        // 旧代 attempt 已收口并随旧 plan 删除（不复用旧 attempt identity）。
+        let remaining = coding_store
+            .list_attempts_for_plan(PROJECT_ID, ISSUE_ID, &plan_id)
+            .unwrap();
+        assert!(
+            remaining.is_empty(),
+            "旧代 attempt 必须随取代删除：{remaining:?}"
+        );
+
+        // 旧 plan 已删除，只留一条带触发原因的无内容删除事实。
+        let scope = crate::product::entity_deletion_store::EntityScope::new(
+            PROJECT_ID,
+            ISSUE_ID,
+            crate::product::entity_deletion_store::DeletionEntityKind::Plan,
+            &plan_id,
+        );
+        let tombstone = crate::product::entity_deletion_store::EntityDeletionStore::new(
+            fixture.paths.clone(),
+        )
+        .get(&scope)
+        .unwrap()
+        .expect("取代删除墓碑");
+        assert_eq!(
+            tombstone.phase,
+            crate::product::entity_deletion_store::DeletionPhase::Deleted
+        );
+        assert_eq!(
+            tombstone.trigger_reason.as_deref(),
+            Some("re_enable_prepare_intent_rotation")
+        );
+        assert!(
+            LifecycleStore::new(fixture.paths.clone())
+                .get_issue_work_item_plan(PROJECT_ID, ISSUE_ID, &plan_id)
+                .is_err(),
+            "旧 plan 记录必须不存在"
+        );
+
+        // enrollment 已重新开启：终止态清空、绑定解绑（prepare_intent_id 轮换）。
         let current = IssueAutomationStore::new(fixture.paths.clone())
             .get(PROJECT_ID, ISSUE_ID)
             .unwrap()
             .unwrap();
-        assert!(current.terminated_at.is_some());
-        assert!(!current.enabled);
-        assert_eq!(current.policy_revision, terminated_revision);
-        assert_eq!(current.plan_id.as_deref(), Some(plan_id.as_str()));
+        assert!(current.terminated_at.is_none());
+        assert!(current.enabled);
+        assert!(current.plan_id.is_none());
+        assert_ne!(
+            current.prepare_intent_id, terminated.prepare_intent_id,
+            "prepare_intent_id 必须轮换（新链不复用被终止的 plan）"
+        );
     }
 
     /// 收口门放行红测：绑定实体已删（墓碑）且无未终结 attempt（仅终态

@@ -1222,6 +1222,30 @@ impl CodingPlanRunStore {
         crate::product::coding_attempt_store::remove_file_if_exists(&lock_path)
     }
 
+    /// plan 代际取代的**原地演进**路径（REQ-WPS-02 Scenario「原地重编译确认
+    /// 不得跳过旧代运行资源清理」）：清 workspace lifecycle 元数据但**保留
+    /// plan 根**。与 [`Self::purge_workspace_lifecycle_with_lease`] 的差别是
+    /// 不消费删除独占（plan 根仍在），只按文件自身独占锁删除元数据与其前导
+    /// 点锁。缺失=已清（幂等）；坏 JSON/身份错配 fail-closed。
+    pub fn purge_workspace_lifecycle(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+    ) -> Result<(), ProductStoreError> {
+        let path = self.lifecycle_path(project_id, issue_id, plan_id)?;
+        if path_is_regular_file(&path)? {
+            with_exclusive_lock(&path, || {
+                let _ = self.read_workspace_lifecycle(project_id, issue_id, plan_id)?;
+                std::fs::remove_file(&path).map_err(|error| {
+                    ProductStoreError::Io(format!("remove {}: {error}", path.display()))
+                })
+            })?;
+        }
+        let lock_path = path.with_file_name(format!(".{plan_id}.json.lock"));
+        crate::product::coding_attempt_store::remove_file_if_exists(&lock_path)
+    }
+
     // ─── H2a（设计 2026-10-14 A/C 节）：plan 执行轮生命周期元数据 ───
 
     /// 生命周期元数据目录（冻结地址）：

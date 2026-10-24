@@ -294,6 +294,22 @@ impl WorkspaceEngine {
         tx: &mut WorkItemPlanCompileTransaction,
         outcome: &InitialPlanCompileOutcome,
     ) -> Result<(), String> {
+        // 单 plan 不变量（REQ-WPS-01/REQ-WPS-02 Scenario「重新编译确认不产生第二
+        // 个 plan」与「原地重编译确认不得跳过旧代运行资源清理」）：编译确认前
+        // 先清旧代运行资源（attempts/worktree/reviewer/锁/workspace lifecycle）
+        // 并删除同 issue 的其它存活 plan；失败 → 不确认新代（fail-closed）。
+        crate::product::plan_generation_supersede::ensure_single_plan_generation(
+            &lifecycle.app_paths(),
+            &tx.project_id,
+            &tx.issue_id,
+            &[tx.plan_id.clone()],
+            crate::product::entity_deletion_cascade::PlanSupersedeReason::RecompileConfirm,
+            None,
+        )
+        .await
+        .map_err(|error| {
+            format!("plan generation supersede before compile confirm failed: {error:?}")
+        })?;
         let work_item_ids = outcome
             .plan_projection_bundle
             .coder_group_context

@@ -287,6 +287,35 @@ pub async fn ensure_enrolled_plan(
     let store =
         crate::product::issue_automation_store::IssueAutomationStore::new(product_app_paths(state));
     let (project_id, issue_id) = (enrollment.project_id.clone(), enrollment.issue_id.clone());
+
+    // 单 plan 不变量（REQ-WPS-01/REQ-WPS-02 Scenario「re-enable 轮换
+    // `prepare_intent_id` 时删除旧 plan」）：bound prepare 建立新 plan/session
+    // **之前**先按同一闭包完整删除旧 plan 及其全部从属产物。保留集合＝本代
+    // 将要建立的 plan id（新 intent 派生）＋当前 enrollment 仍绑定的 plan id
+    // （幂等补偿重入时不得删掉自己在用的 plan）。删除未成功 → fail-closed，
+    // 不建立新 plan。
+    let app_paths = product_app_paths(state);
+    let mut keep_plan_ids = vec![format!(
+        "issue_work_item_plan_auto_{}",
+        enrollment.prepare_intent_id
+    )];
+    if let Some(bound_plan_id) = enrollment.plan_id.clone() {
+        if !keep_plan_ids.contains(&bound_plan_id) {
+            keep_plan_ids.push(bound_plan_id);
+        }
+    }
+    let supersede = crate::product::plan_generation_supersede::ensure_single_plan_generation(
+        &app_paths,
+        &project_id,
+        &issue_id,
+        &keep_plan_ids,
+        crate::product::entity_deletion_cascade::PlanSupersedeReason::ReEnablePrepareIntentRotation,
+        Some(state.workspace_root.as_path()),
+    )
+    .await
+    .map_err(super::deletion::cascade_delete_api_error)?;
+    super::deletion::evict_workspace_session_managers(state, &supersede.evicted_session_ids).await;
+
     // create 回调错误类型固定为 EnrollmentError：ApiError 原样暂存、锁外还原，
     // 不丢验证/运行错误细节。
     let mut create_error: Option<ApiError> = None;
@@ -325,7 +354,6 @@ pub async fn ensure_enrolled_plan(
         })?;
 
     // 绑定已 durable；锁外加载记录并补异步上下文消息（Unchanged 幂等路径同样补）。
-    let app_paths = product_app_paths(state);
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let Some(plan_id) = bound.plan_id.clone() else {
         return Err(ApiError::runtime(

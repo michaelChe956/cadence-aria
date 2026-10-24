@@ -19,7 +19,7 @@ use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
 #[cfg(test)]
 use preflight::{SingleCandidatePreflightDecision, preflight_single_repository_candidate};
 
-mod deletion;
+pub(crate) mod deletion;
 pub(crate) mod plan_preparation;
 pub(crate) mod preflight;
 
@@ -765,10 +765,25 @@ pub async fn prepare_work_item_plan(
     Path((project_id, issue_id)): Path<(String, String)>,
     Json(request): Json<PrepareWorkItemPlanRequest>,
 ) -> ApiResult<Json<PrepareWorkItemPlanResponse>> {
+    // 单 plan 不变量（REQ-WPS-01/REQ-WPS-02 Scenario「重新 prepare 不产生第二个
+    // plan」）：建立新 plan **之前**先按同一闭包完整删除旧 plan；删除未成功
+    // MUST NOT 建立新 plan（fail-closed）。
+    let app_paths = product_app_paths(&state);
+    let supersede = crate::product::plan_generation_supersede::ensure_single_plan_generation(
+        &app_paths,
+        &project_id,
+        &issue_id,
+        &[],
+        crate::product::entity_deletion_cascade::PlanSupersedeReason::Reprepare,
+        Some(state.workspace_root.as_path()),
+    )
+    .await
+    .map_err(deletion::cascade_delete_api_error)?;
+    deletion::evict_workspace_session_managers(&state, &supersede.evicted_session_ids).await;
+
     // P1 WIGA Task 3：共用 prepare 数据面（manual ids=None）；异步上下文消息与
     // 响应投影留在此 handler，契约与失败诊断语义不变。
     let records = prepare_plan_records(&state, &project_id, &issue_id, request, None)?;
-    let app_paths = product_app_paths(&state);
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let PreparedPlanRecords { plan, session } = records;
     let session_id = session.id.clone();
@@ -1181,6 +1196,7 @@ mod tests {
     use super::*;
 
     include!("lifecycle_tests.inc.rs");
+    include!("lifecycle_tests_wps.inc.rs");
     include!("lifecycle_tests_n7.inc.rs");
     include!("lifecycle_recent_completion_tests.inc.rs");
     include!("lifecycle_tests_n1.inc.rs");

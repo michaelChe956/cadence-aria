@@ -86,6 +86,10 @@ pub enum DeletionPhase {
 }
 
 /// 单条无内容删除记录（REQ-DEL-02）。
+///
+/// `trigger_reason` 只在「代际取代」路径写入（REQ-WPS-07 允许的唯一附加
+/// 内容：触发原因，用于区分「用户删除」与「代际取代」）；用户面删除为
+/// `None`。绝不承载标题/正文/hash/恢复副本。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntityDeletionRecord {
     #[serde(flatten)]
@@ -93,6 +97,28 @@ pub struct EntityDeletionRecord {
     pub phase: DeletionPhase,
     pub started_at: String,
     pub deleted_at: Option<String>,
+    /// 代际取代触发原因（REQ-WPS-02/REQ-WPS-07）：稳定短码，无内容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_reason: Option<String>,
+}
+
+/// 待人工处置的删除失败事实（REQ-WPS-04 fail-closed）。
+///
+/// 任一从属产物删除失败时落盘：失败项清单、错误摘要与触发点，供人工从同一
+/// 入口重入续清（plan 根保留为可达入口）。内容只含身份与失败项 id，无正文。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntityDeletionFailure {
+    #[serde(flatten)]
+    pub scope: EntityScope,
+    /// 显式需要人工处置（true＝子树失败待人工；根未删）。
+    pub needs_human: bool,
+    /// 失败项标识（产物类别 + id；无 id 者用类别名）。
+    pub failed_items: Vec<String>,
+    /// 失败原因摘要（错误文本，不含业务正文）。
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_reason: Option<String>,
+    pub updated_at: String,
 }
 
 /// 外部引用事实（D1.1 `list_incoming_entity_references` 消费，plan §0.2）。
@@ -193,6 +219,18 @@ impl EntityDeletionStore {
         &self,
         lease: &EntityDeletionLease,
     ) -> Result<EntityDeletionRecord, ProductStoreError> {
+        self.begin_with_reason(lease, None)
+    }
+
+    /// purging 开始（幂等）＋代际取代触发原因（REQ-WPS-02/REQ-WPS-07）。
+    ///
+    /// 既存记录原样返回（不重写 started_at/deleted_at/trigger_reason）——重放
+    /// 不得改变首次落盘的事实；首次落盘时写入触发原因（用户面删除为 None）。
+    pub fn begin_with_reason(
+        &self,
+        lease: &EntityDeletionLease,
+        trigger_reason: Option<&str>,
+    ) -> Result<EntityDeletionRecord, ProductStoreError> {
         let scope = lease.scope();
         let path = entity_deletion_record_path(&self.paths, scope)?;
         match read_json_if_exists::<EntityDeletionRecord>(&path)? {
@@ -206,6 +244,7 @@ impl EntityDeletionStore {
                     phase: DeletionPhase::Purging,
                     started_at: Utc::now().to_rfc3339(),
                     deleted_at: None,
+                    trigger_reason: trigger_reason.map(str::to_string),
                 };
                 write_json(&path, &record)?;
                 Ok(record)
@@ -280,6 +319,47 @@ impl EntityDeletionStore {
         lease: &EntityDeletionLease,
     ) -> Result<(), ProductStoreError> {
         let path = pending_manifest_path(&self.paths, lease.scope())?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ProductStoreError::Io(format!(
+                "remove {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
+    /// 落盘待人工处置的失败事实（REQ-WPS-04）：子树清理失败时记录失败项、
+    /// 错误摘要与触发点。plan 根保持存在（可达的 purging/needs_human 入口）。
+    pub fn save_pending_failure(
+        &self,
+        lease: &EntityDeletionLease,
+        failure: &EntityDeletionFailure,
+    ) -> Result<(), ProductStoreError> {
+        let scope = lease.scope();
+        if &failure.scope != scope {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "entity_deletion_failure",
+                reason: "failure scope must match the deletion lease".to_string(),
+            });
+        }
+        write_json(&pending_failure_path(&self.paths, scope)?, failure)
+    }
+
+    /// 读取待人工处置的失败事实；NotFound=无失败事实。
+    pub fn load_pending_failure(
+        &self,
+        lease: &EntityDeletionLease,
+    ) -> Result<Option<EntityDeletionFailure>, ProductStoreError> {
+        read_json_if_exists(&pending_failure_path(&self.paths, lease.scope())?)
+    }
+
+    /// 幂等移除失败事实；NotFound=已移除。成功完成后调用。
+    pub fn remove_pending_failure(
+        &self,
+        lease: &EntityDeletionLease,
+    ) -> Result<(), ProductStoreError> {
+        let path = pending_failure_path(&self.paths, lease.scope())?;
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
@@ -412,6 +492,18 @@ fn owned_artifact_index_path(
 ) -> Result<PathBuf, ProductStoreError> {
     Ok(issue_entity_operations_root(paths, scope)?
         .join("owned-index")
+        .join(scope.kind.path_segment())
+        .join(format!("{}.json", scope.entity_id)))
+}
+
+/// 待人工处置的失败事实路径：
+/// `{issue root}/entity-operations/pending-failures/{kind}/{id}.json`。
+fn pending_failure_path(
+    paths: &ProductAppPaths,
+    scope: &EntityScope,
+) -> Result<PathBuf, ProductStoreError> {
+    Ok(issue_entity_operations_root(paths, scope)?
+        .join("pending-failures")
         .join(scope.kind.path_segment())
         .join(format!("{}.json", scope.entity_id)))
 }
