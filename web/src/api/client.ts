@@ -1031,17 +1031,6 @@ export function getCodingAttemptDiff(
   );
 }
 
-export function deleteCodingAttempt(
-  address: CodingAttemptAddress,
-): Promise<void> {
-  return requestJson<void>(
-    codingAttemptApiPath(address),
-    {
-      method: "DELETE",
-    },
-  );
-}
-
 export function abortCodingAttempt(
   address: CodingAttemptAddress,
 ): Promise<CodingAttempt> {

@@ -6,7 +6,6 @@ import {
   confirmWorkItemExecutionPlan,
   createCodingAttempt,
   createGroupCodingAttempt,
-  deleteCodingAttempt,
   deletePlanCodingWorkspaces,
   getCodingAttemptArtifact,
   getCodingAttemptDiff,
@@ -43,7 +42,6 @@ describe("coding attempts api client", () => {
     await getCodingAttemptSnapshot(address);
     await getCodingAttemptDiff(address);
     await abortCodingAttempt(address);
-    await deleteCodingAttempt(address);
     await getCodingAttemptArtifact(address, "unit.stdout.log");
     await confirmWorkItemExecutionPlan(address);
     await requestWorkItemExecutionPlanChange(address, { note: "补充边界测试" });
@@ -60,7 +58,6 @@ describe("coding attempts api client", () => {
       basePath,
       `${basePath}/diff`,
       `${basePath}/abort`,
-      basePath,
       `${basePath}/artifacts/unit.stdout.log`,
       `${basePath}/execution-plan/confirm`,
       `${basePath}/execution-plan/change-request`,
@@ -71,12 +68,12 @@ describe("coding attempts api client", () => {
     expect(calls[1].init?.method).toBeUndefined();
     expect(calls[2].init?.method).toBeUndefined();
     expect(calls[3].init?.method).toBe("POST");
-    expect(calls[4].init?.method).toBe("DELETE");
-    expect(calls[6].init?.method).toBe("POST");
-    expect(calls[7].init?.body).toBe(JSON.stringify({ note: "补充边界测试" }));
+    expect(calls[4].init?.method).toBeUndefined();
+    expect(calls[5].init?.method).toBe("POST");
+    expect(calls[6].init?.body).toBe(JSON.stringify({ note: "补充边界测试" }));
     // P1-b（REQ-MTG-11 / 契约 A2）：plan 级聚合确认——无 body POST。
-    expect(calls[8].init?.method).toBe("POST");
-    expect(calls[8].init?.body).toBeUndefined();
+    expect(calls[7].init?.method).toBe("POST");
+    expect(calls[7].init?.body).toBeUndefined();
   });
 
   it("maps coding attempt snapshot and artifact response fields", async () => {

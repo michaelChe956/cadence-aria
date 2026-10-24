@@ -11,7 +11,6 @@ import {
   deleteStorySpec,
   deleteWorkItem,
   deleteWorkItemPlan,
-  deleteCodingAttempt,
   generateDesignSpecs,
   generateStorySpecs,
   getAutomationEnrollmentControl,
@@ -505,11 +504,6 @@ describe("api client", () => {
       "issue/with space",
       "plan/with space",
     );
-    await deleteCodingAttempt({
-      projectId: "project/with space",
-      issueId: "issue/with space",
-      attemptId: "attempt/with space",
-    });
 
     expect(calls.map((call) => call.input)).toEqual([
       "/api/projects/project%2Fwith%20space",
@@ -519,27 +513,11 @@ describe("api client", () => {
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/design-specs/design%2Fwith%20space",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-items/work%2Fwith%20space",
       "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/work-item-plans/plan%2Fwith%20space",
-      "/api/projects/project%2Fwith%20space/issues/issue%2Fwith%20space/coding-attempts/attempt%2Fwith%20space",
     ]);
     expect(calls.every((call) => call.init?.method === "DELETE")).toBe(true);
     expect(calls[1]?.init?.headers).toMatchObject({
       "Idempotency-Key": "delete-repository-test-1",
     });
-  });
-
-  it("handles delete coding attempt 204 response without parsing json", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response(null, { status: 204 })),
-    );
-
-    await expect(
-      deleteCodingAttempt({
-        projectId: "project_0001",
-        issueId: "issue_0001",
-        attemptId: "coding_attempt_0001",
-      }),
-    ).resolves.toBeUndefined();
   });
 
   it("cascade_d2_3: lifecycle entity deletes default to no query and encode confirmed option", async () => {

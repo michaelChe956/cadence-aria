@@ -9,7 +9,6 @@ import { CODING_ATTEMPT_ADDRESS } from "./CodingWorkspacePage.test-utils";
 
 vi.mock("../api/client", () => ({
   confirmWorkItemExecutionPlan: vi.fn(),
-  deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
   requestWorkItemExecutionPlanChange: vi.fn(),
   // 批 2 T4：真实 hook 按码比对/解析终止身份（本测试不触发该分支）。
