@@ -98,3 +98,38 @@ async fn reprepare_removes_old_plan_workspace_session() {
     assert_eq!(sessions_after_second.len(), 1, "旧会话必须随旧 plan 删除");
     assert_ne!(sessions_after_second[0].id, first_session_id);
 }
+
+/// F4 回归：并发两次 prepare（同一 issue）→ 存活 plan 恒为 1。
+///
+/// 「删旧 + 建立」必须在同一 issue 级 plan-slot 互斥区内——否则两个并发
+/// 触发可各建一个 plan（不变量复核发生在建立**之前**，捕获不到）。
+#[tokio::test]
+async fn concurrent_prepare_keeps_single_live_plan() {
+    let root = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let (lifecycle, story_spec_id, design_spec_id) =
+        seed_single_physical_prepare_work_item_plan_fixture(&paths);
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let app = build_web_router(state);
+
+    let (first, second) = tokio::join!(
+        post_prepare_work_item_plan(&app, story_spec_id.clone(), design_spec_id.clone()),
+        post_prepare_work_item_plan(&app, story_spec_id.clone(), design_spec_id.clone()),
+    );
+    let statuses = [first.status(), second.status()];
+    assert!(
+        statuses.contains(&StatusCode::OK),
+        "并发 prepare 至少一次成功: {statuses:?}"
+    );
+    let plans = lifecycle
+        .list_issue_work_item_plans(PROJECT_ID, ISSUE_ID)
+        .unwrap();
+    assert_eq!(
+        plans.len(),
+        1,
+        "同一 issue 存活 plan 必须恒为 1（并发 prepare 不得各建一个 plan）"
+    );
+}

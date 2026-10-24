@@ -298,11 +298,24 @@ impl WorkspaceEngine {
         // 个 plan」与「原地重编译确认不得跳过旧代运行资源清理」）：编译确认前
         // 先清旧代运行资源（attempts/worktree/reviewer/锁/workspace lifecycle）
         // 并删除同 issue 的其它存活 plan；失败 → 不确认新代（fail-closed）。
-        crate::product::plan_generation_supersede::ensure_single_plan_generation(
+        //
+        // plan-slot 互斥覆盖「取代删除 + 编译确认」全过程：并发的 prepare 不得
+        // 在本编译确认期间建出第二个 plan。
+        let plan_slot = crate::product::plan_generation_supersede::acquire_issue_plan_slot(
             &lifecycle.app_paths(),
             &tx.project_id,
             &tx.issue_id,
-            &[tx.plan_id.clone()],
+        )
+        .await
+        .map_err(|error| {
+            format!("acquire issue plan slot before compile confirm failed: {error:?}")
+        })?;
+        crate::product::plan_generation_supersede::ensure_single_plan_generation(
+            &lifecycle.app_paths(),
+            &plan_slot,
+            &tx.project_id,
+            &tx.issue_id,
+            std::slice::from_ref(&tx.plan_id),
             crate::product::entity_deletion_cascade::PlanSupersedeReason::RecompileConfirm,
             None,
         )

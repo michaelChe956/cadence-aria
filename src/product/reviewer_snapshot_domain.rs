@@ -128,10 +128,10 @@ fn read_lossy(path: &Path) -> String {
 }
 
 fn expand_home(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
     PathBuf::from(path)
 }
@@ -273,6 +273,7 @@ impl IgnoreRulesFreeze {
     }
 
     /// 合成 manifest(合同测试)用的空冻结:无规则、无豁免清单。
+    #[cfg(test)]
     pub(crate) fn synthetic() -> Self {
         Self {
             schema: IGNORE_RULES_FREEZE_SCHEMA.to_string(),

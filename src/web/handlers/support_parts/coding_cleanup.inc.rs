@@ -802,13 +802,21 @@ fn close_plan_coding_workspace_round_with_lease(
         .map_err(product_store_api_error)?;
 
     // ④ 目标仓专属资源清理（真实 owner 复核：他人仍持有保留；缺失=已清）。
-    crate::product::entity_deletion_cascade::cleanup_plan_shared_worktrees(
+    //    本口径**只删记录、保留 worktree 实体**（实体被下一轮复用）。
+    let shared_worktree_cleanup =
+        crate::product::entity_deletion_cascade::cleanup_plan_shared_worktrees(
+            app_paths,
+            lease,
+            &manifest,
+            state.run.as_ref(),
+            &[],
+            &[],
+            crate::product::entity_deletion_cascade::SharedWorktreeEntityMode::RecordOnly,
+        )
+        .map_err(product_store_api_error)?;
+    crate::product::entity_deletion_cascade::delete_shared_worktree_records(
         app_paths,
-        lease,
-        &manifest,
-        state.run.as_ref(),
-        &[],
-        &[],
+        &shared_worktree_cleanup,
     )
     .map_err(product_store_api_error)?;
 

@@ -88,7 +88,9 @@ pub(crate) enum CascadeDeleteError {
     /// fail-closed：不建立新 plan）。
     Busy,
     /// 冻结 target 不是合法逻辑仓 id（数据损坏，fail-closed）。
-    InvalidTargetRepository { target_repository_id: String },
+    InvalidTargetRepository {
+        target_repository_id: String,
+    },
 }
 
 /// 代际取代结果（供调用方审计与断言）。
@@ -134,9 +136,11 @@ pub(crate) async fn purge_entity_closure(
                 ProductStoreError::Io(format!("purge plan sources {plan_id}: {error:?}"))
             })?;
         // plan store drafts / compile transaction / outline context index。
-        WorkItemPlanStore::new(app_paths.clone()).purge_plan_artifacts(project_id, issue_id, plan_id)?;
+        WorkItemPlanStore::new(app_paths.clone())
+            .purge_plan_artifacts(project_id, issue_id, plan_id)?;
         // revisions + publications。
-        WorkItemRevisionStore::new(app_paths.clone()).purge_plan_revisions(project_id, issue_id, plan_id)?;
+        WorkItemRevisionStore::new(app_paths.clone())
+            .purge_plan_revisions(project_id, issue_id, plan_id)?;
         // 本 plan 拥有的 attempt 集合（真实 owner-key；删除前先采集——删除后
         // 无法再由 attempt 记录反推 shared-worktree 锁的持有者）。
         let plan_attempt_ids: Vec<String> = if coding_gate == CodingGateMode::Cascade {
@@ -154,22 +158,57 @@ pub(crate) async fn purge_entity_closure(
         } else {
             Vec::new()
         };
-        // coding attempts 及其运行资源（仅代际取代路径；用户面删除在门禁已拒）。
-        if coding_gate == CodingGateMode::Cascade {
-            purge_plan_coding_attempts(app_paths, project_id, issue_id, plan_id, manifest).await?;
-        }
-        // coding attempt 初始化残留锁与 journal 残留。
-        purge_attempt_lock_residue(app_paths, project_id, issue_id, plan_id, &manifest.work_item_ids)?;
         // 目标仓资源（shared-worktree 记录 + 锁 + worktree 实体）。
-        let worktree_entities = cleanup_plan_shared_worktrees(
+        // **先于 attempt 清理**：实体删除失败即中止 → attempt 记录仍在 →
+        // 重入仍能按真实 owner-key 判定归属并补删实体（attempt 先删则归属
+        // 复核失配，实体残留成孤儿）。
+        //
+        // 实体先删、记录后删（记录删除即释放其锁；实体删除失败时锁原样保留）。
+        //
+        // ① 失败重入补删：上次遗留的待删实体（记录可能已被他路径删掉、归属
+        //    复核也可能失配——实体目录路径必须被记住，否则残留成孤儿）。
+        let deletion_store = EntityDeletionStore::new(app_paths.clone());
+        let pending_entities = deletion_store.load_pending_worktree_entities(lease)?;
+        if !pending_entities.is_empty() {
+            remove_shared_worktree_entity_paths(&pending_entities).await?;
+            deletion_store.remove_pending_worktree_entities(lease)?;
+        }
+        // ② 正常判定 → 落盘待删路径 → 真删实体 → 删记录 → 清待删清单。
+        let shared_worktree_cleanup = cleanup_plan_shared_worktrees(
             app_paths,
             lease,
             manifest,
             plan_run,
             resource_leases,
             &plan_attempt_ids,
+            SharedWorktreeEntityMode::DeleteEntity,
         )?;
-        remove_shared_worktree_entities(&worktree_entities).await?;
+        deletion_store
+            .save_pending_worktree_entities(lease, &shared_worktree_cleanup.worktree_entities)?;
+        remove_shared_worktree_entities(&shared_worktree_cleanup).await?;
+        delete_shared_worktree_records(app_paths, &shared_worktree_cleanup)?;
+        deletion_store.remove_pending_worktree_entities(lease)?;
+        // worktree 实体残留复核（禁止「记录已删、实体目录还在」）。
+        for entity_path in &shared_worktree_cleanup.worktree_entities {
+            if entity_path.exists() {
+                return Err(ProductStoreError::Io(format!(
+                    "entity_deletion_residue: shared worktree entity {} still present",
+                    entity_path.display()
+                )));
+            }
+        }
+        // coding attempts 及其运行资源（仅代际取代路径；用户面删除在门禁已拒）。
+        if coding_gate == CodingGateMode::Cascade {
+            purge_plan_coding_attempts(app_paths, project_id, issue_id, plan_id, manifest).await?;
+        }
+        // coding attempt 初始化残留锁与 journal 残留。
+        purge_attempt_lock_residue(
+            app_paths,
+            project_id,
+            issue_id,
+            plan_id,
+            &manifest.work_item_ids,
+        )?;
         // run 本体与 workspace lifecycle 元数据（安全删除窗口内 unlink）。
         let run_store = CodingPlanRunStore::new(app_paths.clone());
         run_store.purge_plan_with_lease(lease)?;
@@ -195,6 +234,12 @@ pub(crate) async fn purge_entity_closure(
 /// 归属判定用真实 owner-key：group attempt 以 `work_item_group_id == plan_id`
 /// 归属；single scope attempt 以其 `work_item_id` 落在本 plan 的 owned WI 集合
 /// 归属。摘要缺项但真实绑定在位者照样纳入（REQ-WPS-03「摘要残缺但仍须清全」）。
+///
+/// **兜底（孤儿 attempt）**：attempt 记录自身不携带 plan 字段，归属只能经
+/// 「group 绑定」或「work item 记录的 `source_work_item_plan_id`」反查。传入
+/// 的 `work_item_ids` 来自 manifest 采集（plan 根/WI 记录已清时该集合为空），
+/// 此时无 WI 记录的孤儿 attempt 会被漏掉 → 其运行目录/reviewer 资源/
+/// worktree 实体成孤儿。故此处再按 WI 记录的真实 plan 归属兜底枚举。
 pub(crate) fn plan_owned_attempts(
     coding_store: &CodingAttemptStore,
     project_id: &str,
@@ -207,7 +252,9 @@ pub(crate) fn plan_owned_attempts(
         attempts.insert(attempt.id);
     }
     for work_item_id in work_item_ids {
-        for attempt in coding_store.list_attempts_for_work_item(project_id, issue_id, work_item_id)? {
+        for attempt in
+            coding_store.list_attempts_for_work_item(project_id, issue_id, work_item_id)?
+        {
             // 他 plan 的 group attempt（group 绑定优先）不构成本 plan 的 attempt。
             if attempt
                 .work_item_group_id
@@ -217,6 +264,27 @@ pub(crate) fn plan_owned_attempts(
                 continue;
             }
             attempts.insert(attempt.id);
+        }
+    }
+    // 兜底：按 work item 记录的真实 plan 归属反查（覆盖无 WI 记录的孤儿
+    // attempt——其 WI 记录仍在，只是没进 manifest 的 owned WI 集合）。
+    let lifecycle = LifecycleStore::new(coding_store.paths());
+    let plan_owned_work_items: BTreeSet<String> = lifecycle
+        .list_work_items(project_id, issue_id)?
+        .into_iter()
+        .filter(|item| item.source_work_item_plan_id.as_deref() == Some(plan_id))
+        .map(|item| item.id)
+        .collect();
+    if !plan_owned_work_items.is_empty() {
+        for attempt in coding_store.list_attempts_for_issue(project_id, issue_id)? {
+            // group attempt 的归属由 group 绑定决定（他 plan 的 group attempt
+            // 不构成本 plan 的 attempt）。
+            if attempt.work_item_group_id.is_some() {
+                continue;
+            }
+            if plan_owned_work_items.contains(&attempt.work_item_id) {
+                attempts.insert(attempt.id);
+            }
         }
     }
     let mut resolved = Vec::with_capacity(attempts.len());
@@ -240,7 +308,8 @@ pub(crate) fn terminate_plan_coding_attempts(
     work_item_ids: &[String],
 ) -> Result<(), ProductStoreError> {
     let coding_store = CodingAttemptStore::new(app_paths.clone());
-    for attempt in plan_owned_attempts(&coding_store, project_id, issue_id, plan_id, work_item_ids)? {
+    for attempt in plan_owned_attempts(&coding_store, project_id, issue_id, plan_id, work_item_ids)?
+    {
         if matches!(
             attempt.status,
             CodingAttemptStatus::Completed
@@ -324,8 +393,9 @@ fn collect_attempt_work_item_ids(
 /// 删除 attempt 的 worktree 实体（git 注册项 ＋ 目录）。
 ///
 /// 物理仓路径由 worktree 自身的 `.git` gitfile 反解（linked worktree：
-/// `<main>/.git/worktrees/<name>` → `<main>`）；不可反解时跳过（无实体可删），
-/// 绝不猜测仓路径。
+/// `<main>/.git/worktrees/<name>` → `<main>`）；**不可反解时仍删目录残留**
+/// （与 [`remove_shared_worktree_entity`] 同口径）——直接跳过会把目录留成
+/// 孤儿：重入时 attempt 记录已删，无任何路径能再定位并清掉它。
 async fn remove_attempt_worktree_entity(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
@@ -336,21 +406,27 @@ async fn remove_attempt_worktree_entity(
     if !worktree_path.exists() {
         return Ok(());
     }
-    let Some(repo_path) = resolve_main_repo_from_worktree(worktree_path) else {
-        return Ok(());
-    };
-    let git = GitWorkspaceService::new();
-    git.remove_worktree(&repo_path, worktree_path)
-        .await
-        .map_err(|error| {
-            ProductStoreError::Io(format!(
-                "remove worktree {}: {error}",
-                worktree_path.display()
-            ))
+    if let Some(repo_path) = resolve_main_repo_from_worktree(worktree_path) {
+        let git = GitWorkspaceService::new();
+        git.remove_worktree(&repo_path, worktree_path)
+            .await
+            .map_err(|error| {
+                ProductStoreError::Io(format!(
+                    "remove worktree {}: {error}",
+                    worktree_path.display()
+                ))
+            })?;
+        git.prune_worktrees(&repo_path).await.map_err(|error| {
+            ProductStoreError::Io(format!("prune worktrees {}: {error}", repo_path.display()))
         })?;
-    git.prune_worktrees(&repo_path).await.map_err(|error| {
-        ProductStoreError::Io(format!("prune worktrees {}: {error}", repo_path.display()))
-    })?;
+    }
+    // git 注册项已删但目录仍在（反解失败/删除未清空）→ 目录兜底删除，
+    // 杜绝「记录已删、实体目录成孤儿」。
+    if worktree_path.exists() {
+        std::fs::remove_dir_all(worktree_path).map_err(|error| {
+            ProductStoreError::Io(format!("remove {}: {error}", worktree_path.display()))
+        })?;
+    }
     let _ = app_paths;
     Ok(())
 }
@@ -415,7 +491,9 @@ pub(crate) fn purge_attempt_lock_residue(
 ) -> Result<(), ProductStoreError> {
     use crate::product::lifecycle_store::remove_file_if_exists;
 
-    let coding_attempts_root = app_paths.issue_root(project_id, issue_id).join("coding-attempts");
+    let coding_attempts_root = app_paths
+        .issue_root(project_id, issue_id)
+        .join("coding-attempts");
 
     // group-initialization-arbitration 文件 + lock（issue 级仲裁）。
     let _ = remove_file_if_exists(&coding_attempts_root.join("group-initialization-arbitration"));
@@ -459,21 +537,55 @@ pub(crate) fn purge_attempt_lock_residue(
     Ok(())
 }
 
-/// 目标仓资源清理（shared-worktree 记录 ＋ 锁 ＋ worktree 实体）。
+/// shared-worktree 实体的处置口径（[`cleanup_plan_shared_worktrees`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SharedWorktreeEntityMode {
+    /// 真删 worktree 实体（git 注册项 ＋ 目录）：代际取代闭包口径。
+    ///
+    /// **实体先删、记录后删**：实体删除失败即中止，记录仍在 → 重入仍能枚举
+    /// 到该实体并补删。先删记录会让重入失去定位，实体残留成孤儿（违反
+    /// 「禁止根已删、产物还在」）。
+    DeleteEntity,
+    /// 只删记录、保留实体：round-close 重置口径（worktree 目录被下一轮复用）。
+    RecordOnly,
+}
+
+/// shared-worktree 清理的待办（判定已在 cleanup lease 内完成）。
+///
+/// **记录删除推迟到实体真删之后**（[`delete_shared_worktree_records`]）：
+/// 先删记录会让重入失去实体定位——实体删除失败后重入已无记录可枚举，实体
+/// 残留成孤儿（违反「禁止根已删、产物还在」）。
+pub(crate) struct SharedWorktreeCleanupOutcome<'a> {
+    /// cleanup lease 守卫（持有到记录删除完成——并发 takeover 被挡住）。
+    _guards: Vec<CleanupLeaseGuard<'a>>,
+    /// 待真删的 worktree 实体路径（`DeleteEntity` 口径；`RecordOnly` 为空）。
+    worktree_entities: Vec<PathBuf>,
+    /// 待删的记录键（`None`＝legacy issue 布局）。
+    record_keys: Vec<Option<LogicalRepositoryId>>,
+    project_id: String,
+    issue_id: String,
+}
+
+/// 目标仓资源清理（shared-worktree 记录 ＋ 锁 ＋ worktree 实体）——**判定阶段**。
 ///
 /// 仅 manifest 目标仓 ∪ plan-run 冻结 target ∪ legacy issue 布局（None 键），
 /// **不整 issue 枚举删除**（REQ-WPS-03「共享工作树仍被其他 plan 使用」）。
 /// 每个资源在稳定 repo resource cleanup lease 内复核真实 owners：他 Plan 仍
 /// 使用（存活、非本 scope、非墓碑 scope）则保留记录，但**释放本 plan 持有的
-/// 锁**（置空 owner ＋ status=Ready）；目标专属才删记录并真删 worktree 实体。
-pub(crate) fn cleanup_plan_shared_worktrees(
+/// 锁**（置空 owner ＋ status=Ready）；目标专属才进入待删集合。
+///
+/// 本阶段**不删记录**：调用方须先真删 worktree 实体
+/// （[`remove_shared_worktree_entities`]），再删记录
+/// （[`delete_shared_worktree_records`]）——顺序不可颠倒。
+pub(crate) fn cleanup_plan_shared_worktrees<'a>(
     app_paths: &ProductAppPaths,
     lease: &EntityDeletionLease,
     manifest: &EntityDeletionManifest,
     plan_run: Option<&CodingPlanRun>,
-    resource_leases: &[(SharedResourceKey, SharedResourceCleanupLease)],
+    resource_leases: &'a [(SharedResourceKey, SharedResourceCleanupLease)],
     plan_attempt_ids: &[String],
-) -> Result<Vec<PathBuf>, ProductStoreError> {
+    entity_mode: SharedWorktreeEntityMode,
+) -> Result<SharedWorktreeCleanupOutcome<'a>, ProductStoreError> {
     let scope = lease.scope();
     if scope.kind != DeletionEntityKind::Plan {
         return Err(ProductStoreError::InvalidRecord {
@@ -485,7 +597,9 @@ pub(crate) fn cleanup_plan_shared_worktrees(
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let operations = EntityOperationStore::new(app_paths.clone());
     let deletion_records = EntityDeletionStore::new(app_paths.clone());
+    let mut guards: Vec<CleanupLeaseGuard<'a>> = Vec::new();
     let mut worktree_entities: Vec<PathBuf> = Vec::new();
+    let mut record_keys: Vec<Option<LogicalRepositoryId>> = Vec::new();
 
     let repositories = plan_shared_worktree_repository_ids(&lifecycle, scope, manifest, plan_run)?;
     let candidates = plan_shared_worktree_candidate_ids(&lifecycle, scope, manifest, plan_run)?;
@@ -497,14 +611,15 @@ pub(crate) fn cleanup_plan_shared_worktrees(
             issue_id: issue_id.to_string(),
             repository_id: logical_repository_id,
         };
-        with_held_or_acquired_cleanup_lease(&operations, resource_leases, &key, || {
-            let Some(record) = (match logical_repository_id {
-                Some(repository_id) => lifecycle
-                    .get_repo_shared_worktree(project_id, issue_id, repository_id)?,
-                None => lifecycle.get_issue_shared_worktree(project_id, issue_id)?,
-            }) else {
-                return Ok(());
-            };
+        // cleanup lease 全程持有（含实体真删）——并发 takeover 被挡住。
+        let guard = acquire_cleanup_lease(&operations, resource_leases, &key)?;
+        let record = match logical_repository_id {
+            Some(repository_id) => {
+                lifecycle.get_repo_shared_worktree(project_id, issue_id, repository_id)?
+            }
+            None => lifecycle.get_issue_shared_worktree(project_id, issue_id)?,
+        };
+        if let Some(record) = record {
             let ownership = classify_shared_worktree_ownership(
                 &lifecycle,
                 &deletion_records,
@@ -515,7 +630,7 @@ pub(crate) fn cleanup_plan_shared_worktrees(
                 candidates.contains(&repository_id),
             )?;
             match ownership {
-                SharedWorktreeOwnership::Unrelated => Ok(()),
+                SharedWorktreeOwnership::Unrelated => {}
                 SharedWorktreeOwnership::OtherLiveOwner => {
                     // 共享资源仍被他人使用：保留记录，但释放本 plan 持有的锁。
                     release_shared_worktree_lock(
@@ -526,44 +641,90 @@ pub(crate) fn cleanup_plan_shared_worktrees(
                         record.current_lock_owner_id.as_deref(),
                         plan_attempt_ids,
                     )?;
-                    Ok(())
                 }
                 SharedWorktreeOwnership::ClaimedByThisPlan => {
-                    // 目标专属：先释放锁（owner 置空 ＋ Ready），再删记录，
-                    // 最后真删 worktree 实体（git 注册项 ＋ 目录）。
-                    release_shared_worktree_lock(
-                        app_paths,
-                        project_id,
-                        issue_id,
-                        logical_repository_id,
-                        record.current_lock_owner_id.as_deref(),
-                        plan_attempt_ids,
-                    )?;
-                    match logical_repository_id {
-                        Some(repository_id) => lifecycle
-                            .delete_repo_shared_worktree(project_id, issue_id, repository_id)?,
-                        None => lifecycle.delete_issue_shared_worktree(project_id, issue_id)?,
+                    // 目标专属：**不提前释放锁**——记录即将删除（删除即释放其
+                    // 锁）；实体删除失败时锁原样保留，重入仍能按真实 owner-key
+                    // 判定归属并补删实体。
+                    if entity_mode == SharedWorktreeEntityMode::DeleteEntity {
+                        worktree_entities.push(record.worktree_path.clone());
                     }
-                    worktree_entities.push(record.worktree_path.clone());
-                    Ok(())
+                    record_keys.push(logical_repository_id);
                 }
             }
-        })?;
+        }
+        guards.push(guard);
     }
-    Ok(worktree_entities)
+    Ok(SharedWorktreeCleanupOutcome {
+        _guards: guards,
+        worktree_entities,
+        record_keys,
+        project_id: project_id.to_string(),
+        issue_id: issue_id.to_string(),
+    })
 }
 
-/// 复用编排层已持的 cleanup lease；未持有的 key 现取（try 非阻塞，争用
-/// Busy fail-closed——不静默跳过留孤儿资源）。
-fn with_held_or_acquired_cleanup_lease<T>(
+/// 真删已判定的 worktree 实体（git 注册项 ＋ 目录）。
+///
+/// 失败即中止：记录仍在 → 重入仍能判定到该实体并补删（绝不留下「记录已删、
+/// 实体还在」的孤儿）。
+pub(crate) async fn remove_shared_worktree_entities(
+    outcome: &SharedWorktreeCleanupOutcome<'_>,
+) -> Result<(), ProductStoreError> {
+    remove_shared_worktree_entity_paths(&outcome.worktree_entities).await
+}
+
+/// 按路径清单真删 worktree 实体（失败重入补删用）。
+pub(crate) async fn remove_shared_worktree_entity_paths(
+    worktree_paths: &[PathBuf],
+) -> Result<(), ProductStoreError> {
+    for worktree_path in worktree_paths {
+        remove_shared_worktree_entity(worktree_path).await?;
+    }
+    Ok(())
+}
+
+/// 删除已判定的 shared-worktree 记录（实体已清，或本口径明确保留实体）。
+pub(crate) fn delete_shared_worktree_records(
+    app_paths: &ProductAppPaths,
+    outcome: &SharedWorktreeCleanupOutcome<'_>,
+) -> Result<(), ProductStoreError> {
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    for repository_id in &outcome.record_keys {
+        match repository_id {
+            Some(repository_id) => lifecycle.delete_repo_shared_worktree(
+                &outcome.project_id,
+                &outcome.issue_id,
+                *repository_id,
+            )?,
+            None => {
+                lifecycle.delete_issue_shared_worktree(&outcome.project_id, &outcome.issue_id)?
+            }
+        }
+    }
+    Ok(())
+}
+
+/// cleanup lease 守卫：编排层已持有则借用（不重复取锁），否则就地 try 取。
+///
+/// 未持有的 key 现取（try 非阻塞，争用 Busy fail-closed——不静默跳过留孤儿
+/// 资源）。借用态不释放编排层的 lease（其生命周期由编排层决定）。
+enum CleanupLeaseGuard<'a> {
+    Held {
+        _lease: &'a SharedResourceCleanupLease,
+    },
+    Acquired {
+        _lease: SharedResourceCleanupLease,
+    },
+}
+
+fn acquire_cleanup_lease<'a>(
     operations: &EntityOperationStore,
-    resource_leases: &[(SharedResourceKey, SharedResourceCleanupLease)],
+    resource_leases: &'a [(SharedResourceKey, SharedResourceCleanupLease)],
     key: &SharedResourceKey,
-    operation: impl FnOnce() -> Result<T, ProductStoreError>,
-) -> Result<T, ProductStoreError> {
+) -> Result<CleanupLeaseGuard<'a>, ProductStoreError> {
     if let Some((_, lease)) = resource_leases.iter().find(|(held, _)| held == key) {
-        let _guard = lease;
-        return operation();
+        return Ok(CleanupLeaseGuard::Held { _lease: lease });
     }
     let lease = operations
         .try_acquire_shared_resource_cleanup(key)
@@ -577,8 +738,7 @@ fn with_held_or_acquired_cleanup_lease<T>(
                     .unwrap_or_default(),
             },
         })?;
-    let _guard = lease;
-    operation()
+    Ok(CleanupLeaseGuard::Acquired { _lease: lease })
 }
 
 /// 释放 shared-worktree 锁（owner 置空 ＋ status=Ready）——**取代删除闭包内的
@@ -604,7 +764,10 @@ fn release_shared_worktree_lock(
     let Some(owner_id) = owner_id else {
         return Ok(());
     };
-    if !plan_attempt_ids.iter().any(|attempt_id| attempt_id == owner_id) {
+    if !plan_attempt_ids
+        .iter()
+        .any(|attempt_id| attempt_id == owner_id)
+    {
         return Ok(());
     }
     let path = match repository_id {
@@ -672,17 +835,19 @@ fn classify_shared_worktree_ownership(
         return Ok(SharedWorktreeOwnership::OtherLiveOwner);
     }
     if let Some(owner_id) = record.current_lock_owner_id.as_deref() {
-        let own_lock = plan_attempt_ids.iter().any(|attempt_id| attempt_id == owner_id);
+        let own_lock = plan_attempt_ids
+            .iter()
+            .any(|attempt_id| attempt_id == owner_id);
         // 锁 owner 属他人且不在本 run 冻结集/selection 内 → 在途 writer，保留。
         let orphan = own_lock
             || plan_run.is_some_and(|run| {
                 run.target_attempts
                     .iter()
                     .any(|frozen| frozen.attempt_id == owner_id)
-                || run
-                    .selection
-                    .as_ref()
-                    .is_some_and(|selection| selection.attempt_id == owner_id)
+                    || run
+                        .selection
+                        .as_ref()
+                        .is_some_and(|selection| selection.attempt_id == owner_id)
             });
         if !orphan {
             return Ok(SharedWorktreeOwnership::OtherLiveOwner);
@@ -716,12 +881,11 @@ pub(crate) fn plan_shared_worktree_repository_ids(
     let mut candidate: BTreeSet<Option<uuid::Uuid>> = BTreeSet::new();
     let mut repositories: BTreeSet<Option<uuid::Uuid>> = BTreeSet::new();
     for target in &manifest.target_repository_ids {
-        let parsed = uuid::Uuid::parse_str(target).map_err(|_| {
-            ProductStoreError::InvalidRecord {
+        let parsed =
+            uuid::Uuid::parse_str(target).map_err(|_| ProductStoreError::InvalidRecord {
                 kind: "entity_target_repository",
                 reason: format!("owned work item target repository is not a logical id: {target}"),
-            }
-        })?;
+            })?;
         candidate.insert(Some(parsed));
     }
     if let Some(run) = plan_run {
@@ -742,7 +906,10 @@ pub(crate) fn plan_shared_worktree_repository_ids(
     for repository_id in store.list_repo_shared_worktrees(project_id, issue_id)? {
         repositories.insert(Some(repository_id.0));
     }
-    if store.get_issue_shared_worktree(project_id, issue_id)?.is_some() {
+    if store
+        .get_issue_shared_worktree(project_id, issue_id)?
+        .is_some()
+    {
         repositories.insert(None);
     }
     Ok(repositories)
@@ -761,12 +928,11 @@ pub(crate) fn plan_shared_worktree_candidate_ids(
     let (project_id, issue_id) = (scope.project_id.as_str(), scope.issue_id.as_str());
     let mut candidate: BTreeSet<Option<uuid::Uuid>> = BTreeSet::new();
     for target in &manifest.target_repository_ids {
-        let parsed = uuid::Uuid::parse_str(target).map_err(|_| {
-            ProductStoreError::InvalidRecord {
+        let parsed =
+            uuid::Uuid::parse_str(target).map_err(|_| ProductStoreError::InvalidRecord {
                 kind: "entity_target_repository",
                 reason: format!("owned work item target repository is not a logical id: {target}"),
-            }
-        })?;
+            })?;
         candidate.insert(Some(parsed));
     }
     if let Some(run) = plan_run {
@@ -783,25 +949,18 @@ pub(crate) fn plan_shared_worktree_candidate_ids(
             candidate.insert(Some(parsed));
         }
     }
-    if store.get_issue_shared_worktree(project_id, issue_id)?.is_some() {
+    if store
+        .get_issue_shared_worktree(project_id, issue_id)?
+        .is_some()
+    {
         candidate.insert(None);
     }
     Ok(candidate)
 }
 
-/// 真删 shared worktree 实体（git 注册项 ＋ 目录）。
+/// 单个 shared worktree 实体的物理清除（git 注册项 ＋ 目录）。
 ///
 /// 主仓路径由 worktree 的 `.git` gitfile 反解；不可反解时只删目录残留。
-pub(crate) async fn remove_shared_worktree_entities(
-    worktree_paths: &[PathBuf],
-) -> Result<(), ProductStoreError> {
-    for worktree_path in worktree_paths {
-        remove_shared_worktree_entity(worktree_path).await?;
-    }
-    Ok(())
-}
-
-/// 单个 shared worktree 实体的物理清除。
 async fn remove_shared_worktree_entity(worktree_path: &Path) -> Result<(), ProductStoreError> {
     if !worktree_path.exists() {
         return Ok(());
@@ -834,6 +993,10 @@ async fn remove_shared_worktree_entity(worktree_path: &Path) -> Result<(), Produ
 /// （owner 指向不存在的 attempt）——必须释放（置空 owner ＋ status=Ready），
 /// 否则新代永远拿不到锁。只释放 owner ∈ `plan_attempt_ids` 的锁；他人持有
 /// 的锁不动。记录本身保留（他 plan 仍可能使用）。
+///
+/// **持 repo resource cleanup lease**：`release_shared_worktree_lock` 是
+/// 「读 → 校验 → 写」，记录自身不取 flock——不持 lease 时并发的 takeover
+/// 会在读改写之间被覆盖（锁 owner 被写回旧值，新代仍拿不到锁）。
 pub(crate) fn release_plan_shared_worktree_locks(
     app_paths: &ProductAppPaths,
     project_id: &str,
@@ -844,8 +1007,25 @@ pub(crate) fn release_plan_shared_worktree_locks(
         return Ok(());
     }
     let lifecycle = LifecycleStore::new(app_paths.clone());
+    let operations = EntityOperationStore::new(app_paths.clone());
     for repository_id in lifecycle.list_repo_shared_worktrees(project_id, issue_id)? {
-        let Some(record) = lifecycle.get_repo_shared_worktree(project_id, issue_id, repository_id)?
+        let key = SharedResourceKey {
+            project_id: project_id.to_string(),
+            issue_id: issue_id.to_string(),
+            repository_id: Some(repository_id),
+        };
+        // cleanup lease 全程持有（读记录前取）——并发 takeover 被挡住。
+        let _lease = operations
+            .try_acquire_shared_resource_cleanup(&key)
+            .map_err(|error| match error {
+                EntityOperationError::Store(inner) => inner,
+                _ => ProductStoreError::Conflict {
+                    kind: "entity_busy",
+                    id: repository_id.0.to_string(),
+                },
+            })?;
+        let Some(record) =
+            lifecycle.get_repo_shared_worktree(project_id, issue_id, repository_id)?
         else {
             continue;
         };
@@ -858,6 +1038,21 @@ pub(crate) fn release_plan_shared_worktree_locks(
             plan_attempt_ids,
         )?;
     }
+    // legacy issue 布局（None 键）。
+    let key = SharedResourceKey {
+        project_id: project_id.to_string(),
+        issue_id: issue_id.to_string(),
+        repository_id: None,
+    };
+    let _lease = operations
+        .try_acquire_shared_resource_cleanup(&key)
+        .map_err(|error| match error {
+            EntityOperationError::Store(inner) => inner,
+            _ => ProductStoreError::Conflict {
+                kind: "entity_busy",
+                id: issue_id.to_string(),
+            },
+        })?;
     if let Some(record) = lifecycle.get_issue_shared_worktree(project_id, issue_id)? {
         release_shared_worktree_lock(
             app_paths,
@@ -924,3 +1119,6 @@ pub(crate) fn record_pending_failure(
     };
     EntityDeletionStore::new(app_paths.clone()).save_pending_failure(lease, &failure)
 }
+
+#[cfg(test)]
+mod tests;

@@ -1183,6 +1183,30 @@ impl AdvanceStore {
                 id: scope.entity_id.clone(),
             });
         }
+        self.purge_plan_artifacts_for_generation(
+            scope.project_id.as_str(),
+            scope.issue_id.as_str(),
+            scope.entity_id.as_str(),
+            artifacts,
+        )
+    }
+
+    /// plan 代际取代的**原地演进**路径：按 plan 身份清 advance 产物
+    /// （retry → initialization journal → record）。
+    ///
+    /// 与 [`Self::purge_plan_artifacts`] 的差别是**不消费删除独占**——原地
+    /// 演进的 plan 根保留（不产生墓碑），但旧代 advance 产物必须清：残留的
+    /// record 会被 advance 按 plan 回放（`Replayed`），新代永远进不了 coding。
+    pub fn purge_plan_artifacts_for_generation(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        plan_id: &str,
+        artifacts: &AdvancePlanArtifacts,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(project_id)?;
+        validate_relative_id(issue_id)?;
+        validate_relative_id(plan_id)?;
         for id in artifacts
             .advance_ids
             .iter()
@@ -1190,11 +1214,6 @@ impl AdvanceStore {
         {
             validate_relative_id(id)?;
         }
-        let (project_id, issue_id, plan_id) = (
-            scope.project_id.as_str(),
-            scope.issue_id.as_str(),
-            scope.entity_id.as_str(),
-        );
         // ① retry（advance-retries 根短独占）。
         self.with_existing_retries_root(project_id, issue_id, || {
             for command_id in &artifacts.retry_command_ids {

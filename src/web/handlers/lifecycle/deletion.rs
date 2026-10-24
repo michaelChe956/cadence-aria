@@ -720,7 +720,9 @@ pub(crate) fn cascade_delete_api_error(error: CascadeDeleteError) -> ApiError {
             "实体存在进行中的运行或并发写入，请等待收口后重试删除",
             json!({}),
         ),
-        CascadeDeleteError::InvalidTargetRepository { target_repository_id } => ApiError::runtime(
+        CascadeDeleteError::InvalidTargetRepository {
+            target_repository_id,
+        } => ApiError::runtime(
             "entity_target_repository_invalid",
             "owned work item target repository is not a logical id",
             json!({ "target_repository_id": target_repository_id }),
@@ -830,4 +832,3 @@ fn schema_v2_plan_for_work_item(
     }
     Ok(None)
 }
-

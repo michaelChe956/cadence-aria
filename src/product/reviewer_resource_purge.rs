@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
 use crate::product::reviewer_window_store::{
-    REVIEWER_WINDOW_STORE_DIR, ReviewerWindowRecord, WindowLeaseRecord, common_key_of,
+    ChannelGateRecord, GateState, REVIEWER_WINDOW_STORE_DIR, ReviewerWindowRecord,
+    WindowLeaseRecord, common_key_of,
 };
 
 /// reviewer 快照 store 根目录名（生产根 `<aria>/reviewer-snapshots`）。
@@ -58,8 +59,10 @@ impl ReviewerResourcePurger {
         let mut common_dirs: BTreeSet<PathBuf> = BTreeSet::new();
 
         // ① 活跃窗口记录 + 归档窗口记录（两者都携带 attempt_id）。
-        for directory in [self.window_root.join("windows"), self.window_root.join("window-archive")]
-        {
+        for directory in [
+            self.window_root.join("windows"),
+            self.window_root.join("window-archive"),
+        ] {
             for path in json_files_in(&directory)? {
                 let record: ReviewerWindowRecord = read_typed_json(&path)?;
                 if !wanted.contains(record.attempt_id.as_str()) {
@@ -72,7 +75,12 @@ impl ReviewerResourcePurger {
 
         // ② 窗口记录本体（活跃 + 归档）与违规 journal。
         for window_id in &window_ids {
-            remove_file_if_exists(&self.window_root.join("windows").join(format!("{window_id}.json")))?;
+            remove_file_if_exists(
+                &self
+                    .window_root
+                    .join("windows")
+                    .join(format!("{window_id}.json")),
+            )?;
             for path in json_files_in(&self.window_root.join("window-archive"))? {
                 let name = path
                     .file_name()
@@ -83,7 +91,12 @@ impl ReviewerResourcePurger {
                     remove_file_if_exists(&path)?;
                 }
             }
-            remove_file_if_exists(&self.window_root.join("violations").join(format!("{window_id}.json")))?;
+            remove_file_if_exists(
+                &self
+                    .window_root
+                    .join("violations")
+                    .join(format!("{window_id}.json")),
+            )?;
         }
 
         // ③ 树级租约记录：按 attempt_id 或窗口归属精确删除（不整目录清空）。
@@ -94,15 +107,32 @@ impl ReviewerResourcePurger {
             }
         }
 
-        // ④ 写通道记录：按 common-dir 键目录精确删除（目录空则回收）。
+        // ④ 写通道闸门记录：**只删被本次待清窗口持有**的那几条。
+        //
+        // 闸门按 common-dir 键目录存放，**同仓可有多窗口**（他 plan/issue 的
+        // 存活窗口）。整目录清空会误删他窗口的 `Draining`/`Frozen` 闸门：
+        // 记录被删后 `enter_write_channel` 会按缺失重建为 `Open`——平台写
+        // 闸门被静默解除；他窗口的 `poll_channel_drain` 也会因闸门消失报
+        // `OwnerMismatch`。故此处按 `GateState` 持有的 window_id 精确判定。
         for common_dir in &common_dirs {
             let channel_dir = self
                 .window_root
                 .join("channels")
                 .join(common_key_of(common_dir));
             for path in json_files_in(&channel_dir)? {
-                remove_file_if_exists(&path)?;
+                let gate: ChannelGateRecord = read_typed_json(&path)?;
+                let held_by_purged_window = match &gate.state {
+                    // `Open` 不被任何窗口持有：保留（它不是本窗口的闸门）。
+                    GateState::Open => false,
+                    GateState::Draining { window_id } | GateState::Frozen { window_id } => {
+                        window_ids.contains(window_id)
+                    }
+                };
+                if held_by_purged_window {
+                    remove_file_if_exists(&path)?;
+                }
             }
+            // 目录仅在空时回收（非空＝他窗口闸门仍在用）。
             let _ = std::fs::remove_dir(&channel_dir);
         }
 
@@ -296,10 +326,82 @@ mod tests {
         assert!(!window_root.join("windows").join("win_own.json").exists());
         assert!(window_root.join("windows").join("win_other.json").exists());
         assert!(
-            !archive.join("win_own.archived-g1-20261024T000000000Z.json").exists(),
+            !archive
+                .join("win_own.archived-g1-20261024T000000000Z.json")
+                .exists(),
             "归档记录必须物理删除"
         );
-        assert!(!paths.root().join(REVIEWER_SNAPSHOT_STORE_DIR).join("windows").join("win_own").exists());
+        assert!(
+            !paths
+                .root()
+                .join(REVIEWER_SNAPSHOT_STORE_DIR)
+                .join("windows")
+                .join("win_own")
+                .exists()
+        );
         assert!(!snapshot_archive.exists(), "归档快照必须物理删除");
+    }
+
+    /// F1 回归：清本窗口时**不得整删同仓的写通道闸门目录**——他窗口的
+    /// `Draining`/`Frozen` 闸门必须保留（删了会被 `enter_write_channel` 重建
+    /// 为 `Open`，平台写闸门被静默解除；该窗口的 `poll_channel_drain` 也会
+    /// 因闸门消失报 `OwnerMismatch`）。
+    #[test]
+    fn purge_removes_own_channel_gate_and_keeps_other_window_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join("aria"));
+        let common = temp.path().join("common");
+        std::fs::create_dir_all(&common).unwrap();
+        seed_window(paths.root(), "win_own", "attempt_own", &common);
+        seed_window(paths.root(), "win_other", "attempt_other", &common);
+
+        // 同一 common-dir 下两条闸门记录（按通道分文件）。
+        let channel_dir = paths
+            .root()
+            .join(REVIEWER_WINDOW_STORE_DIR)
+            .join("channels")
+            .join(common_key_of(&common));
+        std::fs::create_dir_all(&channel_dir).unwrap();
+        let gate = |channel: &str, window_id: &str| {
+            serde_json::json!({
+                "schema": "reviewer_window_v1",
+                "common_dir": common.display().to_string(),
+                "channel": channel,
+                "state": {"state": "frozen", "window_id": window_id},
+                "in_flight": [],
+                "generation": 1,
+            })
+        };
+        std::fs::write(
+            channel_dir.join("stage.json"),
+            serde_json::to_vec(&gate("stage", "win_own")).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            channel_dir.join("commit.json"),
+            serde_json::to_vec(&gate("commit", "win_other")).unwrap(),
+        )
+        .unwrap();
+
+        ReviewerResourcePurger::new(&paths)
+            .purge_for_attempts(&["attempt_own".to_string()])
+            .expect("purge");
+
+        assert!(
+            !channel_dir.join("stage.json").exists(),
+            "本窗口持有的闸门记录必须物理删除"
+        );
+        assert!(
+            channel_dir.join("commit.json").exists(),
+            "同仓他窗口的 Frozen 闸门必须保留（整删会解除平台写闸门）"
+        );
+        let preserved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(channel_dir.join("commit.json")).unwrap())
+                .unwrap();
+        assert_eq!(preserved["state"]["state"], serde_json::json!("frozen"));
+        assert_eq!(
+            preserved["state"]["window_id"],
+            serde_json::json!("win_other")
+        );
     }
 }

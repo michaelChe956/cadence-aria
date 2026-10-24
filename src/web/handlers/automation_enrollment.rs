@@ -85,8 +85,28 @@ async fn supersede_terminated_plan_generation(
         .get(project_id, issue_id)
         .map_err(product_store_api_error)?
         .and_then(|enrollment| enrollment.plan_id);
+    // 单 plan 不变量（REQ-WPS-01）：取代删除与新代建立落在同一 issue 级
+    // plan-slot 互斥区（重新开启后的新代 plan 由 `ensure_enrolled_plan` 在
+    // 同一互斥区内建立）。
+    let plan_slot = crate::product::plan_generation_supersede::acquire_issue_plan_slot(
+        &app_paths, project_id, issue_id,
+    )
+    .await
+    .map_err(|error| {
+        ApiError::validation_with_details(
+            "automation_plan_cleanup_required",
+            "automation plan still holds unfinished attempts or unclosed run facts; retry the \
+             termination to finish cleanup before re-enabling the automation",
+            serde_json::json!({
+                "plan_id": superseded_plan_id.clone().unwrap_or_default(),
+                "reason": "plan_generation_supersede_failed",
+                "message": format!("{error:?}"),
+            }),
+        )
+    })?;
     let report = crate::product::plan_generation_supersede::ensure_single_plan_generation(
         &app_paths,
+        &plan_slot,
         project_id,
         issue_id,
         &[],
@@ -2718,12 +2738,11 @@ mod tests {
             crate::product::entity_deletion_store::DeletionEntityKind::Plan,
             &plan_id,
         );
-        let tombstone = crate::product::entity_deletion_store::EntityDeletionStore::new(
-            fixture.paths.clone(),
-        )
-        .get(&scope)
-        .unwrap()
-        .expect("取代删除墓碑");
+        let tombstone =
+            crate::product::entity_deletion_store::EntityDeletionStore::new(fixture.paths.clone())
+                .get(&scope)
+                .unwrap()
+                .expect("取代删除墓碑");
         assert_eq!(
             tombstone.phase,
             crate::product::entity_deletion_store::DeletionPhase::Deleted

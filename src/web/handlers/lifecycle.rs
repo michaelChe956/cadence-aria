@@ -769,8 +769,18 @@ pub async fn prepare_work_item_plan(
     // plan」）：建立新 plan **之前**先按同一闭包完整删除旧 plan；删除未成功
     // MUST NOT 建立新 plan（fail-closed）。
     let app_paths = product_app_paths(&state);
+    // 单 plan 不变量（REQ-WPS-01）：「删旧 + 建立」落在同一 issue 级
+    // plan-slot 互斥区——两个并发 prepare 不得各建一个 plan。
+    let plan_slot = crate::product::plan_generation_supersede::acquire_issue_plan_slot(
+        &app_paths,
+        &project_id,
+        &issue_id,
+    )
+    .await
+    .map_err(deletion::cascade_delete_api_error)?;
     let supersede = crate::product::plan_generation_supersede::ensure_single_plan_generation(
         &app_paths,
+        &plan_slot,
         &project_id,
         &issue_id,
         &[],

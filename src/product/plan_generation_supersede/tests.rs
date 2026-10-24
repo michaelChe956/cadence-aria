@@ -4,7 +4,7 @@
 //! 仍有 2 个、reviewer 窗口 7、快照 8、租约 1——即旧代产物未被清除。
 //! 绿态（实现后）：取代删除后从属产物逐项归零，只留一条无内容删除事实。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
@@ -167,7 +167,9 @@ fn seed_reviewer_resources(paths: &ProductAppPaths, attempt_id: &str) {
     )
     .expect("seed lease");
     // 快照基线（活跃 ＋ 归档）。
-    let snapshot_root = paths.root().join(crate::product::reviewer_resource_purge::REVIEWER_SNAPSHOT_STORE_DIR);
+    let snapshot_root = paths
+        .root()
+        .join(crate::product::reviewer_resource_purge::REVIEWER_SNAPSHOT_STORE_DIR);
     let snapshot_window = snapshot_root.join("windows").join(WINDOW_ID);
     std::fs::create_dir_all(&snapshot_window).expect("snapshot window");
     std::fs::write(snapshot_window.join("manifest.json"), b"{}").expect("snapshot manifest");
@@ -243,11 +245,19 @@ async fn supersede_removes_full_closure_and_leaves_single_tombstone() {
         .id
         .clone();
     assert!(exists(&attempts_root.join(format!("{attempt_id}.json"))));
-    assert!(exists(&window_root.join("windows").join(format!("{WINDOW_ID}.json"))));
+    assert!(exists(
+        &window_root
+            .join("windows")
+            .join(format!("{WINDOW_ID}.json"))
+    ));
     assert!(exists(&snapshot_root.join("windows").join(WINDOW_ID)));
 
+    let plan_slot = acquire_issue_plan_slot(&paths, PROJECT_ID, ISSUE_ID)
+        .await
+        .expect("plan slot");
     let report = ensure_single_plan_generation(
         &paths,
+        &plan_slot,
         PROJECT_ID,
         ISSUE_ID,
         &[],
@@ -268,11 +278,18 @@ async fn supersede_removes_full_closure_and_leaves_single_tombstone() {
                     .join(format!("{PLAN_ID}.json")),
             ),
         ),
-        ("attempt_record", exists(&attempts_root.join(format!("{attempt_id}.json")))),
+        (
+            "attempt_record",
+            exists(&attempts_root.join(format!("{attempt_id}.json"))),
+        ),
         ("attempt_run_dirs", exists(&attempts_root.join(&attempt_id))),
         (
             "reviewer_window",
-            exists(&window_root.join("windows").join(format!("{WINDOW_ID}.json"))),
+            exists(
+                &window_root
+                    .join("windows")
+                    .join(format!("{WINDOW_ID}.json")),
+            ),
         ),
         (
             "reviewer_window_archive",
@@ -318,9 +335,11 @@ async fn supersede_removes_full_closure_and_leaves_single_tombstone() {
     );
 
     // 单 plan 不变量：存活 plan 数归零。
-    assert!(list_live_plan_ids(&paths, PROJECT_ID, ISSUE_ID)
-        .expect("live plans")
-        .is_empty());
+    assert!(
+        list_live_plan_ids(&paths, PROJECT_ID, ISSUE_ID)
+            .expect("live plans")
+            .is_empty()
+    );
 
     // 只留一条无内容删除事实，且带触发原因。
     let scope = EntityScope::new(PROJECT_ID, ISSUE_ID, DeletionEntityKind::Plan, PLAN_ID);
@@ -344,24 +363,34 @@ async fn supersede_replay_is_idempotent() {
     seed_plan(&paths);
     seed_attempt(&paths);
 
-    ensure_single_plan_generation(
-        &paths,
-        PROJECT_ID,
-        ISSUE_ID,
-        &[],
-        PlanSupersedeReason::Reprepare,
-        None,
-    )
-    .await
-    .expect("first supersede");
+    {
+        let plan_slot = acquire_issue_plan_slot(&paths, PROJECT_ID, ISSUE_ID)
+            .await
+            .expect("plan slot");
+        ensure_single_plan_generation(
+            &paths,
+            &plan_slot,
+            PROJECT_ID,
+            ISSUE_ID,
+            &[],
+            PlanSupersedeReason::Reprepare,
+            None,
+        )
+        .await
+        .expect("first supersede");
+    }
     let scope = EntityScope::new(PROJECT_ID, ISSUE_ID, DeletionEntityKind::Plan, PLAN_ID);
     let first = EntityDeletionStore::new(paths.clone())
         .get(&scope)
         .expect("tombstone")
         .expect("tombstone");
 
+    let plan_slot = acquire_issue_plan_slot(&paths, PROJECT_ID, ISSUE_ID)
+        .await
+        .expect("plan slot");
     let report = ensure_single_plan_generation(
         &paths,
+        &plan_slot,
         PROJECT_ID,
         ISSUE_ID,
         &[],
@@ -370,10 +399,7 @@ async fn supersede_replay_is_idempotent() {
     )
     .await
     .expect("replay supersede");
-    assert!(
-        report.deleted_plan_ids.is_empty(),
-        "重放不得重复删除"
-    );
+    assert!(report.deleted_plan_ids.is_empty(), "重放不得重复删除");
     let second = EntityDeletionStore::new(paths.clone())
         .get(&scope)
         .expect("tombstone")
@@ -420,8 +446,12 @@ async fn supersede_does_not_touch_other_issue() {
         })
         .expect("seed other issue plan");
 
+    let plan_slot = acquire_issue_plan_slot(&paths, PROJECT_ID, ISSUE_ID)
+        .await
+        .expect("plan slot");
     ensure_single_plan_generation(
         &paths,
+        &plan_slot,
         PROJECT_ID,
         ISSUE_ID,
         &[],
@@ -436,5 +466,234 @@ async fn supersede_does_not_touch_other_issue() {
             .get_issue_work_item_plan(PROJECT_ID, "issue_0002", PLAN_ID)
             .is_ok(),
         "他 issue 的同名 plan 必须原样保留"
+    );
+}
+
+/// 建旧代 advance 产物（record ＋ 外层 initialization journal）。
+fn seed_advance_artifacts(paths: &ProductAppPaths, plan_id: &str) -> (PathBuf, PathBuf) {
+    let root = paths
+        .issue_root(PROJECT_ID, ISSUE_ID)
+        .join("advance-records");
+    std::fs::create_dir_all(&root).expect("advance root");
+    let record_path = root.join("advance_0001.json");
+    let journal_path = root.join(format!("{plan_id}.initialization.json"));
+    let record = serde_json::json!({
+        "id": "advance_0001",
+        "command_id": "advance_command_0001",
+        "project_id": PROJECT_ID,
+        "issue_id": ISSUE_ID,
+        "plan_id": plan_id,
+        "plan_revision_id": "plan_revision_0001",
+        "attempt_id": "attempt_0001",
+        "status": "completed",
+        "workspace_entry": null,
+        "error": null,
+        "created_at": "2026-10-24T00:00:00Z",
+        "updated_at": "2026-10-24T00:00:00Z",
+    });
+    std::fs::write(
+        &record_path,
+        serde_json::to_vec(&record).expect("advance record"),
+    )
+    .unwrap();
+    let journal = serde_json::json!({
+        "advance_id": "advance_0001",
+        "plan_id": plan_id,
+        "attempt_id": "attempt_0001",
+        "phase": "ready",
+        "error": null,
+        "created_at": "2026-10-24T00:00:00Z",
+        "updated_at": "2026-10-24T00:00:00Z",
+    });
+    std::fs::write(
+        &journal_path,
+        serde_json::to_vec(&journal).expect("advance journal"),
+    )
+    .unwrap();
+    (record_path, journal_path)
+}
+
+/// F2 回归：原地重编译（新代沿用同一 plan_id）必须清旧代 advance 产物——
+///
+/// 残留 record 会被 advance 按 plan 回放（`Replayed`），新代永远进不了 coding。
+#[tokio::test]
+async fn inplace_recompile_clears_old_generation_advance_artifacts() {
+    let (_temp, paths) = seed_paths();
+    seed_plan(&paths);
+    let (record_path, journal_path) = seed_advance_artifacts(&paths, PLAN_ID);
+    assert!(record_path.exists() && journal_path.exists());
+
+    let plan_slot = acquire_issue_plan_slot(&paths, PROJECT_ID, ISSUE_ID)
+        .await
+        .expect("plan slot");
+    let report = ensure_single_plan_generation(
+        &paths,
+        &plan_slot,
+        PROJECT_ID,
+        ISSUE_ID,
+        &[PLAN_ID.to_string()],
+        PlanSupersedeReason::RecompileConfirm,
+        None,
+    )
+    .await
+    .expect("inplace supersede");
+    assert_eq!(report.runtime_purged_plan_ids, vec![PLAN_ID.to_string()]);
+
+    assert!(
+        !record_path.exists(),
+        "旧代 advance record 必须清（新代不得被按 plan 回放旧记录）"
+    );
+    assert!(
+        !journal_path.exists(),
+        "旧代 advance initialization journal 必须清"
+    );
+    // 新代 advance 命令不得命中旧记录（否则 outcome 为 Replayed）。
+    let store = crate::product::advance_store::AdvanceStore::new(paths.clone());
+    assert!(
+        store
+            .get_advance_for_plan(PROJECT_ID, ISSUE_ID, PLAN_ID)
+            .expect("advance for plan")
+            .is_none(),
+        "新代不得再命中旧代 advance record"
+    );
+}
+
+/// F2 回归：无 attempt 时**不得提前返回**——旧代锁残留、初始化 journal 与
+/// workspace lifecycle 仍须清（否则新代继承旧执行轮状态）。
+#[tokio::test]
+async fn inplace_recompile_without_attempts_still_clears_locks_and_lifecycle() {
+    let (_temp, paths) = seed_paths();
+    seed_plan(&paths);
+    // 无 attempt（首次编译场景）。
+    assert!(
+        CodingAttemptStore::new(paths.clone())
+            .list_attempts_for_work_item(PROJECT_ID, ISSUE_ID, WORK_ITEM_ID)
+            .expect("attempts")
+            .is_empty()
+    );
+
+    let issue_root = paths.issue_root(PROJECT_ID, ISSUE_ID);
+    // 旧代 attempt 锁残留。
+    let lock_dir = issue_root
+        .join("coding-attempts")
+        .join("work-item-attempt-locks");
+    std::fs::create_dir_all(&lock_dir).expect("lock dir");
+    let lock_path = lock_dir.join(WORK_ITEM_ID);
+    std::fs::write(&lock_path, b"owner").expect("lock");
+    // 旧代 group 初始化 journal。
+    let journal_dir = issue_root
+        .join("coding-attempts")
+        .join("group-initializations");
+    std::fs::create_dir_all(&journal_dir).expect("journal dir");
+    let journal_path = journal_dir.join(format!("{PLAN_ID}.json"));
+    std::fs::write(&journal_path, b"{}").expect("journal");
+    // 旧代 workspace lifecycle（执行轮 generation）。
+    let lifecycle_root = issue_root.join("coding-plan-workspace-lifecycles");
+    std::fs::create_dir_all(&lifecycle_root).expect("lifecycle root");
+    let lifecycle_path = lifecycle_root.join(format!("{PLAN_ID}.json"));
+    std::fs::write(
+        &lifecycle_path,
+        serde_json::to_vec(&serde_json::json!({
+            "project_id": PROJECT_ID,
+            "issue_id": ISSUE_ID,
+            "plan_id": PLAN_ID,
+            "generation": 3,
+            "created_at": "2026-10-24T00:00:00Z",
+            "updated_at": "2026-10-24T00:00:00Z",
+        }))
+        .expect("lifecycle json"),
+    )
+    .expect("lifecycle");
+
+    let plan_slot = acquire_issue_plan_slot(&paths, PROJECT_ID, ISSUE_ID)
+        .await
+        .expect("plan slot");
+    ensure_single_plan_generation(
+        &paths,
+        &plan_slot,
+        PROJECT_ID,
+        ISSUE_ID,
+        &[PLAN_ID.to_string()],
+        PlanSupersedeReason::RecompileConfirm,
+        None,
+    )
+    .await
+    .expect("inplace supersede");
+
+    assert!(!lock_path.exists(), "无 attempt 也必须清 attempt 锁残留");
+    assert!(!journal_path.exists(), "无 attempt 也必须清初始化 journal");
+    assert!(
+        !lifecycle_path.exists(),
+        "无 attempt 也必须清 workspace lifecycle（执行轮 generation 复位）"
+    );
+}
+
+/// 一个并发触发：plan-slot 互斥区内的「取代删除 + 建立新 plan」。
+///
+/// 建立动作与取代删除同处一个互斥区（单 plan 不变量 REQ-WPS-01）。
+async fn supersede_and_establish(
+    paths: &ProductAppPaths,
+    plan_id: &str,
+) -> Result<(), CascadeDeleteError> {
+    let plan_slot = acquire_issue_plan_slot(paths, PROJECT_ID, ISSUE_ID).await?;
+    ensure_single_plan_generation(
+        paths,
+        &plan_slot,
+        PROJECT_ID,
+        ISSUE_ID,
+        &[],
+        PlanSupersedeReason::Reprepare,
+        None,
+    )
+    .await?;
+    // 取代删除与建立之间让出调度（真实路径此处有 await：会话 manager 驱逐、
+    // plan 创建）：并发触发的真实交错点。
+    tokio::task::yield_now().await;
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some(plan_id.to_string()),
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            source_story_spec_ids: Vec::new(),
+            source_design_spec_ids: Vec::new(),
+            options: IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: IssueWorkItemPlanStatus::Confirmed,
+            work_item_ids: Vec::new(),
+            repository_profile_ref: None,
+            verification_plan_ids: Vec::new(),
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .map_err(CascadeDeleteError::Store)?;
+    Ok(())
+}
+
+/// F4 回归：并发两次「取代删除 + 建立 plan」（同一 issue）→ 存活 plan 恒为 1。
+///
+/// 「删旧 + 建立」必须在同一 issue 级 plan-slot 互斥区内——否则两个并发
+/// 触发可各建一个 plan（不变量复核发生在建立**之前**，捕获不到）。
+#[tokio::test]
+async fn concurrent_supersede_and_establish_keeps_single_live_plan() {
+    let (_temp, paths) = seed_paths();
+
+    let (first, second) = tokio::join!(
+        supersede_and_establish(&paths, "issue_work_item_plan_0002"),
+        supersede_and_establish(&paths, "issue_work_item_plan_0003"),
+    );
+    first.expect("first supersede+establish");
+    second.expect("second supersede+establish");
+
+    let live = list_live_plan_ids(&paths, PROJECT_ID, ISSUE_ID).expect("live plans");
+    assert_eq!(
+        live.len(),
+        1,
+        "同一 issue 存活 plan 必须恒为 1（并发触发不得各建一个 plan），实际: {live:?}"
     );
 }

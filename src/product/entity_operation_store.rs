@@ -57,6 +57,21 @@ pub struct SharedResourceKey {
     pub repository_id: Option<LogicalRepositoryId>,
 }
 
+/// issue 级 **plan-slot 互斥** lease（单 plan 不变量：REQ-WPS-01）。
+///
+/// 「删旧 plan」与「建立新 plan」必须落在**同一互斥区**——否则两个并发触发
+/// 可各建一个 plan（不变量复核发生在建立之前，捕获不到）。
+///
+/// 与 issue 关系短锁（[`EntityOperationStore::with_issue_relations`]）**不同
+/// 锁文件**：关系短锁不可重入，若复用同一把锁，删旧闭包内再取关系锁即自
+/// 死锁。锁序固定：**plan-slot → scope → repo resource → issue 关系短锁**。
+///
+/// 不可重入：同一 issue 的 plan-slot 不可嵌套获取（调用方 MUST NOT 在已持
+/// plan-slot 的临界区内再次获取）。
+pub struct IssuePlanSlotLease {
+    _lock: StableFileLock,
+}
+
 /// 共享运行 lease：最外层取得，任务全生命周期持有；内层写消费
 /// [`EntityRunLease::with_admitted_write`]，不重取 scope。
 pub struct EntityRunLease {
@@ -215,6 +230,37 @@ impl EntityOperationStore {
         let lock_path = issue_relations_lock_path(&self.paths, project_id, issue_id)?;
         let _guard = StableFileLock::acquire_exclusive(&lock_path)?;
         operation()
+    }
+
+    /// issue 级 **plan-slot 互斥**（单 plan 不变量：REQ-WPS-01）。
+    ///
+    /// 「删旧 plan」与「建立新 plan」必须在同一互斥区内完成：调用方持本
+    /// lease 覆盖**取代删除 + 新 plan 建立**全过程。
+    ///
+    /// **非阻塞 try ＋ 异步退避**（不阻塞 executor）：临界区跨 await（git
+    /// 实体删除等），阻塞式 flock 会在单线程 runtime 上把持锁者饿死（死锁）。
+    /// 有界重试，超时按 `entity_busy` fail-closed（不静默建第二个 plan）。
+    ///
+    /// 不可重入——同一 issue 不可嵌套获取（会自死锁）。
+    pub async fn acquire_issue_plan_slot(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<IssuePlanSlotLease, ProductStoreError> {
+        const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
+        const MAX_ATTEMPTS: usize = 3_000;
+
+        let lock_path = issue_plan_slot_lock_path(&self.paths, project_id, issue_id)?;
+        for _ in 0..MAX_ATTEMPTS {
+            if let Some(lock) = StableFileLock::try_acquire_exclusive(&lock_path)? {
+                return Ok(IssuePlanSlotLease { _lock: lock });
+            }
+            tokio::time::sleep(RETRY_BACKOFF).await;
+        }
+        Err(ProductStoreError::Conflict {
+            kind: "entity_busy",
+            id: format!("issue_plan_slot:{project_id}/{issue_id}"),
+        })
     }
 
     /// repo resource 写准入：非阻塞独占短 lease；争用 Busy；锁 inode 在 purge 外。
@@ -521,6 +567,23 @@ fn issue_relations_lock_path(
         .issue_lifecycle_root(project_id, issue_id)
         .join("entity-operations")
         .join("relations.lock"))
+}
+
+/// issue 级 plan-slot 互斥锁路径（与 issue 关系短锁**不同文件**）。
+///
+/// 独立锁文件的原因：关系短锁不可重入，而删旧闭包内部仍需取关系短锁——
+/// 共用同一把锁会在已持锁区内自死锁。
+fn issue_plan_slot_lock_path(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+) -> Result<PathBuf, ProductStoreError> {
+    crate::product::json_store::validate_relative_id(project_id)?;
+    crate::product::json_store::validate_relative_id(issue_id)?;
+    Ok(paths
+        .issue_lifecycle_root(project_id, issue_id)
+        .join("entity-operations")
+        .join("plan-slot.lock"))
 }
 
 fn shared_resource_lock_path(

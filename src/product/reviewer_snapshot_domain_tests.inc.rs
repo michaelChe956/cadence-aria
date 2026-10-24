@@ -20,7 +20,7 @@ async fn capture_excludes_ignored_but_keeps_tracked_and_untracked() {
     // ignored 产物:node_modules/、dist/、ignored.log(既有模式);
     // .gitignore 是 tracked 文件:改写保留为 Coder dirty,仍在域内。
     fs::write(
-        &worktree.join(".gitignore"),
+        worktree.join(".gitignore"),
         "ignored.log\nnode_modules/\ndist/\n*.forced\n",
     )
     .unwrap();
@@ -92,7 +92,7 @@ async fn restore_never_touches_or_deletes_ignored_artifacts() {
     let fixture = build_fixture(Layout::Plain);
     let worktree = fixture.worktree.clone();
     fs::write(
-        &worktree.join(".gitignore"),
+        worktree.join(".gitignore"),
         "ignored.log\nnode_modules/\ndist/\n",
     )
     .unwrap();
@@ -226,7 +226,7 @@ async fn reviewer_gitignore_rewrite_cannot_shrink_domain() {
     // 嵌套 .gitignore 进一步遮蔽。
     let baseline_gitignore = fs::read_to_string(worktree.join(".gitignore")).unwrap();
     fs::write(
-        &worktree.join(".gitignore"),
+        worktree.join(".gitignore"),
         format!("{baseline_gitignore}evil.txt\n"),
     )
     .unwrap();

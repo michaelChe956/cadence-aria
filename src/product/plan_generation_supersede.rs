@@ -28,8 +28,8 @@ use crate::product::entity_deletion_store::{
     DeletionEntityKind, DeletionPhase, EntityDeletionManifest, EntityDeletionStore, EntityScope,
 };
 use crate::product::entity_operation_store::{
-    EntityDeletionLease, EntityOperationError, EntityOperationStore, SharedResourceCleanupLease,
-    SharedResourceKey,
+    EntityDeletionLease, EntityOperationError, EntityOperationStore, IssuePlanSlotLease,
+    SharedResourceCleanupLease, SharedResourceKey,
 };
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
@@ -37,15 +37,35 @@ use crate::product::logical_codebase::LogicalRepositoryId;
 
 use super::entity_deletion_cascade::CascadeDeleteError;
 
+/// 取 issue 级 plan-slot 互斥 lease（单 plan 不变量 REQ-WPS-01）。
+///
+/// 调用方 MUST 持有它覆盖「取代删除 + 新 plan 建立」全过程。
+pub(crate) async fn acquire_issue_plan_slot(
+    app_paths: &ProductAppPaths,
+    project_id: &str,
+    issue_id: &str,
+) -> Result<IssuePlanSlotLease, CascadeDeleteError> {
+    EntityOperationStore::new(app_paths.clone())
+        .acquire_issue_plan_slot(project_id, issue_id)
+        .await
+        .map_err(CascadeDeleteError::Store)
+}
+
 /// 代际取代入口：删除 issue 下所有**非保留**的存活 plan（先删旧，再建新）。
 ///
 /// `keep_plan_ids` 是本代要保留的 plan（原地演进路径传入本 plan id；建立
 /// 新代时传空集）。保留项只清运行资源（attempts/worktree/reviewer/锁），
 /// 不删其根。
 ///
+/// **`slot` 是 issue 级 plan-slot 互斥 lease**：调用方 MUST 持有它覆盖
+/// 「取代删除 + 新 plan 建立」全过程（单 plan 不变量 REQ-WPS-01）——否则
+/// 两个并发触发可各建一个 plan（本函数内的不变量复核发生在建立**之前**，
+/// 捕获不到）。
+///
 /// 返回后调用方**才可**建立新 plan；删除失败时调用方 MUST NOT 建立新 plan。
 pub(crate) async fn ensure_single_plan_generation(
     app_paths: &ProductAppPaths,
+    slot: &IssuePlanSlotLease,
     project_id: &str,
     issue_id: &str,
     keep_plan_ids: &[String],
@@ -58,6 +78,7 @@ pub(crate) async fn ensure_single_plan_generation(
     let purge_kept_runtime = reason == PlanSupersedeReason::RecompileConfirm;
     let operations = EntityOperationStore::new(app_paths.clone());
     let mut report = PlanSupersedeReport::default();
+    let _slot = slot;
 
     // ① issue 级 plan 作用域互斥内采集存活 plan（两路存储）。
     let live_plan_ids = operations
@@ -71,8 +92,14 @@ pub(crate) async fn ensure_single_plan_generation(
         if keep_plan_ids.iter().any(|kept| kept == &plan_id) {
             // 原地演进：只清旧代运行资源，plan 根保留（仅重新编译确认路径）。
             if purge_kept_runtime {
-                purge_plan_runtime_resources(app_paths, project_id, issue_id, &plan_id, workspace_root)
-                    .await?;
+                purge_plan_runtime_resources(
+                    app_paths,
+                    project_id,
+                    issue_id,
+                    &plan_id,
+                    workspace_root,
+                )
+                .await?;
                 report.runtime_purged_plan_ids.push(plan_id);
             }
             continue;
@@ -126,7 +153,10 @@ pub(crate) async fn delete_plan_generation(
     let store = LifecycleStore::new(app_paths.clone());
 
     // ① 墓碑：已删 → 幂等成功（零动作）；purging → 重入续清。
-    let reentry = match deletion_store.get(&scope).map_err(CascadeDeleteError::Store)? {
+    let reentry = match deletion_store
+        .get(&scope)
+        .map_err(CascadeDeleteError::Store)?
+    {
         Some(record) if record.phase == DeletionPhase::Deleted => return Ok(Vec::new()),
         Some(_) => true,
         None => false,
@@ -163,14 +193,7 @@ pub(crate) async fn delete_plan_generation(
     //    （含触发原因）。
     let manifest = operations
         .with_issue_relations(project_id, issue_id, || {
-            collect_and_begin(
-                app_paths,
-                &deletion_store,
-                &lease,
-                &scope,
-                reentry,
-                reason,
-            )
+            collect_and_begin(app_paths, &deletion_store, &lease, &scope, reentry, reason)
         })
         .map_err(CascadeDeleteError::Store)?;
 
@@ -282,8 +305,13 @@ pub(crate) async fn delete_plan_generation(
 /// 运行资源清理」）。
 ///
 /// 清除旧代：coding attempts 及其运行目录、worktree 实体、reviewer
-/// windows/snapshots/leases（含归档）、attempt locks、workspace lifecycle。
-/// **plan 根保留**（本代沿用同一 plan_id 原地演进）。
+/// windows/snapshots/leases（含归档）、attempt locks、workspace lifecycle、
+/// **advance 产物（record/retry/initialization journal）与 advance engine
+/// checkpoint**。**plan 根保留**（本代沿用同一 plan_id 原地演进）。
+///
+/// **无 attempt ≠ 无旧代运行事实**：advance 记录、初始化 journal、锁与
+/// lifecycle 仍须清——残留的 advance record 会被 advance 按 plan 回放
+/// （`Replayed`），新代任何 advance 命令都进不了 coding。
 pub(crate) async fn purge_plan_runtime_resources(
     app_paths: &ProductAppPaths,
     project_id: &str,
@@ -297,9 +325,10 @@ pub(crate) async fn purge_plan_runtime_resources(
         .collect_entity_deletion_manifest(&scope)
         .map_err(CascadeDeleteError::Store)?;
 
-    // 本 plan 拥有的 attempt 集合（真实 owner-key）。无 attempt ＝没有旧代
-    // 运行事实（首次编译）→ 无旧代运行资源可清，零副作用放行。
-    let coding_store = crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
+    // 本 plan 拥有的 attempt 集合（真实 owner-key）。空集不提前返回：旧代
+    // 运行事实（advance 产物/锁/lifecycle）仍可能存在。
+    let coding_store =
+        crate::product::coding_attempt_store::CodingAttemptStore::new(app_paths.clone());
     let attempts = super::entity_deletion_cascade::plan_owned_attempts(
         &coding_store,
         project_id,
@@ -308,9 +337,6 @@ pub(crate) async fn purge_plan_runtime_resources(
         &manifest.work_item_ids,
     )
     .map_err(CascadeDeleteError::Store)?;
-    if attempts.is_empty() {
-        return Ok(());
-    }
 
     // 收口未终结 attempt（失败即中止，零副作用）。
     terminate_plan_coding_attempts(
@@ -323,19 +349,27 @@ pub(crate) async fn purge_plan_runtime_resources(
     .map_err(CascadeDeleteError::Store)?;
 
     // coding attempts 及其运行资源（attempts/worktree/reviewer）。
-    let attempt_ids: Vec<String> = attempts
-        .iter()
-        .map(|attempt| attempt.id.clone())
-        .collect();
+    let attempt_ids: Vec<String> = attempts.iter().map(|attempt| attempt.id.clone()).collect();
     super::entity_deletion_cascade::purge_plan_coding_attempts(
-        app_paths,
-        project_id,
-        issue_id,
-        plan_id,
-        &manifest,
+        app_paths, project_id, issue_id, plan_id, &manifest,
     )
     .await
     .map_err(CascadeDeleteError::Store)?;
+
+    // 旧代 advance 产物（retry → initialization journal → record）：新代沿用
+    // 同一 plan_id，残留 record 会被 advance 按 plan 回放（`Replayed`），
+    // 新代永远进不了 coding。
+    crate::product::advance_store::AdvanceStore::new(app_paths.clone())
+        .purge_plan_artifacts_for_generation(
+            project_id,
+            issue_id,
+            plan_id,
+            &crate::product::advance_store::AdvancePlanArtifacts {
+                advance_ids: manifest.advance_ids.clone(),
+                retry_command_ids: manifest.advance_retry_command_ids.clone(),
+            },
+        )
+        .map_err(CascadeDeleteError::Store)?;
 
     // 旧代 attempt 持有的 shared-worktree 锁：释放（owner 置空 ＋ Ready），
     // 否则新代永远拿不到锁。
@@ -347,7 +381,7 @@ pub(crate) async fn purge_plan_runtime_resources(
     )
     .map_err(CascadeDeleteError::Store)?;
 
-    // attempt 残留锁。
+    // attempt 残留锁 ＋ group initialization journal。
     purge_attempt_lock_residue(
         app_paths,
         project_id,
@@ -362,7 +396,18 @@ pub(crate) async fn purge_plan_runtime_resources(
         .purge_workspace_lifecycle(project_id, issue_id, plan_id)
         .map_err(CascadeDeleteError::Store)?;
 
-    let _ = workspace_root;
+    // advance engine checkpoint（按本 plan 的 session 清；与整删闭包同口径）。
+    if let Some(workspace_root) = workspace_root {
+        let checkpoint_session_root = workspace_root
+            .join("advance-engine-checkpoints")
+            .join("workspace-sessions");
+        for session_id in &manifest.session_ids {
+            crate::product::lifecycle_store::remove_dir_all_if_exists(
+                &checkpoint_session_root.join(session_id),
+            )
+            .map_err(CascadeDeleteError::Store)?;
+        }
+    }
     Ok(())
 }
 
@@ -401,19 +446,18 @@ fn resource_cleanup_leases(
     plan_run: Option<&crate::product::coding_plan_run::CodingPlanRun>,
 ) -> Result<Vec<(SharedResourceKey, SharedResourceCleanupLease)>, CascadeDeleteError> {
     let (project_id, issue_id) = (scope.project_id.as_str(), scope.issue_id.as_str());
-    let repositories =
-        super::entity_deletion_cascade::plan_shared_worktree_repository_ids(
-            store, scope, manifest, plan_run,
-        )
-        .map_err(|error| match error {
-            ProductStoreError::InvalidRecord {
-                kind: "entity_target_repository",
-                ..
-            } => CascadeDeleteError::InvalidTargetRepository {
-                target_repository_id: manifest.target_repository_ids.join(","),
-            },
-            other => CascadeDeleteError::Store(other),
-        })?;
+    let repositories = super::entity_deletion_cascade::plan_shared_worktree_repository_ids(
+        store, scope, manifest, plan_run,
+    )
+    .map_err(|error| match error {
+        ProductStoreError::InvalidRecord {
+            kind: "entity_target_repository",
+            ..
+        } => CascadeDeleteError::InvalidTargetRepository {
+            target_repository_id: manifest.target_repository_ids.join(","),
+        },
+        other => CascadeDeleteError::Store(other),
+    })?;
     let operations = EntityOperationStore::new(app_paths.clone());
     let mut leases = Vec::new();
     for repository_id in repositories {

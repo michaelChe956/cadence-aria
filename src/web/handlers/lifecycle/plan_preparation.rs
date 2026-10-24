@@ -295,21 +295,34 @@ pub async fn ensure_enrolled_plan(
     // （幂等补偿重入时不得删掉自己在用的 plan）。删除未成功 → fail-closed，
     // 不建立新 plan。
     let app_paths = product_app_paths(state);
+    // 单 plan 不变量（REQ-WPS-01）：「删旧 + 建立 bound plan」落在同一 issue
+    // 级 plan-slot 互斥区——并发补偿不得各建一个 plan。
+    let plan_slot = crate::product::plan_generation_supersede::acquire_issue_plan_slot(
+        &app_paths,
+        &project_id,
+        &issue_id,
+    )
+    .await
+    .map_err(super::deletion::cascade_delete_api_error)?;
     let mut keep_plan_ids = vec![format!(
         "issue_work_item_plan_auto_{}",
         enrollment.prepare_intent_id
     )];
-    if let Some(bound_plan_id) = enrollment.plan_id.clone() {
-        if !keep_plan_ids.contains(&bound_plan_id) {
-            keep_plan_ids.push(bound_plan_id);
-        }
+    if let Some(bound_plan_id) = enrollment.plan_id.clone()
+        && !keep_plan_ids.contains(&bound_plan_id)
+    {
+        keep_plan_ids.push(bound_plan_id);
     }
     let supersede = crate::product::plan_generation_supersede::ensure_single_plan_generation(
         &app_paths,
+        &plan_slot,
         &project_id,
         &issue_id,
         &keep_plan_ids,
-        crate::product::entity_deletion_cascade::PlanSupersedeReason::ReEnablePrepareIntentRotation,
+        // 触发源＝**重新 prepare**（reconcile tick 补偿 / bound prepare）。
+        // 「重新开启」触发源在 `automation_enrollment` 的取代删除面记录
+        // （`re_enable_prepare_intent_rotation`）——两者审计可区分（REQ-WPS-07）。
+        crate::product::entity_deletion_cascade::PlanSupersedeReason::Reprepare,
         Some(state.workspace_root.as_path()),
     )
     .await

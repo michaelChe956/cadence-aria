@@ -193,6 +193,14 @@ impl EntityDeletionManifest {
     }
 }
 
+/// 待真删的 worktree 实体路径清单（失败重入补删用；见
+/// [`EntityDeletionStore::save_pending_worktree_entities`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingWorktreeEntities {
+    pub scope: EntityScope,
+    pub paths: Vec<String>,
+}
+
 /// 单条删除事实 + pending/纯 ID 索引存储（plan §0.2/§0.5，D1.0）。
 #[derive(Debug, Clone)]
 pub struct EntityDeletionStore {
@@ -370,6 +378,63 @@ impl EntityDeletionStore {
         }
     }
 
+    /// 落盘**待真删的 worktree 实体路径**（失败重入补删用）。
+    ///
+    /// 实体删除失败时，shared-worktree 记录可能已被他路径删掉、或归属复核
+    /// 在锁释放/attempt 已删后失配——实体目录路径必须被记住，否则实体残留
+    /// 成孤儿（违反「禁止根已删、产物还在」）。仅失败重入期间存在；成功
+    /// 完成后移除（不落进墓碑，REQ-WPS-07「只留无内容事实」不受影响）。
+    pub fn save_pending_worktree_entities(
+        &self,
+        lease: &EntityDeletionLease,
+        paths: &[PathBuf],
+    ) -> Result<(), ProductStoreError> {
+        let scope = lease.scope();
+        let pending = PendingWorktreeEntities {
+            scope: scope.clone(),
+            paths: paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        };
+        write_json(
+            &pending_worktree_entities_path(&self.paths, scope)?,
+            &pending,
+        )
+    }
+
+    /// 读取待真删的 worktree 实体路径；NotFound=无。
+    pub fn load_pending_worktree_entities(
+        &self,
+        lease: &EntityDeletionLease,
+    ) -> Result<Vec<PathBuf>, ProductStoreError> {
+        let scope = lease.scope();
+        let Some(pending) = read_json_if_exists::<PendingWorktreeEntities>(
+            &pending_worktree_entities_path(&self.paths, scope)?,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+        ensure_record_scope(&pending.scope, scope)?;
+        Ok(pending.paths.iter().map(PathBuf::from).collect())
+    }
+
+    /// 幂等移除待真删实体路径清单；NotFound=已移除。成功完成后调用。
+    pub fn remove_pending_worktree_entities(
+        &self,
+        lease: &EntityDeletionLease,
+    ) -> Result<(), ProductStoreError> {
+        let path = pending_worktree_entities_path(&self.paths, lease.scope())?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ProductStoreError::Io(format!(
+                "remove {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
     /// 纯 ID/scope 占用索引（§0.5）：root/pending 均缺后仍可反查 exact IDs；
     /// 重复索引按并集合并不丢事实。
     pub fn index_owned_artifact_ids(
@@ -504,6 +569,18 @@ fn pending_failure_path(
 ) -> Result<PathBuf, ProductStoreError> {
     Ok(issue_entity_operations_root(paths, scope)?
         .join("pending-failures")
+        .join(scope.kind.path_segment())
+        .join(format!("{}.json", scope.entity_id)))
+}
+
+/// 待真删 worktree 实体路径清单：
+/// `{issue root}/entity-operations/pending-worktree-entities/{kind}/{id}.json`。
+fn pending_worktree_entities_path(
+    paths: &ProductAppPaths,
+    scope: &EntityScope,
+) -> Result<PathBuf, ProductStoreError> {
+    Ok(issue_entity_operations_root(paths, scope)?
+        .join("pending-worktree-entities")
         .join(scope.kind.path_segment())
         .join(format!("{}.json", scope.entity_id)))
 }
