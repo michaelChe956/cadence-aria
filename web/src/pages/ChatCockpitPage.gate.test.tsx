@@ -91,6 +91,8 @@ vi.mock("../components/cockpit/CockpitShell", () => ({
   useCockpitSettingsSlotRef: () => () => undefined,
   // P4-e：coding_action「去处理」导航注入(no-op——保持各测试原有意图)。
   useCockpitAttentionTargetOpener: () => () => undefined,
+  // UI-3：共享待处理抽屉聚焦（null → 消费方回落旧导航，保持各测试原意图）。
+  useCockpitInboxFocusOpener: () => null,
 }));
 
 describe("ChatCockpitPage", () => {

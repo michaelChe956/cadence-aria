@@ -58,9 +58,14 @@ import {
 import {
   codingAttentionLocationItem,
   useCockpitAttentionTargetOpener,
+  useCockpitInboxFocusOpener,
   useCockpitInboxPulse,
 } from "../../cockpit/CockpitShell";
 import type { CodingAttentionLocationItem } from "../../../router";
+import {
+  inboxFocusTargetFromAttention,
+  type WorkbenchInboxFocusTarget,
+} from "../../../state/workbench-inbox-focus";
 import { C1RecoveryCard, LcBootstrapCard } from "./CockpitInboxWaitingCards";
 
 const KIND_GLYPH = {
@@ -112,6 +117,7 @@ export function CockpitInbox({
   onOpenInfoSession,
   onOpenInfoCoding,
   onOpenAttentionTarget,
+  onOpenInboxFocus,
   artifactVersions = [],
   leaseEvents = null,
   latestReviewSummary = null,
@@ -147,6 +153,12 @@ export function CockpitInbox({
    *（显式 prop 优先，缺省回落 shell context；均未接线不出按钮）。
    */
   onOpenAttentionTarget?: (item: CodingAttentionLocationItem) => void;
+  /**
+   * UI-3（待处理统一）：coding_action「去处理」打开共享待处理抽屉并聚焦
+   *（显式 prop 优先，缺省回落 shell context；attempt 目标优先走此通道，
+   * plan/workspace 目标回落 onOpenAttentionTarget 统一导航）。
+   */
+  onOpenInboxFocus?: (target: WorkbenchInboxFocusTarget) => void;
   /** REQ-DLS-03：STALE 错误条引用的最近租约转移事件（诊断端点拉取，缺省不渲染）。 */
   leaseEvents?: readonly LeaseDiagnosticsEvent[] | null;
   latestReviewSummary?: string | null;
@@ -164,6 +176,9 @@ export function CockpitInbox({
   // P4-e：显式 prop 优先，缺省回落 shell 注入的统一导航（均未接线为 null）。
   const shellAttentionOpener = useCockpitAttentionTargetOpener();
   const openAttentionTarget = onOpenAttentionTarget ?? shellAttentionOpener;
+  // UI-3：共享待处理抽屉聚焦（同上回落规则）。
+  const shellInboxFocusOpener = useCockpitInboxFocusOpener();
+  const openInboxFocus = onOpenInboxFocus ?? shellInboxFocusOpener;
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
   const selectableItems = useMemo(
     () => (onBulkConfirm ? items.filter(isSelectableGate) : []),
@@ -219,6 +234,7 @@ export function CockpitInbox({
     onOpenInfoSession,
     onOpenInfoCoding,
     openAttentionTarget,
+    openInboxFocus,
     onTakeover,
     onRetry,
     onRetryFailedSc,
@@ -314,24 +330,37 @@ export function CockpitInbox({
 }
 
 /**
- * P4-e（REQ-UI37-19）：coding_action 卡「去处理」——durable 事实投影与页面内
- * 卡同源，收件箱只导航（经统一 target/focus 下钻到 attempt 卡、plan 总览或
- * workspace 会话），不在通知/收件箱上执行确认/终止或重复渲染表单。导航经
- * shell 注入的 `onOpenAttentionTarget`（显式 prop 优先，context 兜底；均未
- * 接线时不出按钮，fail-closed——本组件不 import router，避免循环加载）。
+ * P4-e（REQ-UI37-19）+ UI-3：coding_action 卡「去处理」——durable 事实投影
+ * 与页面内卡同源，收件箱只定位不执行动作。UI-3 起 attempt 目标优先打开
+ * **共享待处理抽屉**并聚焦（onOpenInboxFocus，设计 §3 能力 6）；plan/
+ * workspace 目标及未接线时回落 `onOpenAttentionTarget` 统一导航（显式
+ * prop 优先，context 兜底；均未接线时不出按钮，fail-closed——本组件不
+ * import router，避免循环加载）。
  */
 function CodingAttentionOpenButton({
   info,
   openTarget,
+  openInboxFocus,
 }: {
   info: NonNullable<CockpitInboxItem["attentionInfo"]>;
-  openTarget: (item: CodingAttentionLocationItem) => void;
+  openTarget: ((item: CodingAttentionLocationItem) => void) | null;
+  openInboxFocus: ((target: WorkbenchInboxFocusTarget) => void) | null;
 }) {
+  const handleClick = () => {
+    if (openInboxFocus !== null) {
+      const focusTarget = inboxFocusTargetFromAttention(info);
+      if (focusTarget !== null) {
+        openInboxFocus(focusTarget);
+        return;
+      }
+    }
+    openTarget?.(codingAttentionLocationItem(info));
+  };
   return (
     <button
       type="button"
       data-testid="cockpit-attention-open"
-      onClick={() => openTarget(codingAttentionLocationItem(info))}
+      onClick={handleClick}
       className="mt-2 min-h-9 rounded-md border border-amber-300 bg-white px-2.5 py-1 text-xs font-semibold text-amber-900 transition-colors duration-200 hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
     >
       去处理
@@ -346,6 +375,7 @@ function CockpitInboxRow({
   onOpenInfoSession,
   onOpenInfoCoding,
   openAttentionTarget,
+  openInboxFocus,
   onTakeover,
   onRetry,
   onRetryFailedSc,
@@ -377,6 +407,8 @@ function CockpitInboxRow({
   }) => void;
   /** P4-e（REQ-UI37-19）：coding_action「去处理」导航（见 CockpitInbox 同名 prop）。 */
   openAttentionTarget: ((item: CodingAttentionLocationItem) => void) | null;
+  /** UI-3：coding_action「去处理」的共享待处理抽屉聚焦通道（可 null）。 */
+  openInboxFocus: ((target: WorkbenchInboxFocusTarget) => void) | null;
   onTakeover?: (sessionId: string) => Promise<void>;
   onRetry?: (item: CockpitInboxItem) => void;
   /** P2 GAP-E/G（Task 0.1）：失败 SC 现场的人工显式重驱（透传页面 REST 接线）。 */
@@ -480,10 +512,13 @@ function CockpitInboxRow({
             查看 Plan 会话
           </button>
         ) : null}
-        {item.kind === "coding_action" && item.attentionInfo && openAttentionTarget ? (
+        {item.kind === "coding_action" &&
+        item.attentionInfo &&
+        (openAttentionTarget !== null || openInboxFocus !== null) ? (
           <CodingAttentionOpenButton
             info={item.attentionInfo}
             openTarget={openAttentionTarget}
+            openInboxFocus={openInboxFocus}
           />
         ) : null}
         {item.kind === "gate" && actions && actionable ? (
@@ -1119,7 +1154,7 @@ function isSelectableGate(item: CockpitInboxItem): boolean {
  * 新 run），409 冲突经条目 inlineError 呈现（同命令可重试）。无
  * expected_run_id 的旧投影只提示刷新后作答，不猜 run。
  */
-function ChoiceInboxCard({
+export function ChoiceInboxCard({
   item,
   onChoiceRespond,
 }: {

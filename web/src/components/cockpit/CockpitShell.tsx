@@ -26,6 +26,11 @@ import type {
   CodingAttentionInboxProjection,
 } from "../../state/workspace-cockpit-projection";
 import type { CodingAttentionLocationItem } from "../../router";
+import {
+  inboxFocusTargetFromAttention,
+  useWorkbenchInboxFocusOpener,
+  type WorkbenchInboxFocusTarget,
+} from "../../state/workbench-inbox-focus";
 import { CockpitEscalation } from "./CockpitEscalation";
 import { CockpitSettingsDialog } from "./CockpitSettingsDialog";
 import { isRecentCompletionVisible } from "../../state/recent-completion";
@@ -53,6 +58,12 @@ type CockpitShellContextValue = {
    * 收件箱「去处理」等 shell 子树消费；null = 宿主未接线，不出导航按钮。
    */
   openAttentionTarget: ((item: CodingAttentionLocationItem) => void) | null;
+  /**
+   * UI-3（待处理统一）：打开共享待处理抽屉并聚焦（/workbench
+   * overlay=inbox + 定位字段）；shell 子树（收件箱行等）消费。
+   * null = 无路由上下文且宿主未注入（单组件测试），消费方回落旧导航。
+   */
+  openInboxFocus: ((target: WorkbenchInboxFocusTarget) => void) | null;
 };
 
 const CockpitShellContext = createContext<CockpitShellContextValue | null>(null);
@@ -90,16 +101,19 @@ export function codingAttentionLocationItem(
 
 // P4-e（REQ-UI37-19）：coding_action 新 key 系统提醒——候选已由 observer 层
 // 做 hydration 静默基线与同 key 去重，这里每身份至多发一次浏览器
-// Notification（权限已授且设置开启才发）；onclick 只导航到对应卡/plan 总览，
-// 不执行确认/终止；权限拒绝/无 API 时平台消息（toast＋收件箱行）仍是退路。
+// Notification（权限已授且设置开启才发）；UI-3（设计 §3 能力 6）起 onclick
+// 只开共享待处理抽屉并聚焦（不执行确认/终止；coding_plan/workspace_session
+// 目标回落统一导航）；权限拒绝/无 API 时平台消息（toast＋收件箱行）仍是退路。
 function CodingAttentionNotifier({
   candidates,
   systemNotificationsEnabled,
   openTarget,
+  openInboxFocus,
 }: {
   candidates: readonly CockpitInboxItem[];
   systemNotificationsEnabled: boolean;
   openTarget: (item: CodingAttentionLocationItem) => void;
+  openInboxFocus: ((target: WorkbenchInboxFocusTarget) => void) | null;
 }) {
   const remindedIdentitiesRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -122,30 +136,52 @@ function CodingAttentionNotifier({
         body: item.summary || item.attentionInfo.attentionKind,
         tag: `aria-coding-attention:${identity}`,
       });
-      const locationItem = codingAttentionLocationItem(item.attentionInfo);
+      const attention = item.attentionInfo;
+      const locationItem = codingAttentionLocationItem(attention);
       notification.onclick = () => {
         window.focus();
+        const focusTarget =
+          openInboxFocus !== null
+            ? inboxFocusTargetFromAttention(attention)
+            : null;
+        if (focusTarget !== null && openInboxFocus !== null) {
+          openInboxFocus(focusTarget);
+          return;
+        }
         openTarget(locationItem);
       };
     }
-  }, [candidates, systemNotificationsEnabled, openTarget]);
+  }, [candidates, systemNotificationsEnabled, openTarget, openInboxFocus]);
   return null;
 }
 
 // P4-e（REQ-UI37-19）：告警条「去处理」的 coding 分流——全局按钮不能再把
-// coding item.id 前缀（`coding_attention:…`）当 sessionId。
+// coding item.id 前缀（`coding_attention:…`）当 sessionId；UI-3 起与通知
+// 同源：attempt 目标开共享待处理抽屉聚焦（openInboxFocus），其余回落
+// 统一导航。
 function CodingAttentionGoToButton({
   info,
   openTarget,
+  openInboxFocus,
 }: {
   info: CodingAttentionInboxProjection;
   openTarget: (item: CodingAttentionLocationItem) => void;
+  openInboxFocus: ((target: WorkbenchInboxFocusTarget) => void) | null;
 }) {
+  const handleClick = () => {
+    const focusTarget =
+      openInboxFocus !== null ? inboxFocusTargetFromAttention(info) : null;
+    if (focusTarget !== null && openInboxFocus !== null) {
+      openInboxFocus(focusTarget);
+      return;
+    }
+    openTarget(codingAttentionLocationItem(info));
+  };
   return (
     <button
       type="button"
       data-testid="cockpit-attention-go-to"
-      onClick={() => openTarget(codingAttentionLocationItem(info))}
+      onClick={handleClick}
       className="min-h-11 rounded-md bg-white px-3 text-sm font-semibold text-[var(--aria-danger)] transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--aria-danger)]"
     >
       去处理
@@ -198,10 +234,21 @@ export function useCockpitAttentionTargetOpener(): ((
 ) => void) | null {
   return useContext(CockpitShellContext)?.openAttentionTarget ?? null;
 }
+
+/**
+ * UI-3（待处理统一）：shell 子树读取「打开共享待处理抽屉并聚焦」通道；
+ * 未接线（无路由上下文且宿主未注入）返回 null，消费方回落旧导航。
+ */
+export function useCockpitInboxFocusOpener(): ((
+  target: WorkbenchInboxFocusTarget,
+) => void) | null {
+  return useContext(CockpitShellContext)?.openInboxFocus ?? null;
+}
 export function CockpitShell({
   children,
   onGoToInbox,
   onOpenAttentionTarget,
+  onOpenInboxFocus,
 }: {
   children: ReactNode;
   onGoToInbox?: (sessionId: string) => void;
@@ -212,7 +259,17 @@ export function CockpitShell({
    * 组件自身不 import router 模块，避免 Shell↔router 循环加载。
    */
   onOpenAttentionTarget?: (item: CodingAttentionLocationItem) => void;
+  /**
+   * UI-3（待处理统一）：打开共享待处理抽屉并聚焦——显式注入优先（测试
+   * 用）；缺省用内置实现（useWorkbenchInboxFocusOpener，仅依赖
+   * @tanstack/react-router + 冻结 search 契约，不 import ./router，
+   * 无路由上下文时为 null → 消费方回落旧导航）。
+   */
+  onOpenInboxFocus?: (target: WorkbenchInboxFocusTarget) => void;
 }): JSX.Element {
+  // UI-3：共享待处理抽屉聚焦导航（通知/告警/收件箱行同源消费）。
+  const routerOpenInboxFocus = useWorkbenchInboxFocusOpener();
+  const openInboxFocus = onOpenInboxFocus ?? routerOpenInboxFocus;
   const [settings, setSettings] = useState<CockpitSettings>(() => readCockpitSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSlot, setSettingsSlot] = useState<HTMLElement | null>(null);
@@ -456,11 +513,13 @@ export function CockpitShell({
       codingAttemptForSession,
       registerSettingsSlot: setSettingsSlot,
       openAttentionTarget: onOpenAttentionTarget ?? null,
+      openInboxFocus,
     }),
     [
       inbox,
       notificationGuidance,
       onOpenAttentionTarget,
+      openInboxFocus,
       pulseItemIds,
       records,
       settings,
@@ -503,6 +562,7 @@ export function CockpitShell({
               <CodingAttentionGoToButton
                 info={firstCodingAttention}
                 openTarget={onOpenAttentionTarget}
+                openInboxFocus={openInboxFocus}
               />
             ) : (
               <button
@@ -518,9 +578,31 @@ export function CockpitShell({
         {toast ? (
           <div
             role="status"
+            data-testid="cockpit-gate-toast"
             className="fixed right-4 top-28 z-[100] max-w-sm rounded-md border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] px-4 py-3 text-sm font-semibold text-[var(--aria-ink)] shadow-lg"
           >
             需要处理：{toast.title}
+            {/* UI-3：toast 只提醒+定位——coding_action 且可开抽屉时点击聚焦，
+                不执行动作；其余保持纯展示。 */}
+            {toast.kind === "coding_action" &&
+            toast.attentionInfo &&
+            openInboxFocus !== null ? (
+              <button
+                type="button"
+                data-testid="cockpit-toast-open-inbox"
+                onClick={() => {
+                  const focusTarget = inboxFocusTargetFromAttention(
+                    toast.attentionInfo!,
+                  );
+                  if (focusTarget !== null) {
+                    openInboxFocus(focusTarget);
+                  }
+                }}
+                className="ml-2 min-h-9 rounded-md border border-amber-300 bg-white px-2.5 py-1 text-xs font-semibold text-amber-900 transition-colors duration-200 hover:bg-amber-100"
+              >
+                去处理
+              </button>
+            ) : null}
           </div>
         ) : null}
         {infoToast && !toast ? (
@@ -553,6 +635,7 @@ export function CockpitShell({
             candidates={notificationCandidates}
             systemNotificationsEnabled={settings.systemNotificationsEnabled}
             openTarget={onOpenAttentionTarget}
+            openInboxFocus={openInboxFocus}
           />
         ) : null}
         <div data-testid="cockpit-shell-scroll" className="min-h-0 flex-1 overflow-y-auto">

@@ -8,6 +8,9 @@ import {
   codingAttentionIdentity,
   codingAttentionItem,
   cockpitInboxItemSessionId,
+  dedupeCodingChoiceInboxItems,
+  inboxCodingChoiceIdentity,
+  type CockpitInboxItem,
   gateActionBlockCopy,
   gateActionBlockReason,
   gateKindOf,
@@ -1585,5 +1588,90 @@ describe("c1TargetLabel", () => {
     expect(label).not.toContain("undefined");
     expect(label).not.toContain("null");
     expect(label).toContain("—");
+  });
+});
+
+// ── UI-3（待处理统一）：coding choice 规范身份与双来源去重 ──
+describe("UI-3 canonical coding choice identity & dedupe", () => {
+  const attentionChoiceDto = (
+    overrides: Partial<CodingAttentionItemDto> = {},
+  ): CodingAttentionItemDto => ({
+    key: "choice:attempt_0001:choice_9",
+    kind: "choice",
+    project_id: "project_0001",
+    issue_id: "issue_0001",
+    plan_id: null,
+    attempt_id: "attempt_0001",
+    logical_work_item_id: null,
+    repository_name: "repo-a",
+    reason_code: null,
+    title: "选择请求待作答",
+    summary: "是否补齐测试",
+    occurred_at: "2026-10-24T00:00:00Z",
+    target: { type: "coding_attempt", attempt_id: "attempt_0001" },
+    focus: { choice_id: "choice_9" },
+    ...overrides,
+  });
+
+  const choiceCard = (
+    overrides: Partial<NonNullable<CockpitInboxItem["choice"]>> = {},
+  ): CockpitInboxItem => ({
+    id: "session_001:choice:choice_9",
+    kind: "choice",
+    severity: 2,
+    title: "选择请求待作答",
+    summary: "是否补齐测试",
+    triage: false,
+    source: "choice",
+    createdAt: null,
+    gate: null,
+    inlineError: null,
+    choice: {
+      sessionId: "session_001",
+      choiceId: "choice_9",
+      prompt: "是否补齐测试",
+      expectedRunId: "run_1",
+      questions: [],
+      allowMultiple: false,
+      allowFreeText: false,
+      source: "coding",
+      attemptAddress: {
+        projectId: "project_0001",
+        issueId: "issue_0001",
+        attemptId: "attempt_0001",
+      },
+      status: "open",
+      ...overrides,
+    },
+  });
+
+  it("同一 choice 双来源只显示一次：作答卡保留，同身份目录行丢弃", () => {
+    const card = choiceCard();
+    const catalogRow = codingAttentionItem(attentionChoiceDto());
+    expect(inboxCodingChoiceIdentity(card)).toBe(inboxCodingChoiceIdentity(catalogRow));
+    const deduped = dedupeCodingChoiceInboxItems([card, catalogRow]);
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0]).toBe(card);
+  });
+
+  it("不同 attempt 的同 choiceId 不误并（完整作用域归一）", () => {
+    const card = choiceCard();
+    const otherAttempt = codingAttentionItem(
+      attentionChoiceDto({
+        attempt_id: "attempt_0002",
+        target: { type: "coding_attempt", attempt_id: "attempt_0002" },
+        key: "choice:attempt_0002:choice_9",
+      }),
+    );
+    expect(inboxCodingChoiceIdentity(card)).not.toBe(inboxCodingChoiceIdentity(otherAttempt));
+    expect(dedupeCodingChoiceInboxItems([card, otherAttempt])).toHaveLength(2);
+  });
+
+  it("无作答卡时目录行原样保留；workspace choice 卡不参与合并", () => {
+    const catalogRow = codingAttentionItem(attentionChoiceDto());
+    expect(dedupeCodingChoiceInboxItems([catalogRow])).toEqual([catalogRow]);
+    const workspaceCard = choiceCard({ source: "workspace", attemptAddress: undefined });
+    expect(inboxCodingChoiceIdentity(workspaceCard)).toBeNull();
+    expect(dedupeCodingChoiceInboxItems([workspaceCard, catalogRow])).toHaveLength(2);
   });
 });

@@ -57,6 +57,7 @@ import type { ChatEntry, ChoiceResponsePayload } from "../state/chat-entries";
 import { createCockpitActionFacade } from "../state/cockpit-action-routing";
 import {
   cockpitInboxItemSessionId,
+  dedupeCodingChoiceInboxItems,
   gateActionBlockReason,
   gateKindOf,
   isStoryDesignAuthorConfirm,
@@ -268,7 +269,10 @@ export function ChatCockpitPage({
       }
       merged.push(item);
     }
-    return merged;
+    // UI-3（待处理统一）：同一 choice 双来源只显示一次——snapshot 派生的
+    // 就地作答卡（含逐题表单）优先，同规范身份（完整作用域+choiceId）的
+    // coding_attention 目录行丢弃，不重复计数/展示。
+    return dedupeCodingChoiceInboxItems(merged);
   }, [choiceCommands, codingChoiceItems, observedInbox, sessionId]);
 
   // F-59：等待提示条数据源——投影驱动的 pending choice（观测/takeover 态同样带）。

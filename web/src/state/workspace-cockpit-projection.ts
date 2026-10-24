@@ -1004,6 +1004,92 @@ export function codingAttentionIdentity(item: CodingAttentionItemDto): string {
   return JSON.stringify([item.project_id, item.issue_id, item.key]);
 }
 
+/**
+ * UI-3（待处理统一）：coding choice 的**规范身份**——完整作用域
+ * （project/issue/attempt）+ 来源类型 + choiceId 归一（JSON 数组序列化，
+ * 与 codingAttentionIdentity 同构）。用于跨来源合并去重（lifecycle
+ * coding_attention 目录行 vs 页面 snapshot 派生的就地作答卡）；通知身份
+ * （codingAttentionIdentity）只管提醒去重，两者不混。
+ */
+export function canonicalCodingChoiceIdentity(input: {
+  projectId: string;
+  issueId: string;
+  attemptId: string;
+  choiceId: string;
+}): string {
+  return JSON.stringify([
+    "coding_choice",
+    input.projectId,
+    input.issueId,
+    input.attemptId,
+    input.choiceId,
+  ]);
+}
+
+/** 收件箱条目的 coding choice 规范身份；非 coding choice 条目返回 null。 */
+export function inboxCodingChoiceIdentity(
+  item: CockpitInboxItem,
+): string | null {
+  if (
+    item.kind === "choice" &&
+    item.choice !== null &&
+    item.choice.source === "coding" &&
+    item.choice.attemptAddress !== undefined &&
+    item.choice.choiceId !== ""
+  ) {
+    return canonicalCodingChoiceIdentity({
+      ...item.choice.attemptAddress,
+      choiceId: item.choice.choiceId,
+    });
+  }
+  if (
+    item.kind === "coding_action" &&
+    item.attentionInfo !== undefined &&
+    item.attentionInfo !== null &&
+    item.attentionInfo.attentionKind === "choice" &&
+    item.attentionInfo.attemptId !== null &&
+    item.attentionInfo.focus?.choice_id
+  ) {
+    return canonicalCodingChoiceIdentity({
+      projectId: item.attentionInfo.projectId,
+      issueId: item.attentionInfo.issueId,
+      attemptId: item.attentionInfo.attemptId,
+      choiceId: item.attentionInfo.focus.choice_id,
+    });
+  }
+  return null;
+}
+
+/**
+ * UI-3：同一 choice 双来源只显示一次——coding 就地作答卡（含逐题表单，
+ * 可直接操作）优先，同规范身份的 coding_action 目录行丢弃（目录行只是
+ * 指针，不是第二张卡）。其余条目原样保留。
+ */
+export function dedupeCodingChoiceInboxItems(
+  items: readonly CockpitInboxItem[],
+): CockpitInboxItem[] {
+  const choiceCardIdentities = new Set<string>();
+  for (const item of items) {
+    if (item.kind === "choice") {
+      const identity = inboxCodingChoiceIdentity(item);
+      if (identity !== null) {
+        choiceCardIdentities.add(identity);
+      }
+    }
+  }
+  if (choiceCardIdentities.size === 0) {
+    return [...items];
+  }
+  return items.filter((item) => {
+    // 只丢弃与作答卡同身份的 coding_action 目录行；choice 卡本身保留。
+    if (item.kind !== "coding_action") {
+      return true;
+    }
+    const identity = inboxCodingChoiceIdentity(item);
+    return identity === null || !choiceCardIdentities.has(identity);
+  });
+}
+
 /** P4-d：durable 待处理事项 → 收件箱条目（进 display/count，无 watched/
  * TTL/上限过滤）。kind 全量透传（choice/triage/blocked/stalled/
  * manual_recovery/final_confirm/plan_final_confirm 及未知未来 kind 均

@@ -92,12 +92,14 @@ function ShellWithInbox({
   notificationCandidates = [],
   onGoToInbox,
   onOpenAttentionTarget,
+  onOpenInboxFocus,
 }: {
   inbox: readonly CockpitInboxItem[];
   countedInbox?: readonly CockpitInboxItem[];
   notificationCandidates?: readonly CockpitInboxItem[];
   onGoToInbox?: (sessionId: string) => void;
   onOpenAttentionTarget?: (item: CodingAttentionLocationItem) => boolean;
+  onOpenInboxFocus?: (target: WorkbenchInboxFocusTarget) => void;
 }) {
   mockedUseWorkspaceSessionObservers.mockReturnValue({
     records: [],
@@ -112,7 +114,11 @@ function ShellWithInbox({
   });
 
   return (
-    <CockpitShell onGoToInbox={onGoToInbox} onOpenAttentionTarget={onOpenAttentionTarget}>
+    <CockpitShell
+      onGoToInbox={onGoToInbox}
+      onOpenAttentionTarget={onOpenAttentionTarget}
+      onOpenInboxFocus={onOpenInboxFocus}
+    >
       <CockpitInbox items={inbox} />
     </CockpitShell>
   );
@@ -124,12 +130,14 @@ function renderShell({
   notificationCandidates,
   onGoToInbox,
   onOpenAttentionTarget,
+  onOpenInboxFocus,
 }: {
   inbox: readonly CockpitInboxItem[];
   countedInbox?: readonly CockpitInboxItem[];
   notificationCandidates?: readonly CockpitInboxItem[];
   onGoToInbox?: (sessionId: string) => void;
   onOpenAttentionTarget?: (item: CodingAttentionLocationItem) => boolean;
+  onOpenInboxFocus?: (target: WorkbenchInboxFocusTarget) => void;
 }) {
   return render(
     <ShellWithInbox
@@ -138,6 +146,7 @@ function renderShell({
       notificationCandidates={notificationCandidates}
       onGoToInbox={onGoToInbox}
       onOpenAttentionTarget={onOpenAttentionTarget}
+      onOpenInboxFocus={onOpenInboxFocus}
     />,
   );
 }
@@ -540,6 +549,7 @@ describe("CockpitShell", () => {
 import { codingAttentionItem } from "../../state/workspace-cockpit-projection";
 import type { CodingAttentionItemDto } from "../../api/types/lifecycle";
 import type { CodingAttentionLocationItem } from "../../router";
+import type { WorkbenchInboxFocusTarget } from "../../state/workbench-inbox-focus";
 
 function planACodingAttentionItem(): CockpitInboxItem {
   const dto: CodingAttentionItemDto = {
@@ -687,5 +697,107 @@ describe("CockpitShell coding_action 新 key 系统提醒（P4-e/REQ-UI37-19）"
       }),
     );
     expect(onGoToInbox).not.toHaveBeenCalledWith("coding_attention");
+  });
+});
+
+// ── UI-3（待处理统一）：通知/告警/toast 点击只开共享待处理抽屉并聚焦 ──
+// onOpenInboxFocus 注入替代内置路由实现；attempt 目标走抽屉聚焦，
+// coding_plan/workspace_session 目标回落 onOpenAttentionTarget 统一导航。
+describe("CockpitShell UI-3 待处理抽屉聚焦（通知同源）", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    attentionNotifications.length = 0;
+    AttentionNotificationMock.permission = "granted";
+    vi.stubGlobal("Notification", AttentionNotificationMock);
+    mockedUseWorkspaceSessionObservers.mockReset();
+    useWorkspaceStore.getState().reset();
+    window.localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("系统通知 onclick 只开待处理抽屉并聚焦（attempt+gate 定位），不走统一导航", async () => {
+    const item = planACodingAttentionItem();
+    const onOpenInboxFocus = vi.fn();
+    const onOpenAttentionTarget = vi.fn(() => true);
+    renderShell({
+      inbox: [item],
+      countedInbox: [item],
+      notificationCandidates: [item],
+      onOpenInboxFocus,
+      onOpenAttentionTarget,
+    });
+
+    await waitFor(() => expect(attentionNotifications).toHaveLength(1));
+    attentionNotifications[0].onclick?.(new Event("click"));
+    expect(onOpenInboxFocus).toHaveBeenCalledWith({
+      planId: null,
+      attemptId: "coding_attempt_a",
+      workItemId: null,
+      gateId: "gate_7",
+      choiceId: null,
+    });
+    expect(onOpenAttentionTarget).not.toHaveBeenCalled();
+  });
+
+  it("告警条「去处理」开待处理抽屉聚焦；toast「去处理」同源", async () => {
+    const item = planACodingAttentionItem();
+    const onOpenInboxFocus = vi.fn();
+    renderShell({
+      inbox: [item],
+      countedInbox: [item],
+      notificationCandidates: [item],
+      onOpenInboxFocus,
+      onOpenAttentionTarget: vi.fn(() => true),
+    });
+
+    await screen.findByRole("alert");
+    await userEvent.click(await screen.findByTestId("cockpit-attention-go-to"));
+    expect(onOpenInboxFocus).toHaveBeenCalledWith(
+      expect.objectContaining({ attemptId: "coding_attempt_a", gateId: "gate_7" }),
+    );
+
+    // toast（新增待处理的首条平台消息）同源聚焦。
+    const toastOpen = await screen.findByTestId("cockpit-toast-open-inbox");
+    await userEvent.click(toastOpen);
+    expect(onOpenInboxFocus).toHaveBeenCalledTimes(2);
+  });
+
+  it("workspace_session 目标回落统一导航（不开抽屉）", async () => {
+    const dto: CodingAttentionItemDto = {
+      key: "recovery:ws_7",
+      kind: "manual_recovery",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
+      plan_id: null,
+      attempt_id: null,
+      logical_work_item_id: null,
+      repository_name: null,
+      reason_code: null,
+      title: "等待人工恢复",
+      summary: "恢复候选待处理",
+      occurred_at: "2026-10-16T00:00:00Z",
+      target: { type: "workspace_session", session_id: "ws_7" },
+      focus: null,
+    };
+    const item = codingAttentionItem(dto);
+    const onOpenInboxFocus = vi.fn();
+    const onOpenAttentionTarget = vi.fn(() => true);
+    renderShell({
+      inbox: [item],
+      countedInbox: [item],
+      notificationCandidates: [item],
+      onOpenInboxFocus,
+      onOpenAttentionTarget,
+    });
+
+    await screen.findByTestId("cockpit-attention-go-to");
+    await userEvent.click(screen.getByTestId("cockpit-attention-go-to"));
+    expect(onOpenInboxFocus).not.toHaveBeenCalled();
+    expect(onOpenAttentionTarget).toHaveBeenCalledWith(
+      expect.objectContaining({ target: { type: "workspace_session", session_id: "ws_7" } }),
+    );
   });
 });

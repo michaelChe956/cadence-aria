@@ -74,6 +74,8 @@ vi.mock("../components/cockpit/CockpitShell", () => ({
   useCockpitObservedRecords: () => cockpitObservedRecords,
   useCockpitSettingsSlotRef: () => () => undefined,
   useCockpitAttentionTargetOpener: () => () => undefined,
+  // UI-3：共享待处理抽屉聚焦（null → 消费方回落旧导航，保持各测试原意图）。
+  useCockpitInboxFocusOpener: () => null,
 }));
 
 const MANAGED_AUTOMATION = {

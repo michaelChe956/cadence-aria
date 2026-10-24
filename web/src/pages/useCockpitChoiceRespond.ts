@@ -10,7 +10,14 @@ import { newCommandId } from "../hooks/useWorkspaceWs";
 import type { ChoiceResponsePayload } from "../state/chat-entries";
 import type { CockpitInboxItem } from "../state/workspace-cockpit-projection";
 
-export function useCockpitChoiceRespond(sessionId: string) {
+/**
+ * UI-3（设计 §3 兼容能力 4）：sessionId 改**显式作用域**——缺省 null 时
+ * 不再隐式借用「当前页面会话」；coding choice 必须自带 attemptAddress
+ *（REST per-attempt 作用域），workspace choice 必须自带 choice.sessionId
+ * 或由宿主显式传入 fallback（驾驶舱页面传自身 sessionId）。两者皆缺
+ * fail-closed 不发请求（不猜作用域、不解析 item.id）。
+ */
+export function useCockpitChoiceRespond(fallbackSessionId: string | null = null) {
   // P0 1.3（REQ-WIGA-05）Task 11：choice 就地作答命令台账——key
   // `${scopeSessionId}:${choiceId}`；202（submitting/resolving）保卡复查、
   // delivered 移除卡片、expired（410）不路由新 run、error（409 等）保留
@@ -33,8 +40,17 @@ export function useCockpitChoiceRespond(sessionId: string) {
       if (choice === null || choice.expectedRunId === null) {
         return;
       }
-      const scopeId = choice.sessionId ?? sessionId;
-      const key = `${scopeId}:${choice.choiceId}`;
+      const codingScope =
+        choice.source === "coding" && choice.attemptAddress !== undefined;
+      const scopeId = choice.sessionId ?? fallbackSessionId;
+      if (!codingScope && scopeId === null) {
+        // 显式作用域缺失：fail-closed，不回退隐式会话。
+        return;
+      }
+      // 台账键按显式作用域归一：workspace 取 session，coding 无 session 时
+      // 取 attemptId（同一 attempt 的 choice 命令账本唯一）。
+      const ledgerScope = scopeId ?? choice.attemptAddress?.attemptId ?? "";
+      const key = `${ledgerScope}:${choice.choiceId}`;
       const prior = choiceCommands[key];
       // 同命令重试纪律：错误/冲突后重试复用首个 command_id 与同一份 answers
       //（服务端按 (command_id) 幂等/异 payload 409）；新作答才生成新 id。
@@ -112,7 +128,7 @@ export function useCockpitChoiceRespond(sessionId: string) {
         window.setTimeout(() => {
           void (choice.source === "coding" && choice.attemptAddress
             ? getCodingChoiceResponseStatus(choice.attemptAddress, choice.choiceId, recheckCommandId)
-            : getWorkspaceChoiceResponseStatus(scopeId, choice.choiceId, recheckCommandId)
+            : getWorkspaceChoiceResponseStatus(ledgerScope, choice.choiceId, recheckCommandId)
           )
             .then((status) => {
               const next = mapState(status.state);
@@ -129,7 +145,7 @@ export function useCockpitChoiceRespond(sessionId: string) {
       applyStatus({ status: "submitting" });
       void (choice.source === "coding" && choice.attemptAddress
         ? postCodingChoiceResponse(choice.attemptAddress, choice.choiceId, request)
-        : postWorkspaceChoiceResponse(scopeId, choice.choiceId, request)
+        : postWorkspaceChoiceResponse(ledgerScope, choice.choiceId, request)
       )
         .then((status) => {
           const next = mapState(status.state);
@@ -155,7 +171,7 @@ export function useCockpitChoiceRespond(sessionId: string) {
           });
         });
     },
-    [choiceCommands, sessionId],
+    [choiceCommands, fallbackSessionId],
   );
   return { choiceCommands, handleChoiceRespond };
 }
