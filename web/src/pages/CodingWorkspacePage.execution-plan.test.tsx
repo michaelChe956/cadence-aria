@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import {
   confirmWorkItemExecutionPlan,
-  deleteCodingAttempt,
   getCodingAttemptDiff,
   requestWorkItemExecutionPlanChange,
 } from "../api/client";
@@ -23,7 +22,6 @@ import {
 
 vi.mock("../api/client", () => ({
   confirmWorkItemExecutionPlan: vi.fn(),
-  deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
   requestWorkItemExecutionPlanChange: vi.fn(),
 }));

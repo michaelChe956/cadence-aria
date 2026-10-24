@@ -11,7 +11,6 @@ import {
 
 vi.mock("../api/client", () => ({
   confirmWorkItemExecutionPlan: vi.fn(),
-  deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
   requestWorkItemExecutionPlanChange: vi.fn(),
 }));

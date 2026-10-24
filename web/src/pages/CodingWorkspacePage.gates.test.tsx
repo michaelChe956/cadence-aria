@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProviderHealthResponse } from "../api/types";
 import {
   confirmWorkItemExecutionPlan,
-  deleteCodingAttempt,
   enterVerificationTriage,
   getCodingAttemptDiff,
   getVerificationCommandEvidence,
@@ -26,7 +25,6 @@ import {
 
 vi.mock("../api/client", () => ({
   confirmWorkItemExecutionPlan: vi.fn(),
-  deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
   requestWorkItemExecutionPlanChange: vi.fn(),
   listVerificationTriageRecords: vi.fn(),

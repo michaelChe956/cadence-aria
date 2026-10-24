@@ -20,7 +20,6 @@ import {
 } from "./CodingWorkspacePage.test-utils";
 
 vi.mock("../api/client", () => ({
-  deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
 }));
 

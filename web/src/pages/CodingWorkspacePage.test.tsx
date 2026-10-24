@@ -13,7 +13,6 @@ import type {
 } from "../api/types";
 import {
   confirmWorkItemExecutionPlan,
-  deleteCodingAttempt,
   getCodingAttemptDiff,
   getPlanCodingProgress,
   requestWorkItemExecutionPlanChange,
@@ -43,7 +42,6 @@ import {
 
 vi.mock("../api/client", () => ({
   confirmWorkItemExecutionPlan: vi.fn(),
-  deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
   // 默认无 plan 聚合（旧用例降级回局部投影）；需要聚合的用例单独 mockResolvedValue。
   getPlanCodingProgress: vi.fn(async () => {
@@ -115,12 +113,6 @@ function spyScrollIntoView() {
 
 describe("CodingWorkspacePage shell and actions", () => {
   installCodingWorkspacePageTestHooks();
-
-  const OTHER_CODING_ATTEMPT_ADDRESS = {
-    projectId: "project_0002",
-    issueId: "issue_0002",
-    attemptId: "coding_attempt_0002",
-  } as const;
 
   function mockCodingSessionState(
     overrides: Partial<Extract<CodingWsOutMessage, { type: "coding_session_state" }>>,
@@ -870,40 +862,10 @@ describe("CodingWorkspacePage shell and actions", () => {
     expect(screen.getByText("abc123")).toBeInTheDocument();
   });
 
-  it("deletes the coding workspace after confirmation and navigates back", async () => {
+  // UI-2（选 A）：单删入口（「仅删除当前 Coding 工作区」）已删除——顶栏只剩
+  // 状态/连接/审计/设置；单仓 scope 下页内不再有任何删除入口。
+  it("no longer renders a single attempt delete entry", () => {
     mockCodingWs();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    vi.mocked(deleteCodingAttempt).mockResolvedValue(undefined);
-    const onBack = vi.fn();
-    useCodingWorkspaceStore.setState({
-      projectId: CODING_ATTEMPT_ADDRESS.projectId,
-      issueId: CODING_ATTEMPT_ADDRESS.issueId,
-      attemptId: "coding_attempt_0001",
-      status: "running",
-      stage: "coding",
-    });
-
-    render(
-      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={onBack} />
-    );
-
-    await userEvent.click(
-      screen.getByRole("button", { name: "仅删除当前 Coding 工作区" }),
-    );
-
-    expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining("日志、测试输出和 worktree"),
-    );
-    await waitFor(() =>
-      expect(deleteCodingAttempt).toHaveBeenCalledWith(CODING_ATTEMPT_ADDRESS),
-    );
-    expect(onBack).toHaveBeenCalled();
-    confirm.mockRestore();
-  });
-
-  it("disables deletion while the store belongs to a previous address", async () => {
-    mockCodingWs();
-    vi.mocked(deleteCodingAttempt).mockResolvedValue(undefined);
     useCodingWorkspaceStore.setState({
       projectId: CODING_ATTEMPT_ADDRESS.projectId,
       issueId: CODING_ATTEMPT_ADDRESS.issueId,
@@ -913,18 +875,14 @@ describe("CodingWorkspacePage shell and actions", () => {
     });
 
     render(
-      <CodingWorkspacePage
-        address={OTHER_CODING_ATTEMPT_ADDRESS}
-        onBack={vi.fn()}
-      />,
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
     );
 
-    const deleteButton = screen.getByRole("button", {
-      name: "仅删除当前 Coding 工作区",
-    });
-    expect(deleteButton).toBeDisabled();
-    await userEvent.click(deleteButton);
-    expect(deleteCodingAttempt).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "仅删除当前 Coding 工作区" }),
+    ).not.toBeInTheDocument();
+    // 全量入口只属于 plan 聚合标题区（group scope），单仓 scope 不渲染。
+    expect(screen.queryByTestId("plan-coding-delete-all")).not.toBeInTheDocument();
   });
 
   it("disables final confirm for incomplete readiness but leaves abort available", () => {

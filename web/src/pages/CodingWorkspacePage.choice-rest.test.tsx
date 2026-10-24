@@ -21,7 +21,6 @@ import {
 vi.mock("../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof ApiClient>()),
   confirmWorkItemExecutionPlan: vi.fn(),
-  deleteCodingAttempt: vi.fn(),
   getCodingAttemptDiff: vi.fn(),
   getCodingAttemptSnapshot: vi.fn(),
   postCodingChoiceResponse: vi.fn(),

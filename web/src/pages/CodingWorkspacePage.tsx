@@ -4,7 +4,6 @@ import {
   Clock,
   History,
   Settings2,
-  Trash2,
   Wifi,
   WifiOff,
   X,
@@ -12,7 +11,6 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiRequestError,
-  deleteCodingAttempt,
   deletePlanCodingWorkspaces,
   enterVerificationTriage,
   getCodingAttemptSnapshot,
@@ -184,7 +182,6 @@ export function CodingWorkspacePage({
   // P1-c：下钻定位的门卡/确认区目标——等元素真出现（快照/WS 帧有先后，
   // 可能晚于挂载）再 scrollIntoView，定位成功即消费。
   const [pendingCardFocus, setPendingCardFocus] = useState<PendingCardFocus | null>(null);
-  const [deleteBusy, setDeleteBusy] = useState(false);
   const [groupDeleteBusy, setGroupDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
@@ -496,8 +493,7 @@ export function CodingWorkspacePage({
   }, []);
 
   useEffect(() => {
-    // 地址切换：两类删除 busy 一并复位（P2-1；在途请求由地址守卫忽略结算）。
-    setDeleteBusy(false);
+    // 地址切换：整组删除 busy 复位（在途请求由地址守卫忽略结算）。
     setGroupDeleteBusy(false);
     setDeleteError(null);
     setPlanError(null);
@@ -672,53 +668,6 @@ export function CodingWorkspacePage({
     );
   }
 
-  async function handleDeleteCodingWorkspace() {
-    // P2-1：与整组删除互斥——双 handler 共用 deleteGenerationRef，并发顶号会使
-    // 先发者 finally 的地址守卫永假、busy 永久卡死（顶栏唯一删除出口）。
-    if (!storeMatchesAddress || groupDeleteBusy) {
-      return;
-    }
-    const active = ACTIVE_ATTEMPT_STATUSES.has(store.status ?? "created");
-    // H5（设计 D）＋P2-2：多仓 group 下单删是防呆确认——明确「仅删当前」会使
-    // 整轮授权失效。units.length 是工作项数，冒充工作区成员数会 N×R 失真，
-    // 恒用泛化句（成员计数由服务端聚合权威给出）。
-    const groupNotice = store.workItemGroupId
-      ? "这是本计划的 Coding 工作区之一；仅删此项会使整轮授权失效，其余工作区保留且不能用于新一键首启。若要从头开始，请使用「删除本计划全部 Coding 工作区」。"
-      : "";
-    const message = [
-      active
-        ? "运行中的 Attempt 会被终止并删除。本操作会删除当前 Coding Workspace 的日志、测试输出和 worktree，且无法撤销。"
-        : "本操作会删除当前 Coding Workspace 的日志、测试输出和 worktree，且无法撤销。",
-      groupNotice,
-    ]
-      .filter(Boolean)
-      .join("\n");
-    if (!window.confirm(message)) {
-      return;
-    }
-
-    const requestAddress = { ...address };
-    const requestAddressKey = addressKey;
-    const requestGeneration = deleteGenerationRef.current + 1;
-    deleteGenerationRef.current = requestGeneration;
-    setDeleteBusy(true);
-    setDeleteError(null);
-    try {
-      await deleteCodingAttempt(requestAddress);
-      if (isCurrentDeleteRequest(requestAddressKey, requestGeneration)) {
-        onBack();
-      }
-    } catch (reason) {
-      if (isCurrentDeleteRequest(requestAddressKey, requestGeneration)) {
-        setDeleteError(errorMessage(reason, "删除 Coding Workspace 失败"));
-      }
-    } finally {
-      if (isCurrentDeleteRequest(requestAddressKey, requestGeneration)) {
-        setDeleteBusy(false);
-      }
-    }
-  }
-
   // H5（设计 C，冻结契约先行、H4 端点后行）：plan 聚合标题区整组删除——服务端
   // 分类 → required 409 → 恰一次 window.confirm → confirmed=true 复删；取消零
   // 出站破坏请求。command_id 同一删除动作稳定复用（失败重试不换 key，服务端
@@ -728,8 +677,8 @@ export function CodingWorkspacePage({
   // lifecycle 与 run facts）；typed 409/500 直达错误面，不自动重试。
   async function handleDeleteAllCodingWorkspaces() {
     const planId = store.workItemGroupId;
-    // P2-1：与单删互斥（同上，防止 groupDeleteBusy 永久卡死清剩余唯一出口）。
-    if (!planId || groupDeleteBusy || deleteBusy || !storeMatchesAddress) {
+    // P2-1：防重复点击（防止 groupDeleteBusy 永久卡死清剩余唯一出口）。
+    if (!planId || groupDeleteBusy || !storeMatchesAddress) {
       return;
     }
     const requestAddressKey = addressKey;
@@ -932,15 +881,6 @@ export function CodingWorkspacePage({
           Coding Attempt #{store.attemptId ?? address.attemptId}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <button
-            type="button"
-            disabled={deleteBusy || groupDeleteBusy || !storeMatchesAddress}
-            onClick={() => void handleDeleteCodingWorkspace()}
-            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--aria-danger)] bg-white px-2 text-xs font-semibold text-[var(--aria-danger)] hover:bg-red-50 disabled:opacity-50"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            仅删除当前 Coding 工作区
-          </button>
           <StatusBadge value={store.status ?? "created"} />
           {connected ? (
             <Wifi aria-label="已连接" className="h-4 w-4 text-[var(--aria-success)]" />
@@ -1077,7 +1017,6 @@ export function CodingWorkspacePage({
           refreshKey={`${store.status ?? "-"}-${store.stage ?? "-"}-${store.units.length}`}
           onDeleteAllCodingWorkspaces={() => void handleDeleteAllCodingWorkspaces()}
           groupDeleteBusy={groupDeleteBusy}
-          deleteBusy={deleteBusy}
           onOpenPlanOverview={openGroupPlanOverview}
         />
       ) : null}
