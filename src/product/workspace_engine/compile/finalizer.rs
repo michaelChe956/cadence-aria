@@ -310,14 +310,29 @@ impl WorkspaceEngine {
         .map_err(|error| {
             format!("acquire issue plan slot before compile confirm failed: {error:?}")
         })?;
+        // F2/R2：旧代 **advance engine checkpoint** 的清理根。`ProductAppPaths`
+        // 根是 `<workspace_root>/.aria`（`WebAppState` 的唯一构造口径；与
+        // `logical_codebase::evidence_injection` 的注入根同源），故父目录即
+        // workspace root。此前此处传 `None`，使 `purge_plan_runtime_resources`
+        // 的 checkpoint 清理分支成为死代码——新代仍可能从旧代同 session 的
+        // checkpoint 恢复。
+        let app_paths = lifecycle.app_paths();
+        // 只接受绝对父目录：相对根（如 `ProductAppPaths::new("aria")`）的
+        // `parent()` 是空串，拼出的相对 checkpoint 根会落到进程 CWD——宁可不
+        // 清（fail-safe）也不误删。
+        let workspace_root = app_paths
+            .root()
+            .parent()
+            .filter(|parent| parent.is_absolute())
+            .map(std::path::Path::to_path_buf);
         crate::product::plan_generation_supersede::ensure_single_plan_generation(
-            &lifecycle.app_paths(),
+            &app_paths,
             &plan_slot,
             &tx.project_id,
             &tx.issue_id,
             std::slice::from_ref(&tx.plan_id),
             crate::product::entity_deletion_cascade::PlanSupersedeReason::RecompileConfirm,
-            None,
+            workspace_root.as_deref(),
         )
         .await
         .map_err(|error| {

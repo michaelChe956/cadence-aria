@@ -167,6 +167,21 @@ pub(crate) async fn purge_entity_closure(
         //
         // ① 失败重入补删：上次遗留的待删实体（记录可能已被他路径删掉、归属
         //    复核也可能失配——实体目录路径必须被记住，否则残留成孤儿）。
+        //
+        //    F3/R4 已知边界（有意保留）：本清单只有**路径**、没有仓库身份，
+        //    故补删不再取 repo resource cleanup lease，也不做「记录仍在且仍
+        //    归属本 plan」的复核——记录缺失正是需要本清单的原因。可删除面由
+        //    两道硬约束封住：
+        //    · 写入侧：清单只在 ② 中、持有 deletion lease ＋ 候选仓
+        //      resource_leases ＋ issue 关系短锁时落盘，内容即本次授权的
+        //      实体集合；
+        //    · 删除侧：兜底删除强制 aria worktree 命名空间守卫
+        //      （`ensure_worktree_namespace_path`，见 `remove_shared_worktree_entity`）
+        //      ——路径不在 `<repo>/.worktrees/aria-*/<name>` 内即 fail-closed。
+        //    交错窗口极窄：新 plan 必须在本函数（及其持锁的取代删除）完成后
+        //    才可建立（单 plan 不变量 REQ-WPS-01 ＋ issue plan-slot 互斥），
+        //    期间不可能出现「本 issue 同仓同一 worktree 路径被新 plan 重新
+        //    启用」——新启用要经过同一闭包的前置删除，必然先消费或重写本清单。
         let deletion_store = EntityDeletionStore::new(app_paths.clone());
         let pending_entities = deletion_store.load_pending_worktree_entities(lease)?;
         if !pending_entities.is_empty() {
@@ -396,6 +411,10 @@ fn collect_attempt_work_item_ids(
 /// `<main>/.git/worktrees/<name>` → `<main>`）；**不可反解时仍删目录残留**
 /// （与 [`remove_shared_worktree_entity`] 同口径）——直接跳过会把目录留成
 /// 孤儿：重入时 attempt 记录已删，无任何路径能再定位并清掉它。
+///
+/// **兜底删除受 aria worktree 命名空间守卫约束**（R3，数据安全）：路径必须
+/// 位于 `<repo>/.worktrees/aria-work-items|aria-issues|aria-pointer/…`，
+/// 否则 fail-closed（错误上抛、记录保留待人工），绝不 `remove_dir_all`。
 async fn remove_attempt_worktree_entity(
     app_paths: &ProductAppPaths,
     attempt: &CodingExecutionAttempt,
@@ -422,7 +441,20 @@ async fn remove_attempt_worktree_entity(
     }
     // git 注册项已删但目录仍在（反解失败/删除未清空）→ 目录兜底删除，
     // 杜绝「记录已删、实体目录成孤儿」。
+    //
+    // R3（数据安全）：反解失败时记录里的路径未经任何校验，若它指向主仓根
+    // （`.git` 是目录 → 反解失败）直接 `remove_dir_all` 会**整仓删除**。
+    // 故兜底前强制命名空间守卫：只删
+    // `<repo>/.worktrees/aria-work-items|aria-issues|aria-pointer/…` 内的实体；
+    // 不满足即 fail-closed（错误上抛 → attempt 记录保留，待人工处理）。
     if worktree_path.exists() {
+        crate::product::git_workspace_service::ensure_worktree_namespace_path(worktree_path)
+            .map_err(|error| {
+                ProductStoreError::Io(format!(
+                    "refuse to remove worktree entity {}: {error} (record kept for manual recovery)",
+                    worktree_path.display()
+                ))
+            })?;
         std::fs::remove_dir_all(worktree_path).map_err(|error| {
             ProductStoreError::Io(format!("remove {}: {error}", worktree_path.display()))
         })?;
@@ -960,7 +992,9 @@ pub(crate) fn plan_shared_worktree_candidate_ids(
 
 /// 单个 shared worktree 实体的物理清除（git 注册项 ＋ 目录）。
 ///
-/// 主仓路径由 worktree 的 `.git` gitfile 反解；不可反解时只删目录残留。
+/// 主仓路径由 worktree 的 `.git` gitfile 反解；不可反解时只删目录残留——
+/// 且**必须落在 aria worktree 命名空间内**（R3，数据安全：反解失败时记录里
+/// 的原始路径未经校验，指向主仓根即整仓删除），否则 fail-closed。
 async fn remove_shared_worktree_entity(worktree_path: &Path) -> Result<(), ProductStoreError> {
     if !worktree_path.exists() {
         return Ok(());
@@ -979,7 +1013,16 @@ async fn remove_shared_worktree_entity(worktree_path: &Path) -> Result<(), Produ
             ProductStoreError::Io(format!("prune worktrees {}: {error}", repo_path.display()))
         })?;
     }
+    // R3（数据安全）：同 [`remove_attempt_worktree_entity`]——兜底删除前强制
+    // 命名空间守卫，指向主仓根/他处目录一律 fail-closed（记录保留待人工）。
     if worktree_path.exists() {
+        crate::product::git_workspace_service::ensure_worktree_namespace_path(worktree_path)
+            .map_err(|error| {
+                ProductStoreError::Io(format!(
+                    "refuse to remove shared worktree entity {}: {error} (record kept for manual recovery)",
+                    worktree_path.display()
+                ))
+            })?;
         std::fs::remove_dir_all(worktree_path).map_err(|error| {
             ProductStoreError::Io(format!("remove {}: {error}", worktree_path.display()))
         })?;

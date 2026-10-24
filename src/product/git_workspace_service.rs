@@ -881,6 +881,61 @@ fn reject_parent_dir_components(path: &Path) -> Result<(), GitWorkspaceError> {
     Ok(())
 }
 
+/// 无法反解主仓时的 worktree 目录**兜底删除**守卫（不需要 `repo_path`）。
+///
+/// 与 [`ensure_safe_worktree_path`] 语义同源（拒绝父级 `..`、`.worktrees` 下
+/// 首层白名单、实体名非空），但主仓路径不可知——反解失败的现场正是
+/// 「gitfile 缺失/损坏」——故只凭路径形状确认目标是 aria worktree 实体：
+/// `<repo>/.worktrees/<aria-work-items|aria-issues|aria-pointer>/<name>`。
+///
+/// 不满足即 [`GitWorkspaceError::UnsafePath`]（调用方 MUST fail-closed：
+/// 保留记录待人工，绝不 `remove_dir_all`）。典型危险现场：`worktree_path`
+/// 被记录为主仓根（`.git` 是目录，反解失败）——旧实现会整仓删除。
+///
+/// 取**最后一个** `.worktrees` 段：嵌套 worktree（worktree 内的 `.worktrees`）
+/// 时以最具体的一层判定，仍是同一语义。
+pub(crate) fn ensure_worktree_namespace_path(
+    worktree_path: &Path,
+) -> Result<(), GitWorkspaceError> {
+    reject_parent_dir_components(worktree_path)?;
+    // 路径存在（调用方只在 exists 时兜底）；canonicalize 解析符号链接——
+    // 指向命名空间之外的链接按目标判定（fail-closed）。
+    let normalized = worktree_path.canonicalize().map_err(|error| {
+        GitWorkspaceError::Io(format!("canonicalize {}: {error}", worktree_path.display()))
+    })?;
+    let components: Vec<&std::ffi::OsStr> = normalized.iter().collect();
+    let Some(index) = components
+        .iter()
+        .rposition(|component| *component == std::ffi::OsStr::new(".worktrees"))
+    else {
+        return Err(GitWorkspaceError::UnsafePath(format!(
+            "{} is not inside a `.worktrees` namespace",
+            worktree_path.display()
+        )));
+    };
+    let Some(prefix) = components.get(index + 1).and_then(|value| value.to_str()) else {
+        return Err(GitWorkspaceError::UnsafePath(format!(
+            "{} has no worktree prefix below `.worktrees`",
+            worktree_path.display()
+        )));
+    };
+    if !SAFE_WORKTREE_PREFIXES.contains(&prefix) {
+        return Err(GitWorkspaceError::UnsafePath(format!(
+            "{} is outside allowed aria worktree prefixes {:?}",
+            worktree_path.display(),
+            SAFE_WORKTREE_PREFIXES
+        )));
+    }
+    // 白名单层之下必须还有实体名（不得删整个前缀命名空间）。
+    if components.len() <= index + 2 {
+        return Err(GitWorkspaceError::UnsafePath(format!(
+            "{} is a worktree namespace root, not a worktree entity",
+            worktree_path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn ensure_safe_aria_branch_name(branch_name: &str) -> Result<(), GitWorkspaceError> {
     if branch_name.starts_with('/')
         || branch_name.contains("..")

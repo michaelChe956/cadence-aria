@@ -9,9 +9,11 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
 use crate::product::lifecycle_store::{
-    CreateIssueWorkItemPlanInput, CreateWorkItemInput, LifecycleStore,
+    CreateIssueWorkItemPlanInput, CreateWorkItemInput, CreateWorkspaceSessionInput, LifecycleStore,
 };
-use crate::product::models::{IssueWorkItemPlanOptions, IssueWorkItemPlanStatus};
+use crate::product::models::{
+    IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, ProviderName, WorkspaceType,
+};
 
 const PROJECT_ID: &str = "project_0001";
 const ISSUE_ID: &str = "issue_0001";
@@ -182,7 +184,16 @@ fn seed_reviewer_resources(paths: &ProductAppPaths, attempt_id: &str) {
 /// 建 shared-worktree 记录（锁持有者＝本 plan 的 attempt）。
 fn seed_shared_worktree(paths: &ProductAppPaths, attempt_id: &str) {
     let repository_id = uuid::Uuid::from_u128(0x5150);
-    let worktree_path = paths.root().join("shared-worktree-checkout");
+    // R3：真实 shared-worktree 实体恒在 `<repo>/.worktrees/aria-*` 命名空间内；
+    // 兜底删除有命名空间守卫，命名空间外的记录会被 fail-closed 保留（数据安全）。
+    let worktree_path = paths
+        .root()
+        .parent()
+        .expect("app root has parent")
+        .join("repo")
+        .join(".worktrees")
+        .join("aria-work-items")
+        .join("wt-1");
     std::fs::create_dir_all(&worktree_path).expect("worktree dir");
     let record = serde_json::json!({
         "id": "shared_worktree_0001",
@@ -625,6 +636,69 @@ async fn inplace_recompile_without_attempts_still_clears_locks_and_lifecycle() {
     assert!(
         !lifecycle_path.exists(),
         "无 attempt 也必须清 workspace lifecycle（执行轮 generation 复位）"
+    );
+}
+
+/// F2/R2 回归（分支覆盖）：`RecompileConfirm` **且传入 workspace root** 时
+/// 旧代 advance engine checkpoint 必须被清（按 session 精确删，不整删共享根）。
+///
+/// 此前 finalizer（该原因的**唯一**调用点）传 `None`，`if let Some(workspace_root)`
+/// 分支从未执行——checkpoint 清理是死代码，新代仍可能从旧代同 session 恢复。
+#[tokio::test]
+async fn inplace_recompile_clears_advance_engine_checkpoints_when_root_given() {
+    let (temp, paths) = seed_paths();
+    seed_plan(&paths);
+    // plan 拥有的 workspace session（manifest.session_ids 的唯一真实来源）。
+    let session = LifecycleStore::new(paths.clone())
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            entity_id: PLAN_ID.to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Codex,
+            reviewer_provider: None,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("seed workspace session");
+    let workspace_root = temp.path();
+    let sessions_root = workspace_root
+        .join("advance-engine-checkpoints")
+        .join("workspace-sessions");
+    let checkpoint_session = sessions_root.join(&session.id);
+    std::fs::create_dir_all(checkpoint_session.join("checkpoints")).expect("checkpoint dir");
+    std::fs::write(
+        checkpoint_session.join("checkpoints").join("cp_001.json"),
+        b"{}",
+    )
+    .expect("checkpoint file");
+    let other_session = sessions_root.join("workspace_session_other");
+    std::fs::create_dir_all(&other_session).expect("other session dir");
+
+    let plan_slot = acquire_issue_plan_slot(&paths, PROJECT_ID, ISSUE_ID)
+        .await
+        .expect("plan slot");
+    ensure_single_plan_generation(
+        &paths,
+        &plan_slot,
+        PROJECT_ID,
+        ISSUE_ID,
+        &[PLAN_ID.to_string()],
+        PlanSupersedeReason::RecompileConfirm,
+        Some(workspace_root),
+    )
+    .await
+    .expect("inplace supersede");
+
+    assert!(
+        !checkpoint_session.exists(),
+        "RecompileConfirm 且传入 root 时必须清旧代同 session 的 advance engine checkpoint"
+    );
+    assert!(
+        other_session.exists(),
+        "checkpoint 清理按 session 精确删除，他 session 必须保留（不整删共享根）"
     );
 }
 

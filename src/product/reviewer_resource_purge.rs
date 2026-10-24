@@ -19,7 +19,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::ProductStoreError;
 use crate::product::reviewer_window_store::{
     ChannelGateRecord, GateState, REVIEWER_WINDOW_STORE_DIR, ReviewerWindowRecord,
-    WindowLeaseRecord, common_key_of,
+    WindowLeaseRecord,
 };
 
 /// reviewer 快照 store 根目录名（生产根 `<aria>/reviewer-snapshots`）。
@@ -56,21 +56,26 @@ impl ReviewerResourcePurger {
         }
         let wanted: BTreeSet<&str> = attempt_ids.iter().map(String::as_str).collect();
         let mut window_ids: BTreeSet<String> = BTreeSet::new();
-        let mut common_dirs: BTreeSet<PathBuf> = BTreeSet::new();
+        // 存活窗口 id（`windows/` 现有记录，全部 attempt）——④ 闸门收割据此
+        // 判定「该闸门是否还有窗口能解冻」。
+        let mut live_window_ids: BTreeSet<String> = BTreeSet::new();
 
         // ① 活跃窗口记录 + 归档窗口记录（两者都携带 attempt_id）。
-        for directory in [
-            self.window_root.join("windows"),
-            self.window_root.join("window-archive"),
-        ] {
-            for path in json_files_in(&directory)? {
-                let record: ReviewerWindowRecord = read_typed_json(&path)?;
-                if !wanted.contains(record.attempt_id.as_str()) {
-                    continue;
-                }
-                window_ids.insert(record.window_id.clone());
-                common_dirs.insert(record.identity.common_dir.clone());
+        for path in json_files_in(&self.window_root.join("windows"))? {
+            let record: ReviewerWindowRecord = read_typed_json(&path)?;
+            live_window_ids.insert(record.window_id.clone());
+            if !wanted.contains(record.attempt_id.as_str()) {
+                continue;
             }
+            window_ids.insert(record.window_id.clone());
+        }
+        // 归档记录是**终态**窗口（接管时留证），不是存活窗口。
+        for path in json_files_in(&self.window_root.join("window-archive"))? {
+            let record: ReviewerWindowRecord = read_typed_json(&path)?;
+            if !wanted.contains(record.attempt_id.as_str()) {
+                continue;
+            }
+            window_ids.insert(record.window_id.clone());
         }
 
         // ② 窗口记录本体（活跃 + 归档）与违规 journal。
@@ -99,6 +104,12 @@ impl ReviewerResourcePurger {
             )?;
         }
 
+        // ②（续）：删除后本轮被清窗口即**不再存活**（`windows/` 已无其记录）
+        // ——④ 的闸门收割按删除后的存活集合判定。
+        for window_id in &window_ids {
+            live_window_ids.remove(window_id);
+        }
+
         // ③ 树级租约记录：按 attempt_id 或窗口归属精确删除（不整目录清空）。
         for path in json_files_in(&self.window_root.join("leases"))? {
             let lease: WindowLeaseRecord = read_typed_json(&path)?;
@@ -107,28 +118,34 @@ impl ReviewerResourcePurger {
             }
         }
 
-        // ④ 写通道闸门记录：**只删被本次待清窗口持有**的那几条。
+        // ④ 写通道闸门记录：只删「持有者已无存活窗口记录」的那几条。
         //
         // 闸门按 common-dir 键目录存放，**同仓可有多窗口**（他 plan/issue 的
         // 存活窗口）。整目录清空会误删他窗口的 `Draining`/`Frozen` 闸门：
         // 记录被删后 `enter_write_channel` 会按缺失重建为 `Open`——平台写
         // 闸门被静默解除；他窗口的 `poll_channel_drain` 也会因闸门消失报
         // `OwnerMismatch`。故此处按 `GateState` 持有的 window_id 精确判定。
-        for common_dir in &common_dirs {
-            let channel_dir = self
-                .window_root
-                .join("channels")
-                .join(common_key_of(common_dir));
+        //
+        // **收割而非仅按 attempt 反查**（F1/R1）：上一轮可能停在「窗口记录
+        // 已删、闸门未删」（IO/中断）；重入时该窗口已不在 `windows/`，按
+        // attempt 反查的窗口集合采集不到它 → 其 common-dir 完全不被访问，
+        // `Frozen` 闸门永久残留。而窗口 id 由 `role_run_window_id(attempt,
+        // role_run)` 构造、attempt 不复用 → 该仓该通道永久 `Blocked`（再无
+        // 窗口能解冻）。
+        //
+        // 故遍历**全部** `channels/*/`（不限于本次采集到的 common-dir），收割
+        // 「持有者不在存活窗口集合」的 `Draining`/`Frozen` 闸门；`Open` 不被
+        // 任何窗口持有，无条件保留（它不是任何窗口的闸门）。
+        for channel_dir in directories_in(&self.window_root.join("channels"))? {
             for path in json_files_in(&channel_dir)? {
                 let gate: ChannelGateRecord = read_typed_json(&path)?;
-                let held_by_purged_window = match &gate.state {
-                    // `Open` 不被任何窗口持有：保留（它不是本窗口的闸门）。
+                let ownerless = match &gate.state {
                     GateState::Open => false,
                     GateState::Draining { window_id } | GateState::Frozen { window_id } => {
-                        window_ids.contains(window_id)
+                        !live_window_ids.contains(window_id)
                     }
                 };
-                if held_by_purged_window {
+                if ownerless {
                     remove_file_if_exists(&path)?;
                 }
             }
@@ -244,6 +261,7 @@ fn remove_dir_all_if_exists(path: &Path) -> Result<(), ProductStoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::product::reviewer_window_store::common_key_of;
 
     fn seed_window(root: &Path, window_id: &str, attempt_id: &str, common_dir: &Path) {
         let windows = root.join("reviewer-windows").join("windows");
@@ -403,5 +421,113 @@ mod tests {
             preserved["state"]["window_id"],
             serde_json::json!("win_other")
         );
+    }
+
+    /// 某 common-dir 的通道闸门目录（按 `common_key_of` 键）。
+    fn channel_dir(root: &Path, common_dir: &Path) -> PathBuf {
+        root.join(REVIEWER_WINDOW_STORE_DIR)
+            .join("channels")
+            .join(common_key_of(common_dir))
+    }
+
+    /// 写一条闸门记录（`state_json` 是 `GateState` 的 serde 值）。
+    fn seed_gate(channel_root: &Path, common_dir: &Path, channel: &str, state: &serde_json::Value) {
+        std::fs::create_dir_all(channel_root).unwrap();
+        let record = serde_json::json!({
+            "schema": "reviewer_window_v1",
+            "common_dir": common_dir.display().to_string(),
+            "channel": channel,
+            "state": state,
+            "in_flight": [],
+            "generation": 1,
+        });
+        std::fs::write(
+            channel_root.join(format!("{channel}.json")),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// F1/R1 回归（闸门收割缺口）：上一轮在「删窗口记录之后、删闸门之前」
+    /// 失败（IO/中断）→ 重入时窗口记录已不在，`window_ids` 采集不到该
+    /// common-dir；而 `window_id = role_run_window_id(attempt, role_run)`
+    /// 永不复用 → 该仓该通道的 `Frozen` 闸门无人能解冻，**永久 Blocked**。
+    ///
+    /// 修法（④ 阶段）：除本次待清窗口持有的闸门外，再收割「无任何存活
+    /// 窗口记录引用」的闸门——遍历**全部** `channels/*/`（不局限于本次
+    /// 采集到的 common-dir），`Open` 无条件保留。
+    #[test]
+    fn purge_harvests_gates_of_windows_without_surviving_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path().join("aria"));
+        let common_a = temp.path().join("common-a");
+        let common_b = temp.path().join("common-b");
+        std::fs::create_dir_all(&common_a).unwrap();
+        std::fs::create_dir_all(&common_b).unwrap();
+        // 本次待清窗口 + 同仓存活窗口。
+        seed_window(paths.root(), "win_own", "attempt_own", &common_a);
+        seed_window(paths.root(), "win_alive", "attempt_other", &common_a);
+
+        let dir_a = channel_dir(paths.root(), &common_a);
+        // 孤儿闸门：持有窗口的记录已不存在（重入现场）。
+        seed_gate(
+            &dir_a,
+            &common_a,
+            "stage",
+            &serde_json::json!({"state": "frozen", "window_id": "win_gone"}),
+        );
+        // 存活他窗的冻结闸门 → 必须保留。
+        seed_gate(
+            &dir_a,
+            &common_a,
+            "commit",
+            &serde_json::json!({"state": "frozen", "window_id": "win_alive"}),
+        );
+        // 放行闸门 → 无条件保留。
+        seed_gate(
+            &dir_a,
+            &common_a,
+            "push",
+            &serde_json::json!({"state": "open"}),
+        );
+        // 另一 common-dir（不属本次待清窗口采集集）的孤儿冻结闸门 →
+        // 收割必须覆盖全部通道目录，否则该仓同样永久 Blocked。
+        let dir_b = channel_dir(paths.root(), &common_b);
+        seed_gate(
+            &dir_b,
+            &common_b,
+            "build",
+            &serde_json::json!({"state": "draining", "window_id": "win_gone_b"}),
+        );
+
+        ReviewerResourcePurger::new(&paths)
+            .purge_for_attempts(&["attempt_own".to_string()])
+            .expect("purge");
+
+        assert!(
+            !dir_a.join("stage.json").exists(),
+            "持有窗口记录已不存在的 Frozen 闸门必须被收割（否则该通道永久 Blocked）"
+        );
+        assert!(
+            !dir_b.join("build.json").exists(),
+            "收割必须覆盖本次待清窗口未触及的 common-dir（重入现场）"
+        );
+        assert!(
+            dir_a.join("commit.json").exists(),
+            "存活窗口持有的 Frozen 闸门必须保留"
+        );
+        let preserved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir_a.join("commit.json")).unwrap()).unwrap();
+        assert_eq!(
+            preserved["state"]["window_id"],
+            serde_json::json!("win_alive")
+        );
+        assert!(
+            dir_a.join("push.json").exists(),
+            "Open 闸门不被任何窗口持有，必须无条件保留"
+        );
+        let open: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir_a.join("push.json")).unwrap()).unwrap();
+        assert_eq!(open["state"]["state"], serde_json::json!("open"));
     }
 }
