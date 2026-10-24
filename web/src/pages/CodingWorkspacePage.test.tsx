@@ -64,6 +64,12 @@ vi.mock("../hooks/useWorkspaceSessionObservers", () => ({
   useWorkspaceSessionObservers: vi.fn(),
 }));
 
+// UI-1：coding 页返回总览现在落到 /workbench 抽屉（overlay=plan-overview）；
+// AppShell（Issue 工作台）与本页断言无关，打桩防真实工作台挂载发请求。
+vi.mock("../app-shell", () => ({
+  AppShell: () => <div data-testid="workbench-page">Workbench</div>,
+}));
+
 vi.mock("../components/shared/MonacoViewer", () => ({
   MonacoViewer: ({
     value,
@@ -1378,7 +1384,7 @@ describe("P1-c A1 attention target navigation", () => {
     });
   });
 
-  it("builds the plan overview location for coding_plan targets", () => {
+  it("builds the plan overview drawer location for coding_plan targets", () => {
     expect(
       codingAttentionLocation(
         attentionItem({
@@ -1391,9 +1397,9 @@ describe("P1-c A1 attention target navigation", () => {
         }),
       ),
     ).toEqual({
-      to: "/workbench/projects/$projectId/issues/$issueId/coding-plans/$planId",
-      params: { projectId: "project_1", issueId: "issue_1", planId: "plan_1" },
-      search: {},
+      to: "/workbench",
+      params: {},
+      search: { overlay: "plan-overview", planId: "plan_1" },
     });
   });
 
@@ -1508,11 +1514,14 @@ describe("P1-c router integration", () => {
     await userEvent.click(screen.getByRole("button", { name: "返回" }));
 
     await waitFor(() => {
-      expect(history.location.pathname).toBe(
-        "/workbench/projects/project_0001/issues/issue_0001/coding-plans/work_item_plan_0001",
-      );
+      expect(history.location.pathname).toBe("/workbench");
     });
-    // getPlanCodingProgress 默认 mock 抛错——总览页错误面即“已回到总览”证据。
+    expect(history.location.search).toContain("overlay=plan-overview");
+    expect(history.location.search).toContain("planId=work_item_plan_0001");
+    // coding 页入口在导航前种入 plan 地址簿——抽屉开箱即解析；
+    // getPlanCodingProgress 默认 mock 抛错，总览错误面即「已回到总览」证据。
+    expect(await screen.findByTestId("plan-overview-drawer")).toBeInTheDocument();
     expect(await screen.findByTestId("plan-overview-error")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-workspace-page")).toBeNull();
   });
 });

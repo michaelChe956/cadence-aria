@@ -51,6 +51,12 @@ type ModalBehaviorOptions = {
   onClose: (() => void) | null;
   closeDisabled: boolean;
   containerRef: RefObject<HTMLElement | null>;
+  /**
+   * UI-1：默认 false（既有语义不变）——Esc 一律关闭本层。true 时仅当焦点
+   * 在本容器内才响应 Esc：用于与其它浮层并存的常驻层（/workbench 抽屉），
+   * 上层浮层持有焦点时把 Esc 留给它，避免一次 Esc 连关多层。
+   */
+  escOnlyWhenFocused?: boolean;
 };
 
 // 浮层行为内核（body 锁 / Esc / 焦点移入归还 / Tab 圈闭）：
@@ -61,6 +67,7 @@ export function useModalBehavior({
   onClose,
   closeDisabled,
   containerRef,
+  escOnlyWhenFocused = false,
 }: ModalBehaviorOptions) {
   const onCloseRef = useRef(onClose);
   const closeDisabledRef = useRef(closeDisabled);
@@ -85,6 +92,12 @@ export function useModalBehavior({
     // 焦点不在本容器内（上层又叠了弹窗）时不处理，避免劫持其键盘。
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        if (escOnlyWhenFocused) {
+          const scope = containerRef.current;
+          if (scope && !scope.contains(document.activeElement)) {
+            return;
+          }
+        }
         if (!closeDisabledRef.current) {
           onCloseRef.current?.();
         }

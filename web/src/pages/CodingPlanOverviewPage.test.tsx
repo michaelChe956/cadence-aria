@@ -1,7 +1,39 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
 import type { PlanCodingProgressDto } from "../api/types";
-import { CodingPlanOverviewPage } from "./CodingPlanOverviewPage";
+import { CodingPlanOverviewView } from "./CodingPlanOverviewPage";
+import {
+  CodingPlanOverviewDrawer,
+} from "./CodingPlanOverviewDrawer";
+import type { PlanOverviewOpenTarget } from "./CodingPlanOverviewPage";
+import { useWorkbenchOverlayDirectory } from "../state/workbench-overlay-store";
+
+// UI-1：抽屉内详情复用既有 CodingWorkspacePage——测试用轻桩替身（真实页
+// 由 CodingWorkspacePage.test.tsx 覆盖），只断言地址/焦点/回调接线。
+vi.mock("./CodingWorkspacePage", () => ({
+  CodingWorkspacePage: ({
+    address,
+    focus,
+    onBack,
+  }: {
+    address: { projectId: string; issueId: string; attemptId: string };
+    focus?: { gateId?: string; choiceId?: string };
+    onBack: () => void;
+  }) => (
+    <div
+      data-testid="coding-workspace-page-stub"
+      data-project-id={address.projectId}
+      data-issue-id={address.issueId}
+      data-attempt-id={address.attemptId}
+      data-gate-id={focus?.gateId ?? ""}
+    >
+      <button type="button" onClick={onBack}>
+        返回
+      </button>
+    </div>
+  ),
+}));
 
 // P1-b（REQ-MTG-12）：只读 plan 总览——列全 WI/仓库/unit 进度/attempt 状态/
 // 依赖/待办徽标；标题执行/确认 N/M；5 秒轮询见非当前仓更新；聚合确认一次 POST；
@@ -213,10 +245,10 @@ function renderOverview(
   onOpenAttempt = vi.fn(),
 ) {
   return render(
-    <CodingPlanOverviewPage
+    <CodingPlanOverviewView
       {...ADDRESS}
       onOpenAttempt={onOpenAttempt}
-      onBack={vi.fn()}
+      pollIntervalMs={5_000}
     />,
   );
 }
@@ -448,7 +480,7 @@ describe("CodingPlanOverviewPage read-only overview (P1-b/REQ-MTG-12)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<CodingPlanOverviewPage {...ADDRESS} onOpenAttempt={vi.fn()} />);
+    render(<CodingPlanOverviewView {...ADDRESS} onOpenAttempt={vi.fn()} />);
     expect(screen.getByTestId("plan-overview-loading")).toBeInTheDocument();
 
     const error = await screen.findByTestId("plan-overview-error");
@@ -530,5 +562,199 @@ describe("CodingPlanOverviewPage read-only overview (P1-b/REQ-MTG-12)", () => {
 
     await screen.findByTestId("plan-overview-units");
     expect(screen.queryByTestId("plan-final-confirm-button")).toBeNull();
+  });
+});
+
+// ── UI-1（owner 拍板）：总览抽屉化——总览 ↔ 单个 Attempt 详情切换 ──
+
+function DrawerHarness({
+  planId = ADDRESS.planId,
+  onOpenAttempt,
+  onBackToOverview,
+  onClose,
+}: {
+  planId?: string;
+  onOpenAttempt: (target: PlanOverviewOpenTarget) => void;
+  onBackToOverview: () => void;
+  onClose: () => void;
+}) {
+  const [attempt, setAttempt] = useState<PlanOverviewOpenTarget | null>(null);
+  return (
+    <CodingPlanOverviewDrawer
+      planId={planId}
+      attemptId={attempt?.attemptId}
+      workItemId={attempt?.workItemId}
+      gateId={attempt?.gateId}
+      choiceId={attempt?.choiceId}
+      onOpenAttempt={(target) => {
+        onOpenAttempt(target);
+        setAttempt(target);
+      }}
+      onBackToOverview={() => {
+        onBackToOverview();
+        setAttempt(null);
+      }}
+      onClose={onClose}
+    />
+  );
+}
+
+function renderDrawer(
+  handlers: Partial<{
+    onOpenAttempt: (target: PlanOverviewOpenTarget) => void;
+    onBackToOverview: () => void;
+    onClose: () => void;
+  }> = {},
+  planId?: string,
+) {
+  return render(
+    <DrawerHarness
+      planId={planId}
+      onOpenAttempt={handlers.onOpenAttempt ?? vi.fn()}
+      onBackToOverview={handlers.onBackToOverview ?? vi.fn()}
+      onClose={handlers.onClose ?? vi.fn()}
+    />,
+  );
+}
+
+describe("CodingPlanOverviewDrawer overview ↔ detail switching (UI-1)", () => {
+  beforeEach(() => {
+    useWorkbenchOverlayDirectory.getState().resetWorkbenchOverlayDirectory();
+    useWorkbenchOverlayDirectory
+      .getState()
+      .seedWorkbenchOverlayAddress(ADDRESS.planId, {
+        projectId: ADDRESS.projectId,
+        issueId: ADDRESS.issueId,
+      });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("renders the embedded overview inside the drawer and opens detail via a WI row", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(overviewDto()), { status: 200 })),
+    );
+
+    renderDrawer();
+
+    expect(screen.getByTestId("plan-overview-drawer")).toBeInTheDocument();
+    await screen.findByTestId("plan-overview-units");
+    // 归档勿遗漏：聚合确认（PlanCodingFinalConfirm）随总览一并进抽屉。
+    expect(screen.getByTestId("plan-overview-stats")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-workspace-page-stub")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("plan-overview-open-wi_registration"));
+
+    const detail = await screen.findByTestId("coding-workspace-page-stub");
+    expect(detail).toHaveAttribute("data-project-id", ADDRESS.projectId);
+    expect(detail).toHaveAttribute("data-issue-id", ADDRESS.issueId);
+    expect(detail).toHaveAttribute("data-attempt-id", "coding_attempt_web_0001");
+    // 禁止双挂载：任一时刻只有一个既有 Attempt 详情实例。
+    expect(screen.queryAllByTestId("coding-workspace-page-stub")).toHaveLength(1);
+  });
+
+  it("routes attention badges into the drawer detail with gate focus", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(overviewDto()), { status: 200 })),
+    );
+
+    renderDrawer();
+
+    await screen.findByTestId("plan-overview-units");
+    fireEvent.click(screen.getByTestId("plan-overview-attention-gate-busi-1"));
+
+    const detail = await screen.findByTestId("coding-workspace-page-stub");
+    expect(detail).toHaveAttribute("data-attempt-id", "coding_attempt_busi_0001");
+    expect(detail).toHaveAttribute("data-gate-id", "gate_busi_1");
+  });
+
+  it("returns to the overview with the scroll position restored", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(overviewDto()), { status: 200 })),
+    );
+
+    renderDrawer();
+
+    await screen.findByTestId("plan-overview-units");
+    const overviewBody = screen.getByTestId("plan-overview-drawer-overview");
+    overviewBody.scrollTop = 240;
+    fireEvent.scroll(overviewBody);
+
+    fireEvent.click(screen.getByTestId("plan-overview-open-wi_registration"));
+    await screen.findByTestId("coding-workspace-page-stub");
+    // 总览保持挂载但隐藏（数据与滚动容器不重建）。
+    expect(screen.getByTestId("plan-overview-drawer-overview").className).toContain(
+      "hidden",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+
+    expect(screen.queryByTestId("coding-workspace-page-stub")).toBeNull();
+    expect(screen.getByTestId("plan-overview-units")).toBeVisible();
+    expect(screen.getByTestId("plan-overview-drawer-overview").scrollTop).toBe(240);
+  });
+
+  it("stops the 5s polling as soon as the drawer closes", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify(overviewDto()), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const view = renderDrawer();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    view.unmount();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses the overview polling while a detail is mounted", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify(overviewDto()), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderDrawer();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId("plan-overview-open-wi_registration"));
+    // fake timers 下不用 findBy（其轮询依赖真实定时器）——fireEvent 已在
+    // act 内同步完成挂载。
+    expect(
+      screen.getByTestId("coding-workspace-page-stub"),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a placeholder while the plan address is unresolved", () => {
+    renderDrawer(undefined, "plan_without_seed");
+
+    expect(
+      screen.getByTestId("plan-overview-drawer-unresolved"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("plan-overview-view")).toBeNull();
   });
 });

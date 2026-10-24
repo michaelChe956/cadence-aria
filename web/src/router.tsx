@@ -6,20 +6,28 @@ import {
   createRoute,
   createRouter,
   useNavigate,
+  useLocation,
   useParams,
   useSearch,
   type RouterHistory,
 } from "@tanstack/react-router";
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { AppShell } from "./app-shell";
 import { ProviderAvailabilityGuard } from "./components/providers/ProviderAvailabilityGuard";
 import { CockpitShell } from "./components/cockpit/CockpitShell";
 import { ChatWorkspacePage } from "./pages/ChatWorkspacePage";
 import { CodingWorkspacePage } from "./pages/CodingWorkspacePage";
-import { CodingPlanOverviewPage } from "./pages/CodingPlanOverviewPage";
+import { WorkbenchOverlayHost } from "./components/lifecycle/WorkbenchOverlayHost";
 import type { CodingAttentionItemDto } from "./api/types";
 import { ImageCreatePage } from "./pages/ImageCreatePage";
 import { LegacyCodingWorkspaceRedirect } from "./pages/LegacyCodingWorkspaceRedirect";
+import { seedWorkbenchOverlayAddress } from "./state/workbench-overlay-store";
+import {
+  mergeWorkbenchSearch,
+  parseWorkbenchSearch,
+  searchParamString,
+  type WorkbenchSearch,
+} from "./workbench-search";
 
 function RootRouteComponent() {
   const navigate = useNavigate();
@@ -63,49 +71,66 @@ const indexRoute = createRoute({
   component: () => <Navigate to="/workbench" />,
 });
 
-type WorkbenchSearch = {
-  focus?: string;
-};
 
 function WorkbenchRouteComponent() {
   const search = useSearch({ strict: false }) as WorkbenchSearch;
   const navigate = useNavigate();
+  // UI-1 冻结契约：/workbench 的任何 search 写入都必须合并现有 search
+  // （mergeWorkbenchSearch）。此前 syncDrawerFocus 只写 {focus} 会覆盖掉
+  // overlay 抽屉定位字段——本回调是必改点。
   const syncDrawerFocus = useCallback(
     (entityKey: string | null) => {
       void navigate({
         to: "/workbench",
-        search: { focus: entityKey ?? undefined },
+        search: (previous: Partial<WorkbenchSearch>) =>
+          mergeWorkbenchSearch(previous, { focus: entityKey ?? undefined }),
         replace: true,
       });
     },
     [navigate],
   );
+  // overlay 抽屉（plan-overview/inbox）定位写入：同路由合并，可前进后退。
+  const updateOverlaySearch = useCallback(
+    (patch: Partial<WorkbenchSearch>) => {
+      void navigate({
+        to: "/workbench",
+        search: (previous: Partial<WorkbenchSearch>) =>
+          mergeWorkbenchSearch(previous, patch),
+      });
+    },
+    [navigate],
+  );
   return (
-    <AppShell
-      focusEntityKey={search.focus ?? null}
-      onDrawerFocusChange={syncDrawerFocus}
-      onOpenWorkspace={(sessionId) =>
-        void navigate({
-          to: "/workbench/workspace/$sessionId",
-          params: { sessionId },
-        })
-      }
-      onOpenCodingWorkspace={({ projectId, issueId, attemptId }) =>
-        void navigate({
-          to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
-          params: { projectId, issueId, attemptId },
-        })
-      }
-    />
+    <>
+      <AppShell
+        focusEntityKey={search.focus ?? null}
+        onDrawerFocusChange={syncDrawerFocus}
+        onOpenWorkspace={(sessionId) =>
+          void navigate({
+            to: "/workbench/workspace/$sessionId",
+            params: { sessionId },
+          })
+        }
+        onOpenCodingWorkspace={({ projectId, issueId, attemptId }) =>
+          void navigate({
+            to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+            params: { projectId, issueId, attemptId },
+          })
+        }
+      />
+      <WorkbenchOverlayHost
+        search={search}
+        onSearchChange={updateOverlaySearch}
+      />
+    </>
   );
 }
 
 const workbenchRoute = createRoute({
   getParentRoute: () => guardedWorkflowRoute,
   path: "/workbench",
-  validateSearch: (search: Record<string, unknown>): WorkbenchSearch => ({
-    focus: typeof search.focus === "string" ? search.focus : undefined,
-  }),
+  validateSearch: (search: Record<string, unknown>): WorkbenchSearch =>
+    parseWorkbenchSearch(search),
   component: WorkbenchRouteComponent,
 });
 
@@ -144,11 +169,17 @@ function CodingWorkspaceRouteComponent() {
   const navigate = useNavigate();
   // P1-c：planId 存在即「从总览下钻」上下文——返回回总览，否则回 workbench。
   const planId = search.planId;
-  const openPlanOverview = (targetPlanId: string) =>
+  // UI-1：总览入口改开 /workbench 抽屉（overlay=plan-overview），返回按钮
+  // 的 planId 上下文同样落到抽屉。跨路由进入不做 functional search 合并
+  // （from 路由同名字段会串味），显式全新 search；导航前种入 plan 地址簿，
+  // 抽屉开箱即解析。
+  const openPlanOverview = (targetPlanId: string) => {
+    seedWorkbenchOverlayAddress(targetPlanId, { projectId, issueId });
     void navigate({
-      to: "/workbench/projects/$projectId/issues/$issueId/coding-plans/$planId",
-      params: { projectId, issueId, planId: targetPlanId },
+      to: "/workbench",
+      search: { overlay: "plan-overview", planId: targetPlanId },
     });
+  };
   return (
     <CodingWorkspacePage
       address={{ projectId, issueId, attemptId }}
@@ -182,45 +213,45 @@ const codingWorkspaceRoute = createRoute({
   component: CodingWorkspaceRouteComponent,
 });
 
-function searchParamString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
 
-function CodingPlanOverviewRouteComponent() {
+// UI-1（owner 拍板）：旧整页总览路由仅做 replace 重定向到规范化 workbench
+// 地址并打开抽屉（移除整页渲染）；plan 地址簿先种入——刷新/分享旧链接同样
+// 落到抽屉形态。
+function CodingPlanOverviewRedirectRouteComponent() {
   const { projectId, issueId, planId } = useParams({ strict: false });
   const navigate = useNavigate();
+  useEffect(() => {
+    if (!projectId || !issueId || !planId) {
+      return;
+    }
+    seedWorkbenchOverlayAddress(planId, { projectId, issueId });
+    void navigate({
+      to: "/workbench",
+      search: { overlay: "plan-overview", planId },
+      replace: true,
+    });
+  }, [navigate, planId, projectId, issueId]);
   return (
-    <CodingPlanOverviewPage
-      projectId={projectId}
-      issueId={issueId}
-      planId={planId}
-      onBack={() => void navigate({ to: "/workbench" })}
-      onOpenAttempt={(target) =>
-        void navigate({
-          to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
-          params: { projectId, issueId, attemptId: target.attemptId },
-          search: {
-            planId,
-            workItemId: target.workItemId,
-            gateId: target.gateId,
-            choiceId: target.choiceId,
-          },
-        })
-      }
-    />
+    <div
+      data-testid="plan-overview-redirect"
+      className="px-4 py-3 text-xs text-[var(--aria-ink-muted)]"
+    >
+      正在跳转到 Coding Plan 总览…
+    </div>
   );
 }
 
 const codingPlanOverviewRoute = createRoute({
   getParentRoute: () => guardedWorkflowRoute,
   path: "/workbench/projects/$projectId/issues/$issueId/coding-plans/$planId",
-  component: CodingPlanOverviewRouteComponent,
+  component: CodingPlanOverviewRedirectRouteComponent,
 });
 
-// ── P1-c（REQ-MTG-12）：plan 总览路由与 A1 待办 target 统一导航 ──
-// 契约 A1：attempt 走既有 coding 路由、plan 走 coding-plans/$planId、plan
-// 问题走 workspace/$sessionId；gateId/choiceId 焦点与 planId（返回总览上下文）
-// 经 search 传递。块 4（P4-e）只回调本 helper，不重复实现导航。
+// ── P1-c（REQ-MTG-12）+ UI-1：A1 待办 target 统一导航 ──
+// 契约 A1：attempt 走既有 coding 路由、plan 走 /workbench 总览抽屉
+// （overlay=plan-overview）、plan 问题走 workspace/$sessionId；
+// gateId/choiceId 焦点与 planId（返回总览上下文）经 search 传递。
+// 块 4（P4-e）只回调本 helper，不重复实现导航。
 export type CodingWorkspaceFocusSearch = {
   planId?: string;
   workItemId?: string;
@@ -268,14 +299,11 @@ export function codingAttentionLocation(
     };
   }
   if (item.target.type === "coding_plan" && item.target.plan_id) {
+    // UI-1：plan 目标改开 /workbench 总览抽屉（与 Coding 页总览入口同一抽屉）。
     return {
-      to: "/workbench/projects/$projectId/issues/$issueId/coding-plans/$planId",
-      params: {
-        projectId: item.project_id,
-        issueId: item.issue_id,
-        planId: item.target.plan_id,
-      },
-      search: {},
+      to: "/workbench",
+      params: {},
+      search: { overlay: "plan-overview", planId: item.target.plan_id },
     };
   }
   if (item.target.type === "workspace_session" && item.target.session_id) {
@@ -305,13 +333,40 @@ export function openCodingAttentionLocation(
 // P4-e（块 4）消费入口：通知/收件箱「去处理」经此统一导航，不各自拼地址。
 export function useCodingAttentionTargetOpener() {
   const navigate = useNavigate();
+  const location = useLocation();
   return useCallback((item: CodingAttentionLocationItem) => {
-    openCodingAttentionLocation(
-      (location) =>
-        void (navigate as unknown as LooseNavigate)({ ...location }),
-      item,
-    );
-  }, [navigate]);
+    openCodingAttentionLocation((targetLocation) => {
+      if (targetLocation.to === "/workbench") {
+        // UI-1：plan 目标开抽屉前种入地址簿（item 持有完整归一地址）。
+        if (item.target.type === "coding_plan" && item.target.plan_id) {
+          seedWorkbenchOverlayAddress(item.target.plan_id, {
+            projectId: item.project_id,
+            issueId: item.issue_id,
+          });
+        }
+        const overlaySearch = targetLocation.search as Partial<WorkbenchSearch>;
+        // 已在 /workbench 上时合并现有 search（保留 focus/抽屉定位）；跨路由
+        // 进入时显式全新 search，避免 from 路由同名字段串味。
+        void (
+          navigate as unknown as (location: {
+            to: string;
+            params: Record<string, string>;
+            search: unknown;
+          }) => void
+        )(
+          location.pathname === "/workbench"
+            ? {
+                ...targetLocation,
+                search: (previous: Partial<WorkbenchSearch>) =>
+                  mergeWorkbenchSearch(previous, overlaySearch),
+              }
+            : { ...targetLocation, search: overlaySearch },
+        );
+        return;
+      }
+      void (navigate as unknown as LooseNavigate)({ ...targetLocation });
+    }, item);
+  }, [navigate, location.pathname]);
 }
 
 function LegacyCodingWorkspaceRouteComponent() {

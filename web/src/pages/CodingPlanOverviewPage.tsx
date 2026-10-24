@@ -1,5 +1,4 @@
 import { useMemo } from "react";
-import { ArrowLeft, ClipboardList } from "lucide-react";
 import type { CodingAttentionItemDto } from "../api/types";
 import { usePlanCodingProgress } from "../hooks/usePlanCodingProgress";
 import {
@@ -10,13 +9,18 @@ import { PlanCodingFinalConfirm } from "./PlanCodingFinalConfirm";
 import { toPlanCodingProgressView } from "./plan-coding-progress";
 
 /**
- * P1-b（REQ-MTG-12）：只读 plan 总览（owner 选 A：列表+单详情切换）——按
- * order_index 列出全部 WI（逻辑 ID、summary 缺省回落 ID、仓库、unit 进度、
- * attempt 状态、依赖/等待原因、待办徽标、详情链接），标题显示执行/确认 N/M；
- * 总览可见时 5 秒轮询（非当前仓更新无需手动刷新）；除 plan 聚合确认外不提供
- * 任何业务写操作。单详情切换由调用方导航（P1-c 接线）：点 WI 行/徽标只回调
- * onOpenAttempt——同一时刻只进一个 attempt 详情，返回后仍在总览；详情按
- * attempt 地址走既有 REST/WS 能力，本页不自建第二套详情。
+ * P1-b（REQ-MTG-12）：只读 plan 总览——按 order_index 列出全部 WI（逻辑 ID、
+ * summary 缺省回落 ID、仓库、unit 进度、attempt 状态、依赖/等待原因、待办
+ * 徽标、详情链接），标题显示执行/确认 N/M；总览可见时 5 秒轮询（非当前仓
+ * 更新无需手动刷新）；除 plan 聚合确认外不提供任何业务写操作。单详情切换由
+ * 调用方导航（P1-c 接线）：点 WI 行/徽标只回调 onOpenAttempt——同一时刻只进
+ * 一个 attempt 详情，返回后仍在总览；详情按 attempt 地址走既有 REST/WS 能力，
+ * 本视图不自建第二套详情。
+ *
+ * UI-1（owner 拍板：总览弹窗化）：本组件从整页拆为可嵌入视图，由
+ * CodingPlanOverviewDrawer（Issue 工作台为背景的宽抽屉）承载；页面级
+ * 头部/返回按钮移除，由抽屉壳提供。pollIntervalMs 由宿主按可见性控制：
+ * 抽屉内详情态暂停轮询、抽屉关闭即卸载停止轮询。
  */
 export type PlanOverviewOpenTarget = {
   attemptId: string;
@@ -25,24 +29,27 @@ export type PlanOverviewOpenTarget = {
   choiceId?: string;
 };
 
-export function CodingPlanOverviewPage({
+export function CodingPlanOverviewView({
   projectId,
   issueId,
   planId,
-  onBack,
   onOpenAttempt,
+  pollIntervalMs,
 }: {
   projectId: string;
   issueId: string;
   planId: string;
-  onBack?: () => void;
   onOpenAttempt: (target: PlanOverviewOpenTarget) => void;
+  /** >0 时按间隔轮询；undefined/缺省关闭轮询（保留已取数据）。注意不能给
+   * 默认值——抽屉详情态显式传 undefined 必须能停轮询（默认值会吃掉
+   * undefined）。 */
+  pollIntervalMs?: number;
 }) {
   const { data, loading, error, refetch } = usePlanCodingProgress({
     projectId,
     issueId,
     planId,
-    pollIntervalMs: 5_000,
+    pollIntervalMs,
   });
   const view = useMemo(() => (data ? toPlanCodingProgressView(data) : null), [
     data,
@@ -74,28 +81,9 @@ export function CodingPlanOverviewPage({
 
   return (
     <div
-      data-testid="plan-overview-page"
-      className="flex min-h-0 flex-1 flex-col bg-[var(--aria-panel)]"
+      data-testid="plan-overview-view"
+      className="flex min-h-0 flex-1 flex-col"
     >
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-[var(--aria-line)] px-4 text-xs">
-        {onBack ? (
-          <button
-            type="button"
-            aria-label="返回"
-            onClick={onBack}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--aria-ink-muted)] transition-colors duration-200 hover:bg-[var(--aria-panel-muted)]"
-          >
-            <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-          </button>
-        ) : null}
-        <ClipboardList className="h-4 w-4" aria-hidden="true" />
-        <span className="font-semibold text-[var(--aria-ink)]">
-          Coding Plan 总览
-        </span>
-        <span className="min-w-0 truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
-          {planId}
-        </span>
-      </header>
       {loading && !view ? (
         <div
           data-testid="plan-overview-loading"
@@ -125,7 +113,7 @@ export function CodingPlanOverviewPage({
         <>
           <section
             data-testid="plan-overview-stats"
-            className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--aria-line)] px-4 py-2 text-xs"
+            className="flex min-w-0 shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--aria-line)] px-4 py-2 text-xs"
           >
             <div className="font-semibold text-[var(--aria-ink)]">
               执行 {view.completedUnitCount}/{view.units.length}
@@ -151,7 +139,7 @@ export function CodingPlanOverviewPage({
           </section>
           <ul
             data-testid="plan-overview-units"
-            className="grid min-h-0 flex-1 content-start gap-1 overflow-auto px-4 py-2"
+            className="grid min-h-0 flex-1 content-start gap-1 px-4 py-2"
           >
             {orderedUnits.map((unit) => {
               const badges = badgesByAttempt.get(unit.attemptId) ?? [];

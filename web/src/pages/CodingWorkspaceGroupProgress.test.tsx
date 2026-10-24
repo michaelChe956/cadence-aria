@@ -851,7 +851,10 @@ describe("p1-b: overview entry and aggregate confirm wiring", () => {
     await screen.findByTestId("plan-coding-progress");
     const button = screen.getByTestId("plan-coding-open-overview");
     expect(button).toHaveTextContent("查看全部 WI");
+    // UI-1：总览入口开同一抽屉——组件层契约即回调触发（router 侧接线由
+    // router.test/CodingWorkspacePage.test 覆盖）。
     fireEvent.click(button);
+    expect(onOpenPlanOverview).toHaveBeenCalledTimes(1);
   });
 
   it("renders the 查看全部 WI entry in the local fallback branch too", () => {

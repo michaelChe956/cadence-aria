@@ -57,6 +57,7 @@ import {
   useLifecycleWorkbenchStore,
   type LifecycleCard as LifecycleCardData,
 } from "../../state/lifecycle-workbench-store";
+import { useWorkbenchOverlayDirectory } from "../../state/workbench-overlay-store";
 import { useLifecycleInvalidationRefresh } from "./useLifecycleInvalidationRefresh";
 import { WorkbenchSurface } from "../shell/WorkbenchSurface";
 import {
@@ -223,6 +224,15 @@ export function IssueLifecycleWorkbench({
   );
   const openDrawer = useLifecycleWorkbenchStore((state) => state.openDrawer);
   const closeDrawer = useLifecycleWorkbenchStore((state) => state.closeDrawer);
+  // UI-1：把已加载 lifecycle 目录同步进 overlay 地址簿——/workbench 抽屉按
+  // planId/attemptId 解析 (projectId, issueId)；入口种子优先，此处同值覆盖
+  // 不改变语义（见 workbench-overlay-store 头注释）。
+  const syncWorkbenchOverlayDirectory = useWorkbenchOverlayDirectory(
+    (state) => state.syncWorkbenchOverlayDirectory,
+  );
+  useEffect(() => {
+    syncWorkbenchOverlayDirectory(lifecycles);
+  }, [lifecycles, syncWorkbenchOverlayDirectory]);
 
   useEffect(() => {
     void refresh();
