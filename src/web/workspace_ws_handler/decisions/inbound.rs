@@ -191,7 +191,13 @@ async fn handle_workspace_inbound_message_inner(
                 let err = WsOutMessage::Error { message: e };
                 let _ = send_json_outbound(&outbound_tx, &err).await;
             } else {
-                let state_msg = engine.build_session_state();
+                let mut state_msg = engine.build_session_state();
+                // 对外出口统一以 durable enrollment 覆盖 automation 归属
+                //（真实链 2026-10-24：裸帧携带引擎缺省 client/off 会让
+                // 前端 automationManaged 误判、重现接管死路）。
+                run_context
+                    .manager
+                    .project_automation_ownership(&mut state_msg);
                 let _ = send_json_outbound(&outbound_tx, &state_msg).await;
             }
         }
@@ -225,10 +231,16 @@ async fn handle_workspace_inbound_message_inner(
                     let _ = send_json_outbound(&outbound_tx, &err).await;
                     return;
                 }
-                let state_msg = {
+                let mut state_msg = {
                     let engine = engine.lock().await;
                     engine.build_session_state()
                 };
+                // 对外出口统一以 durable enrollment 覆盖 automation 归属
+                //（裸帧携带引擎缺省 client/off 会让前端 automationManaged
+                // 误判、重现接管死路）。
+                run_context
+                    .manager
+                    .project_automation_ownership(&mut state_msg);
                 let _ = send_json_outbound(&outbound_tx, &state_msg).await;
             }
         }
@@ -468,11 +480,20 @@ async fn handle_workspace_inbound_message_inner(
             } else {
                 let engine_for_hello = engine.clone();
                 let outbound_for_hello = outbound_tx.clone();
+                // 无 cursor Hello 的全量基线帧同样过 durable 归属投影——
+                //（真实链 2026-10-24，workspace_session_auto_261ab5db 现场）
+                // 此前裸发 `engine.build_session_state()`（automation 为引擎
+                // 缺省 client/off）且晚于 socket 初帧到达，观察/驾驶连接的
+                // 前端 automationManaged 被“伪 client”覆盖 → 精确绑定
+                // enabled enrollment 的 stopped_needs_human 收件箱误现
+                // 「接管」按钮，服务端 takeover 拒 409 形成死路。
+                let manager_for_hello = run_context.manager.clone();
                 tokio::spawn(async move {
-                    let state_msg = {
+                    let mut state_msg = {
                         let engine = engine_for_hello.lock().await;
                         engine.build_session_state()
                     };
+                    manager_for_hello.project_automation_ownership(&mut state_msg);
                     let _ = send_json_outbound(&outbound_for_hello, &state_msg).await;
                 });
             }
@@ -719,6 +740,7 @@ async fn handle_workspace_inbound_message_inner(
             handle_plan_amendment_confirmation_from_handler(
                 app_state.clone(),
                 engine.clone(),
+                run_context.manager.clone(),
                 outbound_tx.clone(),
                 amendment_id,
             )
@@ -730,6 +752,7 @@ async fn handle_workspace_inbound_message_inner(
         } => {
             handle_plan_amendment_cancel_from_handler(
                 engine.clone(),
+                run_context.manager.clone(),
                 outbound_tx.clone(),
                 amendment_id,
                 reason,

@@ -1146,3 +1146,181 @@ fn build_work_item_plan_generate_request_includes_validator_findings_as_revision
     assert!(feedback.contains("write_scope_required"));
     assert!(feedback.contains("work item must have at least one exclusive_write_scope"));
 }
+
+#[tokio::test]
+async fn hello_without_cursor_baseline_keeps_durable_automation_ownership() {
+    // 真实链 2026-10-24（workspace_session_auto_261ab5db 现场）：enabled
+    // enrollment 精确绑定的 stopped_needs_human 会话，驾驶舱观察/驾驶连接
+    // 无 cursor Hello 会收到一条未经 `project_automation_ownership` 覆盖的
+    // `engine.build_session_state()` 基线帧——automation 落引擎缺省
+    // client/off（伪 client），前端 automationManaged 判 false、收件箱
+    // 呈现「接管/确认接管」；服务端 takeover 却按 durable 精确绑定拒 409
+    // `workspace_session_takeover_not_allowed`，形成「要人工接管又不许
+    // 接管」死路。契约（P0 1.2 / manager `project_automation_ownership`
+    // 文档）要求对外 SessionState 帧一律以 durable enrollment 覆盖归属——
+    // 本测试钉死该出口：Hello 无 cursor 基线帧必须携带 server/enabled。
+    use crate::product::issue_automation_store::IssueAutomationStore;
+    use crate::product::json_store::write_json;
+    use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, WorkItemPlanSessionOptions};
+    use crate::product::models::IssueWorkItemPlanOptions;
+    use crate::product::models::WorkspaceSessionStatus;
+    use crate::product::models::automation::{
+        EnrollmentOptions, EnrollmentSource, EnrollmentWriteCommand, PlanApprovalPolicy,
+    };
+    use crate::product::work_item_plan_policy::{HumanGateSnapshot, HumanReason, RunPolicy};
+
+    let inner = crate::web::handlers::automation_enrollment_test_support::seed_fixture(1, true);
+    let root_path = inner._root.path().to_path_buf();
+    let app_paths = inner.paths.clone();
+    let lifecycle = inner.lifecycle.clone();
+    const PROJECT: &str = "project_0001";
+    const ISSUE: &str = "issue_0001";
+    let store = IssueAutomationStore::new(app_paths.clone());
+
+    store
+        .compare_and_set(
+            PROJECT,
+            ISSUE,
+            None,
+            EnrollmentWriteCommand::Enable {
+                command_id: None,
+                selection_key: "hello-baseline-ownership".to_string(),
+                source: EnrollmentSource {
+                    stories: Vec::new(),
+                    designs: Vec::new(),
+                },
+                options: EnrollmentOptions {
+                    author_provider: ProviderName::Fake,
+                    reviewer_provider: ProviderName::Fake,
+                    review_rounds: 0,
+                    superpowers_enabled: false,
+                    openspec_enabled: false,
+                    plan_approval: PlanApprovalPolicy::Auto,
+                    plan_options: IssueWorkItemPlanOptions {
+                        include_integration_tests: false,
+                        include_e2e_tests: false,
+                        force_frontend_backend_split: false,
+                        require_execution_plan_confirm: false,
+                    },
+                },
+                target: crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                    repository_id: "repo-1".to_string(),
+                },
+            },
+        )
+        .expect("enable enrollment");
+
+    let mut record = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: PROJECT.to_string(),
+            issue_id: ISSUE.to_string(),
+            entity_id: "plan_bound_hello".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: None,
+            review_rounds: 0,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                run_policy: RunPolicy::AutoIfValid,
+                rollout_snapshot: false,
+            }),
+        })
+        .expect("create session");
+    record.status = WorkspaceSessionStatus::StoppedNeedsHuman;
+    record.single_candidate_phase = Some(crate::product::models::SingleCandidatePhase::Approval);
+    record.human_gate_snapshot = Some(HumanGateSnapshot {
+        candidate_recovery: None,
+        findings: Vec::new(),
+        repeated_fingerprints: Vec::new(),
+        attempts_used: 0,
+        manual_repairs_remaining: 1,
+        trigger: HumanReason::NativeHumanRequired,
+        resumable: true,
+        accepted_feedback_turns: Some(0),
+    });
+    write_json(
+        &app_paths
+            .issue_lifecycle_root(PROJECT, ISSUE)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist stopped record");
+    store
+        .bind_plan(PROJECT, ISSUE, 1, "plan_bound_hello", &record.id)
+        .expect("bind managed plan");
+
+    let checkpoint_store = Arc::new(CheckpointStore::new(root_path.join("checkpoints")));
+    let (engine_tx, _engine_rx) = mpsc::channel::<EngineEvent>(64);
+    let session = WorkspaceSession::from_record(record.clone());
+    let engine = Arc::new(Mutex::new(WorkspaceEngine::new_persistent(
+        checkpoint_store,
+        lifecycle.clone(),
+        engine_tx,
+        session,
+    )));
+    let run_context = ProviderRunContext::test_fixture(
+        Arc::new(ProviderRegistry::new()),
+        engine.clone(),
+        WorkspaceRunRegistry::default(),
+        record.id.clone(),
+        app_paths.clone(),
+        record.clone(),
+    );
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundControl>(64);
+    let inbound_context = WorkspaceInboundContext {
+        app_state: WebAppState::new(
+            root_path.clone(),
+            crate::web::runtime::WebRuntime::new_fake(root_path.clone()),
+        ),
+        engine,
+        run_context,
+        outbound_tx,
+        session_id: record.id.clone(),
+    };
+
+    handle_workspace_inbound_message(
+        inbound_context,
+        WsInMessage::Hello {
+            session_id: record.id.clone(),
+            last_seen_node_id: None,
+            role: Some(crate::web::workspace_ws_types::HelloRole::Observer),
+            after_event_seq: None,
+        },
+    )
+    .await;
+
+    let mut saw_session_state = false;
+    for _ in 0..8 {
+        let Ok(Some(outbound)) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            outbound_rx.recv(),
+        )
+        .await
+        else {
+            break;
+        };
+        let OutboundControl::Text(json) = outbound else {
+            continue;
+        };
+        let frame: serde_json::Value = serde_json::from_str(&json).expect("frame json");
+        if frame["type"] != "session_state" {
+            continue;
+        }
+        saw_session_state = true;
+        assert_eq!(
+            frame["automation"]["owner"], "server",
+            "hello baseline must project durable ownership: {frame}"
+        );
+        assert_eq!(
+            frame["automation"]["enabled"], true,
+            "hello baseline must project durable ownership: {frame}"
+        );
+    }
+    assert!(
+        saw_session_state,
+        "hello without cursor must send a session_state baseline"
+    );
+}

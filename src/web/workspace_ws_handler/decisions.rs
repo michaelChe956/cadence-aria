@@ -89,6 +89,7 @@ pub(crate) fn confirmation_trust_waiting_projection(
 pub(crate) async fn handle_plan_amendment_confirmation_from_handler(
     app_state: WebAppState,
     engine: Arc<Mutex<WorkspaceEngine>>,
+    manager: Arc<crate::web::workspace_session::WorkspaceSessionManager>,
     outbound_tx: mpsc::Sender<OutboundControl>,
     amendment_id: String,
 ) {
@@ -121,7 +122,11 @@ pub(crate) async fn handle_plan_amendment_confirmation_from_handler(
                 let _ = send_json_outbound(&outbound_tx, &message).await;
                 return;
             }
-            let state = engine.lock().await.build_session_state();
+            let mut state = engine.lock().await.build_session_state();
+            // 对外出口统一以 durable enrollment 覆盖 automation 归属
+            //（裸帧携带引擎缺省 client/off 会让前端 automationManaged
+            // 误判、重现接管死路，见真实链 2026-10-24）。
+            manager.project_automation_ownership(&mut state);
             let _ = send_json_outbound(&outbound_tx, &state).await;
         }
         Ok(None) => {
@@ -145,6 +150,7 @@ pub(crate) async fn handle_plan_amendment_confirmation_from_handler(
 
 pub(crate) async fn handle_plan_amendment_cancel_from_handler(
     engine: Arc<Mutex<WorkspaceEngine>>,
+    manager: Arc<crate::web::workspace_session::WorkspaceSessionManager>,
     outbound_tx: mpsc::Sender<OutboundControl>,
     amendment_id: String,
     reason: Option<String>,
@@ -155,7 +161,11 @@ pub(crate) async fn handle_plan_amendment_cancel_from_handler(
     };
     match result {
         Ok(()) => {
-            let state = engine.lock().await.build_session_state();
+            let mut state = engine.lock().await.build_session_state();
+            // 对外出口统一以 durable enrollment 覆盖 automation 归属
+            //（裸帧携带引擎缺省 client/off 会让前端 automationManaged
+            // 误判、重现接管死路，见真实链 2026-10-24）。
+            manager.project_automation_ownership(&mut state);
             let _ = send_json_outbound(&outbound_tx, &state).await;
         }
         Err(error) => {
