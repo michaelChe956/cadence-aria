@@ -1,4 +1,4 @@
-import { Plus, RefreshCw } from "lucide-react";
+import { CircleHelp, Plus, RefreshCw } from "lucide-react";
 import { useCockpitSettingsSlotRef } from "../cockpit/CockpitShell";
 
 export function IssueLifecycleWorkbenchHeader({
@@ -8,6 +8,7 @@ export function IssueLifecycleWorkbenchHeader({
   onShowAll,
   onRefresh,
   onCreateIssue,
+  onReopenOnboarding,
 }: {
   projectName?: string;
   focusedIssueId: string | null;
@@ -15,6 +16,8 @@ export function IssueLifecycleWorkbenchHeader({
   onShowAll: () => void;
   onRefresh: () => void;
   onCreateIssue: () => void;
+  /** UI-4：重开操作引导；未接线（如独立测试宿主）时不渲染该入口。 */
+  onReopenOnboarding?: () => void;
 }) {
   const settingsSlotRef = useCockpitSettingsSlotRef();
 
@@ -56,6 +59,18 @@ export function IssueLifecycleWorkbenchHeader({
           <Plus className="mr-1 h-4 w-4" />
           新建 Issue
         </button>
+        {onReopenOnboarding ? (
+          <button
+            type="button"
+            data-testid="onboarding-help-trigger"
+            aria-label="重新打开操作引导"
+            title="重新打开操作引导"
+            onClick={onReopenOnboarding}
+            className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-md border border-[var(--aria-line)] text-[var(--aria-ink-muted)] transition-colors hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"
+          >
+            <CircleHelp aria-hidden="true" className="h-4 w-4" />
+          </button>
+        ) : null}
         <div
           data-testid="cockpit-settings-slot"
           ref={settingsSlotRef}

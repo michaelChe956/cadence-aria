@@ -56,6 +56,35 @@ describe("onboarding 锚点契约（宿主组件渲染）", () => {
     expect(screen.getByTestId("onboarding-anchor-issue-create")).toHaveTextContent("新建 Issue");
   });
 
+  it("工作台头部右侧设置入口旁暴露引导重开入口（44×44 命中区）", async () => {
+    const user = userEvent.setup();
+    const onReopenOnboarding = vi.fn();
+    render(
+      <IssueLifecycleWorkbenchHeader
+        projectName="演示项目"
+        focusedIssueId={null}
+        canCreateIssue
+        onShowAll={() => {}}
+        onRefresh={() => {}}
+        onCreateIssue={() => {}}
+        onReopenOnboarding={onReopenOnboarding}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "重新打开操作引导" });
+    expect(trigger).toHaveAttribute("data-testid", "onboarding-help-trigger");
+    // tooltip 补足可发现性（原生 title 先例）。
+    expect(trigger).toHaveAttribute("title", "重新打开操作引导");
+    // 44×44 命中区（h-11/w-11 = 44px），非 fixed 定位。
+    expect(trigger.className).toContain("h-11");
+    expect(trigger.className).toContain("w-11");
+    expect(trigger.className).not.toContain("fixed");
+    // 位于右上角设置入口旁：与设置槽同一操作容器相邻。
+    const settingsSlot = screen.getByTestId("cockpit-settings-slot");
+    expect(trigger.parentElement).toBe(settingsSlot.parentElement);
+    await user.click(trigger);
+    expect(onReopenOnboarding).toHaveBeenCalledTimes(1);
+  });
+
   it("阶段步进器暴露三个阶段入口锚点", () => {
     render(<StageStepper stages={stageFixtures} activeStage="story" onSelect={() => {}} />);
     expect(screen.getByTestId("onboarding-anchor-stage-story")).toBeInTheDocument();

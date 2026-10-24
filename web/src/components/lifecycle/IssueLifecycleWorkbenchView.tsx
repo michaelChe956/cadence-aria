@@ -45,7 +45,7 @@ export type IssueLifecycleWorkbenchViewProps = {
   onSelectProject: (id: string) => void; onCreateProject: () => void; onAddCodebase: () => void;
   onDeleteProject: (id: string) => void; onDeleteRepository: (id: string) => void;
   onDeleteLogicalCodebase: (id: string) => void; onShowAll: () => void; onRefresh: () => void;
-  onCreateIssue: () => void; onToggleLcSummary: () => void;
+  onCreateIssue: () => void; onToggleLcSummary: () => void; onReopenOnboarding?: () => void;
   onSelectLogicalCodebase: (id: string) => void; onOpenRegistration: () => void;
   onStartAggregateInitialization: () => void; onCancelAggregateInitialization: () => void;
   onRebuildAggregateIndex: () => void; onPublishFull: () => void; onPublishIncremental: () => void;
@@ -87,7 +87,7 @@ export function IssueLifecycleWorkbenchView({
   aggregateInitializationBusy, aggregateIndex, aggregateIndexRebuilding, latestPointerPublication,
   pointerPublicationBusy, showIncrementalHint, focusedEntity, isDrawerOpen, drawerWorkItems,
   codingAttempts, deliverySummary, selectedIssueDeliverySummary, onSelectProject, onCreateProject, onAddCodebase, onDeleteProject,
-  onDeleteRepository, onDeleteLogicalCodebase, onShowAll, onRefresh, onCreateIssue, onToggleLcSummary,
+  onDeleteRepository, onDeleteLogicalCodebase, onShowAll, onRefresh, onCreateIssue, onToggleLcSummary, onReopenOnboarding,
   onSelectLogicalCodebase, onOpenRegistration, onStartAggregateInitialization,
   onCancelAggregateInitialization, onRebuildAggregateIndex, onPublishFull, onPublishIncremental,
   onRetryRepo, onRevoke, onToggleQueueCollapsed, onToggleQueueGroup, onQueueFilterTextChange,
@@ -99,7 +99,7 @@ export function IssueLifecycleWorkbenchView({
   return <>
     <div data-testid="workbench-shell" className={`grid h-[100dvh] min-h-0 bg-[var(--aria-bg)] text-[var(--aria-ink)] lg:grid-cols-[17rem_minmax(0,1fr)]${isDrawerOpen && focusedEntity ? " lg:pr-[calc(480px+1rem)]" : ""}`}>
       <ProjectSidebar projects={projects} codebases={codebases} repositories={repositories} selectedProjectId={selectedProjectId} issueCount={issueCount} busy={busy} onSelectProject={onSelectProject} onCreateProject={onCreateProject} onAddCodebase={onAddCodebase} onDeleteProject={onDeleteProject} onDeleteRepository={onDeleteRepository} onDeleteLogicalCodebase={onDeleteLogicalCodebase} />
-      <WorkbenchSurface mainLabel="Issue 生命周期工作台" statusBar={busy ? <span className="text-xs font-semibold text-[var(--aria-ink-muted)]">加载中</span> : null} alert={error} header={<IssueLifecycleWorkbenchHeader projectName={selectedProject?.name} focusedIssueId={focusedIssueId} canCreateIssue={canCreateIssueForProject(selectedProjectId, repositories, logicalCodebases)} onShowAll={onShowAll} onRefresh={onRefresh} onCreateIssue={onCreateIssue} />} main={<div className="space-y-3">
+      <WorkbenchSurface mainLabel="Issue 生命周期工作台" statusBar={busy ? <span className="text-xs font-semibold text-[var(--aria-ink-muted)]">加载中</span> : null} alert={error} header={<IssueLifecycleWorkbenchHeader projectName={selectedProject?.name} focusedIssueId={focusedIssueId} canCreateIssue={canCreateIssueForProject(selectedProjectId, repositories, logicalCodebases)} onShowAll={onShowAll} onRefresh={onRefresh} onCreateIssue={onCreateIssue} onReopenOnboarding={onReopenOnboarding} />} main={<div className="space-y-3">
         {selectedProjectId && logicalCodebases.length > 0 ? <>
           <LogicalCodebaseSummaryBar summary={{ lcName: activeLogicalCodebaseName, indexState: (aggregateIndex as { state?: string } | null)?.state ?? null, publicationStatus: latestPointerPublication?.status ?? null, hasWarning: lcSummaryHasWarning }} expanded={lcSummaryExpanded} onToggle={onToggleLcSummary} />
         </> : null}

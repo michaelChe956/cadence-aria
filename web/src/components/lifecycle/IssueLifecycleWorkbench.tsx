@@ -151,11 +151,14 @@ export function IssueLifecycleWorkbench({
   onDrawerFocusChange,
   onOpenWorkspace = defaultOpenWorkspace,
   onOpenCodingWorkspace = defaultOpenCodingWorkspace,
+  onReopenOnboarding,
 }: {
   focusEntityKey?: string | null;
   onDrawerFocusChange?: (entityKey: string | null) => void;
   onOpenWorkspace?: (sessionId: string) => void;
   onOpenCodingWorkspace?: (address: CodingAttemptAddress) => void;
+  /** UI-4：引导重开入口接线；由 AppShell 的唯一 useOnboarding 实例提供。 */
+  onReopenOnboarding?: () => void;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [repositories, setRepositories] = useState<Repository[]>([]);
@@ -1251,6 +1254,7 @@ export function IssueLifecycleWorkbench({
       onShowAll={() => setFocusedIssueId(null)}
       onRefresh={() => void refresh()}
       onCreateIssue={() => setDialogOpen(true)}
+      onReopenOnboarding={onReopenOnboarding}
       onToggleLcSummary={handleToggleLcSummary}
       onSelectLogicalCodebase={setSelectedLogicalCodebaseId}
       onOpenRegistration={() => setRegistrationDialogOpen(true)}

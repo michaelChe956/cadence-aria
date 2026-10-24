@@ -6,7 +6,20 @@ import { ONBOARDING_SEEN_KEY } from "./onboarding/useOnboarding";
 import { CURRENT_VERSION } from "./whats-new/changelog";
 
 vi.mock("./components/lifecycle/IssueLifecycleWorkbench", () => ({
-  IssueLifecycleWorkbench: () => <div data-testid="workbench-stub" />,
+  // UI-4：引导触发器移入工作台页头，stub 转发重开接线供外壳级验证。
+  IssueLifecycleWorkbench: ({
+    onReopenOnboarding,
+  }: {
+    onReopenOnboarding?: () => void;
+  }) => (
+    <div data-testid="workbench-stub">
+      {onReopenOnboarding ? (
+        <button type="button" data-testid="workbench-stub-onboarding-reopen" onClick={onReopenOnboarding}>
+          重开引导
+        </button>
+      ) : null}
+    </div>
+  ),
 }));
 
 const SEEN_KEY = "aria-whats-new-seen";
@@ -60,11 +73,15 @@ describe("AppShell 操作引导", () => {
     expect(screen.getByTestId("onboarding-progress")).toHaveTextContent("第 1 / 共 13 步");
   });
 
-  it("同一设备再次进入不自动展示引导", () => {
+  it("同一设备再次进入不自动展示引导，且重开入口经 props 下传工作台（旧左下位置消失）", () => {
     window.localStorage.setItem(ONBOARDING_SEEN_KEY, "1");
     renderShell();
     expect(screen.queryByTestId("onboarding-wizard")).not.toBeInTheDocument();
-    expect(screen.getByTestId("onboarding-help-trigger")).toBeInTheDocument();
+    // 外壳不再直挂固定按钮；AppShell 把 onboarding.reopen 接线到工作台（页头）。
+    expect(screen.queryByTestId("onboarding-help-trigger")).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("workbench-stub-onboarding-reopen"),
+    ).toBeInTheDocument();
   });
 
   it("跳过后写入已读并关闭", async () => {
@@ -81,7 +98,7 @@ describe("AppShell 操作引导", () => {
     renderShell();
     expect(screen.queryByTestId("onboarding-wizard")).not.toBeInTheDocument();
 
-    await user.click(screen.getByTestId("onboarding-help-trigger"));
+    await user.click(screen.getByTestId("workbench-stub-onboarding-reopen"));
     expect(screen.getByTestId("onboarding-wizard")).toBeInTheDocument();
     expect(screen.getByTestId("onboarding-progress")).toHaveTextContent("第 1 / 共 13 步");
     expect(window.localStorage.getItem(ONBOARDING_SEEN_KEY)).toBe("1");
