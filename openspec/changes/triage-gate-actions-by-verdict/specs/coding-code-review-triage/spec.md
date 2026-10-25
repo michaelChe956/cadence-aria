@@ -25,7 +25,7 @@
 
 「最新一次结论」的口径 MUST 与送回 Coder 动作的既有读取口径一致（同一 attempt 结论集合中的最后一条）。派生所用事实 MUST 可观察：门 payload 的 `available_actions` 是权威动作集合，客户端 MUST NOT 自行增删动作；该 attempt 的 Code Review 结论集合（含每条结论的 verdict）随会话状态下发，客户端 MUST 以其中最新一条作为说明文案依据。系统 MAY 在门 payload 上额外携带派生成因（如最新 verdict 字段）；携带时其值 MUST 与派生所用 verdict 一致，且 MUST NOT 改变 `available_actions` 的权威性。
 
-对升级前已落地且仍 open 的门禁，系统 MUST NOT 回写其动作集合；该门实例的呈现 MUST 依据最新 verdict 事实禁用 `send_to_coder` 并给出替代动作指引（`retry_review`／`manual_continue`），MUST NOT 依赖用户提交失败后再禁用。
+对升级前已落地且仍 open 的门禁，系统 MUST NOT 回写其动作集合，也 MUST NOT 在读取路径上重新派生；服务端 MUST 继续对该门实例的 `send_to_coder` 提交做前置校验拒绝，呈现层 MAY 依据服务端返回的可观察码或门记录中的派生事实给出替代动作指引，但 MUST NOT 自行增删（含禁用或隐藏）`available_actions` 中的动作——动作集合只由服务端在门落地时决定，存量门的动作集合清理见本 change 的存量门处置工作包。
 
 #### Scenario: 门禁动作集合完整
 
@@ -60,7 +60,7 @@
 #### Scenario: 存量在途门不回写
 
 - **WHEN** 升级前已落地且仍 open 的分诊门禁在升级后被读取或应答
-- **THEN** 其 `available_actions` MUST NOT 被回写或重新派生；呈现层按最新 verdict 事实禁用该实例的 `send_to_coder` 并给出替代动作指引；对该门的 `send_to_coder` 提交仍 MUST 由服务端前置校验拒绝
+- **THEN** 其 `available_actions` MUST NOT 被回写或重新派生；服务端 MUST 继续对该门实例的 `send_to_coder` 提交做前置校验拒绝，返回可识别的不可执行原因（`send_to_coder_latest_review_not_actionable`），MUST NOT 落地 rework instruction、MUST NOT 改变 attempt 状态、不关闭门；呈现层 MAY 依据服务端返回的可观察码给出替代动作指引，但 MUST NOT 自行增删 `available_actions` 中的动作
 
 ### Requirement: 分诊门禁的送回 Coder 动作必须可用
 
