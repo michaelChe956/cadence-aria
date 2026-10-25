@@ -759,10 +759,21 @@ export function c1TargetLabel(target: C1WaitingItem["target"]): string {
   }
 }
 
+/** F-A additive（owner 2026-10-25 裁定，cadence/notes/2026-10-25_UI复验发现）：
+ * 等待项可操作性分类的本地 wire 扩展。false = 自动等待/只读信息（租约活跃
+ * 到期自动恢复、当前绑定健在时的换代历史）——投 kind="info" 归「进度信息」
+ * 分组，不进「需要人工处理」与待处理计数；true = 需要人工决策。wire 主镜像
+ * 在 api/types/lifecycle.ts（不在本改动文件集内），按既有 additive 缺省约定
+ * 在此本地扩展；旧响应缺失该字段按 true 解释（保持旧展示）。 */
+export type ClassifiedC1WaitingItem = C1WaitingItem & { requires_human?: boolean };
+
 /** durable C1WaitingItem → 收件箱条目（不进 countedInbox；动作走 C1 REST）。
  * C5 Task 6：project 级条目不传 issueId——id 直接采用后端稳定 id
  *（c1:project:{project_id}:repository_init:{operation_id}），不拼接
- * undefined issueId；issue 级条目维持 `c1:{issueId}:{item.id}` 前缀。 */
+ * undefined issueId；issue 级条目维持 `c1:{issueId}:{item.id}` 前缀。
+ * F-A：requires_human=false 的条目投 kind="info"——两个待处理抽屉
+ *（CockpitInbox / WorkbenchInboxOverlay）按 kind 分组，info 落「进度信息」
+ * 且不渲染 C1 恢复卡（无动作按钮）；需要人工的维持 kind="c1_recovery"。 */
 export function c1WaitingItem(
   item: C1WaitingItem,
   projectId: string,
@@ -781,9 +792,10 @@ export function c1WaitingItem(
     item.possible_side_effect ? `可能副作用：${item.possible_side_effect}` : null,
     item.next_phase ? `下一阶段：${item.next_phase}` : null,
   ].filter((part): part is string => Boolean(part));
+  const requiresHuman = (item as ClassifiedC1WaitingItem).requires_human ?? true;
   return {
     id: issueId !== undefined ? `c1:${issueId}:${item.id}` : item.id,
-    kind: "c1_recovery",
+    kind: requiresHuman ? "c1_recovery" : "info",
     severity: item.actions.length > 0 ? 2 : 3,
     title: C1_WAITING_KIND_TITLES[item.kind] ?? "C1 恢复等待项",
     summary: summaryParts.join(" · "),

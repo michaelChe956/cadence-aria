@@ -5,6 +5,7 @@ import { installWorkspaceStoreTestHooks } from "./workspace-ws-store.test-utils"
 import {
   c1TargetLabel,
   c1WaitingItem,
+  type ClassifiedC1WaitingItem,
   codingAttentionIdentity,
   codingAttentionItem,
   cockpitInboxItemSessionId,
@@ -1135,6 +1136,84 @@ describe("C5 project repository initialization waiting projection", () => {
     expect(item.c1Info?.issueId).toBe("issue_0001");
     expect(item.c1Info?.operationId).toBeNull();
     expect(item.c1Info?.diagnostics).toBeNull();
+  });
+});
+
+// F-A（owner 2026-10-25 裁定，cadence/notes/2026-10-25_UI复验发现）：等待项
+// 可操作性分类——lease_wait 与当前绑定健在的 generation_history 是自动等待/
+// 只读信息，投 kind="info"（两个待处理抽屉均按 kind 分组：info 落「进度信息」、
+// 不渲染 C1 恢复卡/动作按钮、不进待处理计数）；需要人工的维持 c1_recovery。
+describe("F-A waiting item operability classification", () => {
+  const leaseWaitWaiting: ClassifiedC1WaitingItem = {
+    id: "c1:lease_wait:issue_0001:coding_attempt_3681bce5",
+    kind: "lease_wait",
+    reason: "lease active; automation keeps waiting (lease coding_attempt_3681bce5)",
+    completed_steps: [],
+    target: null,
+    plan_id: "plan_0001",
+    session_id: "wsp_0001",
+    attempt_id: null,
+    gate_id: null,
+    possible_side_effect: "2026-10-25T08:00:00Z",
+    actions: [],
+    next_phase: null,
+    requires_human: false,
+  };
+  const generationHistoryReadOnly: ClassifiedC1WaitingItem = {
+    id: "c1:generation_history:issue_0001",
+    kind: "generation_history",
+    reason: "5 previous binding generation(s) kept read-only; current binding active",
+    completed_steps: [],
+    target: null,
+    plan_id: "plan_0006",
+    session_id: "wsp_0006",
+    attempt_id: null,
+    gate_id: null,
+    possible_side_effect: null,
+    actions: [],
+    next_phase: null,
+    requires_human: false,
+  };
+  const generationHistoryDangling: ClassifiedC1WaitingItem = {
+    ...generationHistoryReadOnly,
+    reason: "5 previous binding generation(s) kept read-only; current binding dangling (plan)",
+    actions: ["rebind"],
+    next_phase: "rebind",
+    requires_human: true,
+  };
+
+  it("classifies active-lease waiting as info out of the needs-human group", () => {
+    const item = c1WaitingItem(leaseWaitWaiting, "project_0001", "issue_0001");
+    expect(item.kind).toBe("info");
+    expect(item.severity).toBe(3);
+    expect(item.title).toBe("租约活跃，自动链等待中");
+    expect(item.summary).toContain("coding_attempt_3681bce5");
+    expect(item.c1Info?.actions).toEqual([]);
+  });
+
+  it("downgrades generation_history to read-only info while the current binding is live", () => {
+    const item = c1WaitingItem(generationHistoryReadOnly, "project_0001", "issue_0001");
+    expect(item.kind).toBe("info");
+    expect(item.title).toBe("存在旧代绑定（只读可查）");
+    expect(item.c1Info?.actions).toEqual([]);
+    expect(item.c1Info?.nextPhase).toBeNull();
+  });
+
+  it("keeps generation_history actionable when the current binding is dangling", () => {
+    const item = c1WaitingItem(generationHistoryDangling, "project_0001", "issue_0001");
+    expect(item.kind).toBe("c1_recovery");
+    expect(item.severity).toBe(2);
+    expect(item.c1Info?.actions).toEqual(["rebind"]);
+    expect(item.c1Info?.nextPhase).toBe("rebind");
+  });
+
+  it("treats old responses without the flag as needing human", () => {
+    const legacyWire: ClassifiedC1WaitingItem = {
+      ...leaseWaitWaiting,
+      requires_human: undefined,
+    };
+    const legacy = c1WaitingItem(legacyWire, "project_0001", "issue_0001");
+    expect(legacy.kind).toBe("c1_recovery");
   });
 });
 

@@ -214,6 +214,18 @@ pub struct C1WaitingItemDto {
     /// C5 Task 6 additive：被后继接续的原 Failed operation（只读关联投影）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    /// F-A additive（owner 2026-10-25 裁定，cadence/notes/2026-10-25_UI复验发现）：等待项
+    /// 可操作性分类。false = 自动等待/只读信息（到期自动恢复或纯审计痕迹，前端
+    /// 归「进度信息」分组，不进「需要人工处理」与待处理计数）；true = 需要人工
+    /// 决策。旧响应缺失该字段按 true 解释（fail-safe：旧数据保持旧展示，不因
+    /// 缺字段静默降级真待办）。
+    #[serde(default = "c1_waiting_item_requires_human_by_default")]
+    pub requires_human: bool,
+}
+
+/// [`C1WaitingItemDto::requires_human`] 的反序列化缺省（旧响应 → true）。
+fn c1_waiting_item_requires_human_by_default() -> bool {
+    true
 }
 
 /// G1：candidate_recovery 引用的门是否已被处理（approve/close 后节点
@@ -339,6 +351,7 @@ pub fn list_c1_waiting_items(
             issue_id: None,
             parent_operation_id: None,
             superseded_by: None,
+            requires_human: true,
         });
     }
 
@@ -371,7 +384,11 @@ pub fn list_c1_waiting_items(
     } else {
         None
     };
-    let lease_item = |kind: &str, reason: String, actions: Vec<&str>, next_phase: Option<&str>| {
+    let lease_item = |kind: &str,
+                      reason: String,
+                      actions: Vec<&str>,
+                      next_phase: Option<&str>,
+                      requires_human: bool| {
         C1WaitingItemDto {
             id: format!("c1:{kind}:{issue_id}:{lease_id}"),
             kind: kind.to_string(),
@@ -393,14 +410,19 @@ pub fn list_c1_waiting_items(
             issue_id: None,
             parent_operation_id: None,
             superseded_by: None,
+            requires_human,
         }
     };
     match disposition {
+        // F-A（owner 2026-10-25 裁定）：租约活跃是自动等待（到期自动恢复），
+        // 不需要人动手——requires_human=false，前端归「进度信息」不进
+        // 「需要人工处理」与计数；死亡租约仍需人确认接管。
         LeaseDisposition::ActiveWait => items.push(lease_item(
             "lease_wait",
             format!("lease active; automation keeps waiting (lease {lease_id})"),
             vec![],
             None,
+            false,
         )),
         LeaseDisposition::DeadNeedsTakeover => items.push(lease_item(
             "lease_takeover",
@@ -410,6 +432,7 @@ pub fn list_c1_waiting_items(
             ),
             vec!["confirm_takeover"],
             Some("takeover_confirmed"),
+            true,
         )),
         LeaseDisposition::UnknownNeedsHuman => {
             let unstarted = evidence
@@ -424,6 +447,7 @@ pub fn list_c1_waiting_items(
                     ),
                     vec![],
                     Some("manual_triage_or_rebind"),
+                    true,
                 ));
             }
         }
@@ -461,6 +485,7 @@ pub fn list_c1_waiting_items(
                 issue_id: None,
                 parent_operation_id: None,
                 superseded_by: None,
+                requires_human: true,
             });
         }
 
@@ -502,21 +527,63 @@ pub fn list_c1_waiting_items(
                 issue_id: None,
                 parent_operation_id: None,
                 superseded_by: None,
+                requires_human: true,
             });
         }
     }
 
     // A13：换代历史只读可查 + 显式 rebind 操作面。
+    // F-A（owner 2026-10-25 裁定）：当前绑定健在（plan 记录与 session 均存在）时，
+    // 换代历史只是只读审计信息——不给 rebind 动作、requires_human=false（前端归
+    // 「进度信息」，不进「需要人工处理」与待处理计数）；仅当前绑定失效（单 plan
+    // 级联删除/悬空绑定，plan 或 session 任一缺失）才升级为换代待办 +「去换代」。
+    // plan 存在性经目录列表判定（目录缺失=空列表，真实 IO/JSON 错误仍上抛；
+    // 单文件读取把缺文件当 Io 上抛，无法与真 IO 失败区分）。
+    let bound_plan_live = match plan_id.as_deref() {
+        None => false,
+        Some(bound_plan_id) => lifecycle
+            .list_issue_work_item_plans(project_id, issue_id)?
+            .iter()
+            .any(|plan| plan.id == bound_plan_id),
+    };
+    let bound_session_live = bound_session.is_some();
     if let Some(history) = enrollment.binding_history.as_ref()
         && !history.previous.is_empty()
     {
+        let (reason, actions, next_phase, requires_human) = if bound_plan_live && bound_session_live
+        {
+            (
+                format!(
+                    "{} previous binding generation(s) kept read-only; current binding active",
+                    history.previous.len()
+                ),
+                Vec::new(),
+                None,
+                false,
+            )
+        } else {
+            let mut gaps: Vec<&str> = Vec::new();
+            if !bound_plan_live {
+                gaps.push("plan");
+            }
+            if !bound_session_live {
+                gaps.push("session");
+            }
+            (
+                format!(
+                    "{} previous binding generation(s) kept read-only; current binding dangling ({})",
+                    history.previous.len(),
+                    gaps.join("+")
+                ),
+                vec!["rebind".to_string()],
+                Some("rebind".to_string()),
+                true,
+            )
+        };
         items.push(C1WaitingItemDto {
             id: format!("c1:generation_history:{issue_id}"),
             kind: "generation_history".to_string(),
-            reason: format!(
-                "{} previous binding generation(s) kept read-only",
-                history.previous.len()
-            ),
+            reason,
             completed_steps: Vec::new(),
             target: binding_target.clone(),
             plan_id: plan_id.clone(),
@@ -524,8 +591,8 @@ pub fn list_c1_waiting_items(
             attempt_id: None,
             gate_id: None,
             possible_side_effect: None,
-            actions: vec!["rebind".to_string()],
-            next_phase: Some("rebind".to_string()),
+            actions,
+            next_phase,
             expected_version: None,
             action_context: Vec::new(),
             operation_id: None,
@@ -534,6 +601,7 @@ pub fn list_c1_waiting_items(
             issue_id: None,
             parent_operation_id: None,
             superseded_by: None,
+            requires_human,
         });
     }
     // C2 Task 12（REQ-CRO-06）：coding 链十类 durable 等待事实 additive 投影
@@ -646,6 +714,7 @@ fn repository_initialization_failure_item(
         issue_id: None,
         parent_operation_id: operation.parent_operation_id.clone(),
         superseded_by: None,
+        requires_human: true,
     }
 }
 
@@ -705,6 +774,7 @@ pub fn list_project_c1_waiting_items(
                     issue_id: None,
                     parent_operation_id: operation.parent_operation_id.clone(),
                     superseded_by: None,
+                    requires_human: true,
                 });
             }
             // Completed 后继：原等待项稳定消隐（记录仍可查）。
@@ -772,6 +842,7 @@ fn append_c2_waiting_items(
         issue_id: None,
         parent_operation_id: None,
         superseded_by: None,
+        requires_human: true,
     };
 
     for attempt in &attempts {
@@ -1183,5 +1254,326 @@ mod tests {
                 .is_none(),
             "禁用后不得把历史成功当当前信息"
         );
+    }
+
+    // ── F-A（owner 2026-10-25 裁定，cadence/notes/2026-10-25_UI复验发现）：
+    //    等待项可操作性分类——lease_wait 归自动等待，generation_history 按
+    //    当前绑定有效性分流。──
+
+    /// F-A 夹具：project/issue + enabled enrollment 绑定 plan/session 并
+    /// rebind 一次制造 `history.previous`；`with_plan_record` 控制当前绑定
+    /// 指向的 plan 记录是否落盘（false = 悬空绑定，如单 plan 级联删除后）。
+    fn f_a_waiting_fixture(
+        with_plan_record: bool,
+    ) -> (tempfile::TempDir, ProductAppPaths, String, String) {
+        use crate::product::issue_automation_store::IssueAutomationStore;
+        use crate::product::json_store::write_json;
+        use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, LifecycleStore};
+        use crate::product::logical_codebase::EnrollmentTarget;
+        use crate::product::models::automation::{
+            EnrollmentBindingIdentityInput, EnrollmentOptions, EnrollmentRebindRequest,
+            EnrollmentSource, EnrollmentWriteCommand, PlanApprovalPolicy,
+        };
+        use crate::product::models::lifecycle::{
+            IssueWorkItemPlan, IssueWorkItemPlanOptions, IssueWorkItemPlanStatus,
+        };
+        use crate::product::models::provider::ProviderName;
+        use crate::product::models::{IssueRecord, IssueWorkItemDependencyEdge, WorkspaceType};
+        use crate::product::project_store::{CreateProjectInput, ProjectStore};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+        ProjectStore::new(paths.clone())
+            .create(CreateProjectInput {
+                name: "f-a waiting fixture".to_string(),
+                description: None,
+            })
+            .unwrap();
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let now = chrono::Utc::now().to_rfc3339();
+        write_json(
+            &paths.issue_root(PROJECT_ID, ISSUE_ID).join("issue.json"),
+            &IssueRecord {
+                id: ISSUE_ID.to_string(),
+                project_id: PROJECT_ID.to_string(),
+                repo_id: None,
+                logical_codebase_id: None,
+                title: "f-a waiting fixture".to_string(),
+                description: None,
+                change_id: "f_a_waiting".to_string(),
+                phase: crate::product::models::IssuePhase::Clarification,
+                status: crate::product::models::IssueStatus::Draft,
+                active_binding_id: None,
+                created_at: now.clone(),
+                updated_at: now,
+                base_branch: None,
+            },
+        )
+        .unwrap();
+
+        let plan_id = "plan_fa_0001".to_string();
+        let session = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                entity_id: plan_id.clone(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            })
+            .unwrap();
+        let session_id = session.id.clone();
+
+        let target = EnrollmentTarget::SingleRepository {
+            repository_id: "repo_physical_fa".to_string(),
+        };
+        let source = EnrollmentSource {
+            stories: vec![],
+            designs: vec![],
+        };
+        let options = EnrollmentOptions {
+            author_provider: ProviderName::Fake,
+            reviewer_provider: ProviderName::Fake,
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            plan_approval: PlanApprovalPolicy::Manual,
+            plan_options: IssueWorkItemPlanOptions {
+                include_integration_tests: true,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+        };
+        let automation = IssueAutomationStore::new(paths.clone());
+        automation
+            .compare_and_set(
+                PROJECT_ID,
+                ISSUE_ID,
+                None,
+                EnrollmentWriteCommand::Enable {
+                    command_id: None,
+                    selection_key: "f_a_waiting_fixture".to_string(),
+                    source: source.clone(),
+                    options: options.clone(),
+                    target: target.clone(),
+                },
+            )
+            .unwrap();
+        automation
+            .bind_plan(PROJECT_ID, ISSUE_ID, 1, &plan_id, &session_id)
+            .unwrap();
+        // rebind 一次：同 plan/session 换代，history.previous 恰有一条。
+        automation
+            .rebind(
+                PROJECT_ID,
+                ISSUE_ID,
+                EnrollmentRebindRequest {
+                    command_id: "cmd-f-a-rebind-v2".to_string(),
+                    expected_policy_revision: 2,
+                    expected_binding_version: 1,
+                    binding: EnrollmentBindingIdentityInput {
+                        plan_id: plan_id.clone(),
+                        session_id: session_id.clone(),
+                        source,
+                        target,
+                        author_provider: ProviderName::Codex,
+                        reviewer_provider: ProviderName::Fake,
+                    },
+                    reason: "f-a fixture rebind".to_string(),
+                },
+            )
+            .unwrap();
+
+        if with_plan_record {
+            write_json(
+                &paths
+                    .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+                    .join("issue-work-item-plans")
+                    .join(format!("{plan_id}.json")),
+                &IssueWorkItemPlan {
+                    id: plan_id.clone(),
+                    project_id: PROJECT_ID.to_string(),
+                    issue_id: ISSUE_ID.to_string(),
+                    source_story_spec_ids: vec![],
+                    source_design_spec_ids: vec![],
+                    options: IssueWorkItemPlanOptions {
+                        include_integration_tests: true,
+                        include_e2e_tests: false,
+                        force_frontend_backend_split: false,
+                        require_execution_plan_confirm: false,
+                    },
+                    status: IssueWorkItemPlanStatus::Draft,
+                    work_item_ids: vec![],
+                    repository_profile_ref: None,
+                    verification_plan_ids: vec![],
+                    dependency_graph: vec![IssueWorkItemDependencyEdge {
+                        from_work_item_id: "a".to_string(),
+                        to_work_item_id: "b".to_string(),
+                    }],
+                    created_from_provider_run: None,
+                    validator_findings: vec![],
+                    review_summary: None,
+                    ever_confirmed: None,
+                    created_at: "2026-10-25T00:00:00Z".to_string(),
+                    updated_at: "2026-10-25T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        }
+        (tmp, paths, plan_id, session_id)
+    }
+
+    /// F-A：当前绑定健在（plan 记录与 session 均存在）时，换代历史降级为
+    /// 只读信息——无 rebind 动作、requires_human=false（不进「需要人工
+    /// 处理」与待处理计数）。
+    #[test]
+    fn f_a_generation_history_demotes_to_read_only_info_while_binding_live() {
+        let (_tmp, paths, plan_id, session_id) = f_a_waiting_fixture(true);
+        let items = list_c1_waiting_items(&paths, PROJECT_ID, ISSUE_ID).unwrap();
+        let generation = items
+            .iter()
+            .find(|item| item.kind == "generation_history")
+            .expect("generation history stays queryable");
+        assert!(
+            generation.reason.contains("current binding active"),
+            "reason must state the live binding: {generation:?}"
+        );
+        assert!(
+            generation.actions.is_empty(),
+            "live binding must not offer rebind: {generation:?}"
+        );
+        assert_eq!(generation.next_phase, None);
+        assert!(!generation.requires_human);
+        assert_eq!(generation.plan_id.as_deref(), Some(plan_id.as_str()));
+        assert_eq!(generation.session_id.as_deref(), Some(session_id.as_str()));
+    }
+
+    /// F-A：当前绑定失效（plan 记录缺失，如单 plan 级联删除）时，换代历史
+    /// 保持换代待办——rebind 动作 + requires_human=true。
+    #[test]
+    fn f_a_generation_history_stays_actionable_when_binding_dangling() {
+        let (_tmp, paths, _plan_id, _session_id) = f_a_waiting_fixture(false);
+        let items = list_c1_waiting_items(&paths, PROJECT_ID, ISSUE_ID).unwrap();
+        let generation = items
+            .iter()
+            .find(|item| item.kind == "generation_history")
+            .expect("generation history stays queryable");
+        assert!(
+            generation
+                .reason
+                .contains("current binding dangling (plan)"),
+            "reason must name the dangling leg: {generation:?}"
+        );
+        assert_eq!(generation.actions, vec!["rebind".to_string()]);
+        assert_eq!(generation.next_phase.as_deref(), Some("rebind"));
+        assert!(generation.requires_human);
+    }
+
+    /// F-A：租约活跃（自动链到期自动恢复）是自动等待——requires_human=false，
+    /// 无动作；死租约的接管项不在此夹具出现（见 c1 测试既有覆盖）。
+    #[test]
+    fn f_a_lease_wait_is_auto_waiting_not_needs_human() {
+        use crate::product::coding_attempt_store::{CodingAttemptStore, CreateCodingAttemptInput};
+        use crate::product::coding_models::CodingAttemptStatus;
+        use crate::product::json_store::write_json;
+        use crate::product::models::lifecycle::IssueSharedWorktree;
+        use crate::product::models::project::IssueSharedWorktreeStatus;
+        use crate::product::models::provider::ProviderName;
+        use crate::web::workspace_ws_types::ProviderConfigSnapshot;
+
+        let (_tmp, paths, _plan_id, _session_id) = f_a_waiting_fixture(true);
+        let store = CodingAttemptStore::new(paths.clone());
+        let attempt = store
+            .create_attempt(CreateCodingAttemptInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                work_item_id: "work_item_fa_0001".to_string(),
+                base_branch: "main".to_string(),
+                branch_name: "aria/fa-running".to_string(),
+                worktree_path: None,
+                provider_config_snapshot: ProviderConfigSnapshot {
+                    author: ProviderName::Fake,
+                    reviewer: None,
+                    review_rounds: 0,
+                    permission_modes: Default::default(),
+                },
+                target_snapshot: None,
+                max_auto_rework: 0,
+            })
+            .unwrap();
+        let mut running = attempt.clone();
+        running.status = CodingAttemptStatus::Running;
+        store.write_coding_attempt_for_test(&running).unwrap();
+        write_json(
+            &paths
+                .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+                .join("issue-shared-worktree.json"),
+            &IssueSharedWorktree {
+                id: "issue_shared_worktree_fa".to_string(),
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: "repo_physical_fa".to_string(),
+                target_repository_id: None,
+                checkout_id: None,
+                path_schema_version: 0,
+                branch_name: "aria/issue-shared-fa".to_string(),
+                worktree_path: std::path::PathBuf::from("/tmp/fa-shared-worktree"),
+                base_branch: "main".to_string(),
+                status: IssueSharedWorktreeStatus::Running,
+                current_active_work_item_id: Some("work_item_fa_0001".to_string()),
+                current_lock_owner_id: Some(running.id.clone()),
+                last_completed_work_item_id: None,
+                created_at: "2026-10-25T00:00:00Z".to_string(),
+                updated_at: "2026-10-25T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+
+        let items = list_c1_waiting_items(&paths, PROJECT_ID, ISSUE_ID).unwrap();
+        let lease_wait = items
+            .iter()
+            .find(|item| item.kind == "lease_wait")
+            .expect("active lease must project lease_wait");
+        assert!(
+            lease_wait.reason.contains("lease active"),
+            "reason must carry the holder lease: {lease_wait:?}"
+        );
+        assert!(lease_wait.actions.is_empty());
+        assert!(!lease_wait.requires_human);
+        assert!(
+            !items
+                .iter()
+                .any(|item| item.kind == "lease_takeover" || item.kind == "lease_unknown"),
+            "active lease must not project takeover/unknown noise: {items:?}"
+        );
+    }
+
+    /// F-A additive 契约：旧响应缺 `requires_human` 字段按需要人工解释
+    /// （fail-safe 不静默降级真待办）；新响应显式携带该字段。
+    #[test]
+    fn f_a_requires_human_defaults_true_for_old_responses() {
+        let old_response = r#"{
+            "id": "c1:lease_wait:issue_0001:lease_0001",
+            "kind": "lease_wait",
+            "reason": "lease active; automation keeps waiting",
+            "completed_steps": [],
+            "target": null,
+            "plan_id": null,
+            "session_id": null,
+            "attempt_id": null,
+            "gate_id": null,
+            "possible_side_effect": null,
+            "actions": [],
+            "next_phase": null
+        }"#;
+        let parsed: C1WaitingItemDto = serde_json::from_str(old_response).unwrap();
+        assert!(parsed.requires_human, "旧响应缺省按需要人工解释");
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(serialized["requires_human"], serde_json::json!(true));
     }
 }
