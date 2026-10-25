@@ -60,7 +60,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("src/cross_cutting/provider_resources.rs", 3341),
     ("src/cross_cutting/streaming_provider/mod.rs", 2062),
     ("src/cross_cutting/streaming_provider/tests.rs", 2388),
-    ("src/product/advance_store.rs", 2525),
+    ("src/product/advance_store.rs", 1369),
     ("src/product/coding_attempt_store/admission_tests.rs", 1302),
     ("src/product/coding_attempt_store/gate.rs", 2079),
     (
@@ -71,8 +71,8 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/product/coding_attempt_store/tests/issue_delivery.rs",
         1216,
     ),
-    ("src/product/coding_plan_run.rs", 3128),
-    ("src/product/coding_workspace_engine/code_review.rs", 2087),
+    ("src/product/coding_plan_run.rs", 2872),
+    ("src/product/coding_workspace_engine/code_review.rs", 1817),
     ("src/product/coding_workspace_engine/gates.rs", 1436),
     (
         "src/product/coding_workspace_engine/group_review_orchestrator.rs",
@@ -167,7 +167,8 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         1315,
     ),
     ("src/product/models/tests.rs", 1523),
-    ("src/product/reviewer_reconciliation.rs", 2471),
+    // 2026-10-25：reviewer_reconciliation.rs 已拆分至 507 行（< 1200 硬线），
+    // 按「拆分达标后必须移除」的登记回收先例移除本项。
     // 2026-10-23：既有债务登记（本批未改该文件，基线即 3362 行）
     ("src/product/reviewer_snapshot.rs", 3362),
     // 2026-10-23：既有债务登记（本批未改该文件，基线即 4198 行）
