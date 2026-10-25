@@ -653,6 +653,7 @@ pub(crate) fn cleanup_plan_shared_worktrees<'a>(
         };
         if let Some(record) = record {
             let ownership = classify_shared_worktree_ownership(
+                app_paths,
                 &lifecycle,
                 &deletion_records,
                 scope,
@@ -838,6 +839,7 @@ enum SharedWorktreeOwnership {
 
 /// shared-worktree 归属判定：谁在用这条记录。
 fn classify_shared_worktree_ownership(
+    app_paths: &ProductAppPaths,
     lifecycle: &LifecycleStore,
     deletion_records: &EntityDeletionStore,
     scope: &EntityScope,
@@ -870,21 +872,34 @@ fn classify_shared_worktree_ownership(
         let own_lock = plan_attempt_ids
             .iter()
             .any(|attempt_id| attempt_id == owner_id);
-        // 锁 owner 属他人且不在本 run 冻结集/selection 内 → 在途 writer，保留。
-        let orphan = own_lock
-            || plan_run.is_some_and(|run| {
-                run.target_attempts
-                    .iter()
-                    .any(|frozen| frozen.attempt_id == owner_id)
-                    || run
-                        .selection
-                        .as_ref()
-                        .is_some_and(|selection| selection.attempt_id == owner_id)
-            });
-        if !orphan {
-            return Ok(SharedWorktreeOwnership::OtherLiveOwner);
+        // 本 plan 的 run 冻结集/selection 同样构成本 plan 持有的锁。
+        let frozen = plan_run.is_some_and(|run| {
+            run.target_attempts
+                .iter()
+                .any(|frozen| frozen.attempt_id == owner_id)
+                || run
+                    .selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.attempt_id == owner_id)
+        });
+        if own_lock || frozen {
+            return Ok(SharedWorktreeOwnership::ClaimedByThisPlan);
         }
-        return Ok(SharedWorktreeOwnership::ClaimedByThisPlan);
+        // 锁 owner 不属本 plan 的已知 attempt 集合：
+        // ① 记录归属未知（`claims_this_plan=false`）→ 按在途 writer 保留
+        //    （REQ-WPS-03 不误伤：他 plan 直接改写 owner 的记录绝不清）；
+        // ② 记录已被本 plan 的其他证据主张（`claims_this_plan`：记录 active/
+        //    last-completed WI 归属本 plan，或路径界定的 journal 归属本 plan）
+        //    且该 owner 已无 attempt 记录 → 半残现场的孤儿残留（attempt 主体被
+        //    外部清掉、锁 owner 悬空），随闭包清。判据可靠：真实 writer MUST 先
+        //    持久化 attempt 记录再取 worktree 锁（journal `AttemptPersisted`
+        //    先于 `WorktreeBound`），故「无 attempt 记录」的 owner 不可能是存活
+        //    writer；按「在途 writer」保留会让半残现场永远收敛不了
+        //    （违反 REQ-WPS-03「半残仍须清全」）。
+        if claims_this_plan && !lock_owner_attempt_exists(app_paths, scope, owner_id)? {
+            return Ok(SharedWorktreeOwnership::ClaimedByThisPlan);
+        }
+        return Ok(SharedWorktreeOwnership::OtherLiveOwner);
     }
     if claims_this_plan {
         return Ok(SharedWorktreeOwnership::ClaimedByThisPlan);
@@ -895,6 +910,23 @@ fn classify_shared_worktree_ownership(
         return Ok(SharedWorktreeOwnership::ClaimedByThisPlan);
     }
     Ok(SharedWorktreeOwnership::Unrelated)
+}
+
+/// 锁 owner 是否有对应的 attempt 记录（真实在途 writer 的前提）。
+///
+/// 只有 attempt 记录仍在的 owner 才可能是在途 writer（先 `AttemptPersisted`
+/// 后 `WorktreeBound`）；记录缺失即残留孤儿 owner。真实 IO 错误仍上抛。
+fn lock_owner_attempt_exists(
+    app_paths: &ProductAppPaths,
+    scope: &EntityScope,
+    owner_id: &str,
+) -> Result<bool, ProductStoreError> {
+    let attempts = CodingAttemptStore::new(app_paths.clone());
+    match attempts.get_attempt(&scope.project_id, &scope.issue_id, owner_id) {
+        Ok(_) => Ok(true),
+        Err(ProductStoreError::NotFound { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// 目标仓集合（shared-worktree 记录的候选 key）。

@@ -815,6 +815,11 @@ impl super::CodingAttemptStore {
     /// 模式）——租约即安全清理窗口，不嵌套重取 scope；missing 幂等；
     /// journal 身份/归属错配 fail-closed 不误删他 Plan 对象；不删
     /// `group-initializations` 根与 arbitration 公共锁。
+    ///
+    /// **内容不可解析 ≠ 删除失败**（REQ-WPS-03/04）：journal 的归属由路径
+    /// 界定（文件名即 plan_id、目录即 plan_id），解析失败只说明该文件已不是
+    /// 有效 journal 记录——按孤儿残留直接删除并继续（[`Self::read_journal_for_purge`]）；
+    /// 真实 IO 错误（打开/删除失败）仍 fail-closed 上抛。
     pub fn purge_group_initialization_journals_with_lease(
         &self,
         lease: &EntityDeletionLease,
@@ -838,21 +843,23 @@ impl super::CodingAttemptStore {
         // ① legacy 原路径 `{plan_id}.json`。
         let original = self.group_initialization_journal_path(project_id, issue_id, plan_id);
         if super::path_is_regular_file(&original)? {
-            let journal: CodingGroupInitializationJournal = read_json(&original)?;
-            validate_group_initialization_journal(&journal)?;
-            if journal.project_id != project_id
-                || journal.issue_id != issue_id
-                || journal.plan_id != plan_id
-            {
-                return Err(ProductStoreError::IdentityMismatch {
-                    kind: "coding_group_initialization_journal",
-                    id: plan_id.to_string(),
-                });
+            // 损坏残留（解析失败）已按孤儿处理：直接删掉，继续流程。
+            if let Some(journal) = Self::read_journal_for_purge(&original)? {
+                validate_group_initialization_journal(&journal)?;
+                if journal.project_id != project_id
+                    || journal.issue_id != issue_id
+                    || journal.plan_id != plan_id
+                {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "coding_group_initialization_journal",
+                        id: plan_id.to_string(),
+                    });
+                }
             }
             super::remove_file_if_exists(&original)?;
         }
         // ② per-target 子目录 `{plan_id}/{target}.json`（逐一身份核对；非
-        //    json 条目跳过，坏 JSON/归属错配 fail-closed）。
+        //    json 条目跳过，归属错配 fail-closed；损坏内容按孤儿残留删除）。
         let directory = self
             .coding_attempts_root(project_id, issue_id)
             .join("group-initializations")
@@ -876,20 +883,54 @@ impl super::CodingAttemptStore {
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
-            let journal: CodingGroupInitializationJournal = read_json(&path)?;
-            validate_group_initialization_journal(&journal)?;
-            if journal.project_id != project_id
-                || journal.issue_id != issue_id
-                || journal.plan_id != plan_id
-            {
-                return Err(ProductStoreError::IdentityMismatch {
-                    kind: "coding_group_initialization_journal",
-                    id: plan_id.to_string(),
-                });
+            if let Some(journal) = Self::read_journal_for_purge(&path)? {
+                validate_group_initialization_journal(&journal)?;
+                if journal.project_id != project_id
+                    || journal.issue_id != issue_id
+                    || journal.plan_id != plan_id
+                {
+                    return Err(ProductStoreError::IdentityMismatch {
+                        kind: "coding_group_initialization_journal",
+                        id: plan_id.to_string(),
+                    });
+                }
             }
             super::remove_file_if_exists(&path)?;
         }
         Ok(())
+    }
+
+    /// 读取「路径界定归属」的 journal 残留（purge 专用）。
+    ///
+    /// - 文件缺失 → `None`（缺失即已清，幂等）；
+    /// - 内容解析失败 → `None`：该文件已不携带任何 journal 记录，路径
+    ///   （`{plan_id}.json`／`{plan_id}/{target}.json`）本身已界定归属，故按孤儿
+    ///   残留删除，不得让整个删除因残留物不可解析而失败（REQ-WPS-03/04）；
+    /// - 真实 IO 错误（打开失败，权限拒绝等）→ 上抛 fail-closed。
+    fn read_journal_for_purge(
+        path: &std::path::Path,
+    ) -> Result<Option<CodingGroupInitializationJournal>, ProductStoreError> {
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "open {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        match serde_json::from_reader(file) {
+            Ok(journal) => Ok(Some(journal)),
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "purge unparseable group initialization journal residue (path-scoped ownership)"
+                );
+                Ok(None)
+            }
+        }
     }
 
     /// OQ2 定位规则（WP2）：mark/advance 相位函数据此找到 journal 的实际存储
@@ -1836,5 +1877,80 @@ mod tests {
         assert_eq!(kept[0].id, bystander.id);
         assert_ne!(kept[0].attempt.id, journal_a.attempt.id);
         assert_ne!(kept[0].attempt.id, journal_b.attempt.id);
+    }
+
+    #[test]
+    fn h2b_purge_journals_deletes_unparseable_residue() {
+        // 半残现场：journal 内容损坏（`{}`）时归属已由路径界定（文件名/父目录
+        // 即 plan_id），删除侧必须直接清掉并继续——残留不可解析不是删除失败
+        // （REQ-WPS-03/04）。他 Plan 的完好 journal 不受影响。
+        let target = LogicalRepositoryId(uuid::Uuid::from_u64_pair(
+            0x3333_3333_3333_3333,
+            0x3333_3333_3333_3333,
+        ));
+        let (_tmp, paths, store, project_id, issue_id) = routing_store(vec![target]);
+        let _damaged = prepare_for_target(
+            &store,
+            &project_id,
+            &issue_id,
+            "work_item_plan_h2b_damaged",
+            "wi_damaged",
+            target,
+        );
+        let bystander = prepare_for_target(
+            &store,
+            &project_id,
+            &issue_id,
+            "work_item_plan_h2b_damaged_keep",
+            "wi_keep",
+            target,
+        );
+        let damaged_target_path = store.group_initialization_journal_path_for_target(
+            &project_id,
+            &issue_id,
+            "work_item_plan_h2b_damaged",
+            &target,
+        );
+        assert!(damaged_target_path.is_file());
+        std::fs::write(&damaged_target_path, "{}").unwrap();
+        // legacy 原路径同样损坏（半残现场两种形态并存）。
+        let damaged_legacy = store.group_initialization_journal_path(
+            &project_id,
+            &issue_id,
+            "work_item_plan_h2b_damaged",
+        );
+        std::fs::write(&damaged_legacy, "{}").unwrap();
+
+        let scope = EntityScope::new(
+            &project_id,
+            &issue_id,
+            DeletionEntityKind::Plan,
+            "work_item_plan_h2b_damaged",
+        );
+        let lease = EntityOperationStore::new(paths.clone())
+            .try_acquire_delete(&scope)
+            .unwrap();
+        store
+            .purge_group_initialization_journals_with_lease(&lease)
+            .expect("unparseable journal residue must not fail the purge");
+        drop(lease);
+
+        assert!(
+            !damaged_target_path.exists(),
+            "damaged per-target journal residue must be purged"
+        );
+        assert!(
+            !damaged_legacy.exists(),
+            "damaged legacy journal residue must be purged"
+        );
+        let kept = store
+            .list_group_initialization_journals_for_plan(
+                &project_id,
+                &issue_id,
+                "work_item_plan_h2b_damaged_keep",
+            )
+            .unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, bystander.id);
     }
 }

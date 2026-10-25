@@ -168,6 +168,27 @@ fn assert_plan_artifacts_purged(app_paths: &ProductAppPaths, attempt_id: Option<
             .exists(),
         "group initialization journal must be purged"
     );
+    // journal 的 flock sidecar：journal 已删则 sidecar 也必须清掉（孤儿锁不留）。
+    assert!(
+        !coding_root
+            .join("group-initializations")
+            .join(format!(".{GROUP_PLAN_ID}.json.lock"))
+            .exists(),
+        "group initialization journal lock must be purged"
+    );
+    // group 初始化仲裁文件与公共锁：半残现场（内容不可解析）同样必须清掉。
+    assert!(
+        !coding_root
+            .join("group-initialization-arbitration")
+            .exists(),
+        "group initialization arbitration residue must be purged"
+    );
+    assert!(
+        !coding_root
+            .join(".group-initialization-arbitration.lock")
+            .exists(),
+        "group initialization arbitration lock must be purged"
+    );
     // work-item-attempt-locks 按 plan 的 work_item 精确清理：本 plan 的锁必须消失，
     // 但共享目录里其他 plan 的 work_item 锁不能被误伤（见不误伤专项测试）。
     let locks_dir = coding_root.join("work-item-attempt-locks");

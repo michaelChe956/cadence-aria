@@ -54,7 +54,13 @@ impl SharedWorktreeOwnerHints<'_> {
 }
 
 /// group 初始化 journal 的最小归属视图（只读 join 三字段；serde 默认忽略
-/// 其余字段，损坏/缺字段按 JSON 错误 fail-closed 上抛）。
+/// 其余字段）。
+///
+/// **损坏内容不作为归属声明**：journal 是「路径界定归属」（`{plan_id}.json`
+/// 或 `{plan_id}/{target}.json`）的残留产物，解析失败只说明该文件不再携带
+/// 任何 owner-key 证据，按 REQ-WPS-03「缺失即视为已清」跳过——它不能也不需要
+/// 阻止删除/准入推进（删除侧由 `purge_attempt_lock_residue` 按路径直接清掉）。
+/// 真实 IO 错误（权限拒绝等）仍 fail-closed（[`read_journal_view_if_exists`]）。
 #[derive(serde::Deserialize)]
 struct SharedWorktreeJournalView {
     #[allow(dead_code)]
@@ -1397,7 +1403,11 @@ impl LifecycleStore {
     }
 
     /// 枚举 group 初始化 journal 归属视图（单 target `{plan}.json` 与 per-target
-    /// `{plan}/{repository}.json` 两个层级；损坏 JSON fail-closed 上抛）。
+    /// `{plan}/{repository}.json` 两个层级）。
+    ///
+    /// 损坏 JSON **不** fail-closed：损坏文件不再提供 lease/attempt 证据，按
+    /// 缺失处理（删除侧按路径清掉），不得让残留物让整个删除/准入失败；真实
+    /// IO 错误仍上抛（见 [`read_journal_ownership`]）。
     fn shared_worktree_journal_views(
         &self,
         project_id: &str,
@@ -1410,13 +1420,13 @@ impl LifecycleStore {
             .join("group-initializations");
         let mut views = Vec::new();
         for path in json_child_paths(&root)? {
-            if let Some(view) = read_json_if_exists::<SharedWorktreeJournalView>(&path)? {
+            if let JournalOwnership::View(view) = read_journal_ownership(&path)? {
                 views.push(view);
             }
         }
         for plan_dir in child_directories(&root)? {
             for path in json_child_paths(&plan_dir)? {
-                if let Some(view) = read_json_if_exists::<SharedWorktreeJournalView>(&path)? {
+                if let JournalOwnership::View(view) = read_journal_ownership(&path)? {
                     views.push(view);
                 }
             }
@@ -1475,15 +1485,34 @@ impl LifecycleStore {
             Some(repository) => {
                 for plan_dir in child_directories(&journals_root)? {
                     let path = plan_dir.join(format!("{}.json", repository.0));
-                    if let Some(view) = read_json_if_exists::<SharedWorktreeJournalView>(&path)? {
-                        scopes.push(plan_scope(project_id, issue_id, &view.plan_id));
+                    let plan_id = match read_journal_ownership(&path)? {
+                        JournalOwnership::View(view) => Some(view.plan_id),
+                        // 损坏残留：`{plan_id}/{repository}.json` 的父目录名即
+                        // plan_id（路径界定归属），文件本身已按本 target 命中。
+                        JournalOwnership::DamagedPath => plan_dir
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .map(str::to_string),
+                        JournalOwnership::Missing => None,
+                    };
+                    if let Some(plan_id) = plan_id {
+                        scopes.push(plan_scope(project_id, issue_id, &plan_id));
                     }
                 }
             }
             None => {
                 for path in json_child_paths(&journals_root)? {
-                    if let Some(view) = read_json_if_exists::<SharedWorktreeJournalView>(&path)? {
-                        scopes.push(plan_scope(project_id, issue_id, &view.plan_id));
+                    let plan_id = match read_journal_ownership(&path)? {
+                        JournalOwnership::View(view) => Some(view.plan_id),
+                        // 损坏残留：`{plan_id}.json` 的文件名即 plan_id。
+                        JournalOwnership::DamagedPath => path
+                            .file_stem()
+                            .and_then(|value| value.to_str())
+                            .map(str::to_string),
+                        JournalOwnership::Missing => None,
+                    };
+                    if let Some(plan_id) = plan_id {
+                        scopes.push(plan_scope(project_id, issue_id, &plan_id));
                     }
                 }
             }
@@ -1668,6 +1697,52 @@ fn sort_and_dedup_scopes(scopes: &mut Vec<EntityScope>) {
             ))
     });
     scopes.dedup();
+}
+
+/// journal 文件在归属解析中的解读结果。
+enum JournalOwnership {
+    /// 内容有效：真实 owner-key（plan_id / lease / lock WI）。
+    View(SharedWorktreeJournalView),
+    /// 文件存在但内容不可解析：**路径界定归属**——`{plan_id}.json` 的文件名或
+    /// `{plan_id}/{target}.json` 的父目录名本身即 plan_id，故它仍是本 plan 的
+    /// 孤儿残留（不再携带 lease/attempt 证据）。不得据此中止删除（REQ-WPS-03）。
+    DamagedPath,
+    /// 文件缺失：缺失即已清。
+    Missing,
+}
+
+/// journal 归属解读（**路径界定归属**的残留口径）。
+///
+/// - 文件缺失 → [`JournalOwnership::Missing`]；
+/// - 内容解析失败 → [`JournalOwnership::DamagedPath`]：损坏的 journal 不再是
+///   有效记录（删除侧按路径直接清掉），只说明它不能提供 lease/attempt 证据，
+///   绝不让整个删除/准入因残留物不可解析而失败；
+/// - 真实 IO 错误（权限拒绝、打开失败等）→ 上抛 fail-closed（REQ-WPS-04：只有
+///   真实失败才中止，残留不可解析不是删除失败）。
+fn read_journal_ownership(path: &std::path::Path) -> Result<JournalOwnership, ProductStoreError> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(JournalOwnership::Missing);
+        }
+        Err(error) => {
+            return Err(ProductStoreError::Io(format!(
+                "open {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    match serde_json::from_reader(file) {
+        Ok(view) => Ok(JournalOwnership::View(view)),
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "unparseable group initialization journal residue (path-scoped ownership)"
+            );
+            Ok(JournalOwnership::DamagedPath)
+        }
+    }
 }
 
 /// 目录的直接子 `.json` 文件路径（目录缺失=空；真实 IO 错误上抛）。
