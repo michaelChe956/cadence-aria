@@ -167,10 +167,19 @@ function CodingWorkspaceRouteComponent() {
   const { projectId, issueId, attemptId } = useParams({ strict: false });
   const search = useSearch({ strict: false }) as CodingWorkspaceFocusSearch;
   const navigate = useNavigate();
-  // P1-c：planId 存在即「从总览下钻」上下文——返回回总览，否则回 workbench。
+  // P1-c：planId 即 plan 上下文。原先它是「返回回总览」的唯一依据；现在只在
+  // 无 A 类标记时才生效（见下方来源分流 B）。
   const planId = search.planId;
-  // UI-1：总览入口改开 /workbench 抽屉（overlay=plan-overview），返回按钮
-  // 的 planId 上下文同样落到抽屉。跨路由进入不做 functional search 合并
+  // F-B（owner 复验残项：不再无脑落主页抽屉）：「返回」按来源分流——
+  //   A 同页「全部 WI」弹窗下钻（from=plan-overview-modal + backAttemptId）
+  //     → 回来源 attempt 页并自动重开总览弹窗（同页形态，URL 不跳 /workbench）；
+  //   B 工作台总览抽屉来源（from=workbench-overlay，或缺省 from 的 planId
+  //     上下文——既有 A1/深链入口）→ 仍回总览抽屉（UI-1 形态不回归）；
+  //   C 无来源 → 回工作台主页，不带 overlay。
+  const backAttemptId =
+    search.from === "plan-overview-modal" ? search.backAttemptId : undefined;
+  // UI-1：总览入口改开 /workbench 抽屉（overlay=plan-overview），「返回」的
+  // 抽屉落点同样落到抽屉。跨路由进入不做 functional search 合并
   // （from 路由同名字段会串味），显式全新 search；导航前种入 plan 地址簿，
   // 抽屉开箱即解析。
   const openPlanOverview = (targetPlanId: string) => {
@@ -188,12 +197,25 @@ function CodingWorkspaceRouteComponent() {
         gateId: search.gateId,
         choiceId: search.choiceId,
       }}
+      // A 类返回：回到来源 attempt 时只带「重开总览」请求——来源页本身的返回
+      // 语义保持无来源（再按返回即回工作台主页），不继承本次下钻链。
+      openOverviewRequested={search.openOverview === true}
       onOpenPlanOverview={openPlanOverview}
-      onBack={() =>
-        planId
-          ? openPlanOverview(planId)
-          : void navigate({ to: "/workbench" })
-      }
+      onBack={() => {
+        if (backAttemptId) {
+          void navigate({
+            to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+            params: { projectId, issueId, attemptId: backAttemptId },
+            search: { openOverview: true },
+          });
+          return;
+        }
+        if (planId) {
+          openPlanOverview(planId);
+          return;
+        }
+        void navigate({ to: "/workbench", search: {} });
+      }}
     />
   );
 }
@@ -209,6 +231,13 @@ const codingWorkspaceRoute = createRoute({
     focus: searchParamString(search.focus),
     gateId: searchParamString(search.gateId),
     choiceId: searchParamString(search.choiceId),
+    from:
+      search.from === "plan-overview-modal" ||
+      search.from === "workbench-overlay"
+        ? search.from
+        : undefined,
+    backAttemptId: searchParamString(search.backAttemptId),
+    openOverview: search.openOverview === true ? true : undefined,
   }),
   component: CodingWorkspaceRouteComponent,
 });
@@ -258,7 +287,22 @@ export type CodingWorkspaceFocusSearch = {
   focus?: string;
   gateId?: string;
   choiceId?: string;
+  /** F-B：「返回」来源标记——`"plan-overview-modal"` 表示本页由「全部 WI」
+   * 同页弹窗下钻而来（A 类），配 backAttemptId 即回来源 attempt 页；
+   * `"workbench-overlay"` 显式声明工作台总览抽屉来源（B 类）。两者都缺省时
+   * 按 planId 判定 B/C：有 planId ⇒ 工作台总览抽屉（既有形态），无 ⇒ 主页。 */
+  from?: CodingWorkspaceReturnSource;
+  /** F-B：A 类下钻的来源 attempt id——「返回」回到该 attempt 并重开总览弹窗。 */
+  backAttemptId?: string;
+  /** F-B：`true` ⇒ 挂载/换址后自动打开本页总览弹窗（A 类返回时携带）。
+   * 用布尔而非 "1"：TanStack 的 search 序列化会给「可 JSON 解析的字符串」
+   * 加引号（`openOverview=%221%22`），布尔落成干净的 `openOverview=true`。 */
+  openOverview?: boolean;
 };
+
+export type CodingWorkspaceReturnSource =
+  | "plan-overview-modal"
+  | "workbench-overlay";
 
 export type CodingAttentionLocation = {
   to: string;

@@ -648,6 +648,64 @@ describe("router", () => {
     expect(screen.queryByTestId("coding-workspace-page")).toBeNull();
   });
 
+  // F-B（owner 复验残项）：「返回」按来源分流——显式抽屉来源仍走抽屉…
+  it("keeps the overlay drawer as the back target for an overlay-sourced coding page", async () => {
+    loadAvailableProviders();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("plan aggregate not configured for this test");
+      }),
+    );
+    const history = createMemoryHistory({
+      initialEntries: [
+        "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_web_0001" +
+          "?planId=issue_plan_0001&from=workbench-overlay",
+      ],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "返回" }));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe("/workbench");
+    });
+    expect(history.location.search).toContain("overlay=plan-overview");
+    expect(history.location.search).toContain("planId=issue_plan_0001");
+    expect(await screen.findByTestId("plan-overview-drawer")).toBeInTheDocument();
+  });
+
+  // …而 A 类（同页「全部 WI」弹窗下钻）回来源 attempt 页并请求重开总览，
+  // 绝不落主页抽屉。
+  it("returns a modal-sourced coding page to its source attempt", async () => {
+    loadAvailableProviders();
+    const history = createMemoryHistory({
+      initialEntries: [
+        "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_web_0001" +
+          "?planId=issue_plan_0001&workItemId=work_item_0002" +
+          "&from=plan-overview-modal&backAttemptId=coding_attempt_0001",
+      ],
+    });
+
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "返回" }));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe(
+        "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_0001",
+      );
+    });
+    expect(history.location.search).toContain("openOverview=true");
+    expect(history.location.search).not.toContain("overlay=");
+    expect(screen.queryByTestId("plan-overview-drawer")).toBeNull();
+    expect(screen.getByTestId("coding-workspace-page")).toHaveAttribute(
+      "data-attempt-id",
+      "coding_attempt_0001",
+    );
+  });
+
   it("clears the overlay fields on drawer close while preserving focus", async () => {
     loadAvailableProviders();
     seedPlanAddress();

@@ -137,6 +137,7 @@ export function CodingWorkspacePage({
   focus,
   onOpenPlanOverview,
   planOverviewMode = "inline",
+  openOverviewRequested = false,
 }: {
   address: CodingAttemptAddress;
   onBack: () => void;
@@ -146,6 +147,9 @@ export function CodingWorkspacePage({
   onOpenPlanOverview?: (planId: string) => void;
   /** 「查看全部 WI」入口形态；默认 inline（本页弹窗），external 交回宿主。 */
   planOverviewMode?: PlanOverviewEntryMode;
+  /** F-B（A 类返回）：总览弹窗重开请求——从本页弹窗下钻的详情页点「返回」
+   * 回到来源 attempt 时 router 携带 openOverview=true，本页据此自动打开弹窗。 */
+  openOverviewRequested?: boolean;
 }) {
   const api = useCodingWorkspaceWs(address);
   // F-B：总览下钻到别的 attempt 需要导航能力。useRouter 在没有 RouterProvider
@@ -239,6 +243,14 @@ export function CodingWorkspacePage({
   useEffect(() => {
     setPlanOverviewOpen(false);
   }, [address.attemptId]);
+  // F-B（A 类返回）：从本页弹窗下钻的详情页点「返回」→ router 回本页并带
+  // openOverview=true——据此自动重开总览弹窗。关闭仍由用户自持：请求值不变
+  // 时本 effect 不重跑（换 attempt 才重放）。
+  useEffect(() => {
+    if (openOverviewRequested) {
+      setPlanOverviewOpen(true);
+    }
+  }, [openOverviewRequested, address.attemptId]);
   const childWorkspaceError =
     store.activePlanRepair &&
     planRepairWorkspaceSessionId === store.activePlanRepair.childSessionId
@@ -281,7 +293,8 @@ export function CodingWorkspacePage({
     : undefined;
   // F-B：总览里点行/徽标下钻到单个 Attempt 详情——不在弹窗内就地展开（会
   // 同时挂载第二个 attempt 的 WS/store），而是导航到目标 attempt：同一时刻
-  // 只有一个 attempt 实例在页面上。
+  // 只有一个 attempt 实例在页面上。地址带 A 类来源标记（from +
+  // backAttemptId）：目标页「返回」据此回到本 attempt 并自动重开总览弹窗。
   const handleOpenOverviewAttempt = (target: PlanOverviewOpenTarget) => {
     setPlanOverviewOpen(false);
     if (target.attemptId === address.attemptId) {
@@ -300,6 +313,8 @@ export function CodingWorkspacePage({
         workItemId: target.workItemId,
         gateId: target.gateId,
         choiceId: target.choiceId,
+        from: "plan-overview-modal",
+        backAttemptId: address.attemptId,
       },
     });
   };

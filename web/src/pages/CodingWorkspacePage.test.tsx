@@ -1846,4 +1846,99 @@ describe("F-B plan overview in-page modal", () => {
     // 单实例：任一时刻只有一个 attempt 详情页挂载。
     expect(screen.getAllByTestId("coding-workspace-page")).toHaveLength(1);
   });
+
+  // F-B（owner 复验残项）：「返回」按来源分流——A 类（同页弹窗下钻）回来源
+  // attempt 页并自动重开总览弹窗，不落主页抽屉。
+  it("returns a modal drilldown to the source attempt with the overview reopened", async () => {
+    loadProviderAvailability();
+    mockCodingWs();
+    groupSessionState();
+    vi.mocked(getPlanCodingProgress).mockResolvedValue(planProgressDto());
+
+    const history = createMemoryHistory({ initialEntries: [CODING_PATH] });
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    expect(await screen.findByTestId("coding-workspace-page")).toBeInTheDocument();
+    await userEvent.click(await screen.findByTestId("plan-coding-open-overview"));
+    await screen.findByTestId("plan-overview-units");
+    await userEvent.click(screen.getByTestId("plan-overview-open-work_item_0002"));
+
+    const DRILLED_PATH =
+      "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_web_0001";
+    await waitFor(() => {
+      expect(history.location.pathname).toBe(DRILLED_PATH);
+    });
+    // 下钻地址带上来源标记与来源 attempt（A 类返回落点依据）。
+    expect(history.location.search).toContain("from=plan-overview-modal");
+    expect(history.location.search).toContain(
+      "backAttemptId=coding_attempt_0001",
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "返回" }));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe(CODING_PATH);
+    });
+    expect(history.location.search).toContain("openOverview=true");
+    // 不落主页抽屉：仍是 coding 页形态，总览弹窗自动重开。
+    expect(screen.queryByTestId("plan-overview-drawer")).toBeNull();
+    expect(await screen.findByTestId("plan-overview-modal")).toBeInTheDocument();
+    expect(await screen.findByTestId("plan-overview-units")).toBeInTheDocument();
+    expect(screen.getAllByTestId("coding-workspace-page")).toHaveLength(1);
+
+    // 用户关闭后不再被 openOverview 请求拉回（弹窗开关归用户；URL 请求值
+    // 只在换 attempt 时重放）。
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByTestId("plan-overview-modal")).toBeNull();
+    expect(history.location.search).toContain("openOverview=true");
+  });
+
+  // F-B：「返回」B 类——工作台抽屉（总览）来源保持既有抽屉形态，不回主页。
+  it("returns an overlay-sourced attempt to the plan overview drawer", async () => {
+    loadProviderAvailability();
+    mockCodingWs();
+    groupSessionState();
+    vi.mocked(getPlanCodingProgress).mockResolvedValue(planProgressDto());
+
+    const history = createMemoryHistory({
+      initialEntries: [
+        "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_web_0001" +
+          "?planId=work_item_plan_0001&from=workbench-overlay",
+      ],
+    });
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    expect(await screen.findByTestId("coding-workspace-page")).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "返回" }));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe("/workbench");
+    });
+    expect(history.location.search).toContain("overlay=plan-overview");
+    expect(history.location.search).toContain("planId=work_item_plan_0001");
+    expect(await screen.findByTestId("plan-overview-drawer")).toBeInTheDocument();
+    // 抽屉形态不双挂载：coding 页随路由离开卸载。
+    expect(screen.queryByTestId("coding-workspace-page")).toBeNull();
+  });
+
+  // F-B：「返回」C 类——无来源（直接打开 attempt 页）回工作台主页且不带
+  // overlay（不再无脑落主页抽屉）。
+  it("returns a source-less attempt to the bare workbench root", async () => {
+    loadProviderAvailability();
+    mockCodingWs();
+    groupSessionState();
+
+    const history = createMemoryHistory({ initialEntries: [CODING_PATH] });
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    expect(await screen.findByTestId("coding-workspace-page")).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "返回" }));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe("/workbench");
+    });
+    expect(history.location.search).not.toContain("overlay=");
+    expect(history.location.search).not.toContain("planId=");
+    expect(screen.queryByTestId("plan-overview-drawer")).toBeNull();
+  });
 });
