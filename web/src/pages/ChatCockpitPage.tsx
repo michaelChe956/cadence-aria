@@ -4,11 +4,9 @@ import type { AuthorDecisionChoice } from "../api/types";
 import {
   findWorkspaceSessionIssueAddress,
   getCodingAttemptSnapshot,
-  getAutomationEnrollmentControl,
   postAutomationContinuePlan,
   postRetryFailedScRun,
   takeoverWorkspaceSession,
-  type AutomationControlStatus,
 } from "../api/client";
 import { fetchWorkspaceArtifactVersion } from "../api/workspace-content";
 import {
@@ -112,6 +110,7 @@ import { useCockpitHotkeyActions } from "./useCockpitHotkeyActions";
 import { useCockpitNodeDetailHydration } from "./useCockpitNodeDetailHydration";
 import { useCockpitChoiceRespond } from "./useCockpitChoiceRespond";
 import { useCockpitWaitingActions } from "./useCockpitWaitingActions";
+import { useCockpitPlanContinueControl } from "./useCockpitPlanContinueControl";
 
 export function ChatCockpitPage({
   sessionId,
@@ -710,16 +709,10 @@ export function ChatCockpitPage({
   // issue 目录解析（一次，缓存）→ P4 control GET 只读投影（stop_key/stage/
   // allowed_actions/context_required）→ continue-plan REST。一切动作与读取
   // 都走 client.ts 通道；前端不凭本地状态决定恢复路线（control 为权威）。
-  const [planIssueAddress, setPlanIssueAddress] = useState<{
-    projectId: string;
-    issueId: string;
-  } | null>(null);
-  const [planControl, setPlanControl] = useState<AutomationControlStatus | null>(null);
   const [planContinueNotice, setPlanContinueNotice] = useState<{
     tone: "info" | "warn" | "danger";
     text: string;
   } | null>(null);
-  const [planControlRefreshTick, setPlanControlRefreshTick] = useState(0);
   // 同源托管管理态：durable 归属 owner=server 且 enabled（与 P4 服务端
   // takeover 拒绝/收件箱隐藏同源），未知（null）不猜。
   const sessionManagedByAutomation =
@@ -738,58 +731,20 @@ export function ChatCockpitPage({
       state.sessionStatus === "running");
   const planContinueEligible =
     isCurrentSession && sessionManagedByAutomation && planStopShaped;
-
-  useEffect(() => {
-    if (!planContinueEligible || planIssueAddress !== null) {
-      return;
-    }
-    let alive = true;
-    // 只读目录解析（projects → issues → lifecycle）；失败静默保持无恢复面。
-    void findWorkspaceSessionIssueAddress(sessionId)
-      .then((address) => {
-        if (alive && address !== null) {
-          setPlanIssueAddress(address);
-        }
-      })
-      .catch(() => undefined);
-    return () => {
-      alive = false;
-    };
-  }, [planContinueEligible, planIssueAddress, sessionId]);
-
-  useEffect(() => {
-    if (!planContinueEligible || planIssueAddress === null) {
-      if (!planContinueEligible) {
-        setPlanControl(null);
-      }
-      return;
-    }
-    let alive = true;
-    const { projectId, issueId } = planIssueAddress;
-    void getAutomationEnrollmentControl(projectId, issueId)
-      .then((status) => {
-        if (alive) {
-          setPlanControl(status);
-        }
-      })
-      .catch(() => {
-        if (alive) {
-          setPlanControl(null);
-        }
-      });
-    return () => {
-      alive = false;
-    };
-    // 会话状态推进/继续动作后复读（tick 递增），停点漂移即时对账。
-  }, [
-    planContinueEligible,
+  // 目录解析 + control 投影与复读节拍：已拆到 useCockpitPlanContinueControl
+  //（纯移动零行为变化，依赖数组原样）。
+  const {
     planIssueAddress,
+    planControl,
     planControlRefreshTick,
+    setPlanControlRefreshTick,
+  } = useCockpitPlanContinueControl({
+    planContinueEligible,
     sessionId,
-    state.activeNodeId,
-    state.sessionStatus,
-    state.stage,
-  ]);
+    activeNodeId: state.activeNodeId,
+    sessionStatus: state.sessionStatus,
+    stage: state.stage,
+  });
 
   // 恢复面资格只镜像 control 的 allowed_actions（含 continue_plan）与身份
   //（stop_key/binding）；terminated/unmanaged/waiting 无 continue 不出面。

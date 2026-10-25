@@ -90,6 +90,14 @@ import {
 } from "./CodingPlanOverviewModal";
 import { PrepareExecutionPlanPanel, StatusBadge } from "./CodingWorkspaceReports";
 import { planRepairActionGenerationKey } from "./plan-repair-action-generation";
+import {
+  choiceEntryFromState,
+  choiceMetadataString,
+  displayCodingStage,
+  markChoiceEntry,
+  newPlanGroupDeleteCommandId,
+  normalizedRefs,
+} from "./coding-workspace-page-helpers";
 
 type CodingWorkspaceDrawer = "providers" | "runs" | "audit";
 type PendingRepairAction = {
@@ -1485,37 +1493,6 @@ export function CodingWorkspacePage({
   }
 }
 
-function choiceEntryFromState(requestId: string) {
-  return (
-    useCodingWorkspaceStore
-      .getState()
-      .chatEntries.find(
-        (candidate) =>
-          candidate.type === "choice_request" && candidate.metadata?.request_id === requestId,
-      ) ?? null
-  );
-}
-
-function choiceMetadataString(entry: ChatEntry | null, key: string) {
-  const metadata = entry?.metadata as Record<string, unknown> | undefined;
-  return typeof metadata?.[key] === "string" ? (metadata[key] as string) : null;
-}
-
-function markChoiceEntry(
-  requestId: string,
-  merge: (metadata: Record<string, unknown>) => Record<string, unknown>,
-  resolved = false,
-) {
-  const store = useCodingWorkspaceStore.getState();
-  const entry = choiceEntryFromState(requestId);
-  if (!entry) return;
-  store.appendChatEntry({
-    ...entry,
-    resolved,
-    metadata: merge({ ...(entry.metadata as Record<string, unknown>) }),
-  });
-}
-
 function repairScopeMatches(
   scope: RepairActionScope | null,
   repair: PlanRepairSessionState | null,
@@ -1538,28 +1515,3 @@ function protocolErrorMatchesAction(
   return true;
 }
 
-function normalizedRefs(refs: string[] | undefined): string[] {
-  return [...new Set((refs ?? []).map((ref) => ref.trim()).filter(Boolean))].sort();
-}
-
-function displayCodingStage(stage: string) {
-  const labels: Record<string, string> = {
-    prepare_context: "准备上下文",
-    worktree_prepare: "准备 Worktree",
-    coding: "Coder",
-    code_review: "Code Reviewer",
-    review_request: "准备 PR",
-    internal_pr_review: "GroupFinalReview",
-    final_confirm: "人工组最终确认",
-  };
-  return labels[stage] ?? stage;
-}
-
-// H5：整组删除一次用户动作生成一次（同动作失败重试复用，服务端按 command_id
-// 幂等回执；与 workbench 的 plan_start_ui_ 同一约定）。
-function newPlanGroupDeleteCommandId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return `plan_delete_ui_${crypto.randomUUID()}`;
-  }
-  return `plan_delete_ui_${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
