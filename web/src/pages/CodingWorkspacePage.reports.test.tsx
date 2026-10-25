@@ -188,6 +188,11 @@ describe("CodingWorkspacePage reports and history", () => {
     expect(gate).toHaveTextContent("review_payload_parse_error");
     expect(gate).toHaveTextContent("code_review_0001.json");
     expect(gate).toHaveTextContent("provider-raw/code_review/code_review_0001.txt");
+    // F-E：本门只有「重试审查」＋「人工继续」，底部提示与门卡统一说"放行说明"，
+    // 不再把放行写成"修复意见"。
+    expect(
+      screen.getByText("请使用上方门禁操作提交人工放行说明（会记入质量豁免审计）"),
+    ).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "重试审查" }));
 

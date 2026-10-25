@@ -106,6 +106,19 @@ export function CodingComposer({
   const inputDisabled = status === "completed" || status === "aborted";
   const canSend = !inputDisabled && trimmedInput.length > 0;
   const blockedByGate = pendingGate?.kind === "blocked";
+  // F-E：底部这行提示与上方门卡/字段同一套词汇——人工放行门写的是放行说明
+  //（进质量豁免审计），发回 Coder 门才是修复意见；两者并存时说"人工处理意见"。
+  const blockedGateHasBypass =
+    pendingGate?.available_actions.some(actionIsQualityBypass) ?? false;
+  const blockedGateHasCoderFeedback =
+    pendingGate?.available_actions.some((action) => action.action_type === "send_to_coder") ??
+    false;
+  const blockedComposerHint =
+    blockedGateHasBypass && blockedGateHasCoderFeedback
+      ? "请使用上方门禁操作提交人工处理意见（人工放行会记入质量豁免审计）"
+      : blockedGateHasBypass
+        ? "请使用上方门禁操作提交人工放行说明（会记入质量豁免审计）"
+        : "请使用上方门禁操作提交人工修复意见";
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -120,7 +133,7 @@ export function CodingComposer({
     return (
       <div className="grid gap-2 border-t border-[var(--aria-line)] bg-white px-3 py-2">
         <div className="text-xs font-semibold text-[var(--aria-ink-muted)]">
-          请使用上方门禁操作提交人工修复意见
+          {blockedComposerHint}
         </div>
         <div className="flex min-w-0 items-center justify-between gap-2">
           <div className="truncate text-xs text-[var(--aria-ink-muted)]">{statusText}</div>
