@@ -16,10 +16,12 @@ vi.mock("./CodingWorkspacePage", () => ({
     address,
     focus,
     onBack,
+    planOverviewMode,
   }: {
     address: { projectId: string; issueId: string; attemptId: string };
     focus?: { gateId?: string; choiceId?: string };
     onBack: () => void;
+    planOverviewMode?: string;
   }) => (
     <div
       data-testid="coding-workspace-page-stub"
@@ -27,6 +29,7 @@ vi.mock("./CodingWorkspacePage", () => ({
       data-issue-id={address.issueId}
       data-attempt-id={address.attemptId}
       data-gate-id={focus?.gateId ?? ""}
+      data-plan-overview-mode={planOverviewMode ?? ""}
     >
       <button type="button" onClick={onBack}>
         返回
@@ -653,6 +656,9 @@ describe("CodingPlanOverviewDrawer overview ↔ detail switching (UI-1)", () => 
     expect(detail).toHaveAttribute("data-project-id", ADDRESS.projectId);
     expect(detail).toHaveAttribute("data-issue-id", ADDRESS.issueId);
     expect(detail).toHaveAttribute("data-attempt-id", "coding_attempt_web_0001");
+    // F-B：抽屉已承载总览——详情页的「查看全部 WI」走 external 形态（回到
+    // 抽屉总览），不在抽屉里再叠一层本页弹窗。
+    expect(detail).toHaveAttribute("data-plan-overview-mode", "external");
     // 禁止双挂载：任一时刻只有一个既有 Attempt 详情实例。
     expect(screen.queryAllByTestId("coding-workspace-page-stub")).toHaveLength(1);
   });

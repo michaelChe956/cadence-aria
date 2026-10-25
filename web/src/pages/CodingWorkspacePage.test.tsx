@@ -9,6 +9,7 @@ import type {
   CodingAttentionItemDto,
   CodingExecutionUnit,
   CodingWsOutMessage,
+  PlanCodingProgressDto,
   ProviderHealthResponse,
 } from "../api/types";
 import {
@@ -1292,9 +1293,9 @@ describe("CodingWorkspacePage P1-c navigation and focus", () => {
     expect(scrolled).toContain(banner);
   });
 
-  // P1-c 红测④前置：GroupProgress「查看全部 WI」入口由页面透传回调（router
-  // 接线导航到总览路由；页面自身不感知路由）。
-  it("forwards the group progress overview entry through onOpenPlanOverview", async () => {
+  // F-B（owner 真机复验 2026-10-25）：「查看全部 WI」入口改为本页弹窗承载
+  // 总览——不再把宿主回调（router 侧跳主页抽屉）当作出路。
+  it("opens the plan overview in an in-page modal instead of calling the host callback", async () => {
     const onOpenPlanOverview = vi.fn();
     mockCodingWs();
     mockCodingSessionState({
@@ -1326,7 +1327,47 @@ describe("CodingWorkspacePage P1-c navigation and focus", () => {
     );
 
     await userEvent.click(await screen.findByTestId("plan-coding-open-overview"));
+    expect(await screen.findByTestId("plan-overview-modal")).toBeInTheDocument();
+    // 不跨页导航：宿主回调（router 侧跳主页抽屉）不被触发。
+    expect(onOpenPlanOverview).not.toHaveBeenCalled();
+  });
+
+  // F-B：external 形态（抽屉宿主）——总览已由抽屉承载，入口交回宿主回调。
+  it("hands the overview entry back to the host in external mode", async () => {
+    const onOpenPlanOverview = vi.fn();
+    mockCodingWs();
+    mockCodingSessionState({
+      attempt_scope: "work_item_group",
+      work_item_group_id: "work_item_plan_0001",
+      current_work_item_id: "work_item_0001",
+      active_unit_id: "coding_unit_0001",
+      units: [
+        {
+          unit_id: "coding_unit_0001",
+          logical_work_item_id: "work_item_0001",
+          work_item_revision_id: "work_item_revision_0001",
+          dependency_logical_work_item_ids: [],
+          order_index: 0,
+          status: "running",
+          summary: null,
+          latest_handoff_revision_id: null,
+          completion_commit: null,
+        },
+      ],
+    });
+
+    render(
+      <CodingWorkspacePage
+        address={CODING_ATTEMPT_ADDRESS}
+        onBack={vi.fn()}
+        onOpenPlanOverview={onOpenPlanOverview}
+        planOverviewMode="external"
+      />,
+    );
+
+    await userEvent.click(await screen.findByTestId("plan-coding-open-overview"));
     expect(onOpenPlanOverview).toHaveBeenCalledWith("work_item_plan_0001");
+    expect(screen.queryByTestId("plan-overview-modal")).toBeNull();
   });
 });
 
@@ -1523,5 +1564,286 @@ describe("P1-c router integration", () => {
     expect(await screen.findByTestId("plan-overview-drawer")).toBeInTheDocument();
     expect(await screen.findByTestId("plan-overview-error")).toBeInTheDocument();
     expect(screen.queryByTestId("coding-workspace-page")).toBeNull();
+  });
+});
+
+// ── F-B（owner 真机复验 2026-10-25）：「查看全部 WI」改为 Coding Attempt 页
+// 内的弹窗——不跨页导航、不跳主页抽屉、关闭即停轮询、明细不双挂载 ──
+
+describe("F-B plan overview in-page modal", () => {
+  installCodingWorkspacePageTestHooks();
+
+  beforeEach(() => {
+    vi.mocked(useWorkspaceSessionObservers).mockReturnValue({
+      records: [],
+      inbox: [],
+      countedInbox: [],
+      watchedSessionIds: [],
+      watchSession: vi.fn(),
+      codingAttemptForSession: () => null,
+      displayItems: [],
+      actionableCount: 0,
+      notificationCandidates: [],
+    });
+  });
+
+  function availableProviderHealth(): ProviderHealthResponse {
+    return {
+      schema_version: 1,
+      generation: 1,
+      checked_at: "2026-10-16T00:00:00Z",
+      state_status: "ready",
+      state_error: null,
+      real_workflow_blocked: false,
+      test_provider_enabled: false,
+      providers: [],
+    };
+  }
+
+  function loadProviderAvailability() {
+    const health = availableProviderHealth();
+    useProviderAvailabilityStore.setState({
+      snapshot: health,
+      loadStatus: "loaded",
+      generation: health.generation,
+      stateStatus: health.state_status,
+      stateError: health.state_error,
+      realWorkflowBlocked: health.real_workflow_blocked,
+      testProviderEnabled: health.test_provider_enabled,
+    });
+  }
+
+  function planProgressDto(): PlanCodingProgressDto {
+    return {
+      plan_id: "work_item_plan_0001",
+      bound_plan_revision_id: "plan_revision_0001",
+      command_id: "plan_start_0001",
+      mode: "first_ready_unit",
+      phase: "running",
+      primary_attempt_id: "coding_attempt_0001",
+      selected_unit_id: "coding_unit_0001",
+      selected_attempt_id: "coding_attempt_0001",
+      target_attempts: [
+        {
+          target_repository_id: "repo_0001",
+          attempt_id: "coding_attempt_0001",
+          attempt_status: "running",
+          worktree_path: "/tmp/wt",
+          lease_state: "held",
+          repository_name: "主仓",
+          branch_name: "feat/1",
+          base_branch: "main",
+          stage: "coding",
+          head_commit: null,
+          push_status: null,
+          push_error: null,
+          review_request_id: null,
+          manual_recovery_reason: null,
+        },
+        {
+          target_repository_id: "repo_0002",
+          attempt_id: "coding_attempt_web_0001",
+          attempt_status: "running",
+          worktree_path: null,
+          lease_state: "held",
+          repository_name: "web 仓",
+          branch_name: null,
+          base_branch: null,
+          stage: "coding",
+          head_commit: null,
+          push_status: null,
+          push_error: null,
+          review_request_id: null,
+          manual_recovery_reason: null,
+        },
+      ],
+      units: [
+        {
+          unit_id: "coding_unit_0001",
+          logical_work_item_id: "work_item_0001",
+          target_repository_id: "repo_0001",
+          attempt_id: "coding_attempt_0001",
+          unit_status: "running",
+          execution_state: "running",
+          unsatisfied_dependency_ids: [],
+          waiting_reason: null,
+          dependency_logical_work_item_ids: [],
+          order_index: 0,
+          summary: "主仓工作项",
+        },
+        {
+          unit_id: "coding_unit_0002",
+          logical_work_item_id: "work_item_0002",
+          target_repository_id: "repo_0002",
+          attempt_id: "coding_attempt_web_0001",
+          unit_status: "running",
+          execution_state: "running",
+          unsatisfied_dependency_ids: [],
+          waiting_reason: null,
+          dependency_logical_work_item_ids: [],
+          order_index: 1,
+          summary: null,
+        },
+      ],
+      final_confirm: {
+        state: "not_ready",
+        ready_attempt_ids: [],
+        confirmed_attempt_ids: [],
+        blocking: [],
+      },
+      attention_items: [],
+      plan_complete: false,
+    };
+  }
+
+  function groupSessionState() {
+    useCodingWorkspaceStore.getState().setSessionState({
+      type: "coding_session_state",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
+      attempt_id: "coding_attempt_0001",
+      attempt_scope: "work_item_group",
+      work_item_group_id: "work_item_plan_0001",
+      current_work_item_id: "work_item_0001",
+      active_unit_id: "coding_unit_0001",
+      units: [
+        {
+          unit_id: "coding_unit_0001",
+          logical_work_item_id: "work_item_0001",
+          work_item_revision_id: "work_item_revision_0001",
+          dependency_logical_work_item_ids: [],
+          order_index: 0,
+          status: "running",
+          summary: null,
+          latest_handoff_revision_id: null,
+          completion_commit: null,
+        },
+      ],
+      status: "running",
+      stage: "coding",
+      branch_name: "aria/work-items/work_item_0001/attempt-1",
+      base_branch: "main",
+      worktree_path: "/tmp/worktree",
+      rework_count: 0,
+      max_auto_rework: 2,
+      head_commit: null,
+      pushed_remote: null,
+      provider_config_snapshot: {
+        author: "fake",
+        reviewer: "fake",
+        review_rounds: 1,
+      },
+      role_provider_config_snapshot: {
+        coder: "fake",
+        code_reviewer: "fake",
+        internal_reviewer: "fake",
+        review_rounds: 1,
+        permission_modes: { ...DEFAULT_PERMISSION_MODES },
+      },
+      timeline_nodes: [],
+      active_node_id: null,
+      code_review_reports: [],
+      review_request: null,
+      internal_pr_review: null,
+      pending_gates: [],
+      pending_choices: [],
+      role_runs: [],
+      chat_entries: [],
+      work_item_markdown: null,
+      verification_commands: [],
+      work_item_execution_plan: null,
+      linked_plan_repair: null,
+      require_execution_plan_confirm: false,
+    });
+  }
+
+  const CODING_PATH =
+    "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_0001";
+
+  // F-B 核心：入口在同页弹窗里开总览，URL 不变、不跳 /workbench。
+  it("opens the overview in an in-page modal without navigating away", async () => {
+    loadProviderAvailability();
+    mockCodingWs();
+    groupSessionState();
+    vi.mocked(getPlanCodingProgress).mockResolvedValue(planProgressDto());
+
+    const history = createMemoryHistory({ initialEntries: [CODING_PATH] });
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    expect(await screen.findByTestId("coding-workspace-page")).toBeInTheDocument();
+    await userEvent.click(await screen.findByTestId("plan-coding-open-overview"));
+
+    expect(await screen.findByTestId("plan-overview-modal")).toBeInTheDocument();
+    expect(await screen.findByTestId("plan-overview-units")).toBeInTheDocument();
+    // 同页：URL 未变、没有跨页导航（router 侧主页抽屉没被打开）。
+    expect(history.location.pathname).toBe(CODING_PATH);
+    expect(history.location.search).not.toContain("overlay=");
+    expect(screen.queryByTestId("plan-overview-drawer")).toBeNull();
+    // 没有第二个 attempt 实例：仍是同一个 coding 页。
+    expect(screen.getAllByTestId("coding-workspace-page")).toHaveLength(1);
+  });
+
+  // F-B：关闭弹窗即停轮询（弹窗卸载 → 5 秒轮询句柄释放）。
+  it("stops the plan polling when the modal closes", async () => {
+    vi.useFakeTimers();
+    mockCodingWs();
+    groupSessionState();
+    const progressMock = vi.mocked(getPlanCodingProgress);
+    progressMock.mockResolvedValue(planProgressDto());
+
+    render(
+      <CodingWorkspacePage address={CODING_ATTEMPT_ADDRESS} onBack={vi.fn()} />,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    fireEvent.click(screen.getByTestId("plan-coding-open-overview"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const opened = progressMock.mock.calls.length;
+
+    // 弹窗可见期间按 5 秒轮询。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(progressMock.mock.calls.length).toBeGreaterThan(opened);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByTestId("plan-overview-modal")).toBeNull();
+    const closed = progressMock.mock.calls.length;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(progressMock.mock.calls.length).toBe(closed);
+    vi.useRealTimers();
+  });
+
+  // F-B：明细下钻只导航一次到目标 attempt，不双挂载第二个 attempt 实例。
+  it("navigates to the selected attempt without mounting a second instance", async () => {
+    loadProviderAvailability();
+    mockCodingWs();
+    groupSessionState();
+    vi.mocked(getPlanCodingProgress).mockResolvedValue(planProgressDto());
+
+    const history = createMemoryHistory({ initialEntries: [CODING_PATH] });
+    render(<RouterProvider router={createAppRouter(history)} />);
+
+    expect(await screen.findByTestId("coding-workspace-page")).toBeInTheDocument();
+    await userEvent.click(await screen.findByTestId("plan-coding-open-overview"));
+    await screen.findByTestId("plan-overview-units");
+    await userEvent.click(screen.getByTestId("plan-overview-open-work_item_0002"));
+
+    await waitFor(() => {
+      expect(history.location.pathname).toBe(
+        "/workbench/projects/project_0001/issues/issue_0001/coding/coding_attempt_web_0001",
+      );
+    });
+    // 弹窗随下钻关闭（详情不在弹窗里就地展开）。
+    expect(screen.queryByTestId("plan-overview-modal")).toBeNull();
+    // 单实例：任一时刻只有一个 attempt 详情页挂载。
+    expect(screen.getAllByTestId("coding-workspace-page")).toHaveLength(1);
   });
 });

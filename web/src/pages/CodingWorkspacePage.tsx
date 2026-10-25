@@ -8,6 +8,7 @@ import {
   WifiOff,
   X,
 } from "lucide-react";
+import { useRouter } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiRequestError,
@@ -83,6 +84,10 @@ import {
   requestIdFromEntry,
 } from "./CodingWorkspaceControls";
 import { CodingWorkspaceGroupProgress } from "./CodingWorkspaceGroupProgress";
+import {
+  CodingPlanOverviewModal,
+  type PlanOverviewOpenTarget,
+} from "./CodingPlanOverviewModal";
 import { PrepareExecutionPlanPanel, StatusBadge } from "./CodingWorkspaceReports";
 import { planRepairActionGenerationKey } from "./plan-repair-action-generation";
 
@@ -116,11 +121,22 @@ type PendingCardFocus =
   | { type: "gate"; gateId: string }
   | { type: "final_confirm" };
 
+/**
+ * F-B（owner 真机复验 2026-10-25）：「查看全部 WI」入口形态——
+ * - inline（默认）：本页弹窗承载「全部 WI 总览」。不跨页导航——跨页会离开
+ *   Coding Attempt 页，WS 断连并 reset 全局 store（当前 attempt 的运行上下文
+ *   与门状态全丢，回来还要重连重建），这正是 owner 复验指出的问题。
+ * - external：交回宿主的 onOpenPlanOverview 回调。抽屉宿主用它回到抽屉总览
+ *   （那里总览已由抽屉承载，页面再弹一层是重复浮层）。
+ */
+export type PlanOverviewEntryMode = "inline" | "external";
+
 export function CodingWorkspacePage({
   address,
   onBack,
   focus,
   onOpenPlanOverview,
+  planOverviewMode = "inline",
 }: {
   address: CodingAttemptAddress;
   onBack: () => void;
@@ -128,8 +144,13 @@ export function CodingWorkspacePage({
   focus?: CodingWorkspaceFocusTarget;
   /** P1-c：GroupProgress「查看全部 WI」入口；未接线不渲染（携带 planId）。 */
   onOpenPlanOverview?: (planId: string) => void;
+  /** 「查看全部 WI」入口形态；默认 inline（本页弹窗），external 交回宿主。 */
+  planOverviewMode?: PlanOverviewEntryMode;
 }) {
   const api = useCodingWorkspaceWs(address);
+  // F-B：总览下钻到别的 attempt 需要导航能力。useRouter 在没有 RouterProvider
+  // 时返回 undefined（页面单测即独立渲染），此处不抛错——拿不到路由就不导航。
+  const router = useRouter({ warn: false });
   // P2-e（REQ-CRO-11）：choice 作答走 REST 命令谱系（同 command 重试/202
   // 复查/expired 不路由新 run），不再经 WS choice_response。
   const { respondChoice } = useChoiceRespondCommand(address, handleChoiceCommandState);
@@ -190,6 +211,8 @@ export function CodingWorkspacePage({
   const [pendingRepairAction, setPendingRepairAction] =
     useState<PendingRepairAction | null>(null);
   const [activeDrawer, setActiveDrawer] = useState<CodingWorkspaceDrawer | null>(null);
+  // F-B：「全部 WI 总览」本页弹窗的开关（inline 形态）。
+  const [planOverviewOpen, setPlanOverviewOpen] = useState(false);
   const [auditTarget, setAuditTarget] = useState<OperationAuditTarget | null>(null);
   // 辅助抽屉浮层行为（body 锁/Esc/焦点移入归还/Tab 圈闭），与 DialogShell 同一规范。
   const drawerPanelRef = useRef<HTMLElement | null>(null);
@@ -211,6 +234,11 @@ export function CodingWorkspacePage({
     addressKeyRef.current = addressKey;
     deleteGenerationRef.current += 1;
   }
+  // F-B：换 attempt（地址变化）后不再保留旧 attempt 的总览弹窗——弹窗里的
+  // planId 与当前 attempt 不同源，留着会误导。
+  useEffect(() => {
+    setPlanOverviewOpen(false);
+  }, [address.attemptId]);
   const childWorkspaceError =
     store.activePlanRepair &&
     planRepairWorkspaceSessionId === store.activePlanRepair.childSessionId
@@ -241,10 +269,40 @@ export function CodingWorkspacePage({
   const pageError = store.activePlanRepair ? deleteError : planError ?? deleteError;
   // P1-c：GroupProgress「查看全部 WI」透传——planId 取 store（router 回调导航）。
   const groupPlanId = store.workItemGroupId;
-  const openGroupPlanOverview =
-    groupPlanId && onOpenPlanOverview
-      ? () => onOpenPlanOverview(groupPlanId)
-      : undefined;
+  // F-B：「查看全部 WI」默认在本页弹窗内承载总览（inline）——不跨页导航，
+  // 当前 attempt 的 WS/store 与门状态原地保留。external 形态（抽屉宿主）
+  // 才交回宿主回调。
+  const openGroupPlanOverview = groupPlanId
+    ? planOverviewMode === "external"
+      ? onOpenPlanOverview
+        ? () => onOpenPlanOverview(groupPlanId)
+        : undefined
+      : () => setPlanOverviewOpen(true)
+    : undefined;
+  // F-B：总览里点行/徽标下钻到单个 Attempt 详情——不在弹窗内就地展开（会
+  // 同时挂载第二个 attempt 的 WS/store），而是导航到目标 attempt：同一时刻
+  // 只有一个 attempt 实例在页面上。
+  const handleOpenOverviewAttempt = (target: PlanOverviewOpenTarget) => {
+    setPlanOverviewOpen(false);
+    if (target.attemptId === address.attemptId) {
+      // 已在当前 attempt 详情上——关弹窗即可，不做重复导航。
+      return;
+    }
+    void router?.navigate({
+      to: "/workbench/projects/$projectId/issues/$issueId/coding/$attemptId",
+      params: {
+        projectId: address.projectId,
+        issueId: address.issueId,
+        attemptId: target.attemptId,
+      },
+      search: {
+        planId: groupPlanId ?? undefined,
+        workItemId: target.workItemId,
+        gateId: target.gateId,
+        choiceId: target.choiceId,
+      },
+    });
+  };
   const providerSummary = store.roleProviderConfigSnapshot
     ? `Coder ${store.roleProviderConfigSnapshot.coder} · Reviewer ${store.roleProviderConfigSnapshot.code_reviewer}`
     : "provider pending";
@@ -1297,6 +1355,18 @@ export function CodingWorkspacePage({
             </div>
           </aside>
         </div>
+      ) : null}
+
+      {/* F-B：「查看全部 WI」在本页弹窗内承载总览——不跨页导航，当前 attempt
+          的 WS/store 与门状态原地保留；弹窗关闭即卸载（轮询随之停止）。 */}
+      {planOverviewOpen && groupPlanId ? (
+        <CodingPlanOverviewModal
+          projectId={address.projectId}
+          issueId={address.issueId}
+          planId={groupPlanId}
+          onOpenAttempt={handleOpenOverviewAttempt}
+          onClose={() => setPlanOverviewOpen(false)}
+        />
       ) : null}
 
       <div

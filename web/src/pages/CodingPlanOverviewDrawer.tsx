@@ -79,7 +79,9 @@ export function CodingPlanOverviewDrawer({
               className="flex min-h-0 flex-1 flex-col"
             >
               {/* 既有 Attempt 详情单实例：onBack/onOpenPlanOverview 都回总览
-                  （GroupProgress 的 planId 即本抽屉 planId，同名互证）。 */}
+                  （GroupProgress 的 planId 即本抽屉 planId，同名互证）。
+                  external 形态：抽屉已承载总览，详情页的「查看全部 WI」回到
+                  抽屉总览，不在抽屉里再叠一层本页弹窗。 */}
               <CodingWorkspacePage
                 address={{
                   projectId: address.projectId,
@@ -89,6 +91,7 @@ export function CodingPlanOverviewDrawer({
                 focus={{ gateId, choiceId }}
                 onBack={onBackToOverview}
                 onOpenPlanOverview={() => onBackToOverview()}
+                planOverviewMode="external"
               />
             </div>
           ) : null}
