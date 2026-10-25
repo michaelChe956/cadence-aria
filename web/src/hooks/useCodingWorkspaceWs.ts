@@ -16,7 +16,10 @@ import {
 import type { ChoiceResponsePayload } from "../state/chat-entries";
 import { codingChatEntryToChatEntry } from "../state/coding-chat-entry-mapping";
 import { useCodingLogStore } from "../state/coding-log-store";
-import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
+import {
+  SESSION_INVALID_PROTOCOL_CODES,
+  useCodingWorkspaceStore,
+} from "../state/coding-workspace-store";
 import { useOperationAuditStore } from "../state/operation-audit-store";
 import { CODING_START_REJECTION_COPY } from "../state/cockpit-operation-semantics";
 
@@ -623,6 +626,12 @@ function handleCodingWsMessage(
         code,
         message: message.message as string,
       });
+      // 会话失效最小提示（owner 2026-10-25 真机）：服务端已经找不到该
+      // attempt（删除/换代）或作用域对不上——页面持有的身份必然陈旧，
+      // 置位页面级提示，要求用户刷新后再操作；不在此做大规模会话失效重构。
+      if (SESSION_INVALID_PROTOCOL_CODES.includes(code)) {
+        store.markSessionInvalidated();
+      }
       markSubmittingGateError(code);
       rejectCodingChoiceRequestFromError(message.message as string);
       break;

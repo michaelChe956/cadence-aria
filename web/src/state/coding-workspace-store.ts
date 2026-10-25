@@ -57,6 +57,16 @@ export interface CodingProtocolError {
   message: string;
 }
 
+/**
+ * WS 侧确认「该 attempt/会话已不可用」的错误码（服务端 lookup 失败/身份冲突）：
+ * 页面持有的投影必然陈旧，需要提示用户刷新，而不是继续在旧身份上操作。
+ */
+export const SESSION_INVALID_PROTOCOL_CODES: readonly string[] = [
+  "coding_attempt_not_found",
+  "coding_attempt_ambiguous",
+  "coding_attempt_scope_mismatch",
+];
+
 export interface CodingLogEntry {
   id: string;
   message: string;
@@ -140,6 +150,8 @@ export interface CodingWorkspaceState {
   connectionStatus: CodingConnectionStatus;
   pendingGates: CodingPendingGate[];
   protocolError: CodingProtocolError | null;
+  /** WS 侧 attempt 已不存在（被删除/换代）→ 页面身份陈旧，需提示刷新。 */
+  sessionInvalidated: boolean;
   tabLockedByUser: boolean;
   workItemExecutionPlan: WorkItemExecutionPlan | null;
   activePlanRepair: PlanRepairSessionState | null;
@@ -179,6 +191,8 @@ export interface CodingWorkspaceActions {
   completeStream: (nodeId?: string | null) => void;
   setConnectionStatus: (status: CodingConnectionStatus) => void;
   setProtocolError: (error: CodingProtocolError | null) => void;
+  /** 会话失效（WS lookup 失败）：置位页面级提示；新快照到达即清除。 */
+  markSessionInvalidated: () => void;
   setSelectedNode: (nodeId: string | null) => void;
   setActiveTab: (tab: CodingArtifactTab, lockedByUser?: boolean) => void;
   setPlanRepairRequired: (message: PlanRepairRequiredInput) => void;
@@ -251,6 +265,7 @@ const initialState: CodingWorkspaceState = {
   connectionStatus: "disconnected",
   pendingGates: [],
   protocolError: null,
+  sessionInvalidated: false,
   tabLockedByUser: false,
   workItemExecutionPlan: null,
   activePlanRepair: null,
@@ -329,6 +344,8 @@ export const useCodingWorkspaceStore = create<
         // 批 2 T4：同源管理投影随快照落 store（terminated 仍 managed）。
         automation: snapshot.automation ?? null,
         protocolError: null,
+        // 新快照即活会话（之前 lookup 失败已被本轮 attach 覆盖）。
+        sessionInvalidated: false,
         streamingContent: null,
         activeStreamNodeId: null,
         ...(!prev.tabLockedByUser && nextTab ? { activeTab: nextTab } : {}),
@@ -494,6 +511,8 @@ export const useCodingWorkspaceStore = create<
   setConnectionStatus: (connectionStatus) => set({ connectionStatus }),
 
   setProtocolError: (protocolError) => set({ protocolError }),
+
+  markSessionInvalidated: () => set({ sessionInvalidated: true }),
 
   setSelectedNode: (selectedNodeId) =>
     set((state) => {

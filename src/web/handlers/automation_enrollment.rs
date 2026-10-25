@@ -29,6 +29,9 @@ use crate::web::handlers::lifecycle::preflight::logical_repository_ids_for_prefl
 use crate::web::state::WebAppState;
 use crate::web::types::{EnrollmentBindRequest, EnrollmentPutRequest};
 
+use super::automation_enrollment_conflict::{
+    enrollment_conflict, termination_api_error, termination_identity_conflict,
+};
 use super::support::{product_app_paths, product_store_api_error};
 
 pub async fn put_automation_enrollment(
@@ -688,14 +691,6 @@ pub(crate) fn invalid_scope(reason: impl Into<String>) -> ApiError {
     ApiError::validation("automation_enrollment_invalid_scope", reason)
 }
 
-fn enrollment_conflict(current_revision: Option<u64>, message: &str) -> ApiError {
-    ApiError::validation_with_details(
-        "automation_enrollment_conflict",
-        message,
-        json!({ "current_revision": current_revision }),
-    )
-}
-
 fn enrollment_not_found() -> ApiError {
     ApiError::runtime(
         "automation_enrollment_not_found",
@@ -886,8 +881,8 @@ pub async fn post_automation_enrollment_terminate(
         return Err(automation_plan_termination_required_error(&identity));
     }
     if request.expected_enrollment_id != enrollment.enrollment_id {
-        return Err(enrollment_conflict(
-            Some(enrollment.policy_revision),
+        return Err(termination_identity_conflict(
+            &identity,
             "termination enrollment identity mismatch",
         ));
     }
@@ -896,8 +891,8 @@ pub async fn post_automation_enrollment_terminate(
         && let Some(history) = enrollment.binding_history.as_ref()
         && expected_binding != &history.current
     {
-        return Err(enrollment_conflict(
-            Some(enrollment.policy_revision),
+        return Err(termination_identity_conflict(
+            &identity,
             "termination binding identity mismatch",
         ));
     }
@@ -915,7 +910,7 @@ pub async fn post_automation_enrollment_terminate(
     };
     let result = store
         .terminate_plan(&project_id, &issue_id, store_request)
-        .map_err(enrollment_api_error)?;
+        .map_err(|error| termination_api_error(error, &identity))?;
     let terminated_enrollment = result.enrollment.clone();
 
     // ②T2 引擎侧收口（专用取消契约；仅调用不并写其文件）。

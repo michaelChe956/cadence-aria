@@ -15,6 +15,11 @@ import { useCodingWorkspaceStore } from "../../../state/coding-workspace-store";
 import { DialogShell } from "../../shared/DialogShell";
 import { ConfirmTwiceButton } from "./ConfirmTwiceButton";
 import { BTN_SECONDARY_CLASS } from "../gate-visual-tokens";
+import {
+  AUTOMATION_ENROLLMENT_CONFLICT,
+  conflictUnrecoverableMessage,
+  refreshTerminationIdentityOnConflict,
+} from "./automationTerminationConflict";
 
 // 从 CockpitInbox.tsx 拆出（large_file_guard 1200 行上限，纯移动零行为变化）：
 // durable 等待项卡片（C1/C2 恢复、LC 冷启动、repository 初始化恢复）与动作文案常量。
@@ -117,6 +122,9 @@ export function AutomationTerminationConfirmSurface() {
   const setSubmitting = useCodingWorkspaceStore((state) => state.setTerminationSubmitting);
   const setError = useCodingWorkspaceStore((state) => state.setTerminationError);
   const setResult = useCodingWorkspaceStore((state) => state.setTerminationResult);
+  const sessionInvalidated = useCodingWorkspaceStore(
+    (state) => state.sessionInvalidated,
+  );
   const [identityNotice, setIdentityNotice] = useState<string | null>(null);
   const request = termination.pending;
 
@@ -182,6 +190,27 @@ export function AutomationTerminationConfirmSurface() {
           return;
         }
       }
+      if (
+        error instanceof ApiRequestError &&
+        error.code === AUTOMATION_ENROLLMENT_CONFLICT
+      ) {
+        // owner 2026-10-25 真机死路根修：revision 漂移（enrollment 反复重开）
+        // 属正常现象。用服务端当前身份刷新确认面并提示，让用户能再点一次
+        // 确认——不静默失败、不自动重试终止动作；首次点击即 409 同路。
+        const recovered = await refreshTerminationIdentityOnConflict({
+          details: error.details,
+          projectId: request.projectId,
+          issueId: request.issueId,
+          fallbackEnrollmentId: request.enrollmentId,
+          openConfirm,
+        });
+        if (recovered !== null) {
+          setIdentityNotice(recovered.notice);
+          return;
+        }
+        setError(conflictUnrecoverableMessage(error.message));
+        return;
+      }
       setError(error instanceof Error && error.message !== "" ? error.message : "终止请求失败");
     }
   };
@@ -210,6 +239,13 @@ export function AutomationTerminationConfirmSurface() {
         {identityNotice ? (
           <p role="status" className="font-semibold">
             {identityNotice}
+          </p>
+        ) : null}
+        {sessionInvalidated ? (
+          // owner 2026-10-25 真机：会话已在服务端失效（删除/换代），页面身份
+          // 必然陈旧——确认前先提示刷新；不阻断终止（REST 仍可能生效）。
+          <p role="status" className="font-semibold text-[var(--aria-danger)]">
+            该会话已失效，服务端已找不到该 coding 会话；请刷新页面后再确认终止。
           </p>
         ) : null}
         {termination.submitting ? (

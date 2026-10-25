@@ -49,6 +49,7 @@ import {
   AutomationTerminationConfirmSurface,
   AutomationTerminationEntryButton,
 } from "../components/chat-workspace/cockpit/CockpitInboxWaitingCards";
+import { AutomationSessionInvalidHint } from "../components/chat-workspace/cockpit/automationTerminationConflict";
 import {
   useChoiceRespondCommand,
   type ChoiceRespondCommandState,
@@ -1044,6 +1045,9 @@ export function CodingWorkspacePage({
           outcome={store.planTermination.terminated?.outcome ?? null}
         />
       ) : null}
+      {/* owner 2026-10-25 真机：会话已失效（WS 侧 attempt 不存在）时明确提示
+          刷新，避免继续在陈旧身份上操作终止/确认。 */}
+      <AutomationSessionInvalidHint />
       <AutomationTerminationConfirmSurface />
       {/* P3 WIGA Task 4（§4.2 / D5）：readiness Complete 且 waiting_for_human/
           final_confirm 的等待态——明确「编码执行完成，待最终确认」，人手

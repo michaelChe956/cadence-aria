@@ -21,6 +21,10 @@ import {
   AutomationTerminationConfirmSurface,
   C1RecoveryCard,
 } from "./CockpitInboxWaitingCards";
+import {
+  AUTOMATION_ENROLLMENT_CONFLICT,
+  AutomationSessionInvalidHint,
+} from "./automationTerminationConflict";
 
 vi.mock("../../../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof ApiClient>()),
@@ -89,7 +93,8 @@ function enrollmentFixture(): IssueAutomationEnrollment {
 describe("AutomationTerminationConfirmSurface（T4 统一二次确认面）", () => {
   beforeEach(() => {
     useCodingWorkspaceStore.getState().reset();
-    vi.clearAllMocks();
+    // resetAllMocks：mock 实现也要隔离（否则上一用例的一次性实现污染下一用例）。
+    vi.resetAllMocks();
   });
 
   it("renders nothing while no termination is pending", () => {
@@ -151,6 +156,151 @@ describe("AutomationTerminationConfirmSurface（T4 统一二次确认面）", ()
     });
   });
 
+  // owner 2026-10-25 真机红测：页面持有旧一代会话/投影（enrollment 已被
+  // 反复重开 → policy_revision 轮换到 26），首次点击确认即 409
+  // `automation_enrollment_conflict`。前端必须用服务端当前身份刷新确认面、
+  // 给出可操作提示，让用户再点一次即可成功——而不是只报错死路。
+  it("recovers from a first-click 409 by refreshing the identity, then terminates on the next click", async () => {
+    vi.mocked(postAutomationEnrollmentTerminate)
+      .mockRejectedValueOnce(
+        new ApiRequestError({
+          code: AUTOMATION_ENROLLMENT_CONFLICT,
+          message: "automation enrollment revision conflict (current revision 26)",
+          details: {
+            current_revision: 26,
+            enrollment_id: "enrollment_0001",
+            plan_id: "plan_0001",
+            session_id: "session_0001",
+          },
+        }),
+      )
+      .mockResolvedValueOnce({
+        command_id: "cmd-fe-terminate-enrollment_0001",
+        state: "accepted",
+        enrollment_id: "enrollment_0001",
+        plan_id: "plan_0001",
+        terminated_at: "2026-10-25T01:00:00Z",
+        outcome: "terminated",
+        results: [],
+      });
+    useCodingWorkspaceStore.getState().openTerminationConfirm({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      enrollmentId: "enrollment_0001",
+      policyRevision: 24,
+    });
+
+    const user = userEvent.setup();
+    render(<AutomationTerminationConfirmSurface />);
+    await user.click(screen.getByRole("button", { name: "终止整个自动化" }));
+    await user.click(screen.getByRole("button", { name: "确认终止整个自动化" }));
+
+    // ① 自愈：确认面保持打开、提示服务端当前 revision、无错误弹窗。
+    expect(await screen.findByText(/已更新到 rev 26，请重新确认终止/)).toBeInTheDocument();
+    expect(screen.getByTestId("automation-termination-confirm")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(useCodingWorkspaceStore.getState().planTermination.pending).toEqual({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      enrollmentId: "enrollment_0001",
+      policyRevision: 26,
+    });
+    // 不自动重试终止动作：仍只有第一次请求（旧 revision）。
+    expect(postAutomationEnrollmentTerminate).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(postAutomationEnrollmentTerminate).mock.calls[0]?.[2]).toEqual({
+      command_id: "cmd-fe-terminate-enrollment_0001",
+      expected_enrollment_id: "enrollment_0001",
+      expected_policy_revision: 24,
+      confirmed: true,
+    });
+
+    // ② 用户再走一次二段确认（重新 arm → 确认）：以刷新后的 revision 提交并成功。
+    await user.click(screen.getByRole("button", { name: "终止整个自动化" }));
+    await user.click(screen.getByRole("button", { name: "确认终止整个自动化" }));
+    await vi.waitFor(() => {
+      expect(postAutomationEnrollmentTerminate).toHaveBeenCalledTimes(2);
+    });
+    expect(vi.mocked(postAutomationEnrollmentTerminate).mock.calls[1]?.[2]).toEqual({
+      command_id: "cmd-fe-terminate-enrollment_0001",
+      expected_enrollment_id: "enrollment_0001",
+      expected_policy_revision: 26,
+      confirmed: true,
+    });
+    await vi.waitFor(() => {
+      expect(screen.queryByTestId("automation-termination-confirm")).toBeNull();
+    });
+    expect(
+      useCodingWorkspaceStore.getState().planTermination.terminated?.terminatedAt,
+    ).toBe("2026-10-25T01:00:00Z");
+  });
+
+  // 旧服务端 409 只带 current_revision、或不带（additive 前的形态）：退回
+  // 只读 GET enrollment 刷新身份，仍不自动提交终止。
+  it("refreshes the identity from GET when the 409 details carry no revision", async () => {
+    vi.mocked(getAutomationEnrollment).mockResolvedValue({
+      ...enrollmentFixture(),
+      policy_revision: 26,
+    } as IssueAutomationEnrollment);
+    vi.mocked(postAutomationEnrollmentTerminate).mockRejectedValue(
+      new ApiRequestError({
+        code: AUTOMATION_ENROLLMENT_CONFLICT,
+        message: "automation enrollment revision conflict",
+        details: {},
+      }),
+    );
+    useCodingWorkspaceStore.getState().openTerminationConfirm({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      enrollmentId: "enrollment_0001",
+      policyRevision: 24,
+    });
+
+    const user = userEvent.setup();
+    render(<AutomationTerminationConfirmSurface />);
+    await user.click(screen.getByRole("button", { name: "终止整个自动化" }));
+    await user.click(screen.getByRole("button", { name: "确认终止整个自动化" }));
+
+    expect(
+      await screen.findByText(/已刷新自动化 enrollment 身份（rev 26）/),
+    ).toBeInTheDocument();
+    expect(getAutomationEnrollment).toHaveBeenCalledWith("project_0001", "issue_0001");
+    expect(useCodingWorkspaceStore.getState().planTermination.pending?.policyRevision).toBe(26);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(postAutomationEnrollmentTerminate).toHaveBeenCalledTimes(1);
+  });
+
+  // 会话失效（WS 侧 attempt 已不存在）最小提示：页面级提示 + 确认面上的刷新
+  // 提醒；不阻断终止（REST 仍可能生效）。
+  it("warns that the stale session needs a refresh once the WS reports it invalid", async () => {
+    useCodingWorkspaceStore.getState().markSessionInvalidated();
+    useCodingWorkspaceStore.getState().openTerminationConfirm({
+      projectId: "project_0001",
+      issueId: "issue_0001",
+      enrollmentId: "enrollment_0001",
+      policyRevision: 3,
+    });
+
+    render(
+      <>
+        <AutomationSessionInvalidHint />
+        <AutomationTerminationConfirmSurface />
+      </>,
+    );
+
+    expect(screen.getByTestId("automation-session-invalid")).toHaveTextContent(
+      "该会话已失效",
+    );
+    expect(screen.getByTestId("automation-session-invalid")).toHaveTextContent(
+      "请刷新页面",
+    );
+    expect(screen.getByTestId("automation-termination-confirm")).toHaveTextContent(
+      "该会话已失效",
+    );
+    expect(screen.getByTestId("automation-termination-confirm")).toHaveTextContent(
+      "请刷新页面后再确认终止",
+    );
+  });
+
   it("shows the server rejection inline without closing the confirm surface", async () => {
     vi.mocked(postAutomationEnrollmentTerminate).mockRejectedValue(
       new ApiRequestError({
@@ -181,7 +331,8 @@ describe("AutomationTerminationConfirmSurface（T4 统一二次确认面）", ()
 describe("C1RecoveryCard abort routing（T4 收件箱统一终止）", () => {
   beforeEach(() => {
     useCodingWorkspaceStore.getState().reset();
-    vi.clearAllMocks();
+    // resetAllMocks：mock 实现也要隔离（否则上一用例的一次性实现污染下一用例）。
+    vi.resetAllMocks();
   });
 
   it("manual: fires the original gate-responses REST abort and opens no confirm surface", async () => {
