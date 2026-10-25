@@ -1044,7 +1044,10 @@ export function ChatCockpitPage({
         onOpenAudit={openAudit}
         canManualAdvance={canManualAdvance}
         onAdvance={actions.advance}
-        inboxCount={observedInbox.length}
+        // F-A（owner 2026-10-25 第 3 条）：待处理徽标只数"真需要人决策"的条目——
+        // `kind="info"`（自动等待/只读换代历史/plan 确认 info）在抽屉里落「进度信息」
+        // 分组且无动作按钮，计进徽标会把"不点也能过"的东西灌成待办。
+        inboxCount={observedInbox.filter((item) => item.kind !== "info").length}
         inboxOpen={inboxDrawerOpen}
         onToggleInbox={() => setInboxDrawerOpen((open) => !open)}
       />
