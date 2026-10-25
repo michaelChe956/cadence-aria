@@ -3,6 +3,7 @@ import { useState, type FormEvent } from "react";
 import type {
   CodingExecutionStage,
   CodingGateRequired,
+  CodingReviewVerdict,
   GroupFinalReadinessDiagnostic,
   GroupFinalReadinessStatus,
   CodingProviderRole,
@@ -16,7 +17,6 @@ import type { ChatEntry } from "../state/chat-entries";
 import { codingStartupRejectionCopy } from "../state/cockpit-operation-semantics";
 import { CoderTriageCard, GateMetadata, VerificationTriageSection } from "./CoderTriageCard";
 import type { CodingPendingGate } from "../state/coding-workspace-store";
-import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 
 export const ACTIVE_ATTEMPT_STATUSES = new Set([
   "created",
@@ -398,12 +398,6 @@ export function GatePanel({
 }) {
   const [reason, setReason] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
-  // F-D：最后一个协议错误的原文——门动作被服务端拒绝时，gate.errorCode 只有
-  // `coding_gate_response_failed` 这个粗码，具体原因（如 send_to_coder 的前置
-  // 不满足）在 message 里。两者配对只用于识别「这一实例的哪次失败」。
-  const protocolErrorMessage = useCodingWorkspaceStore(
-    (state) => state.protocolError?.message ?? null,
-  );
 
   if (!gate) {
     return null;
@@ -450,27 +444,26 @@ export function GatePanel({
   // F-E：输入框的标签/占位/必填文案按"这个门到底让人做什么"分派——人工放行门写的是
   // 放行说明（进质量豁免审计），发回 Coder 门写的是修复意见；两者同门并存时分开说。
   const reasonField = reasonFieldCopy(needsCoderFeedbackContext, hasQualityBypassAction);
-  // F-D：服务端已判定「最近一次审查结论不能作为返修指令」（send_to_coder 的前置是
-  // verdict ∈ {request_changes, blocked}）。判定只作用于**当前门实例**：gate.errorCode
-  // 由 store 在每次提交前清空，门被解决或换成新实例即自然复位；动作集合仍由服务端
-  // available_actions 权威（spec 要求恰好四项），这里只是把这一实例的该动作置为禁用，
-  // 不从清单里删除。
-  const sendToCoderRejected =
-    gateErrorCode === GATE_RESPONSE_FAILED_CODE &&
-    (protocolErrorMessage ?? "").includes(SEND_TO_CODER_NOT_ACTIONABLE_CODE);
-  const gateErrorCopy = gateErrorGuidance(gateErrorCode, protocolErrorMessage);
-  // 指引里的替代动作必须引用本门真实的动作文案（门的 label 有 "重试代码审查"/"重试审查" 两族）。
-  const retryActionLabel =
-    activeGate.available_actions.find((action) => action.action_type === "retry_review")?.label ??
-    null;
-  const qualityBypassLabel =
-    activeGate.available_actions.find(actionIsQualityBypass)?.label ?? null;
+  // change `triage-gate-actions-by-verdict`：动作集合由服务端按该 attempt 最新一条
+  // Code Review 结论的 verdict 派生，`available_actions` 是权威——前端不增删动作、
+  // 不按错误码置灰（F-D 的过渡置灰已移除）。这里只在集合确实不含「提交给 Coder 修复」
+  // 时，用门 payload 暴露的派生事实解释原因并给替代动作。
+  const sendToCoderOmitted =
+    isCodeReviewTriageGate(activeGate) &&
+    !activeGate.available_actions.some((action) => action.action_type === "send_to_coder");
+  const sendToCoderOmittedCopy = sendToCoderOmitted
+    ? sendToCoderOmittedGuidance({
+        verdict: activeGate.latest_review_verdict ?? null,
+        retryLabel:
+          activeGate.available_actions.find((action) => action.action_type === "retry_review")
+            ?.label ?? null,
+        qualityBypassLabel: activeGate.available_actions.find(actionIsQualityBypass)?.label ?? null,
+      })
+    : null;
+  const gateErrorCopy = gateErrorGuidance(gateErrorCode);
 
   function actionDisabled(action: CodingGateRequired["available_actions"][number]) {
     if (submitting) {
-      return true;
-    }
-    if (action.action_type === "send_to_coder" && sendToCoderRejected) {
       return true;
     }
     // F-E：必填校验前置——空说明时直接把需要上下文的动作禁用，并就地说明要填什么，
@@ -522,22 +515,15 @@ export function GatePanel({
               人工放行会记录质量豁免；请说明跳过该门禁的原因和后续风险处理
             </div>
           ) : null}
-          {/* F-D：必败动作不再静默失败——服务端已判定的原因改成可执行指引，
-              并把该实例的「提交给 Coder 修复」置灰（动作集合本身仍由服务端
-              available_actions 权威，未从清单移除）。 */}
-          {sendToCoderRejected ? (
+          {/* change `triage-gate-actions-by-verdict`：集合里没有「提交给 Coder 修复」时，
+              用门 payload 暴露的最新 verdict 事实解释原因（不依赖任何失败往返）。 */}
+          {sendToCoderOmittedCopy ? (
             <div
-              data-testid="coding-gate-send-to-coder-unavailable"
+              data-testid="coding-gate-send-to-coder-omitted"
               role="status"
               className="mt-1 rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs leading-4 text-amber-900"
             >
-              「提交给 Coder 修复」在当前门不可用：最近一次 Code Review 结论无法作为返修指令
-              （结论不是 request_changes／blocked）。
-              {retryActionLabel ? `请改用「${retryActionLabel}」；` : null}
-              {qualityBypassLabel
-                ? `或填写人工放行说明后点「${qualityBypassLabel}」（会记入质量豁免审计）。`
-                : null}
-              重试审查或本门解决后该动作会自动恢复可用。
+              {sendToCoderOmittedCopy}
             </div>
           ) : null}
           {isVerificationTriageEligibleGate(activeGate) ? (
@@ -604,11 +590,6 @@ export function GatePanel({
               key={action.action_id}
               type="button"
               disabled={actionDisabled(action)}
-              title={
-                action.action_type === "send_to_coder" && sendToCoderRejected
-                  ? "最近一次 Code Review 结论无法作为返修指令；请重试代码审查或人工继续"
-                  : undefined
-              }
               onClick={() => handleAction(action)}
               className="inline-flex h-8 items-center justify-center rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -634,11 +615,6 @@ function actionRequiresContext(action: CodingGateRequired["available_actions"][n
 function actionIsQualityBypass(action: CodingGateRequired["available_actions"][number]) {
   return action.action_type === "manual_continue" || action.action_type === "accept_risk";
 }
-
-/** 门动作被服务端拒绝时 WS 帧里的粗码（`coding_ws_handler/socket.rs`）。 */
-const GATE_RESPONSE_FAILED_CODE = "coding_gate_response_failed";
-/** `send_code_review_feedback_to_coder` 的前置不满足码（`rework.rs`）。 */
-const SEND_TO_CODER_NOT_ACTIONABLE_CODE = "send_to_coder_latest_review_not_actionable";
 
 /** F-E：必填文案必须带动作名与后果，用户才知道"填这段字会换来什么"——
  * 字段名按"这个动作会拿这段文字做什么"分派，不把「人工放行」说成「修复意见」。 */
@@ -689,16 +665,14 @@ function reasonFieldCopy(
   };
 }
 
-/** F-D：把已经发生的门动作失败翻译成可执行指引（原始码另以小字保留）。 */
-function gateErrorGuidance(
-  errorCode: string | null,
-  protocolErrorMessage: string | null,
-): string | null {
+/** 把已经发生的门动作失败翻译成可执行指引（原始码另以小字保留）。
+ *
+ * change `triage-gate-actions-by-verdict`：不再依据「send_to_coder 前置不满足」
+ * 错误码做任何动作置灰或专用指引——动作集合由服务端按最新 verdict 派生、
+ * `available_actions` 权威，客户端不按失败码增删或禁用动作。 */
+function gateErrorGuidance(errorCode: string | null): string | null {
   if (errorCode === null) {
     return null;
-  }
-  if ((protocolErrorMessage ?? "").includes(SEND_TO_CODER_NOT_ACTIONABLE_CODE)) {
-    return "「提交给 Coder 修复」被服务端拒绝：最近一次 Code Review 结论不是 request_changes／blocked，无法作为返修指令。请重试代码审查，或填写人工放行说明后点「人工继续」。";
   }
   if (errorCode === "coding_gate_extra_context_required") {
     return "该动作需要非空说明文字（人工放行/发回 Coder/说明情况重试都要求填写意见）。";
@@ -714,6 +688,50 @@ const VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES = [
   // P2-a/P2-d（REQ-CVT-06）：运行环境阻塞门同样可转入验证处理（与后端白名单同步）。
   "coding_operational_blocker",
 ] as const;
+
+/** change `triage-gate-actions-by-verdict`：动作集合按最新 Code Review verdict
+ * 派生的三个分诊门（与后端 `CODE_REVIEW_TRIAGE_REASON_CODES` 同源）。 */
+export const CODE_REVIEW_TRIAGE_REASON_CODES = [
+  "code_review_output_human_triage",
+  "code_review_verification_incomplete",
+  "code_review_operational_blocker",
+] as const;
+
+export function isCodeReviewTriageGate(gate: Pick<CodingGateRequired, "reason_code">): boolean {
+  return (
+    gate.reason_code != null &&
+    (CODE_REVIEW_TRIAGE_REASON_CODES as readonly string[]).includes(gate.reason_code)
+  );
+}
+
+/** 集合不含「提交给 Coder 修复」时的说明文案：依据是门记录暴露的派生事实
+ *（`latest_review_verdict`），**不依赖**提交失败返回的错误码；事实缺失
+ *（存量在途门／结论读不到）时给通用说明。 */
+function sendToCoderOmittedGuidance({
+  verdict,
+  retryLabel,
+  qualityBypassLabel,
+}: {
+  verdict: CodingReviewVerdict | null;
+  retryLabel: string | null;
+  qualityBypassLabel: string | null;
+}): string {
+  const reason =
+    verdict === "approve"
+      ? "最近一次 Code Review 结论为「通过」（verdict=approve），本轮不需要送回 Coder 返修"
+      : verdict === null
+        ? "最近一次 Code Review 结论不可读（未产生结论或读取失败），系统按不可返修处理"
+        : "服务端未在本门提供该动作（动作集合以服务端 available_actions 为准）";
+  const alternatives = [
+    retryLabel ? `「${retryLabel}」重新审查` : null,
+    qualityBypassLabel
+      ? `填写人工放行说明后点「${qualityBypassLabel}」（会记入质量豁免审计）`
+      : null,
+  ].filter((option): option is string => option !== null);
+  return `本门动作集合不含「提交给 Coder 修复」：${reason}。${
+    alternatives.length > 0 ? `可用 ${alternatives.join("，或")}。` : ""
+  }`;
+}
 
 /** P2-d（REQ-CRO-09，C5）：走 CoderTriageCard 的分诊门 reason_code——集中定义；
  * P4-e（REQ-CRO-09/PTR-IDLE）：`coder_provider_stalled` 纳入——coder 挂起门

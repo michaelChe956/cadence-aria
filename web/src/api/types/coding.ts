@@ -454,6 +454,11 @@ export type CodingGateRequired = {
   evidence_refs?: string[];
   raw_provider_output_ref?: string | null;
   diagnostic?: CodingGateDiagnostic | null;
+  /** change `triage-gate-actions-by-verdict`：三个 Code Review 分诊门派生
+   *  `available_actions` 所用的事实——该 attempt 最新一条 Code Review 结论的 verdict
+   *（读不到为 null/缺失，即 fail-closed 三项派生）。`available_actions` 仍是权威
+   *  动作集合；本字段只用于「为什么没有送回 Coder」文案，前端不得据此增删动作。 */
+  latest_review_verdict?: CodingReviewVerdict | null;
   /** P2-c（REQ-CRO-09）：分诊卡三段大白话投影；旧门 JSON 无该字段 → 前端回落 description。 */
   triage_summary?: CodingTriageSummary | null;
 };

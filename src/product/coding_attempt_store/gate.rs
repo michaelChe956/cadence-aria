@@ -280,6 +280,42 @@ impl super::CodingAttemptStore {
         })
     }
 
+    /// change `triage-gate-actions-by-verdict`：分诊门派生事实的独立落盘入口
+    /// （仿 `attach_blocked_gate_triage_summary`）。把建门时派生
+    /// `available_actions` 所用的最新 Code Review verdict 写到门记录上，供呈现面
+    /// 生成「为什么没有送回 Coder」文案；`available_actions` 仍是权威动作集合，
+    /// 本入口 MUST NOT 改动动作。
+    ///
+    /// `verdict` 为 `None` 表示「读不到事实」（fail-closed 三项派生），写入时显式
+    /// 置 `None`：去重复用同门实例（同 attempt/node/stage/reason_code）时不会残留
+    /// 上一轮的 verdict。回写失败不影响已落盘的门（调用方按 F-7 忽略错误）。
+    pub fn attach_blocked_gate_latest_review_verdict(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        attempt_id: &str,
+        gate_id: &str,
+        verdict: Option<crate::product::coding_models::ReviewVerdict>,
+    ) -> Result<CodingGateRequired, ProductStoreError> {
+        validate_relative_id(gate_id)?;
+        let gates_root = self.blocked_gates_root(project_id, issue_id, attempt_id);
+        let lock_target = gates_root.join("blocked-gate-mutations");
+        with_exclusive_lock(&lock_target, || {
+            let path = gates_root.join(format!("{gate_id}.json"));
+            if !super::path_is_regular_file(&path)? {
+                return Err(ProductStoreError::NotFound {
+                    kind: "coding_blocked_gate",
+                    id: gate_id.to_string(),
+                });
+            }
+            let mut record: BlockedGateRecord = read_json(&path)?;
+            record.gate.latest_review_verdict = verdict;
+            record.updated_at = Utc::now().to_rfc3339();
+            write_json(&path, &record)?;
+            Ok(record.gate)
+        })
+    }
+
     /// P2-c：按 `save_provider_raw_output` 生成的引用读回原始输出。宽容语义：
     /// 引用形状不符或文件不存在返回 `Ok(None)`（F-7：读不到绝不影响开门）。
     pub fn read_provider_raw_output_by_ref(
@@ -1362,6 +1398,10 @@ fn create_blocked_gate_unlocked(
         evidence_refs: input.evidence_refs,
         raw_provider_output_ref: input.raw_provider_output_ref,
         diagnostic,
+        // change `triage-gate-actions-by-verdict`：派生事实不经建门输入——建门后由
+        // `attach_blocked_gate_latest_review_verdict` 独立入口回写（仅三个 Code
+        // Review 分诊门）。
+        latest_review_verdict: None,
         // P2-c（C1 裁定）：摘要不经建门输入——建门后由
         // `attach_blocked_gate_triage_summary` 独立入口回写。
         triage_summary: None,

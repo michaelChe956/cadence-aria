@@ -115,6 +115,7 @@ fn review_artifacts_round_trip_preserves_evidence() {
         evidence_refs: vec!["code_review_0001.json".to_string()],
         raw_provider_output_ref: Some("provider-raw/code_review/code_review_0001.txt".to_string()),
         diagnostic: None,
+        latest_review_verdict: None,
         triage_summary: None,
     };
     let gate_value = serde_json::to_value(&gate).expect("serialize gate");

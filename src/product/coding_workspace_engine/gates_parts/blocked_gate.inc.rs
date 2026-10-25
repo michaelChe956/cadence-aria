@@ -33,9 +33,18 @@ impl CodingWorkspaceEngine {
             .iter()
             .find(|action| action.action_id == action_id)
             .ok_or_else(|| {
-                CodingWorkspaceEngineError::ProviderStream(
-                    "coding_gate_action_not_allowed".to_string(),
-                )
+                // change `triage-gate-actions-by-verdict`：`available_actions` 是权威
+                // 动作集合，集合里没有的动作一律拒绝。三个 Code Review 分诊门上的
+                // 「送回 Coder」可能被 verdict 派生掉——此时直发（陈旧快照／脚本／
+                // 存量门）必须保留可观察码 `send_to_coder_latest_review_not_actionable`，
+                // 不用笼统的 `coding_gate_action_not_allowed` 掩盖原因。
+                let code = if action_id == "send_to_coder" && is_code_review_feedback_gate(&gate)
+                {
+                    "send_to_coder_latest_review_not_actionable"
+                } else {
+                    "coding_gate_action_not_allowed"
+                };
+                CodingWorkspaceEngineError::ProviderStream(code.to_string())
             })?;
         if action.action_type == CodingGateActionType::RetryReview
             && code_review_provider_interrupted

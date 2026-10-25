@@ -7,8 +7,11 @@
 //!   `code_review_verification_incomplete`）。
 //! - requirement 3: OpenOperationalGate 落 blocked gate（reason_code=
 //!   `code_review_operational_blocker`）。
-//! - requirement 4: 三类 gate 的动作集合均为
-//!   `[retry_review, send_to_coder, manual_continue, abort]`。
+//! - requirement 4（change `triage-gate-actions-by-verdict`）：三类 gate 的动作集合
+//!   按该 attempt 最新一条 Code Review 结论的 verdict 派生——基础恒为
+//!   `[retry_review, manual_continue, abort]`，仅当 verdict ∈
+//!   {`request_changes`, `blocked`} 时额外含 `send_to_coder`（可返修结论下四项）；
+//!   读不到 verdict 时按三项 fail-closed，门仍正常落地。
 //! - requirement 6: 互斥——同一 stage 不得 double-gate。
 //!
 //! 生产实现按 `code_review_flow_decision` 的分诊结果创建门禁；这些测试确保
@@ -155,7 +158,12 @@ async fn stop_for_human_triage_lands_blocked_gate_with_review_actions() {
     assert_eq!(
         action_ids,
         vec!["abort", "manual_continue", "retry_review", "send_to_coder"],
-        "code review triage gate 动作集合必须为四项",
+        "可返修结论（request_changes）下 code review triage gate 动作集合为四项",
+    );
+    assert_eq!(
+        gates[0].latest_review_verdict,
+        Some(ReviewVerdict::RequestChanges),
+        "门必须暴露派生所用的最新 verdict 事实",
     );
 }
 
@@ -241,7 +249,12 @@ async fn retry_verification_lands_blocked_gate_with_review_actions() {
     assert_eq!(
         action_ids,
         vec!["abort", "manual_continue", "retry_review", "send_to_coder"],
-        "code review triage gate 动作集合必须为四项",
+        "可返修结论（request_changes）下 code review triage gate 动作集合为四项",
+    );
+    assert_eq!(
+        gates[0].latest_review_verdict,
+        Some(ReviewVerdict::RequestChanges),
+        "门必须暴露派生所用的最新 verdict 事实",
     );
 }
 
@@ -374,7 +387,13 @@ async fn open_operational_gate_lands_blocked_gate_with_review_actions() {
             .iter()
             .map(|action| action.action_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["retry_review", "send_to_coder", "manual_continue", "abort"]
+        vec!["retry_review", "send_to_coder", "manual_continue", "abort"],
+        "可返修结论（request_changes）下动作顺序仍为 retry → send_to_coder → manual_continue → abort",
+    );
+    assert_eq!(
+        gates[0].latest_review_verdict,
+        Some(ReviewVerdict::RequestChanges),
+        "门必须暴露派生所用的最新 verdict 事实",
     );
 }
 
@@ -665,6 +684,599 @@ async fn code_review_completion_survives_disconnected_observers() {
         .expect("role run exists");
     assert_eq!(run.status, CodingRoleRunStatus::Completed);
     drop(root);
+}
+
+// ─── change `triage-gate-actions-by-verdict`：动作集合按最新 verdict 派生 ───
+
+/// 直接落一条 Code Review 结论（派生动作集合的事实源），不跑 provider。
+///
+/// 派生只在建门时发生，读取口径与 `send_code_review_feedback_to_coder`
+/// （`rework.rs`）一致：同一 attempt 结论集合的最后一条。本 helper 只负责把事实
+/// 写进 store，读法由生产代码复用同一口径。
+fn seed_review_conclusion(
+    store: &crate::product::coding_attempt_store::CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    id: &str,
+    verdict: ReviewVerdict,
+) {
+    store
+        .save_code_review_report(
+            attempt,
+            &CodeReviewReport {
+                id: id.to_string(),
+                attempt_id: attempt.id.clone(),
+                round: 1,
+                verdict,
+                findings: Vec::new(),
+                tested_evidence_refs: Vec::new(),
+                diff_refs: Vec::new(),
+                summary: "seeded review conclusion".to_string(),
+                created_at: "2026-10-25T00:00:00Z".to_string(),
+                raw_provider_output_ref: None,
+                role_run_id: None,
+                run_no: None,
+                unit_run_id: None,
+                acceptance: None,
+                review_window_id: None,
+            },
+        )
+        .expect("seed code review report");
+}
+
+fn triage_test_engine(
+    store: &crate::product::coding_attempt_store::CodingAttemptStore,
+) -> CodingWorkspaceEngine {
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    CodingWorkspaceEngine::new(
+        store.clone(),
+        crate::product::git_workspace_service::GitWorkspaceService::new(),
+        tx,
+    )
+}
+
+/// 分诊门只可能在 CodeReview 阶段落地；把测试夹具的 attempt 置到该阶段。
+fn attempt_at_code_review(
+    store: &crate::product::coding_attempt_store::CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> CodingExecutionAttempt {
+    store
+        .update_attempt_stage(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingExecutionStage::CodeReview,
+        )
+        .expect("code review stage")
+}
+
+/// 走真实建门路径落一个 Code Review 分诊门。
+async fn create_triage_gate(
+    engine: &CodingWorkspaceEngine,
+    attempt: &CodingExecutionAttempt,
+    reason_code: &'static str,
+    node_id: &str,
+) -> CodingExecutionAttempt {
+    engine
+        .create_review_blocked_gate(ReviewBlockedGateInput {
+            attempt,
+            node_id,
+            stage: CodingExecutionStage::CodeReview,
+            role: CodingProviderRole::CodeReviewer,
+            title: "Code Review 分诊".to_string(),
+            description: "按最新 verdict 派生动作集合".to_string(),
+            reason_code,
+            evidence_refs: Vec::new(),
+            raw_provider_output_ref: None,
+        })
+        .await
+        .expect("create review blocked gate")
+}
+
+fn open_triage_gate(
+    store: &crate::product::coding_attempt_store::CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+) -> crate::product::coding_models::CodingGateRequired {
+    let mut gates = store
+        .list_open_blocked_gates(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .expect("open gates");
+    assert_eq!(gates.len(), 1, "必须且只能落一个门");
+    gates.remove(0)
+}
+
+fn gate_action_ids(gate: &crate::product::coding_models::CodingGateRequired) -> Vec<String> {
+    gate.available_actions
+        .iter()
+        .map(|action| action.action_id.clone())
+        .collect()
+}
+
+fn provider_stream_code(error: &CodingWorkspaceEngineError) -> String {
+    match error {
+        CodingWorkspaceEngineError::ProviderStream(code) => code.clone(),
+        other => panic!("expected provider stream error, got {other:?}"),
+    }
+}
+
+/// 最新 verdict 不在可返修集合（`approve`）时，三个分诊门各自派生恰好三项，
+/// 且门 payload 暴露派生所用 verdict 事实；读路径（`normalize_blocked_gate`）
+/// 不得把 `send_to_coder` 补回去。
+#[tokio::test]
+async fn triage_gates_derive_three_actions_when_latest_verdict_is_approve() {
+    for reason_code in CODE_REVIEW_TRIAGE_REASON_CODES {
+        let (_root, store, attempt) = running_attempt_with_worktree();
+        let attempt = attempt_at_code_review(&store, &attempt);
+        seed_review_conclusion(
+            &store,
+            &attempt,
+            "code_review_report_0001",
+            ReviewVerdict::Approve,
+        );
+        let engine = triage_test_engine(&store);
+        let updated = create_triage_gate(&engine, &attempt, reason_code, "coding_node_0001").await;
+        assert_eq!(
+            updated.status,
+            CodingAttemptStatus::Blocked,
+            "{reason_code}: 门必须正常落地"
+        );
+
+        let gate = open_triage_gate(&store, &updated);
+        assert_eq!(gate.reason_code.as_deref(), Some(reason_code));
+        assert_eq!(
+            gate_action_ids(&gate),
+            vec!["retry_review", "manual_continue", "abort"],
+            "{reason_code}: approve 只派生三项（不含 send_to_coder）",
+        );
+        assert_eq!(
+            gate.latest_review_verdict,
+            Some(ReviewVerdict::Approve),
+            "{reason_code}: 门必须暴露派生所用 verdict 事实",
+        );
+
+        // 读路径只做归一，不重新派生：再读一次仍是三项。
+        let reread = open_triage_gate(&store, &updated);
+        assert_eq!(
+            gate_action_ids(&reread),
+            vec!["retry_review", "manual_continue", "abort"],
+            "{reason_code}: 读路径不得补回 send_to_coder",
+        );
+    }
+}
+
+/// 该 attempt 没有任何 Code Review 结论时 fail-closed：动作集合恰好三项、不虚构
+/// verdict 事实、门仍可操作（`retry_review` 能收口并回到 CodeReview）。
+#[tokio::test]
+async fn triage_gate_without_code_review_report_fails_closed_to_three_actions() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let attempt = attempt_at_code_review(&store, &attempt);
+    let engine = triage_test_engine(&store);
+    let updated = create_triage_gate(
+        &engine,
+        &attempt,
+        "code_review_output_human_triage",
+        "coding_node_0001",
+    )
+    .await;
+    assert_eq!(updated.status, CodingAttemptStatus::Blocked);
+
+    let gate = open_triage_gate(&store, &updated);
+    assert_eq!(
+        gate_action_ids(&gate),
+        vec!["retry_review", "manual_continue", "abort"],
+        "读不到结论必须按三项 fail-closed",
+    );
+    assert_eq!(
+        gate.latest_review_verdict, None,
+        "读不到结论时不得虚构 verdict 事实",
+    );
+
+    let resumed = engine
+        .handle_blocked_gate_response(
+            &updated.project_id,
+            &updated.issue_id,
+            &updated.id,
+            &gate.gate_id,
+            "retry_review",
+            None,
+        )
+        .await
+        .expect("三项门必须可收口");
+    assert_eq!(resumed.status, CodingAttemptStatus::Running);
+    assert_eq!(resumed.stage, CodingExecutionStage::CodeReview);
+    assert!(
+        store
+            .list_open_blocked_gates(&updated.project_id, &updated.issue_id, &updated.id)
+            .expect("open gates")
+            .is_empty(),
+        "retry_review 必须收口该门"
+    );
+}
+
+/// 结论不可解析（损坏 JSON）等同读取失败：按三项 fail-closed，门仍正常落地。
+#[tokio::test]
+async fn triage_gate_with_unreadable_code_review_report_fails_closed_to_three_actions() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let attempt = attempt_at_code_review(&store, &attempt);
+    let reports_dir = store
+        .attempt_dir(&attempt.project_id, &attempt.issue_id, &attempt.id)
+        .join("code-reviews");
+    std::fs::create_dir_all(&reports_dir).expect("reports dir");
+    std::fs::write(
+        reports_dir.join("code_review_report_0001.json"),
+        "{ not json",
+    )
+    .expect("corrupt report");
+    assert!(
+        store
+            .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .is_err(),
+        "损坏的结论文件必须表现为读取失败",
+    );
+
+    let engine = triage_test_engine(&store);
+    let updated = create_triage_gate(
+        &engine,
+        &attempt,
+        "code_review_verification_incomplete",
+        "coding_node_0001",
+    )
+    .await;
+    let gate = open_triage_gate(&store, &updated);
+    assert_eq!(
+        gate_action_ids(&gate),
+        vec!["retry_review", "manual_continue", "abort"],
+        "结论不可解析必须按三项 fail-closed",
+    );
+    assert_eq!(gate.latest_review_verdict, None);
+}
+
+/// `retry_review` 产生新结论后动作集合必须重新派生，且不存在持久禁用位：
+/// `approve`（三项）→ retry_review → 新结论 `request_changes` → 新门四项。
+#[tokio::test]
+async fn retry_review_rederives_triage_actions_from_new_conclusion() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let attempt = attempt_at_code_review(&store, &attempt);
+    seed_review_conclusion(
+        &store,
+        &attempt,
+        "code_review_report_0001",
+        ReviewVerdict::Approve,
+    );
+    let engine = triage_test_engine(&store);
+    let gated = create_triage_gate(
+        &engine,
+        &attempt,
+        "code_review_output_human_triage",
+        "coding_node_0001",
+    )
+    .await;
+    let first_gate = open_triage_gate(&store, &gated);
+    assert_eq!(
+        gate_action_ids(&first_gate),
+        vec!["retry_review", "manual_continue", "abort"],
+    );
+
+    let resumed = engine
+        .handle_blocked_gate_response(
+            &gated.project_id,
+            &gated.issue_id,
+            &gated.id,
+            &first_gate.gate_id,
+            "retry_review",
+            None,
+        )
+        .await
+        .expect("retry_review 必须收口旧门");
+    assert_eq!(resumed.status, CodingAttemptStatus::Running);
+
+    // 新一轮 Code Review 落地后的结论（本用例固定派生输入；provider→报告的链路
+    // 已由 `stop_for_human_triage_*` 等既有用例覆盖）。
+    seed_review_conclusion(
+        &store,
+        &resumed,
+        "code_review_report_0002",
+        ReviewVerdict::RequestChanges,
+    );
+    let regated = create_triage_gate(
+        &engine,
+        &resumed,
+        "code_review_output_human_triage",
+        "coding_node_0002",
+    )
+    .await;
+    let second_gate = open_triage_gate(&store, &regated);
+    assert_eq!(
+        gate_action_ids(&second_gate),
+        vec!["retry_review", "send_to_coder", "manual_continue", "abort"],
+        "新结论可返修时必须重新派生为四项（不得永久缺失该动作）",
+    );
+    assert_eq!(
+        second_gate.latest_review_verdict,
+        Some(ReviewVerdict::RequestChanges),
+    );
+}
+
+/// 同 attempt／node／stage／reason_code 命中 store 去重路径时，动作集合与派生事实
+/// 都按新结论覆盖（`create_blocked_gate_unlocked` 既有覆盖行为），不残留上一轮
+/// verdict 或动作。
+#[tokio::test]
+async fn triage_gate_dedupe_path_rederives_actions_and_verdict() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let attempt = attempt_at_code_review(&store, &attempt);
+    seed_review_conclusion(
+        &store,
+        &attempt,
+        "code_review_report_0001",
+        ReviewVerdict::Approve,
+    );
+    let engine = triage_test_engine(&store);
+    let gated = create_triage_gate(
+        &engine,
+        &attempt,
+        "code_review_output_human_triage",
+        "coding_node_0001",
+    )
+    .await;
+    let first = open_triage_gate(&store, &gated);
+    assert_eq!(
+        gate_action_ids(&first),
+        vec!["retry_review", "manual_continue", "abort"],
+    );
+
+    seed_review_conclusion(
+        &store,
+        &attempt,
+        "code_review_report_0002",
+        ReviewVerdict::RequestChanges,
+    );
+    let regated = create_triage_gate(
+        &engine,
+        &attempt,
+        "code_review_output_human_triage",
+        "coding_node_0001",
+    )
+    .await;
+    let second = open_triage_gate(&store, &regated);
+    assert_eq!(second.gate_id, first.gate_id, "同键必须命中既有 open 门");
+    assert_eq!(
+        gate_action_ids(&second),
+        vec!["retry_review", "send_to_coder", "manual_continue", "abort"],
+        "去重路径必须按新结论覆盖动作集合",
+    );
+    assert_eq!(
+        second.latest_review_verdict,
+        Some(ReviewVerdict::RequestChanges),
+        "去重路径必须覆盖派生事实，不残留上一轮 verdict",
+    );
+}
+
+/// 集合不含 `send_to_coder` 时，脚本/陈旧快照直发该动作仍必须被服务端拒绝：
+/// 可观察码 `send_to_coder_latest_review_not_actionable` 保留，不落 rework
+/// instruction、不改 attempt 状态、不关门。
+#[tokio::test]
+async fn verdict_derived_triage_gate_rejects_direct_send_to_coder() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let attempt = attempt_at_code_review(&store, &attempt);
+    seed_review_conclusion(
+        &store,
+        &attempt,
+        "code_review_report_0001",
+        ReviewVerdict::Approve,
+    );
+    let engine = triage_test_engine(&store);
+    let gated = create_triage_gate(
+        &engine,
+        &attempt,
+        "code_review_output_human_triage",
+        "coding_node_0001",
+    )
+    .await;
+    let gate = open_triage_gate(&store, &gated);
+    assert!(!gate_action_ids(&gate).contains(&"send_to_coder".to_string()));
+
+    let error = engine
+        .handle_blocked_gate_response(
+            &gated.project_id,
+            &gated.issue_id,
+            &gated.id,
+            &gate.gate_id,
+            "send_to_coder",
+            Some("请按审查结论返修".to_string()),
+        )
+        .await
+        .expect_err("集合不含该动作时必须拒绝");
+    assert_eq!(
+        provider_stream_code(&error),
+        "send_to_coder_latest_review_not_actionable",
+    );
+
+    assert!(
+        store
+            .list_rework_instructions(&gated.project_id, &gated.issue_id, &gated.id)
+            .expect("rework instructions")
+            .is_empty(),
+        "被拒绝的提交不得落地 rework instruction",
+    );
+    let persisted = store
+        .get_attempt(&gated.project_id, &gated.issue_id, &gated.id)
+        .expect("attempt");
+    assert_eq!(persisted.status, CodingAttemptStatus::Blocked);
+    assert_eq!(persisted.stage, CodingExecutionStage::CodeReview);
+    assert_eq!(
+        open_triage_gate(&store, &gated).gate_id,
+        gate.gate_id,
+        "拒绝不得关闭该门",
+    );
+}
+
+/// 存量在途门（升级前落了四动作、不回写）：最新 verdict 不可返修时，直发
+/// `send_to_coder` 仍被既有前置拒绝，语义与派生门一致。
+#[tokio::test]
+async fn legacy_four_action_triage_gate_still_rejects_send_to_coder() {
+    let (_root, store, attempt) = running_attempt_with_worktree();
+    let attempt = attempt_at_code_review(&store, &attempt);
+    seed_review_conclusion(
+        &store,
+        &attempt,
+        "code_review_report_0001",
+        ReviewVerdict::Approve,
+    );
+    let blocked = store
+        .update_attempt_status(
+            &attempt.project_id,
+            &attempt.issue_id,
+            &attempt.id,
+            CodingAttemptStatus::Blocked,
+        )
+        .expect("blocked");
+    let gate = store
+        .create_blocked_gate(
+            &blocked,
+            CreateBlockedGateInput {
+                attempt_id: blocked.id.clone(),
+                stage: CodingExecutionStage::CodeReview,
+                node_id: Some("coding_node_0001".to_string()),
+                role: Some(CodingProviderRole::CodeReviewer),
+                title: "Code Review 结论需人工分诊".to_string(),
+                description: "升级前落地的四动作门".to_string(),
+                reason_code: Some("code_review_output_human_triage".to_string()),
+                evidence_refs: Vec::new(),
+                raw_provider_output_ref: None,
+                available_actions: vec![
+                    coding_gate_action_for_id("retry_review").expect("retry review action"),
+                    coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
+                    coding_gate_action_for_id("manual_continue").expect("manual continue action"),
+                    coding_gate_action_for_id("abort").expect("abort action"),
+                ],
+            },
+        )
+        .expect("legacy four action gate");
+    // 不回写：存量门没有派生事实字段，动作集合保持落地时的样子。
+    assert_eq!(gate.latest_review_verdict, None);
+
+    let engine = triage_test_engine(&store);
+    let error = engine
+        .handle_blocked_gate_response(
+            &blocked.project_id,
+            &blocked.issue_id,
+            &blocked.id,
+            &gate.gate_id,
+            "send_to_coder",
+            Some("请按审查结论返修".to_string()),
+        )
+        .await
+        .expect_err("verdict 不可返修时存量门也必须拒绝");
+    assert_eq!(
+        provider_stream_code(&error),
+        "send_to_coder_latest_review_not_actionable",
+    );
+    assert!(
+        store
+            .list_rework_instructions(&blocked.project_id, &blocked.issue_id, &blocked.id)
+            .expect("rework instructions")
+            .is_empty(),
+    );
+    let persisted = store
+        .get_attempt(&blocked.project_id, &blocked.issue_id, &blocked.id)
+        .expect("attempt");
+    assert_eq!(persisted.status, CodingAttemptStatus::Blocked);
+    assert_eq!(
+        open_triage_gate(&store, &blocked),
+        gate,
+        "存量门保持原样（不回写、不关闭）",
+    );
+}
+
+/// REQ-CVT-03：转入「验证处理」前后门动作集合逐项相同（含是否含
+/// `send_to_coder`）、门仍 open、finding 不变——本用例用 `approve` 派生的三项门，
+/// 转入不得把被派生掉的 `send_to_coder` 加回来。
+#[tokio::test]
+async fn verification_triage_entry_keeps_verdict_derived_actions_unchanged() {
+    let (_root, store, engine, attempt) = verification_triage_group_fixture();
+    store
+        .save_code_review_report(
+            &attempt,
+            &CodeReviewReport {
+                id: "code_review_report_0001".to_string(),
+                attempt_id: attempt.id.clone(),
+                round: 1,
+                verdict: ReviewVerdict::Approve,
+                findings: vec![ReviewFinding {
+                    severity: FindingSeverity::Error,
+                    file_path: Some("src/lib.rs".to_string()),
+                    line: Some(42),
+                    message: "missing validation".to_string(),
+                    required_action: Some("add validation".to_string()),
+                    source_stage: CodingExecutionStage::CodeReview,
+                    evidence: Vec::new(),
+                    plan_defect_evidence: Vec::new(),
+                    related_requirements: Vec::new(),
+                    related_design_constraints: Vec::new(),
+                    related_work_item_tasks: Vec::new(),
+                    defect_class: crate::product::models::PlanDefectClass::ImplementationDefect,
+                    reason_code: None,
+                    contract_refs: Vec::new(),
+                    capability_refs: Vec::new(),
+                    repair_target: None,
+                    recommended_route: crate::product::models::PlanDefectRoute::CoderRework,
+                    confidence: None,
+                }],
+                tested_evidence_refs: Vec::new(),
+                diff_refs: Vec::new(),
+                summary: "reviewer approved with advisory finding".to_string(),
+                created_at: "2026-07-01T00:00:00Z".to_string(),
+                raw_provider_output_ref: None,
+                role_run_id: None,
+                run_no: None,
+                unit_run_id: None,
+                acceptance: None,
+                review_window_id: None,
+            },
+        )
+        .expect("code review report");
+    let gated = engine
+        .create_review_blocked_gate(ReviewBlockedGateInput {
+            attempt: &attempt,
+            node_id: "coding_node_0001",
+            stage: CodingExecutionStage::CodeReview,
+            role: CodingProviderRole::CodeReviewer,
+            title: "Code Review 验证证据不完整".to_string(),
+            description: "approve 派生的三项门".to_string(),
+            reason_code: "code_review_verification_incomplete",
+            evidence_refs: vec!["code_review_report_0001".to_string()],
+            raw_provider_output_ref: None,
+        })
+        .await
+        .expect("triage gate");
+    let before = open_triage_gate(&store, &gated);
+    assert_eq!(
+        gate_action_ids(&before),
+        vec!["retry_review", "manual_continue", "abort"],
+    );
+
+    engine
+        .enter_verification_triage(
+            &gated.project_id,
+            &gated.issue_id,
+            &gated.id,
+            equivalent_evidence_entry(TRIAGE_CHECK_PLAIN, Some(3)),
+        )
+        .await
+        .expect("enter verification triage");
+
+    let after = open_triage_gate(&store, &gated);
+    assert_eq!(after.gate_id, before.gate_id, "转入不得换门");
+    assert_eq!(
+        gate_action_ids(&after),
+        gate_action_ids(&before),
+        "转入前后动作集合必须逐项相同（含是否含 send_to_coder）",
+    );
+    assert_eq!(after.latest_review_verdict, before.latest_review_verdict);
+    let reports = store
+        .list_code_review_reports(&gated.project_id, &gated.issue_id, &gated.id)
+        .expect("reports");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].findings.len(), 1);
+    assert_eq!(reports[0].findings[0].message, "missing validation");
 }
 
 include!("verification_triage_gates.rs");

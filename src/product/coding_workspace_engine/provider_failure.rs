@@ -24,6 +24,21 @@ pub(crate) const VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES: [&str; 5] = [
     super::gates::CODING_OPERATIONAL_BLOCKER_REASON_CODE,
 ];
 
+/// 三个 Code Review 分诊门（`coding-code-review-triage` 的 verdict 派生规则适用面）。
+///
+/// 其余 reason_code（`code_review_blocked`、`code_review_report_not_accepted`、
+/// `internal_review_*`、`reviewer_rework_limit_reached` 等）动作集合保持既有语义，
+/// 不受本派生规则影响（change `triage-gate-actions-by-verdict` 非目标）。
+pub(crate) const CODE_REVIEW_TRIAGE_REASON_CODES: [&str; 3] = [
+    "code_review_output_human_triage",
+    "code_review_verification_incomplete",
+    "code_review_operational_blocker",
+];
+
+pub(crate) fn is_code_review_triage_reason_code(reason_code: &str) -> bool {
+    CODE_REVIEW_TRIAGE_REASON_CODES.contains(&reason_code)
+}
+
 pub(crate) fn is_verification_triage_eligible_gate(gate: &CodingGateRequired) -> bool {
     gate.reason_code
         .as_deref()
@@ -99,6 +114,24 @@ impl CodingWorkspaceEngine {
         }
     }
 
+    /// 该 attempt 最新一条 Code Review 结论的 verdict——分诊门动作集合派生的唯一事实源。
+    ///
+    /// 读取口径与 `send_code_review_feedback_to_coder`（`rework.rs`）完全一致：
+    /// `list_code_review_reports(...)` 的最后一条（同 attempt 结论集合的最新结论）。
+    /// 任何读不到的情形（无结论 / 结论不可解析 / 读取失败）返回 `None`，调用方按
+    /// fail-closed 派生（不含 `send_to_coder`），绝不以默认值兜底。
+    fn latest_code_review_verdict(
+        &self,
+        attempt: &CodingExecutionAttempt,
+    ) -> Option<ReviewVerdict> {
+        self.store
+            .list_code_review_reports(&attempt.project_id, &attempt.issue_id, &attempt.id)
+            .ok()?
+            .into_iter()
+            .last()
+            .map(|report| report.verdict)
+    }
+
     pub(crate) async fn create_review_blocked_gate(
         &self,
         input: ReviewBlockedGateInput<'_>,
@@ -126,6 +159,11 @@ impl CodingWorkspaceEngine {
             }
             _ => coding_gate_action_for_id("retry_review").expect("retry review action"),
         };
+        let latest_verdict = if is_code_review_triage_reason_code(reason_code) {
+            self.latest_code_review_verdict(attempt)
+        } else {
+            None
+        };
         let available_actions = if reason_code == "code_review_provider_interrupted" {
             vec![retry_action]
         } else if matches!(
@@ -142,18 +180,28 @@ impl CodingWorkspaceEngine {
                 coding_gate_action_for_id("manual_continue").expect("manual continue action"),
                 coding_gate_action_for_id("abort").expect("abort action"),
             ]
-        } else if matches!(
-            reason_code,
-            "code_review_output_human_triage"
-                | "code_review_verification_incomplete"
-                | "code_review_operational_blocker"
-        ) {
-            vec![
-                retry_action,
-                coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
+        } else if is_code_review_triage_reason_code(reason_code) {
+            // change `triage-gate-actions-by-verdict`：三个 Code Review 分诊门的动作
+            // 集合按该 attempt 最新一条 Code Review 结论的 verdict 派生——基础恰好
+            // `retry_review` + `manual_continue` + `abort`；当且仅当 verdict ∈
+            // {request_changes, blocked} 时额外含 `send_to_coder`，其余 verdict（含
+            // approve）不含。读不到 verdict 时 fail-closed 按三项派生：缺事实只影响
+            // 这一个动作，不影响门落地与其余三个出口。
+            let mut actions = Vec::with_capacity(4);
+            actions.push(retry_action);
+            if matches!(
+                latest_verdict,
+                Some(ReviewVerdict::Blocked | ReviewVerdict::RequestChanges)
+            ) {
+                actions.push(
+                    coding_gate_action_for_id("send_to_coder").expect("send to coder action"),
+                );
+            }
+            actions.push(
                 coding_gate_action_for_id("manual_continue").expect("manual continue action"),
-                coding_gate_action_for_id("abort").expect("abort action"),
-            ]
+            );
+            actions.push(coding_gate_action_for_id("abort").expect("abort action"));
+            actions
         } else {
             vec![
                 retry_action,
@@ -182,6 +230,23 @@ impl CodingWorkspaceEngine {
                 available_actions,
             },
         )?;
+        let gate = if is_code_review_triage_reason_code(reason_code) {
+            // 派生事实可观察：把建门时派生 `available_actions` 所用的最新 verdict 落到
+            // 门记录上（additive、独立回写，`available_actions` 仍是权威动作集合）。
+            // 回写失败只让呈现面缺少文案依据，不影响已落盘的门（F-7：读不到事实绝不
+            // 影响开门）。显式写 `None` 也会清掉去重复用同门实例时上一轮残留的 verdict。
+            self.store
+                .attach_blocked_gate_latest_review_verdict(
+                    &updated.project_id,
+                    &updated.issue_id,
+                    &updated.id,
+                    &gate.gate_id,
+                    latest_verdict,
+                )
+                .unwrap_or(gate)
+        } else {
+            gate
+        };
         let _ = self
             .event_tx
             .send(CodingWsOutMessage::CodingGateRequired { gate })

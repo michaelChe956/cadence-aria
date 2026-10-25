@@ -4,6 +4,7 @@ use crate::product::models::ProviderName;
 
 use super::execution::{CodingExecutionStage, CodingProviderRole};
 use super::provider_config::CodingRoleProviderConfigSnapshot;
+use super::review::ReviewVerdict;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -152,6 +153,15 @@ pub struct CodingGateRequired {
     pub raw_provider_output_ref: Option<String>,
     #[serde(default)]
     pub diagnostic: Option<CodingGateDiagnostic>,
+    /// change `triage-gate-actions-by-verdict`：三个 Code Review 分诊门派生
+    /// `available_actions` 所用的事实——该 attempt 最新一条 Code Review 结论的
+    /// verdict（读不到时为 `None`，即 fail-closed 三项派生）。additive：旧 gate
+    /// JSON 与非分诊门反序列化为 `None`；`available_actions` 仍是权威动作集合，
+    /// 本字段只供呈现面生成「为什么没有送回 Coder」文案，客户端 MUST NOT 据此
+    /// 增删动作。经 `CodingAttemptStore::attach_blocked_gate_latest_review_verdict`
+    /// 独立入口落盘（不给 `CreateBlockedGateInput` 加字段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_review_verdict: Option<ReviewVerdict>,
     /// P2-c（REQ-CRO-09）：分诊卡「大白话」摘要投影。additive：旧 gate JSON
     /// 反序列化为 `None`（前端缺省回落 `description`）；经
     /// `CodingAttemptStore::attach_blocked_gate_triage_summary` 独立入口落盘

@@ -311,6 +311,7 @@ pub(crate) fn stage_gate_required(gate: CodingStageGateState) -> CodingGateRequi
         evidence_refs: Vec::new(),
         raw_provider_output_ref: None,
         diagnostic: None,
+        latest_review_verdict: None,
         triage_summary: None,
     }
 }
