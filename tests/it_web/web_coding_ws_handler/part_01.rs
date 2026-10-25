@@ -336,6 +336,7 @@ fn coding_gate_required_out_message_preserves_action_contract() {
         raw_provider_output_ref: None,
         diagnostic: None,
         triage_summary: None,
+        latest_review_verdict: None,
     };
     let message = CodingWsOutMessage::CodingGateRequired { gate };
 

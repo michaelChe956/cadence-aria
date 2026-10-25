@@ -366,6 +366,7 @@ fn review_request_timeline_and_gate_actions_use_stable_wire_values() {
         raw_provider_output_ref: None,
         diagnostic: None,
         triage_summary: None,
+        latest_review_verdict: None,
     };
 
     assert_eq!(
