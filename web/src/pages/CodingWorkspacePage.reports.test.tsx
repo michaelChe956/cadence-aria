@@ -199,7 +199,9 @@ describe("CodingWorkspacePage reports and history", () => {
     expect(api.respondGate).not.toHaveBeenCalled();
 
     await userEvent.type(
-      screen.getByPlaceholderText("说明跳过该门禁的原因和后续风险处理"),
+      screen.getByPlaceholderText(
+        "说明人工放行的原因和后续风险处理；该说明会写入 context note 并记入质量豁免审计",
+      ),
       "人工确认风险可接受，后续补充真实 E2E",
     );
     await userEvent.click(screen.getByRole("button", { name: "人工继续" }));

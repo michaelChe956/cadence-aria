@@ -1157,14 +1157,14 @@ export function ChatCockpitPage({
           <section
             data-testid="cockpit-conversation-flow"
             aria-label="下钻对话流"
-            className={[
-              "grid min-h-0 min-w-0 flex-1 rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]",
-              pendingChoices.length > 0
-                ? "grid-rows-[auto_auto_minmax(0,1fr)_auto_auto]"
-                : "grid-rows-[auto_minmax(0,1fr)_auto_auto]",
-            ].join(" ")}
+            // F-C 同源根修：右列不再用「按 pending choice 二选一的 grid 行模板」排布——
+            // 条件子节点（终止确认面/终止横幅/选择提示/对话流/输入条）数量随状态变化，
+            // 行模板却在声明处固定，任何一处数量不一致就会把某个子节点塞进
+            // `minmax(0,1fr)` 行压成 0px 并被后续兄弟覆盖（确认面「DOM 在、点不到」的根因）。
+            // 改为 flex 纵向流：滚动区 `flex-1 min-h-0`，其余子节点保持自然高度。
+            className="flex min-h-0 min-w-0 flex-1 flex-col rounded-xl border-2 border-[var(--aria-line-strong)] bg-[var(--aria-panel)]"
           >
-          <div className="flex min-w-0 items-center gap-2 px-3 py-2">
+          <div className="flex min-w-0 shrink-0 items-center gap-2 px-3 py-2">
             <h2 className="text-sm font-semibold text-[var(--aria-ink)]">对话流</h2>
             {/* F-39：选中了阶段卡却在对话流里找不到对应气泡（未生成/未水合）时必须给出
                 可辨反馈——此前静默 no-op，用户只看到「点了没反应」。 */}
@@ -1342,7 +1342,7 @@ export function ChatCockpitPage({
                   </>
                 ) : undefined
               }
-              className="min-h-0"
+              className="min-h-0 flex-1"
             />
           ) : drilldownView === "plan" && isPlanApprovalSession ? (
             <PlanApprovalPanel
@@ -1373,13 +1373,18 @@ export function ChatCockpitPage({
               onCacheContent={cacheContent}
               sessionId={selectedSessionId}
               testId="cockpit-conversation-flow-list"
+              className="min-h-0 flex-1"
             />
           )}
           {takeoverSessionId === null && state.streamBuffers[state.activeNodeId ?? ""]?.chunks.length ? (
-            <StreamingConversationBlock
-              content={state.streamBuffers[state.activeNodeId ?? ""]?.chunks.join("") ?? ""}
-              role={state.streamBuffers[state.activeNodeId ?? ""]?.role ?? "author"}
-            />
+            // F-C 同源：flex 纵向流里固定高度的兄弟必须 shrink-0，否则空间不足时
+            // 与滚动区争高（滚动区已 min-h-0 flex-1，可以收缩到 0）。
+            <div className="flex shrink-0 flex-col">
+              <StreamingConversationBlock
+                content={state.streamBuffers[state.activeNodeId ?? ""]?.chunks.join("") ?? ""}
+                role={state.streamBuffers[state.activeNodeId ?? ""]?.role ?? "author"}
+              />
+            </div>
           ) : null}
           {/* F-19（cadence/notes 2026-09-19 阶段4监控）：生成/评审/修订期必须
               暴露中止入口——此前仅 prepare_context/author_confirm 渲染输入条，
@@ -1396,6 +1401,7 @@ export function ChatCockpitPage({
             state.stage === "running" ||
             state.stage === "cross_review" ||
             state.stage === "revision") ? (
+            <div className="flex shrink-0 flex-col">
             <ChatInputBar
               ref={chatInputRef}
               stage={state.stage}
@@ -1437,6 +1443,7 @@ export function ChatCockpitPage({
                   : null
               }
             />
+            </div>
           ) : null}
           {/* 退役留档（T5/REQ-RET-02）：review_decision 动作条随消息族删除。 */}
           </section>

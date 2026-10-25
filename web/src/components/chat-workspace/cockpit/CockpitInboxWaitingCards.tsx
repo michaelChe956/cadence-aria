@@ -12,6 +12,7 @@ import {
  import type { CockpitInboxItem } from "../../../state/workspace-cockpit-projection";
 import { notifyLifecycleInvalidated } from "../../../state/lifecycle-workbench-store";
 import { useCodingWorkspaceStore } from "../../../state/coding-workspace-store";
+import { DialogShell } from "../../shared/DialogShell";
 import { ConfirmTwiceButton } from "./ConfirmTwiceButton";
 import { BTN_SECONDARY_CLASS } from "../gate-visual-tokens";
 
@@ -185,47 +186,60 @@ export function AutomationTerminationConfirmSurface() {
     }
   };
 
+  // F-C 根修（owner 2026-10-25 真机复现「确认面看不见、点不到」）：确认面
+  // 不再作为宿主布局（页面 grid 行模板／收件箱滚动块）的内联兄弟参与排布，
+  // 改为经 DialogShell 的视口浮层（createPortal → document.body，fixed
+  // inset-0 + 蒙层 + 顶层 z）。旧形态在 ChatCockpitPage 的 4 行模板下被放进
+  // `minmax(0,1fr)` 行压成 17px，并被后序的对话流整块覆盖——DOM 在、可点性 0。
   return (
-    <div
-      data-testid="automation-termination-confirm"
-      role="alertdialog"
-      aria-label="终止整个自动化确认"
-      className="flex shrink-0 flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-4 text-amber-900"
+    <DialogShell
+      label="终止整个自动化确认"
+      onClose={closeConfirm}
+      closeDisabled={termination.submitting}
+      closeLabel="取消终止"
+      title={PLAN_TERMINATION_ENTRY_LABEL}
+      icon={<X className="h-4 w-4" aria-hidden="true" />}
+      widthClass="max-w-xl"
+      layerClass="z-[80]"
+      testId="automation-termination-confirm"
     >
-      <span className="font-semibold">{PLAN_TERMINATION_ENTRY_LABEL}</span>
-      <span>{PLAN_TERMINATION_EXPLANATION}</span>
-      {identityNotice ? (
-        <span role="status" className="font-semibold">
-          {identityNotice}
-        </span>
-      ) : null}
-      {termination.submitting ? (
-        <span role="status" className="font-semibold">
-          终止中…
-        </span>
-      ) : (
-        <>
-          <ConfirmTwiceButton
-            variant="ghost"
-            label={PLAN_TERMINATION_ENTRY_LABEL}
-            confirmLabel={PLAN_TERMINATION_CONFIRM_LABEL}
-            onConfirm={() => void submit()}
-          />
-          <button
-            type="button"
-            onClick={closeConfirm}
-            className="inline-flex h-8 items-center rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-900 hover:bg-amber-100"
-          >
-            取消
-          </button>
-        </>
-      )}
-      {termination.error ? (
-        <span role="alert" className="font-semibold text-[var(--aria-danger)]">
-          {termination.error}
-        </span>
-      ) : null}
-    </div>
+      <div className="flex flex-col gap-3 text-xs leading-5 text-amber-900">
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+          {PLAN_TERMINATION_EXPLANATION}
+        </p>
+        {identityNotice ? (
+          <p role="status" className="font-semibold">
+            {identityNotice}
+          </p>
+        ) : null}
+        {termination.submitting ? (
+          <p role="status" className="font-semibold">
+            终止中…
+          </p>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <ConfirmTwiceButton
+              variant="ghost"
+              label={PLAN_TERMINATION_ENTRY_LABEL}
+              confirmLabel={PLAN_TERMINATION_CONFIRM_LABEL}
+              onConfirm={() => void submit()}
+            />
+            <button
+              type="button"
+              onClick={closeConfirm}
+              className={BTN_SECONDARY_CLASS}
+            >
+              取消
+            </button>
+          </div>
+        )}
+        {termination.error ? (
+          <p role="alert" className="font-semibold text-[var(--aria-danger)]">
+            {termination.error}
+          </p>
+        ) : null}
+      </div>
+    </DialogShell>
   );
 }
 

@@ -16,6 +16,7 @@ import type { ChatEntry } from "../state/chat-entries";
 import { codingStartupRejectionCopy } from "../state/cockpit-operation-semantics";
 import { CoderTriageCard, GateMetadata, VerificationTriageSection } from "./CoderTriageCard";
 import type { CodingPendingGate } from "../state/coding-workspace-store";
+import { useCodingWorkspaceStore } from "../state/coding-workspace-store";
 
 export const ACTIVE_ATTEMPT_STATUSES = new Set([
   "created",
@@ -384,6 +385,12 @@ export function GatePanel({
 }) {
   const [reason, setReason] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
+  // F-D：最后一个协议错误的原文——门动作被服务端拒绝时，gate.errorCode 只有
+  // `coding_gate_response_failed` 这个粗码，具体原因（如 send_to_coder 的前置
+  // 不满足）在 message 里。两者配对只用于识别「这一实例的哪次失败」。
+  const protocolErrorMessage = useCodingWorkspaceStore(
+    (state) => state.protocolError?.message ?? null,
+  );
 
   if (!gate) {
     return null;
@@ -415,20 +422,48 @@ export function GatePanel({
   const activeGate = gate;
   const submitting = activeGate.submitting === true;
   const gateErrorCode = activeGate.errorCode ?? null;
-  const needsReason = activeGate.available_actions.some(actionRequiresContext);
+  const gateReasonCode = activeGate.reason_code ?? null;
+  const contextActions = activeGate.available_actions.filter(actionRequiresContext);
+  const needsReason = contextActions.length > 0;
   const needsCoderFeedbackContext = activeGate.available_actions.some(
     (action) => action.action_type === "send_to_coder",
   );
   const trimmedReason = reason.trim();
+  const reasonMissing = needsReason && trimmedReason === "";
   const reasonTooLong = reason.length > 2000;
   const displayedError = reasonTooLong ? "原因不能超过 2000 字" : localError;
   const displayTitle = blockedGateDisplayTitle(activeGate);
   const hasQualityBypassAction = activeGate.available_actions.some(actionIsQualityBypass);
-  const reasonLabel = needsCoderFeedbackContext ? "人工修复意见" : "门禁跳过原因";
-  const reasonPlaceholder = needsCoderFeedbackContext
-    ? "补充本轮人工修复意见；该意见会优先于 Code Reviewer findings"
-    : "说明跳过该门禁的原因和后续风险处理";
-  const missingReasonMessage = needsCoderFeedbackContext ? "需要填写人工修复意见" : "需要填写原因";
+  // F-E：输入框的标签/占位/必填文案按"这个门到底让人做什么"分派——人工放行门写的是
+  // 放行说明（进质量豁免审计），发回 Coder 门写的是修复意见；两者同门并存时分开说。
+  const reasonField = reasonFieldCopy(needsCoderFeedbackContext, hasQualityBypassAction);
+  // F-D：服务端已判定「最近一次审查结论不能作为返修指令」（send_to_coder 的前置是
+  // verdict ∈ {request_changes, blocked}）。判定只作用于**当前门实例**：gate.errorCode
+  // 由 store 在每次提交前清空，门被解决或换成新实例即自然复位；动作集合仍由服务端
+  // available_actions 权威（spec 要求恰好四项），这里只是把这一实例的该动作置为禁用，
+  // 不从清单里删除。
+  const sendToCoderRejected =
+    gateErrorCode === GATE_RESPONSE_FAILED_CODE &&
+    (protocolErrorMessage ?? "").includes(SEND_TO_CODER_NOT_ACTIONABLE_CODE);
+  const gateErrorCopy = gateErrorGuidance(gateErrorCode, protocolErrorMessage);
+  // 指引里的替代动作必须引用本门真实的动作文案（门的 label 有 "重试代码审查"/"重试审查" 两族）。
+  const retryActionLabel =
+    activeGate.available_actions.find((action) => action.action_type === "retry_review")?.label ??
+    null;
+  const qualityBypassLabel =
+    activeGate.available_actions.find(actionIsQualityBypass)?.label ?? null;
+
+  function actionDisabled(action: CodingGateRequired["available_actions"][number]) {
+    if (submitting) {
+      return true;
+    }
+    if (action.action_type === "send_to_coder" && sendToCoderRejected) {
+      return true;
+    }
+    // F-E：必填校验前置——空说明时直接把需要上下文的动作禁用，并就地说明要填什么，
+    // 而不是让用户点一次才知道。
+    return actionRequiresContext(action) && (reasonMissing || reasonTooLong);
+  }
 
   function handleAction(action: CodingGateRequired["available_actions"][number]) {
     // 批 2 T4（REQ-WIGA-09）：托管下门 Abort 动作改走整 plan 统一终止
@@ -443,7 +478,8 @@ export function GatePanel({
     }
     if (actionRequiresContext(action)) {
       if (!trimmedReason) {
-        setLocalError(missingReasonMessage);
+        // 防御：按钮已按 reasonMissing 置灰，键盘/脚本路径仍然给出同一句可执行提示。
+        setLocalError(missingContextMessage(action, gateReasonCode));
         return;
       }
       if (reasonTooLong) {
@@ -473,6 +509,24 @@ export function GatePanel({
               人工放行会记录质量豁免；请说明跳过该门禁的原因和后续风险处理
             </div>
           ) : null}
+          {/* F-D：必败动作不再静默失败——服务端已判定的原因改成可执行指引，
+              并把该实例的「提交给 Coder 修复」置灰（动作集合本身仍由服务端
+              available_actions 权威，未从清单移除）。 */}
+          {sendToCoderRejected ? (
+            <div
+              data-testid="coding-gate-send-to-coder-unavailable"
+              role="status"
+              className="mt-1 rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs leading-4 text-amber-900"
+            >
+              「提交给 Coder 修复」在当前门不可用：最近一次 Code Review 结论无法作为返修指令
+              （结论不是 request_changes／blocked）。
+              {retryActionLabel ? `请改用「${retryActionLabel}」；` : null}
+              {qualityBypassLabel
+                ? `或填写人工放行说明后点「${qualityBypassLabel}」（会记入质量豁免审计）。`
+                : null}
+              重试审查或本门解决后该动作会自动恢复可用。
+            </div>
+          ) : null}
           {isVerificationTriageEligibleGate(activeGate) ? (
             <VerificationTriageSection
               gate={activeGate}
@@ -486,7 +540,7 @@ export function GatePanel({
           {needsReason ? (
             <div className="mt-2 grid gap-1">
               <textarea
-                aria-label={reasonLabel}
+                aria-label={reasonField.label}
                 value={reason}
                 onChange={(event) => {
                   setReason(event.target.value);
@@ -494,9 +548,22 @@ export function GatePanel({
                 }}
                 rows={2}
                 maxLength={2100}
-                placeholder={reasonPlaceholder}
+                placeholder={reasonField.placeholder}
+                aria-describedby={reasonMissing ? "coding-gate-context-required" : undefined}
                 className="min-h-14 w-full resize-y rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs text-amber-950 placeholder:text-amber-700"
               />
+              {/* F-E：必填校验前置——空说明时先就地写清「哪个动作、要填什么、会有什么后果」，
+                  对应动作同时置灰；不是点一次才知道要填。 */}
+              {reasonMissing ? (
+                <div
+                  id="coding-gate-context-required"
+                  data-testid="coding-gate-context-required"
+                  role="status"
+                  className="text-xs leading-4 text-amber-800"
+                >
+                  {contextActions.map((action) => missingContextMessage(action, gateReasonCode)).join("；")}
+                </div>
+              ) : null}
               {displayedError ? (
                 <div className="text-xs font-semibold text-[var(--aria-danger)]">
                   {displayedError}
@@ -505,8 +572,16 @@ export function GatePanel({
             </div>
           ) : null}
           {gateErrorCode ? (
-            <div className="mt-1 text-xs font-semibold text-[var(--aria-danger)]">
-              {gateErrorCode}
+            <div className="mt-1 flex flex-col gap-0.5">
+              {gateErrorCopy ? (
+                <div role="alert" className="text-xs font-semibold text-[var(--aria-danger)]">
+                  {gateErrorCopy}
+                </div>
+              ) : null}
+              {/* 原始错误码保留（排障/支持用），但不再作为唯一信息。 */}
+              <div className="aria-mono text-[10px] text-[var(--aria-ink-muted)]">
+                {gateErrorCode}
+              </div>
             </div>
           ) : null}
         </div>
@@ -515,9 +590,14 @@ export function GatePanel({
             <button
               key={action.action_id}
               type="button"
-              disabled={submitting || (actionRequiresContext(action) && reasonTooLong)}
+              disabled={actionDisabled(action)}
+              title={
+                action.action_type === "send_to_coder" && sendToCoderRejected
+                  ? "最近一次 Code Review 结论无法作为返修指令；请重试代码审查或人工继续"
+                  : undefined
+              }
               onClick={() => handleAction(action)}
-              className="inline-flex h-8 items-center justify-center rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+              className="inline-flex h-8 items-center justify-center rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {submitting ? "处理中" : action.label}
             </button>
@@ -540,6 +620,77 @@ function actionRequiresContext(action: CodingGateRequired["available_actions"][n
 
 function actionIsQualityBypass(action: CodingGateRequired["available_actions"][number]) {
   return action.action_type === "manual_continue" || action.action_type === "accept_risk";
+}
+
+/** 门动作被服务端拒绝时 WS 帧里的粗码（`coding_ws_handler/socket.rs`）。 */
+const GATE_RESPONSE_FAILED_CODE = "coding_gate_response_failed";
+/** `send_code_review_feedback_to_coder` 的前置不满足码（`rework.rs`）。 */
+const SEND_TO_CODER_NOT_ACTIONABLE_CODE = "send_to_coder_latest_review_not_actionable";
+
+/** F-E：必填文案必须带动作名与后果，用户才知道"填这段字会换来什么"——
+ * 字段名按"这个动作会拿这段文字做什么"分派，不把「人工放行」说成「修复意见」。 */
+function missingContextMessage(
+  action: CodingGateRequired["available_actions"][number],
+  reasonCode: string | null,
+): string {
+  switch (action.action_type) {
+    case "manual_continue":
+    case "accept_risk":
+      return `「${action.label}」需要填写人工放行说明（将写入 context note 并记入质量豁免审计${reasonCode ? `：reason_code=${reasonCode}` : ""}）`;
+    case "send_to_coder":
+      return `「${action.label}」需要填写人工修复意见（将作为本轮修复意见发给 Coder）`;
+    case "retry_coding_with_context":
+      return `「${action.label}」需要填写情况说明（将作为情况说明发给 Coder 并重新开跑）`;
+    default:
+      return `「${action.label}」需要填写原因（将写入 context note）`;
+  }
+}
+
+/** F-E：输入框标签/占位按门实际提供的动作分派（放行说明 vs 发回 Coder 的修复意见）。 */
+function reasonFieldCopy(
+  hasCoderFeedback: boolean,
+  hasQualityBypass: boolean,
+): { label: string; placeholder: string } {
+  if (hasQualityBypass && hasCoderFeedback) {
+    return {
+      label: "人工处理说明（人工继续会记入质量豁免审计）",
+      placeholder:
+        "说明人工放行的原因和后续风险处理（会记入质量豁免审计），或写发回 Coder 的修复意见",
+    };
+  }
+  if (hasQualityBypass) {
+    return {
+      label: "人工放行说明（记入质量豁免审计）",
+      placeholder: "说明人工放行的原因和后续风险处理；该说明会写入 context note 并记入质量豁免审计",
+    };
+  }
+  if (hasCoderFeedback) {
+    return {
+      label: "人工修复意见",
+      placeholder: "补充本轮人工修复意见；该意见会优先于 Code Reviewer findings",
+    };
+  }
+  return {
+    label: "门禁跳过原因",
+    placeholder: "说明跳过该门禁的原因和后续风险处理",
+  };
+}
+
+/** F-D：把已经发生的门动作失败翻译成可执行指引（原始码另以小字保留）。 */
+function gateErrorGuidance(
+  errorCode: string | null,
+  protocolErrorMessage: string | null,
+): string | null {
+  if (errorCode === null) {
+    return null;
+  }
+  if ((protocolErrorMessage ?? "").includes(SEND_TO_CODER_NOT_ACTIONABLE_CODE)) {
+    return "「提交给 Coder 修复」被服务端拒绝：最近一次 Code Review 结论不是 request_changes／blocked，无法作为返修指令。请重试代码审查，或填写人工放行说明后点「人工继续」。";
+  }
+  if (errorCode === "coding_gate_extra_context_required") {
+    return "该动作需要非空说明文字（人工放行/发回 Coder/说明情况重试都要求填写意见）。";
+  }
+  return null;
 }
 
 const VERIFICATION_TRIAGE_ELIGIBLE_REASON_CODES = [
