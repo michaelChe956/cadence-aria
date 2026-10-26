@@ -32,6 +32,7 @@ const ACTION_BUTTON_LABELS: Record<BootstrapActionName, string> = {
   retry: "重试",
   revalidate: "核验",
   repair: "去修复",
+  republish: "重新生成政策",
 };
 
 type LogicalCodebaseBootstrapCardProps = {

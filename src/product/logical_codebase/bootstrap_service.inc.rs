@@ -151,9 +151,11 @@ impl LogicalCodebaseBootstrapService {
             LogicalCodebaseBootstrapStep::AggregateIndexActive => {
                 self.dispatch_aggregate_index_action(request)
             }
+            // rules_policy 的 object_id 是政策 artifact id（内含 `/`），
+            // 不是注册批次 id——走注册协调器会拼出越界路径(PathEscape)。
+            LogicalCodebaseBootstrapStep::RulesPolicy => self.dispatch_rules_policy_action(request),
             LogicalCodebaseBootstrapStep::Identity
-            | LogicalCodebaseBootstrapStep::ManifestCheckout
-            | LogicalCodebaseBootstrapStep::RulesPolicy => {
+            | LogicalCodebaseBootstrapStep::ManifestCheckout => {
                 self.dispatch_registration_action(request)
             }
         }
@@ -309,6 +311,38 @@ impl LogicalCodebaseBootstrapService {
     /// identity/manifest/rules：已有 registration batch 的 Continue 走
     /// `resume_batch_checked`（显式 expected revision 幂等 resume）；终态
     /// batch 幂等 replay；无 durable 对象时等待用户在登记链提交材料。
+    /// rules_policy：政策级动作。`Republish` 用当前源原子重发新 revision；
+    /// `Retry`/`Revalidate` 只重投影（投影由调用方在动作后重取），不改事实。
+    fn dispatch_rules_policy_action(
+        &self,
+        request: &BootstrapActionRequest,
+    ) -> Result<BootstrapActionOutcome, ProductStoreError> {
+        if request.action != BootstrapActionKind::Republish {
+            return Ok(BootstrapActionOutcome::WaitingForHuman);
+        }
+        let manifest = crate::product::logical_codebase::LogicalCodebaseStore::for_lc(
+            self.paths.clone(),
+            request.logical_codebase_id.clone(),
+        )
+        .load_manifest(&request.project_id)?
+        .ok_or_else(|| ProductStoreError::NotFound {
+            kind: "logical_codebase_manifest",
+            id: request.logical_codebase_id.clone(),
+        })?;
+        let store =
+            crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
+                self.paths.clone(),
+                request.logical_codebase_id.clone(),
+            );
+        store.republish_policy(
+            &manifest,
+            &manifest.provider_context_root,
+            &request.command_id,
+            chrono::Utc::now().to_rfc3339(),
+        )?;
+        Ok(BootstrapActionOutcome::Accepted)
+    }
+
     fn dispatch_registration_action(
         &self,
         request: &BootstrapActionRequest,

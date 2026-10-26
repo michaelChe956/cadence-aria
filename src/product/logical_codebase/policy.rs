@@ -700,7 +700,11 @@ impl AggregatePolicyArtifactStore {
             decision.artifact
         };
         // R4:滚动保留(尽力而为，失败不影响已提交的一致性)。
-        self.retain_policy_revisions_best_effort(project_id, &logical_codebase_id, canonical_root);
+        self.retain_policy_revisions_best_effort(
+            project_id,
+            &self.scoped_lc_id(project_id),
+            canonical_root,
+        );
         Ok(artifact)
     }
 }

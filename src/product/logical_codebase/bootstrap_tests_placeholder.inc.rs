@@ -371,4 +371,5 @@ fn bootstrap_placeholder_preserves_existing_failure_precedence() {
         );
         assert!(!projection.planning_ready);
     }
+
 }

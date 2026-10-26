@@ -1185,6 +1185,20 @@ mod tests {
 
     // Task 2（aggregate-policy-root-publication）：桩等待谓词专用测试。
     // 按既有 .inc 拆分先例（tests_parts）把本主题测试拆入独立 part,
+    /// 政策漂移只允许一个可执行动作：重发生成新 revision。
+    /// 任何"空转按钮"(retry/revalidate)都不得再出现在政策步骤的动作集里。
+    #[test]
+    fn policy_drift_advertises_only_republish() {
+        assert_eq!(
+            super::policy_digest_drift_actions(),
+            vec![crate::product::logical_codebase::BootstrapActionKind::Republish]
+        );
+        assert_eq!(
+            super::policy_reference_drift_actions(),
+            vec![crate::product::logical_codebase::BootstrapActionKind::Republish]
+        );
+    }
+
     // 保持本文件低于 large_file_guard 的 1200 行上限。
     include!("bootstrap_tests_placeholder.inc.rs");
 }

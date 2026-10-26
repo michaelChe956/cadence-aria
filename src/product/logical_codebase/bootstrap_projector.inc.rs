@@ -772,19 +772,14 @@ fn project_notices(steps: &[BootstrapStepProjection]) -> Vec<LogicalCodebaseBoot
 /// `Republish` 是唯一自愈通道（用当前源重新合成并发布新 revision），
 /// `Retry`/`Revalidate` 保留为既有语义（仅重新投影）。
 fn policy_digest_drift_actions() -> Vec<BootstrapActionKind> {
-    vec![
-        BootstrapActionKind::Retry,
-        BootstrapActionKind::Revalidate,
-        BootstrapActionKind::Republish,
-    ]
+    // 漂移的唯一自愈通道就是重发；重试/核验对政策漂移是空转，不再暴露。
+    vec![BootstrapActionKind::Republish]
 }
 
 /// R2/R5：authority 参考摘要漂移时的可执行动作集。
 /// 参考漂移通常可由 `Revalidate` 自愈（artifact 已被替换），
 /// 若替换未落地则用 `Republish` 重发。
 fn policy_reference_drift_actions() -> Vec<BootstrapActionKind> {
-    vec![
-        BootstrapActionKind::Revalidate,
-        BootstrapActionKind::Republish,
-    ]
+    // 引用漂移同样只能靠重发生成新的权威引用。
+    vec![BootstrapActionKind::Republish]
 }

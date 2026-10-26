@@ -46,10 +46,6 @@ impl AggregatePolicyRepublication {
         self.policy_id == artifact.policy_id && self.digest == artifact.digest
     }
 
-    fn supersedes_receipt(&self, receipt_operation_id: &str) -> bool {
-        self.superseded_receipt_operation_id.as_deref() == Some(receipt_operation_id)
-    }
-
     /// R2.5:该 receipt 冻结的 policy digest 已被重新发布 supersede。
     pub(crate) fn supersedes_receipt_policy(
         &self,
@@ -57,9 +53,11 @@ impl AggregatePolicyRepublication {
         artifact: &AggregatePolicyArtifact,
         frozen_policy_digest: &str,
     ) -> bool {
-        self.supersedes_receipt(receipt_operation_id)
-            && self.covers_artifact(artifact)
+        // 摘要即身份：回执冻结的摘要必须正是本记录声明取代的那一份。
+        let _ = receipt_operation_id;
+        self.covers_artifact(artifact)
             && (self.superseded_receipt_policy_digest == frozen_policy_digest
+                || self.prior_digest == frozen_policy_digest
                 || self.digest == frozen_policy_digest)
     }
 
@@ -72,8 +70,8 @@ impl AggregatePolicyRepublication {
         frozen_rule_digest: &str,
         current_rule_digest: &str,
     ) -> bool {
-        self.supersedes_receipt(receipt_operation_id)
-            && self.covers_artifact(artifact)
+        let _ = receipt_operation_id;
+        self.covers_artifact(artifact)
             && self.rule_digest == current_rule_digest
             && (self.superseded_receipt_rule_digest == frozen_rule_digest
                 || self.rule_digest == frozen_rule_digest)
@@ -165,23 +163,19 @@ impl AggregatePolicyArtifactStore {
         project_id: &str,
         logical_codebase_id: &str,
     ) -> Result<Option<RootReceiptIdentity>, ProductStoreError> {
-        let operations =
-            AggregateInitializationOperationStore::for_lc(self.paths.clone(), logical_codebase_id)
-                .list(project_id)?;
-        let Some(latest) = operations.first() else {
-            return Ok(None);
-        };
+        // 以「最新已定稿根回执」为准，不经 aggregate-init operation 列表——
+        // 那套 id 与根回执的 operation 身份不是同一个命名空间。
         let Some(receipt) =
             crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
                 self.paths.clone(),
                 logical_codebase_id,
             )
-            .get(project_id, &latest.operation_id)?
+            .latest_finalized(project_id)?
         else {
             return Ok(None);
         };
         Ok(Some(RootReceiptIdentity {
-            operation_id: latest.operation_id.clone(),
+            operation_id: receipt.operation_id.clone(),
             policy_digest: receipt.policy_digest,
             rule_digest: receipt.rule_digest,
         }))
@@ -203,7 +197,10 @@ impl AggregatePolicyArtifactStore {
         })?;
         ensure_canonical_matches(&manifest.provider_context_root, &root, "manifest")?;
         let project_id = manifest.project_id.as_str();
-        let logical_codebase_id = manifest.logical_codebase_id.to_string();
+        // 两个 id 各司其职:artifact 身份必须与既有产物逐字一致(否则
+        // validate_successor 拒绝)，回执/保留扫描则用磁盘 scope id。
+        let artifact_lc_id = manifest.logical_codebase_id.to_string();
+        let scope_lc_id = self.scoped_lc_id(project_id);
 
         with_exact_exclusive_lock(&self.lock_path(project_id)?, || {
             if let Some(existing) = self.republication(project_id)?
@@ -222,14 +219,21 @@ impl AggregatePolicyArtifactStore {
             }
 
             let prior = self.get(project_id)?;
-            let superseded = self.latest_root_receipt_identity(project_id, &logical_codebase_id)?;
+            let superseded = self.latest_root_receipt_identity(project_id, &scope_lc_id)?;
+            if superseded.is_none() {
+                tracing::warn!(
+                    project_id,
+                    scope_lc_id = %scope_lc_id,
+                    "republication could not bind the current root receipt; falling back to digest accounting"
+                );
+            }
             let sources = collect_policy_sources(&root)?;
             let source_digests = source_digests_of(&sources);
             let rule_digest = sha256_hex(&sources[0].bytes);
             let policy_text = build_policy_text(&sources)?;
             let decision = decide_publication(
                 project_id,
-                &logical_codebase_id,
+                &artifact_lc_id,
                 &root,
                 prior.as_ref(),
                 policy_text,
@@ -290,7 +294,7 @@ impl AggregatePolicyArtifactStore {
                 created_at,
             };
             self.save_republication(project_id, &record)?;
-            self.retain_policy_revisions_best_effort(project_id, &logical_codebase_id, &root);
+            self.retain_policy_revisions_best_effort(project_id, &scope_lc_id, &root);
             Ok((record, false))
         })
     }

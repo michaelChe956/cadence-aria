@@ -22,7 +22,8 @@ export type BootstrapActionName =
   | "continue"
   | "retry"
   | "revalidate"
-  | "repair";
+  | "repair"
+  | "republish";
 
 export type BootstrapActionOutcome =
   | "accepted"
