@@ -978,6 +978,52 @@ mod tests {
         assert_eq!(store.get(PROJECT).unwrap().unwrap(), done3);
     }
 
+    /// R2：根规则变更后用当前源重新发布——推进 revision、记录 supersede、
+    /// 同 command 重放幂等。
+    #[test]
+    fn republish_after_rule_drift_advances_and_is_replay_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("lc-root");
+        std::fs::create_dir_all(&root).unwrap();
+        write_root_fixture(&root);
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregatePolicyArtifactStore::for_lc(paths.clone(), "lc_0001");
+        let manifest = seed_final_step_operation(&paths, "lc_0001", "op_drift", &canonical);
+        store.ensure_bootstrap(&manifest).unwrap();
+        let publish = publisher(&store, &canonical);
+        let first = publish(&manifest, "op_drift", AT_0800).unwrap();
+        assert_eq!(first.revision, 2);
+
+        // 根规则变更 → 重发必须用新源合成新 revision。
+        std::fs::write(
+            canonical.join("AGENTS.md"),
+            "# 根规则\r\n\r\n规则正文见 .claude/rules/ 目录。\r\n新增一行。\r\n",
+        )
+        .unwrap();
+        let (_record, replayed) = store
+            .republish_policy(&manifest, &canonical, "cmd_republish", AT_0900.to_string())
+            .unwrap();
+        assert!(!replayed, "首次重发不是重放");
+        let current = store.get(PROJECT).unwrap().unwrap();
+        assert_eq!(current.revision, 3, "重发必须推进 revision");
+        assert!(current.policy_text.contains("新增一行。"));
+
+        // 同 command 重放：返回既有记录，不再推进。
+        let (_same, replayed) = store
+            .republish_policy(&manifest, &canonical, "cmd_republish", AT_1000.to_string())
+            .unwrap();
+        assert!(replayed, "同 command 必须识别为重放");
+        assert_eq!(store.get(PROJECT).unwrap().unwrap(), current);
+
+        // 源未再变：新 command 幂等复用当前 revision。
+        let (_again, replayed) = store
+            .republish_policy(&manifest, &canonical, "cmd_republish_2", AT_1100.to_string())
+            .unwrap();
+        assert!(!replayed);
+        assert_eq!(store.get(PROJECT).unwrap().unwrap(), current);
+    }
+
     /// 发布与 save/ensure_bootstrap 共用 scope 锁:并发后只有合法
     /// successor 或冲突,无丢失更新、无重复候选;不同 scope 不共锁。
     #[test]
