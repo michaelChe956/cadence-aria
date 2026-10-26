@@ -1433,6 +1433,79 @@ mod tests {
         artifact
     }
 
+    /// 给合成 artifact 补一份「流水线发布记录」,让它参与新鲜度判定。
+    fn write_publication_record(
+        fixture: &AdmissionFixture,
+        operation_id: &str,
+        artifact: &crate::product::logical_codebase::policy::AggregatePolicyArtifact,
+    ) {
+        let scope = crate::product::logical_codebase::store::lc_scope_root(
+            &fixture.paths,
+            &fixture.project_id,
+            &Some(fixture.lc_id.clone()),
+        )
+        .expect("scope root");
+        let dir = scope.join("aggregate-initializations").join(operation_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = crate::product::logical_codebase::policy::AggregatePolicyPublicationOutput {
+            project_id: fixture.project_id.clone(),
+            lc_id: fixture.lc_id.clone(),
+            logical_codebase_id: artifact.logical_codebase_id.clone(),
+            operation_id: operation_id.to_string(),
+            canonical_root: std::fs::canonicalize(&fixture.aggregate_root).unwrap(),
+            base_policy: crate::product::logical_codebase::policy::AggregatePolicyPublicationReference {
+                policy_id: String::new(),
+                revision: 0,
+                digest: String::new(),
+            },
+            artifact: artifact.clone(),
+            sources: Vec::new(),
+            rule_digest: String::new(),
+        };
+        crate::product::json_store::write_json(&dir.join("policy-publication.json"), &output)
+            .expect("write publication record");
+    }
+
+    /// owner 2026-10-26：规则源变更后，准入必须拒绝用旧政策启动——
+    /// 自动重发不成则停等 `provider_policy_stale`（动作只有 republish）。
+    #[test]
+    fn stale_pipeline_policy_blocks_admission_until_republished() {
+        let fixture = admission_fixture();
+        fixture.write_language_rules("# language\n");
+        let artifact = publish_root_policy_with_receipt(&fixture, "op_stale_gate");
+        write_publication_record(&fixture, "op_stale_gate", &artifact);
+
+        // 规则源新增一行 → 已发布 artifact 落后于当前源。
+        let canonical_root = std::fs::canonicalize(&fixture.aggregate_root).unwrap();
+        std::fs::create_dir_all(canonical_root.join(".claude/rules")).unwrap();
+        std::fs::write(
+            canonical_root.join(".claude/rules/language.md"),
+            "# 语言规则\n\n- 变更后内容。\n",
+        )
+        .unwrap();
+
+        let error = fixture
+            .preflight()
+            .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
+            .expect_err("stale policy must not be consumed");
+        match error {
+            ProviderAdmissionError::Waiting {
+                reason_code,
+                allowed_actions,
+                ..
+            } => {
+                assert_eq!(reason_code, "provider_policy_stale");
+                assert_eq!(
+                    allowed_actions,
+                    vec![BootstrapActionKind::Republish],
+                    "只允许重新生成政策这一个动作"
+                );
+            }
+            other => panic!("expected waiting fact, got {other:?}"),
+        }
+        assert_eq!(fixture.streaming_adapter.start_count(), 0, "provider 零启动");
+    }
+
     /// 消费侧观察面:admission 判定状态与 provider 启动计数(测试 6 断言组)。
     struct ProviderSpawnObservation {
         status: &'static str,
@@ -1515,7 +1588,10 @@ mod tests {
             "digest drift must not be consumed, got {error:?}"
         );
 
-        // (iii) AGENTS.md 原字节漂移(rule digest 漂移):同样停等。
+        // (iii) 本夹具的 artifact 是合成产物（无流水线发布记录）。新契约下
+        //       「是否落后于当前规则」只对流水线产出的 artifact 判定，故规则源
+        //       变更后仍按 artifact 自洽性放行。生产 artifact 均有发布记录，
+        //       其新鲜度由准入 3a2 分支（自动重发 / provider_policy_stale）负责。
         let fixture = admission_fixture();
         fixture.write_language_rules("# language\n");
         publish_root_policy_with_receipt(&fixture, "op_lcg_t03_rule");
@@ -1525,13 +1601,14 @@ mod tests {
             b"# AGENTS rules\nmutated rule bytes\n",
         )
         .unwrap();
+        // 合成 artifact 不做新鲜度判定 → 继续走到材料门（根规则引用被改写）。
         let error = fixture
             .preflight()
             .check(&fixture.launch_request(), &ProviderAdmissionPhase::Normal)
             .unwrap_err();
         assert!(
-            matches!(&error, ProviderAdmissionError::Waiting { reason_code, .. } if reason_code == "provider_policy_artifact_missing"),
-            "rule digest drift must not be consumed, got {error:?}"
+            matches!(&error, ProviderAdmissionError::Waiting { reason_code, .. } if reason_code == "root_rules_missing"),
+            "synthetic artifact: rule materials gate must decide, got {error:?}"
         );
     }
 

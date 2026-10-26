@@ -1507,11 +1507,12 @@ impl LogicalCodebaseProviderGateway {
                 receipts
                     .latest_finalized(&request.project_id)
                     .map_err(ProviderGatewayError::policy)?
-                    .map(|receipt| {
-                        verify_published_policy_body(&self.authority_root, &artifact, &receipt)?;
+                    .map(|_receipt| {
+                        let rule_digest =
+                            verify_published_policy_body(&self.authority_root, &artifact)?;
                         Ok::<_, ProviderGatewayError>(PolicyLocatorDigests {
-                            policy_digest: receipt.policy_digest,
-                            rule_digest: receipt.rule_digest,
+                            policy_digest: artifact.digest.clone(),
+                            rule_digest,
                         })
                     })
                     .transpose()?
@@ -2775,12 +2776,12 @@ impl LogicalCodebaseProviderGateway {
             .map_err(ProviderGatewayError::policy)?
             .ok_or_else(|| ProviderGatewayError::PolicyMissing(request.project_id.clone()))?;
         if let Some(receipts) = &self.receipts
-            && let Some(receipt) = receipts
+            && let Some(_receipt) = receipts
                 .latest_finalized(&request.project_id)
                 .map_err(ProviderGatewayError::policy)?
             && !artifact.is_bootstrap_placeholder()
         {
-            verify_published_policy_body(&self.authority_root, &artifact, &receipt)?;
+            verify_published_policy_body(&self.authority_root, &artifact)?;
         }
         let config_digest =
             SessionPolicyEnvelope::recompute_config_digest(&request.config_artifact_ref)
@@ -3037,8 +3038,11 @@ pub fn ensure_bootstrap_policy(
 pub fn verify_published_policy_body(
     authority_root: &Path,
     artifact: &crate::product::logical_codebase::policy::AggregatePolicyArtifact,
-    receipt: &crate::product::logical_codebase::RootRecipeReceipt,
-) -> Result<(), ProviderGatewayError> {
+) -> Result<String, ProviderGatewayError> {
+    // 权威 = 当前已发布政策。冷启动回执不参与摘要比对（规则变更后它会
+    // 永久落后）；回执只用于判断「冷启动是否跑过」，由调用方判断存在性。
+    // 返回当前根规则摘要，供调用方冻结进会话。
+
     // 1. policy_id 必须是安全相对 locator。
     let locator_relative = Path::new(&artifact.policy_id);
     if locator_relative.is_absolute() || artifact.policy_id.is_empty() {
@@ -3059,26 +3063,14 @@ pub fn verify_published_policy_body(
         )));
     }
 
-    // 2. receipt 与 authority 的 canonical root 一致。
     let canonical_root = authority_root.canonicalize().map_err(|error| {
         ProviderGatewayError::Target(format!(
             "canonicalize authority root {}: {error}",
             authority_root.display()
         ))
     })?;
-    let canonical_receipt_root = receipt.canonical_root.canonicalize().map_err(|error| {
-        ProviderGatewayError::Target(format!(
-            "canonicalize receipt root {}: {error}",
-            receipt.canonical_root.display()
-        ))
-    })?;
-    if canonical_root != canonical_receipt_root {
-        return Err(ProviderGatewayError::PolicyDrift {
-            dimension: "policy_receipt_root".to_string(),
-        });
-    }
 
-    // 3. artifact 的 policy_id/revision 自洽(id 组成即 revision 尾缀)。
+    // 2. artifact 的 policy_id/revision 自洽(id 组成即 revision 尾缀)。
     let expected_id = format!(
         "policy/{}/{}/{}",
         artifact.project_id, artifact.logical_codebase_id, artifact.revision
@@ -3089,7 +3081,7 @@ pub fn verify_published_policy_body(
         });
     }
 
-    // 4. locator 逐组件走查:无 symlink 逃逸,终组件是普通文件。
+    // 3. locator 逐组件走查:无 symlink 逃逸,终组件是普通文件。
     let mut locator = canonical_root.clone();
     let last_index = components.len().saturating_sub(1);
     for (index, component) in components.iter().enumerate() {
@@ -3120,7 +3112,7 @@ pub fn verify_published_policy_body(
         }
     }
 
-    // 5. 原始字节比对 + digest 链三方一致。
+    // 4. 正文逐字节自洽:文件 == artifact 正文 == artifact.digest。
     let raw_body = std::fs::read(&locator).map_err(|error| {
         ProviderGatewayError::Target(format!("read policy body {}: {error}", locator.display()))
     })?;
@@ -3130,13 +3122,13 @@ pub fn verify_published_policy_body(
         });
     }
     let body_digest = format!("sha256:{:x}", Sha256::digest(&raw_body));
-    if artifact.digest != body_digest || receipt.policy_digest != body_digest {
+    if artifact.digest != body_digest {
         return Err(ProviderGatewayError::PolicyDrift {
             dimension: "policy_digest_chain".to_string(),
         });
     }
 
-    // 6. rule digest 独立读取 AGENTS.md 原字节重算。
+    // 5. 根规则摘要当场计算(不再比对回执;规则变化后回执必然落后)。
     let rule_entry = canonical_root
         .join(crate::product::logical_codebase::root_recipe_receipt::ROOT_RULE_ENTRY_FILE);
     let rule_bytes = std::fs::read(&rule_entry).map_err(|error| {
@@ -3145,13 +3137,7 @@ pub fn verify_published_policy_body(
             rule_entry.display()
         ))
     })?;
-    let rule_digest = format!("sha256:{:x}", Sha256::digest(&rule_bytes));
-    if receipt.rule_digest != rule_digest {
-        return Err(ProviderGatewayError::PolicyDrift {
-            dimension: "rule_digest".to_string(),
-        });
-    }
-    Ok(())
+    Ok(format!("sha256:{:x}", Sha256::digest(&rule_bytes)))
 }
 
 #[cfg(test)]

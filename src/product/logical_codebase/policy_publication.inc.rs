@@ -28,6 +28,16 @@ fn invalid_publication(reason: impl Into<String>) -> ProductStoreError {
     }
 }
 
+/// 用当前规则源合成政策正文并返回其摘要（不入库、不改事实）。
+/// 准入前用它判断「已发布 artifact 是否已落后于当前规则」。
+pub(crate) fn current_policy_digest(
+    canonical_root: &Path,
+) -> Result<String, ProductStoreError> {
+    let sources = collect_policy_sources(canonical_root)?;
+    let text = build_policy_text(&sources)?;
+    Ok(sha256_hex(text.as_bytes()))
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }

@@ -296,6 +296,56 @@ impl LogicalCodebaseProviderAdmissionPreflight {
             Some(artifact) if !artifact.is_bootstrap_placeholder() => Some(artifact),
             _ => None,
         };
+        // 3a2. 政策新鲜度（owner 2026-10-26 裁定）：artifact 必须由当前规则源
+        //      合成。规则改过而未重发时，先自动重发一次（同源指纹去重），
+        //      仍落后就停等——绝不用旧政策启动 provider。
+        let published_artifact = match published_artifact {
+            Some(artifact) if matches!(phase, ProviderAdmissionPhase::Normal) => {
+                // 只有流水线产出的 artifact 才有「是否落后于当前规则」的
+                // 语义；源不可读/不完整同样不算过期（交给既有材料门）。
+                let pipeline_published = artifact_store
+                    .has_publication_record(&request.project_id, &artifact)?;
+                let current_digest = if pipeline_published {
+                    crate::product::logical_codebase::policy::current_policy_digest(
+                        &resolution.authority_root,
+                    )
+                    .ok()
+                } else {
+                    None
+                };
+                if current_digest
+                    .as_deref()
+                    .is_none_or(|digest| digest == artifact.digest)
+                {
+                    Some(artifact)
+                } else {
+                    crate::product::logical_codebase::policy::auto_republish_best_effort(
+                        &self.paths,
+                        &request.project_id,
+                        &self.lc_id,
+                        "prepare_admission",
+                    );
+                    let current_digest = current_digest.unwrap_or_default();
+                    match artifact_store.get(&request.project_id)? {
+                        Some(refreshed) if refreshed.digest == current_digest => Some(refreshed),
+                        _ => {
+                            return Err(ProviderAdmissionError::Waiting {
+                                reason_code: "provider_policy_stale".to_string(),
+                                detail: format!(
+                                    "published aggregate policy digest {} is behind the current rule sources {}; republish required before launching a provider",
+                                    artifact.digest, current_digest
+                                ),
+                                missing_materials,
+                                allowed_actions: vec![
+                                    BootstrapActionKind::Republish,
+                                ],
+                            });
+                        }
+                    }
+                }
+            }
+            other => other,
+        };
         if let Some(artifact) = published_artifact.as_ref()
             && matches!(phase, ProviderAdmissionPhase::Normal)
         {
@@ -315,11 +365,10 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                         ],
                     });
                 }
-                Some(receipt) => {
+                Some(_receipt) => {
                     if let Err(error) = crate::product::logical_codebase::provider_gateway::verify_published_policy_body(
                         &resolution.authority_root,
                         artifact,
-                        &receipt,
                     ) {
                         return Err(ProviderAdmissionError::Waiting {
                             reason_code: "provider_policy_artifact_missing".to_string(),

@@ -183,6 +183,17 @@ impl AggregatePolicyArtifactStore {
     }
 
     /// 当前 artifact 对应的发布回执(同 digest 的那条)。
+    /// 该 artifact 是否由发布流水线产出（存在冻结的 publication output）。
+    /// 只有这种 artifact 才参与「是否落后于当前规则源」的新鲜度判定；
+    /// 手工/迁移写入的存量 artifact 不做该判定，避免误判为过期。
+    pub(crate) fn has_publication_record(
+        &self,
+        project_id: &str,
+        current: &AggregatePolicyArtifact,
+    ) -> Result<bool, ProductStoreError> {
+        Ok(self.current_publication_output(project_id, current)?.is_some())
+    }
+
     fn current_publication_output(
         &self,
         project_id: &str,
