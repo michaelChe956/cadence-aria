@@ -161,6 +161,7 @@ fn action_str(action: crate::product::logical_codebase::BootstrapActionKind) -> 
         crate::product::logical_codebase::BootstrapActionKind::StartGeneration => {
             "start_generation"
         }
+        crate::product::logical_codebase::BootstrapActionKind::Republish => "republish",
     }
     .to_string()
 }

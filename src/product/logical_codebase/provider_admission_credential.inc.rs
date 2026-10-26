@@ -12,6 +12,10 @@ pub enum BootstrapActionKind {
     /// 等待动作;由现有 `WsInMessage::StartGeneration` /
     /// `WorkspaceEngine::start_generation` 接受)。
     StartGeneration,
+    /// R2(owner 2026-10-26):规则/政策 drift 等待面的显式重新发布——以
+    /// 当前源重新合成并发布(新 revision)，不重跑任何 provider turn、不改写
+    /// 历史 receipt。自动推进(R5)失败时人工兜底走这个动作。
+    Republish,
 }
 impl BootstrapActionKind {
     /// 与 serde snake_case 序列化一致的稳定动作名（通知 payload/前端按钮
@@ -24,6 +28,7 @@ impl BootstrapActionKind {
             Self::Revalidate => "revalidate",
             Self::Repair => "repair",
             Self::StartGeneration => "start_generation",
+            Self::Republish => "republish",
         }
     }
 }

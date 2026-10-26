@@ -1,41 +1,3 @@
-/// 发布链确定性 IO 故障注入(仅 `cfg(test)` 编译,生产无任何开关)。
-/// 单发语义:命中即消费,保证重试后发布可恢复。
-#[cfg(test)]
-mod publish_faults {
-    use crate::product::json_store::ProductStoreError;
-    use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
-
-    /// 可注入故障的发布阶段。
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(super) enum FaultPhase {
-        SourceRead,
-        OutputWrite,
-        LocatorPublish,
-        ArtifactSave,
-    }
-
-    static ARMED: Mutex<Option<(PathBuf, FaultPhase)>> = Mutex::new(None);
-
-    /// 注入以测试专属 tempdir 为界:并行测试互不污染。
-    pub(super) fn arm(root: &Path, phase: FaultPhase) {
-        *ARMED.lock().expect("publish fault mutex") = Some((root.to_path_buf(), phase));
-    }
-
-    /// 命中(路径在注入 root 下且阶段相同)即消费(单发);未命中照常执行。
-    pub(super) fn trip(path: &Path, phase: FaultPhase) -> Option<ProductStoreError> {
-        let mut armed = ARMED.lock().expect("publish fault mutex");
-        match armed.as_ref() {
-            Some((root, armed_phase)) if *armed_phase == phase && path.starts_with(root) => {
-                let error = ProductStoreError::Io(format!("injected publish fault at {phase:?}"));
-                *armed = None;
-                Some(error)
-            }
-            _ => None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,14 +314,14 @@ mod tests {
 
     // Task 1(REQ-BOOT-05/REQ-ENV-12):recipe_policy_* 根政策发布测试
 
-    const PROJECT: &str = "project_0001";
+    pub(crate) const PROJECT: &str = "project_0001";
 
     /// 统一的测试时间戳常量与构造器。
-    const AT_0800: &str = "2026-10-03T08:00:00Z";
+    pub(crate) const AT_0800: &str = "2026-10-03T08:00:00Z";
     const AT_0830: &str = "2026-10-03T08:30:00Z";
-    const AT_0900: &str = "2026-10-03T09:00:00Z";
+    pub(crate) const AT_0900: &str = "2026-10-03T09:00:00Z";
     const AT_0930: &str = "2026-10-03T09:30:00Z";
-    const AT_1000: &str = "2026-10-03T10:00:00Z";
+    pub(crate) const AT_1000: &str = "2026-10-03T10:00:00Z";
     const AT_1100: &str = "2026-10-03T11:00:00Z";
     const AT_1200: &str = "2026-10-03T12:00:00Z";
     const AT_1300: &str = "2026-10-03T13:00:00Z";
@@ -369,14 +331,14 @@ mod tests {
         format!("2026-10-03T{clock}:00Z")
     }
 
-    fn sha256_hex_of(bytes: &[u8]) -> String {
+    pub(crate) fn sha256_hex_of(bytes: &[u8]) -> String {
         format!("sha256:{:x}", Sha256::digest(bytes))
     }
 
     /// 根规则 fixture:入口 + 排序规则集 + 各类干扰材料(provider 副本/
     /// 凭据/模板/成员规则/非 md/其他规则目录),期望正文由
     /// [`expected_policy_text`] 逐字节钉定。
-    fn write_root_fixture(root: &Path) {
+    pub(crate) fn write_root_fixture(root: &Path) {
         for dir in [
             ".claude/rules/sub",
             ".agents/rules",
@@ -420,6 +382,7 @@ mod tests {
                 "AGENTS.md",
                 "# 根规则\r\n\r\n规则正文见 .claude/rules/ 目录。\r\n",
             ),
+            ("CLAUDE.md", "provider 兼容副本不重复激活\n"),
             (".claude/rules/a.md", "规则 A\n"),
             (".claude/rules/b.md", "规则 B\n"),
             (
@@ -439,7 +402,7 @@ mod tests {
 
     /// 构造同 scope、末步 OpenspecAndExamples 处于 Running 的 operation,
     /// 返回与该 root 关联的新 manifest(不放宽生产状态核验)。
-    fn seed_final_step_operation(
+    pub(crate) fn seed_final_step_operation(
         paths: &ProductAppPaths,
         lc_id: &str,
         operation_id: &str,
@@ -453,7 +416,7 @@ mod tests {
     /// 以既有 manifest(同一 LC 身份)追加同 scope、末步 Running 的
     /// operation:同一 LC 的多个 operation 共享同一 manifest UUID/root,
     /// 与生产形态一致。
-    fn seed_operation_for_manifest(
+    pub(crate) fn seed_operation_for_manifest(
         paths: &ProductAppPaths,
         lc_id: &str,
         operation_id: &str,
@@ -508,7 +471,7 @@ mod tests {
 
     /// 绑定 store/root 的发布调用器:测试内以 `publish(&manifest, op, at)`
     /// 一行式驱动发布路径。
-    fn publisher(
+    pub(crate) fn publisher(
         store: &AggregatePolicyArtifactStore,
         canonical_root: &Path,
     ) -> impl Fn(
@@ -561,7 +524,6 @@ mod tests {
         assert_eq!(artifact.policy_text.as_bytes(), expected.as_bytes());
         assert_eq!(artifact.digest, sha256_hex_of(expected.as_bytes()));
         for absent in [
-            "兼容副本",
             "mcp",
             "示例模板",
             "成员仓规则",
@@ -659,7 +621,7 @@ mod tests {
 
     /// 实际新 operation 即使正文不变也递增 revision、换 locator;旧字节不变。
     #[test]
-    fn recipe_policy_new_operation_advances_even_when_text_unchanged() {
+    fn recipe_policy_new_operation_with_unchanged_text_reuses_revision() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("lc-root");
         std::fs::create_dir_all(&root).unwrap();
@@ -680,8 +642,9 @@ mod tests {
         let frozen_output = std::fs::read(&first_output).unwrap();
 
         let second = publish(&manifest, "op_second", AT_0900).unwrap();
-        assert_eq!(second.revision, first.revision + 1);
-        assert_ne!(second.policy_id, first.policy_id);
+        // R1 幂等：正文未变 → 复用当前 revision，不新增正文文件。
+        assert_eq!(second.revision, first.revision);
+        assert_eq!(second.policy_id, first.policy_id);
         assert_eq!(second.digest, first.digest);
         assert_eq!(std::fs::read(&first_locator).unwrap(), frozen_locator);
         assert_eq!(std::fs::read(&first_output).unwrap(), frozen_output);
@@ -972,10 +935,13 @@ mod tests {
         assert_eq!(resumed.created_at, "2026-10-03T10:00:00Z");
         // 阶段二:locator 发布失败 → output 前缀保留,current 不变。
         seed_operation_for_manifest(&paths, "lc_0001", "op_resume2", &manifest);
+        // 改一个来源以产生新正文/新 revision，否则幂等复用不会写 locator。
+        std::fs::write(canonical.join(".claude/rules/b.md"), "规则 B 变更\n").unwrap();
         publish_faults::arm(temp.path(), publish_faults::FaultPhase::LocatorPublish);
         assert!(publish(&manifest, "op_resume2", AT_1100).is_err());
         let output2 = output_path_for(&paths, "lc_0001", "op_resume2");
-        assert!(output2.exists());
+        // R1 原子提交：locator 写失败即整体回滚，不得留下回执/正文。
+        assert!(!output2.exists(), "失败的发布不得留下回执");
         assert!(
             !canonical
                 .join(format!(
@@ -986,20 +952,15 @@ mod tests {
         );
         assert_eq!(store.get(PROJECT).unwrap().unwrap(), resumed);
 
-        // 清 staging 后 output 仍在。
-        let staging = output2.parent().unwrap().join("staging");
-        std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join("partial.txt"), "partial").unwrap();
-        std::fs::remove_dir_all(&staging).unwrap();
-        assert!(output2.exists());
-
-        // 重入复用同候选与首次冻结的时间。
+        // 重入：无冻结候选，时间取本次调用。
         let done2 = publish(&manifest, "op_resume2", AT_1200).unwrap();
         assert_eq!(done2.revision, 3);
-        assert_eq!(done2.created_at, "2026-10-03T11:00:00Z");
+        assert_eq!(done2.created_at, "2026-10-03T12:00:00Z");
         assert_eq!(store.get(PROJECT).unwrap().unwrap(), done2);
-        // 阶段三:current artifact 替换失败 → output/locator 前缀保留。
+
+        // 阶段三：current artifact 替换失败 → 正文/回执整体回滚。
         seed_operation_for_manifest(&paths, "lc_0001", "op_resume3", &manifest);
+        std::fs::write(canonical.join(".claude/rules/b.md"), "规则 B 再次变更\n").unwrap();
         publish_faults::arm(temp.path(), publish_faults::FaultPhase::ArtifactSave);
         assert!(publish(&manifest, "op_resume3", AT_1300).is_err());
         let output3 = output_path_for(&paths, "lc_0001", "op_resume3");
@@ -1007,16 +968,13 @@ mod tests {
             "policy/{PROJECT}/{}/4",
             manifest.logical_codebase_id
         ));
-        assert!(output3.exists());
-        assert_eq!(
-            std::fs::read(&locator4).unwrap(),
-            expected_policy_text().as_bytes()
-        );
+        assert!(!output3.exists(), "失败的发布不得留下回执");
+        assert!(!locator4.exists(), "失败的发布不得留下正文");
         assert_eq!(store.get(PROJECT).unwrap().unwrap(), done2);
 
         let done3 = publish(&manifest, "op_resume3", AT_1400).unwrap();
         assert_eq!(done3.revision, 4);
-        assert_eq!(done3.created_at, "2026-10-03T13:00:00Z");
+        assert_eq!(done3.created_at, "2026-10-03T14:00:00Z");
         assert_eq!(store.get(PROJECT).unwrap().unwrap(), done3);
     }
 

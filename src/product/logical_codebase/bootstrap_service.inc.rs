@@ -112,8 +112,28 @@ impl LogicalCodebaseBootstrapService {
                 .map_err(BootstrapActionError::Store)?
         };
         // 动作后重新投影，响应携带最新 durable 事实。
-        let projection = LogicalCodebaseBootstrapProjector::new(self.paths.clone())
+        let mut projection = LogicalCodebaseBootstrapProjector::new(self.paths.clone())
             .project(&request.project_id, &request.logical_codebase_id)?;
+        // R5:规则漂移自动重发(best-effort)——动作后仍是漂移则自愈一次并重投影。
+        if rules_policy_drifted(&projection) {
+            let paths = self.paths.clone();
+            let project_id = request.project_id.clone();
+            let logical_codebase_id = request.logical_codebase_id.clone();
+            if let Err(error) = tokio::task::spawn_blocking(move || {
+                crate::product::logical_codebase::policy::auto_republish_best_effort(
+                    &paths,
+                    &project_id,
+                    &logical_codebase_id,
+                    "bootstrap_action",
+                );
+            })
+            .await
+            {
+                tracing::warn!(%error, "policy auto republish task failed");
+            }
+            projection = LogicalCodebaseBootstrapProjector::new(self.paths.clone())
+                .project(&request.project_id, &request.logical_codebase_id)?;
+        }
         Ok(BootstrapActionResult {
             command_id: request.command_id,
             outcome,
@@ -325,4 +345,23 @@ impl LogicalCodebaseBootstrapService {
             Err(error) => Err(error),
         }
     }
+}
+
+/// R5：RulesPolicy 步骤是否仍以政策漂移失败收尾。
+fn rules_policy_drifted(
+    projection: &crate::product::logical_codebase::LogicalCodebaseBootstrapProjection,
+) -> bool {
+    projection
+        .steps
+        .iter()
+        .find(|step| {
+            step.step == crate::product::logical_codebase::LogicalCodebaseBootstrapStep::RulesPolicy
+        })
+        .and_then(|step| step.failure.as_ref())
+        .is_some_and(|failure| {
+            matches!(
+                failure.reason_code.as_str(),
+                "rule_digest_drift" | "policy_digest_drift" | "policy_reference_digest_drift"
+            )
+        })
 }

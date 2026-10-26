@@ -244,37 +244,47 @@ impl LogicalCodebaseBootstrapProjector {
         // 源 1（最终 policy 可解析）：identity/digest 由 store 落盘边界校验，
         // 不可解析的 durable 事实按 store 错误 fail-closed 上抛；引用与正文
         // 漂移（并发修订窗口）核验为等待而非就绪。
-        let artifact =
-            match crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
+        let policy_store =
+            crate::product::logical_codebase::policy::AggregatePolicyArtifactStore::for_lc(
                 self.paths.clone(),
                 logical_codebase_id,
-            )
-            .get(project_id)?
-            {
-                Some(artifact) => artifact,
-                None => {
-                    return Ok(waiting(
-                        "aggregate_policy_artifact_missing",
-                        format!(
-                            "authority reference froze policy {} but the artifact is gone",
-                            policy.policy_id
-                        ),
-                        vec![
-                            BootstrapActionKind::Prepare,
-                            BootstrapActionKind::Revalidate,
-                        ],
-                    ));
-                }
-            };
+            );
+        let artifact = match policy_store.get(project_id)? {
+            Some(artifact) => artifact,
+            None => {
+                return Ok(waiting(
+                    "aggregate_policy_artifact_missing",
+                    format!(
+                        "authority reference froze policy {} but the artifact is gone",
+                        policy.policy_id
+                    ),
+                    vec![
+                        BootstrapActionKind::Prepare,
+                        BootstrapActionKind::Revalidate,
+                    ],
+                ));
+            }
+        };
+        // R2:重新发布记录(纯读)。它只用于「已显式 supersede 的旧冻结摘要」
+        // 收敛，绝不改写历史 receipt/引用。
+        let republication = policy_store.republication(project_id)?;
+        let mut superseded_by: Option<&crate::product::logical_codebase::policy::AggregatePolicyRepublication> =
+            None;
         if artifact.digest != policy.policy_digest {
-            return Ok(waiting(
-                "policy_reference_digest_drift",
-                format!(
-                    "authority reference froze digest {} but the current artifact digest is {}",
-                    policy.policy_digest, artifact.digest
-                ),
-                vec![BootstrapActionKind::Revalidate],
-            ));
+            let resolved = republication
+                .as_ref()
+                .is_some_and(|record| record.covers_artifact(&artifact));
+            if !resolved {
+                return Ok(waiting(
+                    "policy_reference_digest_drift",
+                    format!(
+                        "authority reference froze digest {} but the current artifact digest is {}",
+                        policy.policy_digest, artifact.digest
+                    ),
+                    policy_reference_drift_actions(),
+                ));
+            }
+            superseded_by = republication.as_ref();
         }
 
         // 源 2（recipe operation 生命周期）：与 MemberIndex 步同一 durable
@@ -388,14 +398,24 @@ impl LogicalCodebaseBootstrapProjector {
             ));
         }
         if receipt.policy_digest != artifact.digest {
-            return Ok(waiting(
-                "policy_digest_drift",
-                format!(
-                    "receipt froze policy digest {} but the current artifact digest is {}",
-                    receipt.policy_digest, artifact.digest
-                ),
-                vec![BootstrapActionKind::Retry, BootstrapActionKind::Revalidate],
-            ));
+            let resolved = republication.as_ref().is_some_and(|record| {
+                record.supersedes_receipt_policy(
+                    &latest.operation_id,
+                    &artifact,
+                    &receipt.policy_digest,
+                )
+            });
+            if !resolved {
+                return Ok(waiting(
+                    "policy_digest_drift",
+                    format!(
+                        "receipt froze policy digest {} but the current artifact digest is {}",
+                        receipt.policy_digest, artifact.digest
+                    ),
+                    policy_digest_drift_actions(),
+                ));
+            }
+            superseded_by = republication.as_ref();
         }
         let rule_digest = crate::product::logical_codebase::root_recipe_receipt::root_rule_digest(
             &resolution.authority_root,
@@ -412,14 +432,25 @@ impl LogicalCodebaseBootstrapProjector {
             ));
         };
         if receipt.rule_digest != rule_digest {
-            return Ok(waiting(
-                "rule_digest_drift",
-                format!(
-                    "receipt froze rule digest {} but the current root rule digest is {}",
-                    receipt.rule_digest, rule_digest
-                ),
-                vec![BootstrapActionKind::Retry, BootstrapActionKind::Revalidate],
-            ));
+            let resolved = republication.as_ref().is_some_and(|record| {
+                record.supersedes_receipt_rule(
+                    &latest.operation_id,
+                    &artifact,
+                    &receipt.rule_digest,
+                    &rule_digest,
+                )
+            });
+            if !resolved {
+                return Ok(waiting(
+                    "rule_digest_drift",
+                    format!(
+                        "receipt froze rule digest {} but the current root rule digest is {}",
+                        receipt.rule_digest, rule_digest
+                    ),
+                    policy_digest_drift_actions(),
+                ));
+            }
+            superseded_by = republication.as_ref();
         }
 
         // Task 2（REQ-BOOT-06）：唯一桩等待 guard,位于原 Completed 返回
@@ -446,11 +477,19 @@ impl LogicalCodebaseBootstrapProjector {
             ));
         }
 
-        Ok(BootstrapStepProjection {
-            step: LogicalCodebaseBootstrapStep::RulesPolicy,
-            status: LogicalCodebaseBootstrapStepStatus::Completed,
-            object_id: policy.policy_id.clone(),
-            checkpoint: Some(BootstrapCheckpoint {
+        // R2:被显式重新发布 supersede 的 receipt 不再代表当前权威正文——
+        // Completed 投影改报重新发布后的 artifact 身份(历史 receipt 原样保留)。
+        let checkpoint = match superseded_by {
+            Some(record) => BootstrapCheckpoint {
+                object_id: artifact.policy_id.clone(),
+                input_digest: Some(artifact.digest.clone()),
+                output_artifact_ref: Some(
+                    crate::product::logical_codebase::policy::POLICY_REPUBLICATION_FILE.to_string(),
+                ),
+                expected_membership_revision: Some(latest.input.manifest_revision),
+                completed_at: Some(record.created_at.clone()),
+            },
+            None => BootstrapCheckpoint {
                 object_id: policy.policy_id.clone(),
                 input_digest: Some(receipt.policy_digest.clone()),
                 output_artifact_ref: Some(format!(
@@ -459,7 +498,17 @@ impl LogicalCodebaseBootstrapProjector {
                 )),
                 expected_membership_revision: Some(latest.input.manifest_revision),
                 completed_at: Some(receipt.finalized_at.clone()),
-            }),
+            },
+        };
+        let object_id = match superseded_by {
+            Some(record) => record.policy_id.clone(),
+            None => policy.policy_id.clone(),
+        };
+        Ok(BootstrapStepProjection {
+            step: LogicalCodebaseBootstrapStep::RulesPolicy,
+            status: LogicalCodebaseBootstrapStepStatus::Completed,
+            object_id,
+            checkpoint: Some(checkpoint),
             failure: None,
             allowed_actions: Vec::new(),
         })
@@ -717,4 +766,25 @@ fn project_notices(steps: &[BootstrapStepProjection]) -> Vec<LogicalCodebaseBoot
         });
     }
     notices
+}
+
+/// R2/R5：政策摘要漂移时的可执行动作集。
+/// `Republish` 是唯一自愈通道（用当前源重新合成并发布新 revision），
+/// `Retry`/`Revalidate` 保留为既有语义（仅重新投影）。
+fn policy_digest_drift_actions() -> Vec<BootstrapActionKind> {
+    vec![
+        BootstrapActionKind::Retry,
+        BootstrapActionKind::Revalidate,
+        BootstrapActionKind::Republish,
+    ]
+}
+
+/// R2/R5：authority 参考摘要漂移时的可执行动作集。
+/// 参考漂移通常可由 `Revalidate` 自愈（artifact 已被替换），
+/// 若替换未落地则用 `Republish` 重发。
+fn policy_reference_drift_actions() -> Vec<BootstrapActionKind> {
+    vec![
+        BootstrapActionKind::Revalidate,
+        BootstrapActionKind::Republish,
+    ]
 }

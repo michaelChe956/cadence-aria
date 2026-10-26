@@ -971,7 +971,9 @@ async fn hello_without_cursor_baseline_keeps_durable_automation_ownership() {
     // 本测试钉死该出口：Hello 无 cursor 基线帧必须携带 server/enabled。
     use crate::product::issue_automation_store::IssueAutomationStore;
     use crate::product::json_store::write_json;
-    use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, WorkItemPlanSessionOptions};
+    use crate::product::lifecycle_store::{
+        CreateWorkspaceSessionInput, WorkItemPlanSessionOptions,
+    };
     use crate::product::models::IssueWorkItemPlanOptions;
     use crate::product::models::WorkspaceSessionStatus;
     use crate::product::models::automation::{
@@ -1104,11 +1106,8 @@ async fn hello_without_cursor_baseline_keeps_durable_automation_ownership() {
 
     let mut saw_session_state = false;
     for _ in 0..8 {
-        let Ok(Some(outbound)) = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            outbound_rx.recv(),
-        )
-        .await
+        let Ok(Some(outbound)) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), outbound_rx.recv()).await
         else {
             break;
         };

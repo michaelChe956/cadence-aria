@@ -614,6 +614,11 @@ impl AggregatePolicyArtifactStore {
     }
 
     /// 锁内发布主流程(调用方已持 scope 锁)。
+    ///
+    /// R1:正文未变 → 复用当前 revision(幂等);正文变化/历史半成品 → 写
+    /// `current.revision + 1` 的新 revision 路径，旧 revision 永不改写。
+    /// 落盘顺序由 [`AggregatePolicyArtifactStore::commit_publication`] 固定为
+    /// 正文 → artifact(提交点) → 回执，失败按逆序补偿。
     fn publish_locked(
         &self,
         manifest: &LogicalCodebaseManifest,
@@ -627,19 +632,15 @@ impl AggregatePolicyArtifactStore {
         let output_path = self.publication_output_path(project_id, operation_id)?;
 
         // 首次发布与重入都重新收集来源并复验清单/摘要——漂移冲突停等。
+        // R3:来源在单一快照内读取，绝不拼出混合正文。
         let sources = collect_policy_sources(canonical_root)?;
-        let source_digests: Vec<AggregatePolicySourceDigest> = sources
-            .iter()
-            .map(|source| AggregatePolicySourceDigest {
-                relative_path: source.relative_path.clone(),
-                digest: sha256_hex(&source.bytes),
-            })
-            .collect();
+        let source_digests = source_digests_of(&sources);
         // rule_digest 只取 AGENTS.md 原字节 SHA-256(与 root_rule_digest 同语义)。
         let rule_digest = sha256_hex(&sources[0].bytes);
+        let current = self.get(project_id)?;
 
-        if output_path.exists() {
-            // 同 operation 重入:复用不可变候选与时间,只补齐未完成发布。
+        let artifact = if output_path.exists() {
+            // 同 operation 重入:复用不可变候选与时间，只补齐未完成发布。
             let output: AggregatePolicyPublicationOutput = read_json(&output_path)?;
             validate_publication_identity(
                 &output,
@@ -658,102 +659,49 @@ impl AggregatePolicyArtifactStore {
                     "root rule digest drifted since the frozen publication of operation {operation_id}"
                 )));
             }
-            let candidate = output.artifact.clone();
-            self.complete_locator_and_current(project_id, canonical_root, &candidate)?;
-            return Ok(candidate);
-        }
-
-        // 新候选:base 引用当前 artifact(无则 revision 0);溢出先拒绝。
-        let current = self.get(project_id)?;
-        let (base_revision, base_policy_id, base_digest) = match &current {
-            Some(existing) => (
-                existing.revision,
-                existing.policy_id.clone(),
-                existing.digest.clone(),
-            ),
-            None => (0, String::new(), String::new()),
+            // 候选必须相对 current 可提交，否则在任何写盘前停等。
+            ensure_candidate_committable(project_id, current.as_ref(), &output.artifact)?;
+            self.commit_publication(
+                project_id,
+                canonical_root,
+                &output.artifact,
+                &output,
+                &output_path,
+            )?;
+            output.artifact
+        } else {
+            let policy_text = build_policy_text(&sources)?;
+            let decision = decide_publication(
+                project_id,
+                &logical_codebase_id,
+                canonical_root,
+                current.as_ref(),
+                policy_text,
+                created_at,
+            )?;
+            let output = AggregatePolicyPublicationOutput {
+                project_id: project_id.to_string(),
+                lc_id: scope_lc_id,
+                logical_codebase_id: decision.artifact.logical_codebase_id.clone(),
+                operation_id: operation_id.to_string(),
+                canonical_root: canonical_root.to_path_buf(),
+                base_policy: decision.base,
+                artifact: decision.artifact.clone(),
+                sources: source_digests,
+                rule_digest,
+            };
+            self.commit_publication(
+                project_id,
+                canonical_root,
+                &decision.artifact,
+                &output,
+                &output_path,
+            )?;
+            decision.artifact
         };
-        let revision = base_revision.checked_add(1).ok_or_else(|| {
-            invalid_publication(format!("policy revision overflow from {base_revision}"))
-        })?;
-        let policy_text = build_policy_text(&sources)?;
-        let artifact = AggregatePolicyArtifact {
-            policy_id: format!("policy/{project_id}/{logical_codebase_id}/{revision}"),
-            project_id: project_id.to_string(),
-            logical_codebase_id,
-            revision,
-            digest: sha256_hex(policy_text.as_bytes()),
-            policy_text,
-            created_at,
-        };
-        let output = AggregatePolicyPublicationOutput {
-            project_id: project_id.to_string(),
-            lc_id: scope_lc_id,
-            logical_codebase_id: artifact.logical_codebase_id.clone(),
-            operation_id: operation_id.to_string(),
-            canonical_root: canonical_root.to_path_buf(),
-            base_policy: AggregatePolicyPublicationReference {
-                policy_id: base_policy_id,
-                revision: base_revision,
-                digest: base_digest,
-            },
-            artifact: artifact.clone(),
-            sources: source_digests,
-            rule_digest,
-        };
-        // 顺序固定:先不可变输出(冻结候选与时间)。
-        #[cfg(test)]
-        if let Some(error) = publish_faults::trip(&output_path, FaultPhase::OutputWrite) {
-            return Err(error);
-        }
-        let output_bytes = serde_json::to_vec_pretty(&output)
-            .map_err(|error| ProductStoreError::Json(error.to_string()))?;
-        publish_bytes_no_clobber(&output_path, &output_bytes, None)?;
-        self.complete_locator_and_current(project_id, canonical_root, &artifact)?;
+        // R4:滚动保留(尽力而为，失败不影响已提交的一致性)。
+        self.retain_policy_revisions_best_effort(project_id, &logical_codebase_id, canonical_root);
         Ok(artifact)
-    }
-
-    /// locator no-clobber 发布 → read-back 字节/SHA 复验 → current
-    /// artifact durable 替换(复用既有 identity/successor 规则;同候选
-    /// 幂等跳过)。
-    fn complete_locator_and_current(
-        &self,
-        project_id: &str,
-        canonical_root: &Path,
-        artifact: &AggregatePolicyArtifact,
-    ) -> Result<(), ProductStoreError> {
-        let locator = canonical_root.join(&artifact.policy_id);
-        #[cfg(test)]
-        if let Some(error) = publish_faults::trip(&locator, FaultPhase::LocatorPublish) {
-            return Err(error);
-        }
-        publish_bytes_no_clobber(
-            &locator,
-            artifact.policy_text.as_bytes(),
-            Some(canonical_root),
-        )?;
-        let published = std::fs::read(&locator).map_err(|error| {
-            ProductStoreError::Io(format!("read back {}: {error}", locator.display()))
-        })?;
-        if published != artifact.policy_text.as_bytes() || sha256_hex(&published) != artifact.digest
-        {
-            return Err(invalid_publication(format!(
-                "published policy bytes at {} do not match the artifact digest",
-                locator.display()
-            )));
-        }
-        if let Some(existing) = self.get(project_id)?
-            && existing == *artifact
-        {
-            return Ok(());
-        }
-        #[cfg(test)]
-        if let Some(error) =
-            publish_faults::trip(&self.artifact_path(project_id)?, FaultPhase::ArtifactSave)
-        {
-            return Err(error);
-        }
-        self.save_unlocked(project_id, artifact)
     }
 }
 
@@ -814,7 +762,12 @@ impl AggregatePolicyArtifact {
 // 本文件按仓库惯例拆入 `.inc.rs`(同模块命名空间,符号路径与可见性不变),
 // 保持每个文件低于 large_file_guard 的 1200 行上限(root_recipe_receipt.rs 同款先例):
 // - policy_publication.inc.rs:I1 发布原语——来源收集/正文构造/durable 写入/身份复验。
-// - policy_tests.inc.rs:I2/发布测试与 cfg(test) IO 故障注入 seam。
+// - policy_publish_atomic.inc.rs:R1 发布原子化——决策、提交顺序与失败补偿。
+// - policy_republication.inc.rs:R2 重新发布——新发布 identity + supersede 记录。
+// - policy_retention.inc.rs:R4 revision 滚动保留与引用安全阀。
+// - policy_test_faults.inc.rs:cfg(test) IO/删除/来源改写故障注入 seam。
+// - policy_publish_atomic_tests.inc.rs / policy_r2_tests.inc.rs:R1–R4 测试。
+// - policy_tests.inc.rs:I2/发布测试。
 
 // 引入 manifest 类型以供 ensure_bootstrap 使用;此处只依赖其稳定 logical-codebase
 // UUID、project_id 与 updated_at,与 store.rs 的 LogicalCodebaseManifest 同源。
@@ -823,4 +776,10 @@ use crate::product::logical_codebase::store::{
 };
 
 include!("policy_publication.inc.rs");
+include!("policy_publish_atomic.inc.rs");
+include!("policy_republication.inc.rs");
+include!("policy_retention.inc.rs");
+include!("policy_auto_republish.inc.rs");
+include!("policy_test_faults.inc.rs");
 include!("policy_tests.inc.rs");
+include!("policy_publish_atomic_tests.inc.rs");

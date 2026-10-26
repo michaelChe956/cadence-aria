@@ -8,6 +8,8 @@ const AGGREGATE_POLICY_HEADER: &str = "# 聚合政策\n\n";
 const POLICY_RULES_DIR: &str = ".claude/rules";
 /// 根政策聚合必须包含的最小规则来源。
 const REQUIRED_POLICY_RULE: &str = ".claude/rules/language.md";
+/// R6：政策源第二项（owner 裁定纳入；文件缺失时跳过，不视为错误）。
+const POLICY_CLAUDE_ENTRY_FILE: &str = "CLAUDE.md";
 /// operation 目录下的不可变发布输出文件名。
 const POLICY_PUBLICATION_FILE: &str = "policy-publication.json";
 /// save/ensure_bootstrap/发布三方共用的 scope 锁文件名。
@@ -30,8 +32,61 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
+/// R3:单一来源的稳定性指纹——长度、mtime(秒+纳秒)与 inode。任一变化
+/// 都说明文件在合成窗口内被替换/改写,拼出的正文可能是混合内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceStat {
+    len: u64,
+    modified_secs: i64,
+    modified_nanos: i64,
+    inode: u64,
+}
+
+/// 来源快照指纹:入口/规则相对路径 + 稳定性指纹,按相对路径字节序。
+type SourceFingerprint = Vec<(String, SourceStat)>;
+
+/// 来源合成错误:`Store` 是真实 IO/契约错误(直接上抛),`Unstable` 是
+/// 「读窗口内来源被改写」(重试一次后仍不稳定则报可识别错误)。
+enum SourceSnapshotError {
+    Store(ProductStoreError),
+    Unstable(String),
+}
+
+impl From<ProductStoreError> for SourceSnapshotError {
+    fn from(error: ProductStoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
 /// 读取来源文件原字节。`cfg(test)` 下挂确定性 IO seam(仅测试编译,
 /// 生产无此路径),不可读场景不依赖 chmod。
+/// R6：读取可选来源；文件不存在返回 `None`（与必需源区分）。
+fn read_optional_source_snapshot(
+    path: &Path,
+) -> Result<Option<(Vec<u8>, SourceStat)>, SourceSnapshotError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.is_symlink() || !meta.is_file() {
+                return Err(invalid_publication(format!(
+                    "policy source {} must be a regular file, not a symlink/directory",
+                    path.display()
+                ))
+                .into());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(invalid_publication(format!(
+                "policy source {}: {error}",
+                path.display()
+            ))
+            .into())
+        }
+    }
+    let (bytes, stat) = read_source_snapshot(path)?;
+    Ok(Some((bytes, stat)))
+}
+
 fn read_source_bytes(path: &Path) -> Result<Vec<u8>, ProductStoreError> {
     #[cfg(test)]
     if let Some(error) = publish_faults::trip(path, FaultPhase::SourceRead) {
@@ -41,10 +96,71 @@ fn read_source_bytes(path: &Path) -> Result<Vec<u8>, ProductStoreError> {
         .map_err(|error| ProductStoreError::Io(format!("read {}: {error}", path.display())))
 }
 
-/// 收集根政策来源字节集:入口 `AGENTS.md` 第一,`.claude/rules/` 下全部
-/// 常规 `.md`(含嵌套子目录)按相对路径字节序排列。symlink、非普通
-/// 入口、非法 UTF-8、空/纯白入口与缺 `language.md` 一律 fail-closed。
+/// 来源文件的稳定性指纹(`std::fs::metadata` 跟随 symlink;symlink 本身
+/// 在上层遍历中已拒绝)。
+fn stat_source(path: &Path) -> Result<SourceStat, ProductStoreError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = std::fs::metadata(path)
+        .map_err(|error| ProductStoreError::Io(format!("stat {}: {error}", path.display())))?;
+    Ok(SourceStat {
+        len: meta.len(),
+        modified_secs: meta.mtime(),
+        modified_nanos: meta.mtime_nsec(),
+        inode: meta.ino(),
+    })
+}
+
+/// 读取来源字节并校验读窗口前后 stat 一致:同一 `(len, mtime, inode)`
+/// 才能证明这一次读拿到的是确定性字节。
+fn read_source_snapshot(
+    path: &Path,
+) -> Result<(Vec<u8>, SourceStat), SourceSnapshotError> {
+    let before = stat_source(path)?;
+    let bytes = read_source_bytes(path)?;
+    #[cfg(test)]
+    publish_faults::mutate_source_after_read(path);
+    let after = stat_source(path)?;
+    if before != after {
+        return Err(SourceSnapshotError::Unstable(format!(
+            "{} changed while it was being read",
+            path.display()
+        )));
+    }
+    Ok((bytes, after))
+}
+
+/// 收集根政策来源字节集(R3):一次遍历锁定同一根目录下的全部必需来源,
+/// 逐文件读窗口前后 stat 一致 + 全量指纹复算;任一次不一致重试一次,
+/// 仍不一致报 `policy_sources_unstable`——绝不拼出混合正文。
 fn collect_policy_sources(canonical_root: &Path) -> Result<Vec<PolicySource>, ProductStoreError> {
+    let mut detail = String::from("no consistent snapshot");
+    for _ in 0..2 {
+        let (sources, fingerprint) = match collect_policy_sources_once(canonical_root) {
+            Ok(snapshot) => snapshot,
+            Err(SourceSnapshotError::Store(error)) => return Err(error),
+            Err(SourceSnapshotError::Unstable(reason)) => {
+                detail = reason;
+                continue;
+            }
+        };
+        match fingerprint_policy_sources(canonical_root) {
+            Ok(fresh) if fresh == fingerprint => return Ok(sources),
+            Ok(_) => detail = "policy sources changed during composition".to_string(),
+            Err(error) => detail = error.to_string(),
+        }
+    }
+    Err(invalid_publication(format!(
+        "policy_sources_unstable: {detail}; refusing to compose a mixed policy body"
+    )))
+}
+
+/// 单次来源收集:入口 `AGENTS.md` 第一,`.claude/rules/` 下全部常规 `.md`
+///(含嵌套子目录)按相对路径字节序排列。symlink、非普通入口、非法 UTF-8、
+/// 空/纯白入口与缺 `language.md` 一律 fail-closed。
+fn collect_policy_sources_once(
+    canonical_root: &Path,
+) -> Result<(Vec<PolicySource>, SourceFingerprint), SourceSnapshotError> {
     let entry_path = canonical_root.join(ROOT_RULE_ENTRY_FILE);
     let entry_meta = std::fs::symlink_metadata(&entry_path).map_err(|error| {
         invalid_publication(format!("root rule entry {}: {error}", entry_path.display()))
@@ -53,9 +169,10 @@ fn collect_policy_sources(canonical_root: &Path) -> Result<Vec<PolicySource>, Pr
         return Err(invalid_publication(format!(
             "root rule entry {} must be a regular file, not a symlink/directory",
             entry_path.display()
-        )));
+        ))
+        .into());
     }
-    let entry_bytes = read_source_bytes(&entry_path)?;
+    let (entry_bytes, entry_stat) = read_source_snapshot(&entry_path)?;
     let entry_text = std::str::from_utf8(&entry_bytes).map_err(|_| {
         invalid_publication(format!(
             "root rule entry {} is not valid UTF-8",
@@ -66,24 +183,45 @@ fn collect_policy_sources(canonical_root: &Path) -> Result<Vec<PolicySource>, Pr
         return Err(invalid_publication(format!(
             "root rule entry {} has no effective content",
             entry_path.display()
-        )));
+        ))
+        .into());
     }
 
     let mut sources = vec![PolicySource {
         relative_path: ROOT_RULE_ENTRY_FILE.to_string(),
         bytes: entry_bytes,
     }];
-    let mut rules: Vec<(String, Vec<u8>)> = Vec::new();
-    collect_rules_dir(&canonical_root.join(POLICY_RULES_DIR), "", &mut rules)?;
-    rules.sort_by(|left, right| left.0.cmp(&right.0));
-    for (relative_path, bytes) in rules {
+    let mut fingerprint: SourceFingerprint = vec![(ROOT_RULE_ENTRY_FILE.to_string(), entry_stat)];
+    // R6(owner 2026-10-26)：政策源追加 `CLAUDE.md`（存在才纳入）。
+    // 顺序固定在 `AGENTS.md` 之后、`.claude/rules/*` 之前，保证合成确定性。
+    if let Some((claude_bytes, claude_stat)) =
+        read_optional_source_snapshot(&canonical_root.join(POLICY_CLAUDE_ENTRY_FILE))?
+    {
+        std::str::from_utf8(&claude_bytes).map_err(|_| {
+            invalid_publication(format!(
+                "policy source {POLICY_CLAUDE_ENTRY_FILE} is not valid UTF-8"
+            ))
+        })?;
+        sources.push(PolicySource {
+            relative_path: POLICY_CLAUDE_ENTRY_FILE.to_string(),
+            bytes: claude_bytes,
+        });
+        fingerprint.push((POLICY_CLAUDE_ENTRY_FILE.to_string(), claude_stat));
+    }
+    let mut rules: Vec<String> = Vec::new();
+    collect_rule_paths(&canonical_root.join(POLICY_RULES_DIR), "", &mut rules)?;
+    rules.sort();
+    for relative_path in rules {
+        let path = canonical_root.join(&relative_path);
+        let (bytes, stat) = read_source_snapshot(&path)?;
         std::str::from_utf8(&bytes).map_err(|_| {
             invalid_publication(format!("policy source {relative_path} is not valid UTF-8"))
         })?;
         sources.push(PolicySource {
-            relative_path,
+            relative_path: relative_path.clone(),
             bytes,
         });
+        fingerprint.push((relative_path, stat));
     }
 
     if !sources
@@ -92,17 +230,38 @@ fn collect_policy_sources(canonical_root: &Path) -> Result<Vec<PolicySource>, Pr
     {
         return Err(invalid_publication(format!(
             "policy sources must include {REQUIRED_POLICY_RULE}"
-        )));
+        ))
+        .into());
     }
-    Ok(sources)
+    Ok((sources, fingerprint))
 }
 
-/// 递归收集 `.claude/rules/` 下的常规 `.md`(嵌套目录由调用方按相对
-/// 路径字节序排序);目录与常规非 `.md` 跳过,symlink 一律拒绝。
-fn collect_rules_dir(
+/// 复算来源指纹(不读字节,只枚举 + stat):与读取窗口内记录的指纹比较,
+/// 判断整批来源是否仍是同一时刻的同一组文件。
+fn fingerprint_policy_sources(canonical_root: &Path) -> Result<SourceFingerprint, ProductStoreError> {
+    let mut paths = vec![ROOT_RULE_ENTRY_FILE.to_string()];
+    if canonical_root.join(POLICY_CLAUDE_ENTRY_FILE).is_file() {
+        paths.push(POLICY_CLAUDE_ENTRY_FILE.to_string());
+    }
+    let mut rules: Vec<String> = Vec::new();
+    collect_rule_paths(&canonical_root.join(POLICY_RULES_DIR), "", &mut rules)?;
+    rules.sort();
+    paths.extend(rules);
+    paths
+        .into_iter()
+        .map(|relative_path| {
+            let stat = stat_source(&canonical_root.join(&relative_path))?;
+            Ok((relative_path, stat))
+        })
+        .collect()
+}
+
+/// 递归收集 `.claude/rules/` 下的常规 `.md` 相对路径(嵌套目录由调用方按
+/// 相对路径字节序排序);目录与常规非 `.md` 跳过,symlink 一律拒绝。
+fn collect_rule_paths(
     dir: &Path,
     prefix: &str,
-    out: &mut Vec<(String, Vec<u8>)>,
+    out: &mut Vec<String>,
 ) -> Result<(), ProductStoreError> {
     let meta = match std::fs::symlink_metadata(dir) {
         Ok(meta) => meta,
@@ -153,12 +312,11 @@ fn collect_rules_dir(
             format!("{prefix}/{name}")
         };
         if child_meta.is_dir() {
-            collect_rules_dir(&path, &child_prefix, out)?;
+            collect_rule_paths(&path, &child_prefix, out)?;
         } else if child_meta.is_file()
             && path.extension().and_then(|value| value.to_str()) == Some("md")
         {
-            let bytes = read_source_bytes(&path)?;
-            out.push((format!("{POLICY_RULES_DIR}/{child_prefix}"), bytes));
+            out.push(format!("{POLICY_RULES_DIR}/{child_prefix}"));
         }
     }
     Ok(())
@@ -368,11 +526,11 @@ fn publish_bytes_no_clobber(
     fsync_parent(target)
 }
 
-/// 校验后的 current artifact 覆盖式 durable 替换(发布链中唯一允许普通
-/// rename 覆盖的位置):临时文件 fsync → rename → 父目录 fsync。
-fn write_artifact_durable(
+/// 覆盖式 durable JSON 写:临时文件 fsync → rename → 父目录 fsync。
+/// 只用于「单文件即完整状态」的记录(current artifact、重新发布记录)。
+fn write_json_durable<T: serde::Serialize>(
     path: &Path,
-    artifact: &AggregatePolicyArtifact,
+    value: &T,
 ) -> Result<(), ProductStoreError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -381,7 +539,7 @@ fn write_artifact_durable(
             ProductStoreError::Io(format!("create {}: {error}", parent.display()))
         })?;
     }
-    let bytes = serde_json::to_vec_pretty(artifact)
+    let bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| ProductStoreError::Json(error.to_string()))?;
     let temp_path = stage_bytes_durable(path, &bytes)?;
     if let Err(error) = std::fs::rename(&temp_path, path) {
@@ -393,6 +551,26 @@ fn write_artifact_durable(
         )));
     }
     fsync_parent(path)
+}
+
+/// 校验后的 current artifact 覆盖式 durable 替换(发布链中唯一允许普通
+/// rename 覆盖的位置)。
+fn write_artifact_durable(
+    path: &Path,
+    artifact: &AggregatePolicyArtifact,
+) -> Result<(), ProductStoreError> {
+    write_json_durable(path, artifact)
+}
+
+/// 来源摘要集(不重复保存正文;完整正文只存在候选 artifact 中)。
+fn source_digests_of(sources: &[PolicySource]) -> Vec<AggregatePolicySourceDigest> {
+    sources
+        .iter()
+        .map(|source| AggregatePolicySourceDigest {
+            relative_path: source.relative_path.clone(),
+            digest: sha256_hex(&source.bytes),
+        })
+        .collect()
 }
 
 /// 发布前的 operation 状态核验(锁外):同 project、Running、
@@ -489,12 +667,18 @@ fn validate_publication_identity(
         ));
     }
     artifact.validate_digest()?;
-    if output
+    // base 引用两种合法形态:严格前驱(base.revision + 1 == candidate)或
+    // 「复用当前 revision」(base 逐字段等于 candidate——正文未变的幂等
+    // 重放不会新增 revision)。
+    let reuse_current = output.base_policy.policy_id == artifact.policy_id
+        && output.base_policy.revision == artifact.revision
+        && output.base_policy.digest == artifact.digest;
+    let advances_from_base = output
         .base_policy
         .revision
         .checked_add(1)
-        .is_none_or(|expected| expected != artifact.revision)
-    {
+        .is_some_and(|expected| expected == artifact.revision);
+    if !reuse_current && !advances_from_base {
         return Err(invalid_publication(
             "publication base reference does not line up with the candidate revision",
         ));
