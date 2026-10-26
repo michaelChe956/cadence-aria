@@ -21,6 +21,9 @@ use crate::product::models::automation::{
     EnrollmentTerminationResult, EnrollmentWriteCommand, IssueAutomationEnrollment, OperationState,
     PlanGenerationIntent, PlanGenerationPhase, PreparedPlanIntent,
 };
+use crate::product::termination_command_ledger::{
+    TerminationLedgerVerdict, record_termination_ledger_accept, termination_ledger_verdict,
+};
 
 /// issue 级 enrollment 的唯一持久入口；所有写路径都在目标 JSON 的伴生文件锁内
 /// 完成「读、比 revision、写」，跨进程互斥。
@@ -608,29 +611,31 @@ impl IssueAutomationStore {
         request: EnrollmentTerminationRequest,
     ) -> Result<EnrollmentTerminationResult, EnrollmentError> {
         let path = self.enrollment_path(project_id, issue_id)?;
-        let digest = request.payload_digest();
         let resolution = with_exclusive_lock(&path, || {
             let Some(mut saved) = read_optional_enrollment(&path)? else {
                 return Ok(TerminationResolution::Missing);
             };
-            // 命令账本先判：同 command 同 payload 幂等重放，异 payload
-            // fail-closed（不猜哪个是"真的"）。
+            // 账本先判（身份边界见 `termination_command_ledger`）：同命令（含仅前置条件刷新）已终止即重放。
             if let Some(ledger) = saved
                 .command_ledger
                 .iter()
                 .find(|entry| entry.command_id == request.command_id)
             {
-                if ledger.payload_digest == digest {
-                    let terminated_at = saved.terminated_at.clone().unwrap_or_default();
+                if termination_ledger_verdict(ledger, &request)
+                    == TerminationLedgerVerdict::Divergent
+                {
+                    return Ok(TerminationResolution::Conflict {
+                        current_revision: Some(saved.policy_revision),
+                    });
+                }
+                if let Some(terminated_at) = saved.terminated_at.clone() {
                     return Ok(TerminationResolution::Replayed {
                         command_id: request.command_id.clone(),
                         terminated_at,
                         enrollment: saved,
                     });
                 }
-                return Ok(TerminationResolution::Conflict {
-                    current_revision: Some(saved.policy_revision),
-                });
+                // 曾被同命令终止、其后又被人工重新开启：不重放，落到精确 CAS。
             }
             if saved.enrollment_id != request.expected_enrollment_id
                 || request.expected_policy_revision != saved.policy_revision
@@ -656,12 +661,7 @@ impl IssueAutomationStore {
             saved.terminated_at = Some(now.clone());
             saved.policy_revision += 1;
             saved.updated_at = now.clone();
-            saved.command_ledger.push(EnrollmentCommandResult {
-                command_id: request.command_id.clone(),
-                payload_digest: digest,
-                state: OperationState::Accepted,
-                binding_version,
-            });
+            record_termination_ledger_accept(&mut saved.command_ledger, &request, binding_version);
             write_json(&path, &saved)?;
             Ok(TerminationResolution::Accepted {
                 command_id: request.command_id.clone(),
@@ -1728,7 +1728,7 @@ fn path_issue_id(path: &Path) -> String {
         .unwrap_or_default()
 }
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// P1 WIGA Task 10（2.4）：自动化 plan 链四中窗的一次性中断替身。
 ///

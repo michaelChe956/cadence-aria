@@ -913,7 +913,7 @@ fn issue_automation_store_ensure_plan_binding_concurrent_workers_bind_once() {
 // ---------------------------------------------------------------------------
 
 /// N0 测试共享现场：enable＋bind 后返回当前 durable binding 与 revision。
-fn bound_enrollment_with_binding() -> (
+pub(crate) fn bound_enrollment_with_binding() -> (
     tempfile::TempDir,
     IssueAutomationStore,
     EnrollmentBindingIdentity,

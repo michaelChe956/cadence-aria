@@ -76,6 +76,7 @@ mod aggregate_index;
 pub mod aggregate_initialization;
 pub(crate) mod automation_enrollment;
 pub(crate) mod automation_enrollment_conflict;
+pub(crate) mod automation_enrollment_reenable;
 #[cfg(test)]
 pub(crate) mod automation_enrollment_test_support;
 mod automation_gateway_preflight;
