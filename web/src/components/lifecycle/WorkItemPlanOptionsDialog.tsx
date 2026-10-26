@@ -21,6 +21,7 @@ import {
   enrollmentTargetMemberCountText,
   enrollmentTargetPlaceholder,
 } from "../../state/enrollment-target-labels";
+import { sameProviderChoice } from "./automation-reenable";
 import { DialogShell } from "../shared/DialogShell";
 
 export type AutomationMode = "manual" | "automatic";
@@ -86,6 +87,27 @@ export function WorkItemPlanOptionsDialog({
       ? enrollmentProjection.enrollment
       : null;
   const reenablePending = automatic && terminatedEnrollment !== null;
+  // 重新开启时「实际会用的 provider」：当前生效＝enrollment 的生效 options
+  // （不是表单里未生效的值）；本次将应用＝表单本次选择（未选＝沿用原授权）。
+  // 两者不一致＝本次会换 provider（契约路径：重新开启 → 关闭 → 再开启）。
+  const effectiveProviders = terminatedEnrollment
+    ? {
+        author_provider: terminatedEnrollment.options?.author_provider,
+        reviewer_provider: terminatedEnrollment.options?.reviewer_provider,
+      }
+    : null;
+  const appliedProviders = effectiveProviders
+    ? {
+        author_provider:
+          options.author_provider ?? effectiveProviders.author_provider,
+        reviewer_provider:
+          options.reviewer_provider ?? effectiveProviders.reviewer_provider,
+      }
+    : null;
+  const providerChangePending =
+    effectiveProviders !== null &&
+    appliedProviders !== null &&
+    !sameProviderChoice(effectiveProviders, appliedProviders);
   // C5 Task 7：automatic 提交必须有就绪的 target 投影——loading/GET 失败/
   // 身份（scope）缺失都禁止 stale automatic submit；manual 分支不受影响。
   // 重新开启（terminated）例外：payload 取终止记录，投影只用于展示。
@@ -251,19 +273,22 @@ export function WorkItemPlanOptionsDialog({
             </p>
           ) : null}
           {/* REQ-PPS-01：创建即快照 provider，不再依赖创建后页面补发选择；
-              不可用项置灰禁选，缺省项沿用服务端兼容默认。 */}
+              不可用项置灰禁选，缺省项沿用服务端兼容默认。
+              重新开启（terminated）时 provider 选择器保持可用——换 provider 是
+              契约允许的（先重新开启，再走既有 Disable→Enable 路径），本次
+              选择会真正生效（下方如实展示当前生效与本次将应用的取值）。 */}
           <ProviderSelect
             label="Author Provider"
             value={options.author_provider}
             options={providerOptions}
-            disabled={submitting || reenablePending}
+            disabled={submitting}
             onChange={(value) => updateProvider("author_provider", value)}
           />
           <ProviderSelect
             label="Reviewer Provider"
             value={options.reviewer_provider}
             options={providerOptions}
-            disabled={submitting || reenablePending}
+            disabled={submitting}
             onChange={(value) => updateProvider("reviewer_provider", value)}
           />
           {/* P1 WIGA：仅已确认 Design 提供显式自动化选择；缺省手动，人工链路原样。 */}
@@ -362,7 +387,23 @@ export function WorkItemPlanOptionsDialog({
                 className="text-xs text-[var(--aria-ink-muted)]"
               >
                 该 issue 的自动化已于 {terminatedEnrollment.terminated_at} 终止；
-                确认「启用自动化」将按原授权重新开启（生成新的自动化授权，原自动化不恢复）。
+                确认「启用自动化」将重新开启（生成新的自动化授权，原自动化不恢复）。
+              </p>
+            ) : null}
+            {/* 「实际会用的 provider」如实取自 enrollment 的生效 options——不取
+                表单里未生效的值，杜绝静默陷阱；本次改了 provider 时同时展示
+                本次将应用的取值（重新开启 → 关闭 → 再开启后生效）。 */}
+            {effectiveProviders && appliedProviders ? (
+              <p
+                role="status"
+                data-testid="automation-effective-providers"
+                className="text-xs text-[var(--aria-ink-muted)]"
+              >
+                当前生效的 provider：
+                {`Author ${effectiveProviders.author_provider ?? "—"}、Reviewer ${effectiveProviders.reviewer_provider ?? "—"}`}
+                {providerChangePending
+                  ? `；本次将应用：Author ${appliedProviders.author_provider ?? "—"}、Reviewer ${appliedProviders.reviewer_provider ?? "—"}（重新开启后关闭再开启生效，其余参数按原授权）`
+                  : "；本次按原授权重新开启（其余参数不变）。"}
               </p>
             ) : null}
             {automationTargetScope === null ? (

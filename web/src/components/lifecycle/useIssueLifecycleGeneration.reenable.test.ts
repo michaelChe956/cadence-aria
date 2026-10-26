@@ -226,6 +226,134 @@ const AUTOMATIC_OPTIONS: WorkItemPlanOptionsFormValue = {
   automation_mode: "automatic",
 };
 
+/** 用户本次选择的 provider（重新开启时换 provider 的场景）。 */
+const CHOSEN_PROVIDER_OPTIONS: WorkItemPlanOptionsFormValue = {
+  ...AUTOMATIC_OPTIONS,
+  author_provider: "codex",
+  reviewer_provider: "pi",
+};
+
+type PutBody = {
+  expected_revision: number | null;
+  command: {
+    type: string;
+    command_id?: string;
+    selection_key?: string;
+    source?: Record<string, unknown>;
+    options?: Record<string, unknown>;
+    target?: Record<string, unknown>;
+  };
+};
+
+type StatefulEnrollmentStub = {
+  puts: PutBody[];
+  current: () => Record<string, unknown>;
+};
+
+function samePayload(
+  command: PutBody["command"],
+  source: unknown,
+  options: unknown,
+  target: unknown,
+): boolean {
+  return (
+    JSON.stringify(command.source) === JSON.stringify(source) &&
+    JSON.stringify(command.options) === JSON.stringify(options) &&
+    JSON.stringify(command.target ?? null) === JSON.stringify(target ?? null)
+  );
+}
+
+/**
+ * 有状态的 enrollment 夹具：镜像服务端语义——terminated 记录的 Enable 必须
+ * 与终止记录逐字段相等（否则 409）；enabled 记录的异 payload Enable 409；
+ * disabled 记录换 payload 重开放行；Disable 线性化 +1。
+ */
+function stubStatefulEnrollmentFetch(
+  initial: Record<string, unknown>,
+  options?: { failDisableCount?: number },
+): StatefulEnrollmentStub {
+  const puts: PutBody[] = [];
+  let state: Record<string, unknown> = { ...initial };
+  let remainingDisableFailures = options?.failDisableCount ?? 0;
+
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/automation-target")) {
+        return jsonResponse(automationTargetResponse(url));
+      }
+      if (!url.includes("/automation-enrollment")) {
+        throw new Error(`unexpected fetch: ${url}`);
+      }
+      if (init?.method !== "PUT") {
+        return jsonResponse(state);
+      }
+      const body = JSON.parse(String(init.body)) as PutBody;
+      puts.push(body);
+      const revision = Number(state.policy_revision ?? 0);
+      const conflict = () =>
+        jsonResponse(
+          {
+            code: "automation_enrollment_conflict",
+            message: "automation enrollment revision conflict",
+            details: {},
+          },
+          409,
+        );
+      if (body.expected_revision !== revision) {
+        return conflict();
+      }
+      const command = body.command;
+      if (command.type === "disable") {
+        if (remainingDisableFailures > 0) {
+          remainingDisableFailures -= 1;
+          return conflict();
+        }
+        state = {
+          ...state,
+          enabled: false,
+          policy_revision: revision + 1,
+        };
+        return jsonResponse(state);
+      }
+      const terminated = state.terminated_at != null;
+      const payloadMatches = samePayload(
+        command,
+        state.source,
+        state.options,
+        state.target,
+      );
+      if (terminated && !payloadMatches) {
+        // 重新开启必须与终止记录逐字段相等——改了即 409 零副作用。
+        return conflict();
+      }
+      if (!terminated && state.enabled) {
+        if (!payloadMatches) {
+          return conflict();
+        }
+        // 同 payload 幂等重放：revision 不递增。
+        return jsonResponse(state);
+      }
+      state = {
+        ...state,
+        enabled: true,
+        terminated_at: null,
+        policy_revision: revision + 1,
+        selection_key: command.selection_key,
+        source: command.source,
+        options: command.options,
+        target: command.target,
+        prepare_intent_id: "prepare_intent_0002",
+        plan_id: null,
+        session_id: null,
+      };
+      return jsonResponse(state);
+    }),
+  );
+  return { puts, current: () => state };
+}
+
 type GenerationProps = {
   selectionKey: string;
 };
@@ -392,5 +520,87 @@ describe("useIssueLifecycleGeneration：terminated enrollment 上的人工重新
       designs: [{ id: "design_0001", version: 2 }],
     });
     expect(typeof body.command.command_id).toBe("string");
+  });
+
+  it("applies the provider the user picked: re-enable with the terminated payload, then disable, then re-enable with the new payload", async () => {
+    const stub = stubStatefulEnrollmentFetch(terminatedEnrollment());
+    const { actions } = renderGeneration(DIALOG_SELECTION_KEY);
+
+    await actions().handleConfirmWorkItemPlanOptions(CHOSEN_PROVIDER_OPTIONS);
+
+    // 契约：改授权 payload 须先成功重新开启（等 payload），再走既有
+    // Disable→Enable 路径——三步命令，顺序固定。
+    expect(stub.puts.map((put) => put.command.type)).toEqual([
+      "enable",
+      "disable",
+      "enable",
+    ]);
+    // ① 重新开启：payload 与终止记录逐字段相等（不顺便改写授权）。
+    expect(stub.puts[0].command.options).toEqual(terminatedEnrollment().options);
+    expect(stub.puts[0].command.source).toEqual(
+      terminatedEnrollment().source,
+    );
+    // ② Disable 线性化在重新开启之后。
+    expect(stub.puts[1].expected_revision).toBe(4);
+    // ③ 换 provider 后重新开启：终态 enrollment 的 options 是用户选的 provider。
+    const final = stub.current();
+    expect(final.options).toMatchObject({
+      author_provider: "codex",
+      reviewer_provider: "pi",
+    });
+    expect(final.enabled).toBe(true);
+    expect(final.terminated_at).toBeNull();
+    // 其余授权字段不被表单里的未生效值改写。
+    const terminatedOptions = terminatedEnrollment().options as Record<
+      string,
+      unknown
+    >;
+    expect(final.options).toEqual({
+      ...terminatedOptions,
+      author_provider: "codex",
+      reviewer_provider: "pi",
+    });
+  });
+
+  it("keeps the terminated payload and issues no disable/enable churn when the provider is unchanged", async () => {
+    const stub = stubStatefulEnrollmentFetch(terminatedEnrollment());
+    const { actions } = renderGeneration(DIALOG_SELECTION_KEY);
+
+    await actions().handleConfirmWorkItemPlanOptions(AUTOMATIC_OPTIONS);
+
+    // 未换 provider：只发一条等 payload 的重新开启，不产生多余序列。
+    expect(stub.puts).toHaveLength(1);
+    expect(stub.puts[0].command.type).toBe("enable");
+    expect(stub.puts[0].command.options).toEqual(terminatedEnrollment().options);
+    const revisionAfterReenable = stub.current().policy_revision;
+
+    // 幂等重试：同一动作重放不递增 revision、不发新命令。
+    await actions().handleConfirmWorkItemPlanOptions(AUTOMATIC_OPTIONS);
+    expect(stub.puts).toHaveLength(1);
+    expect(stub.current().policy_revision).toBe(revisionAfterReenable);
+  });
+
+  it("resumes the re-enable sequence after a failed step instead of leaving a half-open enrollment", async () => {
+    const stub = stubStatefulEnrollmentFetch(terminatedEnrollment(), {
+      failDisableCount: 1,
+    });
+    const { actions } = renderGeneration(DIALOG_SELECTION_KEY);
+
+    // 第一次提交：重新开启成功，Disable 失败 → 提交报错（授权尚未换 provider）。
+    await expect(
+      actions().handleConfirmWorkItemPlanOptions(CHOSEN_PROVIDER_OPTIONS),
+    ).rejects.toThrow(/启用自动化失败|revision conflict/);
+    expect(stub.current().options).toMatchObject({
+      author_provider: "claude_code",
+      reviewer_provider: "codex",
+    });
+
+    // 重试：从服务端现状续跑（不重复取代），把换 provider 补齐。
+    await actions().handleConfirmWorkItemPlanOptions(CHOSEN_PROVIDER_OPTIONS);
+    expect(stub.current().options).toMatchObject({
+      author_provider: "codex",
+      reviewer_provider: "pi",
+    });
+    expect(stub.current().enabled).toBe(true);
   });
 });

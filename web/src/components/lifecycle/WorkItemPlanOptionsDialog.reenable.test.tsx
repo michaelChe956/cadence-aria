@@ -1,6 +1,8 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
+import { useProviderAvailabilityStore } from "../../state/provider-availability-store";
+import { providerHealthSnapshot } from "../../state/provider-availability-test-fixtures";
 import {
   WorkItemPlanOptionsDialog,
   type WorkItemPlanOptionsFormValue,
@@ -60,7 +62,20 @@ function terminatedEnrollment(): unknown {
     enabled: false,
     policy_revision: 3,
     source: { stories: [], designs: [] },
-    options: {},
+    options: {
+      author_provider: "kimi_code",
+      reviewer_provider: "pi",
+      review_rounds: 1,
+      superpowers_enabled: true,
+      openspec_enabled: true,
+      plan_approval: "auto",
+      plan_options: {
+        include_integration_tests: true,
+        include_e2e_tests: false,
+        force_frontend_backend_split: true,
+        require_execution_plan_confirm: false,
+      },
+    },
     target: {
       kind: "single_repository",
       repository_id: "00000000-0000-0000-0000-000000000001",
@@ -111,6 +126,7 @@ function renderDialog(): HTMLElement {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  useProviderAvailabilityStore.getState().reset();
 });
 
 describe("WorkItemPlanOptionsDialog：terminated 态的自动化入口", () => {
@@ -154,6 +170,52 @@ describe("WorkItemPlanOptionsDialog：terminated 态的自动化入口", () => {
     ).toBeDisabled();
     // 生成模式仍可切回手动（手动链路不经 enrollment）。
     expect(within(dialog).getByRole("radio", { name: "手动" })).toBeEnabled();
+    // provider 是契约允许更换的（重新开启 → 关闭 → 再开启）——选择器保持可用。
+    expect(within(dialog).getByLabelText("Author Provider")).toBeEnabled();
+    expect(within(dialog).getByLabelText("Reviewer Provider")).toBeEnabled();
+  });
+
+  it("shows the provider that is actually in effect on the terminated enrollment", async () => {
+    const user = userEvent.setup();
+    stubFetch("terminated");
+    const dialog = renderDialog();
+
+    await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
+    const providers = await within(dialog).findByTestId(
+      "automation-effective-providers",
+    );
+
+    // 「实际会用的 provider」取自 enrollment 的生效 options（不是表单里
+    // 未生效的值）——杜绝静默陷阱。
+    expect(providers).toHaveTextContent("当前生效");
+    expect(providers).toHaveTextContent("kimi_code");
+    expect(providers).toHaveTextContent("pi");
+  });
+
+  it("states the provider that will be applied when the user picks another one", async () => {
+    const user = userEvent.setup();
+    stubFetch("terminated");
+    useProviderAvailabilityStore.setState({
+      loadStatus: "loaded",
+      snapshot: providerHealthSnapshot({ codex: true, pi: true, kimi_code: true }),
+    });
+    const dialog = renderDialog();
+
+    await user.click(within(dialog).getByRole("radio", { name: "自动化" }));
+    await within(dialog).findByTestId("automation-effective-providers");
+
+    await user.selectOptions(
+      within(dialog).getByLabelText("Author Provider"),
+      "codex",
+    );
+
+    const providers = within(dialog).getByTestId(
+      "automation-effective-providers",
+    );
+    // 当前生效仍是终止记录里的取值（如实展示），本次选择的 provider 另行说明。
+    expect(providers).toHaveTextContent("kimi_code");
+    expect(providers).toHaveTextContent("本次将应用");
+    expect(providers).toHaveTextContent("codex");
   });
 
   it("shows no termination notice when the issue has no enrollment", async () => {

@@ -8,11 +8,16 @@ import {
   putAutomationEnrollment,
   ApiRequestError,
 } from "../../api/client";
-import type { ProductIssue } from "../../api/types";
+import type { IssueAutomationEnrollment, ProductIssue } from "../../api/types";
 import type {
   LifecycleCard,
   LifecycleColumns,
 } from "../../state/lifecycle-workbench-store";
+import {
+  reenableOptionsWithProviderChoice,
+  sameProviderChoice,
+  type ReenableOriginalAuthorization,
+} from "./automation-reenable";
 import { readWorkspaceProviderDefaultsSnapshot } from "../../state/workspace-provider-defaults";
 import {
   defaultLaunchTitle,
@@ -142,20 +147,30 @@ export function useIssueLifecycleGeneration({
   // 重试必须复用同一个 command_id，服务端据此幂等重放首次 durable 结果；
   // 载荷变了就是另一次动作，换新 command_id（否则同 command_id 配异
   // payload 会被服务端判 409）。
-  const enableCommandIdRef = useRef<{
-    digest: string;
-    commandId: string;
-  } | null>(null);
+  // 按 payload 摘要分别记账：一次用户动作可能发多条命令（重新开启序列的
+  // Enable→Disable→Enable），每条命令各自的 payload 摘要对应各自的稳定 id，
+  // 互不覆盖（否则后一条命令会把前一条的重试身份挤掉）。
+  const enableCommandIdRef = useRef<Map<string, string>>(new Map());
 
   function enableCommandId(payloadDigest: string): string {
-    const current = enableCommandIdRef.current;
-    if (current && current.digest === payloadDigest) {
-      return current.commandId;
+    const cache = enableCommandIdRef.current;
+    const existing = cache.get(payloadDigest);
+    if (existing) {
+      return existing;
     }
     const commandId = newRandomId();
-    enableCommandIdRef.current = { digest: payloadDigest, commandId };
+    cache.set(payloadDigest, commandId);
     return commandId;
   }
+
+  // 重新开启序列（terminated → 换 provider）的身份：一次用户动作可能发多条
+  // 命令（Enable 等 payload → Disable → Enable 新 payload）。序列跑到一半
+  // 失败后 enrolment 已非 terminated，靠 enrollment_id 认出「同一次重新开启
+  // 的后续步骤」，从服务端现状续跑；enrollment 换了/被删则序列作废。
+  const reenableSequenceRef = useRef<{
+    enrollmentId: string;
+    original: ReenableOriginalAuthorization;
+  } | null>(null);
 
   function openWorkItemPlanOptions(card: LifecycleCard) {
     setPendingWorkItemPlanLaunch({
@@ -318,8 +333,9 @@ export function useIssueLifecycleGeneration({
    * 当前已确认版本的精确 id+version。相同 selection_key 的失败重试传 GET
    * 到的现行 revision；异 payload 409 由弹窗展示，不自动 Disable/重开。
    * 批 2 T4（REQ-WIGA-09 修订）：terminated 记录上的人工 Enable 是
-   * 「重新开启」——同一条 Enable 命令、同样的线性化 revision，命令身份
-   * 换新，payload 原样回传终止记录（不顺便改写授权）。
+   * 「重新开启」——命令身份换新，payload 原样回传终止记录（不顺便改写
+   * 授权）；用户本次选择的 provider 走契约指定的「先重新开启、再走既有
+   * Disable→Enable 路径」落地（见 runReenableSequence）。
    */
   async function enrollConfirmedDesignAutomation(
     projectId: string,
@@ -329,39 +345,35 @@ export function useIssueLifecycleGeneration({
   ) {
     const enrollment = await getAutomationEnrollment(projectId, card.issueId);
     // 批 2 T4（REQ-WIGA-09 修订）：terminated 的 enrollment 可被人工显式
-    // 重新开启——仍是同一条 Enable 命令，入口（人工点「启用自动化」）即
-    // 显式动作，自动路径不触发。并发语义不变：expected_revision 按线性化
-    // 带当前 revision；payload 与终止记录逐字段相等（服务端比对，改了即
-    // 409）；命令身份（command_id/selection_key）换新——重新开启是新命令，
-    // 须能被命令账本单独留痕。
-    if (enrollment?.terminated_at != null) {
-      const command = {
-        type: "enable" as const,
-        selection_key: reenableSelectionKey(selectionKey),
-        source: enrollment.source,
-        options: enrollment.options,
-        // 旧代 enrollment 可能没有声明 target（无绑定事实）——此时退回
-        // 服务端投影的原样 target，由服务端判定是否接受。
-        target:
-          enrollment.target ??
-          (await getAutomationTarget(projectId, card.issueId, {
-            author_provider: options.author_provider,
-            reviewer_provider: options.reviewer_provider,
-            include_integration_tests: options.include_integration_tests,
-            include_e2e_tests: options.include_e2e_tests,
-            force_frontend_backend_split: options.force_frontend_backend_split,
-            require_execution_plan_confirm:
-              options.require_execution_plan_confirm,
-          })).enrollment_target,
-      };
-      await putAutomationEnrollment(projectId, card.issueId, {
-        expected_revision: enrollment.policy_revision,
-        command: {
-          ...command,
-          command_id: enableCommandId(JSON.stringify(command)),
-        },
-      });
+    // 重新开启——入口（人工点「启用自动化」）即显式动作，自动路径不触发。
+    // 并发语义不变：expected_revision 按线性化带当前 revision；重新开启的
+    // payload 与终止记录逐字段相等（服务端比对，改了即 409）；命令身份
+    // （command_id/selection_key）换新——重新开启是新命令，须能被命令账本
+    // 单独留痕。
+    //
+    // 重新开启序列的中断态：序列跑到一半失败时 enrolment 已非 terminated，
+    // 靠序列身份（enrollment_id）认出「这是同一次重新开启的后续步骤」，
+    // 从服务端现状续跑，不重复取代、不留半开状态。
+    const sequence = reenableSequenceRef.current;
+    const resumingSequence =
+      sequence !== null &&
+      enrollment !== null &&
+      enrollment.enrollment_id === sequence.enrollmentId &&
+      enrollment.terminated_at == null;
+    if (enrollment?.terminated_at != null || resumingSequence) {
+      await runReenableSequence(
+        projectId,
+        card,
+        selectionKey,
+        options,
+        enrollment,
+        sequence,
+      );
       return;
+    }
+    // 序列身份已失效（enrollment 换了/被删）→ 丢弃旧序列状态，走常规路径。
+    if (sequence !== null) {
+      reenableSequenceRef.current = null;
     }
 
     const target = await getAutomationTarget(projectId, card.issueId, {
@@ -419,6 +431,105 @@ export function useIssueLifecycleGeneration({
     };
     await putAutomationEnrollment(projectId, card.issueId, {
       expected_revision: enrollment ? enrollment.policy_revision : null,
+      command: {
+        ...command,
+        command_id: enableCommandId(JSON.stringify(command)),
+      },
+    });
+  }
+
+  /**
+   * terminated 记录的人工重新开启（REQ-WIGA-09 修订）：
+   *   ① Enable（payload 与终止记录逐字段相等）——契约硬要求，异 payload 409；
+   *   ② 用户本次换了 provider 时：Disable → Enable（新 payload）——契约指定
+   *      的「改授权 payload 须先成功重新开启，再走既有 Disable→Enable 路径」；
+   *      disabled 记录换 payload 重开是既有语义（服务端放行）。
+   *   ③ 每步带稳定 command_id 与 expected_revision；中途失败后重试按服务端
+   *      现状续跑（已生效的不重复改写），不重复取代、不留半开状态。
+   *
+   * 未换 provider 时只发 ①（等 payload 重新开启）——不产生多余的
+   * Disable/Enable 序列。
+   */
+  async function runReenableSequence(
+    projectId: string,
+    card: Extract<LifecycleCard, { kind: "design_spec" }>,
+    selectionKey: string,
+    formOptions: WorkItemPlanOptionsFormValue,
+    enrollment: IssueAutomationEnrollment,
+    sequence: { enrollmentId: string; original: ReenableOriginalAuthorization } | null,
+  ): Promise<void> {
+    // 原授权＝终止记录的 payload（重新开启必须逐字段相等）；续跑时沿用序列
+    // 里记下的原授权（服务端现状已是它的投影）。
+    const original: ReenableOriginalAuthorization = sequence?.original ?? {
+      source: enrollment.source,
+      options: enrollment.options,
+      // 旧代 enrollment 可能没有声明 target（无绑定事实）——此时退回
+      // 服务端投影的原样 target，由服务端判定是否接受。
+      target:
+        enrollment.target ??
+        (await getAutomationTarget(projectId, card.issueId, {
+          author_provider: formOptions.author_provider,
+          reviewer_provider: formOptions.reviewer_provider,
+          include_integration_tests: formOptions.include_integration_tests,
+          include_e2e_tests: formOptions.include_e2e_tests,
+          force_frontend_backend_split: formOptions.force_frontend_backend_split,
+          require_execution_plan_confirm:
+            formOptions.require_execution_plan_confirm,
+        })).enrollment_target,
+    };
+    // 目标授权＝原授权 + 用户本次选择的 provider（其余授权字段逐字保留）。
+    const desired = reenableOptionsWithProviderChoice(original.options, {
+      author_provider: formOptions.author_provider,
+      reviewer_provider: formOptions.reviewer_provider,
+    });
+    // 序列身份落账：中断后重试据此续跑（enrollment 换了则序列作废）。
+    reenableSequenceRef.current = {
+      enrollmentId: enrollment.enrollment_id,
+      original,
+    };
+
+    let current = enrollment;
+    // ① 重新开启：payload 与终止记录逐字段相等（授权不被顺便改写）。
+    if (current.terminated_at != null) {
+      const command = {
+        type: "enable" as const,
+        selection_key: reenableSelectionKey(selectionKey),
+        source: original.source,
+        options: original.options,
+        target: original.target,
+      };
+      current = await putAutomationEnrollment(projectId, card.issueId, {
+        expected_revision: current.policy_revision,
+        command: {
+          ...command,
+          command_id: enableCommandId(JSON.stringify(command)),
+        },
+      });
+    }
+
+    // 目标 provider 已生效（未换 provider，或序列已跑到终点）→ 不再改写授权。
+    if (current.enabled && sameProviderChoice(current.options, desired)) {
+      return;
+    }
+
+    // ② 关闭自动化（改授权 payload 的前置步骤；disabled 态重复 Disable 无副作用）。
+    if (current.enabled) {
+      current = await putAutomationEnrollment(projectId, card.issueId, {
+        expected_revision: current.policy_revision,
+        command: { type: "disable" },
+      });
+    }
+
+    // ③ 按新 provider 重新开启（disabled 记录换 payload 重开：契约允许）。
+    const command = {
+      type: "enable" as const,
+      selection_key: reenableSelectionKey(selectionKey),
+      source: original.source,
+      options: desired,
+      target: original.target,
+    };
+    await putAutomationEnrollment(projectId, card.issueId, {
+      expected_revision: current.policy_revision,
       command: {
         ...command,
         command_id: enableCommandId(JSON.stringify(command)),
