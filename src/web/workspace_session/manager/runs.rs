@@ -163,6 +163,8 @@ impl WorkspaceSessionManager {
         // 批 2 N1（REQ-WIGA-12）：本 run 未答挂起 choice 的失效题在状态锁
         // 外清（enrollment 文件锁不得与 manager 状态锁互嵌）。
         let mut stale_choice_ids = Vec::new();
+        // REQ-PRB-06：判定 MUST 在状态锁内作出（见下方赋值），删除在锁外。
+        let no_active_run;
         {
             let mut state = self
                 .state
@@ -183,9 +185,23 @@ impl WorkspaceSessionManager {
             if let Some(completion_tx) = state.run_completions.remove(&token) {
                 completion_tx.send_replace(true);
             }
+            // 锁内取值："此刻已无活动 run"。旧 token 的迟到收口会看到新 run
+            // 仍在位 → false，故不会删掉新 run 的 scratch（supersede 竞态）。
+            no_active_run = state.active_run.is_none();
         }
         if !stale_choice_ids.is_empty() {
             self.resolve_stale_plan_choice_facts(&stale_choice_ids);
+        }
+        // REQ-PRB-06：唯一收口点（正常结束/取消收口/abort 迟到收口共用）。
+        // 仅在此时已无活动 run 才删除；发生在 drop(engine) 之后（provider_run.rs
+        // 先 drop 再 finish_run），删除失败只 warn——残留由下次注册的清空与启动
+        // sweep 回收，不影响收口。
+        if no_active_run {
+            let store =
+                crate::product::lifecycle_store::LifecycleStore::new(self.app_paths.clone());
+            if let Err(error) = store.cleanup_run_scratch(&self.session_id) {
+                tracing::warn!(session_id = %self.session_id, error = %error, "run scratch cleanup failed");
+            }
         }
         self.maybe_recycle().await;
     }
@@ -775,5 +791,90 @@ mod manager_run_scratch_tests {
             "同 run 内重启不得清空 scratch"
         );
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[tokio::test]
+    async fn finish_run_removes_scratch_when_no_active_run() {
+        let manager = WorkspaceSessionManager::test_fixture("n1-run-scratch-finish");
+        let (_, token, _, _rx, _) = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run");
+        let scratch = scratch_of(&manager);
+        std::fs::write(scratch.join("draft.md"), "x").unwrap();
+
+        manager.finish_run(token).await;
+
+        assert!(!scratch.exists(), "唯一活动 run 收口后删除 scratch");
+    }
+
+    /// 契约场景「取消与失败路径不漏清」：取消收口走 abort 摘除活跃 run 后由
+    /// 任务自身迟到 `finish_run` 收口（`cancel_settle.inc.rs` 的同一路径），
+    /// 此时状态锁内已无活动 run → 仍须删除 scratch。
+    #[tokio::test]
+    async fn aborted_run_late_finish_run_removes_scratch() {
+        let manager = WorkspaceSessionManager::test_fixture("n1-run-scratch-abort");
+        let (_, token, _, _rx, _) = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run");
+        let scratch = scratch_of(&manager);
+        std::fs::write(scratch.join("draft.md"), "x").unwrap();
+
+        assert!(manager.abort_active_run().await, "取消收口摘除活跃 run");
+        assert!(manager.active_run().await.is_none());
+        manager.finish_run(token).await;
+
+        assert!(!scratch.exists(), "abort 迟到收口不得漏清 scratch");
+    }
+
+    #[tokio::test]
+    async fn late_finish_run_of_superseded_token_keeps_new_scratch() {
+        // Review Focus #3：旧 token 的迟到收口不得删掉新 run 的 scratch。
+        let manager = WorkspaceSessionManager::test_fixture("n1-run-scratch-supersede-race");
+        let (_, stale_token, _, _rx, _) = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run stale");
+        let _ = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run live");
+        let scratch = scratch_of(&manager);
+        std::fs::write(scratch.join("keep.md"), "新 run 暂存").unwrap();
+
+        manager.finish_run(stale_token).await;
+
+        assert!(
+            scratch.join("keep.md").exists(),
+            "旧 token 迟到收口必须跳过清理"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[tokio::test]
+    async fn finish_run_cleanup_failure_does_not_block_completion() {
+        let manager = WorkspaceSessionManager::test_fixture("n1-run-scratch-guard");
+        let (_, token, _, _rx, _) = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run");
+        let scratch = scratch_of(&manager);
+        let external = manager.app_paths.root().join("external-target");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("keep.md"), "keep").unwrap();
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(scratch.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&external, &scratch).unwrap();
+
+        manager.finish_run(token).await;
+
+        assert!(manager.active_run().await.is_none(), "收口照常完成");
+        assert!(
+            external.join("keep.md").exists(),
+            "护栏拒绝删除符号链接目标"
+        );
+        let _ = std::fs::remove_file(&scratch);
+        let _ = std::fs::remove_dir_all(&external);
     }
 }
