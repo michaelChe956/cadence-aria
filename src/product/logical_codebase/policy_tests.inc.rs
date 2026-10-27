@@ -978,6 +978,56 @@ mod tests {
         assert_eq!(store.get(PROJECT).unwrap().unwrap(), done3);
     }
 
+    /// R3：来源读出后立刻被外部同步改写（合成窗口内）——读窗口前后
+    /// stat 失稳且 seam 持久武装，重试同样失稳 → fail-closed 拒绝拼出
+    /// 混合正文：无候选、不落 locator、current 不变。
+    #[test]
+    fn recipe_policy_refuses_mixed_body_when_source_rewritten_after_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("lc-root");
+        std::fs::create_dir_all(&root).unwrap();
+        write_root_fixture(&root);
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregatePolicyArtifactStore::for_lc(paths.clone(), "lc_0001");
+        let manifest = seed_final_step_operation(&paths, "lc_0001", "op_r3_rewrite", &canonical);
+        let bootstrap = store.ensure_bootstrap(&manifest).unwrap();
+
+        // 模拟外部进程在来源读出后立刻整文件改写（同 inode、新 mtime/长度）。
+        publish_faults::arm_source_mutator(
+            &canonical,
+            ".claude/rules/a.md",
+            "外部同步改写后的规则 A\n".as_bytes(),
+        );
+        let publish = publisher(&store, &canonical);
+        let Err(error) = publish(&manifest, "op_r3_rewrite", AT_0800) else {
+            panic!("读后改写必须被检测，绝不拼出混合正文");
+        };
+        match error {
+            ProductStoreError::InvalidRecord { reason, .. } => assert!(
+                reason.contains("policy_sources_unstable"),
+                "错误应指明来源不稳定: {reason}"
+            ),
+            other => panic!("应报 InvalidRecord，实际: {other}"),
+        }
+        // seam 确已开火：磁盘上的来源已是改写字节（失败确因改写被检测）。
+        assert_eq!(
+            std::fs::read(canonical.join(".claude/rules/a.md")).unwrap(),
+            "外部同步改写后的规则 A\n".as_bytes().to_vec()
+        );
+        // fail-closed 证据链：无候选正文、不落 locator、current 保持 bootstrap。
+        assert!(
+            store
+                .get_recipe_policy_publication(PROJECT, "op_r3_rewrite")
+                .unwrap()
+                .is_none()
+        );
+        assert!(!canonical.join("policy").exists());
+        assert_eq!(store.get(PROJECT).unwrap().unwrap(), bootstrap);
+        // seam 持久武装：新一次发布同样检测到改写并 fail-closed。
+        assert!(publish(&manifest, "op_r3_rewrite", AT_0900).is_err());
+    }
+
     /// R2：根规则变更后用当前源重新发布——推进 revision、记录 supersede、
     /// 同 command 重放幂等。
     #[test]
