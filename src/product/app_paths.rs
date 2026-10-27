@@ -1,5 +1,9 @@
 use std::path::{Path, PathBuf};
 
+/// 与 `tool-policy-run-audit/`、`work-item-split-runs/` 并列的 per-session 暂存分区
+/// （REQ-PRB-04：位于状态根下，不在仓库工作区或 provider cwd 内）。
+pub const RUN_SCRATCH_PARTITION: &str = "run-scratch";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductAppPaths {
     root: PathBuf,
@@ -20,6 +24,15 @@ impl ProductAppPaths {
 
     pub fn projects_root(&self) -> PathBuf {
         self.root.join("projects")
+    }
+
+    pub fn run_scratch_root(&self) -> PathBuf {
+        self.root.join(RUN_SCRATCH_PARTITION)
+    }
+
+    /// 纯路径计算，不做 id 校验（同层既有方法口径）。
+    pub fn run_scratch_dir(&self, workspace_session_id: &str) -> PathBuf {
+        self.run_scratch_root().join(workspace_session_id)
     }
 
     pub fn state_root(&self) -> PathBuf {
