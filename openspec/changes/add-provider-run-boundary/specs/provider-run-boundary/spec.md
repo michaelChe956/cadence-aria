@@ -177,7 +177,7 @@ run 在 manager 登记后，宿主 MUST 尽力准备该 session 的 scratch：�
 
 ### Requirement: REQ-PRB-09 四类越界读写的稳定码检测
 
-宿主 MUST 对作者侧 provider 的 `Command` 类 tool-call 事件做路径分类，命中下列越界类别之一时 MUST 产生带对应稳定码的告警。四个稳定码与类别：① `run_boundary_provider_history_read`（provider 历史目录本身、其之下或其祖先）；② `run_boundary_aria_state_read`（状态根之下且不在本 session scratch 之下）；③ `run_boundary_tmp_draft_touch`（系统临时目录下第一级名称命中通用草稿名）；④ `run_boundary_write_outside_scratch`（写形态词元指向 scratch 之外的绝对路径）。扫描 MUST 手写切词，MUST NOT 引入新依赖。
+宿主 MUST 对作者侧 provider 的 `Command` 类 tool-call 事件做路径分类，命中下列越界类别之一时 MUST 产生带对应稳定码的告警。四个稳定码与类别：① `run_boundary_provider_history_read`（provider 历史目录本身、其之下或其祖先）；② `run_boundary_aria_state_read`（Aria 状态树：状态根之下且不在本 session scratch 之下，或系统临时目录下第一级名称为 `aria-*` 的状态/备份目录之下）；③ `run_boundary_tmp_draft_touch`（系统临时目录下第一级名称命中通用草稿名，`aria-*` 除外——它归类别②）；④ `run_boundary_write_outside_scratch`（写形态词元指向 scratch 之外的绝对路径）。扫描 MUST 手写切词，MUST NOT 引入新依赖。
 
 #### Scenario: provider 历史目录判定范围
 
@@ -186,8 +186,8 @@ run 在 manager 登记后，宿主 MUST 尽力准备该 session 的 scratch：�
 
 #### Scenario: 临时目录草稿名按第一级名称判定
 
-- **WHEN** 作者侧命令触碰的路径位于系统临时目录（`/tmp`、`/var/tmp`）下，且其**第一级名称**不区分大小写地命中 `*plan*`、`*draft*`、`*prior*`、`*refined*`、`*work-item*`、`*spec*`、`*design*`、`*story*` 或 `aria-*`
-- **THEN** 系统 MUST 产生 `run_boundary_tmp_draft_touch` 告警；判定 MUST 仅依据第一级名称，MUST NOT 依赖 cwd
+- **WHEN** 作者侧命令触碰的路径位于系统临时目录（`/tmp`、`/var/tmp`）下，且其**第一级名称**不区分大小写地命中 `*plan*`、`*draft*`、`*prior*`、`*refined*`、`*work-item*`、`*spec*`、`*design*` 或 `*story*`
+- **THEN** 系统 MUST 产生 `run_boundary_tmp_draft_touch` 告警；判定 MUST 仅依据第一级名称，MUST NOT 依赖 cwd；第一级名称为 `aria-*` 的目录 MUST NOT 归本码，而 MUST 归 `run_boundary_aria_state_read`
 
 #### Scenario: 写形态词元判定
 

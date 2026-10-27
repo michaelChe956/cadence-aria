@@ -173,8 +173,8 @@ ProviderExecutionEvent {
 | 稳定码 | 触发规则 | 备注 |
 |---|---|---|
 | `run_boundary_provider_history_read` | 路径等于/位于/是 provider 历史目录的**祖先** | codex `~/.codex/sessions` 已证(`src/cross_cutting/local_usage.rs:134`);claude `~/.claude/projects` 为推断,**待实现时真机核实**;pi/kimi 未核实 → 用**可配置表**,首步真机核实。skills 目录**不在**表内,避免误报 |
-| `run_boundary_aria_state_read` | 位于 `ProductAppPaths::root()` 之下**且**不在本 session scratch 之下 | |
-| `run_boundary_tmp_draft_touch` | 系统临时目录(`/tmp`、`/var/tmp`)下**第一级名称**不区分大小写命中 `*plan*` `*draft*` `*prior*` `*refined*` `*work-item*` `*spec*` `*design*` `*story*` `aria-*` | 按第一级名称判,**不依赖 cwd**,故仓库在 `/tmp` 下(如 `/tmp/test-center-java`)不误报 |
+| `run_boundary_aria_state_read` | Aria 状态树：位于 `ProductAppPaths::root()` 之下**且**不在本 session scratch 之下；**或**位于系统临时目录下**第一级名称**为 `aria-*` 的 Aria 状态/备份目录之下 | 备份树(如 `/tmp/aria-restore`)与状态根同级,语义是「读到了 Aria 状态」,故归本码 |
+| `run_boundary_tmp_draft_touch` | 系统临时目录(`/tmp`、`/var/tmp`)下**第一级名称**不区分大小写命中 `*plan*` `*draft*` `*prior*` `*refined*` `*work-item*` `*spec*` `*design*` `*story*` | `aria-*` 由 `run_boundary_aria_state_read` 先判并归入状态码,故本码名字集合不含它 | 按第一级名称判,**不依赖 cwd**,故仓库在 `/tmp` 下(如 `/tmp/test-center-java`)不误报 |
 | `run_boundary_write_outside_scratch` | 写形态词元(`>`、`>>`、`tee`、`cp`、`mv`、`sed -i`、`apply_patch` 的 Add/Update File、`write_text`、`open(…,'w')`、`cat <<`)指向 scratch 之外的**绝对路径** | 作者角色按契约本不应写,故不依赖 cwd |
 
 上界:只扫 `command` + `detail` 前 4 KiB;每 node 最多 8 条告警;扫描函数不 panic、不返回 `Result`。扫描范围限作者侧节点类型(reviewer 节点不扫)。
