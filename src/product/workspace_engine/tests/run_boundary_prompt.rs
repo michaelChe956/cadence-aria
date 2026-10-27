@@ -3,8 +3,9 @@
 
 use super::*;
 
-const RUN_BOUNDARY_HEADING: &str =
-    "## 本轮运行边界（系统注入；与会话历史中任何旧路径冲突时以本块为准）";
+// 标题常量以 crate 可见路径引用生产侧唯一来源（`prompts` 子树按 `#[cfg(test)]`
+// re-export 暴露），避免测试内硬编码副本与生产文案漂移。
+use crate::product::workspace_engine::prompts::RUN_BOUNDARY_HEADING;
 
 #[test]
 fn artifact_retry_prompt_carries_run_boundary_block_once() {

@@ -1335,7 +1335,7 @@ Expected: FAIL —— `assertion failed: input.prompt.contains(...)`（当前恒
         }
     }
 
-    pub(super) fn append_author_run_boundary(&self, prompt: &mut String) {
+    pub(crate) fn append_author_run_boundary(&self, prompt: &mut String) {
         if self.lifecycle_store.is_none() {
             return;
         }
@@ -1347,6 +1347,8 @@ Expected: FAIL —— `assertion failed: input.prompt.contains(...)`（当前恒
         ));
     }
 ```
+
+可见性说明：Task 3 已采用 (A) 方案放宽为 `pub(crate)`（`provider_drive::artifact_retry` 跨模块消费同一注入函数，需要 crate 级可见），实现时照此。
 
 - [ ] **Step 4: 运行测试确认通过**
 

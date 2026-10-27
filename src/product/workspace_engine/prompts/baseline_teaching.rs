@@ -657,6 +657,7 @@ mod run_boundary_block_tests {
 mod author_run_boundary_tests {
     use super::RUN_BOUNDARY_HEADING;
     use super::baseline_teaching_fixture::{baseline_engine, lc_plan_engine_on_bare_directory};
+    use super::run_boundary_block;
     use crate::product::models::{ProviderName, WorkspaceType};
     use crate::product::workspace_engine::types::{AuthorPromptMode, SessionMessage};
 
@@ -724,10 +725,14 @@ mod author_run_boundary_tests {
         );
     }
 
-    #[test]
-    fn in_memory_engine_prompt_omits_run_boundary_block() {
-        // 无持久 store 的内存态 engine：session 记录由临时 store 铸造，engine 不持有 store
-        // （`WorkspaceEngine::new` 的 `lifecycle_store: None`，src/product/workspace_engine/lifecycle.rs:306-314）。
+    /// 内存态 engine 夹具：无持久 store 的内存态 engine——session 记录由临时 store
+    /// 铸造，engine 本身不持有 store（`WorkspaceEngine::new` 的 `lifecycle_store: None`，
+    /// src/product/workspace_engine/lifecycle.rs:306-314）。返回 engine 与其 author
+    /// prompt（注入前快照，供调用方逐字节比对）。
+    fn in_memory_engine_and_prompt() -> (
+        crate::product::workspace_engine::types::WorkspaceEngine,
+        String,
+    ) {
         let tmp = tempfile::tempdir().expect("tmp");
         let store = crate::product::lifecycle_store::LifecycleStore::new(
             crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria")),
@@ -759,11 +764,13 @@ mod author_run_boundary_tests {
         let input = engine
             .build_streaming_input("生成", AuthorPromptMode::FullConversation)
             .expect("in-memory prompt");
-        assert!(
-            !input.prompt.contains(RUN_BOUNDARY_HEADING),
-            "{}",
-            input.prompt
-        );
+        (engine, input.prompt)
+    }
+
+    #[test]
+    fn in_memory_engine_prompt_omits_run_boundary_block() {
+        let (_engine, prompt) = in_memory_engine_and_prompt();
+        assert!(!prompt.contains(RUN_BOUNDARY_HEADING), "{}", prompt);
     }
 
     #[test]
@@ -779,5 +786,56 @@ mod author_run_boundary_tests {
             "{prompt}"
         );
         assert!(!prompt.contains(RUN_BOUNDARY_HEADING), "{prompt}");
+    }
+
+    /// REQ-PRB-03「修订面携带边界块」：author 修订面（`build_revision_input`）与
+    /// author 两族同构走 `append_author_baseline_teaching` → 边界块恰一次
+    /// （夹具沿用同文件既有 `baseline_engine` + `pending_revision_context` 构造，
+    /// 与 `reviewer_revision_baseline_tests` 的修订面构造同源）。
+    #[test]
+    fn revision_face_carries_run_boundary_block_exactly_once() {
+        let mut revision = baseline_engine("master", None, WorkspaceType::Story);
+        revision.engine.pending_revision_context = Some("补充异常场景".to_string());
+        let input = revision
+            .engine
+            .build_revision_input()
+            .expect("revision baseline session must build");
+        assert_eq!(
+            input.prompt.matches(RUN_BOUNDARY_HEADING).count(),
+            1,
+            "修订面边界块恰一次：{}",
+            input.prompt
+        );
+    }
+
+    /// REQ-PRB-01「内存态 engine 省略该块」的字节层：内存态 engine 的 prompt 与
+    /// 「未注入边界块」的预期字节完全一致——既不含标题，也不含完整边界块字节；
+    /// 且再走一次注入函数对内存态为逐字节 no-op（长度差为 0）。
+    #[test]
+    fn in_memory_engine_prompt_bytes_unchanged_by_run_boundary_injection() {
+        let (engine, prompt) = in_memory_engine_and_prompt();
+        let block = run_boundary_block(
+            &engine.session.session_id,
+            &engine.session.workspace_type,
+            None,
+        );
+        assert!(
+            !prompt.contains(&block),
+            "内存态不得含完整边界块字节：{prompt}"
+        );
+        assert!(
+            !prompt.contains(RUN_BOUNDARY_HEADING),
+            "内存态不得含边界块标题：{prompt}"
+        );
+        // 注入前快照 → 再走一次注入函数，逐字节比对（长度差必须为 0）。
+        let before = prompt.clone();
+        let mut after = before.clone();
+        engine.append_author_run_boundary(&mut after);
+        assert_eq!(
+            after.as_bytes(),
+            before.as_bytes(),
+            "内存态注入必须逐字节 no-op"
+        );
+        assert_eq!(after.len(), before.len(), "注入前后长度差必须为 0");
     }
 }
