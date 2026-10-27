@@ -122,15 +122,21 @@ fn tmp_root_of(boundary: &RunBoundary, tokens: &[Token]) -> Option<String> {
 }
 
 /// provider 历史目录默认表；`HOME` 不可用或表为空时不报该码。
-// claude `~/.claude/projects` 为推断、真机核实前不得写入；provider skills 目录不得写入。
+/// 真机核实（2026-10-27，`ls` + 结构抽样，均存在且为会话历史）：
+/// - `~/.codex/sessions/<yyyy>/<mm>/<dd>/`（仓库内证据 `local_usage.rs:134`）
+/// - `~/.kimi-code/sessions/<workspace>/session_<uuid>/`
+/// - `~/.pi/agent/sessions/<cwd>/<ts>_<uuid>.jsonl`
+/// - `~/.claude/projects/<project>/<uuid>.jsonl`（原标注为推断，本次核实后写入）
+/// provider 的 skills 目录（如 `~/.claude/skills`）不得写入，避免合法读取误报。
 pub(crate) fn default_history_dirs() -> Vec<PathBuf> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Vec::new();
     };
     vec![
-        home.join(".codex/sessions"), // 已核实：src/cross_cutting/local_usage.rs:134
-        home.join(".kimi-code/sessions"), // 待真机核实：local_usage.rs:141-146
-        home.join(".pi/agent/sessions"), // 待真机核实：仅测试夹具 usage_tests.rs:13
+        home.join(".codex/sessions"),     // 已核实：local_usage.rs:134 + 真机
+        home.join(".kimi-code/sessions"), // 已核实：local_usage.rs:141-146 + 真机
+        home.join(".pi/agent/sessions"),  // 已核实：usage_tests.rs:13 + 真机
+        home.join(".claude/projects"),    // 已核实：真机（<project>/<uuid>.jsonl 会话记录）
     ]
 }
 
@@ -509,12 +515,20 @@ mod boundary_scan_tests {
     #[test]
     fn default_history_dirs_includes_codex_sessions() {
         let dirs = default_history_dirs();
+        // 真机核实过的四条历史目录（HOME 不可用时表为空即不报该码）。
         match std::env::var_os("HOME") {
-            Some(home) => assert!(dirs.contains(&PathBuf::from(home).join(".codex/sessions"))),
+            Some(home) => {
+                let home = PathBuf::from(home);
+                for dir in [".codex/sessions", ".kimi-code/sessions", ".pi/agent/sessions", ".claude/projects"] {
+                    assert!(dirs.contains(&home.join(dir)), "{dir}");
+                }
+            }
             None => assert!(dirs.is_empty(), "HOME 不可用时表为空"),
         }
-        // claude / pi / kimi 的历史目录未真机核实前不得写死成事实；skills 目录不得进表。
-        assert!(dirs.iter().all(|dir| !dir.to_string_lossy().contains(".claude")));
+        // provider skills 目录不得进表（合法读取不得误报）。
+        assert!(dirs.iter().all(|dir| !dir.to_string_lossy().contains("skills")));
+        // claude 的历史目录是 projects，不是 projects 之外的路径。
+        assert!(dirs.iter().all(|dir| !dir.to_string_lossy().contains(".claude/plans")));
     }
 
     #[test]
