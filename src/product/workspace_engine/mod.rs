@@ -119,6 +119,12 @@ mod types;
 #[cfg(test)]
 pub(crate) mod tests;
 
+/// provider 零活动看门狗的**生产取值**常量（不受 `cfg(test)` 影响）——供
+/// crate 内跨模块断言（如 scratch 孤儿 TTL 与看门狗阈值的大小关系）链接生产值。
+/// 仅测试期断言消费，故非测试构建下该 re-export 视为未使用。
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use provider_drive::PROVIDER_IDLE_WATCHDOG_TIMEOUT_PRODUCTION;
+
 pub use advance::{
     AdvanceInput, AdvanceOutcome, AdvancePlanAdmission, AdvanceRecord, AdvanceStatus,
     advance_admission_rejected,

@@ -87,6 +87,9 @@ impl LifecycleStore {
     /// REQ-PRB-07：启动后一次孤儿回收。只处理分区直接子目录；三类条件
     /// （session 记录不存在 / 终态 / mtime 超 TTL）任一成立即删。单项失败
     /// 只 warn，不影响其余项，也不向调用方传播（启动 sweep 不阻塞启动）。
+    ///
+    /// **生产调用点必须传 `RUN_SCRATCH_ORPHAN_TTL`**（6 小时）：本函数把 TTL
+    /// 作参数而非缺省值，调用方可能传错阈值（过小则提前回收活 run 的 scratch）。
     pub fn sweep_orphan_run_scratch(
         &self,
         orphan_ttl: Duration,
@@ -259,6 +262,7 @@ mod run_scratch_tests {
     use crate::product::app_paths::{ProductAppPaths, RUN_SCRATCH_PARTITION};
     use crate::product::lifecycle_store::LifecycleStore;
     use crate::product::models::WorkspaceSessionStatus;
+    use crate::product::workspace_engine::PROVIDER_IDLE_WATCHDOG_TIMEOUT_PRODUCTION;
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
@@ -356,6 +360,25 @@ mod run_scratch_tests {
     #[test]
     fn cleanup_is_idempotent_and_reports_absent() {
         let (_tmp, store) = store();
+        // 从未存在 → Absent。
+        assert_eq!(
+            store
+                .cleanup_run_scratch("workspace_session_auto_4")
+                .unwrap(),
+            RunScratchRemoval::Absent
+        );
+        // 真删一次 → Removed（不是「从未存在 → Absent」）。
+        let dir = store.run_scratch_dir("workspace_session_auto_4");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("draft.md"), "x").unwrap();
+        assert_eq!(
+            store
+                .cleanup_run_scratch("workspace_session_auto_4")
+                .unwrap(),
+            RunScratchRemoval::Removed
+        );
+        assert!(!dir.exists(), "真删一次后目录必须消失");
+        // 再删一次 → Absent（幂等：重复清理不报错、不重复动作）。
         assert_eq!(
             store
                 .cleanup_run_scratch("workspace_session_auto_4")
@@ -597,6 +620,68 @@ mod run_scratch_tests {
     }
 
     #[test]
+    fn sweep_orphan_run_scratch_skips_symlinked_entry_without_following() {
+        // REQ-PRB-08 sweep 侧：分区（`run-scratch/`）内的符号链接条目
+        // MUST NOT 被删除，也 MUST NOT 被跟随（不得进入其指向的外部目录）。
+        let (tmp, store) = store();
+        let root = store.app_paths().run_scratch_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let external = tmp.path().join("external-sweep-link-target");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("keep.md"), "keep").unwrap();
+        let link = root.join("workspace_session_auto_link");
+        std::os::unix::fs::symlink(&external, &link).unwrap();
+
+        let removed = store.sweep_orphan_run_scratch(Duration::ZERO).unwrap();
+
+        assert_eq!(removed, 0, "符号链接条目不得被回收");
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "符号链接条目不得被删除"
+        );
+        assert!(
+            external.join("keep.md").exists(),
+            "符号链接不得被跟随（指向物不得被删）"
+        );
+        assert!(external.is_dir(), "符号链接指向的外部目录不得被删");
+    }
+
+    #[test]
+    fn run_scratch_partition_root_replaced_by_regular_file_is_not_followed() {
+        // 分区根被替换为普通文件（不只是符号链接）：拒绝删除，也不在分区外创建。
+        // 观测：分区根为普通文件时，目标 `symlink_metadata` 先以 ENOTDIR 失败，
+        // 故清理返回 Io 错误（而非 `Skipped`）；无论哪种返回，路径保持原样。
+        let (tmp, store) = store();
+        let root = store.app_paths().run_scratch_root();
+        std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+        std::fs::write(&root, "not a dir").unwrap();
+
+        let cleanup = store.cleanup_run_scratch("workspace_session_auto_12");
+        assert!(
+            !matches!(cleanup, Ok(RunScratchRemoval::Removed)),
+            "分区根不可信时不得报告删除：{cleanup:?}"
+        );
+        assert!(root.is_file(), "分区根普通文件不得被删除");
+
+        store
+            .prepare_run_scratch("workspace_session_auto_13")
+            .unwrap();
+        assert!(root.is_file(), "分区根普通文件不得被替换成目录");
+        assert!(
+            !root
+                .parent()
+                .unwrap()
+                .join("workspace_session_auto_13")
+                .exists(),
+            "不得在分区外创建目录"
+        );
+        assert!(
+            !tmp.path().join("workspace_session_auto_13").exists(),
+            "不得在分区外创建目录"
+        );
+    }
+
+    #[test]
     fn sweep_orphan_run_scratch_does_not_trigger_session_read_spy() {
         // Review Focus #2：sweep 必须走 find_workspace_session_path + read_workspace_session_record。
         let (_tmp, store) = store();
@@ -621,13 +706,12 @@ mod run_scratch_tests {
 
     #[test]
     fn run_scratch_orphan_ttl_exceeds_provider_idle_watchdog() {
-        // 设计 §11.3：TTL 须大于 provider 零活动看门狗阈值（生产值 1800s，
-        // `provider_drive/watchdog.rs`）。该常量在 `cfg(test)` 下被改成 150ms
-        // 且 `provider_drive` 为私有模块，故此处按生产值断言，不用测试期常量
-        // 做无效比较。
+        // 技术方案 §11 第 3 条：TTL 须大于 provider 零活动看门狗阈值。断言与
+        // **生产值常量** `PROVIDER_IDLE_WATCHDOG_TIMEOUT_PRODUCTION`（1800s，
+        // 不受 `cfg(test)` 影响）比较——生产阈值一旦上调超过 6h，本断言即报警。
         assert!(
-            RUN_SCRATCH_ORPHAN_TTL > Duration::from_secs(1800),
-            "{RUN_SCRATCH_ORPHAN_TTL:?}"
+            RUN_SCRATCH_ORPHAN_TTL > PROVIDER_IDLE_WATCHDOG_TIMEOUT_PRODUCTION,
+            "{RUN_SCRATCH_ORPHAN_TTL:?} vs {PROVIDER_IDLE_WATCHDOG_TIMEOUT_PRODUCTION:?}"
         );
         assert_eq!(RUN_SCRATCH_ORPHAN_TTL, Duration::from_secs(6 * 60 * 60));
     }

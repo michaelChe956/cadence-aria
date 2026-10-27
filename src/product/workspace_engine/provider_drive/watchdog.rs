@@ -25,6 +25,16 @@ pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
 pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(150);
 
+/// **生产取值**常量（不受 `cfg(test)` 影响）：provider 零活动看门狗阈值 = 1800s。
+///
+/// 与 `PROVIDER_IDLE_WATCHDOG_TIMEOUT` 的生产取值同值，但不受测试期 150ms 覆盖影响，
+/// 供跨模块断言（如 scratch 孤儿 TTL 与看门狗阈值的大小关系）链接**生产值**，
+/// 避免用字面量断言导致生产阈值上调后断言失效。
+/// 非测试构建下无消费方（断言在测试期），故按构建期豁免 dead_code。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT_PRODUCTION: std::time::Duration =
+    std::time::Duration::from_secs(1800);
+
 /// r32 校准:work item plan 驱动循环(SC 单候选 plan 文档生成)的零活动
 /// 看门狗界——1800s(30min)。r32 现场 plan fresh 被 600s 界误杀:Claude
 /// 生成完整 work item plan 文档的合法静默可超 10min(r28 实测生成段
