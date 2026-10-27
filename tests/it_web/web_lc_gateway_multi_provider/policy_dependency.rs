@@ -934,8 +934,17 @@ pub(crate) fn assert_policy_publication_chain(
     }
 
     // 7. 公共只读校验面二次复核(#8 delivered 实现,交叉一致性)。
-    verify_published_policy_body(canonical_root, artifact, receipt)
+    // 2026-10-27:该函数签名收敛为「(authority_root, artifact) -> 当前根规则摘要」
+    // (回执不再参与摘要比对,权威是当前已发布政策),故交叉一致性改为
+    // 「函数现算的当前根规则摘要 == 回执冻结的 rule_digest」。
+    let current_rule_digest = verify_published_policy_body(canonical_root, artifact)
         .map_err(|error| chain_failure(format!("verify_published_policy_body 拒绝: {error}")))?;
+    if current_rule_digest != receipt.rule_digest {
+        return Err(chain_failure(format!(
+            "当前根规则摘要 {current_rule_digest} 与回执冻结摘要 {} 不一致",
+            receipt.rule_digest
+        )));
+    }
 
     Ok(())
 }
