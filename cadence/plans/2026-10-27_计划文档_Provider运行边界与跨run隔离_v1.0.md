@@ -191,7 +191,7 @@ git commit -m "feat(run-boundary): 新增本轮运行边界块渲染与字节预
 
 **Interfaces:**
 - Consumes: `run_boundary_block`（Task 1）；`WorkspaceEngine.lifecycle_store: Option<LifecycleStore>`、`session.session_id`、`session.workspace_type`
-- Produces: `pub(super) fn append_author_run_boundary(&self, prompt: &mut String)`（无返回值；无 store 时直接返回）；`append_author_baseline_teaching` 签名不变：`fn (&self, &mut String) -> Result<Option<BaselineTreeRef>, String>`
+- Produces: `pub(crate) fn append_author_run_boundary(&self, prompt: &mut String)`（Task 3 已放宽为 `pub(crate)`，实现时照此）（无返回值；无 store 时直接返回）；`append_author_baseline_teaching` 签名不变：`fn (&self, &mut String) -> Result<Option<BaselineTreeRef>, String>`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -320,7 +320,7 @@ Expected: FAIL —— `assertion failed: ... matches(...).count() == 1`（当前
     /// REQ-PRB-01/02：本轮运行边界块（无条件注入，先于基线解析）。
     /// 无持久 store 的内存态 engine 整块省略（与基线教学块跳过面同构，
     /// 保证既有 prompt 预算断言字节不变）。
-    pub(super) fn append_author_run_boundary(&self, prompt: &mut String) {
+    pub(crate) fn append_author_run_boundary(&self, prompt: &mut String) {
         if self.lifecycle_store.is_none() {
             return;
         }

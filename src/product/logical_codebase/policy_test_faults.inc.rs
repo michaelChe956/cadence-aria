@@ -38,40 +38,24 @@ mod publish_faults {
     }
 
     /// R3 测试:读后立刻改写命中路径,模拟外部同步替换/重写在合成窗口内发生。
-
     /// 与 `trip` 不同，本 seam 持久武装(每次读都会改写)，使重试同样观察到变化。
-
     pub(super) fn arm_source_mutator(root: &Path, relative_path: &str, replacement: &[u8]) {
-
         *SOURCE_MUTATIONS
-
             .lock()
-
-            .expect("publish source mutation mutex") = Some((root.join(relative_path), replacement.to_vec()));
-
+            .expect("publish source mutation mutex") =
+            Some((root.join(relative_path), replacement.to_vec()));
     }
 
-
-
     /// 命中即改写目标文件(保持武装，不清除)。
-
     pub(super) fn mutate_source_after_read(path: &Path) {
-
         let armed = SOURCE_MUTATIONS
-
             .lock()
-
             .expect("publish source mutation mutex");
 
         if let Some((target, replacement)) = armed.as_ref()
-
             && target == path
-
         {
-
             let _ = std::fs::write(target, replacement);
-
         }
-
     }
 }
