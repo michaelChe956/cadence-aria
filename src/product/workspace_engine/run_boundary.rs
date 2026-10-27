@@ -127,6 +127,7 @@ fn tmp_root_of(boundary: &RunBoundary, tokens: &[Token]) -> Option<String> {
 /// - `~/.kimi-code/sessions/<workspace>/session_<uuid>/`
 /// - `~/.pi/agent/sessions/<cwd>/<ts>_<uuid>.jsonl`
 /// - `~/.claude/projects/<project>/<uuid>.jsonl`（原标注为推断，本次核实后写入）
+///
 /// provider 的 skills 目录（如 `~/.claude/skills`）不得写入，避免合法读取误报。
 pub(crate) fn default_history_dirs() -> Vec<PathBuf> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
