@@ -38,6 +38,10 @@ pub(crate) use review::review_scope_instructions;
 pub(crate) use review_context::{
     SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES, ensure_single_candidate_review_prompt_budget,
 };
+// run-boundary 注入面测试（`tests/part_09.rs` 等非 `prompts` 子树）需以 crate 全路径
+// 引用同一标题常量，故仅在测试构建下 re-export（纯可见性，无行为改动）。
+#[cfg(test)]
+pub(crate) use baseline_teaching::RUN_BOUNDARY_HEADING;
 
 /// 聚合视野材料块的唯一 marker（`aggregate_scope_material_prompt` 以 `## 聚合代码库成员清单`
 /// 开头）。用于在 `build_streaming_input` 中识别 Logical（有 aggregate scope）Story/Design 会话；

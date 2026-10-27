@@ -35,15 +35,12 @@ pub(crate) fn reviewer_baseline_teaching_block(branch: &str) -> String {
     )
 }
 
-// Task 2/3 接线前，仅函数与标题常量被测试消费（接线后这两条属性可移除）；
-// 预算常量在计划内只作测试断言依据，接线后仍无生产消费者，故该属性需保留。
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const RUN_BOUNDARY_HEADING: &str =
     "## 本轮运行边界（系统注入；与会话历史中任何旧路径冲突时以本块为准）";
+// 预算常量只作测试断言依据，无生产消费者（作者漏斗注入后仍如此）。
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const RUN_BOUNDARY_BUDGET_BYTES: usize = 1536;
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn run_boundary_block(
     session_id: &str,
     workspace_type: &WorkspaceType,
@@ -105,12 +102,27 @@ impl WorkspaceEngine {
         ))
     }
 
+    /// REQ-PRB-01/02：本轮运行边界块（无条件注入，先于基线解析）。
+    /// 无持久 store 的内存态 engine 整块省略（与基线教学块跳过面同构，
+    /// 保证既有 prompt 预算断言字节不变）。
+    pub(super) fn append_author_run_boundary(&self, prompt: &mut String) {
+        if self.lifecycle_store.is_none() {
+            return;
+        }
+        prompt.push_str(&run_boundary_block(
+            &self.session.session_id,
+            &self.session.workspace_type,
+            None,
+        ));
+    }
+
     /// author 面（author 两族 + author 修订面，三处同构）：基线解析 fail-closed
     /// + 软限制教学注入，返回基线锚点供 `StreamingProviderInput` 携带。
     pub(super) fn append_author_baseline_teaching(
         &self,
         prompt: &mut String,
     ) -> Result<Option<crate::cross_cutting::streaming_provider::BaselineTreeRef>, String> {
+        self.append_author_run_boundary(prompt);
         let baseline_tree = self.resolve_issue_baseline_tree()?;
         if let Some(baseline) = baseline_tree.as_ref() {
             prompt.push_str(&baseline_teaching_block(&baseline.branch));
@@ -636,5 +648,134 @@ mod run_boundary_block_tests {
                 block.len()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod author_run_boundary_tests {
+    use super::RUN_BOUNDARY_HEADING;
+    use super::baseline_teaching_fixture::{baseline_engine, lc_plan_engine_on_bare_directory};
+    use crate::product::models::{ProviderName, WorkspaceType};
+    use crate::product::workspace_engine::types::{AuthorPromptMode, SessionMessage};
+
+    #[test]
+    fn author_run_boundary_injected_for_all_four_author_types() {
+        for workspace_type in [
+            WorkspaceType::Story,
+            WorkspaceType::Design,
+            WorkspaceType::WorkItem,
+            WorkspaceType::WorkItemPlan,
+        ] {
+            let fixture = baseline_engine("main", None, workspace_type.clone());
+            let input = fixture
+                .engine
+                .build_streaming_input("生成", AuthorPromptMode::FullConversation)
+                .expect("author prompt");
+            assert_eq!(
+                input.prompt.matches(RUN_BOUNDARY_HEADING).count(),
+                1,
+                "{workspace_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn author_run_boundary_injected_for_aggregate_session_without_baseline() {
+        let mut fixture = lc_plan_engine_on_bare_directory();
+        fixture.engine.session.messages.push(SessionMessage {
+            id: "msg_aggregate_scope".to_string(),
+            role: "system".to_string(),
+            content: "## 聚合代码库成员清单\n- busi\n- api".to_string(),
+            checkpoint_id: None,
+            created_at: "2026-10-27T00:00:00Z".to_string(),
+        });
+        let input = fixture
+            .engine
+            .build_streaming_input("生成", AuthorPromptMode::FullConversation)
+            .expect("LC aggregate session prompt");
+        assert_eq!(input.prompt.matches(RUN_BOUNDARY_HEADING).count(), 1);
+        assert!(
+            !input.prompt.contains("基准分支基线（issue 基线 ="),
+            "聚合会话无基线教学块：{}",
+            input.prompt
+        );
+    }
+
+    #[test]
+    fn author_run_boundary_injected_once_with_prior_session_history() {
+        let mut fixture = baseline_engine("main", None, WorkspaceType::WorkItemPlan);
+        fixture.engine.session.messages.push(SessionMessage {
+            id: "msg_prior".to_string(),
+            role: "assistant".to_string(),
+            content: "上一轮草稿已写入 /tmp/work-item-plan.md，可复用。".to_string(),
+            checkpoint_id: None,
+            created_at: "2026-10-27T00:00:00Z".to_string(),
+        });
+        let input = fixture
+            .engine
+            .build_streaming_input("继续", AuthorPromptMode::FullConversation)
+            .expect("author prompt");
+        assert_eq!(
+            input.prompt.matches(RUN_BOUNDARY_HEADING).count(),
+            1,
+            "至多一次"
+        );
+    }
+
+    #[test]
+    fn in_memory_engine_prompt_omits_run_boundary_block() {
+        // 无持久 store 的内存态 engine：session 记录由临时 store 铸造，engine 不持有 store
+        // （`WorkspaceEngine::new` 的 `lifecycle_store: None`，src/product/workspace_engine/lifecycle.rs:306-314）。
+        let tmp = tempfile::tempdir().expect("tmp");
+        let store = crate::product::lifecycle_store::LifecycleStore::new(
+            crate::product::app_paths::ProductAppPaths::new(tmp.path().join(".aria")),
+        );
+        let record = store
+            .create_workspace_session(
+                crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    entity_id: "story_spec_0001".to_string(),
+                    workspace_type: WorkspaceType::Story,
+                    author_provider: ProviderName::ClaudeCode,
+                    reviewer_provider: Some(ProviderName::Codex),
+                    review_rounds: 1,
+                    superpowers_enabled: false,
+                    openspec_enabled: false,
+                    work_item_plan_options: None,
+                },
+            )
+            .expect("create session");
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        let engine = crate::product::workspace_engine::types::WorkspaceEngine::new(
+            std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                tmp.path().join("checkpoints"),
+            )),
+            event_tx,
+            crate::product::workspace_engine::types::WorkspaceSession::from_record(record),
+        );
+        let input = engine
+            .build_streaming_input("生成", AuthorPromptMode::FullConversation)
+            .expect("in-memory prompt");
+        assert!(
+            !input.prompt.contains(RUN_BOUNDARY_HEADING),
+            "{}",
+            input.prompt
+        );
+    }
+
+    #[test]
+    fn reviewer_prompt_omits_run_boundary_block() {
+        let fixture = baseline_engine("main", None, WorkspaceType::Story);
+        let mut prompt = String::new();
+        fixture
+            .engine
+            .append_reviewer_baseline_teaching(&mut prompt)
+            .expect("reviewer baseline");
+        assert!(
+            prompt.contains("基准分支基线（issue 基线 = main）"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains(RUN_BOUNDARY_HEADING), "{prompt}");
     }
 }

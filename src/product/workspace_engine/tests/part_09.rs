@@ -239,7 +239,19 @@ fn build_work_item_plan_streaming_input_uses_splitter_role() {
 
     assert_eq!(input.provider_type, ProviderType::Fake);
     assert_eq!(input.role, AdapterRole::WorkItemSplitter);
-    assert_eq!(input.prompt, "split prompt");
+    // REQ-PRB-01/03：作者侧漏斗（含 work_item_plan 计划 provider 路径）无条件注入
+    // 「本轮运行边界」块，故原「逐字等值」断言改为前缀式（保留「该路径照用传入
+    // stub prompt」的原意）并追加块恰好一次。
+    assert!(input.prompt.starts_with("split prompt"), "{}", input.prompt);
+    assert_eq!(
+        input
+            .prompt
+            .matches(crate::product::workspace_engine::prompts::RUN_BOUNDARY_HEADING)
+            .count(),
+        1,
+        "{}",
+        input.prompt
+    );
     assert_eq!(input.working_dir, PathBuf::from("/tmp/worktree"));
     assert_eq!(
         input.workspace_session_id.as_deref(),
