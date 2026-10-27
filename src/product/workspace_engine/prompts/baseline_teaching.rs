@@ -107,14 +107,28 @@ impl WorkspaceEngine {
     /// 保证既有 prompt 预算断言字节不变）。
     /// 可见性：`pub(crate)`——Task 3 的自动续写重试路径（`provider_drive::artifact_retry`）
     /// 跨模块消费同一注入函数（crate 内可见，不扩张公共面）。
+    /// REQ-PRB-04：scratch 目录在盘上存在时附带其绝对路径条目（`author_scratch_dir`）。
+    /// REQ-PRB-04：仅当 scratch 是真实目录时告知其绝对路径——
+    /// `symlink_metadata` 不跟随符号链接；目录不存在/被替换为链接/普通文件
+    /// 一律省略（不得告知不存在的路径）。存在性取真实文件系统状态。
+    fn author_scratch_dir(&self) -> Option<std::path::PathBuf> {
+        let store = self.lifecycle_store.as_ref()?;
+        let dir = store.run_scratch_dir(&self.session.session_id);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(metadata) if metadata.file_type().is_dir() => Some(dir),
+            _ => None,
+        }
+    }
+
     pub(crate) fn append_author_run_boundary(&self, prompt: &mut String) {
         if self.lifecycle_store.is_none() {
             return;
         }
+        let scratch = self.author_scratch_dir();
         prompt.push_str(&run_boundary_block(
             &self.session.session_id,
             &self.session.workspace_type,
-            None,
+            scratch.as_deref(),
         ));
     }
 
@@ -655,6 +669,7 @@ mod run_boundary_block_tests {
 
 #[cfg(test)]
 mod author_run_boundary_tests {
+    use super::RUN_BOUNDARY_BUDGET_BYTES;
     use super::RUN_BOUNDARY_HEADING;
     use super::baseline_teaching_fixture::{baseline_engine, lc_plan_engine_on_bare_directory};
     use super::run_boundary_block;
@@ -837,5 +852,102 @@ mod author_run_boundary_tests {
             "内存态注入必须逐字节 no-op"
         );
         assert_eq!(after.len(), before.len(), "注入前后长度差必须为 0");
+    }
+
+    /// 从真实 prompt 提取注入的边界块（RUN_BOUNDARY_HEADING 起、至下一个
+    /// 块标题 `\n## ` 前），预算断言按真实注入产物计量。
+    fn injected_run_boundary_block(prompt: &str) -> &str {
+        let start = prompt
+            .find(RUN_BOUNDARY_HEADING)
+            .expect("boundary block injected");
+        let rest = &prompt[start..];
+        let end = rest
+            .find("\n## ")
+            .map(|offset| offset + 1)
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// REQ-PRB-04：scratch 目录存在时边界块带上其绝对路径与「运行结束系统
+    /// 会删除它」；存在性取真实文件系统状态（prepare 后目录在盘上）。
+    #[test]
+    fn run_boundary_block_announces_existing_scratch_dir() {
+        let fixture = baseline_engine("main", None, WorkspaceType::Story);
+        let session_id = fixture.engine.session.session_id.clone();
+        let store = fixture
+            .engine
+            .lifecycle_store
+            .clone()
+            .expect("persistent fixture carry store");
+        store
+            .prepare_run_scratch(&session_id)
+            .expect("prepare scratch");
+        let scratch = store.run_scratch_dir(&session_id);
+
+        let input = fixture
+            .engine
+            .build_streaming_input("生成", AuthorPromptMode::FullConversation)
+            .expect("author prompt");
+        assert!(
+            input.prompt.contains(&scratch.display().to_string()),
+            "{}",
+            input.prompt
+        );
+        assert!(
+            input.prompt.contains("运行结束系统会删除它"),
+            "{}",
+            input.prompt
+        );
+        let block = injected_run_boundary_block(&input.prompt);
+        assert!(
+            block.len() <= RUN_BOUNDARY_BUDGET_BYTES,
+            "带 scratch 边界块 {} 字节超预算 {RUN_BOUNDARY_BUDGET_BYTES}：{block}",
+            block.len()
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// REQ-PRB-04「目录不存在则省略」：不得告知不存在的路径。
+    #[test]
+    fn run_boundary_block_omits_scratch_when_dir_absent() {
+        let fixture = baseline_engine("main", None, WorkspaceType::Story);
+        let session_id = fixture.engine.session.session_id.clone();
+        let store = fixture.engine.lifecycle_store.clone().expect("store");
+        let _ = std::fs::remove_dir_all(store.run_scratch_dir(&session_id));
+
+        let input = fixture
+            .engine
+            .build_streaming_input("生成", AuthorPromptMode::FullConversation)
+            .expect("author prompt");
+        assert!(
+            !input.prompt.contains("run-scratch/"),
+            "目录不存在必须省略条目：{}",
+            input.prompt
+        );
+    }
+
+    /// REQ-PRB-04：scratch 被替换为符号链接时不告知——告知的路径必须是
+    /// 真实目录（`symlink_metadata` 不跟随），防把 provider 引到分区外。
+    #[test]
+    fn run_boundary_block_omits_scratch_when_dir_is_symlink() {
+        let fixture = baseline_engine("main", None, WorkspaceType::Story);
+        let session_id = fixture.engine.session.session_id.clone();
+        let store = fixture.engine.lifecycle_store.clone().expect("store");
+        let scratch = store.run_scratch_dir(&session_id);
+        let external = fixture._aria_root.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::create_dir_all(scratch.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&external, &scratch).unwrap();
+
+        let input = fixture
+            .engine
+            .build_streaming_input("生成", AuthorPromptMode::FullConversation)
+            .expect("author prompt");
+        assert!(
+            !input.prompt.contains("run-scratch/"),
+            "符号链接不告知：{}",
+            input.prompt
+        );
+        let _ = std::fs::remove_file(&scratch);
     }
 }
