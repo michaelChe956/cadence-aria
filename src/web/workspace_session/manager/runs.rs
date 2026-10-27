@@ -9,6 +9,15 @@ use tokio_util::sync::CancellationToken;
 
 use super::{ActiveRun, WorkspaceSessionManager};
 use crate::web::workspace_ws_handler::{ProviderCommand, ProviderRunKind};
+/// test-only 竞态注入点（k3 审 Task 5 竞态收口的可证伪测试基建）：在
+/// 「run 登记完成、scratch 复核/准备之前」同步触发，供竞态测试在该窗口内
+/// 确定性插入 supersede 启动（复现「A 的迟到 prepare 删掉 B 的 scratch」）。
+/// 回调参数为 session_id，由安装方自行过滤；生产构建整体不存在。
+#[cfg(test)]
+type RunScratchPrepareHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+#[cfg(test)]
+static RUN_SCRATCH_PREPARE_SEAM: StdMutex<Option<RunScratchPrepareHook>> = StdMutex::new(None);
 
 impl WorkspaceSessionManager {
     /// REQ-DLS-01：run 层的 lease 复核在状态锁内重读 attachment 当前 epoch，
@@ -151,10 +160,26 @@ impl WorkspaceSessionManager {
             }
             Self::cancel_run(&run);
         }
+        // test-only：seam 触发点（登记后、scratch 复核/准备之前）。
+        #[cfg(test)]
+        self.fire_run_scratch_prepare_seam();
         // REQ-PRB-05：登记后尽力准备 scratch（清空重建 + 0700），失败只 warn。
-        let store = crate::product::lifecycle_store::LifecycleStore::new(self.app_paths.clone());
-        if let Err(error) = store.prepare_run_scratch(&self.session_id) {
-            tracing::warn!(session_id = %self.session_id, error = %error, "run scratch prepare failed");
+        // k3 审竞态收口：prepare 前于状态锁内复核本 run 仍是 active run
+        //（token 匹配）——登记后放锁至 prepare 之间若已被 supersede 顶替，
+        // 顶替者的注册路径已完成自己的 prepare，迟到的清空只会删掉新 run
+        // 刚写下的文件，故跳过。
+        let still_active_run = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state
+                .active_run
+                .as_ref()
+                .is_some_and(|active| active.token == run.1)
+        };
+        if still_active_run {
+            self.prepare_run_scratch_best_effort(run.0);
         }
         Ok(run)
     }
@@ -165,6 +190,8 @@ impl WorkspaceSessionManager {
         let mut stale_choice_ids = Vec::new();
         // REQ-PRB-06：判定 MUST 在状态锁内作出（见下方赋值），删除在锁外。
         let no_active_run;
+        // 迟到收口时活跃 run 可能已被 abort 摘除，run id 不可知 → Option。
+        let mut finished_run_id: Option<u64> = None;
         {
             let mut state = self
                 .state
@@ -175,6 +202,7 @@ impl WorkspaceSessionManager {
                     super::choices::retire_claims_for_run(&mut state, &run.run_incarnation);
                     state.journal.mark_run_terminal();
                     stale_choice_ids = super::choices::unanswered_choice_ids(&run);
+                    finished_run_id = Some(run.id);
                 } else {
                     // 非本人 token：恢复原 run，不误伤。
                     state.active_run = Some(run);
@@ -197,11 +225,7 @@ impl WorkspaceSessionManager {
         // 先 drop 再 finish_run），删除失败只 warn——残留由下次注册的清空与启动
         // sweep 回收，不影响收口。
         if no_active_run {
-            let store =
-                crate::product::lifecycle_store::LifecycleStore::new(self.app_paths.clone());
-            if let Err(error) = store.cleanup_run_scratch(&self.session_id) {
-                tracing::warn!(session_id = %self.session_id, error = %error, "run scratch cleanup failed");
-            }
+            self.cleanup_run_scratch_best_effort(finished_run_id);
         }
         self.maybe_recycle().await;
     }
@@ -379,10 +403,25 @@ impl WorkspaceSessionManager {
                 .mark_run_started(self.next_event_seq.load(Ordering::Relaxed));
             (run_id, token, cancel, command_rx, node_id)
         };
+        // test-only：seam 触发点（登记后、scratch 复核/准备之前）。
+        #[cfg(test)]
+        self.fire_run_scratch_prepare_seam();
         // REQ-PRB-05：登记后尽力准备 scratch（清空重建 + 0700），失败只 warn。
-        let store = crate::product::lifecycle_store::LifecycleStore::new(self.app_paths.clone());
-        if let Err(error) = store.prepare_run_scratch(&self.session_id) {
-            tracing::warn!(session_id = %self.session_id, error = %error, "run scratch prepare failed");
+        // k3 审竞态收口：同 start_run_from_attachment——prepare 前于状态锁内
+        // 复核本 run 仍是 active run（token 匹配），已被顶替则跳过（顶替者的
+        // 注册路径已完成自己的 prepare）。
+        let still_active_run = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state
+                .active_run
+                .as_ref()
+                .is_some_and(|active| active.token == run.1)
+        };
+        if still_active_run {
+            self.prepare_run_scratch_best_effort(run.0);
         }
         Ok(Some(run))
     }
@@ -411,6 +450,36 @@ impl WorkspaceSessionManager {
             .unwrap_or(true)
     }
 
+    /// REQ-PRB-05：登记后尽力准备 per-run scratch（清空重建 + 0700）。失败只
+    /// warn：scratch 非权威（唯一权威通道是最终响应流），残留由下次注册的
+    /// 清空与启动 sweep 回收，不影响启动。
+    fn prepare_run_scratch_best_effort(&self, run_id: u64) {
+        let store = crate::product::lifecycle_store::LifecycleStore::new(self.app_paths.clone());
+        if let Err(error) = store.prepare_run_scratch(&self.session_id) {
+            tracing::warn!(
+                session_id = %self.session_id,
+                run_id,
+                error = %error,
+                "run scratch prepare failed"
+            );
+        }
+    }
+
+    /// REQ-PRB-06：收口时尽力清理 per-run scratch，失败只 warn（残留同上由
+    /// 下次注册的清空与启动 sweep 回收）。`run_id` 为 Option：迟到收口时
+    /// 活跃 run 已被 abort 摘除，run id 不可知。
+    fn cleanup_run_scratch_best_effort(&self, run_id: Option<u64>) {
+        let store = crate::product::lifecycle_store::LifecycleStore::new(self.app_paths.clone());
+        if let Err(error) = store.cleanup_run_scratch(&self.session_id) {
+            tracing::warn!(
+                session_id = %self.session_id,
+                run_id = ?run_id,
+                error = %error,
+                "run scratch cleanup failed"
+            );
+        }
+    }
+
     fn cancel_run(run: &ActiveRun) {
         eprintln!(
             "[aria-cancellation] workspace abort_workspace_run cancelling runner token trigger=abort_workspace_run run_id=run-{} run_token={} node_id={:?}",
@@ -418,6 +487,21 @@ impl WorkspaceSessionManager {
         );
         let _ = run.command_tx.try_send(ProviderCommand::Abort);
         run.cancel.cancel();
+    }
+
+    /// test-only：触发 `RUN_SCRATCH_PREPARE_SEAM`（run 登记后、scratch 复核/
+    /// 准备之前）；生产构建无调用点。
+    #[cfg(test)]
+    fn fire_run_scratch_prepare_seam(&self) {
+        // 锁内克隆、锁外调用：钩子可能长时间阻塞（竞态测试闸门），不得在
+        // 持有 seam 锁期间调用，否则并发触发 seam 的启动路径互相死锁。
+        let hook = RUN_SCRATCH_PREPARE_SEAM
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(&self.session_id);
+        }
     }
 }
 
@@ -876,5 +960,135 @@ mod manager_run_scratch_tests {
         );
         let _ = std::fs::remove_file(&scratch);
         let _ = std::fs::remove_dir_all(&external);
+    }
+
+    /// 竞态用例共享全局 seam（`RUN_SCRATCH_PREPARE_SEAM`），须串行安装/复位。
+    static RACE_SEAM_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 测试结束（含 panic 展开）时复位全局 seam，不泄漏到其它用例。
+    struct SeamReset;
+
+    impl Drop for SeamReset {
+        fn drop(&mut self) {
+            *super::RUN_SCRATCH_PREPARE_SEAM
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+
+    /// 拦截目标 session 在 seam（run 登记后、scratch 复核/准备之前）的第一次
+    /// 启动并阻塞之，返回（命中信号，放行闸门，复位守卫）。窗口内的后续启动
+    /// （supersede 的 B）不受影响——B 的完整注册路径（含 B 自己的 prepare 与
+    /// 落盘）正是竞态用例要保护的受攻击面。
+    fn intercept_first_run_at_prepare_seam(
+        session_id: &'static str,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+        SeamReset,
+    ) {
+        let (hit_tx, hit_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        // Receiver 非 Sync：Mutex 包裹后钩子闭包才满足 Arc 的 Sync 约束。
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let armed_in_hook = armed.clone();
+        *super::RUN_SCRATCH_PREPARE_SEAM
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(std::sync::Arc::new(move |fired_session: &str| {
+                if fired_session != session_id
+                    || armed_in_hook.swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return;
+                }
+                let _ = hit_tx.send(());
+                // 阻塞 A 于「登记后、prepare 前」；放行或对端 drop 均解除。
+                let _ = release_rx
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .recv();
+            }));
+        (hit_rx, release_tx, SeamReset)
+    }
+
+    /// k3 审竞态用例（supersede 抢占 prepare 窗口）：A 登记完成、scratch
+    /// 复核/准备之前被 B 抢占——B supersede 登记、完成自己的 prepare 并落盘
+    /// 文件后，A 迟到的 prepare 不得清掉 B 的 scratch。确定性构造：seam 把
+    /// A 阻塞在「登记后、prepare 前」，主线程在该窗口内完成 B 的 supersede
+    /// 启动与落盘，再放行 A——不依赖时序运气。
+    #[tokio::test]
+    async fn late_prepare_of_superseded_run_keeps_new_scratch() {
+        const SESSION: &str = "n1-run-scratch-late-prepare";
+        let _serial = RACE_SEAM_MUTEX.lock().await;
+        let manager = WorkspaceSessionManager::test_fixture(SESSION);
+        let scratch = scratch_of(&manager);
+        let (hit_rx, release_tx, _seam) = intercept_first_run_at_prepare_seam(SESSION);
+
+        // A：blocking 线程驱动启动（body 无 await 点），登记后停在 seam 处。
+        let manager_a = manager.clone();
+        let handle = tokio::runtime::Handle::current();
+        let run_a = tokio::task::spawn_blocking(move || {
+            handle.block_on(manager_a.start_run(ProviderRunKind::WorkItemPlanBatch, None))
+        });
+        hit_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("A 已完成登记并停在 prepare 前 seam");
+
+        // 窗口内（A 停在 seam）：B supersede——取出 A、登记自己并完成 B 的
+        // prepare（scratch 清空重建），随后落盘 B 的文件。
+        let _run_b = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run B");
+        std::fs::write(scratch.join("b-keep.md"), "B 的暂存").unwrap();
+
+        release_tx.send(()).expect("放行 A 的迟到 prepare");
+        let _ = run_a.await.expect("join A").expect("start run A");
+
+        assert!(
+            scratch.join("b-keep.md").exists(),
+            "被顶替 run 迟到的 prepare 不得清掉新 run 的 scratch"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// 同场景的 auto 认领路径变体：A 经 `try_start_run_if_idle` 空闲认领登记
+    /// 后、prepare 之前被显式启动 B 抢占；A 迟到的 prepare 同样不得清掉 B
+    /// 的 scratch。
+    #[tokio::test]
+    async fn late_prepare_of_superseded_auto_claim_keeps_new_scratch() {
+        const SESSION: &str = "n1-run-scratch-late-claim";
+        let _serial = RACE_SEAM_MUTEX.lock().await;
+        let manager = WorkspaceSessionManager::test_fixture(SESSION);
+        let scratch = scratch_of(&manager);
+        let (hit_rx, release_tx, _seam) = intercept_first_run_at_prepare_seam(SESSION);
+
+        // A：blocking 线程驱动空闲认领，登记后停在 seam 处。
+        let manager_a = manager.clone();
+        let handle = tokio::runtime::Handle::current();
+        let run_a = tokio::task::spawn_blocking(move || {
+            handle
+                .block_on(manager_a.try_start_run_if_idle(ProviderRunKind::WorkItemPlanBatch, None))
+        });
+        hit_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("A 已完成认领登记并停在 prepare 前 seam");
+
+        let _run_b = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run B");
+        std::fs::write(scratch.join("b-keep.md"), "B 的暂存").unwrap();
+
+        release_tx.send(()).expect("放行 A 的迟到 prepare");
+        let claimed = run_a.await.expect("join A").expect("claim A").is_some();
+        assert!(claimed, "A 在空闲时认领，必须登记成功");
+
+        assert!(
+            scratch.join("b-keep.md").exists(),
+            "被顶替认领 run 迟到的 prepare 不得清掉新 run 的 scratch"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }
