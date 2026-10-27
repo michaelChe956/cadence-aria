@@ -770,6 +770,16 @@ pub async fn serve_web(
     {
         eprintln!("[aria-startup] coding run startup reconcile failed: {error}");
     }
+    // REQ-PRB-07：一次性孤儿 scratch 回收（不增常驻任务）。位置与既有
+    // reconcile 同侧——bind 成功之后（B2/F3：bind 失败=零副作用）。失败只
+    // 打日志、不阻塞启动；单项失败由 sweep 内部处理。
+    if let Err(error) = crate::product::lifecycle_store::LifecycleStore::new(product_paths.clone())
+        .sweep_orphan_run_scratch(
+            crate::product::lifecycle_store::run_scratch::RUN_SCRATCH_ORPHAN_TTL,
+        )
+    {
+        eprintln!("[aria-startup] orphan run scratch sweep failed: {error}");
+    }
     refresh_provider_health_for_startup(&state).await;
 
     let app = assemble_production_router(state.clone(), evidence_enabled, static_service);
@@ -1864,5 +1874,66 @@ mod tests {
             );
             assert_ne!(response.status(), StatusCode::FORBIDDEN);
         }
+    }
+
+    /// REQ-PRB-07：启动 sweep 必须在 bind 之后、在开始 serve 之前执行一次，
+    /// 失败只打日志不得传播。计划原文按单行调用字面量断言；该调用含全路径
+    /// 具名 TTL，rustfmt（max_width=100）必然折行，故改为按位置、形参与
+    /// 失败处理方式断言。
+    #[test]
+    fn orphan_run_scratch_sweep_runs_after_bind() {
+        let source = include_str!("app.rs");
+        let start = source.find("pub async fn serve_web(").expect("serve_web");
+        let end = start
+            + source[start..]
+                .find("fn orchestrator_wake_subscribe")
+                .expect("serve_web end");
+        let body = &source[start..end];
+
+        let bind = body.find("TcpListener::bind(addr)").expect("bind call");
+        let reconcile = body
+            .find("reconcile_claimed_coding_runs_once")
+            .expect("coding run reconcile");
+        let sweep = body
+            .find("sweep_orphan_run_scratch(")
+            .expect("orphan run scratch sweep call");
+        let serve = body.find("axum::serve(listener, app)").expect("serve call");
+
+        assert!(
+            bind < sweep,
+            "sweep 必须在 bind 之后（B2/F3：bind 失败=零副作用）"
+        );
+        assert!(
+            reconcile < sweep,
+            "sweep 必须与既有启动副作用同侧（reconcile 之后）"
+        );
+        assert!(sweep < serve, "sweep 必须在开始 serve 之前执行");
+        assert_eq!(
+            body.matches("sweep_orphan_run_scratch(").count(),
+            1,
+            "启动 sweep 只执行一次，不得是周期任务"
+        );
+
+        // 失败处理：`if let Err(error) = …sweep_orphan_run_scratch(…) { 日志 }`，
+        // 不得用 `?` 把错误传播成启动失败。
+        let guard = &body[sweep.saturating_sub(300)..sweep];
+        assert!(
+            guard.contains("if let Err(error)"),
+            "sweep 结果必须显式捕获：{guard}"
+        );
+        assert!(
+            guard.contains("product_paths"),
+            "sweep 必须使用 serve_web 内的 product_paths：{guard}"
+        );
+        let logged = body[sweep..]
+            .find("orphan run scratch sweep failed")
+            .expect("sweep 失败必须只打日志");
+        let call = &body[sweep..sweep + logged];
+        assert!(
+            call.contains("run_scratch::RUN_SCRATCH_ORPHAN_TTL"),
+            "TTL 必须传具名常量 RUN_SCRATCH_ORPHAN_TTL：{call}"
+        );
+        assert!(!call.contains("from_secs"), "TTL 不得写字面量时长：{call}");
+        assert!(!call.contains('?'), "sweep 失败不得用 ? 传播：{call}");
     }
 }
