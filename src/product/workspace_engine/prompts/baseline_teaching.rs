@@ -102,13 +102,7 @@ impl WorkspaceEngine {
         ))
     }
 
-    /// REQ-PRB-01/02：本轮运行边界块（无条件注入，先于基线解析）。
-    /// 无持久 store 的内存态 engine 整块省略（与基线教学块跳过面同构，
-    /// 保证既有 prompt 预算断言字节不变）。
-    /// 可见性：`pub(crate)`——Task 3 的自动续写重试路径（`provider_drive::artifact_retry`）
-    /// 跨模块消费同一注入函数（crate 内可见，不扩张公共面）。
-    /// REQ-PRB-04：scratch 目录在盘上存在时附带其绝对路径条目（`author_scratch_dir`）。
-    /// REQ-PRB-04：仅当 scratch 是真实目录时告知其绝对路径——
+    /// REQ-PRB-04：scratch 目录绝对路径（仅当盘上是真实目录时返回）。
     /// `symlink_metadata` 不跟随符号链接；目录不存在/被替换为链接/普通文件
     /// 一律省略（不得告知不存在的路径）。存在性取真实文件系统状态。
     fn author_scratch_dir(&self) -> Option<std::path::PathBuf> {
@@ -120,6 +114,13 @@ impl WorkspaceEngine {
         }
     }
 
+    /// REQ-PRB-01/02：本轮运行边界块（无条件注入，先于基线解析）。
+    /// 无持久 store 的内存态 engine 整块省略（与基线教学块跳过面同构，
+    /// 保证既有 prompt 预算断言字节不变）。
+    /// 可见性：`pub(crate)`——Task 3 的自动续写重试路径
+    /// （`provider_drive::artifact_retry`）跨模块消费同一注入函数
+    /// （crate 内可见，不扩张公共面）。
+    /// REQ-PRB-04：scratch 是真实目录时附带其绝对路径条目（见 `author_scratch_dir`）。
     pub(crate) fn append_author_run_boundary(&self, prompt: &mut String) {
         if self.lifecycle_store.is_none() {
             return;

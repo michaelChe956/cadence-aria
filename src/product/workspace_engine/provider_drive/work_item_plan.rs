@@ -559,7 +559,8 @@ impl WorkspaceEngine {
     ///
     /// 去重：`upsert_execution_event_json` 按 `event_id` 覆盖同 id 事件；
     /// 上界：每 node 至多 `MAX_RUN_BOUNDARY_ALERTS_PER_NODE` 条告警；
-    /// 只告警：落盘/广播失败一律吞掉，不向上传播。
+    /// 只告警：落盘/广播失败只留 `tracing::warn` 痕迹（与 usage 落盘失败同口径，
+    /// 「没有告警」与「告警没落地」必须可区分），不向上传播。
     async fn append_run_boundary_alerts(
         &mut self,
         node_id: &str,
@@ -568,7 +569,7 @@ impl WorkspaceEngine {
         agent: Option<ProviderName>,
     ) {
         let mut inserted: Vec<ProviderExecutionEvent> = Vec::new();
-        let _ = self
+        let persisted = self
             .update_node_detail(node_id, |detail| {
                 let mut existing = detail
                     .execution_events
@@ -598,15 +599,33 @@ impl WorkspaceEngine {
                 }
             })
             .await;
+        if let Err(error) = persisted {
+            tracing::warn!(
+                target: "workspace_engine",
+                node_id,
+                error = %error,
+                "run boundary alert persist failed"
+            );
+        }
         for alert in inserted {
-            let _ = self
+            let event_id = alert.event_id.clone();
+            if let Err(error) = self
                 .event_tx
                 .send(EngineEvent::ExecutionEvent {
                     event: alert,
                     node_id: Some(node_id.to_string()),
                     agent: agent.clone(),
                 })
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    target: "workspace_engine",
+                    node_id,
+                    event_id,
+                    error = %error,
+                    "run boundary alert broadcast failed"
+                );
+            }
         }
     }
 

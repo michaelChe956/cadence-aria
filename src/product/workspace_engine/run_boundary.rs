@@ -209,13 +209,42 @@ struct Token {
     access: Option<BoundaryAccess>,
 }
 
-/// 手写切词：空白与 shell 标点作分隔，`>` 单独成词，引号只分组不保留内容。
+/// 手写切词：空白与 shell 标点作分隔，`>` 单独成词。
+///
+/// 引号（`'`/`"`/`` ` ``）只作分组边界，字符本身替换为空白；引号**内**的 shell
+/// 符号（`>` `<` `|` `;` `&`）同样替换为空白——它们既不成重定向词元，也不成段
+/// 分隔词元（`grep -n 'a > b' f` 里的 `>` 不是任何落盘形态）。
+/// 引号外的 `<` `|` `;` `&` 保留为独立词元，供 `is_separator` / `segment_end`
+/// 切段（否则 `cp a b; cat x` 的写目标会串到后续命令的只读路径）。
 fn tokenize(text: &str) -> Vec<Token> {
     let mut normalized = String::with_capacity(text.len() + 8);
+    let mut quote: Option<char> = None;
     for ch in text.chars() {
+        if let Some(open) = quote {
+            match ch {
+                // 只由同种引号闭合；异种引号与分组标点同按空白处理（不切换状态）。
+                '>' | '<' | '|' | ';' | '&' | '\'' | '"' | '`' | '(' | ')' | ',' => {
+                    normalized.push(' ');
+                    if ch == open {
+                        quote = None;
+                    }
+                }
+                ch => normalized.push(ch),
+            }
+            continue;
+        }
         match ch {
+            '\'' | '"' | '`' => {
+                quote = Some(ch);
+                normalized.push(' ');
+            }
             '>' => normalized.push_str(" > "),
-            '<' | '|' | ';' | '&' | '(' | ')' | ',' | '\'' | '"' | '`' => normalized.push(' '),
+            '<' | '|' | ';' | '&' => {
+                normalized.push(' ');
+                normalized.push(ch);
+                normalized.push(' ');
+            }
+            '(' | ')' | ',' => normalized.push(' '),
             ch => normalized.push(ch),
         }
     }
@@ -309,10 +338,18 @@ fn write_targets(words: &[&str]) -> Vec<bool> {
             _ => None,
         };
         if let Some(target) = target {
-            flags[target] = true;
+            // 设备路径不是落盘目标（`2>/dev/null`、`tee /dev/null` 等不得判写越界）。
+            if !is_device_path(words[target]) {
+                flags[target] = true;
+            }
         }
     }
     flags
+}
+
+/// `/dev/` 之下的设备/伪设备路径：重定向到设备不构成「写入磁盘上的路径」。
+fn is_device_path(token: &str) -> bool {
+    token.starts_with("/dev/")
 }
 
 /// 绝对路径词元（支持 `--flag=/abs/path` 形式）。
@@ -358,7 +395,7 @@ fn classify(boundary: &RunBoundary, path: &str, access: BoundaryAccess) -> Vec<R
     if tmp_draft {
         codes.push(RunBoundaryCode::TmpDraftTouch);
     }
-    if access == BoundaryAccess::Write && !under_scratch {
+    if access == BoundaryAccess::Write && !under_scratch && !is_device_path(path) {
         codes.push(RunBoundaryCode::WriteOutsideScratch);
     }
     codes
@@ -618,6 +655,86 @@ mod boundary_scan_tests {
             let got = codes(&scan_event(&b, &command_event(command)));
             assert!(!got.contains(&CODE_WRITE_OUTSIDE_SCRATCH), "command={command} got={got:?}");
         }
+    }
+
+    #[test]
+    fn boundary_scan_ignores_device_redirection() {
+        // 审查应修 1：设备路径（`/dev/` 前缀）不是落盘目标，`2>/dev/null` 等
+        // 常见 shell 惯用法不得产生「写越界」假告警。
+        let b = boundary("/home/u/ws/.aria", Some("/home/u/ws/.aria/run-scratch/sid"), &[]);
+        for command in [
+            "ls /tmp 2>/dev/null",
+            "bash -c 'ls /tmp' 2>/dev/null",
+            "make > /dev/null 2>&1",
+            "ls | tee /dev/null",
+        ] {
+            let findings = scan_event(&b, &command_event(command));
+            assert!(findings.is_empty(), "command={command} findings={:?}", codes(&findings));
+        }
+        // 排除设备不改变真实落盘的召回面：同一命令里的文件重定向照常命中。
+        let findings = scan_event(&b, &command_event("echo x > /dev/null 2>&1 && echo y > /tmp/report.md"));
+        assert!(findings.iter().any(|finding| finding.code == RunBoundaryCode::WriteOutsideScratch
+            && finding.access == BoundaryAccess::Write
+            && finding.path == "/tmp/report.md"), "{:?}", findings);
+        assert!(!findings.iter().any(|finding| finding.path.starts_with("/dev/")), "{:?}", findings);
+    }
+
+    fn write_paths(findings: &[BoundaryFinding]) -> Vec<&str> {
+        findings
+            .iter()
+            .filter(|finding| finding.access == BoundaryAccess::Write)
+            .map(|finding| finding.path.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn boundary_scan_keeps_write_targets_within_segment() {
+        // 审查应修 2：`cp`/`mv`/`sed -i` 的写目标只取本段路径；后续命令的绝对
+        // 路径（只读）不得被当成写目标串味。
+        let b = boundary("/home/u/ws/.aria", Some("/home/u/ws/.aria/run-scratch/sid"), &[]);
+        let cases: &[(&str, &str)] = &[
+            ("cp /repo/b.md /repo/c.md; cat /tmp/log.txt", "/repo/c.md"),
+            ("cp /repo/b.md /repo/c.md && cat /tmp/log.txt", "/repo/c.md"),
+            ("mv /repo/b.md /repo/c.md | cat /tmp/log.txt", "/repo/c.md"),
+            ("sed -i 's/a/b/' /repo/x && cat /tmp/log.txt", "/repo/x"),
+        ];
+        for (command, expected) in cases {
+            let findings = scan_event(&b, &command_event(command));
+            let writes = write_paths(&findings);
+            assert_eq!(writes, vec![*expected], "command={command} findings={:?}", codes(&findings));
+            assert!(!writes.contains(&"/tmp/log.txt"), "command={command} 写目标串味：{writes:?}");
+        }
+        // 同段内的真实写仍命中（末个绝对路径）。
+        for command in [
+            "cp /repo/b.md /tmp/copy.md",
+            "mv /repo/b.md /tmp/moved.md",
+            "sed -i 's/a/b/' /tmp/notes.md",
+        ] {
+            let got = codes(&scan_event(&b, &command_event(command)));
+            assert!(got.contains(&CODE_WRITE_OUTSIDE_SCRATCH), "command={command} got={got:?}");
+        }
+    }
+
+    #[test]
+    fn boundary_scan_ignores_operators_inside_quotes() {
+        // 审查建议 3：引号内（shell 字面量）的 `>` 不是重定向，其后的只读路径
+        // 不得被判写越界。
+        let b = boundary("/home/u/ws/.aria", Some("/home/u/ws/.aria/run-scratch/sid"), &[]);
+        for command in [
+            "grep -n 'a > b' /tmp/report.txt",
+            "grep -n \"a > b\" /tmp/report.txt",
+            "grep -n 'a | b' /tmp/report.txt",
+            "grep -n 'a;b' /tmp/report.txt",
+        ] {
+            let findings = scan_event(&b, &command_event(command));
+            assert!(!codes(&findings).contains(&CODE_WRITE_OUTSIDE_SCRATCH), "command={command} findings={:?}", codes(&findings));
+        }
+        // 引号内符号不得破坏真实写形态的识别（`sed -i` 的 `|` 作分隔符）。
+        let got = codes(&scan_event(&b, &command_event("sed -i 's|a|b|' /tmp/notes.md")));
+        assert!(got.contains(&CODE_WRITE_OUTSIDE_SCRATCH), "{got:?}");
+        // 引号外的重定向照常判写。
+        let got = codes(&scan_event(&b, &command_event("echo 'a > b' > /tmp/report.md")));
+        assert!(got.contains(&CODE_WRITE_OUTSIDE_SCRATCH), "{got:?}");
     }
 
     #[test]

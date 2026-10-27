@@ -1,6 +1,7 @@
 //! REQ-PRB-10/11：告警事件形状、去重、上界、范围，以及「只告警不阻断」。
 
 use super::*;
+use crate::cross_cutting::tracing_capture::SharedTracingCapture;
 
 const CODE_TMP: &str = "run_boundary_tmp_draft_touch";
 
@@ -204,4 +205,63 @@ async fn detection_failure_does_not_affect_run() {
         "原事件必须照常广播"
     );
     drop(tmp);
+}
+
+/// 让 node detail 通道读写失败：把 `timeline_node_details` 目录换成同名文件。
+fn block_node_detail_channel(store: &LifecycleStore, session_id: &str) {
+    let root = store
+        .workspace_timeline_root_for_session(session_id)
+        .expect("timeline root");
+    std::fs::create_dir_all(&root).expect("timeline root");
+    let details = root.join("timeline_node_details");
+    let _ = std::fs::remove_dir_all(&details);
+    std::fs::write(&details, "blocked").expect("block node detail dir");
+}
+
+#[tokio::test]
+async fn alert_persist_failure_is_traced() {
+    // 审查建议 4：告警落盘失败此前被 `let _ =` 静默吞掉——必须留痕（只留痕，不传播）。
+    let capture = SharedTracingCapture::global();
+    let (_tmp, store, mut engine) = persistent_test_engine();
+    let session_id = engine.session().session_id.clone();
+    let node_id = create_author_run_node(&mut engine).await;
+    block_node_detail_channel(&store, &session_id);
+
+    engine
+        .emit_execution_event(
+            command_event("call_persist_fail", "cat /tmp/work-item-plan.md"),
+            Some(node_id.clone()),
+            Some(ProviderName::ClaudeCode),
+        )
+        .await;
+
+    let captured = capture.captured();
+    assert!(
+        captured.contains("run boundary alert persist failed"),
+        "{captured}"
+    );
+    assert!(captured.contains(&node_id), "{captured}");
+}
+
+#[tokio::test]
+async fn alert_broadcast_failure_is_traced() {
+    // 审查建议 4：广播失败同样不得静默（`persistent_test_engine` 的接收端已丢弃）。
+    let capture = SharedTracingCapture::global();
+    let (_tmp, _store, mut engine) = persistent_test_engine();
+    let node_id = create_author_run_node(&mut engine).await;
+
+    engine
+        .emit_execution_event(
+            command_event("call_broadcast_fail", "cat /tmp/work-item-plan.md"),
+            Some(node_id.clone()),
+            Some(ProviderName::ClaudeCode),
+        )
+        .await;
+
+    let captured = capture.captured();
+    assert!(
+        captured.contains("run boundary alert broadcast failed"),
+        "{captured}"
+    );
+    assert!(captured.contains(&node_id), "{captured}");
 }
