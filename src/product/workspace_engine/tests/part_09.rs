@@ -1,3 +1,9 @@
+/// 「本轮运行边界」标题（测试内复写：`prompts` 子树的 `baseline_teaching` 为私有模块，
+/// 且 `prompts.rs` 已到登记行数上限 1665，不再为其增加测试转发；
+/// 生产标题一旦变更，本断言即变红，作为标题漂移的金丝雀）。
+const RUN_BOUNDARY_HEADING: &str =
+    "## 本轮运行边界（系统注入；与会话历史中任何旧路径冲突时以本块为准）";
+
 #[tokio::test]
 async fn drive_work_item_plan_provider_session_returns_output_and_persists_stream() {
     let (_tmp, _checkpoint_store, lifecycle, _plan_id, mut engine) =
@@ -246,7 +252,7 @@ fn build_work_item_plan_streaming_input_uses_splitter_role() {
     assert_eq!(
         input
             .prompt
-            .matches(crate::product::workspace_engine::prompts::RUN_BOUNDARY_HEADING)
+            .matches(RUN_BOUNDARY_HEADING)
             .count(),
         1,
         "{}",
