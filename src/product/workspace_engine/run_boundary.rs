@@ -1,14 +1,13 @@
-//! REQ-PRB-09：作者侧 tool-call 越界读写扫描（纯函数；只分类，不接线事件漏斗）。
+//! REQ-PRB-09/10：作者侧 tool-call 越界读写扫描与告警事件构造。
 //! 只扫 `command` + `detail` 前 4 KiB，单事件最多 8 条告警；手写切词，不引 `regex`。
-// Task 10 接线前，本模块入口在非测试构建下暂无调用方。
-#![cfg_attr(not(test), allow(dead_code))]
+//! Task 10 起本模块由 `emit_execution_event` 漏斗调用（只告警，不阻断）。
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::cross_cutting::streaming_provider::{
-    ProviderExecutionEvent, ProviderExecutionEventKind,
+    ProviderExecutionEvent, ProviderExecutionEventKind, ProviderExecutionEventStatus,
 };
 use crate::web::workspace_ws_types::TimelineNodeType;
 
@@ -160,6 +159,36 @@ pub(crate) fn path_hash8(path: &str) -> String {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
     format!("{:016x}", hasher.finish())[..8].to_string()
+}
+
+/// REQ-PRB-10：越界发现 → 告警事件（`kind=Provider`，故不再触发扫描）。
+///
+/// `event_id` = `{稳定码}_{路径 8 位哈希}`：稳定码本身已带 `run_boundary_` 前缀，
+/// 故不再重复拼前缀；同一 code + path 得到同一 id，由
+/// `upsert_execution_event_json` 按 `event_id` 去重（每 node 至多 8 条）。
+pub(crate) fn run_boundary_alert_event(
+    finding: &BoundaryFinding,
+    source_event_id: &str,
+) -> ProviderExecutionEvent {
+    let code = finding.code.as_str();
+    ProviderExecutionEvent {
+        event_id: format!("{code}_{}", path_hash8(&finding.path)),
+        kind: ProviderExecutionEventKind::Provider,
+        status: ProviderExecutionEventStatus::Completed,
+        title: format!("运行边界告警: {code}"),
+        detail: Some(format!(
+            "path={} access={} source_event={source_event_id}",
+            finding.path,
+            match finding.access {
+                BoundaryAccess::Read => "read",
+                BoundaryAccess::Write => "write",
+            }
+        )),
+        command: None,
+        cwd: None,
+        output: None,
+        exit_code: None,
+    }
 }
 
 /// 按 UTF-8 字节截断，不切在字符中间。

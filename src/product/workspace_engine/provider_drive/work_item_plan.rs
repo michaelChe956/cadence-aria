@@ -1,4 +1,5 @@
 use super::*;
+use crate::product::workspace_engine::run_boundary;
 
 impl WorkspaceEngine {
     pub async fn drive_work_item_plan_provider_session_to_output(
@@ -485,14 +486,128 @@ impl WorkspaceEngine {
                     .await;
             }
         }
+        // REQ-PRB-10/11：原事件已照原样持久化 → 此处扫描（只扫作者侧 `Command` 事件）
+        // → 广播原事件 → 最后追加告警事件（只告警，不阻断 run）。
+        let source_event_id = event.event_id.clone();
+        let scan = self.run_boundary_scan_request(&event, node_id.as_deref());
         let _ = self
             .event_tx
             .send(EngineEvent::ExecutionEvent {
                 event,
-                node_id,
-                agent,
+                node_id: node_id.clone(),
+                agent: agent.clone(),
             })
             .await;
+        if let Some((node_id, findings)) = scan {
+            self.append_run_boundary_alerts(&node_id, &source_event_id, &findings, agent)
+                .await;
+        }
+    }
+
+    /// REQ-PRB-10：扫描请求 = 作者侧节点 + `Command` 类事件；其余整段跳过。
+    ///
+    /// 作者侧判定按 `TimelineNodeType` 白名单（不按 provider 名或 role）：
+    /// 先取事件所属节点的类型，内存时间线查不到时回落 `active_node_type()`。
+    fn run_boundary_scan_request(
+        &self,
+        event: &ProviderExecutionEvent,
+        node_id: Option<&str>,
+    ) -> Option<(String, Vec<run_boundary::BoundaryFinding>)> {
+        let node_id = node_id?;
+        if event.kind != ProviderExecutionEventKind::Command {
+            return None;
+        }
+        let node_type = self
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .map(|node| node.node_type.clone())
+            .or_else(|| self.active_node_type())?;
+        if !run_boundary::is_author_side_node(&node_type) {
+            return None;
+        }
+        let context = self.run_boundary_context()?;
+        let findings = run_boundary::scan_event(&context, event);
+        if findings.is_empty() {
+            return None;
+        }
+        Some((node_id.to_string(), findings))
+    }
+
+    /// REQ-PRB-10：扫描上下文（scratch / 状态根 / provider 历史目录表）。
+    ///
+    /// 无持久化 store（内存态 engine）时整段跳过——检测路径不参与成败判定。
+    fn run_boundary_context(&self) -> Option<run_boundary::RunBoundary> {
+        let store = self.lifecycle_store.as_ref()?;
+        let dir = store.run_scratch_dir(&self.session.session_id);
+        let scratch = std::fs::symlink_metadata(&dir)
+            .ok()
+            .filter(|metadata| metadata.file_type().is_dir())
+            .map(|_| dir);
+        Some(run_boundary::RunBoundary {
+            state_root: store.app_paths().root().to_path_buf(),
+            scratch,
+            tmp_roots: vec![
+                std::path::PathBuf::from("/tmp"),
+                std::path::PathBuf::from("/var/tmp"),
+            ],
+            history_dirs: run_boundary::default_history_dirs(),
+        })
+    }
+
+    /// REQ-PRB-10/11：把每个 finding 作为独立告警事件写进 node detail 并广播。
+    ///
+    /// 去重：`upsert_execution_event_json` 按 `event_id` 覆盖同 id 事件；
+    /// 上界：每 node 至多 `MAX_RUN_BOUNDARY_ALERTS_PER_NODE` 条告警；
+    /// 只告警：落盘/广播失败一律吞掉，不向上传播。
+    async fn append_run_boundary_alerts(
+        &mut self,
+        node_id: &str,
+        source_event_id: &str,
+        findings: &[run_boundary::BoundaryFinding],
+        agent: Option<ProviderName>,
+    ) {
+        let mut inserted: Vec<ProviderExecutionEvent> = Vec::new();
+        let _ = self
+            .update_node_detail(node_id, |detail| {
+                let mut existing = detail
+                    .execution_events
+                    .iter()
+                    .filter(|event| {
+                        event
+                            .get("event_id")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|id| id.starts_with("run_boundary_"))
+                    })
+                    .count();
+                for finding in findings {
+                    if existing >= run_boundary::MAX_RUN_BOUNDARY_ALERTS_PER_NODE {
+                        break;
+                    }
+                    let alert = run_boundary::run_boundary_alert_event(finding, source_event_id);
+                    let json = execution_event_json(&alert);
+                    let duplicated = detail
+                        .execution_events
+                        .iter()
+                        .any(|event| event.get("event_id") == json.get("event_id"));
+                    upsert_execution_event_json(&mut detail.execution_events, json);
+                    if !duplicated {
+                        existing += 1;
+                        inserted.push(alert);
+                    }
+                }
+            })
+            .await;
+        for alert in inserted {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::ExecutionEvent {
+                    event: alert,
+                    node_id: Some(node_id.to_string()),
+                    agent: agent.clone(),
+                })
+                .await;
+        }
     }
 
     pub async fn emit_provider_prompt_event(
