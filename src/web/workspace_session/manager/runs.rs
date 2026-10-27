@@ -151,6 +151,11 @@ impl WorkspaceSessionManager {
             }
             Self::cancel_run(&run);
         }
+        // REQ-PRB-05：登记后尽力准备 scratch（清空重建 + 0700），失败只 warn。
+        let store = crate::product::lifecycle_store::LifecycleStore::new(self.app_paths.clone());
+        if let Err(error) = store.prepare_run_scratch(&self.session_id) {
+            tracing::warn!(session_id = %self.session_id, error = %error, "run scratch prepare failed");
+        }
         Ok(run)
     }
 
@@ -325,37 +330,45 @@ impl WorkspaceSessionManager {
         }
         let (command_tx, command_rx) = mpsc::channel(8);
         let cancel = CancellationToken::new();
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.active_run.is_some() {
-            return Ok(None);
+        let run = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.active_run.is_some() {
+                return Ok(None);
+            }
+            state.next_run_id += 1;
+            let run_id = state.next_run_id;
+            let token = crate::web::workspace_ws_handler::NEXT_ACTIVE_RUN_TOKEN
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // 批 2 T2：同 start_run_from_attachment——completion watch 随 run 登记。
+            let (completion_tx, _completion_rx) = watch::channel(false);
+            state.run_completions.insert(token, completion_tx);
+            let node_id = requested_node_id;
+            let lease_epoch = state.lease.epoch;
+            state.active_run = Some(ActiveRun {
+                id: run_id,
+                token,
+                node_id: node_id.clone(),
+                kind,
+                cancel: cancel.clone(),
+                command_tx,
+                pending_choices: Arc::new(StdMutex::new(Vec::new())),
+                lease_epoch,
+                run_incarnation: uuid::Uuid::new_v4().to_string(),
+            });
+            state
+                .journal
+                .mark_run_started(self.next_event_seq.load(Ordering::Relaxed));
+            (run_id, token, cancel, command_rx, node_id)
+        };
+        // REQ-PRB-05：登记后尽力准备 scratch（清空重建 + 0700），失败只 warn。
+        let store = crate::product::lifecycle_store::LifecycleStore::new(self.app_paths.clone());
+        if let Err(error) = store.prepare_run_scratch(&self.session_id) {
+            tracing::warn!(session_id = %self.session_id, error = %error, "run scratch prepare failed");
         }
-        state.next_run_id += 1;
-        let run_id = state.next_run_id;
-        let token = crate::web::workspace_ws_handler::NEXT_ACTIVE_RUN_TOKEN
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // 批 2 T2：同 start_run_from_attachment——completion watch 随 run 登记。
-        let (completion_tx, _completion_rx) = watch::channel(false);
-        state.run_completions.insert(token, completion_tx);
-        let node_id = requested_node_id;
-        let lease_epoch = state.lease.epoch;
-        state.active_run = Some(ActiveRun {
-            id: run_id,
-            token,
-            node_id: node_id.clone(),
-            kind,
-            cancel: cancel.clone(),
-            command_tx,
-            pending_choices: Arc::new(StdMutex::new(Vec::new())),
-            lease_epoch,
-            run_incarnation: uuid::Uuid::new_v4().to_string(),
-        });
-        state
-            .journal
-            .mark_run_started(self.next_event_seq.load(Ordering::Relaxed));
-        Ok(Some((run_id, token, cancel, command_rx, node_id)))
+        Ok(Some(run))
     }
 
     /// test-only：活跃 run 的可比对快照（token/run_incarnation），供自动认领
@@ -697,5 +710,70 @@ mod n1_tests {
             fact_keys(&store).is_empty(),
             "被顶替 run 的失效 choice 题已清"
         );
+    }
+}
+
+#[cfg(test)]
+mod manager_run_scratch_tests {
+    use super::WorkspaceSessionManager;
+    use crate::product::lifecycle_store::LifecycleStore;
+    use crate::web::workspace_ws_handler::ProviderRunKind;
+
+    fn scratch_of(manager: &WorkspaceSessionManager) -> std::path::PathBuf {
+        LifecycleStore::new(manager.app_paths.clone()).run_scratch_dir(&manager.session_id)
+    }
+
+    #[tokio::test]
+    async fn start_run_from_attachment_prepares_run_scratch() {
+        let manager = WorkspaceSessionManager::test_fixture("n1-run-scratch-supersede");
+        let scratch = scratch_of(&manager);
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("old.md"), "前序 run 残留").unwrap();
+
+        let _ = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run");
+
+        assert!(scratch.is_dir());
+        assert!(!scratch.join("old.md").exists(), "新 run 不得看见前序内容");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[tokio::test]
+    async fn try_start_run_if_idle_prepares_run_scratch() {
+        let manager = WorkspaceSessionManager::test_fixture("n1-run-scratch-idle");
+        let scratch = scratch_of(&manager);
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("old.md"), "前序 run 残留").unwrap();
+
+        let started = manager
+            .try_start_run_if_idle(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("claim if idle")
+            .is_some();
+        assert!(started);
+        assert!(!scratch.join("old.md").exists());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[tokio::test]
+    async fn restart_within_run_keeps_scratch_content() {
+        let manager = WorkspaceSessionManager::test_fixture("n1-run-scratch-restart");
+        let (_, token, _, _rx, _) = manager
+            .start_run(ProviderRunKind::WorkItemPlanBatch, None)
+            .await
+            .expect("start run");
+        let scratch = scratch_of(&manager);
+        std::fs::write(scratch.join("keep.md"), "同 run 暂存").unwrap();
+
+        let (tx, _rx2) = tokio::sync::mpsc::channel(8);
+        manager.replace_command_tx_if_token(token, tx).await;
+
+        assert!(
+            scratch.join("keep.md").exists(),
+            "同 run 内重启不得清空 scratch"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }
