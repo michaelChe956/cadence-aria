@@ -241,6 +241,10 @@ impl WorkspaceEngine {
 
     /// 自动续写 prompt 构造。`blocking_reasons` 由调用方在同一 selection 上一次算出
     /// （失败摘要、诊断事件与 prompt 共用同一份 gate 结果，不重复校验同一原文）。
+    ///
+    /// REQ-PRB-03：续写 prompt 整体替换原 prompt（不经作者侧漏斗），故替换后在此
+    /// 重新注入一次本轮运行边界块——续写/重试轮（含 resume 轮）内边界块恰一次，
+    /// 不与原 prompt 叠成两份。
     pub(crate) fn build_artifact_retry_input(
         &self,
         base_input: &StreamingProviderInput,
@@ -254,6 +258,7 @@ impl WorkspaceEngine {
             previous_output,
             blocking_reasons,
         );
+        self.append_author_run_boundary(&mut input.prompt);
         if let Some(provider_session_id) = provider_session_id
             .map(|id| id.trim().to_string())
             .filter(|id| !id.is_empty())

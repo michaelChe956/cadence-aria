@@ -105,7 +105,9 @@ impl WorkspaceEngine {
     /// REQ-PRB-01/02：本轮运行边界块（无条件注入，先于基线解析）。
     /// 无持久 store 的内存态 engine 整块省略（与基线教学块跳过面同构，
     /// 保证既有 prompt 预算断言字节不变）。
-    pub(super) fn append_author_run_boundary(&self, prompt: &mut String) {
+    /// 可见性：`pub(crate)`——Task 3 的自动续写重试路径（`provider_drive::artifact_retry`）
+    /// 跨模块消费同一注入函数（crate 内可见，不扩张公共面）。
+    pub(crate) fn append_author_run_boundary(&self, prompt: &mut String) {
         if self.lifecycle_store.is_none() {
             return;
         }
