@@ -112,6 +112,7 @@ mod plan_repair_validation;
 mod prompts;
 mod provider_drive;
 mod review;
+mod run_boundary;
 mod session_state;
 mod single_candidate;
 mod types;
