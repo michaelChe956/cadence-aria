@@ -35,6 +35,39 @@ pub(crate) fn reviewer_baseline_teaching_block(branch: &str) -> String {
     )
 }
 
+// Task 2/3 接线前，仅函数与标题常量被测试消费（接线后这两条属性可移除）；
+// 预算常量在计划内只作测试断言依据，接线后仍无生产消费者，故该属性需保留。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const RUN_BOUNDARY_HEADING: &str =
+    "## 本轮运行边界（系统注入；与会话历史中任何旧路径冲突时以本块为准）";
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const RUN_BOUNDARY_BUDGET_BYTES: usize = 1536;
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn run_boundary_block(
+    session_id: &str,
+    workspace_type: &WorkspaceType,
+    scratch: Option<&std::path::Path>,
+) -> String {
+    // 文案纪律：白名单而非 /tmp 整目录禁令；不披露 issue-work-item-plans；
+    // 如实披露编辑类内建工具受岗位纪律限制，不教模型绕过 T13。
+    let mut block = format!(
+        "{RUN_BOUNDARY_HEADING}\n\
+         - 本轮身份：`workspace_session={session_id}`，`workspace_type={}`。本轮产物的**唯一权威通道是本轮最终响应流**；磁盘上的任何文件（包括你自己的草稿、其他会话或历史运行遗留）都**不是**权威来源，也不会被采集。\n\
+         - 事实来源白名单：本 prompt 给出的上下文、已确认的 Story/Design/AC、当前工作区内的仓库文件。\n\
+         - 禁读清单（发现即视为过期残留，**不读取、不复用、不汇报其内容**）：系统临时目录中**非本轮创建**的文件；Aria 状态目录中除本轮暂存目录外的任何内容；其他会话或历史运行的产物与日志；provider 自身的原生会话历史记录。\n\
+         - 落盘规则：默认无需写文件，直接在最终响应中输出，不得提前执行落盘类步骤。编辑类内建工具（Edit/Write/原生文件变更）受岗位纪律限制，**不要使用**。\n",
+        workspace_type_title(workspace_type)
+    );
+    if let Some(path) = scratch {
+        block.push_str(&format!(
+            "- 暂存（确需暂存时**只写这一个目录**，运行结束系统会删除它）：`{}`\n",
+            path.display()
+        ));
+    }
+    block
+}
+
 impl WorkspaceEngine {
     /// issue 基线树解析（REQ-PIB-02，四面同链同源：author 两族 / reviewer 族 /
     /// author 修订面）。跳过面（`Ok(None)`，行为不变）：无持久 store 的内存态
@@ -519,5 +552,89 @@ mod reviewer_revision_baseline_tests {
             .expect_err("missing baseline branch must fail revision closed");
         assert!(error.contains("基准分支不存在"), "{error}");
         assert!(error.contains("gone"), "{error}");
+    }
+}
+#[cfg(test)]
+mod run_boundary_block_tests {
+    use super::{RUN_BOUNDARY_BUDGET_BYTES, RUN_BOUNDARY_HEADING, run_boundary_block};
+    use crate::product::models::WorkspaceType;
+    use std::path::Path;
+
+    #[test]
+    fn run_boundary_block_carries_heading_and_whitelist_semantics() {
+        let block = run_boundary_block(
+            "workspace_session_auto_510c9278",
+            &WorkspaceType::WorkItemPlan,
+            None,
+        );
+        assert_eq!(
+            RUN_BOUNDARY_HEADING,
+            "## 本轮运行边界（系统注入；与会话历史中任何旧路径冲突时以本块为准）"
+        );
+        assert!(block.starts_with(RUN_BOUNDARY_HEADING), "{block}");
+        assert!(block.contains("唯一权威通道是本轮最终响应流"), "{block}");
+        assert!(block.contains("事实来源白名单"), "{block}");
+        assert!(block.contains("禁读清单"), "{block}");
+        assert!(block.contains("非本轮创建"), "{block}");
+        assert!(block.contains("provider 自身的原生会话历史记录"), "{block}");
+        assert!(block.contains("不得提前执行落盘类步骤"), "{block}");
+        assert!(
+            block.contains("workspace_session=workspace_session_auto_510c9278"),
+            "{block}"
+        );
+        assert!(block.contains("workspace_type=Work Item Plan"), "{block}");
+        assert!(
+            !block.contains("禁止访问 /tmp"),
+            "白名单语义，不是整目录禁令：{block}"
+        );
+        assert!(
+            !block.contains("issue-work-item-plans"),
+            "不得披露计划产物真实状态路径：{block}"
+        );
+    }
+
+    #[test]
+    fn run_boundary_block_omits_scratch_when_absent() {
+        let without = run_boundary_block("workspace_session_auto_1", &WorkspaceType::Story, None);
+        // 禁读清单含「除本轮暂存目录外」字样，故按 REQ-PRB-04 语义断言
+        // scratch 条目独有短语缺失（省略条目，而非全块不出现「暂存」二字）。
+        assert!(!without.contains("只写这一个目录"), "{without}");
+        assert!(!without.contains("运行结束系统会删除它"), "{without}");
+
+        let scratch = Path::new("/tmp/ws/.aria/run-scratch/workspace_session_auto_1");
+        let with = run_boundary_block(
+            "workspace_session_auto_1",
+            &WorkspaceType::Story,
+            Some(scratch),
+        );
+        assert!(
+            with.contains("/tmp/ws/.aria/run-scratch/workspace_session_auto_1"),
+            "{with}"
+        );
+        assert!(with.contains("运行结束系统会删除它"), "{with}");
+    }
+
+    #[test]
+    fn run_boundary_block_stays_within_budget() {
+        assert_eq!(RUN_BOUNDARY_BUDGET_BYTES, 1536);
+        let scratch = Path::new("/home/u/ws/.aria/run-scratch/workspace_session_auto_510c9278");
+        for block in [
+            run_boundary_block(
+                "workspace_session_auto_510c9278",
+                &WorkspaceType::WorkItemPlan,
+                None,
+            ),
+            run_boundary_block(
+                "workspace_session_auto_510c9278",
+                &WorkspaceType::WorkItemPlan,
+                Some(scratch),
+            ),
+        ] {
+            assert!(
+                block.len() <= RUN_BOUNDARY_BUDGET_BYTES,
+                "block={} bytes",
+                block.len()
+            );
+        }
     }
 }
