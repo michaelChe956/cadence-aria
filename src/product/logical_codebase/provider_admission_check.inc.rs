@@ -323,7 +323,7 @@ impl LogicalCodebaseProviderAdmissionPreflight {
                         &self.paths,
                         &request.project_id,
                         &self.lc_id,
-                        "prepare_admission",
+                        crate::product::logical_codebase::policy::AUTO_REPUBLISH_TRIGGER_PREPARE,
                     );
                     let current_digest = current_digest.unwrap_or_default();
                     match artifact_store.get(&request.project_id)? {

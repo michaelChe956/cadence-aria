@@ -124,7 +124,7 @@ impl LogicalCodebaseBootstrapService {
                     &paths,
                     &project_id,
                     &logical_codebase_id,
-                    "bootstrap_action",
+                    crate::product::logical_codebase::policy::AUTO_REPUBLISH_TRIGGER_BOOTSTRAP_ACTION,
                 );
             })
             .await

@@ -110,7 +110,7 @@ impl AggregatePolicyArtifactStore {
         if revisions.len() <= POLICY_REVISION_RETENTION_WINDOW {
             return Ok(());
         }
-        revisions.sort_by(|left, right| right.0.cmp(&left.0));
+        revisions.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         let references = self.collect_policy_revision_references(project_id, logical_codebase_id)?;
         for (index, (revision, path)) in revisions.into_iter().enumerate() {
             if index < POLICY_REVISION_RETENTION_WINDOW || references.revisions.contains(&revision) {
