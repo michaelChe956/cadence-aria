@@ -43,13 +43,21 @@
 //! 墓碑证据（只认 L1，generation 相位必须仍是 `Claimed`）；reviewer 窗口簇按 attempt
 //! 聚合 W-1..W-4，该 attempt 名下**全部**窗口（含归档）都成立才产出一条簇级可删决策，
 //! 任一不满足即整簇只报不删；实体身份台账条目只认 plan 的 L1 墓碑。它**只判定、不删除**
-//! ——删除动作与三道闸编排属销账编排子模块（后续任务）。
+//! ——删除动作与三道闸编排属 `cleanup` 子模块。
+//!
+//! `cleanup` 子模块是**唯一真正执行删除**的销账编排面（REQ-DRG-13 / 14 / 15 / 16 / 17；
+//! 技术方案 §3.4.2）：闸 1 默认 dry-run，`apply=true` 必须带令牌且与入口内部重跑巡检
+//! 的 findings 摘要一致；闸 2 只删按类型判定面产出的 `Delete`（intent / 窗口簇 / 台账
+//! 条目三类），墓碑与用户业务数据永不删；闸 3 删除幂等（缺失视为已清）、逐行留痕
+//! （台账全量比对去重）并在清理后再巡检自证归零（只报不删残留与不可判定都不计入
+//! 归零）。它的内联测试按本目录既有约定外置在 `cleanup_tests.rs`。
 
 // Task 1 只产出静态表与纯结构，调用点自 Task 2 起接线，故非测试构建下这些项
 // 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table` 与 `resolve`）。
 // **全部接线完成后（Task 9）删除本行**，让死代码重新回到门禁视野。
 #![allow(dead_code)]
 
+pub(crate) mod cleanup;
 pub(crate) mod cleanup_rules;
 pub(crate) mod ledger;
 pub(crate) mod listing;
