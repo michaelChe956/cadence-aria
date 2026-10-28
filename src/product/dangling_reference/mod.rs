@@ -34,13 +34,21 @@
 //! cleanup.jsonl`）。它**逐行追加**紧凑 JSON（不复用整文件覆盖的写语义）、按
 //! `record_path` + `target_id` + `action` 全量比对去重（同一清理动作重入不追加
 //! 重复行），并按大小轮转 + 保留期分片清理。它不判定删什么、也不执行删除。
-//! 销账规则与编排子模块由后续任务追加。
+//!
+//! `cleanup_rules` 子模块是**按类型销账规则判定面**（REQ-DRG-12 / 19 / 20；技术方案
+//! §3.4.1）：自动化 intent 走 REQ-DRG-20 的四道前置条件——在
+//! `automation-enrollment.json` 文件锁内重读 enrollment 状态、generation 相位与目标
+//! 墓碑证据（只认 L1，generation 相位必须仍是 `Claimed`）；reviewer 窗口簇按 attempt
+//! 聚合 W-1..W-4，该 attempt 名下**全部**窗口（含归档）都成立才产出一条簇级可删决策，
+//! 任一不满足即整簇只报不删；实体身份台账条目只认 plan 的 L1 墓碑。它**只判定、不删除**
+//! ——删除动作与三道闸编排属销账编排子模块（后续任务）。
 
 // Task 1 只产出静态表与纯结构，调用点自 Task 2 起接线，故非测试构建下这些项
 // 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table` 与 `resolve`）。
 // **全部接线完成后（Task 9）删除本行**，让死代码重新回到门禁视野。
 #![allow(dead_code)]
 
+pub(crate) mod cleanup_rules;
 pub(crate) mod ledger;
 pub(crate) mod listing;
 pub(crate) mod patrol;
