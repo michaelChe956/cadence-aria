@@ -8,14 +8,22 @@
 //! `resolve` 子模块**会做只读 IO**：读 deletion 墓碑、`entity-operations` 下的
 //! pending-failure 事实、reviewer-window 树级租约文件、worktree 路径与
 //! coding attempt / session 记录；全部为只读（不取 lease、不写回），读失败
-//! 一律原样上抛、不得降级成「目标不存在」。容错列举、巡检与销账由后续任务
-//! 追加子模块。
+//! 一律原样上抛、不得降级成「目标不存在」。
+//!
+//! `listing` 子模块**同样只做只读 IO**：读自动化 intent、reviewer 窗口记录、
+//! reviewer 快照 manifest 与实体身份台账条目。它是第 ① 层的容错列举面
+//! （REQ-DRG-03）：遇到指向已删对象的条目时**跳过该条目并产生一条告警**，
+//! MUST NOT 使整次列举失败；只吞「目标已删」这一种错（REQ-DRG-05），
+//! JSON 解析失败 / IO 失败一律原样上抛（不得折叠成「跳过」）。存在性判为
+//! 「不可判定」（`Unknown`）的引用既不跳过条目也不产生告警、不计入悬空
+//! 条目数（REQ-DRG-23）。巡检与销账由后续任务追加子模块。
 
 // Task 1 只产出静态表与纯结构，调用点自 Task 2 起接线，故非测试构建下这些项
 // 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table` 与 `resolve`）。
 // **全部接线完成后（Task 9）删除本行**，让死代码重新回到门禁视野。
 #![allow(dead_code)]
 
+pub(crate) mod listing;
 pub(crate) mod reference_table;
 pub(crate) mod resolve;
 
