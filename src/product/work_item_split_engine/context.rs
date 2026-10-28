@@ -465,4 +465,59 @@ mod tests {
         assert_eq!(lines.first(), Some(&"file: f00.txt"));
         assert_eq!(lines.last(), Some(&"file: f29.txt"));
     }
+
+    /// 主记录缺失语义回归（REQ-DRG-04）：请求一个已被删除的 story_spec 时，既有
+    /// 错误码 `story_spec_not_found` 与既有文案 MUST 逐字不变——MUST NOT 被悬空引用
+    /// 治理的容错降级为「跳过并告警」或静默返回空。
+    #[test]
+    fn missing_story_spec_keeps_existing_error_code_and_wording() {
+        use crate::product::models::{IssuePhase, IssueStatus};
+
+        let temp = TempDir::new().expect("temp store");
+        let lifecycle =
+            LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(temp.path()));
+        let issue = IssueRecord {
+            id: "issue_0001".to_string(),
+            project_id: "project_0001".to_string(),
+            repo_id: None,
+            base_branch: None,
+            logical_codebase_id: None,
+            title: "Test Issue".to_string(),
+            description: None,
+            change_id: "change_0001".to_string(),
+            phase: IssuePhase::Clarification,
+            status: IssueStatus::Draft,
+            active_binding_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let request = GenerateWorkItemsRequest {
+            title: "test plan".to_string(),
+            story_spec_ids: vec!["story_spec_gone".to_string()],
+            design_spec_ids: Vec::new(),
+            include_integration_tests: None,
+            include_e2e_tests: None,
+            force_frontend_backend_split: None,
+            require_execution_plan_confirm: None,
+            author_provider: None,
+            reviewer_provider: None,
+            review_rounds: None,
+            superpowers_enabled: None,
+            openspec_enabled: None,
+            revision_feedback: None,
+        };
+
+        let error = collect_story_context(&lifecycle, &request, &issue)
+            .expect_err("缺失 story spec MUST 仍报错，不得降级为跳过或空结果");
+
+        assert_eq!(
+            error.code, "story_spec_not_found",
+            "错误码 MUST 逐字不变（REQ-DRG-04）"
+        );
+        assert_eq!(
+            error.message, "story spec not found",
+            "错误文案 MUST 逐字不变（REQ-DRG-04）"
+        );
+        assert_eq!(error.details, json!({}), "错误 details MUST 保持既有空对象");
+    }
 }

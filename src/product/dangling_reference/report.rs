@@ -11,6 +11,7 @@ use std::path::Path;
 
 use crate::product::dangling_reference::patrol::{
     PATROL_ACTION_DELETE, PATROL_ACTION_DELETE_GROUP, PatrolFinding, PatrolReport,
+    UndeterminedEntry,
 };
 use crate::product::json_store::ProductStoreError;
 use crate::product::reviewer_snapshot::sha256_hex;
@@ -64,19 +65,42 @@ pub(crate) enum CleanupReportStatus {
     AutomaticFailed { reason: String },
 }
 
-/// 把巡检报告渲染成 Markdown 清单（技术方案 §5.1 的五节形态）。
+/// 销账后的「归零自证」现场（REQ-DRG-17 / 23）：**销账后**再巡检得到的自证结论。
 ///
-/// 五节分工（REQ-DRG-11 / 23）：「2. 明细」只收录可删条目；「3. 只报不删
+/// 与「2. 明细 / 3. 只报不删残留 / 4. 不可判定」三节（**销账前**现场）分节并列，
+/// MUST NOT 混列（REQ-DRG-11 的分节互斥要求）。
+#[derive(Debug, Clone)]
+pub(crate) struct GovernanceSelfProof {
+    /// 仍未归零的可删条目（逐条；空 = 本次可删类型全部归零）。
+    pub(crate) unzeroed: Vec<PatrolFinding>,
+    /// 未归零可删条目按记录类型的计数（与 `unzeroed` 同口径，不另立判定）。
+    pub(crate) unzeroed_by_type: BTreeMap<String, usize>,
+    /// 只报不删残留条数（不计入归零）。
+    pub(crate) residual_count: usize,
+    /// 不可判定条目（逐条）。
+    pub(crate) undetermined: Vec<UndeterminedEntry>,
+    /// 销账侧给出的治理完成标记（清单渲染时仍会用三类计数复核，见
+    /// [`render_self_proof_section`]）。
+    pub(crate) governance_complete: bool,
+}
+
+/// 把巡检报告渲染成 Markdown 清单（技术方案 §5.1 / §5.2 的六节形态）。
+///
+/// 各节分工（REQ-DRG-11 / 17 / 23）：「2. 明细」只收录可删条目；「3. 只报不删
 /// 残留」收录命中悬空但按规则不可删的条目；「4. 不可判定」只收录读失败 /
 /// 数据源不可用的条目；「5. 未归类项」只收录判据表外记录——三节 MUST NOT
-/// 混列。头部说明行（模式行、巡检时间与令牌行）属清单说明文字，不参与令牌摘要。
+/// 混列。「6. 归零自证」写**销账后**现场（`self_proof`），与前三节分节并列。
+/// 头部说明行（模式行、巡检时间与令牌行）属清单说明文字，不参与令牌摘要。
 ///
 /// `status` = 本次模式与销账结果；模式行 MUST 如实标注（REQ-DRG-11）。
+/// `self_proof` = 销账成功后取得的自证现场；销账失败时为 `None`（清单仍写出，
+/// 但 MUST NOT 视为治理完成）。
 pub(crate) fn render_markdown_report(
     report: &PatrolReport,
     token: &str,
     scanned_at: &str,
     status: &CleanupReportStatus,
+    self_proof: Option<&GovernanceSelfProof>,
 ) -> String {
     let mut markdown = String::new();
 
@@ -99,6 +123,7 @@ pub(crate) fn render_markdown_report(
     render_residual_section(report, &mut markdown);
     render_undetermined_section(report, &mut markdown);
     render_unclassified_section(report, &mut markdown);
+    render_self_proof_section(report, self_proof, &mut markdown);
     render_covered_types_section(report, &mut markdown);
 
     markdown
@@ -333,6 +358,105 @@ fn render_unclassified_section(report: &PatrolReport, markdown: &mut String) {
     }
 }
 
+/// 「6. 归零自证（销账后现场）」：销账后再巡检的自证结论（REQ-DRG-17 / 23）。
+///
+/// 本节写**销账后**现场，与「2. 明细 / 3. 只报不删残留 / 4. 不可判定」三节
+/// （**销账前**现场）分节并列、MUST NOT 混列。四条内容齐备：本次可删类型的
+/// 归零计数、未归零可删项逐条、不可判定项逐条、治理是否完成。
+///
+/// 诚实口径：完成标记为真时仍用三类计数复核（未归零可删项 / 不可判定 / 只报
+/// 不删残留），任一类非空即 MUST NOT 宣称治理完成。销账失败（`None`）时本节
+/// 只写「未取得自证结果」，MUST NOT 视为治理完成。
+fn render_self_proof_section(
+    report: &PatrolReport,
+    proof: Option<&GovernanceSelfProof>,
+    markdown: &mut String,
+) {
+    markdown.push_str("\n## 6. 归零自证（销账后现场）\n\n");
+    let Some(proof) = proof else {
+        markdown.push_str(
+            "（销账失败，未取得自证结果——MUST NOT 视为治理完成；逐条真相以删除留痕台账为准）\n",
+        );
+        return;
+    };
+
+    markdown.push_str("### 6.1 本次可删类型的归零计数\n\n");
+    let mut types: BTreeSet<&str> = report
+        .findings
+        .iter()
+        .filter(|finding| is_deletable_action(&finding.proposed_action))
+        .map(|finding| finding.record_type.as_str())
+        .collect();
+    types.extend(proof.unzeroed_by_type.keys().map(String::as_str));
+    if types.is_empty() {
+        markdown.push_str("（本次无可删条目）\n");
+    } else {
+        markdown.push_str(
+            "> 计数为**销账后**仍未归零的可删条目数（按 finding 逐条）；本次已归零的类型记 0；不可判定与只报不删残留不计入。\n\n",
+        );
+        markdown.push_str("| 记录类型 | 未归零可删条目数 |\n|---|---|\n");
+        for record_type in types {
+            let count = proof
+                .unzeroed_by_type
+                .get(record_type)
+                .copied()
+                .unwrap_or(0);
+            markdown.push_str(&format!("| {record_type} | {count} |\n"));
+        }
+    }
+
+    markdown.push_str("\n### 6.2 未归零的可删条目\n\n");
+    if proof.unzeroed.is_empty() {
+        markdown.push_str("（无：本次可删条目已全部归零）\n");
+    } else {
+        markdown.push_str(
+            "| 记录路径 | 记录类型 | 引用字段 | 引用目标类型 | 引用目标 id | 已删证据 | 建议动作 |\n",
+        );
+        markdown.push_str("|---|---|---|---|---|---|---|\n");
+        for finding in sorted_findings(&proof.unzeroed) {
+            markdown.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                finding.record_path,
+                finding.record_type,
+                finding.reference_field,
+                finding.target_kind,
+                finding.target_id,
+                finding.evidence_level,
+                finding.proposed_action,
+            ));
+        }
+    }
+
+    markdown.push_str("\n### 6.3 不可判定的条目\n\n");
+    if proof.undetermined.is_empty() {
+        markdown.push_str("（无）\n");
+    } else {
+        markdown.push_str("| 记录路径 | 引用字段 | 失败原因 |\n|---|---|---|\n");
+        for entry in &proof.undetermined {
+            markdown.push_str(&format!(
+                "| {} | {} | {} |\n",
+                entry.record_path, entry.reference_field, entry.reason
+            ));
+        }
+    }
+
+    markdown.push_str("\n### 6.4 治理是否完成\n\n");
+    let complete = proof.governance_complete
+        && proof.unzeroed.is_empty()
+        && proof.undetermined.is_empty()
+        && proof.residual_count == 0;
+    if complete {
+        markdown.push_str("- 治理完成：是（本次可删条目全部归零、无只报不删残留、无不可判定）\n");
+    } else {
+        markdown.push_str(&format!(
+            "- 治理完成：否（未归零可删条目 {} 条、不可判定 {} 条、只报不删残留 {} 条）——MUST NOT 宣称悬空引用已治理完成\n",
+            proof.unzeroed.len(),
+            proof.undetermined.len(),
+            proof.residual_count
+        ));
+    }
+}
+
 /// 附录：本次巡检覆盖的记录类型清单（U7 / R3）。
 fn render_covered_types_section(report: &PatrolReport, markdown: &mut String) {
     markdown.push_str("\n## 附：本次巡检覆盖的记录类型\n\n");
@@ -446,6 +570,7 @@ mod report_tests {
             "sha256:abc",
             "2026-10-28T10:00:00Z",
             &CleanupReportStatus::ReportOnly,
+            None,
         );
         assert!(markdown.contains("## 1. 汇总"), "{markdown}");
         assert!(markdown.contains("## 2. 明细"), "{markdown}");
@@ -495,12 +620,14 @@ mod report_tests {
             "sha256:abc",
             "2026-10-28T10:00:00Z",
             &CleanupReportStatus::Automatic { deleted_count: 1 },
+            None,
         );
         let second_markdown = render_markdown_report(
             &report,
             "sha256:abc",
             "2037-01-01T00:00:00Z",
             &CleanupReportStatus::Automatic { deleted_count: 1 },
+            None,
         );
         assert!(first_markdown.contains("2026-10-28T10:00:00Z"));
         assert!(second_markdown.contains("2037-01-01T00:00:00Z"));
@@ -549,6 +676,7 @@ mod report_tests {
             "sha256:abc",
             "2026-10-28T10:00:00Z",
             &CleanupReportStatus::ReportOnly,
+            None,
         );
         assert!(
             markdown.contains("| automation_plan_intent | 1 | 0 | 1 |"),
@@ -587,6 +715,7 @@ mod report_tests {
             "sha256:abc",
             "2026-10-28T10:00:00Z",
             &CleanupReportStatus::Automatic { deleted_count: 6 },
+            None,
         );
         assert!(
             markdown.contains("自动销账（服务启动时自动执行；本次已删除 6 条）"),
@@ -611,6 +740,7 @@ mod report_tests {
             &CleanupReportStatus::AutomaticFailed {
                 reason: reason.to_string(),
             },
+            None,
         );
         assert!(
             markdown.contains(&format!("销账失败（错误：{reason}）")),
@@ -634,6 +764,7 @@ mod report_tests {
             "sha256:abc",
             "2026-10-28T10:00:00Z",
             &CleanupReportStatus::ReportOnly,
+            None,
         );
         assert!(
             markdown.contains("只报不删（dry-run，未执行任何删除）"),
@@ -650,6 +781,7 @@ mod report_tests {
             "sha256:abc",
             "2026-10-28T10:00:00Z",
             &CleanupReportStatus::Automatic { deleted_count: 0 },
+            None,
         );
         assert!(
             markdown.contains(
@@ -677,6 +809,237 @@ mod report_tests {
             workspace.join(CLEANUP_LEDGER_RELATIVE_PATH),
             paths.dangling_reference_ledger_path(),
             "清单里的台账相对路径必须与真实落点一致"
+        );
+    }
+
+    /// 取清单中的某一节（到下一个 `## ` 标题为止）。
+    fn section<'a>(markdown: &'a str, heading: &str) -> &'a str {
+        let start = markdown
+            .find(heading)
+            .unwrap_or_else(|| panic!("清单缺少「{heading}」节：{markdown}"));
+        let rest = &markdown[start..];
+        let end = rest[heading.len()..]
+            .find("\n## ")
+            .map(|offset| heading.len() + offset + 1)
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// 「归零自证」节（REQ-DRG-17 / 23）：归零计数、未归零可删项逐条、不可判定项
+    /// 逐条、治理是否完成四项齐备；未完成时 MUST NOT 宣称治理完成。
+    #[test]
+    fn dangling_report_self_proof_section_lists_unzeroed_and_undetermined() {
+        let report = PatrolReport {
+            findings: vec![finding(
+                "projects/p1/issues/i1/a.json",
+                "source.stories[].id",
+                PATROL_ACTION_DELETE,
+                "L1",
+            )],
+            undetermined: Vec::new(),
+            unclassified: Vec::new(),
+            covered_record_types: vec!["automation_plan_intent".to_string()],
+        };
+        let proof = GovernanceSelfProof {
+            unzeroed: vec![finding(
+                "projects/p1/issues/i1/automation-plan-intent.json",
+                "source.stories[].id",
+                PATROL_ACTION_DELETE,
+                "L1",
+            )],
+            unzeroed_by_type: [("automation_plan_intent".to_string(), 1)]
+                .into_iter()
+                .collect(),
+            residual_count: 0,
+            undetermined: vec![UndeterminedEntry {
+                record_path: "reviewer-windows/windows/win_bad.json".to_string(),
+                reference_field: "attempt_id".to_string(),
+                reason: "json parse failed".to_string(),
+            }],
+            governance_complete: false,
+        };
+        let markdown = render_markdown_report(
+            &report,
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::Automatic { deleted_count: 1 },
+            Some(&proof),
+        );
+
+        let self_proof = section(&markdown, "## 6. 归零自证（销账后现场）");
+        assert!(
+            self_proof.contains("| automation_plan_intent | 1 |"),
+            "6.1 必须给出本次可删类型的归零计数：{self_proof}"
+        );
+        assert!(
+            self_proof.contains("projects/p1/issues/i1/automation-plan-intent.json"),
+            "6.2 必须逐条列出未归零可删项：{self_proof}"
+        );
+        assert!(
+            self_proof.contains("reviewer-windows/windows/win_bad.json")
+                && self_proof.contains("json parse failed"),
+            "6.3 必须逐条列出不可判定项及原因：{self_proof}"
+        );
+        assert!(
+            self_proof.contains("治理完成：否"),
+            "6.4 治理未完成时必须写明「否」：{self_proof}"
+        );
+        assert!(
+            !self_proof.contains("治理完成：是"),
+            "存在未归零可删项时 MUST NOT 宣称治理完成：{self_proof}"
+        );
+    }
+
+    /// 分节互斥（REQ-DRG-11）：销账后的「归零自证」节 MUST NOT 与销账前的
+    /// 「明细 / 只报不删残留 / 不可判定」三节混列。
+    #[test]
+    fn dangling_report_self_proof_section_is_disjoint_from_pre_cleanup_sections() {
+        let pre_only = finding(
+            "projects/p1/issues/i1/pre.json",
+            "session_id",
+            PATROL_ACTION_REPORT_ONLY,
+            "未确证",
+        );
+        let report = PatrolReport {
+            findings: vec![pre_only.clone()],
+            undetermined: Vec::new(),
+            unclassified: Vec::new(),
+            covered_record_types: vec!["automation_plan_intent".to_string()],
+        };
+        let proof = GovernanceSelfProof {
+            unzeroed: vec![finding(
+                "projects/p1/issues/i1/post.json",
+                "source.stories[].id",
+                PATROL_ACTION_DELETE,
+                "L1",
+            )],
+            unzeroed_by_type: [("automation_plan_intent".to_string(), 1)]
+                .into_iter()
+                .collect(),
+            residual_count: 0,
+            undetermined: vec![UndeterminedEntry {
+                record_path: "state/post/undetermined.json".to_string(),
+                reference_field: "session_id".to_string(),
+                reason: "post read failed".to_string(),
+            }],
+            governance_complete: false,
+        };
+        let markdown = render_markdown_report(
+            &report,
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::Automatic { deleted_count: 0 },
+            Some(&proof),
+        );
+
+        let residual_section = section(&markdown, "## 3. 只报不删残留");
+        let undetermined_section = section(&markdown, "## 4. 不可判定");
+        let self_proof = section(&markdown, "## 6. 归零自证（销账后现场）");
+        assert!(
+            residual_section.contains("projects/p1/issues/i1/pre.json")
+                && !residual_section.contains("projects/p1/issues/i1/post.json"),
+            "销账前残留节 MUST NOT 收录销账后的自证条目：{residual_section}"
+        );
+        assert!(
+            undetermined_section.contains("（无）"),
+            "销账前不可判定节 MUST NOT 收录销账后的不可判定条目：{undetermined_section}"
+        );
+        assert!(
+            self_proof.contains("projects/p1/issues/i1/post.json")
+                && !self_proof.contains("projects/p1/issues/i1/pre.json"),
+            "归零自证节 MUST NOT 混列销账前的残留条目：{self_proof}"
+        );
+        assert!(
+            self_proof.contains("state/post/undetermined.json"),
+            "归零自证节必须逐条列出销账后的不可判定条目：{self_proof}"
+        );
+    }
+
+    /// 销账失败（无自证现场）：本节 MUST 写明「未取得自证结果」，MUST NOT 宣称
+    /// 治理完成。
+    #[test]
+    fn dangling_report_self_proof_section_admits_missing_proof() {
+        let markdown = render_markdown_report(
+            &empty_report(),
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::AutomaticFailed {
+                reason: "Io(boom)".to_string(),
+            },
+            None,
+        );
+        let self_proof = section(&markdown, "## 6. 归零自证（销账后现场）");
+        assert!(
+            self_proof.contains("销账失败，未取得自证结果"),
+            "销账失败时本节必须写明未取得自证结果：{self_proof}"
+        );
+        assert!(
+            !self_proof.contains("治理完成：是"),
+            "无自证结果时 MUST NOT 宣称治理完成：{self_proof}"
+        );
+    }
+
+    /// 诚实口径：即使传入的完成标记为真，只要任一类计数非空，清单 MUST 写「否」
+    /// ——MUST NOT 宣称治理完成而实际未完成。
+    #[test]
+    fn dangling_report_self_proof_never_claims_complete_when_counts_non_empty() {
+        let proof = GovernanceSelfProof {
+            unzeroed: vec![finding(
+                "projects/p1/issues/i1/post.json",
+                "source.stories[].id",
+                PATROL_ACTION_DELETE,
+                "L1",
+            )],
+            unzeroed_by_type: [("automation_plan_intent".to_string(), 1)]
+                .into_iter()
+                .collect(),
+            residual_count: 0,
+            undetermined: Vec::new(),
+            governance_complete: true,
+        };
+        let markdown = render_markdown_report(
+            &empty_report(),
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::Automatic { deleted_count: 0 },
+            Some(&proof),
+        );
+        let self_proof = section(&markdown, "## 6. 归零自证（销账后现场）");
+        assert!(
+            self_proof.contains("治理完成：否"),
+            "存在未归零可删项时 MUST NOT 宣称治理完成：{self_proof}"
+        );
+        assert!(
+            !self_proof.contains("治理完成：是"),
+            "存在未归零可删项时 MUST NOT 宣称治理完成：{self_proof}"
+        );
+    }
+
+    /// 全部归零且无残留 / 无不可判定：本节 MUST 明确写「治理完成：是」。
+    #[test]
+    fn dangling_report_self_proof_section_states_completion_when_fully_zeroed() {
+        let proof = GovernanceSelfProof {
+            unzeroed: Vec::new(),
+            unzeroed_by_type: BTreeMap::new(),
+            residual_count: 0,
+            undetermined: Vec::new(),
+            governance_complete: true,
+        };
+        let markdown = render_markdown_report(
+            &empty_report(),
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::Automatic { deleted_count: 0 },
+            Some(&proof),
+        );
+        let self_proof = section(&markdown, "## 6. 归零自证（销账后现场）");
+        assert!(
+            self_proof.contains("治理完成：是"),
+            "全归零时必须写明治理完成：{self_proof}"
+        );
+        assert!(
+            self_proof.contains("（无：本次可删条目已全部归零）"),
+            "6.2 必须显式写明无未归零项：{self_proof}"
         );
     }
 }

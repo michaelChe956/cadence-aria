@@ -789,14 +789,20 @@ pub async fn serve_web(
         &product_paths,
         &workspace_root,
     ) {
-        Ok(outcome) => eprintln!(
-            "[aria-startup] dangling reference governance done: report={} dangling={} undetermined={} deleted={} token={}",
-            outcome.report_path.display(),
-            outcome.dangling_count,
-            outcome.undetermined_count,
-            outcome.deleted_count,
-            outcome.findings_token
-        ),
+        Ok(outcome) => {
+            eprintln!(
+                "[aria-startup] dangling reference governance done: report={} dangling={} undetermined={} deleted={} token={}",
+                outcome.report_path.display(),
+                outcome.dangling_count,
+                outcome.undetermined_count,
+                outcome.deleted_count,
+                outcome.findings_token
+            );
+            // REQ-DRG-17 / 23：未归零可删项与不可判定项 MUST 逐条列出（不只打计数）。
+            for line in outcome.log_lines() {
+                eprintln!("{line}");
+            }
+        }
         Err(error) => eprintln!("[aria-startup] dangling reference governance failed: {error}"),
     }
     refresh_provider_health_for_startup(&state).await;

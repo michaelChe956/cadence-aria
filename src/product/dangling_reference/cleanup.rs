@@ -127,6 +127,9 @@ pub(crate) struct CleanupOutcome {
     /// 自证归零计数：`record_type` → **仍未归零的可删条目数**。已归零的类型不出现
     /// 在此表中（空表 = 白名单内可删类型全部归零）。
     pub(crate) zeroed_by_type: BTreeMap<String, usize>,
+    /// 仍未归零的可删条目（逐条；REQ-DRG-17「未归零必须列出」的逐条数据面）。
+    /// 与 `zeroed_by_type` 同口径（后者是本表的按类型计数），不带任何判定旁路。
+    pub(crate) unzeroed: Vec<PatrolFinding>,
     /// 「只报不删残留」：自证巡检里**不可删**的悬空引用（证据不足 / 表外 / 降级），
     /// 不计入归零（REQ-DRG-17）。
     pub(crate) residual: Vec<PatrolFinding>,
@@ -159,12 +162,13 @@ fn run_cleanup_with_attempt_probe(
         // dry-run：只出清单，零删除、零留痕。
         let before = patrol_state_root(paths)?;
         let decisions = collect_decisions(paths, attempt_probe)?;
-        let (zeroed_by_type, residual) = classify_findings(&before.findings, &decisions);
+        let classified = classify_findings(&before.findings, &decisions);
         return Ok(finish_outcome(CleanupOutcome {
             deleted_count: 0,
             report_only: report_only_of(&decisions),
-            zeroed_by_type,
-            residual,
+            zeroed_by_type: classified.unzeroed_by_type,
+            unzeroed: classified.unzeroed,
+            residual: classified.residual,
             undetermined: before.undetermined,
             governance_complete: false,
         }));
@@ -181,12 +185,13 @@ fn run_cleanup_with_attempt_probe(
     // 闸 3 ③：清理后再巡检一次自证归零。
     let after = patrol_state_root(paths)?;
     let after_decisions = collect_decisions(paths, attempt_probe)?;
-    let (zeroed_by_type, residual) = classify_findings(&after.findings, &after_decisions);
+    let classified = classify_findings(&after.findings, &after_decisions);
     Ok(finish_outcome(CleanupOutcome {
         deleted_count,
         report_only: report_only_of(&decisions),
-        zeroed_by_type,
-        residual,
+        zeroed_by_type: classified.unzeroed_by_type,
+        unzeroed: classified.unzeroed,
+        residual: classified.residual,
         undetermined: after.undetermined,
         governance_complete: false,
     }))
@@ -209,6 +214,16 @@ fn report_only_of(decisions: &[CleanupDecision]) -> Vec<CleanupDecision> {
         .collect()
 }
 
+/// 自证归类结果（销账后现场）：未归零的可删条目（逐条 + 按类型计数）与只报不删残留。
+struct ZeroingClassification {
+    /// 仍未归零的可删条目，按记录类型的计数（空表 = 可删类型全部归零）。
+    unzeroed_by_type: BTreeMap<String, usize>,
+    /// 仍未归零的可删条目（逐条，供清单「归零自证」节与启动日志逐条列出）。
+    unzeroed: Vec<PatrolFinding>,
+    /// 只报不删残留（不可删的悬空引用，不计入归零）。
+    residual: Vec<PatrolFinding>,
+}
+
 /// 自证口径：按判定面把 findings 分成「仍未归零的可删条目」与「只报不删残留」。
 ///
 /// 可删性**只认判定面**（本次可删 = 该条记录 / 该 attempt 簇有 `Delete` 决策），
@@ -217,7 +232,7 @@ fn report_only_of(decisions: &[CleanupDecision]) -> Vec<CleanupDecision> {
 fn classify_findings(
     findings: &[PatrolFinding],
     decisions: &[CleanupDecision],
-) -> (BTreeMap<String, usize>, Vec<PatrolFinding>) {
+) -> ZeroingClassification {
     let mut deletable_paths: BTreeSet<&str> = BTreeSet::new();
     let mut deletable_attempts: BTreeSet<&str> = BTreeSet::new();
     for decision in decisions {
@@ -236,21 +251,27 @@ fn classify_findings(
             deletable_attempts.insert(target_id.as_str());
         }
     }
-    let mut zeroed_by_type: BTreeMap<String, usize> = BTreeMap::new();
+    let mut unzeroed_by_type: BTreeMap<String, usize> = BTreeMap::new();
+    let mut unzeroed = Vec::new();
     let mut residual = Vec::new();
     for finding in findings {
         let deletable = deletable_paths.contains(finding.record_path.as_str())
             || (is_attempt_owned_record(&finding.record_type)
                 && deletable_attempts.contains(finding.target_id.as_str()));
         if deletable {
-            *zeroed_by_type
+            *unzeroed_by_type
                 .entry(finding.record_type.clone())
                 .or_insert(0) += 1;
+            unzeroed.push(finding.clone());
         } else {
             residual.push(finding.clone());
         }
     }
-    (zeroed_by_type, residual)
+    ZeroingClassification {
+        unzeroed_by_type,
+        unzeroed,
+        residual,
+    }
 }
 
 /// 按 attempt 归属删除的记录类型（窗口簇及其快照基线）。

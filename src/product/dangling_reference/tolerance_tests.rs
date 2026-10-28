@@ -104,3 +104,44 @@ fn live_ledger_session_ids_keeps_bindings_without_tombstone() {
     assert_eq!(live.len(), 1, "无墓碑的绑定不得被跳过");
     assert_eq!(warnings.len(), 0, "无墓碑不得产生悬空告警");
 }
+
+/// 读失败照旧上抛（REQ-DRG-24 / REQ-DRG-05）：墓碑文件存在但**内容不是合法
+/// JSON** 时，`live_ledger_session_ids` MUST 返回 `Err`，MUST NOT 把它当成
+/// 「目标已删」而跳过绑定。
+///
+/// 「一个都没跳」的可观测形态：跳过路径返回 `Ok((空集合, 逐条告警))`——因此
+/// 拿到 `Err` 即证明没有任何绑定被跳过，且错误必须是**解析失败原文**（不是
+/// 「不存在」）。
+#[test]
+fn live_ledger_session_ids_propagates_tombstone_parse_failure_without_skipping() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path());
+    let tombstone = temp
+        .path()
+        .join("projects/project_0001/issues/issue_0001/entity-deletions/plan")
+        .join("issue_work_item_plan_0007.json");
+    write(&tombstone, "{ this is not json");
+    let scope = EntityScope::new(
+        "project_0001",
+        "issue_0001",
+        DeletionEntityKind::Plan,
+        "issue_work_item_plan_0007",
+    );
+    let ids: BTreeSet<String> = ["s_a".to_string(), "s_b".to_string()].into_iter().collect();
+
+    let error = live_ledger_session_ids(&paths, &scope, ids)
+        .expect_err("墓碑解析失败 MUST 原样上抛，MUST NOT 跳过绑定");
+
+    assert!(
+        matches!(error, ProductStoreError::Json(_)),
+        "解析失败必须以 JSON 错误上抛：{error:?}"
+    );
+    assert!(
+        !matches!(error, ProductStoreError::NotFound { .. }),
+        "读失败 MUST NOT 被折叠成「目标不存在」：{error:?}"
+    );
+    assert!(
+        error.to_string().starts_with("product_store_json:"),
+        "错误文案必须保留既有读取失败口径：{error}"
+    );
+}

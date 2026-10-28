@@ -6,11 +6,21 @@
 
 use super::*;
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::dangling_reference::cleanup::{CleanupRequest, run_cleanup};
 use crate::product::dangling_reference::listing::EntityIdentityBindingEntry;
+use crate::product::issue_automation_store::IssueAutomationStore;
 use crate::product::json_store::ProductStoreError;
+use crate::product::logical_codebase::EnrollmentTarget;
+use crate::product::models::automation::{
+    EnrollmentOptions, EnrollmentSource, EnrollmentTerminationRequest, EnrollmentWriteCommand,
+    PlanApprovalPolicy, SourceRevisionRef,
+};
+use crate::product::models::lifecycle::IssueWorkItemPlanOptions;
+use crate::product::models::provider::ProviderName;
 use crate::product::reviewer_window_store::tree_key_of;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier};
 use tempfile::TempDir;
 
 fn probe_false() -> impl Fn(&str) -> Result<bool, ProductStoreError> {
@@ -640,4 +650,154 @@ fn dangling_intent_four_preconditions_uses_lock_inner_evidence() {
     )
     .expect("decide");
     assert_report_only(&pending, "L1");
+}
+
+// ─── 与既有取代路径并发（REQ-DRG-15「幂等不得免除锁语义」的并发面）─────────
+
+/// 销账删除 intent 与既有「取代」路径（terminated enrollment 人工重开 →
+/// `supersede_terminated_enrollment` 删旧代意图）**并发**对同一 intent 动手：
+/// 双方均 MUST NOT 报错。
+///
+/// 构造性保证：两路都在 `automation-enrollment.json` 的同一把文件锁内动手，且
+/// 后到者遇 `NotFound` 一律视为「已清」（`Ok(None)` / `metadata().is_ok()` 跳过）。
+/// 本用例只钉「双方均无错误 + 结果确定」（intent 被清、enrollment 回到启用），
+/// 不锁定谁先谁后，也不锁定内部删除条数。
+#[test]
+fn dangling_intent_cleanup_concurrent_with_supersede_path_never_errors() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path());
+    let issue_root = paths.issue_root("project_0001", "issue_0001");
+    std::fs::create_dir_all(&issue_root).unwrap();
+
+    // ① 既有 enrollment 生命周期：启用 → 终止（已终止记录既是 intent 销账的
+    //    I-1 前置条件，也是「取代」路径的入口状态）。
+    let store = IssueAutomationStore::new(paths.clone());
+    let source = EnrollmentSource {
+        stories: vec![SourceRevisionRef {
+            id: "story_spec_0005".into(),
+            version: 1,
+        }],
+        designs: Vec::new(),
+    };
+    let options = EnrollmentOptions {
+        author_provider: ProviderName::Codex,
+        reviewer_provider: ProviderName::Codex,
+        review_rounds: 1,
+        superpowers_enabled: false,
+        openspec_enabled: false,
+        plan_approval: PlanApprovalPolicy::Manual,
+        plan_options: IssueWorkItemPlanOptions {
+            include_integration_tests: false,
+            include_e2e_tests: false,
+            force_frontend_backend_split: false,
+            require_execution_plan_confirm: false,
+        },
+    };
+    let target = EnrollmentTarget::SingleRepository {
+        repository_id: "repo_1".into(),
+    };
+    let created = store
+        .compare_and_set(
+            "project_0001",
+            "issue_0001",
+            None,
+            EnrollmentWriteCommand::Enable {
+                command_id: None,
+                selection_key: "selection_1".into(),
+                source: source.clone(),
+                options: options.clone(),
+                target: target.clone(),
+            },
+        )
+        .expect("启用 enrollment");
+    store
+        .terminate_plan(
+            "project_0001",
+            "issue_0001",
+            EnrollmentTerminationRequest {
+                command_id: "terminate-concurrent-1".into(),
+                expected_enrollment_id: created.enrollment_id.clone(),
+                expected_policy_revision: created.policy_revision,
+                reason: "并发取代用例".into(),
+            },
+        )
+        .expect("终止 enrollment");
+    let terminated_revision = store
+        .get("project_0001", "issue_0001")
+        .expect("读 enrollment")
+        .expect("enrollment 必须存在")
+        .policy_revision;
+
+    // ② 待删 plan intent（身份与已终止 enrollment 一致）+ 两条 L1 墓碑。
+    let intent_body = serde_json::json!({
+        "enrollment_id": created.enrollment_id,
+        "prepare_intent_id": "p1",
+        "project_id": "project_0001",
+        "issue_id": "issue_0001",
+        "source": source.clone(),
+        "options": options.clone(),
+        "target": target.clone(),
+        "plan_id": "issue_work_item_plan_0007",
+        "session_id": "workspace_session_auto_x",
+    });
+    std::fs::write(
+        issue_root.join("automation-plan-intent.json"),
+        serde_json::to_vec(&intent_body).unwrap(),
+    )
+    .unwrap();
+    write_tombstone(temp.path(), "story", "story_spec_0005");
+    write_tombstone(temp.path(), "plan", "issue_work_item_plan_0007");
+
+    // ③ 两路并发（barrier 保证尽量重叠）。
+    let barrier = Arc::new(Barrier::new(2));
+    let cleanup_paths = paths.clone();
+    let cleanup_barrier = Arc::clone(&barrier);
+    let cleanup = std::thread::spawn(move || {
+        cleanup_barrier.wait();
+        run_cleanup(&cleanup_paths, &CleanupRequest::automatic())
+    });
+    let supersede_store = store.clone();
+    let supersede_barrier = Arc::clone(&barrier);
+    let supersede = std::thread::spawn(move || {
+        supersede_barrier.wait();
+        supersede_store.compare_and_set_reenable(
+            "project_0001",
+            "issue_0001",
+            Some(terminated_revision),
+            EnrollmentWriteCommand::Enable {
+                command_id: Some("reenable-concurrent-1".into()),
+                selection_key: "selection_1".into(),
+                source,
+                options,
+                target,
+            },
+            false,
+        )
+    });
+
+    let cleanup_result = cleanup.join().expect("销账线程不得 panic");
+    let supersede_result = supersede.join().expect("取代线程不得 panic");
+    assert!(
+        cleanup_result.is_ok(),
+        "销账 MUST NOT 因并发取代路径报错：{cleanup_result:?}"
+    );
+    assert!(
+        supersede_result.is_ok(),
+        "取代路径 MUST NOT 因并发销账报错：{supersede_result:?}"
+    );
+
+    // 结果确定（不锁内部次序）：intent 必被清掉（先到者删、后到者视为已清），
+    // 取代后的 enrollment 必回到启用态。
+    assert!(
+        !issue_root.join("automation-plan-intent.json").exists(),
+        "同一 intent 必须被清掉（无论哪一路先到）"
+    );
+    let final_enrollment = store
+        .get("project_0001", "issue_0001")
+        .expect("读 enrollment")
+        .expect("enrollment 必须存在");
+    assert!(
+        final_enrollment.enabled && final_enrollment.terminated_at.is_none(),
+        "取代路径必须落定启用态：{final_enrollment:?}"
+    );
 }
