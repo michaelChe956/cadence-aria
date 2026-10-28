@@ -120,3 +120,88 @@ fn startup_governance_is_idempotent_across_restarts() {
     );
     assert_eq!(second.deleted_count, 0, "重入零删除");
 }
+
+/// 写一条实体身份台账绑定（`state/entity-identity/sessions/<session_id>.json`）。
+fn write_binding(paths: &ProductAppPaths, session_id: &str, kind: &str, entity_id: &str) {
+    let dir = paths.root().join("state/entity-identity/sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = format!(
+        r#"{{"project_id":"project_0001","issue_id":"issue_0001","entity_kind":"{kind}","entity_id":"{entity_id}"}}"#
+    );
+    std::fs::write(dir.join(format!("{session_id}.json")), body).unwrap();
+}
+
+/// 写一份 L1 墓碑（issue 级 `entity-deletions/<kind>/<id>.json`）。
+fn write_tombstone(paths: &ProductAppPaths, kind: &str, id: &str) {
+    let path = paths
+        .issue_root("project_0001", "issue_0001")
+        .join("entity-deletions")
+        .join(kind)
+        .join(format!("{id}.json"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let body = format!(
+        r#"{{"project_id":"project_0001","issue_id":"issue_0001","entity_kind":"{kind}","entity_id":"{id}","phase":"deleted","started_at":"2026-10-28T10:00:00Z","deleted_at":"2026-10-28T10:05:00Z"}}"#
+    );
+    std::fs::write(&path, body).unwrap();
+}
+
+/// 缺陷复现（实测）：自动模式实删 6 条，清单却写「模式：dry-run（未执行任何
+/// 删除）」。清单模式行 MUST 如实标注自动模式与本次实际删除数（REQ-DRG-11）。
+#[test]
+fn startup_governance_report_mode_line_records_actual_deletions() {
+    let workspace = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(workspace.path().join(".aria"));
+    write_binding(&paths, "s_l1", "plan", "issue_work_item_plan_0007");
+    write_tombstone(&paths, "plan", "issue_work_item_plan_0007");
+
+    let outcome = run_startup_governance(&paths, workspace.path()).expect("启动期治理应当成功");
+
+    assert_eq!(outcome.deleted_count, 1, "L1 台账条目必须被删：{outcome:?}");
+    let content = std::fs::read_to_string(&outcome.report_path).expect("读取巡检清单");
+    assert!(
+        content.contains("自动销账（服务启动时自动执行；本次已删除 1 条）"),
+        "清单模式行必须如实写明自动模式与删除数：{content}"
+    );
+    assert!(
+        !content.contains("dry-run（未执行任何删除）"),
+        "自动模式 MUST NOT 谎报未执行删除：{content}"
+    );
+    assert!(
+        content.contains(".aria/state/entity-deletions/dangling-reference/cleanup.jsonl"),
+        "清单必须指向留痕台账：{content}"
+    );
+}
+
+/// 销账失败时清单仍然写出，且模式行 MUST 写明失败原因、MUST NOT 声称未删除
+/// ——失败可能发生在部分删除之后，逐条真相以留痕台账为准。
+#[test]
+fn startup_governance_report_mode_line_admits_cleanup_failure() {
+    let workspace = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(workspace.path().join(".aria"));
+    write_binding(&paths, "s_l1", "plan", "issue_work_item_plan_0007");
+    write_tombstone(&paths, "plan", "issue_work_item_plan_0007");
+    // 用普通文件占住台账目录位 → 销账在「删除后留痕」处失败（即部分删除后失败）。
+    std::fs::write(paths.state_root().join("entity-deletions"), b"blocked").unwrap();
+
+    let error = run_startup_governance(&paths, workspace.path()).expect_err("销账应当失败");
+    assert!(!error.to_string().is_empty());
+
+    let report_path = workspace
+        .path()
+        .join("cadence")
+        .join("analysis-docs")
+        .join(report_file_name(&run_day()));
+    let content = std::fs::read_to_string(&report_path).expect("销账失败时清单仍必须写出");
+    assert!(
+        content.contains("销账失败（错误："),
+        "清单模式行必须写明销账失败原因：{content}"
+    );
+    assert!(
+        !content.contains("未删除任何记录"),
+        "销账失败 MUST NOT 谎称未删除：{content}"
+    );
+    assert!(
+        !content.contains("dry-run（未执行任何删除）"),
+        "销账失败 MUST NOT 沿用 dry-run 文案：{content}"
+    );
+}

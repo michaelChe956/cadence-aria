@@ -14,7 +14,9 @@
 //!    16 / 17）。清单摘要仅用于审计关联，**不是删除凭据**（REQ-DRG-22）。
 //! 3. **清单写出**：`cadence/analysis-docs/<运行日>_分析报告_悬空引用巡检清单_v1.0.md`
 //!    （REQ-DRG-11）。清单记录**本次巡检（销账前现场）**的发现集合，便于人核对
-//!    「这次看到了什么、删了什么」。
+//!    「这次看到了什么、删了什么」；模式行**如实标注**本次模式与销账结果
+//!    （自动销账写明实际删除数；销账失败写明错误原因，MUST NOT 声称未删除），
+//!    并指向留痕台账供逐条核对。
 //!
 //! **失败口径**：本入口的失败一律以 `Err` 上抛；调用方（服务启动序列）**只打
 //! 日志、不阻断启动**。清单在销账失败时**仍然写出**（销账前的现场），保证
@@ -26,7 +28,8 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::dangling_reference::cleanup::{CleanupRequest, run_cleanup};
 use crate::product::dangling_reference::patrol::patrol_state_root;
 use crate::product::dangling_reference::report::{
-    findings_token, render_markdown_report, report_file_name, write_markdown_report,
+    CleanupReportStatus, findings_token, render_markdown_report, report_file_name,
+    write_markdown_report,
 };
 use crate::product::json_store::ProductStoreError;
 
@@ -64,9 +67,18 @@ pub(crate) fn run_startup_governance(
     // ② 自动销账（白名单 + 证据门不变；无人工令牌环节）。
     let cleanup = run_cleanup(paths, &CleanupRequest::automatic());
 
-    // ③ 清单写出（销账前现场；销账失败也写出，便于事后查）。
+    // ③ 清单写出（销账前现场；销账失败也写出，模式行如实标注失败原因）。
     let report_path = report_path(workspace_root);
-    let content = render_markdown_report(&report, &token, &chrono::Utc::now().to_rfc3339());
+    let status = match &cleanup {
+        Ok(outcome) => CleanupReportStatus::Automatic {
+            deleted_count: outcome.deleted_count,
+        },
+        Err(error) => CleanupReportStatus::AutomaticFailed {
+            reason: error.to_string(),
+        },
+    };
+    let content =
+        render_markdown_report(&report, &token, &chrono::Utc::now().to_rfc3339(), &status);
     write_markdown_report(&report_path, &content)?;
 
     let outcome = cleanup?;

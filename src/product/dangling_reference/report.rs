@@ -1,7 +1,8 @@
 //! 巡检清单渲染与 findings 摘要令牌（REQ-DRG-11 / 22）。
 //!
 //! 本模块消费 [`crate::product::dangling_reference::patrol::PatrolReport`]，
-//! 把三栏结果渲染成 Markdown 清单并计算销账闸门用的摘要令牌。
+//! 把三栏结果渲染成 Markdown 清单，并计算发现集合的摘要令牌（**仅用于审计
+//! 关联，不是删除凭据**——REQ-DRG-22）。
 //! 令牌口径逐字满足 REQ-DRG-22：只对 findings 的规范化序列化取摘要，
 //! 不含巡检时间、令牌行自身、不可判定与未归类条目。
 
@@ -39,16 +40,43 @@ pub(crate) fn report_file_name(run_day: &str) -> String {
     format!("{run_day}_分析报告_悬空引用巡检清单_v1.0.md")
 }
 
+/// 删除留痕台账**相对工作区根**的路径（REQ-DRG-11：清单须指向逐条删除明细）。
+///
+/// 清单落在 `<workspace>/cadence/analysis-docs/`，台账落在
+/// `<workspace>/.aria/state/entity-deletions/dangling-reference/cleanup.jsonl`
+/// （[`crate::product::app_paths::ProductAppPaths::dangling_reference_ledger_path`]
+/// 的绝对形态）。此处给相对工作区根的形态，便于人按清单直接核对。
+pub(crate) const CLEANUP_LEDGER_RELATIVE_PATH: &str =
+    ".aria/state/entity-deletions/dangling-reference/cleanup.jsonl";
+
+/// 清单头部的「本次模式与销账结果」（REQ-DRG-11）。
+///
+/// 模式行 MUST 如实反映本次运行：自动模式写明实际删除条数；销账失败写明错误
+/// 原文且 MUST NOT 声称「未删除任何记录」——失败可能发生在部分删除之后，
+/// 逐条真相以留痕台账为准。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CleanupReportStatus {
+    /// 只报不删（dry-run 复核）：零删除、零留痕。
+    ReportOnly,
+    /// 自动销账成功：本次实际删除 `deleted_count` 条。
+    Automatic { deleted_count: usize },
+    /// 自动销账失败：`reason` 为错误原文；已发生的删除以留痕台账为准。
+    AutomaticFailed { reason: String },
+}
+
 /// 把巡检报告渲染成 Markdown 清单（技术方案 §5.1 的五节形态）。
 ///
 /// 五节分工（REQ-DRG-11 / 23）：「2. 明细」只收录可删条目；「3. 只报不删
 /// 残留」收录命中悬空但按规则不可删的条目；「4. 不可判定」只收录读失败 /
 /// 数据源不可用的条目；「5. 未归类项」只收录判据表外记录——三节 MUST NOT
-/// 混列。头部说明行（含巡检时间与令牌行）属清单说明文字，不参与令牌摘要。
+/// 混列。头部说明行（模式行、巡检时间与令牌行）属清单说明文字，不参与令牌摘要。
+///
+/// `status` = 本次模式与销账结果；模式行 MUST 如实标注（REQ-DRG-11）。
 pub(crate) fn render_markdown_report(
     report: &PatrolReport,
     token: &str,
     scanned_at: &str,
+    status: &CleanupReportStatus,
 ) -> String {
     let mut markdown = String::new();
 
@@ -58,9 +86,12 @@ pub(crate) fn render_markdown_report(
     markdown.push_str(
         "- 巡检范围：projects/**/issues/**、reviewer-windows/**、reviewer-snapshots/**、state/entity-identity/**、LC scope 目录\n",
     );
-    markdown.push_str("- 模式：dry-run（未执行任何删除）\n");
+    render_mode_line(status, &mut markdown);
     markdown.push_str(&format!(
-        "- 清单摘要令牌：{token}（= findings 规范化序列化的摘要；开启自动清理时须原样提供）\n"
+        "- 清单摘要令牌：{token}（= findings 规范化序列化的摘要；仅用于审计关联，不是删除凭据）\n"
+    ));
+    markdown.push_str(&format!(
+        "- 删除留痕台账：{CLEANUP_LEDGER_RELATIVE_PATH}（逐条删除明细）\n"
     ));
 
     render_summary_section(report, &mut markdown);
@@ -71,6 +102,29 @@ pub(crate) fn render_markdown_report(
     render_covered_types_section(report, &mut markdown);
 
     markdown
+}
+
+/// 模式行：如实标注本次模式与销账结果（REQ-DRG-11）。
+///
+/// 三种口径互斥：只报不删写明零删除；自动销账写明本次实际删除条数；销账失败
+/// 写明错误原文并指向留痕台账——MUST NOT 声称「未删除任何记录」（失败可能发生
+/// 在部分删除之后）。
+fn render_mode_line(status: &CleanupReportStatus, markdown: &mut String) {
+    match status {
+        CleanupReportStatus::ReportOnly => {
+            markdown.push_str("- 模式：只报不删（dry-run，未执行任何删除）\n");
+        }
+        CleanupReportStatus::Automatic { deleted_count } => {
+            markdown.push_str(&format!(
+                "- 模式：自动销账（服务启动时自动执行；本次已删除 {deleted_count} 条）\n"
+            ));
+        }
+        CleanupReportStatus::AutomaticFailed { reason } => {
+            markdown.push_str(&format!(
+                "- 模式：自动销账（服务启动时自动执行）；销账失败（错误：{reason}）——失败可能发生在部分删除之后，逐条真相以删除留痕台账为准\n"
+            ));
+        }
+    }
 }
 
 /// 落盘清单：创建父目录并写文件（父目录 = `<workspace>/cadence/analysis-docs/`）。
@@ -387,7 +441,12 @@ mod report_tests {
             }],
             covered_record_types: vec!["automation_plan_intent".to_string()],
         };
-        let markdown = render_markdown_report(&report, "sha256:abc", "2026-10-28T10:00:00Z");
+        let markdown = render_markdown_report(
+            &report,
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::ReportOnly,
+        );
         assert!(markdown.contains("## 1. 汇总"), "{markdown}");
         assert!(markdown.contains("## 2. 明细"), "{markdown}");
         assert!(markdown.contains("## 3. 只报不删残留"), "{markdown}");
@@ -431,8 +490,18 @@ mod report_tests {
             unclassified: Vec::new(),
             covered_record_types: vec!["automation_plan_intent".to_string()],
         };
-        let first_markdown = render_markdown_report(&report, "sha256:abc", "2026-10-28T10:00:00Z");
-        let second_markdown = render_markdown_report(&report, "sha256:abc", "2037-01-01T00:00:00Z");
+        let first_markdown = render_markdown_report(
+            &report,
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::Automatic { deleted_count: 1 },
+        );
+        let second_markdown = render_markdown_report(
+            &report,
+            "sha256:abc",
+            "2037-01-01T00:00:00Z",
+            &CleanupReportStatus::Automatic { deleted_count: 1 },
+        );
         assert!(first_markdown.contains("2026-10-28T10:00:00Z"));
         assert!(second_markdown.contains("2037-01-01T00:00:00Z"));
         let token_first = findings_token(&findings);
@@ -475,7 +544,12 @@ mod report_tests {
             }],
             covered_record_types: vec!["automation_plan_intent".to_string()],
         };
-        let markdown = render_markdown_report(&report, "sha256:abc", "2026-10-28T10:00:00Z");
+        let markdown = render_markdown_report(
+            &report,
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::ReportOnly,
+        );
         assert!(
             markdown.contains("| automation_plan_intent | 1 | 0 | 1 |"),
             "悬空条目数只统计 findings（1 条），不可判定/未归类不得折入：{markdown}"
@@ -491,6 +565,118 @@ mod report_tests {
         assert!(
             markdown.contains("未归类（1 条，只报不删）"),
             "未归类须独立分栏计数：{markdown}"
+        );
+    }
+
+    /// 空现场报告（模式行 / 令牌行 / 台账行断言只看头部）。
+    fn empty_report() -> PatrolReport {
+        PatrolReport {
+            findings: Vec::new(),
+            undetermined: Vec::new(),
+            unclassified: Vec::new(),
+            covered_record_types: Vec::new(),
+        }
+    }
+
+    /// 自动模式（服务启动时自动执行）：模式行 MUST 写明本次实际删除条数，
+    /// MUST NOT 再出现 dry-run 文案（缺陷复现：实删 6 条却写「未执行任何删除」）。
+    #[test]
+    fn dangling_report_automatic_mode_line_states_deleted_count() {
+        let markdown = render_markdown_report(
+            &empty_report(),
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::Automatic { deleted_count: 6 },
+        );
+        assert!(
+            markdown.contains("自动销账（服务启动时自动执行；本次已删除 6 条）"),
+            "自动模式必须写明实际删除数：{markdown}"
+        );
+        assert!(
+            !markdown.contains("dry-run（未执行任何删除）"),
+            "自动模式 MUST NOT 谎报未删除：{markdown}"
+        );
+    }
+
+    /// 销账失败：模式行 MUST 写明错误原文，且 MUST NOT 声称「未删除任何记录」
+    /// ——失败可能发生在部分删除之后，逐条真相以留痕台账为准。
+    #[test]
+    fn dangling_report_failed_cleanup_mode_line_admits_partial_state() {
+        let reason =
+            "Io(create /tmp/ws/.aria/state/entity-deletions/dangling-reference: Not a directory)";
+        let markdown = render_markdown_report(
+            &empty_report(),
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::AutomaticFailed {
+                reason: reason.to_string(),
+            },
+        );
+        assert!(
+            markdown.contains(&format!("销账失败（错误：{reason}）")),
+            "销账失败必须写明错误原因：{markdown}"
+        );
+        assert!(
+            !markdown.contains("未删除任何记录"),
+            "销账失败 MUST NOT 谎称未删除（可能已部分删除）：{markdown}"
+        );
+        assert!(
+            !markdown.contains("dry-run（未执行任何删除）"),
+            "销账失败 MUST NOT 沿用 dry-run 文案：{markdown}"
+        );
+    }
+
+    /// 只报不删（dry-run 复核）路径：模式行保留「未执行任何删除」语义。
+    #[test]
+    fn dangling_report_report_only_mode_line_keeps_dry_run_wording() {
+        let markdown = render_markdown_report(
+            &empty_report(),
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::ReportOnly,
+        );
+        assert!(
+            markdown.contains("只报不删（dry-run，未执行任何删除）"),
+            "只报不删模式必须保留 dry-run 语义：{markdown}"
+        );
+    }
+
+    /// 清单头部：令牌行口径与 REQ-DRG-22 一致（仅审计关联、不是删除凭据），
+    /// 并指向留痕台账（逐条删除明细）。
+    #[test]
+    fn dangling_report_header_points_at_cleanup_ledger_and_audit_only_token() {
+        let markdown = render_markdown_report(
+            &empty_report(),
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::Automatic { deleted_count: 0 },
+        );
+        assert!(
+            markdown.contains(
+                "sha256:abc（= findings 规范化序列化的摘要；仅用于审计关联，不是删除凭据）"
+            ),
+            "令牌行必须与 REQ-DRG-22 一致：{markdown}"
+        );
+        assert!(
+            !markdown.contains("须原样提供"),
+            "令牌行 MUST NOT 再声称是删除凭据：{markdown}"
+        );
+        assert!(
+            markdown.contains(CLEANUP_LEDGER_RELATIVE_PATH),
+            "清单必须指向留痕台账：{markdown}"
+        );
+        assert!(markdown.contains("逐条删除明细"), "{markdown}");
+    }
+
+    /// 台账指针与 `ProductAppPaths` 的真实落点一致（防两处路径漂移）。
+    #[test]
+    fn dangling_report_ledger_pointer_matches_app_paths() {
+        let workspace = std::path::Path::new("/tmp/ws");
+        let paths = crate::product::app_paths::ProductAppPaths::new(workspace.join(".aria"));
+        assert_eq!(
+            workspace.join(CLEANUP_LEDGER_RELATIVE_PATH),
+            paths.dangling_reference_ledger_path(),
+            "清单里的台账相对路径必须与真实落点一致"
         );
     }
 }
