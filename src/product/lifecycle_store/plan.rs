@@ -3,6 +3,7 @@ use chrono::Utc;
 use std::collections::BTreeSet;
 
 use crate::product::advance_store::{AdvancePlanArtifacts, AdvanceStore};
+use crate::product::dangling_reference::tolerance::live_ledger_session_ids;
 use crate::product::entity_deletion_store::{
     DeletionEntityKind, EntityDeletionManifest, EntityReference, EntityScope, read_json_if_exists,
 };
@@ -809,18 +810,16 @@ impl LifecycleStore {
     // 归属事实一律来自 server 实际拥有关系（记录 refs/真实 source/binding/身份
     // 索引），不依赖健康 candidate 或先 get 根；读取错误 fail-closed，不当空。
 
-    /// scope 归属 session 纯 ID 集：D1.0 身份 list-by-owner（显式绑定＋
-    /// owned-index，purging/deleted 可查）∪ 存活 session 记录的真实
-    /// parent/Plan binding 归约（§0.5 WI/session 行）。
+    /// scope 归属 session 纯 ID 集：D1.0 身份 list-by-owner（显式绑定＋owned-index，purging/deleted 可查）∪ 存活 session 记录的真实 parent/Plan binding 归约（§0.5 WI/session 行）；台账绑定指向**已删实体**时按 ①层容错跳过该绑定（REQ-DRG-24）。
     fn entity_owned_session_ids(
         &self,
         scope: &EntityScope,
     ) -> Result<BTreeSet<String>, ProductStoreError> {
-        let mut ids: BTreeSet<String> = self
+        let owned = self
             .entity_operation_store()
-            .list_workspace_session_ids_by_owner(scope)?
-            .into_iter()
-            .collect();
+            .list_workspace_session_ids_by_owner(scope)?;
+        let ids: BTreeSet<String> = owned.into_iter().collect();
+        let (mut ids, _skipped) = live_ledger_session_ids(&self.paths, scope, ids)?;
         for session in self.list_workspace_sessions(&scope.project_id, &scope.issue_id)? {
             if self.entity_scope_for_session(&session)?.as_ref() == Some(scope) {
                 ids.insert(session.id);

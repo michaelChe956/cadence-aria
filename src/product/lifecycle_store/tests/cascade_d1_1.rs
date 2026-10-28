@@ -714,3 +714,45 @@ fn cascade_d1_1_audit_dependency_order() {
             .exists()
     );
 }
+
+/// ①层容错接入（REQ-DRG-24）：实体身份台账绑定指向**已删 plan**（L1 墓碑四条
+/// 全成立）→ 反查时**跳过该绑定**，不把已删实体的 session 算进待清理集合；无
+/// 墓碑或删除**进行中**（证据不足）→ 绑定必须保留。
+#[test]
+fn cascade_d1_1_ledger_binding_of_deleted_plan_is_skipped() {
+    let (_tmp, store) = setup();
+    let plan_id = "issue_work_item_plan_0001";
+    let scope = d1_3a_scope(DeletionEntityKind::Plan, plan_id);
+    let session_id = "workspace_session_ledger_0001";
+    EntityOperationStore::new(store.app_paths())
+        .bind_workspace_session_identity(session_id, &scope)
+        .expect("绑定实体身份台账");
+
+    // 未删（无墓碑）：绑定必须计入待清理集合。
+    let alive = store.collect_entity_deletion_manifest(&scope).expect("manifest");
+    assert!(
+        alive.session_ids.contains(&session_id.to_string()),
+        "无墓碑的台账绑定必须计入待清理集合：{:?}",
+        alive.session_ids
+    );
+
+    // 删除进行中（purging 墓碑）：证据不足 → 绑定必须保留。
+    let lease = d1_3a_begin_purge(&store, &scope);
+    let purging = store.collect_entity_deletion_manifest(&scope).expect("manifest");
+    assert!(
+        purging.session_ids.contains(&session_id.to_string()),
+        "删除进行中的绑定不得被跳过：{:?}",
+        purging.session_ids
+    );
+
+    // 删除完成（L1 四条全成立）：绑定必须被跳过。
+    EntityDeletionStore::new(store.app_paths())
+        .complete(&lease)
+        .expect("完成删除墓碑");
+    let deleted = store.collect_entity_deletion_manifest(&scope).expect("manifest");
+    assert!(
+        !deleted.session_ids.contains(&session_id.to_string()),
+        "已删实体的 session 不得算进待清理集合：{:?}",
+        deleted.session_ids
+    );
+}

@@ -60,17 +60,19 @@
 // Task 1 只产出静态表与纯结构，调用点自 Task 2 起接线，故非测试构建下这些项
 // 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table` 与 `resolve`）。
 //
-// Task 10 实测（r5）：**本行仍不能删**——① 层的**四个容错列举 API**
-// （`list_automation_intents` / `list_reviewer_windows` /
+// Task 10 / Task 11 实测（r5）：**本行仍不能删**——① 层的**四个容错列举
+// API**（`list_automation_intents` / `list_reviewer_windows` /
 // `list_reviewer_snapshots` / `list_entity_identity_bindings`）仍无生产消费者：
-// 巡检面（`patrol`）走自己的分区读取实现，不经这四个 API。删掉本行会在
+// 巡检面（`patrol`）走自己的分区读取实现，而产品读路径接入的是 `tolerance`
+// 适配面（窗口容错列举 + 台账绑定跳过），不复用这四个 API。删掉本行会在
 // `cargo check --lib` 触发下列 `dead_code` 告警：
-//   - `mod.rs`：`DANGLING_REFERENCE_WARNING_CODE` / `..._LIMIT` /
-//     `DanglingReferenceWarning` / `DanglingReferenceWarnings` / `warning_key`；
 //   - `listing.rs`：① 层容错列举 API 全量（四个 API 及其数据结构与辅助函数）；
 //   - `reference_table.rs::all_reference_rules`；`resolve.rs` 的
 //     `ReferenceVerdict::L2` 变体；`ledger.rs` 的 `path` 方法；
 //     `cleanup.rs` 的 `CleanupOutcome::report_only` 字段。
+// r5 已把 `mod.rs` 的告警结构（`DANGLING_REFERENCE_WARNING_CODE` /
+// `..._LIMIT` / `DanglingReferenceWarning` / `DanglingReferenceWarnings` /
+// `warning_key`）**接活**（`tolerance` 适配面复用），故它们不在死码清单内。
 // 这些项要等 ① 层被真实消费面接上后再回收，**不要在本行下私自删改生产逻辑**。
 #![allow(dead_code)]
 
@@ -83,6 +85,7 @@ pub(crate) mod reference_table;
 pub(crate) mod report;
 pub(crate) mod resolve;
 pub(crate) mod startup;
+pub(crate) mod tolerance;
 
 /// 悬空引用告警的单一稳定码（REQ-DRG-07）。
 pub(crate) const DANGLING_REFERENCE_WARNING_CODE: &str = "dangling_reference_target_missing";

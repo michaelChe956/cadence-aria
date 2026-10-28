@@ -285,7 +285,7 @@ fn path_exists(path: &Path) -> Result<bool, ProductStoreError> {
 }
 
 /// 记录路径（相对应用状态根 `paths.root()`）。
-fn record_path_of(paths: &ProductAppPaths, path: &Path) -> String {
+pub(crate) fn record_path_of(paths: &ProductAppPaths, path: &Path) -> String {
     path.strip_prefix(paths.root())
         .unwrap_or(path)
         .to_string_lossy()
@@ -324,7 +324,10 @@ fn read_dir_sorted(dir: &Path) -> Result<Vec<(PathBuf, bool)>, ProductStoreError
 }
 
 /// 判据表中某记录类型的某个目标类型对应的字段路径。
-fn field_path_for(rule: &DanglingReferenceRule, target_kind: DanglingTargetKind) -> &'static str {
+pub(crate) fn field_path_for(
+    rule: &DanglingReferenceRule,
+    target_kind: DanglingTargetKind,
+) -> &'static str {
     rule.fields
         .iter()
         .find(|field| field.target_kind == target_kind)
@@ -703,7 +706,7 @@ pub(crate) fn list_entity_identity_bindings(
 }
 
 /// 台账条目的 `entity_kind` 值 → 引用目标类型（判据表按值分派）。
-fn entity_kind_target_kind(entity_kind: &str) -> Option<DanglingTargetKind> {
+pub(crate) fn entity_kind_target_kind(entity_kind: &str) -> Option<DanglingTargetKind> {
     match entity_kind {
         "story" => Some(DanglingTargetKind::StorySpec),
         "design" => Some(DanglingTargetKind::DesignSpec),
