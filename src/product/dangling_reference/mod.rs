@@ -16,7 +16,14 @@
 //! MUST NOT 使整次列举失败；只吞「目标已删」这一种错（REQ-DRG-05），
 //! JSON 解析失败 / IO 失败一律原样上抛（不得折叠成「跳过」）。存在性判为
 //! 「不可判定」（`Unknown`）的引用既不跳过条目也不产生告警、不计入悬空
-//! 条目数（REQ-DRG-23）。巡检与销账由后续任务追加子模块。
+//! 条目数（REQ-DRG-23）。
+//!
+//! `patrol` 子模块**同样只读、零副作用**：遍历五个分区（issue 级 / reviewer
+//! 窗口 / reviewer 快照 / 实体身份台账 / 逻辑代码库 scope）核对引用目标是否
+//! 仍存在，产出巡检报告（REQ-DRG-08 / 09 / 10）。它**不删除、不移动、不修改
+//! 任何文件**，也不落盘清单——清单渲染与销账由后续任务追加子模块。记录自身
+//! 解析失败、分区不可读、会话枚举失败与存在性判 `Unknown` 一律进「不可判定」
+//! （REQ-DRG-23）。
 
 // Task 1 只产出静态表与纯结构，调用点自 Task 2 起接线，故非测试构建下这些项
 // 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table` 与 `resolve`）。
@@ -24,6 +31,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod listing;
+pub(crate) mod patrol;
 pub(crate) mod reference_table;
 pub(crate) mod resolve;
 
