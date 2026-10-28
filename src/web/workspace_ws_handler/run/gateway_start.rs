@@ -583,6 +583,49 @@ pub(crate) fn fail_plan_split_run(run: Option<&PlanSplitRunContext>, reason: &st
 pub(crate) async fn start_work_item_plan_author(
     launch: PlanAuthorLaunch,
     provider: Arc<dyn StreamingProviderAdapter>,
+    input: StreamingProviderInput,
+    cancel: CancellationToken,
+    plan_split_run: Option<&PlanSplitRunContext>,
+) -> Result<ProviderSession, ProviderAdapterError> {
+    // 启动握手停滞界：adapter 的 `start` 在返回 `ProviderSession` 之前可能卡死
+    // 在握手（ACP/JSON-RPC 无应答），而 F-19 系列看门狗**只在拿到 session 之后**
+    // 的驱动循环内生效——握手期此前只受整 run 总预算 3h 兜底，现场形态即
+    // 「37–40 分钟零 provider 事件、零 WS 帧」的静默等待。此处是该 path 的
+    // 唯一物理启动口（七个 caller 共用），在该口收口一次即可覆盖 SC 单候选
+    // 确认 run、SC 返修接力 run（HumanGateScManualRevision）、教学重驱与
+    // legacy/draft/batch author 全部启动路径。取值与关系见
+    // `PROVIDER_LAUNCH_STALL_TIMEOUT_PRODUCTION`。
+    let stall_timeout = crate::product::workspace_engine::provider_launch_stall_timeout();
+    match tokio::time::timeout(
+        stall_timeout,
+        start_work_item_plan_author_inner(launch, provider, input, cancel, plan_split_run),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            // 稳定原因码 `provider_launch_stall` + provider 超时码（HardTimeout
+            // killed）：随既有 Err 通道上浮——门修订轮由调用方
+            // `fail_human_gate_turn(ProviderErr)` 收口（turn 终态、门保持开态
+            // 可再操作），SC 生成轮由驱动入口 `finish_failed_run` 回落可重跑
+            // 起点。launch future 已被 drop（adapter 的进程归属守卫随之收口），
+            // 不留孤儿子进程。
+            Err(ProviderAdapterError::timeout_with_details(
+                format!(
+                    "provider_launch_stall: provider 会话在 {} 秒内未完成启动握手（未产生任何 provider 动作），运行已由启动停滞界中止，可重新开始生成",
+                    stall_timeout.as_secs()
+                ),
+                String::new(),
+                String::new(),
+                stall_timeout.as_millis() as u64,
+            ))
+        }
+    }
+}
+
+async fn start_work_item_plan_author_inner(
+    launch: PlanAuthorLaunch,
+    provider: Arc<dyn StreamingProviderAdapter>,
     mut input: StreamingProviderInput,
     cancel: CancellationToken,
     plan_split_run: Option<&PlanSplitRunContext>,

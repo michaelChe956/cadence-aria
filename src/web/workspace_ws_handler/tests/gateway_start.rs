@@ -289,6 +289,35 @@ impl StreamingProviderAdapter for CapturingStreamingAdapter {
     }
 }
 
+/// 启动握手永不返回的 provider：模拟 adapter `start` 卡死（ACP/JSON-RPC
+/// 握手无应答），用于验证 plan author 启动口的停滞界。取消 token 不可见
+/// ——与现场形态一致（卡在 select 之外的裸 await）。
+struct HangingStartStreamingAdapter {
+    starts: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for HangingStartStreamingAdapter {
+    async fn start(
+        &self,
+        _input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        std::future::pending::<()>().await;
+        unreachable!("hanging provider start never resolves")
+    }
+
+    async fn start_validated(
+        &self,
+        validated: crate::cross_cutting::session_launch::ValidatedStreamingProviderInput,
+        cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        let (input, _launch) = validated.into_parts();
+        self.start(input, cancel).await
+    }
+}
+
 /// B2b1(Task 5.2)测试公共 fixture:ProviderRunFixture 的 LogicalAlias 拓扑
 ///(durable 会话记录 + manifest/selection/policy + gateway 注入 + 成员
 /// checkout=repository_root、聚合根=其父目录),`resolve_plan_author_launch`
@@ -791,6 +820,60 @@ async fn start_work_item_plan_author_none_uses_legacy_provider_start_unchanged()
         audit.stream_launches(),
         0,
         "legacy path must not touch gateway audit"
+    );
+}
+
+#[tokio::test]
+async fn start_work_item_plan_author_bounds_launch_stall_at_shared_choke_point() {
+    // 缺口（owner r20/r21 现场 37–40 分钟静默）：plan author 启动口在拿到
+    // ProviderSession **之前**没有任何停滞界——看门狗全部在驱动循环内生效，
+    // 握手期零 provider 事件、零 WS 帧，只能等整 run 总预算 3h 收口。
+    // 本用例以可注入阈值（50ms，生产 300s）构造「启动永不返回」：
+    // 启动口必须在该界内以稳定码失败，而不是无限等待。
+    let _stall_guard = crate::product::workspace_engine::set_provider_launch_stall_timeout_for_test(
+        std::time::Duration::from_millis(50),
+    );
+
+    let fixture = gateway_fixture();
+    let starts = Arc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn StreamingProviderAdapter> = Arc::new(HangingStartStreamingAdapter {
+        starts: starts.clone(),
+    });
+    let engine = workspace_engine(&fixture, false);
+    let plan_launch = resolve_plan_author_launch(&engine).expect("legacy launch");
+    let input = streaming_input(fixture.aggregate_root.clone());
+
+    // 外层守卫只防止用例自身挂死：真正的界必须由启动口给出。
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        start_work_item_plan_author(plan_launch, provider, input, CancellationToken::new(), None),
+    )
+    .await
+    .expect("launch stall bound must fire before the test guard");
+
+    let error = match outcome {
+        Ok(_) => panic!("hanging provider start must fail, not wait forever"),
+        Err(error) => error,
+    };
+    assert!(
+        error.details.contains("provider_launch_stall"),
+        "stable reason code missing: {}",
+        error.details
+    );
+    assert_eq!(
+        error.code,
+        crate::protocol::provider_errors::ProviderErrorCode::ProviderTimeout,
+        "launch stall must surface as the provider timeout code"
+    );
+    assert_eq!(
+        error.timeout_status,
+        TimeoutStatus::HardTimeoutKilled,
+        "launch stall must be reported as a hard timeout"
+    );
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        1,
+        "the hanging launch must have been attempted exactly once"
     );
 }
 

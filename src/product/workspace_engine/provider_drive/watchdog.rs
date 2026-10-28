@@ -35,6 +35,88 @@ pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT: std::time::Duration =
 pub(crate) const PROVIDER_IDLE_WATCHDOG_TIMEOUT_PRODUCTION: std::time::Duration =
     std::time::Duration::from_secs(1800);
 
+/// provider **启动握手**停滞界：plan author 启动口
+/// (`start_work_item_plan_author`) 从调用到返回 `ProviderSession` 的上限。
+///
+/// 缺口依据（owner r20/r21 现场）：进程在同一处静默 37–40 分钟——零 provider
+/// 事件、零 WS 帧，只能人工 kill。F-19 系列看门狗全部在**拿到 session 之后**的
+/// 驱动循环内生效（`work_item_plan.rs` 的 `PROVIDER_WORK_ITEM_PLAN_IDLE_WATCHDOG_TIMEOUT`、
+/// `provider_drive.rs` 的 `PROVIDER_IDLE_WATCHDOG_TIMEOUT`），而 SC 单候选确认 run
+/// 与 SC 返修接力 run（`HumanGateScManualRevision`）的启动握手在其**之前**：
+/// 握手期间既无 provider 事件可看、也无任何看门狗计时，只能等 adapter 内部
+/// 的整 run 总预算 `DEFAULT_PROVIDER_TIMEOUT_SECS`（3h）收口。
+///
+/// 取值理由（300s）：
+/// - 握手是纯机器交互（spawn 子进程 → initialize → session/new，必要时叠加
+///   trust 登记），三个 adapter 的**单次** RPC 请求界都是 60s
+///   （`PI_RPC_REQUEST_TIMEOUT` / `KIMI_RPC_REQUEST_TIMEOUT` /
+///   `CODEX_RPC_REQUEST_TIMEOUT`）。300s = 5×单次 RPC 界，足以覆盖若干串行
+///   RPC + 进程冷启动 + trust 登记在慢机器上的抖动。
+/// - 严格小于 `PROVIDER_IDLE_WATCHDOG_TIMEOUT`（1800s）：握手期**不存在**模型
+///   生成，因此合法的「慢」远小于生成期合法静默；用 1800s 会把真楔死当正常。
+/// - 远小于整 run 总预算 `DEFAULT_PROVIDER_TIMEOUT_SECS`（3h）：后者是兜底，
+///   不能让一处握手卡死吃掉整个 run 预算（r19 现场桥线程空等 57min 的同族教训）。
+///
+/// 该界只约束「尚未产生任何 provider 动作」的握手窗口，**不改变**任何既有看门狗
+/// 的覆盖：拿到 session 后仍由各驱动循环的零活动/choice 界收口。
+pub(crate) const PROVIDER_LAUNCH_STALL_TIMEOUT_PRODUCTION: std::time::Duration =
+    std::time::Duration::from_secs(300);
+
+/// 生产取值护栏（两构建下都求值）：启动停滞界必须严格小于零活动看门狗阈值，
+/// 且小于整 run 总预算——避免后续校准把启动界抬到与生成期看门狗同界。
+const _: () = assert!(
+    PROVIDER_LAUNCH_STALL_TIMEOUT_PRODUCTION.as_secs()
+        < PROVIDER_IDLE_WATCHDOG_TIMEOUT_PRODUCTION.as_secs()
+);
+const _: () = assert!(
+    PROVIDER_LAUNCH_STALL_TIMEOUT_PRODUCTION.as_secs()
+        < crate::cross_cutting::provider_adapter::DEFAULT_PROVIDER_TIMEOUT_SECS
+);
+
+/// 启动停滞界的**生效值**：生产恒为
+/// [`PROVIDER_LAUNCH_STALL_TIMEOUT_PRODUCTION`]；测试可经
+/// [`set_provider_launch_stall_timeout_for_test`] 注入短阈值（默认不注入，
+/// 保持生产值——既有「启动悬挂」类用例依赖真实悬挂语义，不被测试期常量
+/// 意外缩短）。
+pub(crate) fn provider_launch_stall_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    {
+        let injected_ms =
+            LAUNCH_STALL_TIMEOUT_OVERRIDE_MS.load(std::sync::atomic::Ordering::SeqCst);
+        if injected_ms > 0 {
+            return std::time::Duration::from_millis(injected_ms);
+        }
+    }
+    PROVIDER_LAUNCH_STALL_TIMEOUT_PRODUCTION
+}
+
+/// 测试期注入槽（毫秒；0 = 未注入）。
+#[cfg(test)]
+static LAUNCH_STALL_TIMEOUT_OVERRIDE_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 测试期注入停滞界；Drop 复位。**可控时间**：用例无需真等 300s。
+#[cfg(test)]
+pub(crate) struct ProviderLaunchStallTimeoutGuard;
+
+#[cfg(test)]
+impl Drop for ProviderLaunchStallTimeoutGuard {
+    fn drop(&mut self) {
+        LAUNCH_STALL_TIMEOUT_OVERRIDE_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_provider_launch_stall_timeout_for_test(
+    timeout: std::time::Duration,
+) -> ProviderLaunchStallTimeoutGuard {
+    LAUNCH_STALL_TIMEOUT_OVERRIDE_MS.store(
+        timeout.as_millis() as u64,
+        std::sync::atomic::Ordering::SeqCst,
+    );
+    ProviderLaunchStallTimeoutGuard
+}
+
 /// r32 校准:work item plan 驱动循环(SC 单候选 plan 文档生成)的零活动
 /// 看门狗界——1800s(30min)。r32 现场 plan fresh 被 600s 界误杀:Claude
 /// 生成完整 work item plan 文档的合法静默可超 10min(r28 实测生成段

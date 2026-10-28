@@ -21,9 +21,12 @@ use artifact_retry::artifact_failure_reasons_with_diagnostic;
 use choice_audit::ChoiceResponseAuditInput;
 pub(crate) use pending_choices::PendingChoiceRequests;
 pub(crate) use pending_choices::pending_choice_requests_snapshot;
+#[cfg(test)]
+pub(crate) use watchdog::set_provider_launch_stall_timeout_for_test;
 pub(crate) use watchdog::{
     PROVIDER_CHOICE_WAIT_TIMEOUT, PROVIDER_IDLE_WATCHDOG_TIMEOUT,
-    PROVIDER_IDLE_WATCHDOG_TIMEOUT_PRODUCTION, PROVIDER_WORK_ITEM_PLAN_IDLE_WATCHDOG_TIMEOUT,
+    PROVIDER_IDLE_WATCHDOG_TIMEOUT_PRODUCTION, PROVIDER_LAUNCH_STALL_TIMEOUT_PRODUCTION,
+    PROVIDER_WORK_ITEM_PLAN_IDLE_WATCHDOG_TIMEOUT, provider_launch_stall_timeout,
 };
 
 impl WorkspaceEngine {
