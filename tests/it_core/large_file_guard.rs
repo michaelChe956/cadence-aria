@@ -61,12 +61,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("src/cross_cutting/streaming_provider/mod.rs", 2062),
     ("src/cross_cutting/streaming_provider/tests.rs", 2388),
     ("src/product/advance_store.rs", 1369),
-    ("src/product/coding_attempt_store/admission_tests.rs", 1302),
-    ("src/product/coding_attempt_store/gate.rs", 2079),
-    (
-        "src/product/coding_attempt_store/group_initialization.rs",
-        1840,
-    ),
     (
         "src/product/coding_attempt_store/tests/issue_delivery.rs",
         1216,
@@ -114,8 +108,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/product/coding_workspace_engine/tests/verification_triage_gates.rs",
         1598,
     ),
-    ("src/product/issue_automation_store.rs", 1491),
-    ("src/product/issue_automation_store/tests.rs", 1518),
     ("src/product/lifecycle_store/plan.rs", 1683),
     ("src/product/lifecycle_store/tests.rs", 2893),
     (
@@ -131,7 +123,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/product/lifecycle_store/workspace_single_candidate_tests.rs",
         2055,
     ),
-    ("src/product/lifecycle_store/worktree.rs", 1767),
     (
         "src/product/logical_codebase/coordinator_provider_turn.inc.rs",
         1221,
@@ -139,10 +130,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     (
         "src/product/logical_codebase/production_policy_resolvers.rs",
         1547,
-    ),
-    (
-        "src/product/logical_codebase/provider_admission_preflight_tests.inc.rs",
-        2243,
     ),
     (
         "src/product/logical_codebase/provider_boundary_probe.rs",
@@ -154,10 +141,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ),
     ("src/product/logical_codebase/provider_gateway.rs", 3239),
     (
-        "src/product/logical_codebase/provider_gateway_tests.rs",
-        5474,
-    ),
-    (
         "src/product/logical_codebase/provider_gateway_tests/task28_root_authority.inc.rs",
         1553,
     ),
@@ -167,13 +150,8 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         1315,
     ),
     ("src/product/models/tests.rs", 1523),
-    // 2026-10-25：reviewer_reconciliation.rs 已拆分至 507 行（< 1200 硬线），
-    // 按「拆分达标后必须移除」的登记回收先例移除本项。
-    // 2026-10-23：既有债务登记（本批未改该文件，基线即 3362 行）
     ("src/product/reviewer_snapshot.rs", 3362),
-    // 2026-10-23：既有债务登记（本批未改该文件，基线即 4198 行）
     ("src/product/reviewer_window.rs", 4198),
-    // 2026-10-23：既有债务登记（本批未改该文件，基线即 1921 行）
     ("src/product/reviewer_window_store.rs", 1921),
     ("src/product/work_item_contract/tests/dependency.rs", 1204),
     ("src/product/work_item_plan_compiler/tests.rs", 1449),
@@ -208,10 +186,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("src/product/workspace_engine/review/routing.rs", 1391),
     ("src/product/workspace_engine/session_state.rs", 1457),
     (
-        "src/product/workspace_engine/tests/advance_handler.rs",
-        1342,
-    ),
-    (
         "src/product/workspace_engine/tests/author_revision_loop.rs",
         1227,
     ),
@@ -239,9 +213,7 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ),
     ("src/web/advance_plan.rs", 1644),
     ("src/web/app.rs", 2222),
-    ("src/web/autopilot_orchestrator.rs", 1737),
     ("src/web/coding_start.rs", 1256),
-    ("src/web/coding_start_parts/tests.inc.rs", 1299),
     ("src/web/coding_ws_handler/runner.rs", 2817),
     ("src/web/coding_ws_handler/socket.rs", 1295),
     (
@@ -252,24 +224,16 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/web/coding_ws_handler/tests/runner_recovery/startup_window_compensation.rs",
         1828,
     ),
-    ("src/web/handlers/automation_enrollment.rs", 2493),
     ("src/web/handlers/automation_gateway_preflight.rs", 1217),
     ("src/web/handlers/coding.rs", 1321),
     ("src/web/handlers/coding/plan_start.rs", 2565),
     ("src/web/handlers/coding/plan_start_tests.rs", 4001),
-    ("src/web/handlers/lifecycle_tests_d2_2.inc.rs", 1289),
     ("src/web/handlers/support.rs", 1204),
     ("src/web/handlers/support_parts/coding_cleanup.inc.rs", 1572),
-    ("src/web/handlers/workspace_sc_recovery.rs", 2073),
     ("src/web/types.rs", 1574),
     ("src/web/wiga_gate_fixture.rs", 1764),
-    (
-        "src/web/workspace_session/manager/durable_projection.rs",
-        1329,
-    ),
     ("src/web/workspace_session/tests/part_01.rs", 1580),
     ("src/web/workspace_session/tests/part_07.rs", 1272),
-    ("src/web/workspace_ws_handler/run/gateway_start.rs", 1858),
     ("src/web/workspace_ws_handler/run/provider_run.rs", 1678),
     ("src/web/workspace_ws_handler/run/single_candidate.rs", 1658),
     ("src/web/workspace_ws_handler/socket.rs", 1893),
@@ -281,7 +245,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/web/workspace_ws_handler/tests/conversational_gate_protocol.rs",
         2050,
     ),
-    ("src/web/workspace_ws_handler/tests/gateway_start.rs", 1700),
     (
         "src/web/workspace_ws_handler/tests/planning_resume.rs",
         2444,
@@ -320,20 +283,10 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "web/src/components/chat-workspace/cockpit/CockpitInbox.test.tsx",
         1410,
     ),
-    (
-        "web/src/components/chat-workspace/cockpit/CockpitInbox.tsx",
-        1310,
-    ),
-    (
-        "web/src/components/lifecycle/IssueLifecycleWorkbench.tsx",
-        1288,
-    ),
     ("web/src/hooks/useWorkspaceSessionObservers.test.tsx", 1245),
     ("web/src/pages/ChatCockpitPage.tsx", 1471),
     ("web/src/pages/CodingWorkspacePage.test.tsx", 1560),
     ("web/src/pages/CodingWorkspacePage.tsx", 1541),
-    ("web/src/state/workspace-cockpit-projection.test.ts", 1540),
-    ("web/src/state/workspace-cockpit-projection.ts", 1380),
     ("web/src/state/workspace-ws-store.ts", 1230),
 ];
 

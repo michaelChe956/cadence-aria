@@ -70,7 +70,9 @@ def main() -> int:
         drop = {rel for rel, _, _ in removable}
         kept = [(rel, limit) for rel, limit, _ in keep]
         start = text.index("const GRANDFATHERED")
-        arr_start = text.index("&[", start)
+        # 取初始化器：`= &[` 之后（不是类型标注里的 `&[(&str, usize)]`）
+        eq = text.index("=", start)
+        arr_start = text.index("&[", eq)
         arr_end = text.index("\n];", arr_start)
         body = "".join(f'    ("{rel}", {limit}),\n' for rel, limit in kept)
         new_text = text[:arr_start] + "&[\n" + body + text[arr_end:]
