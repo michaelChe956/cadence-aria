@@ -12,6 +12,7 @@ pub mod coding_work_item_context;
 pub mod coding_workspace_engine;
 pub mod coding_workspace_runner;
 pub mod compatibility_scan;
+pub mod dangling_reference;
 pub mod entity_deletion_cascade;
 pub mod entity_deletion_store;
 pub mod entity_operation_store;
