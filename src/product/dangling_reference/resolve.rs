@@ -2,13 +2,17 @@
 //!
 //! 本模块回答两层问题：
 //! 1. 「目标还在吗」——[`DanglingResolver::target_exists`] 按九类目标分派到
-//!    既有只读 API 做两态判定（REQ-DRG-01）；
+//!    既有只读 API 做存在性判定（REQ-DRG-01，三态：`Exists` / `Missing` /
+//!    `Unknown`）；
 //! 2. 「能证明已删到可销账吗」——[`DanglingResolver::evidence_level`] 按
 //!    L1 墓碑四条 / 类型专属 L2 条件给出证据等级（REQ-DRG-02）。
 //!
 //! 读失败（IO / 解析 / 歧义）一律原样上抛，MUST NOT 被当成「目标不存在」
-//! （REQ-DRG-21）；「已判定悬空但证据不足」归 [`EvidenceLevel::Insufficient`]
-//! （只报不删残留），与巡检侧的「不可判定」（读取失败）是两个概念。
+//! （REQ-DRG-21）；所需存在性数据源 / 作用域在本判定面不可用的目标（U1 四类）
+//! 如实报 [`TargetExistence::Unknown`]，同样 MUST NOT 被当成「目标不存在」
+//! （REQ-DRG-23）。「已判定悬空但证据不足」归 [`EvidenceLevel::Insufficient`]
+//! （只报不删残留），与巡检侧的「不可判定」（读取失败或数据源 / 作用域不可用）
+//! 是两个概念。
 //!
 //! 本任务只交付判定面：不删除任何东西、不接线巡检与销账（Task 4/7/8）。
 
@@ -29,13 +33,17 @@ use crate::product::reviewer_window_store::{
     REVIEWER_WINDOW_STORE_DIR, ReviewerWindowRecord, tree_key_of,
 };
 
-/// 目标两态判定（REQ-DRG-01）：只回答「仍在 / 不在」，不掺删除语义。
+/// 目标存在性判定（REQ-DRG-01 / REQ-DRG-23）：只回答「仍在 / 不在 / 无法判定」，
+/// 不掺删除语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TargetExistence {
     /// 目标记录仍在（存在性读命中）。
     Exists,
     /// 目标记录不在（存在性读**明确**未命中；读失败不落此态，原样上抛）。
     Missing,
+    /// 目标存在性无法判定（所需数据源未接或作用域不足）：MUST 归「不可判定」，
+    /// MUST NOT 计入悬空条目数（REQ-DRG-23）。
+    Unknown,
 }
 
 /// 已删证据等级（REQ-DRG-02）。
@@ -169,7 +177,7 @@ impl<'a> DanglingResolver<'a> {
         }
     }
 
-    /// 九类目标的两态存在性判定（REQ-DRG-01）。
+    /// 九类目标的存在性判定（REQ-DRG-01；三态，见 [`TargetExistence`]）。
     ///
     /// - `StorySpec` / `DesignSpec`：`LifecycleStore::list_story_specs` /
     ///   `list_design_specs` 按 `scope` 的 project/issue 列举比对 id；
@@ -180,9 +188,13 @@ impl<'a> DanglingResolver<'a> {
     ///   路二 `session_ids` 集合成员关系；**任一路命中即判「仍在」**，
     ///   两路皆不命中才算不存在；任一路读失败原样上抛（不可判定）；
     /// - `Checkout` / `AggregateIndex` / `LogicalMember` / `Enrollment`：
-    ///   「上游无法定义」降级（U1）——恒判 `Missing` 且
-    ///   [`Self::evidence_level`] 恒为 [`EvidenceLevel::Insufficient`]，
-    ///   销账侧 MUST NOT 据此删除。
+    ///   存在性数据源需要本判定面没有的作用域（U1）——如实报
+    ///   [`TargetExistence::Unknown`]（REQ-DRG-23），MUST NOT 伪装成
+    ///   [`TargetExistence::Missing`]；其 [`Self::evidence_level`] 仍恒为
+    ///   [`EvidenceLevel::Insufficient`]，销账侧 MUST NOT 据此删除。
+    ///
+    /// `Unknown` 与读失败上抛的共同口径：「不可判定」不计入悬空条目数，
+    /// 也不计入归零（REQ-DRG-22 / REQ-DRG-23）。
     ///
     /// `scope` 缺失时对需要 project/issue 定位的目标返回
     /// `ProductStoreError::NotFound`（不得猜默认 scope）。
@@ -232,13 +244,16 @@ impl<'a> DanglingResolver<'a> {
                     coding_hit || self.session_ids.contains(target_id),
                 ))
             }
-            // U1：三类目标无既有存在性读 API（上游无法定义）；enrollment 是
-            // 在途覆盖状态、永不删。四类一律降级「只报不删」，本判定面恒
-            // Missing——存在性语义到这里为止，删除决策不消费它（REQ-DRG-02/19）。
+            // U1：checkout / aggregate_index / logical_member 的存在性读需要 LC
+            // 作用域（记录落在 `logical-codebases/<lc_id>/`），本判定面无 LC
+            // 上下文；enrollment 需按 project/issue 读当处文件。三者一律如实报
+            // 「无法判定」，MUST NOT 伪装成「不存在」（否则 Task 4 会把正常记录
+            // 整批判为悬空）。真实读须先按 `LogicalCodebaseStore::list(project_id)`
+            // 枚举 LC，属持有 LC 上下文的 Task 4（REQ-DRG-23）。
             DanglingTargetKind::Checkout
             | DanglingTargetKind::AggregateIndex
             | DanglingTargetKind::LogicalMember
-            | DanglingTargetKind::Enrollment => Ok(TargetExistence::Missing),
+            | DanglingTargetKind::Enrollment => Ok(TargetExistence::Unknown),
         }
     }
 
@@ -643,6 +658,131 @@ mod resolve_tests {
         let verdict = window_l2_verdict(&paths, &window, true).expect("verdict");
         assert!(!verdict.no_lease, "租约文件存在即不满足 W-2");
         assert!(!verdict.all_hold());
+    }
+
+    #[test]
+    fn dangling_resolver_attempt_probe_error_is_not_missing() {
+        let temp = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let sessions = BTreeSet::new();
+        let failing_probe =
+            |_id: &str| -> Result<bool, crate::product::json_store::ProductStoreError> {
+                Err(crate::product::json_store::ProductStoreError::Io(
+                    "probe read failed".to_string(),
+                ))
+            };
+        let resolver = DanglingResolver::with_attempt_probe(&paths, &sessions, &failing_probe);
+
+        let error = resolver
+            .target_exists(
+                DanglingTargetKind::Attempt,
+                "coding_attempt_unreadable",
+                None,
+            )
+            .expect_err("读失败必须原样上抛，不得退化为 Missing（REQ-DRG-21）");
+        assert!(
+            matches!(&error, crate::product::json_store::ProductStoreError::Io(message)
+                if message == "probe read failed"),
+            "注入探针的错误必须原样上抛，实际为 {error:?}"
+        );
+    }
+
+    #[test]
+    fn dangling_window_l2_verdict_each_condition_required() {
+        let temp = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let worktree = temp.path().join("gone-worktree");
+        let window = |state: &str| -> ReviewerWindowRecord {
+            serde_json::from_value(serde_json::json!({
+                "schema": "reviewer_window_v1",
+                "window_id": "win_001",
+                "generation": 1,
+                "identity": {
+                    "canonical_worktree": worktree,
+                    "gitdir": temp.path().join("gone-worktree/.git"),
+                    "common_dir": temp.path().join("gone-worktree"),
+                    "lease_id": "lease_1",
+                },
+                "attempt_id": "coding_attempt_9f3",
+                "run_id": "run_1",
+                "provider": "codex",
+                "state": state,
+                "report_acceptance": "accepted",
+                "platform_write_paths": [],
+                "quiesced_scopes": [],
+                "baseline": null,
+                "restore": null,
+                "recovery": null,
+                "last_error": null,
+                "violation_pending": null,
+                "pre_restore_git_facts": [],
+                "transitions": [],
+                "created_at": "2026-10-24T00:00:00Z",
+                "updated_at": "2026-10-24T00:00:00Z",
+            }))
+            .expect("window record")
+        };
+
+        // 基线：终态 + 无租约 + 两路目标皆无 + worktree 已不存在 → 四条件全成立。
+        let verdict = window_l2_verdict(&paths, &window("closed_accepted"), true).expect("verdict");
+        assert!(verdict.all_hold(), "四条件全部成立时 all_hold 必须为真");
+
+        // W-1 反例：窗口未到终态。
+        let verdict = window_l2_verdict(&paths, &window("running"), true).expect("verdict");
+        assert!(!verdict.terminal, "running 不是终态");
+        assert!(!verdict.all_hold(), "W-1 不成立时 all_hold 必须为假");
+
+        // W-3 反例：调用方核对到两路目标仍有命中。
+        let verdict =
+            window_l2_verdict(&paths, &window("closed_accepted"), false).expect("verdict");
+        assert!(
+            !verdict.target_missing,
+            "target_missing=false 即 W-3 不成立"
+        );
+        assert!(!verdict.all_hold(), "W-3 不成立时 all_hold 必须为假");
+
+        // W-4 反例：canonical worktree 路径仍存在。
+        std::fs::create_dir_all(&worktree).unwrap();
+        let verdict = window_l2_verdict(&paths, &window("closed_accepted"), true).expect("verdict");
+        assert!(!verdict.worktree_gone, "worktree 仍存在即 W-4 不成立");
+        assert!(!verdict.all_hold(), "W-4 不成立时 all_hold 必须为假");
+        std::fs::remove_dir_all(&worktree).unwrap();
+
+        // W-2 反例：树级 durable 租约文件存在。
+        let leases = paths.root().join("reviewer-windows/leases");
+        std::fs::create_dir_all(&leases).unwrap();
+        std::fs::write(
+            leases.join(format!("{}.json", tree_key_of(&worktree))),
+            b"{}",
+        )
+        .unwrap();
+        let verdict = window_l2_verdict(&paths, &window("closed_accepted"), true).expect("verdict");
+        assert!(!verdict.no_lease, "租约文件存在即 W-2 不成立");
+        assert!(!verdict.all_hold(), "W-2 不成立时 all_hold 必须为假");
+    }
+
+    #[test]
+    fn dangling_resolver_u1_targets_report_unknown() {
+        let temp = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let sessions = BTreeSet::new();
+        let probe = probe_false();
+        let resolver = DanglingResolver::with_attempt_probe(&paths, &sessions, &probe);
+
+        for kind in [
+            DanglingTargetKind::Checkout,
+            DanglingTargetKind::AggregateIndex,
+            DanglingTargetKind::LogicalMember,
+            DanglingTargetKind::Enrollment,
+        ] {
+            assert_eq!(
+                resolver
+                    .target_exists(kind, "target_0001", Some(&scope()))
+                    .unwrap(),
+                TargetExistence::Unknown,
+                "{kind:?} 的存在性来源在本判定面不可用，必须报「不可判定」而非「不存在」"
+            );
+        }
     }
 
     #[test]

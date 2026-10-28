@@ -1,11 +1,18 @@
 //! 悬空引用治理（`add-dangling-reference-governance`）。
 //!
-//! 本模块当前只承载第 ① 层的判定基础：目标类型枚举、字段名判据表、告警结构与
-//! 去重上界（REQ-DRG-01 / REQ-DRG-07）。全部为静态表与纯数据结构，**不做任何 IO**，
-//! 也不接线任何调用点；存在性核对、容错列举、巡检与销账由后续任务追加子模块。
+//! 本模块承载第 ① 层的判定基础：目标类型枚举与字段名判据表
+//! （`reference_table`，纯静态表、无 IO）、告警结构与去重上界（REQ-DRG-01 /
+//! REQ-DRG-07），以及目标存在性与已删证据分级（`resolve`；REQ-DRG-01 / 02 /
+//! 12 / 21 / 23）。
+//!
+//! `resolve` 子模块**会做只读 IO**：读 deletion 墓碑、`entity-operations` 下的
+//! pending-failure 事实、reviewer-window 树级租约文件、worktree 路径与
+//! coding attempt / session 记录；全部为只读（不取 lease、不写回），读失败
+//! 一律原样上抛、不得降级成「目标不存在」。容错列举、巡检与销账由后续任务
+//! 追加子模块。
 
 // Task 1 只产出静态表与纯结构，调用点自 Task 2 起接线，故非测试构建下这些项
-// 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table`）。
+// 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table` 与 `resolve`）。
 // **全部接线完成后（Task 9）删除本行**，让死代码重新回到门禁视野。
 #![allow(dead_code)]
 
