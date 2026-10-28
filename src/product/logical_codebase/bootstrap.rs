@@ -40,7 +40,9 @@ use crate::product::logical_codebase::repository_routing::{
 // - bootstrap_projector.inc.rs：readiness 只读投影状态机（LogicalCodebaseBootstrapProjector）。
 // - bootstrap_service.inc.rs：bootstrap action 状态机（LogicalCodebaseBootstrapService）。
 // - bootstrap_tests.inc.rs：tests 模块。
+// - bootstrap_tests_aggregate_index.inc.rs：aggregate index 重建/覆盖失败专用 tests 模块。
 include!("bootstrap_types.inc.rs");
 include!("bootstrap_projector.inc.rs");
 include!("bootstrap_service.inc.rs");
 include!("bootstrap_tests.inc.rs");
+include!("bootstrap_tests_aggregate_index.inc.rs");

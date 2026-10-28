@@ -43,6 +43,10 @@ use crate::product::logical_codebase::types::{
 // - provider_admission_check.inc.rs：check 面与共享等待判定 helpers
 //   （LogicalCodebaseProviderAdmissionPreflight::check、ensure_bootstrap_* 等）。
 // - provider_admission_preflight_tests.inc.rs：tests 模块。
+// - provider_admission_preflight_tests_phase.inc.rs：phase credential 与 BootstrapExecutor 测试模块。
+// - provider_admission_preflight_tests_policy_body.inc.rs：canonical 政策正文消费/资格面测试模块。
 include!("provider_admission_credential.inc.rs");
 include!("provider_admission_check.inc.rs");
 include!("provider_admission_preflight_tests.inc.rs");
+include!("provider_admission_preflight_tests_phase.inc.rs");
+include!("provider_admission_preflight_tests_policy_body.inc.rs");

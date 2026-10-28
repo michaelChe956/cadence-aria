@@ -772,6 +772,7 @@ impl AggregatePolicyArtifact {
 // - policy_test_faults.inc.rs:cfg(test) IO/删除/来源改写故障注入 seam。
 // - policy_publish_atomic_tests.inc.rs / policy_r2_tests.inc.rs:R1–R4 测试。
 // - policy_tests.inc.rs:I2/发布测试。
+// - policy_recipe_tests.inc.rs:recipe_policy_* 根政策发布测试模块。
 
 // 引入 manifest 类型以供 ensure_bootstrap 使用;此处只依赖其稳定 logical-codebase
 // UUID、project_id 与 updated_at,与 store.rs 的 LogicalCodebaseManifest 同源。
@@ -786,4 +787,5 @@ include!("policy_retention.inc.rs");
 include!("policy_auto_republish.inc.rs");
 include!("policy_test_faults.inc.rs");
 include!("policy_tests.inc.rs");
+include!("policy_recipe_tests.inc.rs");
 include!("policy_publish_atomic_tests.inc.rs");
