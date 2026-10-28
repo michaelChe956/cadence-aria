@@ -26,9 +26,11 @@ use std::path::Path;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exclusive_lock;
 use crate::product::dangling_reference::listing::EntityIdentityBindingEntry;
-use crate::product::dangling_reference::reference_table::{DanglingRecordType, DanglingTargetKind};
+use crate::product::dangling_reference::reference_table::{
+    DanglingRecordType, DanglingTargetKind, evidence_policy, primary_target_kind,
+};
 use crate::product::dangling_reference::resolve::{
-    DanglingResolver, EvidenceLevel, TargetExistence, window_l2_verdict,
+    DanglingResolver, TargetExistence, required_evidence_level, window_l2_verdict,
 };
 use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
 use crate::product::issue_automation_store::{
@@ -51,10 +53,6 @@ const GENERATION_INTENT_FILE: &str = "automation-generation-intent.json";
 const WINDOWS_DIR: &str = "windows";
 /// reviewer 窗口终态归档目录（归档窗口同属窗口簇，删账按 attempt 聚合）。
 const WINDOW_ARCHIVE_DIR: &str = "window-archive";
-/// 证据等级取值：L1（墓碑四条）。
-const EVIDENCE_L1: &str = "L1";
-/// 证据等级取值：L2（窗口簇四条件）。
-const EVIDENCE_L2: &str = "L2";
 /// 动作取值：删单条记录。
 const ACTION_DELETE_RECORD: &str = "delete_record";
 /// 动作取值：按簇批量删除（窗口簇 / 快照目录 / 台账条目簇）。
@@ -197,9 +195,13 @@ fn decide_intent_cleanup_locked(
             }
             TargetExistence::Missing => {}
         }
-        if resolver.evidence_level(*kind, target_id, Some(&scope))? != EvidenceLevel::L1 {
+        // 证据门：可删等级取自**证据等级表**（附表「可删证据等级」列），不写死 L1。
+        let required = required_evidence_level(*kind);
+        let achieved = resolver.evidence_level(*kind, target_id, Some(&scope))?;
+        if required != Some(achieved) {
             return Ok(report_only(format!(
-                "引用目标缺 L1 墓碑证据（{} {}）：只报不删",
+                "引用目标缺 {} 墓碑证据（{} {}）：只报不删",
+                evidence_policy(*kind).deletable_level.label(),
                 kind.as_str(),
                 target_id
             )));
@@ -215,7 +217,10 @@ fn decide_intent_cleanup_locked(
         record_type: record_type.as_str().to_string(),
         target_kind: target_kind.as_str().to_string(),
         target_id,
-        evidence_level: EVIDENCE_L1.to_string(),
+        evidence_level: evidence_policy(target_kind)
+            .deletable_level
+            .label()
+            .to_string(),
         action: ACTION_DELETE_RECORD.to_string(),
         group_key: None,
     })
@@ -240,6 +245,11 @@ enum IntentInLock {
 }
 
 /// 锁内重读意图记录（既有版本化读侧；解析失败原样上抛）。
+///
+/// **缺失 = 无判定对象**：与既有取代路径（terminated enrollment 人工重开 →
+/// 删旧代意图）并发时，本记录可能在我们进锁后、读之前已被对方删掉。此时
+/// MUST NOT 把「读不到」当成读失败上抛（销账 MUST NOT 因并发取代路径报错），
+/// 按「重入视为已清」只报不删（REQ-DRG-15）。
 fn read_intent_in_lock(
     issue_root: &Path,
     record_type: DanglingRecordType,
@@ -247,37 +257,58 @@ fn read_intent_in_lock(
     match record_type {
         DanglingRecordType::AutomationPlanIntent => {
             let path = issue_root.join(PLAN_INTENT_FILE);
-            Ok(match read_prepared_plan_intent(&path)? {
-                PreparedPlanIntentRead::Current(intent) => IntentInLock::Facts(IntentFacts {
-                    references: intent_references(&intent.source, Some(&intent.plan_id)),
-                    enrollment_id: intent.enrollment_id,
-                    phase: None,
+            match read_prepared_plan_intent(&path) {
+                Ok(read) => Ok(match read {
+                    PreparedPlanIntentRead::Current(intent) => IntentInLock::Facts(IntentFacts {
+                        references: intent_references(&intent.source, Some(&intent.plan_id)),
+                        enrollment_id: intent.enrollment_id,
+                        phase: None,
+                    }),
+                    PreparedPlanIntentRead::LegacyUnbound { .. } => IntentInLock::Unsupported(
+                        "旧代无绑定意图（无 target）：无 story / design / plan 引用可证，只报不删"
+                            .to_string(),
+                    ),
                 }),
-                PreparedPlanIntentRead::LegacyUnbound { .. } => IntentInLock::Unsupported(
-                    "旧代无绑定意图（无 target）：无 story / design / plan 引用可证，只报不删"
-                        .to_string(),
-                ),
-            })
+                Err(error) => missing_intent_in_lock(&path, error),
+            }
         }
         DanglingRecordType::AutomationGenerationIntent => {
             let path = issue_root.join(GENERATION_INTENT_FILE);
-            Ok(match read_plan_generation_intent(&path)? {
-                PlanGenerationIntentRead::Current(intent) => IntentInLock::Facts(IntentFacts {
-                    references: intent_references(&intent.source, Some(&intent.plan_id)),
-                    enrollment_id: intent.enrollment_id,
-                    phase: Some(intent.phase),
+            match read_plan_generation_intent(&path) {
+                Ok(read) => Ok(match read {
+                    PlanGenerationIntentRead::Current(intent) => IntentInLock::Facts(IntentFacts {
+                        references: intent_references(&intent.source, Some(&intent.plan_id)),
+                        enrollment_id: intent.enrollment_id,
+                        phase: Some(intent.phase),
+                    }),
+                    PlanGenerationIntentRead::LegacyUnbound { .. } => IntentInLock::Unsupported(
+                        "旧代无绑定检查点（无 target）：既无相位可证、也无引用可核，只报不删"
+                            .to_string(),
+                    ),
                 }),
-                PlanGenerationIntentRead::LegacyUnbound { .. } => IntentInLock::Unsupported(
-                    "旧代无绑定检查点（无 target）：既无相位可证、也无引用可核，只报不删"
-                        .to_string(),
-                ),
-            })
+                Err(error) => missing_intent_in_lock(&path, error),
+            }
         }
         other => Ok(IntentInLock::Unsupported(format!(
             "记录类型不在销账白名单内：{}，只报不删",
             other.as_str()
         ))),
     }
+}
+
+/// 锁内读失败 → 判定「记录此刻已不存在」（被并发取代路径删掉了）→ 无判定对象。
+///
+/// 记录仍在 → 原样上抛读失败（解析失败 / 真实 IO 失败 MUST NOT 被吞成「已清」）。
+fn missing_intent_in_lock(
+    path: &Path,
+    error: ProductStoreError,
+) -> Result<IntentInLock, ProductStoreError> {
+    if path_exists(path)? {
+        return Err(error);
+    }
+    Ok(IntentInLock::Unsupported(
+        "意图记录已被并发删除：无判定对象（重入视为已清）".to_string(),
+    ))
 }
 
 /// 意图的待核对引用集合：story / design / plan 三类，空 id 不算引用。
@@ -380,8 +411,11 @@ pub(crate) fn decide_window_cluster_cleanup(
             .first()
             .map(|(record_path, _)| record_path.clone())
             .expect("按 attempt 聚合的组必非空");
+        // 窗口簇的目标类型取自判据表（窗口记录的引用字段指向 attempt）。
+        let attempt_kind = primary_target_kind(DanglingRecordType::ReviewerWindow)
+            .expect("判据表必须登记 reviewer 窗口的引用字段");
         // W-3 的前置：attempt 两路核对（任一路命中即「仍在」，读失败上抛）。
-        match resolver.target_exists(DanglingTargetKind::Attempt, &attempt_id, None)? {
+        match resolver.target_exists(attempt_kind, &attempt_id, None)? {
             TargetExistence::Exists => continue,
             TargetExistence::Unknown => {
                 decisions.push(CleanupDecision::ReportOnly {
@@ -415,9 +449,12 @@ pub(crate) fn decide_window_cluster_cleanup(
             None => decisions.push(CleanupDecision::Delete {
                 record_path,
                 record_type: DanglingRecordType::ReviewerWindow.as_str().to_string(),
-                target_kind: DanglingTargetKind::Attempt.as_str().to_string(),
+                target_kind: attempt_kind.as_str().to_string(),
                 target_id: attempt_id.clone(),
-                evidence_level: EVIDENCE_L2.to_string(),
+                evidence_level: evidence_policy(attempt_kind)
+                    .deletable_level
+                    .label()
+                    .to_string(),
                 action: ACTION_DELETE_RECORD_GROUP.to_string(),
                 group_key: Some(attempt_id),
             }),
@@ -516,11 +553,16 @@ pub(crate) fn decide_ledger_entry_cleanup(
         }
         TargetExistence::Missing => {}
     }
-    if resolver.evidence_level(DanglingTargetKind::Plan, &entry.entity_id, Some(&scope))?
-        != EvidenceLevel::L1
-    {
+    // 证据门：可删等级取自**证据等级表**（附表「可删证据等级」列），不写死 L1。
+    let required = required_evidence_level(DanglingTargetKind::Plan);
+    let achieved =
+        resolver.evidence_level(DanglingTargetKind::Plan, &entry.entity_id, Some(&scope))?;
+    if required != Some(achieved) {
         return Ok(report_only(format!(
-            "引用 plan 缺 L1 墓碑证据（{}）：只报不删",
+            "引用 plan 缺 {} 墓碑证据（{}）：只报不删",
+            evidence_policy(DanglingTargetKind::Plan)
+                .deletable_level
+                .label(),
             entry.entity_id
         )));
     }
@@ -531,25 +573,26 @@ pub(crate) fn decide_ledger_entry_cleanup(
             .to_string(),
         target_kind: DanglingTargetKind::Plan.as_str().to_string(),
         target_id: entry.entity_id.clone(),
-        evidence_level: EVIDENCE_L1.to_string(),
+        evidence_level: evidence_policy(DanglingTargetKind::Plan)
+            .deletable_level
+            .label()
+            .to_string(),
         action: ACTION_DELETE_RECORD.to_string(),
         group_key: None,
     })
 }
 
-/// 目标类型 → 墓碑 scope（project/issue 取调用方作用域，kind 按目标类型映射）。
+/// 目标类型 → 墓碑 scope（project/issue 取调用方作用域，kind 取自证据等级表
+/// 登记的墓碑实体种类）。
 fn tombstone_scope(
     project_id: &str,
     issue_id: &str,
     kind: DanglingTargetKind,
     target_id: &str,
 ) -> EntityScope {
-    let deletion_kind = match kind {
-        DanglingTargetKind::StorySpec => DeletionEntityKind::Story,
-        DanglingTargetKind::DesignSpec => DeletionEntityKind::Design,
-        // 其余类型不进 L1 档；调用方只在 story/design/plan 上询问证据。
-        _ => DeletionEntityKind::Plan,
-    };
+    let deletion_kind = evidence_policy(kind)
+        .deletion_kind
+        .expect("L1 档目标类型必登记墓碑实体种类（REQ-DRG-02 附表）");
     EntityScope::new(
         project_id.to_string(),
         issue_id.to_string(),

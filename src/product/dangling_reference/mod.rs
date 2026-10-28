@@ -61,15 +61,27 @@
 // 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table` 与 `resolve`）。
 //
 // Task 10 / Task 11 实测（r5）：**本行仍不能删**——① 层的**四个容错列举
-// API**（`list_automation_intents` / `list_reviewer_windows` /
-// `list_reviewer_snapshots` / `list_entity_identity_bindings`）仍无生产消费者：
-// 巡检面（`patrol`）走自己的分区读取实现，而产品读路径接入的是 `tolerance`
-// 适配面（窗口容错列举 + 台账绑定跳过），不复用这四个 API。删掉本行会在
-// `cargo check --lib` 触发下列 `dead_code` 告警：
-//   - `listing.rs`：① 层容错列举 API 全量（四个 API 及其数据结构与辅助函数）；
-//   - `reference_table.rs::all_reference_rules`；`resolve.rs` 的
-//     `ReferenceVerdict::L2` 变体；`ledger.rs` 的 `path` 方法；
-//     `cleanup.rs` 的 `CleanupOutcome::report_only` 字段。
+// API** 仍无生产消费者：巡检面（`patrol`）走自己的分区读取实现，而产品读
+// 路径接入的是 `tolerance` 适配面（窗口容错列举 + 台账绑定跳过），不复用这
+// 四个 API。删掉本行会在 `cargo check --lib` 触发下列 `dead_code` 告警
+// （**按符号逐条列举**）：
+//   - `listing.rs::list_automation_intents` / `list_reviewer_windows` /
+//     `list_reviewer_snapshots` / `list_entity_identity_bindings`（① 层四个
+//     容错列举 API）；`listing.rs::ListingOutcome<T>` /
+//     `AutomationIntentEntry` / `ReviewerWindowEntry` / `ReviewerSnapshotEntry`
+//     （上述 API 的返回结构）；
+//   - `reference_table.rs::all_reference_rules`（判据表全量导出）；
+//   - `ledger.rs::DanglingReferenceLedger::path`（台账落盘路径）；
+//   - `cleanup.rs::CleanupOutcome::report_only`（dry-run 复核计数）；
+//   - `mod.rs::DanglingReferenceWarnings::len`（告警集合长度）。
+//
+// **不在**死码清单内（已被生产代码接活）：
+//   - `mod.rs::DanglingReferenceWarnings::items`（`tolerance` 适配面复用）；
+//   - `listing.rs::EntityIdentityBindingEntry`（`cleanup.rs` /
+//     `cleanup_rules.rs` 的台账条目判定在用）；
+//   - `resolve.rs::EvidenceLevel::L2`（由 `required_evidence_level` 按证据
+//     等级表「可删证据等级」列构造，销账侧按它判证据门）。
+//
 // r5 已把 `mod.rs` 的告警结构（`DANGLING_REFERENCE_WARNING_CODE` /
 // `..._LIMIT` / `DanglingReferenceWarning` / `DanglingReferenceWarnings` /
 // `warning_key`）**接活**（`tolerance` 适配面复用），故它们不在死码清单内。

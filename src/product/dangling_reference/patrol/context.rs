@@ -1,5 +1,10 @@
-//! 巡检上下文与判定辅助（由 patrol.rs 按职责原样拆出：纯移动 + 必要的
-//! pub(super) 放宽，零逻辑变化）。
+//! 巡检上下文与判定辅助（由 patrol.rs 按职责原样拆出）。
+//!
+//! **判定口径的唯一来源是证据等级表**（`reference_table`：REQ-DRG-02 附表
+//! #1–#10 逐行照抄）：存在性分派走 `resolve::dispatch_existence`（与①层**共用
+//! 同一套分派**），可删档位走附表的「可删证据等级」列——本模块 MUST NOT 另写
+//! 一套 per-target 分支。巡检面与①层的差别只在于**判定面能力**（作用域 /
+//! LC scope 读 / enrollment 读 / 路二可用性），见 [`PatrolContext::env`]。
 
 use super::*;
 /// 巡检上下文：读路径共用的只读事实（session 集合 / attempt 探针 / 窗口簇结论）。
@@ -7,8 +12,9 @@ pub(super) struct PatrolContext<'a> {
     pub(super) paths: &'a ProductAppPaths,
     /// 路二：全量 workspace session id 集合（由列举构建）。
     pub(super) session_ids: BTreeSet<String>,
-    /// 路二枚举失败的组合（非空 → 「未命中」结论不可用，REQ-DRG-23）。
-    pub(super) session_enumeration_errors: Vec<String>,
+    /// 路二枚举失败原因（`None` = 路二完整可用；`Some` = 枚举失败，「未命中」
+    /// 结论不可用，REQ-DRG-23）。
+    pub(super) session_unavailable_reason: Option<String>,
     /// 路一探针（生产走内置 `CodingAttemptStore`；测试注入）。
     pub(super) attempt_probe: Option<AttemptProbe<'a>>,
     /// attempt id → 该 attempt 名下全部窗口（含归档）的 L2 聚合结论。
@@ -16,7 +22,7 @@ pub(super) struct PatrolContext<'a> {
 }
 
 impl PatrolContext<'_> {
-    /// 构造存在性核对器（沿用 `resolve` 的九类分派，不另造一套）。
+    /// 构造存在性核对器（证据等级判定沿用 `resolve` 的实现，不另造一套）。
     pub(super) fn resolver(&self) -> DanglingResolver<'_> {
         match self.attempt_probe {
             Some(probe) => {
@@ -26,104 +32,111 @@ impl PatrolContext<'_> {
         }
     }
 
-    /// 路二是否可用（任一组合枚举失败即不可用）。
-    pub(super) fn sessions_complete(&self) -> bool {
-        self.session_enumeration_errors.is_empty()
+    /// 巡检面的判定面能力（作用域 / LC scope 读 / enrollment 读 / 路二可用性）。
+    ///
+    /// 统一分派（`resolve::dispatch_existence`）据此读存在性；①层与巡检面的
+    /// 差别**只在这里**（巡检面能真读 LC scope 与 enrollment 文件）。
+    fn env<'a>(
+        &'a self,
+        scope: Option<&'a EntityScope>,
+        lc: Option<&'a dyn LcScopeReader>,
+        enrollment: Option<&'a dyn EnrollmentReader>,
+    ) -> ExistenceEnv<'a> {
+        ExistenceEnv {
+            paths: self.paths,
+            session_ids: &self.session_ids,
+            attempt_probe: self.attempt_probe,
+            scope,
+            lc,
+            enrollment,
+            session_unavailable_reason: self.session_unavailable_reason.as_deref(),
+        }
     }
 
-    /// 会话枚举失败的可读原因（供「不可判定」原因列）。
-    pub(super) fn session_enumeration_reason(&self) -> String {
-        format!(
-            "存在性数据源 / 作用域不可用：workspace session 枚举失败，路二无法完成（{}）",
-            self.session_enumeration_errors.join("；")
-        )
+    /// attempt 存在性（统一分派；路二不可用时「未命中」降级为 `Unknown`）。
+    pub(super) fn attempt_existence(
+        &self,
+        attempt_id: &str,
+    ) -> Result<TargetExistence, ProductStoreError> {
+        let verdict = dispatch_existence(
+            &self.env(None, None, None),
+            window_record_target_kind(),
+            attempt_id,
+        )?;
+        Ok(verdict.existence)
     }
 
     /// 单条引用的三态判定（`Exists` / `Missing` + 证据与动作 / `Undetermined`）。
+    ///
+    /// 分派口径一律取自**证据等级表**（`reference_table::evidence_policy`），
+    /// 实现与①层**共用** `resolve::dispatch_existence`——本方法只负责把巡检面
+    /// **能提供的判定面能力**（作用域 / LC scope 读 / enrollment 读 / 路二可用性）
+    /// 传进去，并把三态落到巡检面的三栏结论上；MUST NOT 另写一套 per-target
+    /// 分支（REQ-DRG-01 / 23）。
     pub(super) fn judge(
         &self,
         reference: &PatrolReference<'_>,
         lc: Option<&LcScopeContext>,
     ) -> Result<ReferenceJudgement, ProductStoreError> {
-        match reference.target_kind {
-            DanglingTargetKind::StorySpec
-            | DanglingTargetKind::DesignSpec
-            | DanglingTargetKind::Plan => self.judge_issue_target(reference),
-            DanglingTargetKind::Session => Ok(self.judge_session(reference)),
-            DanglingTargetKind::Attempt => self.judge_attempt(reference),
-            DanglingTargetKind::Enrollment => self.judge_enrollment(reference),
-            DanglingTargetKind::Checkout
-            | DanglingTargetKind::AggregateIndex
-            | DanglingTargetKind::LogicalMember => Ok(self.judge_lc_target(reference, lc)),
-        }
-    }
-
-    /// story / design / plan：同 issue 作用域内的真实读（L1 档位）。
-    pub(super) fn judge_issue_target(
-        &self,
-        reference: &PatrolReference<'_>,
-    ) -> Result<ReferenceJudgement, ProductStoreError> {
-        if reference.project_id.is_empty() || reference.issue_id.is_empty() {
+        let policy = evidence_policy(reference.target_kind);
+        // 作用域需求（附表列）：story / design / plan / enrollment 必须持有记录
+        // 所属的 project/issue；缺作用域即「不可判定」（REQ-DRG-23），不得猜。
+        if policy.scope_requirement == ScopeRequirement::IssueScope
+            && (reference.project_id.is_empty() || reference.issue_id.is_empty())
+        {
             return Ok(ReferenceJudgement::Undetermined {
                 reason: REASON_NO_ISSUE_SCOPE.to_string(),
             });
         }
-        let scope = EntityScope::new(
-            reference.project_id.clone(),
-            reference.issue_id.clone(),
-            deletion_kind_of(reference.target_kind),
-            reference.target_id.clone(),
+        // 判定面能力：墓碑作用域（附表登记的墓碑实体种类）/ LC scope 读 /
+        // enrollment 读 / 路二可用性。
+        let scope = policy.deletion_kind.map(|deletion_kind| {
+            EntityScope::new(
+                reference.project_id.clone(),
+                reference.issue_id.clone(),
+                deletion_kind,
+                reference.target_id.clone(),
+            )
+        });
+        let enrollment = EnrollmentFileReader {
+            paths: self.paths,
+            project_id: &reference.project_id,
+            issue_id: &reference.issue_id,
+        };
+        let env = self.env(
+            scope.as_ref(),
+            lc.map(|scope| scope as &dyn LcScopeReader),
+            Some(&enrollment),
         );
-        let resolver = self.resolver();
-        match resolver.target_exists(
-            reference.target_kind,
-            reference.target_id.as_str(),
-            Some(&scope),
-        )? {
+        let verdict = dispatch_existence(&env, reference.target_kind, &reference.target_id)?;
+        match verdict.existence {
             TargetExistence::Exists => Ok(ReferenceJudgement::Alive),
             TargetExistence::Unknown => Ok(ReferenceJudgement::Undetermined {
-                reason: REASON_TARGET_UNKNOWN.to_string(),
+                reason: undetermined_reason(verdict.cause.as_ref()),
             }),
-            TargetExistence::Missing => {
-                let level = resolver.evidence_level(
+            TargetExistence::Missing => self.missing_judgement(reference, policy, scope.as_ref()),
+        }
+    }
+
+    /// 「已判定悬空」后的证据与动作（按附表登记的可删等级分派）。
+    fn missing_judgement(
+        &self,
+        reference: &PatrolReference<'_>,
+        policy: &TargetEvidencePolicy,
+        scope: Option<&EntityScope>,
+    ) -> Result<ReferenceJudgement, ProductStoreError> {
+        match policy.deletable_level {
+            // L1 档：墓碑四条（REQ-DRG-02）达标才建议删除，否则只报不删。
+            DeletableLevel::L1 => {
+                let level = self.resolver().evidence_level(
                     reference.target_kind,
                     reference.target_id.as_str(),
-                    Some(&scope),
+                    scope,
                 )?;
                 Ok(l1_evidence_judgement(level))
             }
-        }
-    }
-
-    /// session：路二集合成员关系（session 档位恒「只报不删」）。
-    pub(super) fn judge_session(&self, reference: &PatrolReference<'_>) -> ReferenceJudgement {
-        if self.session_ids.contains(reference.target_id.as_str()) {
-            return ReferenceJudgement::Alive;
-        }
-        if self.sessions_complete() {
-            return report_only_judgement();
-        }
-        // 路二未能完成：MUST NOT 当成「目标不存在」（REQ-DRG-21）。
-        ReferenceJudgement::Undetermined {
-            reason: self.session_enumeration_reason(),
-        }
-    }
-
-    /// attempt：两路核对（路一 coding attempt + 路二 session 集合）。
-    pub(super) fn judge_attempt(
-        &self,
-        reference: &PatrolReference<'_>,
-    ) -> Result<ReferenceJudgement, ProductStoreError> {
-        match self.attempt_existence(reference.target_id.as_str())? {
-            TargetExistence::Exists => Ok(ReferenceJudgement::Alive),
-            TargetExistence::Unknown => Ok(ReferenceJudgement::Undetermined {
-                reason: if self.sessions_complete() {
-                    REASON_TARGET_UNKNOWN.to_string()
-                } else {
-                    self.session_enumeration_reason()
-                },
-            }),
-            TargetExistence::Missing => Ok(match self.attempt_clusters.get(&reference.target_id) {
+            // L2 档：该类型的专属可算条件（窗口簇四条件）按 attempt 聚合。
+            DeletableLevel::L2 => Ok(match self.attempt_clusters.get(&reference.target_id) {
                 Some(cluster) if cluster.l2_ready => ReferenceJudgement::Missing {
                     evidence_level: format!("{EVIDENCE_LABEL_L2}（{}）", cluster.summary),
                     proposed_action: PATROL_ACTION_DELETE_GROUP,
@@ -134,66 +147,38 @@ impl PatrolContext<'_> {
                 },
                 None => report_only_judgement(),
             }),
+            // 只报不删档位（含 enrollment 的「永不删」）：一律只报不删。
+            DeletableLevel::ReportOnly | DeletableLevel::NeverDelete => Ok(report_only_judgement()),
         }
     }
+}
 
-    /// attempt 存在性（路二不可用时，「未命中」降级为 `Unknown`）。
-    pub(super) fn attempt_existence(
-        &self,
-        attempt_id: &str,
-    ) -> Result<TargetExistence, ProductStoreError> {
-        let existence =
-            self.resolver()
-                .target_exists(DanglingTargetKind::Attempt, attempt_id, None)?;
-        match existence {
-            TargetExistence::Missing if !self.sessions_complete() => Ok(TargetExistence::Unknown),
-            other => Ok(other),
-        }
+/// 不可判定原因类别 → 巡检面「不可判定」原因文案。
+fn undetermined_reason(cause: Option<&UndeterminedCause>) -> String {
+    match cause {
+        Some(UndeterminedCause::MissingIssueScope) => REASON_NO_ISSUE_SCOPE.to_string(),
+        Some(UndeterminedCause::MissingLcScope) => REASON_NO_LC_SCOPE.to_string(),
+        Some(UndeterminedCause::TargetUnknown) => REASON_TARGET_UNKNOWN.to_string(),
+        Some(UndeterminedCause::SourceUnavailable(reason)) => reason.clone(),
+        None => REASON_TARGET_UNKNOWN.to_string(),
     }
+}
 
-    /// enrollment：按记录所属 project/issue 读当处文件（REQ-DRG-01 点名数据源）。
-    pub(super) fn judge_enrollment(
-        &self,
-        reference: &PatrolReference<'_>,
-    ) -> Result<ReferenceJudgement, ProductStoreError> {
-        if reference.project_id.is_empty() || reference.issue_id.is_empty() {
-            return Ok(ReferenceJudgement::Undetermined {
-                reason: REASON_NO_ISSUE_SCOPE.to_string(),
-            });
-        }
-        let store = IssueAutomationStore::new(self.paths.clone());
-        let existing = store.get(&reference.project_id, &reference.issue_id)?;
-        Ok(match existing {
-            Some(record) if record.enrollment_id == reference.target_id => {
-                ReferenceJudgement::Alive
-            }
-            // 文件缺失或当处 enrollment 是另一个 id：明确未命中。
-            _ => report_only_judgement(),
-        })
-    }
+/// enrollment 文件读能力（按记录所属 issue 绑定；巡检面持有，①层不持有）。
+struct EnrollmentFileReader<'a> {
+    paths: &'a ProductAppPaths,
+    project_id: &'a str,
+    issue_id: &'a str,
+}
 
-    /// checkout / aggregate_index / logical_member：同 LC scope 内的真实读。
-    pub(super) fn judge_lc_target(
-        &self,
-        reference: &PatrolReference<'_>,
-        lc: Option<&LcScopeContext>,
-    ) -> ReferenceJudgement {
-        let Some(lc) = lc else {
-            return ReferenceJudgement::Undetermined {
-                reason: REASON_NO_LC_SCOPE.to_string(),
-            };
-        };
-        let existence = match reference.target_kind {
-            DanglingTargetKind::LogicalMember => lc.member_exists(reference.target_id.as_str()),
-            DanglingTargetKind::Checkout => lc.checkout_exists(reference.target_id.as_str()),
-            _ => lc.aggregate_index_exists(self.paths, reference.target_id.as_str()),
-        };
-        match existence {
-            Ok(true) => ReferenceJudgement::Alive,
-            // 三类恒「只报不删」（§3.1.2 降级档位）。
-            Ok(false) => report_only_judgement(),
-            Err(reason) => ReferenceJudgement::Undetermined { reason },
-        }
+impl EnrollmentReader for EnrollmentFileReader<'_> {
+    /// 当处 enrollment 记录存在且 enrollment id 命中 → 目标仍在。
+    ///
+    /// 文件缺失 / 当处 enrollment 是另一个 id → 明确未命中（REQ-DRG-01）。
+    fn exists(&self, enrollment_id: &str) -> Result<bool, ProductStoreError> {
+        let existing =
+            IssueAutomationStore::new(self.paths.clone()).get(self.project_id, self.issue_id)?;
+        Ok(existing.is_some_and(|record| record.enrollment_id == enrollment_id))
     }
 }
 
@@ -283,6 +268,28 @@ impl LcScopeContext {
     }
 }
 
+/// 巡检面的 LC scope 读能力（统一分派按附表的 `ExistenceDispatch` 列调用）。
+impl LcScopeReader for LcScopeContext {
+    /// 同 LC scope 内逻辑成员是否存在。
+    fn member_exists(&self, target_id: &str) -> Result<bool, String> {
+        LcScopeContext::member_exists(self, target_id)
+    }
+
+    /// 同 LC scope 内 checkout 是否存在。
+    fn checkout_exists(&self, target_id: &str) -> Result<bool, String> {
+        LcScopeContext::checkout_exists(self, target_id)
+    }
+
+    /// 同 LC scope 内聚合索引是否存在。
+    fn aggregate_index_exists(
+        &self,
+        paths: &ProductAppPaths,
+        target_id: &str,
+    ) -> Result<bool, String> {
+        LcScopeContext::aggregate_index_exists(self, paths, target_id)
+    }
+}
+
 /// 单条引用的判定结果（三态在巡检面的映射）。
 pub(super) enum ReferenceJudgement {
     /// 目标仍在：不产发现、不产不可判定。
@@ -328,15 +335,24 @@ impl<'a> PatrolReference<'a> {
     }
 
     /// attempt 引用（全局目标，无 project/issue 作用域需求）。
+    ///
+    /// 目标类型取自**判据表**（reviewer 窗口 / 快照的引用字段指向 attempt），
+    /// MUST NOT 在此另写 per-target 常量。
     pub(super) fn attempt(attempt_id: impl Into<String>) -> Self {
         Self {
             field: FIELD_ATTEMPT,
-            target_kind: DanglingTargetKind::Attempt,
+            target_kind: window_record_target_kind(),
             target_id: attempt_id.into(),
             project_id: String::new(),
             issue_id: String::new(),
         }
     }
+}
+
+/// 窗口 / 快照记录引用的目标类型（取自判据表；窗口簇按该目标聚合）。
+pub(super) fn window_record_target_kind() -> DanglingTargetKind {
+    primary_target_kind(DanglingRecordType::ReviewerWindow)
+        .expect("判据表必须登记 reviewer 窗口的引用字段")
 }
 
 /// 「已判定悬空 + 有 L1 墓碑」→ 建议删除；其余（含证据不足）→ 只报不删。
@@ -355,15 +371,6 @@ pub(super) fn report_only_judgement() -> ReferenceJudgement {
     ReferenceJudgement::Missing {
         evidence_level: EVIDENCE_LABEL_INSUFFICIENT.to_string(),
         proposed_action: PATROL_ACTION_REPORT_ONLY,
-    }
-}
-
-/// 目标类型 → 墓碑实体种类（仅 story / design / plan 有 L1 档位）。
-pub(super) fn deletion_kind_of(target_kind: DanglingTargetKind) -> DeletionEntityKind {
-    match target_kind {
-        DanglingTargetKind::StorySpec => DeletionEntityKind::Story,
-        DanglingTargetKind::DesignSpec => DeletionEntityKind::Design,
-        _ => DeletionEntityKind::Plan,
     }
 }
 

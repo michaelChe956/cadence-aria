@@ -1,11 +1,14 @@
 //! 目标存在性核对与证据分级（REQ-DRG-01 / 02 / 12 / 21）。
 //!
 //! 本模块回答两层问题：
-//! 1. 「目标还在吗」——[`DanglingResolver::target_exists`] 按九类目标分派到
-//!    既有只读 API 做存在性判定（REQ-DRG-01，三态：`Exists` / `Missing` /
-//!    `Unknown`）；
+//! 1. 「目标还在吗」——[`dispatch_existence`] 按**证据等级表**（`reference_table`
+//!    的 `ExistenceDispatch` 列）分派到既有只读 API 做存在性判定（REQ-DRG-01，
+//!    三态：`Exists` / `Missing` / `Unknown`）；①层（[`DanglingResolver`]）与
+//!    巡检面（`patrol`）**共用这一套分派**，两面的差别只在于判定面**能力**
+//!    （作用域 / LC scope 读 / enrollment 读 / 路二可用性）——见 [`ExistenceEnv`]；
 //! 2. 「能证明已删到可销账吗」——[`DanglingResolver::evidence_level`] 按
-//!    L1 墓碑四条 / 类型专属 L2 条件给出证据等级（REQ-DRG-02）。
+//!    L1 墓碑四条 / 类型专属 L2 条件给出证据等级（REQ-DRG-02），可删档位一律
+//!    取自同一张表（`DeletableLevel`）。
 //!
 //! 读失败（IO / 解析 / 歧义）一律原样上抛，MUST NOT 被当成「目标不存在」
 //! （REQ-DRG-21）；所需存在性数据源 / 作用域在本判定面不可用的目标（U1 四类）
@@ -21,11 +24,12 @@ use std::path::{Path, PathBuf};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
-use crate::product::dangling_reference::reference_table::DanglingTargetKind;
+use crate::product::dangling_reference::reference_table::{
+    DanglingTargetKind, DeletableLevel, ExistenceDispatch, evidence_policy,
+};
 use crate::product::entity_deletion_cascade;
 use crate::product::entity_deletion_store::{
-    DeletionEntityKind, DeletionPhase, EntityDeletionStore, EntityScope,
-    issue_entity_operations_root,
+    DeletionPhase, EntityDeletionStore, EntityScope, issue_entity_operations_root,
 };
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
@@ -57,81 +61,218 @@ pub(crate) enum EvidenceLevel {
     Insufficient,
 }
 
-/// 销账等级（REQ-DRG-02 附表，销账白名单的单一事实源）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeletableLevel {
-    /// 只认 L1 墓碑证据（story_spec / design_spec / plan）。
-    L1,
-    /// 该类型专属 L2 条件全成立才可删（attempt）。
-    L2,
-    /// 只报不删（session / checkout / aggregate_index / logical_member；enrollment 永不删）。
-    ReportOnly,
+/// 不可判定的原因类别（统一分派给出；巡检面据此渲染「不可判定」原因列）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UndeterminedCause {
+    /// 缺记录所属的 project/issue 作用域（REQ-DRG-23）。
+    MissingIssueScope,
+    /// 缺逻辑代码库 scope 上下文（REQ-DRG-23）。
+    MissingLcScope,
+    /// 判定面如实报「无法判定」（REQ-DRG-01 三态）。
+    TargetUnknown,
+    /// 数据源不可用（路二枚举失败 / 作用域内读失败）：附具体原因。
+    SourceUnavailable(String),
 }
 
-/// 证据等级表一行：目标类型 → 可删档位 + L2 专属条件（REQ-DRG-02 附表逐行）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TargetEvidencePolicy {
-    pub(crate) target_kind: DanglingTargetKind,
-    pub(crate) deletable_level: DeletableLevel,
-    /// L2 专属条件的可读描述（供巡检清单与销账闸引用）；非 L2 档位为空串。
-    pub(crate) l2_condition: &'static str,
+/// 存在性判定结论：三态 + 不可判定原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExistenceVerdict {
+    /// 三态结论。
+    pub(crate) existence: TargetExistence,
+    /// 不可判定原因（`existence == Unknown` 时有值）。
+    pub(crate) cause: Option<UndeterminedCause>,
 }
 
-/// 证据等级表（REQ-DRG-02 附表的单一事实源）：九类目标逐行登记。
-const EVIDENCE_POLICIES: [TargetEvidencePolicy; 9] = [
-    TargetEvidencePolicy {
-        target_kind: DanglingTargetKind::StorySpec,
-        deletable_level: DeletableLevel::L1,
-        l2_condition: "",
-    },
-    TargetEvidencePolicy {
-        target_kind: DanglingTargetKind::DesignSpec,
-        deletable_level: DeletableLevel::L1,
-        l2_condition: "",
-    },
-    TargetEvidencePolicy {
-        target_kind: DanglingTargetKind::Plan,
-        deletable_level: DeletableLevel::L1,
-        l2_condition: "",
-    },
-    TargetEvidencePolicy {
-        target_kind: DanglingTargetKind::Session,
-        deletable_level: DeletableLevel::ReportOnly,
-        l2_condition: "",
-    },
-    TargetEvidencePolicy {
-        target_kind: DanglingTargetKind::Attempt,
-        deletable_level: DeletableLevel::L2,
-        l2_condition: "终态 + 无租约 + 两路目标皆无 + worktree 已不存在",
-    },
-    TargetEvidencePolicy {
-        target_kind: DanglingTargetKind::Checkout,
-        deletable_level: DeletableLevel::ReportOnly,
-        l2_condition: "",
-    },
-    TargetEvidencePolicy {
-        target_kind: DanglingTargetKind::AggregateIndex,
-        deletable_level: DeletableLevel::ReportOnly,
-        l2_condition: "",
-    },
-    TargetEvidencePolicy {
-        target_kind: DanglingTargetKind::LogicalMember,
-        deletable_level: DeletableLevel::ReportOnly,
-        l2_condition: "",
-    },
-    TargetEvidencePolicy {
-        target_kind: DanglingTargetKind::Enrollment,
-        deletable_level: DeletableLevel::ReportOnly,
-        l2_condition: "",
-    },
-];
+impl ExistenceVerdict {
+    /// 布尔命中 → 三态结论（无不可判定原因）。
+    fn of(hit: bool) -> Self {
+        Self {
+            existence: existence(hit),
+            cause: None,
+        }
+    }
 
-/// 查证据等级表：九类目标必须全部登记，查无此行属编程错误（fail-fast）。
-pub(crate) fn evidence_policy(target_kind: DanglingTargetKind) -> &'static TargetEvidencePolicy {
-    EVIDENCE_POLICIES
-        .iter()
-        .find(|policy| policy.target_kind == target_kind)
-        .expect("证据等级表必须覆盖全部九类目标（REQ-DRG-02 附表）")
+    /// 不可判定结论（带原因）。
+    fn unknown(cause: UndeterminedCause) -> Self {
+        Self {
+            existence: TargetExistence::Unknown,
+            cause: Some(cause),
+        }
+    }
+}
+
+/// LC scope 内的存在性读能力（巡检面提供；① 层无 LC 上下文 → 相关目标恒
+/// 「不可判定」，MUST NOT 伪装成「不存在」，REQ-DRG-23）。
+pub(crate) trait LcScopeReader {
+    /// 同 LC scope 内逻辑成员是否存在。
+    fn member_exists(&self, target_id: &str) -> Result<bool, String>;
+    /// 同 LC scope 内 checkout 是否存在。
+    fn checkout_exists(&self, target_id: &str) -> Result<bool, String>;
+    /// 同 LC scope 内聚合索引是否存在。
+    fn aggregate_index_exists(
+        &self,
+        paths: &ProductAppPaths,
+        target_id: &str,
+    ) -> Result<bool, String>;
+}
+
+/// issue 作用域内的 enrollment 存在性读能力（巡检面提供；① 层无该读能力）。
+pub(crate) trait EnrollmentReader {
+    /// 当处 enrollment 记录是否存在且 enrollment id 命中。
+    fn exists(&self, enrollment_id: &str) -> Result<bool, ProductStoreError>;
+}
+
+/// 存在性判定面的可用能力（作用域与数据源）。
+///
+/// ①层与巡检面**共用同一套分派**（[`dispatch_existence`]）；两面的差别只在本
+/// 结构提供的**能力**：①层不持 LC scope 读 / enrollment 读（相关目标恒「不可
+/// 判定」，REQ-DRG-23），巡检面持有（故巡检面能真读并可判悬空）。
+pub(crate) struct ExistenceEnv<'a> {
+    /// 状态根路径。
+    pub(crate) paths: &'a ProductAppPaths,
+    /// 路二：规划面 workspace session 全量 id 集合。
+    pub(crate) session_ids: &'a BTreeSet<String>,
+    /// 路一探针（`None` = 内置 `CodingAttemptStore`）。
+    pub(crate) attempt_probe: Option<AttemptProbe<'a>>,
+    /// 目标所属 issue 作用域（`None` = 本判定面不持有该作用域）。
+    pub(crate) scope: Option<&'a EntityScope>,
+    /// LC scope 读能力（`None` = 本判定面无 LC 上下文）。
+    pub(crate) lc: Option<&'a dyn LcScopeReader>,
+    /// enrollment 文件读能力（`None` = 本判定面无该读能力）。
+    pub(crate) enrollment: Option<&'a dyn EnrollmentReader>,
+    /// 路二不可用原因（`Some` = 枚举失败，「未命中」不得当成「不存在」）。
+    pub(crate) session_unavailable_reason: Option<&'a str>,
+}
+
+/// 存在性核对的**统一分派**（REQ-DRG-01 / 23）。
+///
+/// 分派口径一律取自证据等级表（`reference_table::evidence_policy`）的
+/// [`ExistenceDispatch`] 列：①层（`DanglingResolver`）与巡检面
+/// （`patrol::PatrolContext`）都经本函数做存在性判定，MUST NOT 各写一套
+/// per-target 分支；两面差别只体现在传入的**能力**（作用域 / LC scope 读 /
+/// enrollment 读 / 路二可用性）上。
+///
+/// 读失败（IO / 解析 / 歧义）原样上抛，MUST NOT 被当成「目标不存在」。
+pub(crate) fn dispatch_existence(
+    env: &ExistenceEnv<'_>,
+    kind: DanglingTargetKind,
+    target_id: &str,
+) -> Result<ExistenceVerdict, ProductStoreError> {
+    let policy = evidence_policy(kind);
+    match policy.dispatch {
+        ExistenceDispatch::StorySpecList => {
+            let Some(scope) = env.scope else {
+                return Ok(ExistenceVerdict::unknown(
+                    UndeterminedCause::MissingIssueScope,
+                ));
+            };
+            let hit = LifecycleStore::new(env.paths.clone())
+                .list_story_specs(&scope.project_id, &scope.issue_id)?
+                .iter()
+                .any(|record| record.id == target_id);
+            Ok(ExistenceVerdict::of(hit))
+        }
+        ExistenceDispatch::DesignSpecList => {
+            let Some(scope) = env.scope else {
+                return Ok(ExistenceVerdict::unknown(
+                    UndeterminedCause::MissingIssueScope,
+                ));
+            };
+            let hit = LifecycleStore::new(env.paths.clone())
+                .list_design_specs(&scope.project_id, &scope.issue_id)?
+                .iter()
+                .any(|record| record.id == target_id);
+            Ok(ExistenceVerdict::of(hit))
+        }
+        ExistenceDispatch::LivePlanIds => {
+            let Some(scope) = env.scope else {
+                return Ok(ExistenceVerdict::unknown(
+                    UndeterminedCause::MissingIssueScope,
+                ));
+            };
+            let hit = entity_deletion_cascade::list_live_plan_ids(
+                env.paths,
+                &scope.project_id,
+                &scope.issue_id,
+            )?
+            .iter()
+            .any(|plan_id| plan_id == target_id);
+            Ok(ExistenceVerdict::of(hit))
+        }
+        ExistenceDispatch::WorkspaceSession => {
+            if env.session_ids.contains(target_id) {
+                return Ok(ExistenceVerdict::of(true));
+            }
+            Ok(match env.session_unavailable_reason {
+                Some(reason) => ExistenceVerdict::unknown(UndeterminedCause::SourceUnavailable(
+                    reason.to_string(),
+                )),
+                None => ExistenceVerdict::of(false),
+            })
+        }
+        ExistenceDispatch::AttemptTwoPath => {
+            // 路一：coding attempt（内置探针或注入探针）；路二：workspace session
+            // 枚举集合。任一路命中即「仍在」；两路皆不命中才算不存在。
+            let coding_hit = match env.attempt_probe {
+                Some(probe) => probe(target_id)?,
+                None => coding_attempt_exists(env.paths, target_id)?,
+            };
+            if coding_hit || env.session_ids.contains(target_id) {
+                return Ok(ExistenceVerdict::of(true));
+            }
+            Ok(match env.session_unavailable_reason {
+                Some(reason) => ExistenceVerdict::unknown(UndeterminedCause::SourceUnavailable(
+                    reason.to_string(),
+                )),
+                None => ExistenceVerdict::of(false),
+            })
+        }
+        ExistenceDispatch::LogicalMember => {
+            let Some(lc) = env.lc else {
+                return Ok(ExistenceVerdict::unknown(UndeterminedCause::MissingLcScope));
+            };
+            Ok(lc_verdict(lc.member_exists(target_id)))
+        }
+        ExistenceDispatch::Checkout => {
+            let Some(lc) = env.lc else {
+                return Ok(ExistenceVerdict::unknown(UndeterminedCause::MissingLcScope));
+            };
+            Ok(lc_verdict(lc.checkout_exists(target_id)))
+        }
+        ExistenceDispatch::AggregateIndex => {
+            let Some(lc) = env.lc else {
+                return Ok(ExistenceVerdict::unknown(UndeterminedCause::MissingLcScope));
+            };
+            Ok(lc_verdict(lc.aggregate_index_exists(env.paths, target_id)))
+        }
+        ExistenceDispatch::EnrollmentFile => {
+            let Some(reader) = env.enrollment else {
+                // 本判定面不持 enrollment 读能力 → 如实报「无法判定」。
+                return Ok(ExistenceVerdict::unknown(UndeterminedCause::TargetUnknown));
+            };
+            Ok(ExistenceVerdict::of(reader.exists(target_id)?))
+        }
+    }
+}
+
+/// LC scope 内读的结果 → 三态结论（读失败 = 不可判定，附原因）。
+fn lc_verdict(result: Result<bool, String>) -> ExistenceVerdict {
+    match result {
+        Ok(true) => ExistenceVerdict::of(true),
+        Ok(false) => ExistenceVerdict::of(false),
+        Err(reason) => ExistenceVerdict::unknown(UndeterminedCause::SourceUnavailable(reason)),
+    }
+}
+
+/// 附表要求的可删证据等级（销账判据从附表读出，MUST NOT 写死 L1 / L2）。
+///
+/// 只报不删档位（`ReportOnly` / `NeverDelete`）返回 `None`——无可删等级。
+pub(crate) fn required_evidence_level(target_kind: DanglingTargetKind) -> Option<EvidenceLevel> {
+    match evidence_policy(target_kind).deletable_level {
+        DeletableLevel::L1 => Some(EvidenceLevel::L1),
+        DeletableLevel::L2 => Some(EvidenceLevel::L2),
+        DeletableLevel::ReportOnly | DeletableLevel::NeverDelete => None,
+    }
 }
 
 /// attempt 路一探针：`(attempt_id) -> 是否命中`。
@@ -179,6 +320,11 @@ impl<'a> DanglingResolver<'a> {
 
     /// 九类目标的存在性判定（REQ-DRG-01；三态，见 [`TargetExistence`]）。
     ///
+    /// 分派口径取自证据等级表（`reference_table::evidence_policy` 的
+    /// [`ExistenceDispatch`] 列），实现见 [`dispatch_existence`]——与巡检面
+    /// **共用同一张表、同一套分派**，本方法只额外提供①层的判定面能力
+    /// （无 LC scope 读 / 无 enrollment 读 / 路二完整可用）。
+    ///
     /// - `StorySpec` / `DesignSpec`：`LifecycleStore::list_story_specs` /
     ///   `list_design_specs` 按 `scope` 的 project/issue 列举比对 id；
     /// - `Plan`：`entity_deletion_cascade::list_live_plan_ids`（legacy 与
@@ -204,56 +350,30 @@ impl<'a> DanglingResolver<'a> {
         target_id: &str,
         scope: Option<&EntityScope>,
     ) -> Result<TargetExistence, ProductStoreError> {
-        match kind {
-            DanglingTargetKind::StorySpec => {
-                let scope = require_scope(target_id, scope)?;
-                let hit = LifecycleStore::new(self.paths.clone())
-                    .list_story_specs(&scope.project_id, &scope.issue_id)?
-                    .iter()
-                    .any(|record| record.id == target_id);
-                Ok(existence(hit))
+        let verdict = dispatch_existence(&self.env(scope), kind, target_id)?;
+        match (verdict.existence, verdict.cause) {
+            // 缺记录所属的 project/issue 作用域：① 层 API 保留「显式 NotFound」
+            // 的既有语义（不得猜默认 scope）；巡检面则如实归「不可判定」。
+            (TargetExistence::Unknown, Some(UndeterminedCause::MissingIssueScope)) => {
+                Err(ProductStoreError::NotFound {
+                    kind: "entity_scope",
+                    id: target_id.to_string(),
+                })
             }
-            DanglingTargetKind::DesignSpec => {
-                let scope = require_scope(target_id, scope)?;
-                let hit = LifecycleStore::new(self.paths.clone())
-                    .list_design_specs(&scope.project_id, &scope.issue_id)?
-                    .iter()
-                    .any(|record| record.id == target_id);
-                Ok(existence(hit))
-            }
-            DanglingTargetKind::Plan => {
-                let scope = require_scope(target_id, scope)?;
-                let hit = entity_deletion_cascade::list_live_plan_ids(
-                    self.paths,
-                    &scope.project_id,
-                    &scope.issue_id,
-                )?
-                .iter()
-                .any(|plan_id| plan_id == target_id);
-                Ok(existence(hit))
-            }
-            DanglingTargetKind::Session => Ok(existence(self.session_ids.contains(target_id))),
-            DanglingTargetKind::Attempt => {
-                // 路一：coding attempt（内置探针或注入探针）。
-                let coding_hit = match self.attempt_probe {
-                    Some(probe) => probe(target_id)?,
-                    None => coding_attempt_exists(self.paths, target_id)?,
-                };
-                // 路二：规划面 workspace session 枚举集合。任一命中即「仍在」。
-                Ok(existence(
-                    coding_hit || self.session_ids.contains(target_id),
-                ))
-            }
-            // U1：checkout / aggregate_index / logical_member 的存在性读需要 LC
-            // 作用域（记录落在 `logical-codebases/<lc_id>/`），本判定面无 LC
-            // 上下文；enrollment 需按 project/issue 读当处文件。四类一律如实报
-            // 「无法判定」，MUST NOT 伪装成「不存在」（否则 Task 4 会把正常记录
-            // 整批判为悬空）。真实读须先按 `LogicalCodebaseStore::list(project_id)`
-            // 枚举 LC，属持有 LC 上下文的 Task 4（REQ-DRG-23）。
-            DanglingTargetKind::Checkout
-            | DanglingTargetKind::AggregateIndex
-            | DanglingTargetKind::LogicalMember
-            | DanglingTargetKind::Enrollment => Ok(TargetExistence::Unknown),
+            (existence, _) => Ok(existence),
+        }
+    }
+
+    /// ① 层判定面的能力（无 LC scope 读 / 无 enrollment 读 / 路二完整可用）。
+    fn env<'b>(&'b self, scope: Option<&'b EntityScope>) -> ExistenceEnv<'b> {
+        ExistenceEnv {
+            paths: self.paths,
+            session_ids: self.session_ids,
+            attempt_probe: self.attempt_probe,
+            scope,
+            lc: None,
+            enrollment: None,
+            session_unavailable_reason: None,
         }
     }
 
@@ -278,14 +398,18 @@ impl<'a> DanglingResolver<'a> {
         match evidence_policy(kind).deletable_level {
             DeletableLevel::L1 => {
                 let caller_scope = require_scope(target_id, scope)?;
-                let deletion_scope = tombstone_scope(kind, target_id, caller_scope);
+                let Some(deletion_scope) = tombstone_scope(kind, target_id, caller_scope) else {
+                    return Ok(EvidenceLevel::Insufficient);
+                };
                 Ok(if self.l1_tombstone_holds(&deletion_scope)? {
                     EvidenceLevel::L1
                 } else {
                     EvidenceLevel::Insufficient
                 })
             }
-            DeletableLevel::L2 | DeletableLevel::ReportOnly => Ok(EvidenceLevel::Insufficient),
+            DeletableLevel::L2 | DeletableLevel::ReportOnly | DeletableLevel::NeverDelete => {
+                Ok(EvidenceLevel::Insufficient)
+            }
         }
     }
 
@@ -339,21 +463,21 @@ fn existence(hit: bool) -> TargetExistence {
     }
 }
 
-/// 目标类型 → 墓碑 scope：kind 按目标类型映射（StorySpec→Story 等），
-/// project/issue 取调用方 scope，entity_id 用被核对的 target_id。
-fn tombstone_scope(kind: DanglingTargetKind, target_id: &str, scope: &EntityScope) -> EntityScope {
-    let deletion_kind = match kind {
-        DanglingTargetKind::StorySpec => DeletionEntityKind::Story,
-        DanglingTargetKind::DesignSpec => DeletionEntityKind::Design,
-        // 本函数仅在 L1 档（StorySpec/DesignSpec/Plan）被调用。
-        _ => DeletionEntityKind::Plan,
-    };
-    EntityScope::new(
+/// 目标类型 → 墓碑 scope：kind 取自证据等级表登记的墓碑实体种类
+/// （附表只给 story / design / plan 登记墓碑档位），project/issue 取调用方
+/// scope，entity_id 用被核对的 target_id。
+fn tombstone_scope(
+    kind: DanglingTargetKind,
+    target_id: &str,
+    scope: &EntityScope,
+) -> Option<EntityScope> {
+    let deletion_kind = evidence_policy(kind).deletion_kind?;
+    Some(EntityScope::new(
         scope.project_id.clone(),
         scope.issue_id.clone(),
         deletion_kind,
         target_id.to_string(),
-    )
+    ))
 }
 
 /// 内置路一探针：coding attempt 存储命中 → `true`；`NotFound` → `false`；
@@ -516,10 +640,13 @@ fn io_error(action: &str, path: &Path, error: &std::io::Error) -> ProductStoreEr
 #[cfg(test)]
 mod resolve_tests {
     use super::{
-        DanglingResolver, EvidenceLevel, TargetExistence, evidence_policy, window_l2_verdict,
+        DanglingResolver, EvidenceLevel, TargetExistence, required_evidence_level,
+        window_l2_verdict,
     };
     use crate::product::app_paths::ProductAppPaths;
-    use crate::product::dangling_reference::reference_table::DanglingTargetKind;
+    use crate::product::dangling_reference::reference_table::{
+        DanglingTargetKind, all_evidence_policies, evidence_policies, evidence_policy,
+    };
     use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
     use crate::product::reviewer_window_store::{ReviewerWindowRecord, tree_key_of};
     use std::collections::BTreeSet;
@@ -851,41 +978,219 @@ mod resolve_tests {
         }
     }
 
+    /// 证据等级表**逐行**锁定 spec REQ-DRG-02 附表 #1–#10 的五列字面值。
+    ///
+    /// 五列 = 目标类型 → 存在性来源 → 唯一可达上游 → L2 专属可算条件 →
+    /// 可删证据等级；附表十行 = 九类目标（attempt 占两行：路 1 / 路 2）。
     #[test]
     fn dangling_resolver_evidence_policy_matches_spec_table() {
-        let level = |kind| evidence_policy(kind).deletable_level;
+        // (目标类型, 存在性来源, 唯一可达上游, L2 专属可算条件, 可删证据等级)
+        let expected: [(&str, &str, &str, &str, &str); 10] = [
+            (
+                "story_spec",
+                "list_story_specs",
+                "无上游（根实体）",
+                "不可用（无上游可解析）",
+                "L1",
+            ),
+            (
+                "design_spec",
+                "list_design_specs",
+                "无上游（根实体）",
+                "不可用（无上游可解析）",
+                "L1",
+            ),
+            (
+                "plan",
+                "list_live_plan_ids",
+                "plan → work item group → story/design（须 plan 记录本身才能解析）",
+                "不可用（plan 记录已消失即无法解析）",
+                "L1",
+            ),
+            (
+                "session",
+                "list_workspace_sessions",
+                "session → enrollment 绑定",
+                "不可用（无独立墓碑，且缺失属正常中间态）",
+                "只报不删",
+            ),
+            (
+                "attempt",
+                "get_attempt_by_id",
+                "attempt 记录无 plan_id，上游不可从 attempt 解析",
+                "由窗口记录自身给出的四条（REQ-DRG-12）",
+                "L2",
+            ),
+            (
+                "attempt",
+                "list_workspace_sessions",
+                "同 #4",
+                "由窗口记录自身给出的四条（REQ-DRG-12）",
+                "L2",
+            ),
+            (
+                "checkout",
+                "LogicalCodebaseStore::list_checkouts（src/product/logical_codebase/store.rs:792）/ load_checkout（:777），须以 for_lc 作用域化；LC 由 LogicalCodebaseStore::list(project_id)（:249）枚举",
+                "未核实，无法定义",
+                "不可用（上游无法定义）",
+                "只报不删",
+            ),
+            (
+                "aggregate_index",
+                "AggregateIndexStore::get（src/product/logical_codebase/aggregate_index/store.rs:72），须以 for_lc 作用域化 + 同上 LC 枚举",
+                "未核实，无法定义",
+                "不可用（上游无法定义）",
+                "只报不删",
+            ),
+            (
+                "logical_member",
+                "LogicalCodebaseStore::list_members（src/product/logical_codebase/store.rs:751）/ load_member（:736）＋ LogicalCodebaseManifest.member_ids（store.rs:32），须以 for_lc 作用域化 + 同上 LC 枚举",
+                "未核实，无法定义",
+                "不可用（上游无法定义）",
+                "只报不删",
+            ),
+            (
+                "enrollment",
+                "{issue_root}/automation-enrollment.json（IssueAutomationStore::get，src/product/issue_automation_store.rs:69）",
+                "无上游（授权根）",
+                "不可用（永不删）",
+                "只报不删（永不删）",
+            ),
+        ];
+        let rows = all_evidence_policies();
         assert_eq!(
-            level(DanglingTargetKind::StorySpec),
-            super::DeletableLevel::L1
+            rows.len(),
+            expected.len(),
+            "证据等级表必须逐行登记 spec 附表 #1–#10"
+        );
+        for (index, (row, expected_row)) in rows.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                (
+                    row.target_kind.as_str(),
+                    row.existence_source,
+                    row.upstream,
+                    row.l2_condition,
+                    row.deletable_level.label(),
+                ),
+                *expected_row,
+                "证据等级表第 {} 行（spec 附表 #{}）的五列必须与 spec 逐字一致",
+                index + 1,
+                index + 1
+            );
+        }
+    }
+
+    /// 目标类型 → 可删等级（单一事实源）：九类目标逐类锁定。
+    #[test]
+    fn dangling_resolver_deletable_level_per_target_follows_spec_table() {
+        let level = |kind| evidence_policy(kind).deletable_level.label();
+        assert_eq!(level(DanglingTargetKind::StorySpec), "L1");
+        assert_eq!(level(DanglingTargetKind::DesignSpec), "L1");
+        assert_eq!(level(DanglingTargetKind::Plan), "L1");
+        assert_eq!(level(DanglingTargetKind::Session), "只报不删");
+        assert_eq!(level(DanglingTargetKind::Attempt), "L2");
+        assert_eq!(level(DanglingTargetKind::Checkout), "只报不删");
+        assert_eq!(level(DanglingTargetKind::AggregateIndex), "只报不删");
+        assert_eq!(level(DanglingTargetKind::LogicalMember), "只报不删");
+        assert_eq!(level(DanglingTargetKind::Enrollment), "只报不删（永不删）");
+    }
+
+    /// 证据等级表的行内一致性：同目标类型的各行在「可删等级 / L2 条件 / 分派」
+    /// 三列上取值一致；墓碑档位（L1）与墓碑实体种类一一对应。
+    #[test]
+    fn dangling_evidence_policy_rows_are_consistent() {
+        for kind in [
+            DanglingTargetKind::StorySpec,
+            DanglingTargetKind::DesignSpec,
+            DanglingTargetKind::Plan,
+            DanglingTargetKind::Session,
+            DanglingTargetKind::Attempt,
+            DanglingTargetKind::Checkout,
+            DanglingTargetKind::AggregateIndex,
+            DanglingTargetKind::LogicalMember,
+            DanglingTargetKind::Enrollment,
+        ] {
+            let rows = evidence_policies(kind);
+            assert!(!rows.is_empty(), "{kind:?} 必须在证据等级表登记");
+            let first = rows[0];
+            for row in rows {
+                assert_eq!(
+                    row.deletable_level, first.deletable_level,
+                    "{kind:?} 的各行可删等级必须一致"
+                );
+                assert_eq!(
+                    row.l2_condition, first.l2_condition,
+                    "{kind:?} 的各行 L2 专属条件必须一致"
+                );
+                assert_eq!(
+                    row.dispatch, first.dispatch,
+                    "{kind:?} 的各行存在性分派口径必须一致"
+                );
+                assert_eq!(
+                    row.deletion_kind.is_some(),
+                    row.deletable_level.label() == "L1",
+                    "{kind:?} 的墓碑档位与墓碑实体种类必须一一对应"
+                );
+            }
+        }
+    }
+
+    /// 销账证据门取自证据等级表（不得旁路常量）。
+    #[test]
+    fn dangling_resolver_required_evidence_level_follows_table() {
+        assert_eq!(
+            required_evidence_level(DanglingTargetKind::StorySpec),
+            Some(EvidenceLevel::L1)
         );
         assert_eq!(
-            level(DanglingTargetKind::DesignSpec),
-            super::DeletableLevel::L1
-        );
-        assert_eq!(level(DanglingTargetKind::Plan), super::DeletableLevel::L1);
-        assert_eq!(
-            level(DanglingTargetKind::Session),
-            super::DeletableLevel::ReportOnly
+            required_evidence_level(DanglingTargetKind::DesignSpec),
+            Some(EvidenceLevel::L1)
         );
         assert_eq!(
-            level(DanglingTargetKind::Attempt),
-            super::DeletableLevel::L2
+            required_evidence_level(DanglingTargetKind::Plan),
+            Some(EvidenceLevel::L1)
         );
         assert_eq!(
-            level(DanglingTargetKind::Checkout),
-            super::DeletableLevel::ReportOnly
+            required_evidence_level(DanglingTargetKind::Attempt),
+            Some(EvidenceLevel::L2)
+        );
+        // 只报不删档位没有可删等级。
+        assert_eq!(required_evidence_level(DanglingTargetKind::Session), None);
+        assert_eq!(required_evidence_level(DanglingTargetKind::Checkout), None);
+        assert_eq!(
+            required_evidence_level(DanglingTargetKind::AggregateIndex),
+            None
         );
         assert_eq!(
-            level(DanglingTargetKind::AggregateIndex),
-            super::DeletableLevel::ReportOnly
+            required_evidence_level(DanglingTargetKind::LogicalMember),
+            None
         );
         assert_eq!(
-            level(DanglingTargetKind::LogicalMember),
-            super::DeletableLevel::ReportOnly
+            required_evidence_level(DanglingTargetKind::Enrollment),
+            None
         );
-        assert_eq!(
-            level(DanglingTargetKind::Enrollment),
-            super::DeletableLevel::ReportOnly
-        );
+    }
+
+    /// 存在性分派只有一处实现：①层与巡检面的生产段都不得出现 per-target 的
+    /// 硬编码分支（目标类型的分派只许写在证据等级表里）。
+    #[test]
+    fn dangling_reference_dispatch_has_no_per_target_branches() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        for relative in [
+            "src/product/dangling_reference/resolve.rs",
+            "src/product/dangling_reference/patrol/context.rs",
+        ] {
+            let path = Path::new(manifest).join(relative);
+            let source = std::fs::read_to_string(&path).expect("读取生产源码");
+            // 只看生产段（跳过 `#[cfg(test)]` 之后的内联测试模块）。
+            let production = source
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or(source.as_str());
+            assert!(
+                !production.contains("DanglingTargetKind::"),
+                "{relative} 的生产段不得出现 per-target 硬编码分支（分派只许在证据等级表）"
+            );
+        }
     }
 }

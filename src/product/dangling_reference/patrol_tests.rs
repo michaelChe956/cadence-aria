@@ -804,3 +804,112 @@ fn dangling_patrol_keeps_counts_separate() {
         "projects/project_0001/issues/issue_0001/automation-legacy-ledger.json"
     );
 }
+
+// -- 两面共用同一张证据等级表 ------------------------------------------
+
+/// 巡检面与①层**共用同一张证据等级表**做存在性分派：同一目标类型、同一能力
+/// 下两面给出同一存在性结论；差异只出现在①层不具备的读能力上（巡检面有
+/// LC scope / enrollment 读能力，①层没有 → 一律「不可判定」）。
+#[test]
+fn dangling_patrol_and_resolver_share_the_same_dispatch() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path());
+    let session_ids = BTreeSet::new();
+    let probe = probe_false();
+    let ctx = PatrolContext {
+        paths: &paths,
+        session_ids: session_ids.clone(),
+        session_unavailable_reason: None,
+        attempt_probe: Some(&probe),
+        attempt_clusters: BTreeMap::new(),
+    };
+    let resolver = DanglingResolver::with_attempt_probe(&paths, &session_ids, &probe);
+
+    // session：路二集合未命中 → 两面都判「不存在」（巡检面只报不删）。
+    let session = PatrolReference::new(
+        "session_id",
+        DanglingTargetKind::Session,
+        "workspace_session_auto_x",
+        "",
+        "",
+    );
+    assert!(
+        matches!(
+            ctx.judge(&session, None).expect("judge session"),
+            ReferenceJudgement::Missing { .. }
+        ),
+        "session 未命中时巡检面必须判「已删」（只报不删）"
+    );
+    assert_eq!(
+        resolver
+            .target_exists(
+                DanglingTargetKind::Session,
+                "workspace_session_auto_x",
+                None
+            )
+            .expect("exists session"),
+        TargetExistence::Missing
+    );
+
+    // attempt：两路皆不命中 → 两面都判「不存在」。
+    let attempt = PatrolReference::attempt("coding_attempt_9f3");
+    assert!(
+        matches!(
+            ctx.judge(&attempt, None).expect("judge attempt"),
+            ReferenceJudgement::Missing { .. }
+        ),
+        "attempt 两路皆无时巡检面必须判「已删」"
+    );
+    assert_eq!(
+        resolver
+            .target_exists(DanglingTargetKind::Attempt, "coding_attempt_9f3", None)
+            .expect("exists attempt"),
+        TargetExistence::Missing
+    );
+
+    // LC 三类：巡检面缺 LC scope → 「不可判定」；①层无 LC 读能力 → 同样
+    // 「不可判定」（不得判成「不存在」）。
+    let checkout = PatrolReference::new(
+        "checkout_id",
+        DanglingTargetKind::Checkout,
+        "checkout_0001",
+        "project_0001",
+        "",
+    );
+    assert!(
+        matches!(
+            ctx.judge(&checkout, None).expect("judge checkout"),
+            ReferenceJudgement::Undetermined { .. }
+        ),
+        "缺 LC scope 时巡检面必须归「不可判定」"
+    );
+    assert_eq!(
+        resolver
+            .target_exists(DanglingTargetKind::Checkout, "checkout_0001", None)
+            .expect("exists checkout"),
+        TargetExistence::Unknown
+    );
+
+    // enrollment：巡检面按记录所属 issue 真读当处文件；①层无该读能力 →
+    // 「不可判定」（附表 #10：只报不删、永不删）。
+    let enrollment = PatrolReference::new(
+        "enrollment_id",
+        DanglingTargetKind::Enrollment,
+        "enrollment_0001",
+        "project_0001",
+        "issue_0001",
+    );
+    assert!(
+        matches!(
+            ctx.judge(&enrollment, None).expect("judge enrollment"),
+            ReferenceJudgement::Missing { .. }
+        ),
+        "当处 enrollment 不存在时巡检面必须判「已删」（只报不删、永不删）"
+    );
+    assert_eq!(
+        resolver
+            .target_exists(DanglingTargetKind::Enrollment, "enrollment_0001", None)
+            .expect("exists enrollment"),
+        TargetExistence::Unknown
+    );
+}

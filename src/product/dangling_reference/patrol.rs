@@ -43,12 +43,14 @@ use std::path::{Path, PathBuf};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::dangling_reference::reference_table::{
-    DanglingRecordType, DanglingTargetKind, reference_rule,
+    DanglingRecordType, DanglingTargetKind, DeletableLevel, ScopeRequirement, TargetEvidencePolicy,
+    evidence_policy, primary_target_kind, reference_rule,
 };
 use crate::product::dangling_reference::resolve::{
-    AttemptProbe, DanglingResolver, EvidenceLevel, TargetExistence, window_l2_verdict,
+    AttemptProbe, DanglingResolver, EnrollmentReader, EvidenceLevel, ExistenceEnv, LcScopeReader,
+    TargetExistence, UndeterminedCause, dispatch_existence, window_l2_verdict,
 };
-use crate::product::entity_deletion_store::{DeletionEntityKind, EntityScope};
+use crate::product::entity_deletion_store::EntityScope;
 use crate::product::issue_automation_store::{
     IssueAutomationStore, PlanGenerationIntentRead, PreparedPlanIntentRead,
     read_plan_generation_intent, read_prepared_plan_intent,
@@ -253,7 +255,14 @@ fn patrol_state_root_with_probe(
     let mut ctx = PatrolContext {
         paths,
         session_ids,
-        session_enumeration_errors: session_errors,
+        session_unavailable_reason: if session_errors.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "存在性数据源 / 作用域不可用：workspace session 枚举失败，路二无法完成（{}）",
+                session_errors.join("；")
+            ))
+        },
         attempt_probe,
         attempt_clusters: BTreeMap::new(),
     };
