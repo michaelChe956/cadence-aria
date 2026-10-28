@@ -879,4 +879,6 @@ fn admission_store_code(error: ProductStoreError) -> StableCode {
 #[cfg(test)]
 mod tests {
     include!("admission_tests.rs");
+    include!("admission_recovery_tests.rs");
+    include!("admission_fixture_tests.rs");
 }
