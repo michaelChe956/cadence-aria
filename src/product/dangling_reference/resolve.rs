@@ -246,7 +246,7 @@ impl<'a> DanglingResolver<'a> {
             }
             // U1：checkout / aggregate_index / logical_member 的存在性读需要 LC
             // 作用域（记录落在 `logical-codebases/<lc_id>/`），本判定面无 LC
-            // 上下文；enrollment 需按 project/issue 读当处文件。三者一律如实报
+            // 上下文；enrollment 需按 project/issue 读当处文件。四类一律如实报
             // 「无法判定」，MUST NOT 伪装成「不存在」（否则 Task 4 会把正常记录
             // 整批判为悬空）。真实读须先按 `LogicalCodebaseStore::list(project_id)`
             // 枚举 LC，属持有 LC 上下文的 Task 4（REQ-DRG-23）。
