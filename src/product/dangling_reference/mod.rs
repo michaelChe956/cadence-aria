@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod reference_table;
+pub(crate) mod resolve;
 
 /// 悬空引用告警的单一稳定码（REQ-DRG-07）。
 pub(crate) const DANGLING_REFERENCE_WARNING_CODE: &str = "dangling_reference_target_missing";
