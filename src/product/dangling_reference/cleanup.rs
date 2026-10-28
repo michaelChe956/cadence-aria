@@ -3,11 +3,11 @@
 //! 本模块是第 ③ 层里**唯一真正执行删除**的一环，三道闸在同一入口 [`run_cleanup`]
 //! 内强制，顺序不可颠倒：
 //!
-//! 1. **闸 1（默认 dry-run + 确认令牌）**：入口先**内部重跑一次巡检**并重算 findings
-//!    摘要令牌（REQ-DRG-22，[`findings_token`]）。`apply == false` → 只出清单（零删除、
-//!    零留痕）；`apply == true` 缺令牌或令牌与重算值不一致 → `Err`，同样**零删除、
-//!    零留痕**。令牌比对用本进程本次现场，不用任何外部清单文件（「拿旧清单开新清理」
-//!    与「清单生成后现场又变了」两种错配一次挡住）。
+//! 1. **闸 1（自动模式）**：**不设人工确认环节**——服务启动时自动跑一次巡检，
+//!    删除判据 = 「白名单类型 + 证据达标」（判定面产出，见闸 2）。清单摘要
+//!    （findings 规范化序列化摘要）**仅用于审计关联**（核对两次巡检是否同一现场），
+//!    MUST NOT 再充当删除凭据（REQ-DRG-22）。`CleanupMode::ReportOnly` 保留
+//!    「只出清单、零删除、零留痕」的 dry-run 复核能力。
 //! 2. **闸 2（按类型白名单）**：删除集合只来自 Task 7 判定面的
 //!    [`CleanupDecision::Delete`]，本模块再按记录类型做一次白名单分派（intent /
 //!    窗口簇 / 台账条目三类）；表外类型、未归类记录、降级类型（checkout /
@@ -53,10 +53,10 @@ use crate::product::dangling_reference::patrol::{
     PatrolFinding, UndeterminedEntry, patrol_state_root,
 };
 use crate::product::dangling_reference::reference_table::{DanglingRecordType, DanglingTargetKind};
-use crate::product::dangling_reference::report::findings_token;
-use crate::product::dangling_reference::resolve::{AttemptProbe, DanglingResolver};
+use crate::product::dangling_reference::resolve::{
+    AttemptProbe, DanglingResolver, issue_scopes, read_dir_sorted, workspace_session_ids,
+};
 use crate::product::json_store::{ProductStoreError, read_json};
-use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::reviewer_resource_purge::ReviewerResourcePurger;
 
 /// 留痕行的触发来源稳定短码（REQ-DRG-16；设计 §3.5.2 行形态）。
@@ -76,16 +76,41 @@ const ENTITY_IDENTITY_DIR: &str = "entity-identity";
 /// 实体身份台账绑定条目目录段。
 const ENTITY_SESSIONS_DIR: &str = "sessions";
 
-/// 一次销账请求（闸 1 的两个开关）。
+/// 销账模式（REQ-DRG-13 自动模式）。
 ///
-/// `apply == false` 是**默认**：只出清单、零删除、零留痕。`apply == true` 时
-/// `confirm_token` 必填，且 MUST 等于入口内部重算的 findings 摘要。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// owner 拍板：销账**不设人工确认环节**——服务启动时自动跑一次巡检，按
+/// 「白名单类型 + 证据达标」自动销账。清单摘要（findings 规范化序列化摘要）
+/// **仅用于审计关联**（核对两次巡检是否同一现场），MUST NOT 再充当删除凭据
+/// （REQ-DRG-22）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CleanupMode {
+    /// 只出清单：零删除、零留痕（dry-run 复核用）。
+    ReportOnly,
+    /// 自动模式：按白名单 + 证据门自动销账（无人工令牌环节）。
+    Automatic,
+}
+
+/// 一次销账请求（销账模式）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CleanupRequest {
-    /// 是否真的执行删除（默认 `false` = dry-run）。
-    pub(crate) apply: bool,
-    /// 确认令牌（`sha256:<64 位小写 hex>`）；dry-run 下忽略。
-    pub(crate) confirm_token: Option<String>,
+    /// 本次销账模式。
+    pub(crate) mode: CleanupMode,
+}
+
+impl CleanupRequest {
+    /// 自动模式请求（服务启动时使用；无令牌、无人工确认）。
+    pub(crate) fn automatic() -> Self {
+        Self {
+            mode: CleanupMode::Automatic,
+        }
+    }
+
+    /// 只出清单的请求（dry-run 复核；零删除、零留痕）。
+    pub(crate) fn report_only() -> Self {
+        Self {
+            mode: CleanupMode::ReportOnly,
+        }
+    }
 }
 
 /// 一次销账编排的结果。
@@ -111,63 +136,13 @@ pub(crate) struct CleanupOutcome {
     pub(crate) governance_complete: bool,
 }
 
-/// 闸 1 的拒绝原因（与存储失败分开，供 CLI 映射稳定错误码）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CleanupGateError {
-    /// `apply == true` 但没给确认令牌。
-    TokenMissing,
-    /// 令牌与入口内部重算的 findings 摘要不一致（`expected` = 重算值，
-    /// `actual` = 传入值）。
-    TokenMismatch {
-        /// 本次现场重算出的令牌。
-        expected: String,
-        /// 调用方传入的令牌。
-        actual: String,
-    },
-}
-
-/// 销账失败：闸 1 拒绝 或 存储 / IO 失败。
-#[derive(Debug)]
-pub(crate) enum CleanupError {
-    /// 闸 1 拒绝（此时 MUST 已保证零删除、零留痕）。
-    Gate(CleanupGateError),
-    /// 巡检 / 判定 / 删除 / 留痕过程中的存储错误。
-    Store(ProductStoreError),
-}
-
-impl std::fmt::Display for CleanupGateError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TokenMissing => write!(
-                formatter,
-                "销账被拒绝：缺少确认令牌（--apply 必须同时给出 --confirm <token>）"
-            ),
-            Self::TokenMismatch { expected, actual } => write!(
-                formatter,
-                "销账被拒绝：确认令牌与当前巡检结果不匹配（本次重算 {expected}，传入 {actual}）"
-            ),
-        }
-    }
-}
-
-impl std::fmt::Display for CleanupError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Gate(error) => write!(formatter, "{error}"),
-            Self::Store(error) => write!(formatter, "销账失败：{error}"),
-        }
-    }
-}
-
-impl std::error::Error for CleanupError {}
-
 /// 执行一次销账编排（三道闸全部在本入口内强制；见模块文档）。
 ///
-/// 返回 [`CleanupOutcome`]；闸 1 拒绝或存储失败返回 [`CleanupError`]。
+/// 返回 [`CleanupOutcome`]；巡检 / 判定 / 删除 / 留痕过程中的存储错误原样上抛。
 pub(crate) fn run_cleanup(
     paths: &ProductAppPaths,
     request: &CleanupRequest,
-) -> Result<CleanupOutcome, CleanupError> {
+) -> Result<CleanupOutcome, ProductStoreError> {
     run_cleanup_with_attempt_probe(paths, request, None)
 }
 
@@ -176,28 +151,14 @@ fn run_cleanup_with_attempt_probe(
     paths: &ProductAppPaths,
     request: &CleanupRequest,
     attempt_probe: Option<AttemptProbe<'_>>,
-) -> Result<CleanupOutcome, CleanupError> {
-    // 闸 1 ①：入口内部重跑一次巡检（同进程、同一现场），重算 findings 摘要。
-    let before = patrol_state_root(paths).map_err(CleanupError::Store)?;
-    let expected_token = findings_token(&before.findings);
-    if request.apply {
-        // 闸 1 ②：缺令牌 / 令牌不一致 → 拒绝，且此前的动作全部只读（零删除、零留痕）。
-        let provided = request
-            .confirm_token
-            .as_deref()
-            .ok_or(CleanupError::Gate(CleanupGateError::TokenMissing))?;
-        if provided != expected_token.as_str() {
-            return Err(CleanupError::Gate(CleanupGateError::TokenMismatch {
-                expected: expected_token,
-                actual: provided.to_string(),
-            }));
-        }
-    }
-
-    // 闸 2：删除集合只来自按类型判定面（本步只读）。
-    let decisions = collect_decisions(paths, attempt_probe).map_err(CleanupError::Store)?;
-    if !request.apply {
-        // 默认 dry-run：只出清单，零删除、零留痕。
+) -> Result<CleanupOutcome, ProductStoreError> {
+    // 闸 1（自动模式）：**无人工令牌环节**——删除判据 = 白名单类型 + 证据达标
+    // （判定面产出，见闸 2）。清单摘要只用于审计关联，不是删除凭据
+    // （REQ-DRG-22）。
+    if request.mode == CleanupMode::ReportOnly {
+        // dry-run：只出清单，零删除、零留痕。
+        let before = patrol_state_root(paths)?;
+        let decisions = collect_decisions(paths, attempt_probe)?;
         let (zeroed_by_type, residual) = classify_findings(&before.findings, &decisions);
         return Ok(finish_outcome(CleanupOutcome {
             deleted_count: 0,
@@ -209,15 +170,17 @@ fn run_cleanup_with_attempt_probe(
         }));
     }
 
+    // 闸 2：删除集合只来自按类型判定面（本步只读）。
+    let decisions = collect_decisions(paths, attempt_probe)?;
+
     // 闸 3 ①②：执行删除 + 逐行留痕。
     let now = Utc::now();
     let run_id = format!("cleanup_{}", now.format(RUN_ID_STAMP_FORMAT));
-    let deleted_count =
-        execute_deletions(paths, &decisions, &run_id, now).map_err(CleanupError::Store)?;
+    let deleted_count = execute_deletions(paths, &decisions, &run_id, now)?;
 
     // 闸 3 ③：清理后再巡检一次自证归零。
-    let after = patrol_state_root(paths).map_err(CleanupError::Store)?;
-    let after_decisions = collect_decisions(paths, attempt_probe).map_err(CleanupError::Store)?;
+    let after = patrol_state_root(paths)?;
+    let after_decisions = collect_decisions(paths, attempt_probe)?;
     let (zeroed_by_type, residual) = classify_findings(&after.findings, &after_decisions);
     Ok(finish_outcome(CleanupOutcome {
         deleted_count,
@@ -330,63 +293,6 @@ fn collect_decisions(
         decisions.push(decide_ledger_entry_cleanup(paths, &entry, &resolver)?);
     }
     Ok(decisions)
-}
-
-/// 规划面 workspace session 全量 id 集合（REQ-DRG-21 路二）。
-///
-/// MUST 用枚举接口；枚举失败 fail-closed 上抛（拿残缺集合会把活窗口判成悬空）。
-fn workspace_session_ids(paths: &ProductAppPaths) -> Result<BTreeSet<String>, ProductStoreError> {
-    let mut ids = BTreeSet::new();
-    for (project_id, issue_id) in issue_scopes(paths)? {
-        let records =
-            LifecycleStore::new(paths.clone()).list_workspace_sessions(&project_id, &issue_id)?;
-        ids.extend(records.into_iter().map(|record| record.id));
-    }
-    Ok(ids)
-}
-
-/// 状态根下的 project × issue 作用域（读根失败上抛：连结构都不通时无从判定）。
-fn issue_scopes(paths: &ProductAppPaths) -> Result<Vec<(String, String)>, ProductStoreError> {
-    let mut scopes = Vec::new();
-    for project_id in child_directory_names(&paths.projects_root())? {
-        for issue_id in child_directory_names(&paths.project_root(&project_id).join("issues"))? {
-            scopes.push((project_id.clone(), issue_id));
-        }
-    }
-    Ok(scopes)
-}
-
-/// 目录下的子目录名（目录不存在 → 空集；其余 IO 失败上抛）。
-fn child_directory_names(dir: &Path) -> Result<BTreeSet<String>, ProductStoreError> {
-    let mut names = BTreeSet::new();
-    for (path, is_dir) in read_dir_sorted(dir)? {
-        if !is_dir {
-            continue;
-        }
-        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-            names.insert(name.to_string());
-        }
-    }
-    Ok(names)
-}
-
-/// 枚举目录子项（按路径升序，逐次可重现；目录不存在按空目录处理）。
-fn read_dir_sorted(dir: &Path) -> Result<Vec<(PathBuf, bool)>, ProductStoreError> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(io_error("read", dir, &error)),
-    };
-    let mut items = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| io_error("read", dir, &error))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| io_error("read", &entry.path(), &error))?;
-        items.push((entry.path(), file_type.is_dir()));
-    }
-    items.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(items)
 }
 
 /// 枚举实体身份台账条目（`<root>/state/entity-identity/sessions/*.json`）。

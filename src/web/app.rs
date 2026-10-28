@@ -780,6 +780,25 @@ pub async fn serve_web(
     {
         eprintln!("[aria-startup] orphan run scratch sweep failed: {error}");
     }
+    // 悬空引用巡检 + 自动销账（owner 拍板：**服务启动时自动跑一次**，不做人工
+    // 触发；`aria inspect dangling-references` 人工入口已删除）。位置与既有
+    // reconcile / scratch sweep 同侧——bind 成功之后（B2/F3：bind 失败=零副作用）。
+    // 删除判据仍是「白名单类型 + 证据达标」，不放宽；失败只打日志、**不阻断启动**
+    // （巡检清单仍会写出，供事后查）。
+    match crate::product::dangling_reference::startup::run_startup_governance(
+        &product_paths,
+        &workspace_root,
+    ) {
+        Ok(outcome) => eprintln!(
+            "[aria-startup] dangling reference governance done: report={} dangling={} undetermined={} deleted={} token={}",
+            outcome.report_path.display(),
+            outcome.dangling_count,
+            outcome.undetermined_count,
+            outcome.deleted_count,
+            outcome.findings_token
+        ),
+        Err(error) => eprintln!("[aria-startup] dangling reference governance failed: {error}"),
+    }
     refresh_provider_health_for_startup(&state).await;
 
     let app = assemble_production_router(state.clone(), evidence_enabled, static_service);
@@ -1935,5 +1954,63 @@ mod tests {
         );
         assert!(!call.contains("from_secs"), "TTL 不得写字面量时长：{call}");
         assert!(!call.contains('?'), "sweep 失败不得用 ? 传播：{call}");
+    }
+
+    /// 悬空引用治理（巡检 + 自动销账）必须在 bind 之后、开始 serve 之前执行
+    /// **一次**，且失败只打日志、**不得阻断启动**（owner 拍板：服务启动时自动
+    /// 跑一次，人工 CLI 入口已删除）。
+    #[test]
+    fn dangling_reference_governance_runs_once_after_bind_and_never_blocks_startup() {
+        let source = include_str!("app.rs");
+        let start = source.find("pub async fn serve_web(").expect("serve_web");
+        let end = start
+            + source[start..]
+                .find("fn orchestrator_wake_subscribe")
+                .expect("serve_web end");
+        let body = &source[start..end];
+
+        let bind = body.find("TcpListener::bind(addr)").expect("bind call");
+        let sweep = body
+            .find("sweep_orphan_run_scratch(")
+            .expect("orphan run scratch sweep call");
+        let governance = body
+            .find("run_startup_governance(")
+            .expect("dangling reference governance call");
+        let serve = body.find("axum::serve(listener, app)").expect("serve call");
+
+        assert!(
+            bind < governance,
+            "治理必须在 bind 之后（B2/F3：bind 失败=零副作用）"
+        );
+        assert!(
+            sweep < governance,
+            "治理必须与既有启动副作用同侧（scratch sweep 之后）"
+        );
+        assert!(governance < serve, "治理必须在开始 serve 之前执行");
+        assert_eq!(
+            body.matches("run_startup_governance(").count(),
+            1,
+            "启动治理只执行一次，不得是周期任务"
+        );
+
+        // 失败处理：必须显式捕获并打日志，不得用 `?` 把错误传播成启动失败。
+        let match_call = body
+            .find("match crate::product::dangling_reference::startup::run_startup_governance(")
+            .expect("治理必须以 match 显式捕获结果");
+        assert!(match_call < governance, "治理必须以 match 显式捕获结果");
+        let guard = &body[match_call..(match_call + 200).min(body.len())];
+        assert!(
+            guard.contains("product_paths"),
+            "治理必须使用 serve_web 内的 product_paths：{guard}"
+        );
+        assert!(
+            guard.contains("workspace_root"),
+            "治理必须使用 serve_web 内的 workspace_root（清单落点）：{guard}"
+        );
+        let logged = body[governance..]
+            .find("dangling reference governance failed")
+            .expect("治理失败必须只打日志");
+        let call = &body[governance..governance + logged];
+        assert!(!call.contains('?'), "治理失败不得用 ? 传播：{call}");
     }
 }

@@ -516,13 +516,11 @@ aria task run --workspace . "你的需求描述"
 
 # 启动 web 服务
 aria web --workspace . --host 127.0.0.1 --port 4317
-
-# 巡检悬空引用并出清单（默认 dry-run：只出清单，零删除零留痕）
-aria inspect dangling-references --workspace .
-
-# 按清单的摘要令牌执行销账（令牌取自上一步输出的 dangling_reference_token）
-aria inspect dangling-references --workspace . --apply --confirm sha256:<摘要>
 ```
+
+> 悬空引用（已删实体留下的旁支记录）的巡检与销账**不提供 CLI 入口**：服务启动时
+> 自动跑一次，按「白名单类型 + 证据达标」自动销账，并把巡检清单写到
+> `cadence/analysis-docs/<运行日>_分析报告_悬空引用巡检清单_v1.0.md` 供事后查。
 
 不过日常主要操作都通过 `/workbench` 工作台完成。
 

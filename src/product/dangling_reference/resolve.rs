@@ -17,7 +17,7 @@
 //! 本任务只交付判定面：不删除任何东西、不接线巡检与销账（Task 4/7/8）。
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::CodingAttemptStore;
@@ -445,6 +445,72 @@ pub(crate) fn window_l2_verdict(
         target_missing,
         worktree_gone,
     })
+}
+
+/// 规划面 workspace session 全量 id 集合（REQ-DRG-21 路二）。
+///
+/// MUST 用枚举接口；枚举失败 fail-closed 上抛（拿残缺集合会把活窗口判成悬空）。
+pub(crate) fn workspace_session_ids(
+    paths: &ProductAppPaths,
+) -> Result<BTreeSet<String>, ProductStoreError> {
+    let mut ids = BTreeSet::new();
+    for (project_id, issue_id) in issue_scopes(paths)? {
+        let records =
+            LifecycleStore::new(paths.clone()).list_workspace_sessions(&project_id, &issue_id)?;
+        ids.extend(records.into_iter().map(|record| record.id));
+    }
+    Ok(ids)
+}
+
+/// 状态根下的 project × issue 作用域（读根失败上抛：连结构都不通时无从判定）。
+pub(crate) fn issue_scopes(
+    paths: &ProductAppPaths,
+) -> Result<Vec<(String, String)>, ProductStoreError> {
+    let mut scopes = Vec::new();
+    for project_id in child_directory_names(&paths.projects_root())? {
+        for issue_id in child_directory_names(&paths.project_root(&project_id).join("issues"))? {
+            scopes.push((project_id.clone(), issue_id));
+        }
+    }
+    Ok(scopes)
+}
+
+/// 目录下的子目录名（目录不存在 → 空集；其余 IO 失败上抛）。
+pub(crate) fn child_directory_names(dir: &Path) -> Result<BTreeSet<String>, ProductStoreError> {
+    let mut names = BTreeSet::new();
+    for (path, is_dir) in read_dir_sorted(dir)? {
+        if !is_dir {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            names.insert(name.to_string());
+        }
+    }
+    Ok(names)
+}
+
+/// 枚举目录子项（按路径升序，逐次可重现；目录不存在按空目录处理）。
+pub(crate) fn read_dir_sorted(dir: &Path) -> Result<Vec<(PathBuf, bool)>, ProductStoreError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io_error("read", dir, &error)),
+    };
+    let mut items = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| io_error("read", dir, &error))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| io_error("read", &entry.path(), &error))?;
+        items.push((entry.path(), file_type.is_dir()));
+    }
+    items.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(items)
+}
+
+/// 统一的 IO 错误包装（读失败一律上抛，MUST NOT 被当成「空集」）。
+fn io_error(action: &str, path: &Path, error: &std::io::Error) -> ProductStoreError {
+    ProductStoreError::Io(format!("{action} {}: {error}", path.display()))
 }
 
 #[cfg(test)]

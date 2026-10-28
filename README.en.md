@@ -461,15 +461,13 @@ aria task run --workspace . "your requirement here"
 
 # Start the web server
 aria web --workspace . --host 127.0.0.1 --port 4317
-
-# Patrol dangling references and write the report (dry-run by default: report only,
-# zero deletions and zero ledger traces)
-aria inspect dangling-references --workspace .
-
-# Run the cleanup with the report's summary token (take it from the
-# dangling_reference_token line of the previous command)
-aria inspect dangling-references --workspace . --apply --confirm sha256:<digest>
 ```
+
+> Dangling-reference patrol and cleanup have **no CLI entry point**: the service
+> runs them automatically once at startup, cleaning up only whitelisted record
+> types whose deletion evidence holds, and writes the patrol report to
+> `cadence/analysis-docs/<run-day>_分析报告_悬空引用巡检清单_v1.0.md` for later
+> inspection.
 
 However, most day-to-day operations are performed through the `/workbench` web UI.
 

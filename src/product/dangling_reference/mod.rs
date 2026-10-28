@@ -46,23 +46,28 @@
 //! ——删除动作与三道闸编排属 `cleanup` 子模块。
 //!
 //! `cleanup` 子模块是**唯一真正执行删除**的销账编排面（REQ-DRG-13 / 14 / 15 / 16 / 17；
-//! 技术方案 §3.4.2）：闸 1 默认 dry-run，`apply=true` 必须带令牌且与入口内部重跑巡检
-//! 的 findings 摘要一致；闸 2 只删按类型判定面产出的 `Delete`（intent / 窗口簇 / 台账
-//! 条目三类），墓碑与用户业务数据永不删；闸 3 删除幂等（缺失视为已清）、逐行留痕
-//! （台账全量比对去重）并在清理后再巡检自证归零（只报不删残留与不可判定都不计入
-//! 归零）。它的内联测试按本目录既有约定外置在 `cleanup_tests.rs`。
+//! 技术方案 §3.4.2）：闸 1 为**自动模式**——不设人工确认环节，删除判据 = 白名单类型
+//! 与证据达标（清单摘要只用于审计关联，不是删除凭据；REQ-DRG-22）；闸 2 只删按类型
+//! 判定面产出的 `Delete`（intent / 窗口簇 / 台账条目三类），墓碑与用户业务数据永不删；
+//! 闸 3 删除幂等（缺失视为已清）、逐行留痕（台账全量比对去重）并在清理后再巡检自证
+//! 归零（只报不删残留与不可判定都不计入归零）。它的内联测试按本目录既有约定外置在
+//! `cleanup_tests.rs`。
+//!
+//! `startup` 子模块是**服务启动时的自动入口**（REQ-DRG-13 自动模式；REQ-DRG-11
+//! 清单自动产出）：巡检 → 自动销账 → 清单写出（`cadence/analysis-docs/`）。失败一律
+//! 上抛，由调用方（服务启动序列）只打日志、不阻断启动。人工 CLI 入口已删除。
 
 // Task 1 只产出静态表与纯结构，调用点自 Task 2 起接线，故非测试构建下这些项
 // 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table` 与 `resolve`）。
 //
-// Task 9（CLI 接线）实测：**本行仍不能删**——巡检面（`patrol`）走自己的分区
-// 读取实现，不经 ① 层的容错列举 API，故 ① 层至今没有生产消费者。删掉本行
-// 会在 `cargo check --lib` 触发 41 条 `dead_code` 告警：
+// Task 10 实测（r5）：**本行仍不能删**——① 层的**四个容错列举 API**
+// （`list_automation_intents` / `list_reviewer_windows` /
+// `list_reviewer_snapshots` / `list_entity_identity_bindings`）仍无生产消费者：
+// 巡检面（`patrol`）走自己的分区读取实现，不经这四个 API。删掉本行会在
+// `cargo check --lib` 触发下列 `dead_code` 告警：
 //   - `mod.rs`：`DANGLING_REFERENCE_WARNING_CODE` / `..._LIMIT` /
 //     `DanglingReferenceWarning` / `DanglingReferenceWarnings` / `warning_key`；
-//   - `listing.rs`：① 层容错列举 API 全量（`list_automation_intents` /
-//     `list_reviewer_windows` / `list_reviewer_snapshots` /
-//     `list_entity_identity_bindings` 及其数据结构与辅助函数）；
+//   - `listing.rs`：① 层容错列举 API 全量（四个 API 及其数据结构与辅助函数）；
 //   - `reference_table.rs::all_reference_rules`；`resolve.rs` 的
 //     `ReferenceVerdict::L2` 变体；`ledger.rs` 的 `path` 方法；
 //     `cleanup.rs` 的 `CleanupOutcome::report_only` 字段。
@@ -77,6 +82,7 @@ pub(crate) mod patrol;
 pub(crate) mod reference_table;
 pub(crate) mod report;
 pub(crate) mod resolve;
+pub(crate) mod startup;
 
 /// 悬空引用告警的单一稳定码（REQ-DRG-07）。
 pub(crate) const DANGLING_REFERENCE_WARNING_CODE: &str = "dangling_reference_target_missing";

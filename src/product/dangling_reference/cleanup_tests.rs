@@ -1,5 +1,6 @@
 use super::*;
 use crate::product::app_paths::ProductAppPaths;
+use crate::product::dangling_reference::report::findings_token;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -104,11 +105,9 @@ fn current_token(paths: &ProductAppPaths) -> String {
     findings_token(&report.findings)
 }
 
-fn apply_request(token: &str) -> CleanupRequest {
-    CleanupRequest {
-        apply: true,
-        confirm_token: Some(token.to_string()),
-    }
+/// 自动模式请求（无令牌、无人工确认）。
+fn automatic_request() -> CleanupRequest {
+    CleanupRequest::automatic()
 }
 
 fn ledger_lines(paths: &ProductAppPaths) -> Vec<String> {
@@ -124,51 +123,29 @@ fn probe_missing() -> impl Fn(&str) -> Result<bool, ProductStoreError> {
     |_id: &str| Ok(false)
 }
 
-// ─── 闸 1：默认 dry-run + 确认令牌 ─────────────────────────────────
+// ─── 闸 1：自动模式（无人工令牌环节）──────────────────────────────
 
+/// 自动模式**不需要任何令牌**：证据达标即删——清单摘要不再是删除凭据
+/// （REQ-DRG-22：仅用于审计关联）。
 #[test]
-fn dangling_cleanup_without_token_deletes_nothing() {
+fn dangling_cleanup_automatic_mode_needs_no_token() {
     let temp = TempDir::new().unwrap();
-    let paths = ProductAppPaths::new(temp.path());
-    let error = run_cleanup(
-        &paths,
-        &CleanupRequest {
-            apply: true,
-            confirm_token: None,
-        },
-    )
-    .expect_err("缺令牌必须拒绝");
-    assert!(matches!(
-        error,
-        CleanupError::Gate(CleanupGateError::TokenMissing)
-    ));
-    assert!(!paths.dangling_reference_ledger_path().exists(), "零留痕");
-}
+    let (paths, issue_root) = plan_intent_issue(temp.path(), plan_intent_body());
+    write_tombstone(temp.path(), "story", "story_spec_0005");
+    write_tombstone(temp.path(), "plan", "issue_work_item_plan_0007");
+    let intent_path = issue_root.join(PLAN_INTENT_FILE);
 
-#[test]
-fn dangling_cleanup_with_mismatched_token_deletes_nothing() {
-    let temp = TempDir::new().unwrap();
-    let paths = ProductAppPaths::new(temp.path());
-    let request = CleanupRequest {
-        apply: true,
-        confirm_token: Some("sha256:bad".into()),
-    };
-    let error = run_cleanup(&paths, &request).expect_err("令牌不匹配必须拒绝");
-    assert!(matches!(
-        error,
-        CleanupError::Gate(CleanupGateError::TokenMismatch { .. })
-    ));
-    assert!(!paths.dangling_reference_ledger_path().exists(), "零留痕");
+    let outcome = run_cleanup(&paths, &automatic_request()).expect("自动模式应当成功");
+    assert_eq!(outcome.deleted_count, 1, "{outcome:?}");
+    assert!(!intent_path.exists(), "白名单内 intent 记录必须被删");
+    assert_eq!(ledger_lines(&paths).len(), 1, "实际删除必须留痕一行");
 }
 
 #[test]
 fn dangling_cleanup_dry_run_never_deletes() {
     let temp = TempDir::new().unwrap();
     let paths = ProductAppPaths::new(temp.path());
-    let request = CleanupRequest {
-        apply: false,
-        confirm_token: None,
-    };
+    let request = CleanupRequest::report_only();
     let outcome = run_cleanup(&paths, &request).expect("dry run");
     assert_eq!(outcome.deleted_count, 0);
     assert!(
@@ -177,9 +154,9 @@ fn dangling_cleanup_dry_run_never_deletes() {
     );
 }
 
-/// 闸 1 的令牌必须是「入口内部重跑巡检」的结果：对不上就整单拒绝。
+/// dry-run 只出清单：零删除、零留痕，且不得宣称治理完成。
 #[test]
-fn dangling_cleanup_gate_one_never_touches_record_on_dry_run_or_mismatch() {
+fn dangling_cleanup_report_only_never_deletes_record() {
     let temp = TempDir::new().unwrap();
     let (paths, issue_root) = plan_intent_issue(temp.path(), plan_intent_body());
     write_tombstone(temp.path(), "story", "story_spec_0005");
@@ -187,11 +164,7 @@ fn dangling_cleanup_gate_one_never_touches_record_on_dry_run_or_mismatch() {
     let intent_path = issue_root.join(PLAN_INTENT_FILE);
     let ledger = paths.dangling_reference_ledger_path();
 
-    let request = CleanupRequest {
-        apply: false,
-        confirm_token: None,
-    };
-    let dry_run = run_cleanup(&paths, &request).expect("dry run");
+    let dry_run = run_cleanup(&paths, &CleanupRequest::report_only()).expect("dry run");
     assert_eq!(dry_run.deleted_count, 0);
     assert!(intent_path.exists(), "dry-run MUST NOT 删除记录");
     assert!(!ledger.exists(), "dry-run 零留痕");
@@ -201,24 +174,12 @@ fn dangling_cleanup_gate_one_never_touches_record_on_dry_run_or_mismatch() {
             .contains_key("automation_plan_intent")
     );
     assert!(!dry_run.governance_complete, "dry-run 不得宣称治理完成");
-
-    let request = CleanupRequest {
-        apply: true,
-        confirm_token: Some("sha256:bad".into()),
-    };
-    let mismatch = run_cleanup(&paths, &request).expect_err("令牌不匹配必须拒绝");
-    assert!(matches!(
-        mismatch,
-        CleanupError::Gate(CleanupGateError::TokenMismatch { .. })
-    ));
-    assert!(intent_path.exists(), "令牌不匹配 MUST NOT 删除记录");
-    assert!(!ledger.exists(), "令牌不匹配零留痕");
 }
 
-// ─── 闸 1 通过：真实删除 + 留痕 + 自证归零 ────────────────────────
+// ─── 自动模式：真实删除 + 留痕 + 自证归零 ────────────────────────
 
 #[test]
-fn dangling_cleanup_with_matching_token_deletes_whitelisted_intent() {
+fn dangling_cleanup_automatic_mode_deletes_whitelisted_intent() {
     let temp = TempDir::new().unwrap();
     let (paths, issue_root) = plan_intent_issue(temp.path(), plan_intent_body());
     write_tombstone(temp.path(), "story", "story_spec_0005");
@@ -226,9 +187,10 @@ fn dangling_cleanup_with_matching_token_deletes_whitelisted_intent() {
     let business = write_user_business_data(temp.path());
     let intent_path = issue_root.join(PLAN_INTENT_FILE);
 
+    // 清单摘要仍按原口径算出（仅供审计关联，不是删除凭据）。
     let token = current_token(&paths);
     assert!(token.starts_with("sha256:"));
-    let outcome = run_cleanup(&paths, &apply_request(&token)).expect("apply");
+    let outcome = run_cleanup(&paths, &automatic_request()).expect("apply");
 
     // 闸 1 通过 + 闸 2 白名单内：intent 记录被删。
     assert_eq!(outcome.deleted_count, 1, "'{outcome:?}'");
@@ -290,7 +252,7 @@ fn dangling_cleanup_deletes_binding_entry_only_for_l1_plan() {
     );
     write_tombstone(temp.path(), "plan", "issue_work_item_plan_0007");
 
-    let outcome = run_cleanup(&paths, &apply_request(&current_token(&paths))).expect("apply");
+    let outcome = run_cleanup(&paths, &automatic_request()).expect("apply");
 
     assert_eq!(outcome.deleted_count, 1, "{outcome:?}");
     let dir = paths
@@ -331,10 +293,9 @@ fn dangling_cleanup_purges_window_cluster_by_attempt() {
         );
     }
     let windows = paths.root().join("reviewer-windows/windows");
-    let token = current_token(&paths);
     let probe = probe_missing();
-    let outcome = run_cleanup_with_attempt_probe(&paths, &apply_request(&token), Some(&probe))
-        .expect("apply");
+    let outcome =
+        run_cleanup_with_attempt_probe(&paths, &automatic_request(), Some(&probe)).expect("apply");
 
     assert_eq!(
         outcome.deleted_count, 1,
@@ -367,7 +328,7 @@ fn dangling_cleanup_keeps_non_whitelisted_records() {
     let intent_path = issue_root.join(PLAN_INTENT_FILE);
     let enrollment_path = issue_root.join(ENROLLMENT_FILE);
 
-    let outcome = run_cleanup(&paths, &apply_request(&current_token(&paths))).expect("apply");
+    let outcome = run_cleanup(&paths, &automatic_request()).expect("apply");
 
     assert_eq!(
         outcome.deleted_count, 0,
@@ -397,7 +358,7 @@ fn dangling_cleanup_residual_is_not_counted_as_zero() {
     let (paths, issue_root) = plan_intent_issue(temp.path(), plan_intent_body());
     let intent_path = issue_root.join(PLAN_INTENT_FILE);
 
-    let outcome = run_cleanup(&paths, &apply_request(&current_token(&paths))).expect("apply");
+    let outcome = run_cleanup(&paths, &automatic_request()).expect("apply");
 
     assert_eq!(outcome.deleted_count, 0, "{outcome:?}");
     assert!(intent_path.exists(), "证据不足 MUST NOT 删");
@@ -429,29 +390,17 @@ fn dangling_cleanup_is_idempotent_on_reentry() {
     write_tombstone(temp.path(), "story", "story_spec_0005");
     write_tombstone(temp.path(), "plan", "issue_work_item_plan_0007");
 
-    let stale_token = current_token(&paths);
-    let first = run_cleanup(&paths, &apply_request(&stale_token)).expect("apply");
+    let first = run_cleanup(&paths, &automatic_request()).expect("apply");
     assert_eq!(first.deleted_count, 1, "{first:?}");
     assert!(!issue_root.join(PLAN_INTENT_FILE).exists());
     let after_first = ledger_lines(&paths);
     assert_eq!(after_first.len(), 1, "{after_first:?}");
 
-    // 重入：重新确认当前现场（记录已不存在 → 无判定对象），必须零删除且不报错。
-    let second = run_cleanup(&paths, &apply_request(&current_token(&paths))).expect("reentry");
+    // 重入：记录已不存在 → 无判定对象，必须零删除且不报错。
+    let second = run_cleanup(&paths, &automatic_request()).expect("reentry");
     assert_eq!(second.deleted_count, 0, "重入 MUST NOT 重复删：{second:?}");
     let after_second = ledger_lines(&paths);
     assert_eq!(after_second, after_first, "重入 MUST NOT 追加重复行");
-
-    // 旧令牌（清理前的现场摘要）再执行一次：现场已变 → 闸 1 拒绝，仍零删除、零留痕。
-    let refused = run_cleanup(&paths, &apply_request(&stale_token));
-    assert!(
-        matches!(
-            refused,
-            Err(CleanupError::Gate(CleanupGateError::TokenMismatch { .. }))
-        ),
-        "旧令牌与当前现场不一致时 MUST 拒绝"
-    );
-    assert_eq!(ledger_lines(&paths), after_first, "拒绝时零留痕");
 }
 
 #[test]
@@ -462,8 +411,7 @@ fn dangling_cleanup_undetermined_blocks_governance_complete() {
     std::fs::create_dir_all(&windows).unwrap();
     std::fs::write(windows.join("win_bad.json"), b"{not-json").unwrap();
 
-    let token = current_token(&paths);
-    let outcome = run_cleanup(&paths, &apply_request(&token)).expect("apply");
+    let outcome = run_cleanup(&paths, &automatic_request()).expect("apply");
 
     assert_eq!(outcome.undetermined.len(), 1, "{outcome:?}");
     assert!(
