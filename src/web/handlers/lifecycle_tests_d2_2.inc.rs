@@ -1376,13 +1376,15 @@ async fn cascade_d2_2_owned_index_pruned_after_completion() {
 // 明确报错且删除不执行；entity_busy details 补占用者信息。
 
 /// 直写最小 enrollment JSON（durable 事实与真实 Enable 同构；删除路径只消费
-/// enabled/terminated_at/plan_id/session_id 字段）。
+/// enabled/terminated_at/plan_id/session_id/source 字段）。source 供 F5
+/// 「source 引用该实体」的悬空失效判定播种。
 fn f3_enable_automation(
     paths: &ProductAppPaths,
     plan_id: Option<&str>,
+    source: crate::product::models::automation::EnrollmentSource,
 ) -> crate::product::models::automation::IssueAutomationEnrollment {
     use crate::product::models::automation::{
-        EnrollmentOptions, EnrollmentSource, IssueAutomationEnrollment, PlanApprovalPolicy,
+        EnrollmentOptions, IssueAutomationEnrollment, PlanApprovalPolicy,
     };
     let enrollment = IssueAutomationEnrollment {
         enrollment_id: "enr_f3_0001".to_string(),
@@ -1391,10 +1393,7 @@ fn f3_enable_automation(
         issue_id: ISSUE_ID.to_string(),
         enabled: true,
         policy_revision: 3,
-        source: EnrollmentSource {
-            stories: Vec::new(),
-            designs: Vec::new(),
-        },
+        source,
         options: EnrollmentOptions {
             author_provider: ProviderName::Fake,
             reviewer_provider: ProviderName::Fake,
@@ -1430,6 +1429,13 @@ fn f3_enable_automation(
     enrollment
 }
 
+fn f3_empty_source() -> crate::product::models::automation::EnrollmentSource {
+    crate::product::models::automation::EnrollmentSource {
+        stories: Vec::new(),
+        designs: Vec::new(),
+    }
+}
+
 fn f3_read_enrollment(
     paths: &ProductAppPaths,
 ) -> crate::product::models::automation::IssueAutomationEnrollment {
@@ -1458,7 +1464,7 @@ async fn cascade_f3_terminates_bound_automation_before_delete() {
         Vec::new(),
         crate::product::models::IssueWorkItemPlanStatus::Draft,
     );
-    let seeded = f3_enable_automation(&paths, Some(D2_2_PLAN_A));
+    let seeded = f3_enable_automation(&paths, Some(D2_2_PLAN_A), f3_empty_source());
 
     let (status, body) = d2_2_delete(&app, "work-item-plans", D2_2_PLAN_A, None).await;
     assert_eq!(status, StatusCode::OK, "delete body: {body}");
@@ -1532,7 +1538,7 @@ async fn cascade_f3_delete_without_bound_automation_is_unchanged() {
             Vec::new(),
             crate::product::models::IssueWorkItemPlanStatus::Draft,
         );
-        let seeded = f3_enable_automation(&paths, Some("work_item_plan_other"));
+        let seeded = f3_enable_automation(&paths, Some("work_item_plan_other"), f3_empty_source());
         let (status, body) = d2_2_delete(&app, "work-item-plans", D2_2_PLAN_A, None).await;
         assert_eq!(status, StatusCode::OK, "delete body: {body}");
         let enrollment = f3_read_enrollment(&paths);
@@ -1560,7 +1566,7 @@ async fn cascade_f3_delete_fails_closed_when_termination_fails() {
         Vec::new(),
         crate::product::models::IssueWorkItemPlanStatus::Draft,
     );
-    let seeded = f3_enable_automation(&paths, Some(D2_2_PLAN_A));
+    let seeded = f3_enable_automation(&paths, Some(D2_2_PLAN_A), f3_empty_source());
     // 终止 CAS 不可用：预占 enrollment 的伴生锁路径（目录形态 → 锁文件
     // open 失败）。issue 目录保持可写，精确只让 terminate_plan 落不了锁。
     let enrollment_lock = paths
@@ -1628,7 +1634,7 @@ async fn cascade_f3_busy_error_reports_automation_occupant() {
         Vec::new(),
         crate::product::models::IssueWorkItemPlanStatus::Draft,
     );
-    let seeded = f3_enable_automation(&paths, Some(D2_2_PLAN_A));
+    let seeded = f3_enable_automation(&paths, Some(D2_2_PLAN_A), f3_empty_source());
     // 在途运行者：持 scope 共享 run lease（autopilot 生成链的持有形态）。
     let scope = EntityScope::new(
         PROJECT_ID,
@@ -1667,4 +1673,282 @@ async fn cascade_f3_busy_error_reports_automation_occupant() {
     drop(run_lease);
     let (status, body) = d2_2_delete(&app, "work-item-plans", D2_2_PLAN_A, None).await;
     assert_eq!(status, StatusCode::OK, "release body: {body}");
+}
+
+// ==== F5（悬空源根修）：删除 Story/Design 时 source 引用该实体的 enrollment 失效 ====
+//
+// 真机缺陷：级联删除不覆盖 automation_enrollment——enabled enrollment 的
+// source 引用被删实体后autopilot 继续带着悬空授权跑；terminated 记录则留下
+// 悬空 source 让人工重新开启必然 422。语义（裁定）：删 Story/Design 时把
+// 引用它的 enrollment 一并失效（同源 terminate CAS、幂等、失败只 warn 不
+// 阻断删除）；已 terminated/disabled 的记录本身已失效，不动。
+
+/// F5 红测①：enabled enrollment 的 source.stories 引用被删 story → 删除
+/// 成功且 enrollment 被同源 terminate CAS 失效（幂等重删不重复终止）。
+#[tokio::test]
+async fn cascade_f5_terminates_enrollment_referencing_deleted_story() {
+    let root = TempDir::new().expect("root");
+    let app = build_test_router(root.path());
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = d2_2_seed_project_issue(&paths);
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "F5 story".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    lifecycle
+        .append_version(crate::product::lifecycle_store::AppendSpecVersionInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            entity_id: story.id.clone(),
+            markdown: "# f5 story".to_string(),
+            provider_run_refs: Vec::new(),
+            review_refs: Vec::new(),
+            confirmed_by: None,
+        })
+        .unwrap();
+    let seeded = f3_enable_automation(
+        &paths,
+        None,
+        crate::product::models::automation::EnrollmentSource {
+            stories: vec![crate::product::models::automation::SourceRevisionRef {
+                id: story.id.clone(),
+                version: 1,
+            }],
+            designs: Vec::new(),
+        },
+    );
+
+    let (status, body) = d2_2_delete(&app, "story-specs", &story.id, None).await;
+    assert_eq!(status, StatusCode::OK, "delete story: {body}");
+
+    // 不得留悬空引用：enrollment 已失效（terminated＋enabled=false）。
+    let enrollment = f3_read_enrollment(&paths);
+    assert!(
+        enrollment.terminated_at.is_some(),
+        "删除引用的 story 必须一并失效 enrollment"
+    );
+    assert!(!enrollment.enabled);
+    assert!(
+        enrollment.command_ledger.iter().any(|entry| entry.command_id
+            == format!(
+                "entity-delete-terminate-{}-r{}",
+                seeded.enrollment_id, seeded.policy_revision
+            )),
+        "失效走同源 terminate CAS 账本: {:?}",
+        enrollment.command_ledger
+    );
+
+    // 幂等：重复删除已完成的 story 不再重复终止（账本不新增）。
+    let ledger_len = enrollment.command_ledger.len();
+    let (status, body) = d2_2_delete(&app, "story-specs", &story.id, None).await;
+    assert_eq!(status, StatusCode::OK, "idempotent redelete: {body}");
+    assert_eq!(f3_read_enrollment(&paths).command_ledger.len(), ledger_len);
+}
+
+/// F5 红测②：source.designs 引用被删 design → 同样失效；不引用被删实体的
+/// enrollment 不受影响。
+#[tokio::test]
+async fn cascade_f5_terminates_enrollment_referencing_deleted_design() {
+    let root = TempDir::new().expect("root");
+    let app = build_test_router(root.path());
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = d2_2_seed_project_issue(&paths);
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "F5 story b".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    let design = lifecycle
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            story_spec_ids: vec![story.id.clone()],
+            title: "F5 design b".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    let source = crate::product::models::automation::EnrollmentSource {
+        stories: Vec::new(),
+        designs: vec![crate::product::models::automation::SourceRevisionRef {
+            id: design.id.clone(),
+            version: 1,
+        }],
+    };
+    f3_enable_automation(&paths, None, source);
+
+    let (status, body) = d2_2_delete(&app, "design-specs", &design.id, None).await;
+    assert_eq!(status, StatusCode::OK, "delete design: {body}");
+    let enrollment = f3_read_enrollment(&paths);
+    assert!(
+        enrollment.terminated_at.is_some(),
+        "删除引用的 design 必须一并失效 enrollment"
+    );
+    assert!(!enrollment.enabled);
+
+ // 反例：enrollment 引用别的实体 → 删除照常、enrollment 原样保持 enabled。
+    {
+        let root = TempDir::new().expect("root");
+        let app = build_test_router(root.path());
+        let paths = ProductAppPaths::new(root.path().join(".aria"));
+        let lifecycle = d2_2_seed_project_issue(&paths);
+        let story = lifecycle
+            .create_story_spec(CreateStorySpecInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                repository_id: REPOSITORY_ID.to_string(),
+                title: "F5 story c".to_string(),
+                aggregate_codebase: None,
+            })
+            .unwrap();
+        let design = lifecycle
+            .create_design_spec(CreateDesignSpecInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                story_spec_ids: vec![story.id.clone()],
+                title: "F5 design c".to_string(),
+                aggregate_codebase: None,
+            })
+            .unwrap();
+        let other = lifecycle
+            .create_design_spec(CreateDesignSpecInput {
+                project_id: PROJECT_ID.to_string(),
+                issue_id: ISSUE_ID.to_string(),
+                story_spec_ids: vec![story.id.clone()],
+                title: "F5 design other".to_string(),
+                aggregate_codebase: None,
+            })
+            .unwrap();
+        let seeded = f3_enable_automation(
+            &paths,
+            None,
+            crate::product::models::automation::EnrollmentSource {
+                stories: Vec::new(),
+                designs: vec![crate::product::models::automation::SourceRevisionRef {
+                    id: design.id.clone(),
+                    version: 1,
+                }],
+            },
+        );
+        let (status, body) = d2_2_delete(&app, "design-specs", &other.id, None).await;
+        assert_eq!(status, StatusCode::OK, "unrelated delete: {body}");
+        let enrollment = f3_read_enrollment(&paths);
+        assert!(
+            enrollment.enabled && enrollment.terminated_at.is_none(),
+            "不引用被删实体的 enrollment 不得被失效"
+        );
+        assert_eq!(enrollment.policy_revision, seeded.policy_revision);
+    }
+}
+
+/// F5 红测③：失效失败只 warn——终止 CAS 不可用时删除照常成功（不得阻断
+/// 级联删除本身）。
+#[tokio::test]
+async fn cascade_f5_invalidation_failure_does_not_block_deletion() {
+    let root = TempDir::new().expect("root");
+    let app = build_test_router(root.path());
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = d2_2_seed_project_issue(&paths);
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "F5 story warn".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    f3_enable_automation(
+        &paths,
+        None,
+        crate::product::models::automation::EnrollmentSource {
+            stories: vec![crate::product::models::automation::SourceRevisionRef {
+                id: story.id.clone(),
+                version: 1,
+            }],
+            designs: Vec::new(),
+        },
+    );
+    // 阻断 enrollment 伴生锁：terminate CAS 落不了锁（失效必失败）。
+    let enrollment_lock = paths
+        .issue_root(PROJECT_ID, ISSUE_ID)
+        .join(".automation-enrollment.json.lock");
+    std::fs::create_dir_all(&enrollment_lock).expect("block enrollment lock");
+
+    let (status, body) = d2_2_delete(&app, "story-specs", &story.id, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "失效失败只 warn，不得阻断级联删除: {body}"
+    );
+    // 删除完成（story 根已清）；失效动作失败留待后续收敛（warn 只留日志）。
+    assert!(
+        !paths
+            .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+            .join("story-specs")
+            .join(format!("{}.json", story.id))
+            .exists(),
+        "story 根必须删除"
+    );
+}
+
+/// F5 红测④：已 terminated 的 enrollment（source 引用被删实体）本身已失效
+/// ——删除照常成功且不重复写 enrollment（幂等、零改写）。
+#[tokio::test]
+async fn cascade_f5_already_terminated_referencing_enrollment_left_untouched() {
+    let root = TempDir::new().expect("root");
+    let app = build_test_router(root.path());
+    let paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = d2_2_seed_project_issue(&paths);
+    let story = lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: REPOSITORY_ID.to_string(),
+            title: "F5 story done".to_string(),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    let mut seeded = f3_enable_automation(
+        &paths,
+        None,
+        crate::product::models::automation::EnrollmentSource {
+            stories: vec![crate::product::models::automation::SourceRevisionRef {
+                id: story.id.clone(),
+                version: 1,
+            }],
+            designs: Vec::new(),
+        },
+    );
+    // 预置终止态（真机现场形态：先终止自动化、再删实体）。
+    seeded.enabled = false;
+    seeded.terminated_at = Some("2026-10-27T08:26:00Z".to_string());
+    crate::product::json_store::write_json(
+        &paths
+            .issue_root(PROJECT_ID, ISSUE_ID)
+            .join("automation-enrollment.json"),
+        &seeded,
+    )
+    .unwrap();
+
+    let (status, body) = d2_2_delete(&app, "story-specs", &story.id, None).await;
+    assert_eq!(status, StatusCode::OK, "delete body: {body}");
+    let enrollment = f3_read_enrollment(&paths);
+    assert_eq!(
+        enrollment.policy_revision, seeded.policy_revision,
+        "已失效记录零改写"
+    );
+    assert!(enrollment.command_ledger.is_empty(), "不重复终止");
+    assert_eq!(
+        enrollment.terminated_at.as_deref(),
+        Some("2026-10-27T08:26:00Z")
+    );
 }

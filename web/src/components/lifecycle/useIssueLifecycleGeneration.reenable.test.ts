@@ -12,11 +12,12 @@ import { useIssueLifecycleGeneration } from "./useIssueLifecycleGeneration";
 // 「启用自动化」＝显式重新开启。契约（owner 裁定 + 主规格 delta）：
 //   ① Enable 必须携带稳定 command_id（同一动作重试复用同一 id；弹窗重开
 //      或换参数换新 id）——缺它后端 422；
-//   ② 重新开启的 payload（source/options/target）与终止记录逐字段相等，
-//      不顺便改写授权——服务端逐字段比对，改了即 409；
+//   ② 重新开启的 source 取**当前 card** 的已确认引用（与常规启用同口径）；
+//      options/target 原样回传终止记录（服务端比对）——旧 source 悬空时
+//      服务端放行 source 漂移（悬空重授权），仍有效但不同则 409；
 //   ③ expected_revision 取终止记录当前 revision（线性化延续）；
-//   ④ 收口未完成（409 automation_plan_cleanup_required）提示先重试清理，
-//      不呈现通用冲突文案；
+//   ④ 收口未完成（409 automation_plan_cleanup_required）提示先重试清理；
+//      重新开启 409 冲突提示走「换代/重绑（rebind）」可行动下一步；
 //   ⑤ 非 terminated 的常规并发语义不变。
 
 const STORY_CARD: LifecycleCard = {
@@ -124,7 +125,10 @@ type CapturedRequests = {
   targetGets: string[];
 };
 
-/** 已终止的 enrollment 投影（terminated_at 非空即终态事实）。 */
+/**
+ * 已终止的 enrollment 投影（terminated_at 非空即终态事实）。source 与当前
+ * card 一致（情形②：旧 source 仍有效且相同 → 正常等 payload 重新开启）。
+ */
 function terminatedEnrollment(): Record<string, unknown> {
   return {
     enrollment_id: "enrollment_0001",
@@ -134,8 +138,8 @@ function terminatedEnrollment(): Record<string, unknown> {
     enabled: false,
     policy_revision: 3,
     source: {
-      stories: [{ id: "story_0001", version: 2 }],
-      designs: [{ id: "design_0001", version: 1 }],
+      stories: [{ id: "story_0001", version: 3 }],
+      designs: [{ id: "design_0001", version: 2 }],
     },
     options: {
       author_provider: "claude_code",
@@ -162,6 +166,58 @@ function terminatedEnrollment(): Record<string, unknown> {
     updated_at: "2026-10-20T00:00:00Z",
     terminated_at: "2026-10-20T00:00:00Z",
   };
+}
+
+/** 情形①：终止记录的 source 指向已删除实体（悬空）——服务端允许按当前
+ *  已确认 source 重新授权（resign）。 */
+function danglingSourceTerminatedEnrollment(): Record<string, unknown> {
+  return {
+    ...terminatedEnrollment(),
+    source: {
+      stories: [{ id: "story_spec_deleted", version: 2 }],
+      designs: [{ id: "design_spec_deleted", version: 1 }],
+    },
+  };
+}
+
+/** 情形③：终止记录的 source 引用的实体仍在（story_0001/design_0001 存在）
+ *  但版本与当前不同——非悬空，服务端维持逐字段相等 409。 */
+function divergentSourceTerminatedEnrollment(): Record<string, unknown> {
+  return {
+    ...terminatedEnrollment(),
+    source: {
+      stories: [{ id: "story_0001", version: 2 }],
+      designs: [{ id: "design_0001", version: 1 }],
+    },
+  };
+}
+
+/** 镜像服务端 `validate_confirmed_source_refs`：提交的 source 必须 id 存在、
+ *  已确认且版本与 current_version 精确一致（悬空/过期引用一律 422）。 */
+function sourceMatchesCurrentCards(source: unknown): boolean {
+  const value = source as {
+    stories?: { id: string; version: number }[];
+    designs?: { id: string; version: number }[];
+  };
+  const refsOk = (
+    refs: { id: string; version: number }[] | undefined,
+    cards: LifecycleCard[],
+    specKind: "story_spec" | "design_spec",
+  ) =>
+    (refs?.length ?? 0) > 0 &&
+    refs!.every((ref) =>
+      cards.some(
+        (card) =>
+          card.kind === specKind &&
+          card.id === ref.id &&
+          card.raw.confirmation_status === "confirmed" &&
+          (card.raw.current_version ?? 1) === ref.version,
+      ),
+    );
+  return (
+    refsOk(value.stories, COLUMNS.story_spec, "story_spec") &&
+    refsOk(value.designs, COLUMNS.design_spec, "design_spec")
+  );
 }
 
 function stubLifecycleFetch(
@@ -264,13 +320,16 @@ function samePayload(
 }
 
 /**
- * 有状态的 enrollment 夹具：镜像服务端语义——terminated 记录的 Enable 必须
- * 与终止记录逐字段相等（否则 409）；enabled 记录的异 payload Enable 409；
- * disabled 记录换 payload 重开放行；Disable 线性化 +1。
+ * 有状态的 enrollment 夹具：镜像服务端语义——提交 source 先过
+ * `validate_confirmed_source_refs`（id 存在/已确认/版本精确一致，否则 422）；
+ * terminated 记录的 Enable 必须与终止记录逐字段相等（否则 409），唯一例外
+ * 是 `sourceDangling: true`（终止记录的原 source 引用实体已删）时仅放行
+ * source 漂移（悬空重授权）；enabled 记录的异 payload Enable 409；disabled
+ * 记录换 payload 重开放行；Disable 线性化 +1。
  */
 function stubStatefulEnrollmentFetch(
   initial: Record<string, unknown>,
-  options?: { failDisableCount?: number },
+  options?: { failDisableCount?: number; sourceDangling?: boolean },
 ): StatefulEnrollmentStub {
   const puts: PutBody[] = [];
   let state: Record<string, unknown> = { ...initial };
@@ -317,6 +376,17 @@ function stubStatefulEnrollmentFetch(
         };
         return jsonResponse(state);
       }
+      // 提交 source 的三条判定不放宽：悬空/过期引用 → 422 零副作用。
+      if (!sourceMatchesCurrentCards(command.source)) {
+        return jsonResponse(
+          {
+            code: "automation_enrollment_invalid_scope",
+            message: "story spec not found or stale for automation enrollment",
+            details: {},
+          },
+          422,
+        );
+      }
       const terminated = state.terminated_at != null;
       const payloadMatches = samePayload(
         command,
@@ -324,9 +394,16 @@ function stubStatefulEnrollmentFetch(
         state.options,
         state.target,
       );
+      const sourceDriftOnly =
+        JSON.stringify(command.source) !== JSON.stringify(state.source) &&
+        JSON.stringify(command.options) === JSON.stringify(state.options) &&
+        JSON.stringify(command.target ?? null) ===
+          JSON.stringify(state.target ?? null);
       if (terminated && !payloadMatches) {
-        // 重新开启必须与终止记录逐字段相等——改了即 409 零副作用。
-        return conflict();
+        // 重新开启与终止记录逐字段相等；悬空源重授权仅放行 source 漂移。
+        if (!(options?.sourceDangling && sourceDriftOnly)) {
+          return conflict();
+        }
       }
       if (!terminated && state.enabled) {
         if (!payloadMatches) {
@@ -415,17 +492,18 @@ describe("useIssueLifecycleGeneration：terminated enrollment 上的人工重新
     expect(body.command.selection_key).not.toBe(DIALOG_SELECTION_KEY);
   });
 
-  it("echoes the terminated record's authorization payload instead of rewriting it", async () => {
+  it("submits the current card source while echoing the terminated record's options and target", async () => {
     const captured = stubLifecycleFetch(terminatedEnrollment());
     const { actions } = renderGeneration(DIALOG_SELECTION_KEY);
 
     await actions().handleConfirmWorkItemPlanOptions(AUTOMATIC_OPTIONS);
 
     const command = captured.enableBodies[0].command;
-    // 契约②：payload 与终止记录逐字段相等——服务端逐字段比对，改了即 409。
+    // 契约②：source 取当前 card 的已确认引用（story v3/design v2，与常规
+    // 启用同口径）；options/target 原样回传终止记录（授权不被顺便改写）。
     expect(command.source).toEqual({
-      stories: [{ id: "story_0001", version: 2 }],
-      designs: [{ id: "design_0001", version: 1 }],
+      stories: [{ id: "story_0001", version: 3 }],
+      designs: [{ id: "design_0001", version: 2 }],
     });
     expect(command.options).toEqual({
       author_provider: "claude_code",
@@ -602,5 +680,54 @@ describe("useIssueLifecycleGeneration：terminated enrollment 上的人工重新
       reviewer_provider: "pi",
     });
     expect(stub.current().enabled).toBe(true);
+  });
+
+  it("resigns on the current card source when the terminated record's source is dangling", async () => {
+    // 情形①：终止记录的 source 引用已删实体（story_spec_deleted 等）——
+    // 重新开启提交**当前 card** 的已确认 source（v3/v2），服务端按悬空
+    // 重授权放行；未换 provider 不产生 Disable/Enable churn。
+    const stub = stubStatefulEnrollmentFetch(danglingSourceTerminatedEnrollment(), {
+      sourceDangling: true,
+    });
+    const { actions } = renderGeneration(DIALOG_SELECTION_KEY);
+
+    await actions().handleConfirmWorkItemPlanOptions(AUTOMATIC_OPTIONS);
+
+    expect(stub.puts).toHaveLength(1);
+    const command = stub.puts[0].command;
+    expect(command.type).toBe("enable");
+    expect(command.source).toEqual({
+      stories: [{ id: "story_0001", version: 3 }],
+      designs: [{ id: "design_0001", version: 2 }],
+    });
+    // options/target 仍回传终止记录（悬空重授权只换 source）。
+    expect(command.options).toEqual(danglingSourceTerminatedEnrollment().options);
+    expect(command.target).toEqual(danglingSourceTerminatedEnrollment().target);
+    const final = stub.current();
+    expect(final.enabled).toBe(true);
+    expect(final.terminated_at).toBeNull();
+    expect(final.source).toEqual({
+      stories: [{ id: "story_0001", version: 3 }],
+      designs: [{ id: "design_0001", version: 2 }],
+    });
+  });
+
+  it("surfaces an actionable rebind hint when the original source is valid but divergent", async () => {
+    // 情形③：终止记录的 source 引用的实体仍在（story_0001 v2，当前 v3）——
+    // 非悬空：按当前 source 提交被服务端 409，提示走「换代/重绑（rebind）」。
+    const stub = stubStatefulEnrollmentFetch(divergentSourceTerminatedEnrollment());
+    const { actions } = renderGeneration(DIALOG_SELECTION_KEY);
+
+    await expect(
+      actions().handleConfirmWorkItemPlanOptions(AUTOMATIC_OPTIONS),
+    ).rejects.toThrow(/换代|重绑|rebind/i);
+    expect(stub.puts).toHaveLength(1);
+    expect(stub.puts[0].command.source).toEqual({
+      stories: [{ id: "story_0001", version: 3 }],
+      designs: [{ id: "design_0001", version: 2 }],
+    });
+    // 409 零副作用：enrollment 保持终止态、revision 不变。
+    expect(stub.current().terminated_at).not.toBeNull();
+    expect(stub.current().policy_revision).toBe(3);
   });
 });

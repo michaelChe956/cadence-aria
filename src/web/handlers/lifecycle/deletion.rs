@@ -200,8 +200,11 @@ async fn cascade_delete_entity(
         .map_err(product_store_api_error)?;
     let manifest = gated.map_err(cascade_gate_api_error)?;
 
-    // ⑥ manager 失效：磁盘清理与内存失效消费同一所属集合（manifest.session_ids）。
-    evict_workspace_session_managers(state, &manifest.session_ids).await;
+    // ⑥.5 悬空引用失效：门禁已过、删除确定执行——source 引用本实体的
+    //     automation enrollment 一并失效（F5；失败只 warn，不阻断删除）。
+    if matches!(kind, DeletionEntityKind::Story | DeletionEntityKind::Design) {
+        invalidate_automation_referencing_entity(&app_paths, &scope);
+    }
 
     // ⑦ 子依赖 purge（依赖序：审计先于 refs 来源，子树先于根）。与 plan 代际
     //    取代路径**共用同一闭包实现**（`entity_deletion_cascade::purge_entity_closure`）：
@@ -674,6 +677,94 @@ fn deletion_confirmation_required_error(
             "entity_id": scope.entity_id,
         }),
     )
+}
+
+/// F5（悬空源根修）：删除 Story/Design 时，source 引用该实体的 automation
+/// enrollment 一并失效——`enabled` 且未 terminated 的走与人工终止/autopilot
+/// 自愈同源的 terminate CAS（`terminated_at`＋`enabled=false` 同锁落盘、稳定
+/// command_id 幂等重放）；已 terminated/disabled 的记录本身已失效（悬空
+/// source 由人工重新开启的悬空重授权收口），零改写。与 ①.5 的
+/// `terminate_automation_bound_to_entity`（plan/session 绑定占用者，失败阻断
+/// 删除）互补：本入口是 source 引用面的**尽力失效**——失败只 warn（不得阻断
+/// 级联删除本身），CAS 竞态重读收敛有限重试。
+fn invalidate_automation_referencing_entity(app_paths: &ProductAppPaths, scope: &EntityScope) {
+    let Ok(enrollment) =
+        crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone())
+            .get(&scope.project_id, &scope.issue_id)
+    else {
+        return;
+    };
+    let Some(enrollment) = enrollment else {
+        return;
+    };
+    if !enrollment.enabled || enrollment.terminated_at.is_some() {
+        return;
+    }
+    let references_entity = match scope.kind {
+        DeletionEntityKind::Story => enrollment
+            .source
+            .stories
+            .iter()
+            .any(|reference| reference.id == scope.entity_id),
+        DeletionEntityKind::Design => enrollment
+            .source
+            .designs
+            .iter()
+            .any(|reference| reference.id == scope.entity_id),
+        // Plan 绑定占用面由 ①.5 `terminate_automation_bound_to_entity` 覆盖。
+        DeletionEntityKind::Plan => false,
+    };
+    if !references_entity {
+        return;
+    }
+    let mut current = enrollment;
+    for _ in 0..3 {
+        let request = crate::product::models::automation::EnrollmentTerminationRequest {
+            command_id: format!(
+                "entity-delete-terminate-{}-r{}",
+                current.enrollment_id, current.policy_revision
+            ),
+            expected_enrollment_id: current.enrollment_id.clone(),
+            expected_policy_revision: current.policy_revision,
+            reason: format!(
+                "referenced entity deleted: {}/{}",
+                scope.kind.path_segment(),
+                scope.entity_id
+            ),
+        };
+        match crate::product::issue_automation_store::IssueAutomationStore::new(app_paths.clone())
+            .terminate_plan(&scope.project_id, &scope.issue_id, request)
+        {
+            Ok(_) => return,
+            // 记录消失或已被并行终止/禁用：失效目标已达成（幂等）。
+            Err(crate::product::models::automation::EnrollmentError::NotFound) => return,
+            Err(crate::product::models::automation::EnrollmentError::Conflict { .. }) => {
+                // CAS 竞态：重读收敛——已失效即返回，仍 enabled 换新 revision 重试。
+                match crate::product::issue_automation_store::IssueAutomationStore::new(
+                    app_paths.clone(),
+                )
+                .get(&scope.project_id, &scope.issue_id)
+                {
+                    Ok(Some(next)) if next.enabled && next.terminated_at.is_none() => {
+                        current = next;
+                        continue;
+                    }
+                    _ => return,
+                }
+            }
+            Err(error) => {
+                // 尽力失效：只 warn，不阻断级联删除本身。
+                tracing::warn!(
+                    automation_enrollment_id = %current.enrollment_id,
+                    entity_kind = %scope.kind.path_segment(),
+                    entity_id = %scope.entity_id,
+                    error = %error,
+                    "source 引用被删实体的自动化 enrollment 未能失效（删除继续）"
+                );
+                return;
+            }
+        }
+    }
 }
 
 /// 收集 issue 下绑定到指定实体集合的 workspace session id。必须在磁盘删除前调用：

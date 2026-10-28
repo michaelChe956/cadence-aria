@@ -5,7 +5,10 @@
 //! 且登记上限已超，禁止继续增长）；纯移动，语义与错误码逐字不变。
 
 use crate::product::issue_automation_store::IssueAutomationStore;
-use crate::product::models::automation::EnrollmentWriteCommand;
+use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::models::automation::{
+    EnrollmentSource, EnrollmentWriteCommand, IssueAutomationEnrollment,
+};
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::handlers::support::{product_app_paths, product_store_api_error};
 use crate::web::state::WebAppState;
@@ -136,4 +139,80 @@ fn cleanup_required_error(plan_id: &str, reason: &str) -> ApiError {
          termination to finish cleanup before re-enabling the automation",
         serde_json::json!({ "plan_id": plan_id, "reason": reason }),
     )
+}
+
+/// 悬空判定（悬空源重授权语义①）：终止记录的原 source 引用的 story/design
+/// 实体任一已不存在（级联删除后）→ 原授权已失效。只判**存在性**——实体仍在
+/// 但版本/确认态漂移不算悬空（维持逐字段相等 409，防止误改授权范围）。
+/// 读取失败 fail-closed 按「未悬空」处理（保持既有 409 语义，不放宽）。
+pub(crate) fn enrollment_source_dangling(
+    lifecycle: &LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    source: &EnrollmentSource,
+) -> bool {
+    let Ok(stories) = lifecycle.list_story_specs(project_id, issue_id) else {
+        return false;
+    };
+    let Ok(designs) = lifecycle.list_design_specs(project_id, issue_id) else {
+        return false;
+    };
+    source
+        .stories
+        .iter()
+        .any(|reference| !stories.iter().any(|story| story.id == reference.id))
+        || source
+            .designs
+            .iter()
+            .any(|reference| !designs.iter().any(|design| design.id == reference.id))
+}
+
+/// terminated 人工重新开启的 CAS 编排（悬空源重授权）：取代删除旧 plan 代际
+/// 后，按「终止记录的原 source 是否悬空」路由 store CAS——悬空走
+/// `compare_and_set_reenable`（仅放行 source 漂移，binding 换代留痕），
+/// 否则走普通 `compare_and_set`（source/options/target 逐字段相等，异即 409）。
+/// 非 terminated 记录维持既有 `compare_and_set` 语义不变。
+pub(crate) async fn supersede_terminated_generation_and_cas(
+    state: &WebAppState,
+    project_id: &str,
+    issue_id: &str,
+    expected_revision: Option<u64>,
+    command: EnrollmentWriteCommand,
+) -> ApiResult<IssueAutomationEnrollment> {
+    let paths = product_app_paths(state);
+    let store = IssueAutomationStore::new(paths.clone());
+    let existing = store
+        .get(project_id, issue_id)
+        .map_err(product_store_api_error)?;
+    let was_terminated = existing
+        .as_ref()
+        .is_some_and(|enrollment| enrollment.terminated_at.is_some());
+    if was_terminated {
+        // 单 plan 不变量（REQ-WPS-01）：重新开启＝旧 plan 作废——旧 plan 及其
+        // 完整闭包在 intent 轮换前删除；失败保持既有
+        // `automation_plan_cleanup_required` 语义（零副作用、CAS 未执行）。
+        supersede_terminated_plan_generation(state, project_id, issue_id).await?;
+    }
+    let enrollment = if was_terminated {
+        let original_source_dangling = matches!(&command, EnrollmentWriteCommand::Enable { .. })
+            && existing.is_some_and(|saved| {
+                enrollment_source_dangling(
+                    &LifecycleStore::new(paths.clone()),
+                    project_id,
+                    issue_id,
+                    &saved.source,
+                )
+            });
+        store.compare_and_set_reenable(
+            project_id,
+            issue_id,
+            expected_revision,
+            command,
+            original_source_dangling,
+        )
+    } else {
+        store.compare_and_set(project_id, issue_id, expected_revision, command)
+    }
+    .map_err(super::automation_enrollment::enrollment_api_error)?;
+    Ok(enrollment)
 }

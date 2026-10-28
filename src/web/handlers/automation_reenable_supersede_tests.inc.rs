@@ -364,3 +364,255 @@ async fn termination_command_retries_after_revision_drift_converge() {
     assert!(retried.terminated_at.is_some());
     assert_eq!(retried.policy_revision, enabled.policy_revision + 1);
 }
+
+// ==== 悬空源重授权（删除 story/design 后 terminated 记录的重新开启）====
+//
+// 真机缺陷：级联删除 story/design 不覆盖 automation enrollment 的 source 引用，
+// terminated 记录留下悬空 source；人工重新开启必须逐字段回传终止记录 →
+// 「story spec … not found」422 死路。裁定语义：
+//   ① 旧 source 引用的实体已删（悬空）→ 原授权失效，允许按当前已确认
+//      source 重新授权，binding 换代留痕（旧代 source 进 previous）；
+//   ② 旧 source 仍有效且相同 → 既有等 payload 重新开启（上方用例已覆盖）；
+//   ③ 旧 source 仍有效但不同 → 维持逐字段相等 409（防误改授权范围）。
+
+/// 播种一组新的已确认 story/design（供悬空重授权的「当前 source」）。
+fn seed_confirmed_spec_pair(
+    fixture: &super::super::automation_enrollment_test_support::Fixture,
+    title: &str,
+) -> (String, String) {
+    use crate::product::lifecycle_store::{
+        AppendSpecVersionInput, CreateDesignSpecInput, CreateStorySpecInput,
+    };
+    let story = fixture
+        .lifecycle
+        .create_story_spec(CreateStorySpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            repository_id: super::super::automation_enrollment_test_support::REPOSITORY_ID
+                .to_string(),
+            title: format!("{title} story"),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    fixture
+        .lifecycle
+        .append_version(AppendSpecVersionInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            entity_id: story.id.clone(),
+            markdown: format!("# {title} story"),
+            provider_run_refs: Vec::new(),
+            review_refs: Vec::new(),
+            confirmed_by: None,
+        })
+        .unwrap();
+    fixture
+        .lifecycle
+        .update_spec_confirmation_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &story.id,
+            LifecycleConfirmationStatus::Confirmed,
+        )
+        .unwrap();
+    let design = fixture
+        .lifecycle
+        .create_design_spec(CreateDesignSpecInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            story_spec_ids: vec![story.id.clone()],
+            title: format!("{title} design"),
+            aggregate_codebase: None,
+        })
+        .unwrap();
+    fixture
+        .lifecycle
+        .append_version(AppendSpecVersionInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            entity_id: design.id.clone(),
+            markdown: format!("# {title} design"),
+            provider_run_refs: Vec::new(),
+            review_refs: Vec::new(),
+            confirmed_by: None,
+        })
+        .unwrap();
+    fixture
+        .lifecycle
+        .update_spec_confirmation_status(
+            PROJECT_ID,
+            ISSUE_ID,
+            &design.id,
+            LifecycleConfirmationStatus::Confirmed,
+        )
+        .unwrap();
+    (story.id, design.id)
+}
+
+/// DELETE 已确认实体（分级确认 REQ-DEL-04：previously-confirmed 需 confirmed=true）。
+async fn delete_confirmed_spec(
+    app: &axum::Router,
+    segment: &str,
+    id: &str,
+) -> (StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/projects/{PROJECT_ID}/issues/{ISSUE_ID}/{segment}/{id}?confirmed=true"
+                ))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
+}
+
+/// 情形①（悬空重授权）：级联删除原授权源后，人工重新开启按**当前已确认
+/// source** 显式重新授权——200 取代生效、binding 换代留痕（旧代悬空 source
+/// 只读进 previous）；新 source 的三条判定（存在/已确认/版本精确匹配）不放宽。
+#[tokio::test]
+async fn reenable_with_dangling_source_resigns_on_current_confirmed_source() {
+    let fixture = seed_fixture(1, true);
+    let app = fixture.router();
+    let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+    assert_eq!(enable.status(), StatusCode::OK);
+    let enabled = response_json(enable).await;
+    let enrollment_id = enabled["enrollment_id"].as_str().unwrap().to_string();
+    let terminate = post_terminate(
+        &app,
+        &serde_json::json!({
+            "command_id": "cmd-dangling-terminate",
+            "expected_enrollment_id": enrollment_id,
+            "expected_policy_revision": enabled["policy_revision"],
+            "confirmed": true,
+        }),
+    )
+    .await;
+    assert_eq!(terminate.status(), StatusCode::OK);
+    let before = current_enrollment(&fixture);
+    let binding_version_before = before
+        .binding_history
+        .as_ref()
+        .map(|history| history.current.binding_version)
+        .unwrap_or(0);
+
+    // 级联删除原授权源（先删引用 story 的 design，再删 story——上游放行）。
+    let (status, body) =
+        delete_confirmed_spec(&app, "design-specs", &fixture.design_id).await;
+    assert_eq!(status, StatusCode::OK, "delete design: {body}");
+    let (status, body) =
+        delete_confirmed_spec(&app, "story-specs", &fixture.story_id).await;
+    assert_eq!(status, StatusCode::OK, "delete story: {body}");
+
+    // 新一代已确认授权源。
+    let (story2, design2) = seed_confirmed_spec_pair(&fixture, "second");
+
+    // 负例：新 source 引用已删实体 → 422（三条判定不因悬空重授权放宽），
+    // 零副作用。
+    let mut bad = enrollment_body(&fixture, 1, 1);
+    bad["expected_revision"] = serde_json::json!(before.policy_revision);
+    bad["command"]["command_id"] = serde_json::json!("cmd-dangling-bad-source");
+    bad["command"]["source"]["stories"][0]["id"] =
+        serde_json::json!(fixture.story_id.clone());
+    bad["command"]["source"]["designs"][0]["id"] = serde_json::json!(design2.clone());
+    let response = put_enrollment(&app, bad).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // 悬空重授权：source＝当前已确认新对，options/target 与终止记录逐字段相等。
+    let mut resign = enrollment_body(&fixture, 1, 1);
+    resign["expected_revision"] = serde_json::json!(before.policy_revision);
+    resign["command"]["command_id"] = serde_json::json!("cmd-dangling-resign");
+    resign["command"]["source"] = serde_json::json!({
+        "stories": [{"id": story2.clone(), "version": 1}],
+        "designs": [{"id": design2.clone(), "version": 1}],
+    });
+    let response = put_enrollment(&app, resign).await;
+    let status = response.status();
+    let payload = response_json(response).await;
+    assert_eq!(status, StatusCode::OK, "dangling resign body: {payload}");
+    assert_eq!(payload["enabled"], true);
+    assert!(payload["terminated_at"].is_null());
+
+    let after = current_enrollment(&fixture);
+    assert!(after.enabled && after.terminated_at.is_none());
+    assert_eq!(after.source.stories.len(), 1);
+    assert_eq!(after.source.stories[0].id, story2);
+    assert_eq!(after.source.designs[0].id, design2);
+    // 留痕＝binding 换代：旧代（悬空 source）只读进 previous，版本 +1。
+    let history = after.binding_history.as_ref().expect("binding history");
+    assert_eq!(
+        history.current.binding_version,
+        binding_version_before + 1,
+        "悬空重授权必须换代（generation +1）"
+    );
+    let previous = history
+        .previous
+        .last()
+        .expect("old generation archived in previous");
+    assert_eq!(previous.source, before.source, "旧代悬空 source 留痕可追溯");
+    assert_eq!(previous.binding_version, binding_version_before);
+    assert_eq!(history.current.source, after.source);
+}
+
+/// 情形③（旧 source 仍有效但不同）：story 版本演进（实体仍在）→ 非悬空，
+/// 按当前版本提交的重新开启维持逐字段相等 409，零副作用。
+#[tokio::test]
+async fn reenable_with_valid_but_divergent_source_stays_conflict() {
+    let fixture = seed_fixture(1, true);
+    let app = fixture.router();
+    let enable = put_enrollment(&app, enrollment_body(&fixture, 1, 1)).await;
+    assert_eq!(enable.status(), StatusCode::OK);
+    let enabled = response_json(enable).await;
+    let terminate = post_terminate(
+        &app,
+        &serde_json::json!({
+            "command_id": "cmd-divergent-terminate",
+            "expected_enrollment_id": enabled["enrollment_id"],
+            "expected_policy_revision": enabled["policy_revision"],
+            "confirmed": true,
+        }),
+    )
+    .await;
+    assert_eq!(terminate.status(), StatusCode::OK);
+    let before = current_enrollment(&fixture);
+
+    // 旧 source 引用的实体仍在，但版本演进到 2（有效、与终止记录不同）。
+    fixture
+        .lifecycle
+        .append_version(crate::product::lifecycle_store::AppendSpecVersionInput {
+            project_id: PROJECT_ID.to_string(),
+            issue_id: ISSUE_ID.to_string(),
+            entity_id: fixture.story_id.clone(),
+            markdown: "# story v2".to_string(),
+            provider_run_refs: Vec::new(),
+            review_refs: Vec::new(),
+            confirmed_by: None,
+        })
+        .unwrap();
+
+    // 按当前版本（story v2）提交重新开启：非悬空 → 维持 409。
+    let mut divergent = enrollment_body(&fixture, 2, 1);
+    divergent["expected_revision"] = serde_json::json!(before.policy_revision);
+    divergent["command"]["command_id"] = serde_json::json!("cmd-divergent-reenable");
+    let response = put_enrollment(&app, divergent).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload = response_json(response).await;
+    assert_eq!(payload["code"], "automation_enrollment_conflict");
+
+    // 零副作用：terminated 事实与授权原样。
+    let after = current_enrollment(&fixture);
+    assert!(after.terminated_at.is_some());
+    assert!(!after.enabled);
+    assert_eq!(after.policy_revision, before.policy_revision);
+    assert_eq!(after.source, before.source);
+    assert_eq!(after.options, before.options);
+}

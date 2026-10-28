@@ -83,6 +83,8 @@ impl IssueAutomationStore {
 
     /// 以 `expected_revision` 线性化 enrollment 修订：`None` 仅对「无记录时的首次
     /// Enable」或「同键同 payload 幂等重试」合法；其余与当前 revision 不符即冲突。
+    /// 语义与 `compare_and_set_reenable(..., original_source_dangling=false)` 等价
+    /// （terminated 重新开启维持 source/options/target 逐字段相等）。
     pub fn compare_and_set(
         &self,
         project_id: &str,
@@ -90,7 +92,39 @@ impl IssueAutomationStore {
         expected_revision: Option<u64>,
         command: EnrollmentWriteCommand,
     ) -> Result<IssueAutomationEnrollment, EnrollmentError> {
-        let path = self.enrollment_path(project_id, issue_id)?;
+        self.compare_and_set_inner(project_id, issue_id, expected_revision, command, false)
+    }
+
+    /// 悬空源重授权专用 CAS（terminated 人工重新开启）：`original_source_dangling`
+    /// 由调用方核实「终止记录的原 source 引用实体已被级联删除」后置真——
+    /// 此时仅放行 source 与终止记录的漂移（原授权失效，按本次提交的当前
+    /// 已确认 source 显式重新授权）；options/target 仍逐字段相等。其余判定
+    /// 与 `compare_and_set` 完全一致（账本重放/revision 线性化/幂等）。
+    pub fn compare_and_set_reenable(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        expected_revision: Option<u64>,
+        command: EnrollmentWriteCommand,
+        original_source_dangling: bool,
+    ) -> Result<IssueAutomationEnrollment, EnrollmentError> {
+        self.compare_and_set_inner(
+            project_id,
+            issue_id,
+            expected_revision,
+            command,
+            original_source_dangling,
+        )
+    }
+
+    fn compare_and_set_inner(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        expected_revision: Option<u64>,
+        command: EnrollmentWriteCommand,
+        original_source_dangling: bool,
+    ) -> Result<IssueAutomationEnrollment, EnrollmentError> {
         // 批 2 P1（REQ-WIGA-02 修订）：Enable 冻结前统一归一选项——auto
         // 授权把 require_execution_plan_confirm 压 false。归一先于幂等
         // 比较：同语义 payload（复选框值漂移）重试仍幂等；Disable 无选项
@@ -111,14 +145,16 @@ impl IssueAutomationStore {
             },
             command @ EnrollmentWriteCommand::Disable => command,
         };
+        let path = self.enrollment_path(project_id, issue_id)?;
         let resolution = with_exclusive_lock(&path, || {
             let existing = read_optional_enrollment(&path)?;
             let resolution = match (&existing, &command) {
                 // REQ-WIGA-09 修订：terminated 的人工显式 Enable 取代——
                 // 判定与落盘见 `supersede_terminated_enrollment`（命令账本
                 // 先判、稳定 command_id、revision 线性化、授权 payload
-                // 逐字段相等）。自动路径无从构造显式 revision＋command_id
-                // 的 Enable，本分支只可能由人工入口触达。
+                // 逐字段相等——悬空源重授权的例外见其内部）。自动路径无从
+                // 构造显式 revision＋command_id 的 Enable，本分支只可能由
+                // 人工入口触达。
                 (
                     Some(saved),
                     EnrollmentWriteCommand::Enable {
@@ -138,6 +174,7 @@ impl IssueAutomationStore {
                         options,
                         target,
                         expected_revision,
+                        original_source_dangling,
                     },
                 )?,
                 // 批 2 T1（REQ-WIGA-09）：terminated 对其余写命令（含缺
@@ -1557,7 +1594,8 @@ fn enable_ledger_entry(
     })
 }
 
-/// terminated 人工取代的 Enable 载荷（锁内传参分组）。
+/// terminated 人工取代的 Enable 载荷（锁内传参分组）。`original_source_dangling`
+/// 由调用方核实「终止记录的原 source 引用实体已删」后置真（悬空源重授权）。
 struct SupersedeEnableRequest<'a> {
     command_id: Option<&'a str>,
     selection_key: &'a str,
@@ -1565,6 +1603,7 @@ struct SupersedeEnableRequest<'a> {
     options: &'a EnrollmentOptions,
     target: &'a EnrollmentTarget,
     expected_revision: Option<u64>,
+    original_source_dangling: bool,
 }
 
 /// REQ-WIGA-09 修订：terminated 的人工显式 Enable 取代（compare_and_set
@@ -1593,6 +1632,7 @@ fn supersede_terminated_enrollment(
         options,
         target,
         expected_revision,
+        original_source_dangling,
     } = request;
     let Some(command_id) = command_id else {
         return Ok(CasResolution::InvalidScope(
@@ -1625,15 +1665,19 @@ fn supersede_terminated_enrollment(
             current_revision: Some(saved.policy_revision),
         });
     }
-    // 授权不改写：与终止记录逐字段相等；旧代无声明（legacy）按本次提交
-    // 显式升级（与既有"旧 enrollment 重开时显式升级 target"语义连续）。
-    let payload_drifted = &saved.source != source
-        || &saved.options != options
+    // 授权不改写：options/target 与终止记录逐字段相等；source 漂移仅在
+    // 调用方已核实原 source 悬空（级联删除后引用实体已不存在、原授权
+    // 失效）时放行——悬空源重授权＝人工显式按当前已确认 source 重新授权，
+    // 留痕由取代落盘的 binding 换代承担（旧代 current 连同悬空 source
+    // 只读进 previous、binding_version+1）。旧代无声明（legacy）按本次
+    // 提交显式升级（与既有"旧 enrollment 重开时显式升级 target"语义连续）。
+    let options_or_target_drifted = &saved.options != options
         || saved
             .target
             .as_ref()
             .is_some_and(|declared| *declared != *target);
-    if payload_drifted {
+    let source_drifted = &saved.source != source;
+    if options_or_target_drifted || (source_drifted && !original_source_dangling) {
         return Ok(CasResolution::Conflict {
             current_revision: Some(saved.policy_revision),
         });

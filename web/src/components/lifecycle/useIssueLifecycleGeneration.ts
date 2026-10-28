@@ -64,9 +64,16 @@ const AUTOMATION_ENROLL_FAILURE_MESSAGE = "启用自动化失败";
 // 批 2 T4（REQ-WIGA-09 修订）：终止收口未完成时不可重新开启——服务端回
 // 409 automation_plan_cleanup_required；该错误有明确的下一步（先重试终止
 // 完成清理），不降级为通用冲突文案。
+// 重新开启（步骤① Enable）的服务端冲突码：旧授权 source 仍有效但与当前
+// 不同、或终止记录被并发修改——有明确下一步（走换代/重绑 rebind），不降级
+// 为通用冲突文案。
 const AUTOMATION_CLEANUP_REQUIRED_CODE = "automation_plan_cleanup_required";
 const AUTOMATION_CLEANUP_REQUIRED_MESSAGE =
   "自动化的终止收口尚未完成：请先重试终止完成清理，再重新开启自动化";
+const AUTOMATION_CONFLICT_CODE = "automation_enrollment_conflict";
+
+const AUTOMATION_REENABLE_CONFLICT_MESSAGE =
+  "重新开启的自动化授权与终止记录不一致（原授权源仍有效但与当前不同）：请先通过自动化控制面执行「换代 / 重新绑定（rebind）」更新授权源，或恢复原授权源后再重新开启";
 
 export interface IssueLifecycleGenerationOptions {
   selectedProjectId: string | null;
@@ -332,10 +339,11 @@ export function useIssueLifecycleGeneration({
    * 服务端只读 target 投影的已解析值（前端不猜默认）；Story/Design 引用取
    * 当前已确认版本的精确 id+version。相同 selection_key 的失败重试传 GET
    * 到的现行 revision；异 payload 409 由弹窗展示，不自动 Disable/重开。
-   * 批 2 T4（REQ-WIGA-09 修订）：terminated 记录上的人工 Enable 是
-   * 「重新开启」——命令身份换新，payload 原样回传终止记录（不顺便改写
-   * 授权）；用户本次选择的 provider 走契约指定的「先重新开启、再走既有
-   * Disable→Enable 路径」落地（见 runReenableSequence）。
+ * 批 2 T4（REQ-WIGA-09 修订 + 悬空源重授权）：terminated 记录上的人工
+ * Enable 是「重新开启」——命令身份换新；source 取当前 card（原 source
+ * 悬空时服务端按重授权放行换代留痕），options/target 原样回传终止记录；
+ * 用户本次选择的 provider 走契约指定的「先重新开启、再走既有
+ * Disable→Enable 路径」落地（见 runReenableSequence）。
    */
   async function enrollConfirmedDesignAutomation(
     projectId: string,
@@ -347,7 +355,8 @@ export function useIssueLifecycleGeneration({
     // 批 2 T4（REQ-WIGA-09 修订）：terminated 的 enrollment 可被人工显式
     // 重新开启——入口（人工点「启用自动化」）即显式动作，自动路径不触发。
     // 并发语义不变：expected_revision 按线性化带当前 revision；重新开启的
-    // payload 与终止记录逐字段相等（服务端比对，改了即 409）；命令身份
+    // source 取当前 card、options/target 回传终止记录（服务端比对：旧
+    // source 仍有效但不同 → 409 提示换代/重绑）；命令身份
     // （command_id/selection_key）换新——重新开启是新命令，须能被命令账本
     // 单独留痕。
     //
@@ -439,16 +448,19 @@ export function useIssueLifecycleGeneration({
   }
 
   /**
-   * terminated 记录的人工重新开启（REQ-WIGA-09 修订）：
-   *   ① Enable（payload 与终止记录逐字段相等）——契约硬要求，异 payload 409；
+   * terminated 记录的人工重新开启（REQ-WIGA-09 修订 + 悬空源重授权）：
+   *   ① Enable——source 取**当前 card** 的已确认引用（与常规启用同口径；
+   *      终止记录的原 source 可能已随实体删除悬空，服务端按悬空重授权
+   *      放行 source 漂移并 binding 换代留痕），options/target 原样回传
+   *      终止记录（服务端逐字段比对：旧 source 仍有效但不同 → 409，提示
+   *      走「换代/重绑（rebind）」）；
    *   ② 用户本次换了 provider 时：Disable → Enable（新 payload）——契约指定
    *      的「改授权 payload 须先成功重新开启，再走既有 Disable→Enable 路径」；
    *      disabled 记录换 payload 重开是既有语义（服务端放行）。
    *   ③ 每步带稳定 command_id 与 expected_revision；中途失败后重试按服务端
    *      现状续跑（已生效的不重复改写），不重复取代、不留半开状态。
    *
-   * 未换 provider 时只发 ①（等 payload 重新开启）——不产生多余的
-   * Disable/Enable 序列。
+   * 未换 provider 时只发 ①——不产生多余的 Disable/Enable 序列。
    */
   async function runReenableSequence(
     projectId: string,
@@ -458,10 +470,35 @@ export function useIssueLifecycleGeneration({
     enrollment: IssueAutomationEnrollment,
     sequence: { enrollmentId: string; original: ReenableOriginalAuthorization } | null,
   ): Promise<void> {
-    // 原授权＝终止记录的 payload（重新开启必须逐字段相等）；续跑时沿用序列
-    // 里记下的原授权（服务端现状已是它的投影）。
+    // 重新开启的 source＝当前 card 的已确认 Story/Design 引用（与常规启用
+    // 路径同一口径）：终止记录的原 source 可能已随级联删除悬空，照抄会让
+    // 服务端 422「not found」死路；仍有效但与当前不同时由服务端 409 裁决。
+    const stories = card.raw.story_spec_ids
+      .map((storyId) => selectedColumns.story_spec.find((story) => story.id === storyId))
+      .filter((story): story is Extract<LifecycleCard, { kind: "story_spec" }> =>
+        story?.kind === "story_spec" && story.raw.confirmation_status === "confirmed",
+      );
+    if (stories.length !== card.raw.story_spec_ids.length) {
+      throw new Error("自动化要求引用的 Story Spec 已全部确认");
+    }
+    if (card.raw.confirmation_status !== "confirmed") {
+      throw new Error("自动化要求 Design Spec 已确认");
+    }
+    // 原授权＝当前 source + 终止记录的 options/target（授权选项/载体不被
+    // 表单顺便改写）；续跑时沿用序列里记下的原授权（服务端现状已是它的投影）。
     const original: ReenableOriginalAuthorization = sequence?.original ?? {
-      source: enrollment.source,
+      source: {
+        stories: stories.map((story) => ({
+          id: story.id,
+          version: story.raw.current_version ?? 1,
+        })),
+        designs: [
+          {
+            id: card.id,
+            version: card.raw.current_version ?? 1,
+          },
+        ],
+      },
       options: enrollment.options,
       // 旧代 enrollment 可能没有声明 target（无绑定事实）——此时退回
       // 服务端投影的原样 target，由服务端判定是否接受。
@@ -489,7 +526,9 @@ export function useIssueLifecycleGeneration({
     };
 
     let current = enrollment;
-    // ① 重新开启：payload 与终止记录逐字段相等（授权不被顺便改写）。
+    // ① 重新开启：source＝当前 card，options/target 回传终止记录（授权选项
+    // 不被顺便改写）。旧 source 仍有效但不同（或被并发修改）时服务端 409
+    // ——给可行动提示：先去换代/重绑（rebind）更新授权源，再重新开启。
     if (current.terminated_at != null) {
       const command = {
         type: "enable" as const,
@@ -498,13 +537,23 @@ export function useIssueLifecycleGeneration({
         options: original.options,
         target: original.target,
       };
-      current = await putAutomationEnrollment(projectId, card.issueId, {
-        expected_revision: current.policy_revision,
-        command: {
-          ...command,
-          command_id: enableCommandId(JSON.stringify(command)),
-        },
-      });
+      try {
+        current = await putAutomationEnrollment(projectId, card.issueId, {
+          expected_revision: current.policy_revision,
+          command: {
+            ...command,
+            command_id: enableCommandId(JSON.stringify(command)),
+          },
+        });
+      } catch (reason) {
+        if (
+          reason instanceof ApiRequestError &&
+          reason.code === AUTOMATION_CONFLICT_CODE
+        ) {
+          throw new Error(AUTOMATION_REENABLE_CONFLICT_MESSAGE);
+        }
+        throw reason;
+      }
     }
 
     // 目标 provider 已生效（未换 provider，或序列已跑到终点）→ 不再改写授权。

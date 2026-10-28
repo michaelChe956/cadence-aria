@@ -32,9 +32,7 @@ use crate::web::types::{EnrollmentBindRequest, EnrollmentPutRequest};
 use super::automation_enrollment_conflict::{
     enrollment_conflict, termination_api_error, termination_identity_conflict,
 };
-use super::automation_enrollment_reenable::{
-    ensure_terminated_reenable_cleanup_closed, supersede_terminated_plan_generation,
-};
+use super::automation_enrollment_reenable::ensure_terminated_reenable_cleanup_closed;
 use super::support::{product_app_paths, product_store_api_error};
 
 pub async fn put_automation_enrollment(
@@ -45,27 +43,19 @@ pub async fn put_automation_enrollment(
     validate_request_ids(&project_id, &issue_id)?;
     validate_enrollment_scope(&state, &project_id, &issue_id, &request.command)?;
     ensure_terminated_reenable_cleanup_closed(&state, &project_id, &issue_id, &request.command)?;
-    // 代际取代的旧身份：CAS 前记录 terminated 态（重开＝旧 plan 作废）。重放
-    // （同 command_id）时 enrollment 已非 terminated → 不重复执行取代删除。
-    let was_terminated = IssueAutomationStore::new(product_app_paths(&state))
-        .get(&project_id, &issue_id)
-        .map_err(product_store_api_error)?
-        .is_some_and(|enrollment| enrollment.terminated_at.is_some());
-    if was_terminated {
-        // 单 plan 不变量（REQ-WPS-01/REQ-WPS-02 Scenario「re-enable 轮换
-        // `prepare_intent_id` 时删除旧 plan」）：重新开启＝旧 plan 作废——旧 plan
-        // 及其完整闭包在 intent 轮换前删除。收口/删除失败 → 既有
-        // `automation_plan_cleanup_required` 语义且零副作用（CAS 未执行）。
-        supersede_terminated_plan_generation(&state, &project_id, &issue_id).await?;
-    }
-    let enrollment = IssueAutomationStore::new(product_app_paths(&state))
-        .compare_and_set(
+    // 代际取代＋悬空源重授权（编排收敛在 reenable 模块；本文件在
+    // large_file_guard 登记表内禁止增长）：terminated 重开＝旧 plan 作废，
+    // 原 source 悬空时仅放行 source 漂移（按当前已确认 source 重新授权，
+    // binding 换代留痕），其余维持逐字段相等 409。
+    let enrollment =
+        super::automation_enrollment_reenable::supersede_terminated_generation_and_cas(
+            &state,
             &project_id,
             &issue_id,
             request.expected_revision,
             request.command,
         )
-        .map_err(enrollment_api_error)?;
+        .await?;
     if enrollment.enabled {
         // P1 WIGA Task 6：成功启用只发唤醒 hint，不绑定运行生命周期；
         // 有界 tick 与 durable reconcile 是权威推进。

@@ -1910,4 +1910,116 @@ fn issue_automation_store_termination_missing_and_manual_disable_regression() {
         .unwrap();
     assert!(reopened.enabled, "plain disable still allows re-enable");
 }
+
+/// 悬空源重授权（store 级）：terminated 记录的 source 引用实体已被级联删除
+/// 时，`compare_and_set_reenable` 放行 **仅 source** 的漂移（人工按当前已确认
+/// source 显式重新授权；binding 换代留痕）；options/target 漂移仍 409；
+/// 未带悬空标记的普通 `compare_and_set` 维持逐字段相等 409。
+#[test]
+fn issue_automation_store_reenable_dangling_source_allows_only_source_drift() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = IssueAutomationStore::new(ProductAppPaths::new(tmp.path()));
+    let created = store
+        .compare_and_set(
+            "project_1",
+            "issue_1",
+            None,
+            enable("human-choice-1", logical_repo(1)),
+        )
+        .unwrap();
+    store
+        .terminate_plan(
+            "project_1",
+            "issue_1",
+            EnrollmentTerminationRequest {
+                command_id: "terminate-dangling".to_string(),
+                expected_enrollment_id: created.enrollment_id.clone(),
+                expected_policy_revision: created.policy_revision,
+                reason: "cascade entity deletion".to_string(),
+            },
+        )
+        .unwrap();
+    let terminated = store.get("project_1", "issue_1").unwrap().unwrap();
+    let binding_version = terminated
+        .binding_history
+        .as_ref()
+        .map(|history| history.current.binding_version)
+        .unwrap_or(0);
+
+    // 新 source（当前已确认的另一对实体）。
+    let resigned_source = EnrollmentSource {
+        stories: vec![SourceRevisionRef {
+            id: "story_spec_0002".into(),
+            version: 3,
+        }],
+        designs: vec![SourceRevisionRef {
+            id: "design_spec_0002".into(),
+            version: 2,
+        }],
+    };
+    let mut resign = reenable("reenable-dangling-1", "human-choice-2");
+    if let EnrollmentWriteCommand::Enable { source: slot, .. } = &mut resign {
+        *slot = resigned_source.clone();
+    }
+
+    // 未声明悬空（普通 CAS 语义）→ source 漂移维持 409。
+    assert_conflict(
+        store
+            .compare_and_set(
+                "project_1",
+                "issue_1",
+                Some(terminated.policy_revision),
+                resign.clone(),
+            )
+            .unwrap_err(),
+        terminated.policy_revision,
+    );
+
+    // 悬空标记放行 source 漂移：取代生效＋binding 换代留痕。
+    let resigned = store
+        .compare_and_set_reenable(
+            "project_1",
+            "issue_1",
+            Some(terminated.policy_revision),
+            resign,
+            true,
+        )
+        .unwrap();
+    assert!(resigned.enabled && resigned.terminated_at.is_none());
+    assert_eq!(resigned.source, resigned_source);
+    let history = resigned.binding_history.as_ref().unwrap();
+    assert_eq!(history.current.binding_version, binding_version + 1);
+    assert_eq!(history.previous.last().unwrap().source, terminated.source);
+
+    // 再终止后：悬空标记不放宽 options/target 漂移。
+    store
+        .terminate_plan(
+            "project_1",
+            "issue_1",
+            EnrollmentTerminationRequest {
+                command_id: "terminate-dangling-2".to_string(),
+                expected_enrollment_id: created.enrollment_id.clone(),
+                expected_policy_revision: resigned.policy_revision,
+                reason: "second cascade entity deletion".to_string(),
+            },
+        )
+        .unwrap();
+    let reterminated = store.get("project_1", "issue_1").unwrap().unwrap();
+    let mut drifted_options = reenable("reenable-dangling-2", "human-choice-3");
+    if let EnrollmentWriteCommand::Enable { options: slot, .. } = &mut drifted_options {
+        slot.review_rounds = 7;
+    }
+    assert_conflict(
+        store
+            .compare_and_set_reenable(
+                "project_1",
+                "issue_1",
+                Some(reterminated.policy_revision),
+                drifted_options,
+                true,
+            )
+            .unwrap_err(),
+        reterminated.policy_revision,
+    );
+}
 include!("target_union_rebind_tests.inc.rs");
