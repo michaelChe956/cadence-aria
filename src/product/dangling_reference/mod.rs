@@ -21,9 +21,13 @@
 //! `patrol` 子模块**同样只读、零副作用**：遍历五个分区（issue 级 / reviewer
 //! 窗口 / reviewer 快照 / 实体身份台账 / 逻辑代码库 scope）核对引用目标是否
 //! 仍存在，产出巡检报告（REQ-DRG-08 / 09 / 10）。它**不删除、不移动、不修改
-//! 任何文件**，也不落盘清单——清单渲染与销账由后续任务追加子模块。记录自身
-//! 解析失败、分区不可读、会话枚举失败与存在性判 `Unknown` 一律进「不可判定」
-//! （REQ-DRG-23）。
+//! 任何文件**，也不落盘清单。记录自身解析失败、分区不可读、会话枚举失败与
+//! 存在性判 `Unknown` 一律进「不可判定」（REQ-DRG-23）。
+//!
+//! `report` 子模块把 `patrol` 产出的三栏结果渲染成 Markdown 巡检清单并计算
+//! findings 摘要令牌（REQ-DRG-11 / 22）：令牌只对 findings 的规范化序列化取
+//! 摘要，不含巡检时间、令牌行自身与不可判定 / 未归类条目；清单落点为
+//! `cadence/analysis-docs/`。销账子模块由后续任务追加。
 
 // Task 1 只产出静态表与纯结构，调用点自 Task 2 起接线，故非测试构建下这些项
 // 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table` 与 `resolve`）。
@@ -33,6 +37,7 @@
 pub(crate) mod listing;
 pub(crate) mod patrol;
 pub(crate) mod reference_table;
+pub(crate) mod report;
 pub(crate) mod resolve;
 
 /// 悬空引用告警的单一稳定码（REQ-DRG-07）。
