@@ -60,14 +60,23 @@ pub(super) fn scan_entity_identity_partition(ctx: &PatrolContext<'_>, builder: &
         let Some(target_kind) = entity_kind_target_kind(&entity_kind) else {
             continue;
         };
-        let entity_id = json_str_field(&value, "entity_id");
-        if entity_id.is_empty() {
-            continue;
-        }
-        let Some(field) = field_path_for(
+        let field = field_path_for(
             DanglingRecordType::EntityIdentitySessionBinding,
             target_kind,
-        ) else {
+        );
+        let entity_id = json_str_field(&value, "entity_id");
+        // `entity_kind` 可判但 `entity_id` 缺失/为空 → 引用目标为空，无法完成
+        // 存在性核对：MUST 记入不可判定（写明原因），MUST NOT 静默跳过
+        // （销账侧同一条目判「只报不删」，两面口径一致）。
+        if entity_id.is_empty() {
+            builder.push_undetermined(
+                record_path,
+                field.unwrap_or(FIELD_RECORD_LEVEL),
+                format!("台账条目缺 entity_id（entity_kind = {entity_kind}）：引用目标为空，无法完成存在性核对"),
+            );
+            continue;
+        }
+        let Some(field) = field else {
             continue;
         };
         let reference = PatrolReference::new(

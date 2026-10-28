@@ -273,9 +273,9 @@ fn patrol_state_root_with_probe(
     }
 
     // ⑤ 分区二：reviewer 窗口（活跃 + 归档）→ attempt 窗口簇 L2 聚合 → 发现。
-    let windows = scan_window_partition(&ctx, &mut builder);
-    ctx.attempt_clusters = build_attempt_clusters(&ctx, &windows, &mut builder);
-    emit_window_findings(&ctx, &windows, &mut builder);
+    let window_scan = scan_window_partition(&ctx, &mut builder);
+    ctx.attempt_clusters = build_attempt_clusters(&ctx, &window_scan, &mut builder);
+    emit_window_findings(&ctx, &window_scan.windows, &mut builder);
 
     // ⑥ 分区三：reviewer 快照 manifest。
     scan_snapshot_partition(&ctx, &mut builder);

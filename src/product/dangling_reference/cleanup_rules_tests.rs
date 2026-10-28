@@ -801,3 +801,105 @@ fn dangling_intent_cleanup_concurrent_with_supersede_path_never_errors() {
         "取代路径必须落定启用态：{final_enrollment:?}"
     );
 }
+
+// ─── P2-A / P2-B 的销账侧口径（与巡检侧同一口径）──────────────────────
+
+/// P2-A（销账侧既有口径的回归钉子）：窗口分区存在**不可解析**记录 → 同 attempt
+/// 的窗口簇一律只报不删（巡检侧 P2-A 修复即对齐这条全局阻断口径）。
+#[test]
+fn dangling_window_cluster_is_report_only_when_any_window_record_unreadable() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path());
+    // 一扇四条件全成立的窗口 + 一扇坏窗口（同属窗口分区）。
+    write_window(
+        &paths,
+        "win_ok",
+        "coding_attempt_9f3",
+        &temp.path().join("missing-ok"),
+        "closed_accepted",
+    );
+    let windows_dir = paths.root().join("reviewer-windows/windows");
+    std::fs::write(windows_dir.join("win_bad.json"), b"{ not json").unwrap();
+
+    let sessions = BTreeSet::new();
+    let probe = probe_false();
+    let resolver = DanglingResolver::with_attempt_probe(&paths, &sessions, &probe);
+    let decisions = decide_window_cluster_cleanup(&paths, &resolver).expect("decide");
+    let cluster = decisions
+        .iter()
+        .find(|decision| match decision {
+            CleanupDecision::ReportOnly { record_path, .. } => record_path.ends_with("win_ok.json"),
+            CleanupDecision::Delete { record_path, .. } => record_path.ends_with("win_ok.json"),
+        })
+        .expect("合规窗口所在 attempt 必须有一条簇级决策");
+    assert_report_only(cluster, "不可解析");
+}
+
+/// P2-B：台账条目缺 `entity_id` MUST NOT 让整轮自动销账失败——该条判只报不删，
+/// 其余删除照常执行（此前空 `entity_id` → `EntityScope::validate` 的
+/// `PathEscape("")` → `run_cleanup` 整轮 `Err`，一条都不删）。
+#[test]
+fn dangling_ledger_entry_without_entity_id_is_report_only_and_cleanup_continues() {
+    let temp = TempDir::new().unwrap();
+    let (paths, issue_root) = plan_intent_issue(temp.path(), plan_intent_body());
+    // ① 一条可删的 plan intent（L1 齐备）。
+    write_tombstone(temp.path(), "story", "story_spec_0005");
+    write_tombstone(temp.path(), "plan", "issue_work_item_plan_0007");
+    // ② 一条可删的窗口簇（全部窗口四条件成立）。
+    for window_id in ["win_a", "win_b"] {
+        write_window(
+            &paths,
+            window_id,
+            "coding_attempt_9f3",
+            &temp.path().join(format!("missing-{window_id}")),
+            "closed_accepted",
+        );
+    }
+    // ③ 一条缺 entity_id 的台账条目（坏条目：entity_kind 可判、引用目标为空）。
+    let sessions_dir = paths.root().join("state/entity-identity/sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::fs::write(
+        sessions_dir.join("s_bad.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "entity_kind": "plan",
+            "project_id": "project_0001",
+            "issue_id": "issue_0001",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let outcome =
+        run_cleanup(&paths, &CleanupRequest::automatic()).expect("单条坏台账不得使整轮销账失败");
+    assert!(
+        outcome.report_only.iter().any(|decision| matches!(
+            decision,
+            CleanupDecision::ReportOnly { record_path, reason }
+                if record_path == "state/entity-identity/sessions/s_bad.json"
+                    && reason.contains("entity_id")
+        )),
+        "坏条目必须只报不删并写明原因：{:?}",
+        outcome.report_only
+    );
+    // 其余删除照常执行。
+    assert!(
+        !issue_root.join("automation-plan-intent.json").exists(),
+        "可删 intent 必须照常删除"
+    );
+    assert!(
+        !paths
+            .root()
+            .join("reviewer-windows/windows/win_a.json")
+            .exists()
+            && !paths
+                .root()
+                .join("reviewer-windows/windows/win_b.json")
+                .exists(),
+        "可删窗口簇必须照常删除"
+    );
+    assert!(
+        outcome.deleted_count >= 2,
+        "至少两类删除照常执行：{}",
+        outcome.deleted_count
+    );
+}

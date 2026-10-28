@@ -108,7 +108,12 @@ pub(crate) fn render_markdown_report(
     markdown.push('\n');
     markdown.push_str(&format!("- 巡检时间：{scanned_at}（不参与令牌摘要）\n"));
     markdown.push_str(
-        "- 巡检范围：projects/**/issues/**、reviewer-windows/**、reviewer-snapshots/**、state/entity-identity/**、LC scope 目录\n",
+        "- 巡检范围（按下列固定层级逐条扫描的记录文件，MUST NOT 视为递归全扫）：\n\
+         \x20 - issue 分区：`projects/<project>/issues/<issue>/*.json`——只扫顶层三个既定语名的记录文件（automation-plan-intent / automation-generation-intent / automation-enrollment），同层其它 json 记未归类；stories / designs / plans / workspace-sessions / codebase-attempts / work-item-revisions / entity-deletions 等**子目录不扫**（属被引用侧或非引用记录）\n\
+         \x20 - reviewer 窗口：`reviewer-windows/windows/*.json` 与 `reviewer-windows/window-archive/*.json`（两路都扫，按 attempt 聚合为窗口簇）\n\
+         \x20 - reviewer 快照：`reviewer-snapshots/windows/<window>/manifest.json`\n\
+         \x20 - 实体身份台账：`state/entity-identity/*.json`（记未归类）与 `state/entity-identity/sessions/*.json`\n\
+         \x20 - 逻辑代码库 scope：`projects/<project>/logical-codebases/<lc>/` 与旧版别名 `projects/<project>/logical-codebase/`（各取 `manifest.json` + `members/*.json` + `checkouts/*.json` + `aggregate-indexes/*.json`）\n",
     );
     render_mode_line(status, &mut markdown);
     markdown.push_str(&format!(
@@ -1040,6 +1045,40 @@ mod report_tests {
         assert!(
             self_proof.contains("（无：本次可删条目已全部归零）"),
             "6.2 必须显式写明无未归零项：{self_proof}"
+        );
+    }
+
+    /// P2-C：清单「巡检范围」声明 MUST 与实现一致——issue 分区只扫**顶层**
+    /// 记录文件，MUST NOT 声称 `issues/**` 递归全扫（REQ-DRG-08 的声明面）。
+    #[test]
+    fn dangling_report_scope_line_matches_top_level_issue_scan() {
+        let markdown = render_markdown_report(
+            &empty_report(),
+            "sha256:abc",
+            "2026-10-28T10:00:00Z",
+            &CleanupReportStatus::ReportOnly,
+            None,
+        );
+        // 头部说明区（到「## 1. 汇总」为止）里的「巡检范围」段。
+        let header = &markdown[..markdown.find("## 1. 汇总").expect("汇总节必须存在")];
+        let scope: String = header
+            .lines()
+            .skip_while(|line| !line.starts_with("- 巡检范围"))
+            .take_while(|line| !line.starts_with("- 模式："))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!scope.is_empty(), "清单必须写明巡检范围：{header}");
+        assert!(
+            !scope.contains("issues/**"),
+            "MUST NOT 声称 issue 分区递归全扫：{scope}"
+        );
+        assert!(
+            scope.contains("projects/<project>/issues/<issue>/*.json"),
+            "必须写明 issue 分区只扫顶层记录文件：{scope}"
+        );
+        assert!(
+            scope.contains("子目录不扫"),
+            "必须写明子目录不参与核对（范围边界）：{scope}"
         );
     }
 }

@@ -527,6 +527,13 @@ pub(crate) fn decide_ledger_entry_cleanup(
             entry.entity_kind
         )));
     }
+    if entry.entity_id.is_empty() {
+        // 空 `entity_id` 会让 `EntityScope::validate` 判 `PathEscape("")` 并让整轮
+        // 销账以 `Err` 收场（一条都不删）：在此收口为只报不删，MUST NOT 上抛。
+        return Ok(report_only(
+            "台账条目缺 entity_id（引用目标为空）：存在性不可判定，只报不删".to_string(),
+        ));
+    }
     if entry.project_id.is_empty() || entry.issue_id.is_empty() {
         return Ok(report_only(
             "台账条目缺 project / issue 作用域：存在性不可判定，只报不删".to_string(),

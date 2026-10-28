@@ -720,6 +720,114 @@ fn dangling_patrol_window_cluster_requires_all_windows() {
     }
 }
 
+/// 截取 Markdown 清单的一节正文（`start` 标题之后到 `end` 标题之前）。
+fn markdown_section<'a>(markdown: &'a str, start: &str, end: &str) -> &'a str {
+    let begin = markdown.find(start).expect("节标题必须存在") + start.len();
+    let rest = &markdown[begin..];
+    let stop = rest.find(end).expect("下一节标题必须存在");
+    &rest[..stop]
+}
+
+/// P2-A（与销账侧同一口径）：窗口分区存在**不可解析**的窗口记录时，窗口簇
+/// MUST 降级为「证据不足 → 只报不删」——销账侧
+/// `decide_window_cluster_cleanup` 用**全局** `unreadable` 阻断全部簇（坏记录
+/// 解析失败 ⇒ 无法排除它属于任何看似合规的簇），巡检侧 MUST 同口径降级，
+/// 否则清单 §2 会把该 attempt 列为可删、§6 却显示残留。
+#[test]
+fn dangling_patrol_degrades_window_cluster_when_any_window_record_unreadable() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path());
+    let windows_dir = paths.root().join("reviewer-windows/windows");
+    let absent_worktree = temp.path().join("absent-worktree");
+    // 一扇四条件全成立的窗口 + 一扇坏窗口（同属该 attempt 的窗口分区）。
+    write(
+        &windows_dir.join("win_ok.json"),
+        &window_body(
+            "win_ok",
+            "coding_attempt_gone",
+            "closed_accepted",
+            &absent_worktree,
+        ),
+    );
+    write(&windows_dir.join("win_bad.json"), "{ not json");
+
+    let report = patrol_state_root(&paths).expect("patrol");
+    assert_eq!(report.undetermined.len(), 1, "{:?}", report.undetermined);
+    let attempt = report
+        .findings
+        .iter()
+        .find(|finding| finding.reference_field == "attempt_id")
+        .expect("attempt 悬空发现");
+    assert_eq!(
+        attempt.proposed_action, PATROL_ACTION_REPORT_ONLY,
+        "存在不可解析窗口记录时整 attempt 不删：{attempt:?}"
+    );
+    assert!(
+        attempt
+            .evidence_level
+            .starts_with(EVIDENCE_LABEL_INSUFFICIENT),
+        "{}",
+        attempt.evidence_level
+    );
+    assert!(
+        attempt.evidence_level.contains("不可解析"),
+        "证据列必须写明降级原因：{}",
+        attempt.evidence_level
+    );
+
+    // 清单分节：该条目 MUST 落「3. 只报不删残留」而非「2. 明细」。
+    use crate::product::dangling_reference::report::{CleanupReportStatus, render_markdown_report};
+    let markdown = render_markdown_report(
+        &report,
+        "sha256:test",
+        "2026-10-28T00:00:00Z",
+        &CleanupReportStatus::ReportOnly,
+        None,
+    );
+    let detail = markdown_section(&markdown, "## 2. 明细", "## 3. 只报不删残留");
+    let residual = markdown_section(&markdown, "## 3. 只报不删残留", "## 4. 不可判定");
+    assert!(
+        !detail.contains("reviewer-windows/windows/win_ok.json"),
+        "不得进可删明细：{detail}"
+    );
+    assert!(
+        residual.contains("reviewer-windows/windows/win_ok.json"),
+        "必须进只报不删残留：{residual}"
+    );
+}
+
+/// P2-B（巡检侧）：台账条目 `entity_kind` 可判但缺 `entity_id` → 记入
+/// **不可判定**并写明原因，MUST NOT 静默跳过（销账侧同一条目判只报不删）。
+#[test]
+fn dangling_patrol_records_ledger_entry_without_entity_id_as_undetermined() {
+    let temp = TempDir::new().unwrap();
+    let paths = ProductAppPaths::new(temp.path());
+    write(
+        &paths
+            .root()
+            .join("state/entity-identity/sessions/workspace_session_auto_x.json"),
+        r#"{"project_id":"project_0001","issue_id":"issue_0001","entity_kind":"plan"}"#,
+    );
+
+    let report = patrol_state_root(&paths).expect("patrol");
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert_eq!(report.undetermined.len(), 1, "{:?}", report.undetermined);
+    let entry = &report.undetermined[0];
+    assert_eq!(
+        entry.record_path,
+        "state/entity-identity/sessions/workspace_session_auto_x.json"
+    );
+    assert_eq!(
+        entry.reference_field, "entity_kind+entity_id",
+        "引用字段列取判据表登记的字段路径"
+    );
+    assert!(
+        entry.reason.contains("entity_id"),
+        "失败原因必须点明缺 entity_id：{}",
+        entry.reason
+    );
+}
+
 // -- 路二未能枚举 ≠ 目标不存在（REQ-DRG-21 / 23） --------------------
 
 #[test]
