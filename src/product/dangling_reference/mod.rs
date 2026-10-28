@@ -54,7 +54,19 @@
 
 // Task 1 只产出静态表与纯结构，调用点自 Task 2 起接线，故非测试构建下这些项
 // 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table` 与 `resolve`）。
-// **全部接线完成后（Task 9）删除本行**，让死代码重新回到门禁视野。
+//
+// Task 9（CLI 接线）实测：**本行仍不能删**——巡检面（`patrol`）走自己的分区
+// 读取实现，不经 ① 层的容错列举 API，故 ① 层至今没有生产消费者。删掉本行
+// 会在 `cargo check --lib` 触发 41 条 `dead_code` 告警：
+//   - `mod.rs`：`DANGLING_REFERENCE_WARNING_CODE` / `..._LIMIT` /
+//     `DanglingReferenceWarning` / `DanglingReferenceWarnings` / `warning_key`；
+//   - `listing.rs`：① 层容错列举 API 全量（`list_automation_intents` /
+//     `list_reviewer_windows` / `list_reviewer_snapshots` /
+//     `list_entity_identity_bindings` 及其数据结构与辅助函数）；
+//   - `reference_table.rs::all_reference_rules`；`resolve.rs` 的
+//     `ReferenceVerdict::L2` 变体；`ledger.rs` 的 `path` 方法；
+//     `cleanup.rs` 的 `CleanupOutcome::report_only` 字段。
+// 这些项要等 ① 层被真实消费面接上后再回收，**不要在本行下私自删改生产逻辑**。
 #![allow(dead_code)]
 
 pub(crate) mod cleanup;

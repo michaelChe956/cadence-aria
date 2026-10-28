@@ -461,6 +461,14 @@ aria task run --workspace . "your requirement here"
 
 # Start the web server
 aria web --workspace . --host 127.0.0.1 --port 4317
+
+# Patrol dangling references and write the report (dry-run by default: report only,
+# zero deletions and zero ledger traces)
+aria inspect dangling-references --workspace .
+
+# Run the cleanup with the report's summary token (take it from the
+# dangling_reference_token line of the previous command)
+aria inspect dangling-references --workspace . --apply --confirm sha256:<digest>
 ```
 
 However, most day-to-day operations are performed through the `/workbench` web UI.

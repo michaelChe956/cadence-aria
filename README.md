@@ -516,6 +516,12 @@ aria task run --workspace . "你的需求描述"
 
 # 启动 web 服务
 aria web --workspace . --host 127.0.0.1 --port 4317
+
+# 巡检悬空引用并出清单（默认 dry-run：只出清单，零删除零留痕）
+aria inspect dangling-references --workspace .
+
+# 按清单的摘要令牌执行销账（令牌取自上一步输出的 dangling_reference_token）
+aria inspect dangling-references --workspace . --apply --confirm sha256:<摘要>
 ```
 
 不过日常主要操作都通过 `/workbench` 工作台完成。
