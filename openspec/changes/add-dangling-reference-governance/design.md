@@ -38,6 +38,13 @@
 24. **窗口簇删除粒度改为按 attempt 聚合**：既有清理器 `purge_for_attempts` 按 attempt id 批量删除该 attempt 名下**全部**窗口（含归档），故销账 MUST 先按 attempt 聚合，**该 attempt 的全部窗口都满足 L2 四条件才删**，任一不满足则一个都不删。
 25. **令牌口径写死**：发现集合 = 本次判定为悬空的条目（**含「只报不删残留」条目本身**），排除巡检时间、令牌行、**不可判定条目**、**未归类条目**与各栏说明文字。
 
+### r4 追加的决策（实施审查后，未改变 owner 边界）
+
+26. **存在性判定是「三态」不是「两态」**：`Exists` / `Missing` / `Unknown`。**存在性数据源或所需作用域在本判定面不可用时 MUST 报 `Unknown`**（归「不可判定」，REQ-DRG-23），MUST NOT 报 `Missing`——否则该类型下**正常存在**的引用会被整批判为悬空（实测：member 记录的 `checkout_ids` 3/3 命中、aggregate-index 的 `member_snapshots[].checkout_id` 96/96 命中，技术方案 §2.4.4）。读取失败同样 MUST NOT 退化为 `Missing`，须原样上抛。
+27. **U1 四类（checkout / aggregate_index / logical_member / enrollment）在 Task 2 判定面报 `Unknown`**：LC 三类记录落在 `logical-codebases/<lc_id>/`，读 API 已核实（`list_checkouts` / `load_checkout`、`list_members` / `load_member`、`AggregateIndexStore::get`、`IssueAutomationStore::get`）但**须先 `LogicalCodebaseStore::list(project_id)` 枚举 LC 再 `for_lc` 作用域化**；`LogicalCodebaseStore::new(paths)` 只落 legacy 根，直接读会「换个方式」继续误报。真实读属持有 LC 上下文的巡检（Task 4）。四类仍**只报不删**。
+28. **「不可判定」定义扩为「读取失败 **或** 所需存在性数据源 / 作用域不可用」**；判为 `Unknown` 的条目**不计入悬空条目数、不计入归零、不进入令牌的发现集合**（REQ-DRG-17 / 22 / 23）。
+29. **判据表末行（LC 三类）与实际记录形状的偏差 MUST 在巡检开工前核对**：单数 `checkout_id` / `repository_id` / `aggregate_index_id` ≠ 实际的 `checkout_ids[]` / `member_snapshots[].checkout_id` / `LogicalCodebaseManifest.active_aggregate_index_id`；`physical_repository_id` **不是** LC 成员 id（技术方案 §3.3.2 的偏差登记表）。
+
 ## 架构
 
 ````
@@ -143,7 +150,7 @@ provider 适配层 / ProviderToolPolicy / gateway envelope / StreamingProviderIn
 **r2 收紧后的定义**：
 
 - **L1 直证** = 四条**同时**成立：① 墓碑记录存在（`{issue_lifecycle_root}/entity-deletions/{kind}/{id}.json`）；② 墓碑的删除阶段为**已完成**（`DeletionPhase::Deleted`，磁盘取值 `"deleted"`；另一态 `Purging` = 删除进行中）；③ 墓碑带完成时间（`deleted_at`）；④ 该实体**没有**待人工处置的删除失败事实（`{issue_root}/entity-operations/pending-failures/{kind}/{id}.json`）。
-  → 理由：`Purging` 墓碑对应的子树可能仍在被重入清理；pending failure 表示删除**已失败待人工处置**。两者都属「**证据不足 / 删除未完成**」（**不是**「不可判定」——「不可判定」在本能力中只指读取失败），**只报不删**并归入清单的「只报不删残留」节。台账是级联删除重入的反查索引（允许 purging/deleted scope 查询、entity root 缺失仍可反查），对它们销账会造成「级联重试漏清 session 且无人察觉」。
+  → 理由：`Purging` 墓碑对应的子树可能仍在被重入清理；pending failure 表示删除**已失败待人工处置**。两者都属「**证据不足 / 删除未完成**」（**不是**「不可判定」——「不可判定」只收**读取失败**或**所需存在性数据源 / 作用域不可用**），**只报不删**并归入清单的「只报不删残留」节。台账是级联删除重入的反查索引（允许 purging/deleted scope 查询、entity root 缺失仍可反查），对它们销账会造成「级联重试漏清 session 且无人察觉」。
 - **L2 推定** = 目标记录不存在 **且** **该目标类型在证据等级表中给出的专属可算条件**成立。「唯一可达上游」只在 `Plan` 一类上可解析，其余类型按表降级。**L2 只在「证据等级表」标为 L2 的目标类型上可用**；其余一律只报不删。
 
 **证据等级表**（销账白名单的单一事实源）：目标类型 → 存在性来源 → 唯一可达上游 → **L2 专属可算条件** → 可删等级。story / design / plan 为 L1；reviewer 窗口的 attempt 为 L2（条件由窗口记录自身给出，见 §2b 与决策 7）；session、checkout、aggregate_index、member、enrollment 为**只报不删**（前者缺失是正常中间态，中间三类上游未核实无法定义，enrollment 永不删）。**该表的等级列已写进 spec REQ-DRG-02**，使 spec 与本文件、技术方案同源。
@@ -275,7 +282,7 @@ r1 写的「销账与取代逻辑竞争 intent 文件 → 用『缺失=已清』
 
 - **[①层当前没有面向用户的既有消费面]** → 如实标注：三个旁支记录类型今天都没有「面向用户的列举面」（intent 只有按固定路径的单条读、窗口只有启动补偿扫描消费、台账只有按 owner 反查消费），所以新增的容错列举 API 若不被调用，①层的「不阻塞用户流程」是**预防性**收益。真正的止血来自在途的自动化线修复。若 owner 要求①层立刻产生可观测收益，需先解出零余量文件的余量（见 R4）。
 - **[L2 推定仍可能误判]**（r2 改写）→ L2 的四条窗口条件全部可从窗口记录自身复算，但「目标已不在」仍可能因人工移动或未登记的读路径而误判。**L2 只对证据等级表标 L2 的类型有效**；其余一律只报不删；闸 2 的类型白名单是最后一道防线；销账前必过闸 1（owner 凭清单确认）。
-- **[L1 过宽会把「删除进行中 / 删除已失败」当成已删]**（r2 新增）→ L1 收紧为四条（墓碑存在 + `phase == deleted` + `deleted_at` 有值 + 无 pending failure）；`purging`、缺完成时间与带 pending failure 的墓碑归「**证据不足 / 删除未完成 → 只报不删残留**」（**不**归「不可判定」——「不可判定」只指读取失败）。**实测现场 12 份墓碑全为 `deleted`、无 `pending-failures/` 目录**；`purging` 样本**待实现时核实**（技术方案 §11 U13）。
+- **[L1 过宽会把「删除进行中 / 删除已失败」当成已删]**（r2 新增）→ L1 收紧为四条（墓碑存在 + `phase == deleted` + `deleted_at` 有值 + 无 pending failure）；`purging`、缺完成时间与带 pending failure 的墓碑归「**证据不足 / 删除未完成 → 只报不删残留**」（**不**归「不可判定」——「不可判定」只收**读取失败**或**所需存在性数据源 / 作用域不可用**）。**实测现场 12 份墓碑全为 `deleted`、无 `pending-failures/` 目录**；`purging` 样本**待实现时核实**（技术方案 §11 U13）。
 - **[规划面窗口被误判悬空并被物理删除]**（r2 新增）→ 存在性核对**两路都做**（coding attempt / workspace session），任一路命中即判「仍在」。**实测 12/12 为 coding attempt 形态**，规划面形态无样本 → 现场行为**待实现时核实**。
 - **[路二的数据源不可得 → 活窗口被误判]**（r3 新增，闭环复审 N-5）→ 窗口 / 快照记录不带 `project_id` / `issue_id`，`list_workspace_sessions` 必须两者齐备 → 巡检 MUST **遍历全部 project × issue 枚举**建 session id 集合；`find_workspace_session_path`（`pub(super)`，新模块调不到）与 `get_workspace_session`（读路径写回副作用）**都不可用**。枚举失败一律归**不可判定**，MUST NOT 当成「不存在」。
 - **[同 attempt 混合状态时误删窗口]**（r3 新增，闭环复审 N-9）→ `purge_for_attempts` 按 attempt id **批量**删除该 attempt 名下全部窗口（含归档），而 L2 四条件按**窗口**判 → 销账 MUST **按 attempt 聚合、全部满足才删**（决策 7）。本现场 6 窗口恰好全满足 → 现场不暴露，**待实现时核实**（技术方案 §11 U15）。
@@ -293,7 +300,7 @@ r1 写的「销账与取代逻辑竞争 intent 文件 → 用『缺失=已清』
 - **[单一台账长期增长]** → 有意为之（审计留存）；保留期与轮转策略待 owner 依既有审计留存惯例裁定。
 - **[cleanup_id 哈希碰撞导致漏记]** → 概率可忽略；采用全量比对（而非仅 hash 比对）可彻底消除，台账量级小时成本可忽略。
 - **[留痕台账落点是新分区，与「留痕进已有删除记录机制」的 owner 表述有出入]**（r2 新增）→ 既有删除记录机制经核实**无法承载**（语义/基数/覆盖三重不匹配，且墓碑根每 issue 级、无全局根）；已如实更正表述，**行形态**沿用既有根级 JSONL 审计规范。落点归属**需 owner 拍板**（技术方案 §11 U10）。
-- **[九个目标类型中有三类的确切读 API 未核实]**（checkout / aggregate_index / logical_repository member）→ 因上游不可定义，r2 已把这三类**降级为「只报不删」**并在清单中标注，不阻塞其余类型。实施时若能定位读 API 并定义上游，可提出升级提案（不改本 spec）。
+- **[U1 四类（checkout / aggregate_index / logical_member / enrollment）的存在性在判定面不可判定]**（r4 更正）→ 读 API 已核实：`LogicalCodebaseStore::list_checkouts`（`src/product/logical_codebase/store.rs:792`）/ `load_checkout`（`:777`）、`list_members`（`:751`）/ `load_member`（`:736`）+ `LogicalCodebaseManifest.member_ids`（`store.rs:32`）、`AggregateIndexStore::get`（`src/product/logical_codebase/aggregate_index/store.rs:72`）、`IssueAutomationStore::get`（`src/product/issue_automation_store.rs:69`）；但 checkout / aggregate_index / logical_member 的记录落在 `logical-codebases/<lc_id>/`，核对 MUST 先按 `LogicalCodebaseStore::list(project_id)`（`:249`）枚举 LC 再以 `for_lc` 作用域化读取，而 Task 2 的判定面**没有** LC 上下文（`LogicalCodebaseStore::new(paths)` 走 legacy 根，直接读会**换个方式**继续误报「不存在」）。→ 判定面对这四类 **MUST 报「不可判定」（`Unknown`）**，MUST NOT 报「不存在」；真实读属持有 LC 上下文的 Task 4。四类仍**只报不删**，不阻塞其余类型。
 - **[巡检清单落点]**（r2 已消解）→ 按 `rule://document-storage` 的「分析报告 → `cadence/analysis-docs/`」分类统一落点，不再与规则分类表冲突。
 
 ## Migration Plan
@@ -311,7 +318,7 @@ r1 写的「销账与取代逻辑竞争 intent 文件 → 用『缺失=已清』
 ## Open Questions
 
 - 告警条数上界与去重键的最终取值（REQ-DRG-07 只约束「有上界」与「同键去重」，不约束具体数值）——可由实施者依既有日志/事件上界惯例裁定，不改变 spec。
-- checkout / aggregate_index / member 三类目标的读 API 定位——r2 已把这三类**降级为「只报不删」**；实施期若能定位读 API 并定义上游，可提出升级提案（**不改变本 spec**）。
+- checkout / aggregate_index / member 三类目标的读 API——**r4 已核实**（`list_checkouts` / `load_checkout`、`list_members` / `load_member`、`AggregateIndexStore::get`，均须 `for_lc` 作用域化且 LC 由 `LogicalCodebaseStore::list(project_id)` 枚举）；三类仍**只报不删**，判定面在无 LC 上下文时 MUST 报「不可判定」（`Unknown`）；实施期若能定义上游并可算，可提出升级提案（**不改变本 spec**）。
 - 台账保留期与轮转策略——由 owner 依既有审计留存惯例裁定，不改变 spec。
 - 启动补偿扫描是否接入容错列举（取决于 `code_review.rs` 能否解出行数余量）——属在途工作与门禁治理的决策，不改变本能力的三层结构。
 - **（r2 新增，需 owner 拍板）销账留痕台账的落点归属**：既有删除记录机制经核实无法承载（每 issue 级逐实体墓碑，无全局根，语义/基数/覆盖三重不匹配）。当前方案落 `{state_root}/entity-deletions/dangling-reference/cleanup.jsonl`（**目录由本 change 新建**，行形态沿用既有根级 JSONL 审计规范）；是否改归既有根级审计分区范式（如 `tool-policy-run-audit/` 同级的新分区）由 owner 裁定——**不改变本 spec**（REQ-DRG-16 只约束「落在**状态根下单一全局**追加式 JSONL 台账」与行形态）。

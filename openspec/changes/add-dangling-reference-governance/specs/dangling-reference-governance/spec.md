@@ -24,6 +24,11 @@
 > ⑧ **REQ-DRG-12 的窗口删除粒度改为按 attempt 聚合**：该 attempt 全部窗口都满足才删；
 > ⑨ **REQ-DRG-22 写死残留条目是否进摘要**（进），并排除未归类条目；
 > ⑩ **REQ-DRG-09 点名 intent 的五个授权引用字段与 enrollment 的全部引用字段**；REQ-DRG-02 补「`deleted_at` 缺失」场景。
+>
+> **r4 修订说明（2026-10-28，实施审查后）**：本轮把**存在性判定的三态语义**写进契约，并落实此前挂「待核实」的读 API，**不改变任何 owner 边界**。要点：
+> ① **REQ-DRG-01 改为三态判定**（`Exists` / `Missing` / `Unknown`）：存在性数据源或所需作用域在本判定面不可用时 MUST 归「不可判定」（REQ-DRG-23），MUST NOT 判为「不存在」；目标类型名统一为 `logical_member`（正文原误写 `logical_repository(member)`，与 REQ-DRG-02 附表、设计 §3.1.2 / §3.3.2 及实现一致）。
+> ② **REQ-DRG-02 附表 #7–#10 的存在性来源落实为具体读 API 与作用域**：checkout / aggregate_index / logical_member 的记录落在 `logical-codebases/<lc_id>/`，核对 MUST 先按 `LogicalCodebaseStore::list(project_id)` 枚举 LC 再以 `for_lc` 作用域化读取；enrollment 的来源 `{issue_root}/automation-enrollment.json` 已可读（`IssueAutomationStore::get`），不再挂「待核实」。附表「两类非可删结论」的「证据不足」行补前提「**目标已判定为不存在**」。
+> ③ **REQ-DRG-23 的「不可判定」定义扩为「读取失败 **或** 所需存在性数据源 / 作用域不可用」**；REQ-DRG-17 / 22 明确判为 `Unknown` 的条目 MUST NOT 计入悬空条目数、MUST NOT 计入归零、MUST NOT 进入令牌的发现集合。
 
 ### 目标行为映射
 
@@ -57,17 +62,19 @@
 
 ### Requirement: 引用目标类型按字段名判定（REQ-DRG-01）
 
-系统 MUST 以「记录类型 → 引用字段 → 目标实体类型」的静态映射判定引用指向，判定依据 MUST 是字段名而非实体 id 前缀。目标实体类型 MUST 覆盖 story_spec、design_spec、plan、session、attempt、checkout、aggregate_index、logical_repository(member)、enrollment 九类。系统 MUST NOT 依赖实体 id 的字符串前缀来推断类型。
+系统 MUST 以「记录类型 → 引用字段 → 目标实体类型」的静态映射判定引用指向，判定依据 MUST 是字段名而非实体 id 前缀。目标实体类型 MUST 覆盖 story_spec、design_spec、plan、session、attempt、checkout、aggregate_index、logical_member、enrollment 九类。系统 MUST NOT 依赖实体 id 的字符串前缀来推断类型。
+
+存在性判定 MUST 为**三态**：`Exists`（明确命中）/ `Missing`（**明确未命中**）/ `Unknown`（**无法判定**）。存在性数据源或所需作用域在本判定面不可用时，MUST 判 `Unknown` 并归「不可判定」（REQ-DRG-23），MUST NOT 判 `Missing`；读取失败同样 MUST NOT 判 `Missing`，MUST 原样上抛。核对数据源见 REQ-DRG-02 附表「存在性来源」列。
 
 #### Scenario: 无前缀的 enrollment id 仍可判定
 
 - **WHEN** 某记录以 `enrollment_id` 字段引用一个授权记录，且该 id 是不带任何固定前缀的字符串
-- **THEN** 系统 MUST 按字段名判定其目标类型为 enrollment 并核对目标是否仍存在，MUST NOT 因 id 无前缀而放弃判定
+- **THEN** 系统 MUST 按字段名判定其目标类型为 enrollment，并以 `{issue_root}/automation-enrollment.json`（`IssueAutomationStore::get`，`src/product/issue_automation_store.rs:69`）核对目标是否仍存在，MUST NOT 因 id 无前缀而放弃判定；当判定面不持有该记录所属的 project/issue 作用域、无法读该文件时，该条 MUST 归「不可判定」（REQ-DRG-23），MUST NOT 判为「不存在」
 
 #### Scenario: 强类型 checkout 引用仍可判定
 
 - **WHEN** 某记录以 `checkout_id` 字段引用一个 checkout 记录
-- **THEN** 系统 MUST 按字段名判定其目标类型为 checkout 并核对目标是否仍存在
+- **THEN** 系统 MUST 按字段名判定其目标类型为 checkout，并以 `LogicalCodebaseStore::list_checkouts`（`src/product/logical_codebase/store.rs:792`；单条读 `load_checkout`，`:777`）核对目标是否仍存在；因 checkout 记录落在 `logical-codebases/<lc_id>/`，核对 MUST 先按 `LogicalCodebaseStore::list(project_id)`（`:249`）枚举 LC、再以 `LogicalCodebaseStore::for_lc(paths, lc_id)` 作用域化读取；判定面未持有 LC 上下文时该条 MUST 归「不可判定」（REQ-DRG-23），MUST NOT 判为「不存在」
 
 #### Scenario: 表外记录类型不猜引用语义
 
@@ -78,13 +85,13 @@
 
 系统 MUST 将「目标记录不存在」区分为两级证据。
 
-**L1 直证** MUST 由以下四条**同时成立**构成：① 目标实体存在删除墓碑记录；② 墓碑记录的删除阶段为**已完成**；③ 墓碑记录带有完成时间；④ 该实体**没有**待人工处置的删除失败事实。任一条不成立时，系统 MUST NOT 判定为 L1。
+**L1 直证** MUST 由以下四条**同时成立**构成：① 存在删除墓碑；② 删除阶段为**已完成**；③ 带完成时间；④ **无**待人工处置的删除失败事实。任一条不成立 MUST NOT 判 L1。
 
-**L2 推定** MUST 要求「目标记录不存在」与「**该类型的专属可算条件**」（见证据等级表）同时成立，MUST NOT 用统一的「上游不可达」表述替代。
+**L2 推定** MUST 要求「目标不存在」与「**该类型的专属可算条件**」（见等级表）同时成立，MUST NOT 用统一的「上游不可达」替代。
 
-系统 MUST 维护一张「目标类型 → 存在性来源 → 唯一可达上游 → L2 专属可算条件 → 可删证据等级」的表作为销账白名单的**单一事实源**（表体见本 REQ 末尾）：**L1 可删**；**L2 仅对该表标为 L2 的类型、且其专属可算条件成立时可删**；其余一律只报不删；无法定义上游的类型 **MUST 降级为只报不删**；**实体删除墓碑 MUST 永不删除**。
+系统 MUST 维护一张「目标类型 → 存在性来源 → 唯一可达上游 → L2 专属可算条件 → 可删证据等级」的表作为销账白名单的**单一事实源**（表体见末尾）：**L1 可删**；**L2 仅对表中标 L2 且专属可算条件成立的类型可删**；其余一律只报不删；无法定义上游者 **MUST 降级为只报不删**；**墓碑 MUST 永不删除**。
 
-「不可判定」**只指读取失败**；已判定为悬空但证据不足者 MUST 归「证据不足 / 删除未完成」，MUST NOT 归「不可判定」。
+「不可判定」指读取失败**或所需存在性数据源 / 作用域不可用**（REQ-DRG-01 / 23）；已判「不存在」但证据不足者 MUST 归「证据不足 / 删除未完成」，MUST NOT 归「不可判定」。
 
 #### Scenario: 墓碑直证已删
 
@@ -116,9 +123,9 @@
 - **WHEN** 某目标类型在可删等级表中被标为 L2，且其专属可算条件成立
 - **THEN** 系统 MUST 判定其证据等级为 L2，并在清单中如实标注为推定而非墓碑
 
-#### Scenario: 不可判定只指读取失败
+#### Scenario: 证据不足不得冒充不可判定
 
-- **WHEN** 某条引用的目标已被判定为不存在但证据等级不足（L1 四条缺一、或 L2 专属条件不成立）
+- **WHEN** 某条引用的目标已被判定为不存在（`Missing`）但证据等级不足（L1 四条缺一、或 L2 专属条件不成立）
 - **THEN** 该条目 MUST 计入悬空条目数并归入「只报不删残留」节，MUST NOT 归入「不可判定」节
 
 #### Scenario: 无法定义上游的类型降级
@@ -141,17 +148,17 @@
 | 4 | `Session` | `list_workspace_sessions` | session → enrollment 绑定 | 不可用（无独立墓碑，且缺失属正常中间态） | **只报不删** |
 | 5 | `Attempt`（路 1 coding attempt） | `get_attempt_by_id` | attempt 记录无 `plan_id`，上游不可从 attempt 解析 | **由窗口记录自身给出的四条**（REQ-DRG-12） | **L2** |
 | 6 | `Attempt`（路 2 规划面 workspace session） | `list_workspace_sessions` | 同 #4 | **由窗口记录自身给出的四条**（REQ-DRG-12） | **L2** |
-| 7 | `Checkout` | LC checkout 记录（读 API 待实现时核实） | 未核实，无法定义 | 不可用（上游无法定义） | **只报不删** |
-| 8 | `AggregateIndex` | LC aggregate-index 记录（读 API 待实现时核实） | 未核实，无法定义 | 不可用（上游无法定义） | **只报不删** |
-| 9 | `LogicalMember` | LC manifest 成员集（读 API 待实现时核实） | 未核实，无法定义 | 不可用（上游无法定义） | **只报不删** |
-| 10 | `Enrollment` | `{issue_root}/automation-enrollment.json` | 无上游（授权根） | 不可用（永不删） | **只报不删（永不删）** |
+| 7 | `Checkout` | `LogicalCodebaseStore::list_checkouts`（`src/product/logical_codebase/store.rs:792`）/ `load_checkout`（`:777`），须以 `for_lc` 作用域化；LC 由 `LogicalCodebaseStore::list(project_id)`（`:249`）枚举 | 未核实，无法定义 | 不可用（上游无法定义） | **只报不删** |
+| 8 | `AggregateIndex` | `AggregateIndexStore::get`（`src/product/logical_codebase/aggregate_index/store.rs:72`），须以 `for_lc` 作用域化 + 同上 LC 枚举 | 未核实，无法定义 | 不可用（上游无法定义） | **只报不删** |
+| 9 | `LogicalMember` | `LogicalCodebaseStore::list_members`（`src/product/logical_codebase/store.rs:751`）/ `load_member`（`:736`）＋ `LogicalCodebaseManifest.member_ids`（`store.rs:32`），须以 `for_lc` 作用域化 + 同上 LC 枚举 | 未核实，无法定义 | 不可用（上游无法定义） | **只报不删** |
+| 10 | `Enrollment` | `{issue_root}/automation-enrollment.json`（`IssueAutomationStore::get`，`src/product/issue_automation_store.rs:69`） | 无上游（授权根） | 不可用（永不删） | **只报不删（永不删）** |
 
 **附：两类非可删结论的区分（MUST NOT 混用）**
 
 | 类别 | 触发条件 | 归属节 | 计入悬空条目数 | 计入归零 |
 |---|---|---|---|---|
-| **不可判定（读取失败）** | 判定目标存在性时因 IO / 解析 / 权限错误**无法完成判定** | 清单「不可判定」节（REQ-DRG-23） | 否 | 否 |
-| **证据不足 / 删除未完成** | 目标已判定为不存在，但证据等级不足 L1（墓碑进行中、墓碑缺完成时间、存在待人工处置的删除失败事实、无墓碑、上游无法定义、降级类型） | 清单「只报不删残留」节（REQ-DRG-11） | 是 | 否 |
+| **不可判定（读取失败 / 数据源或作用域不可用）** | 判定目标存在性时因 IO / 解析 / 权限错误**无法完成判定**，**或**该目标所需存在性数据源 / 作用域在本判定面不可用（存在性判为 `Unknown`） | 清单「不可判定」节（REQ-DRG-23） | 否 | 否 |
+| **证据不足 / 删除未完成** | **前提：目标已判定为不存在（`Missing`）**；在此前提下证据等级不足 L1（墓碑进行中、墓碑缺完成时间、存在待人工处置的删除失败事实、无墓碑、上游无法定义、降级类型） | 清单「只报不删残留」节（REQ-DRG-11） | 是 | 否 |
 
 ### Requirement: 读侧容错只对旁支引用生效（REQ-DRG-03）
 
@@ -355,8 +362,8 @@
 
 #### Scenario: 不可判定单列一节
 
-- **WHEN** 巡检因读取失败无法判定某条引用
-- **THEN** 该条目 MUST 出现在不可判定节，MUST NOT 被计入悬空条目数
+- **WHEN** 巡检因读取失败、或所需存在性数据源 / 作用域不可用（存在性判为 `Unknown`）而无法判定某条引用
+- **THEN** 该条目 MUST 出现在不可判定节，MUST NOT 被计入悬空条目数，MUST NOT 进入令牌的发现集合（REQ-DRG-22）
 
 ### Requirement: 销账规则表（REQ-DRG-12）
 
@@ -505,7 +512,7 @@ reviewer 窗口簇的 L2 条件 MUST 由窗口记录自身可算的四条构成�
 
 ### Requirement: 闸 3：清理后自证归零（REQ-DRG-17）
 
-销账完成后 MUST 再执行一次巡检。归零计数 MUST **只统计销账白名单内且本次可删的类型**；MUST NOT 把「只报不删残留」或「不可判定」计入归零。存在未归零的可删条目时，系统 MUST 逐条列出，MUST NOT 宣称悬空引用已治理完成。存在任一「不可判定」条目时，系统 MUST NOT 宣称归零。
+销账完成后 MUST 再执行一次巡检。归零计数 MUST **只统计销账白名单内且本次可删的类型**；MUST NOT 把「只报不删残留」或「不可判定」计入归零。存在性判为「无法判定」（`Unknown`，REQ-DRG-01 / 23）的条目 MUST 归「不可判定」，MUST NOT 计入悬空条目数，MUST NOT 计入归零计数。存在未归零的可删条目时，系统 MUST 逐条列出，MUST NOT 宣称悬空引用已治理完成。存在任一「不可判定」条目时，系统 MUST NOT 宣称归零。
 
 #### Scenario: 归零计数逐类给出
 
@@ -702,7 +709,7 @@ MUST NOT 以「幂等」为由免除锁语义。
 
 ### Requirement: 确认令牌的计算与校验口径（REQ-DRG-22）
 
-确认令牌 MUST 等于本次巡检**发现集合的规范化序列化**的摘要。发现集合 = 本次巡检**判定为悬空**的条目（含其中「只报不删残留」的条目）；**未归类条目与不可判定条目不属于发现集合**。规范化序列化 MUST：按记录路径升序排序（同记录路径再按引用字段与目标 id 升序）；每条只含记录路径、记录类型、引用字段、引用目标类型、引用目标 id、证据等级与建议动作七个字段；MUST NOT 包含巡检时间、令牌行自身、不可判定条目、未归类条目，或清单中的说明性文字（汇总栏、只报不删残留栏与不可判定栏的栏目标题与说明文字）。**「只报不删残留」条目本身的七个字段值 MUST 参与摘要**——只排除其所在栏目的说明文字，不排除条目本身。
+确认令牌 MUST 等于本次巡检**发现集合的规范化序列化**的摘要。发现集合 = 本次巡检**判定为悬空**（目标已判定为不存在）的条目（含其中「只报不删残留」的条目）；**未归类条目与不可判定条目（含 `Unknown`）不属于发现集合**。规范化序列化 MUST：按记录路径升序排序（同记录路径再按引用字段与目标 id 升序）；每条只含记录路径、记录类型、引用字段、引用目标类型、引用目标 id、证据等级与建议动作七个字段；MUST NOT 包含巡检时间、令牌行自身、不可判定条目、未归类条目，或清单中的说明性文字（汇总栏、只报不删残留栏与不可判定栏的栏目标题与说明文字）。**「只报不删残留」条目本身的七个字段值 MUST 参与摘要**——只排除其所在栏目的说明文字，不排除条目本身。
 
 开启销账时，系统 MUST 在入口内部**重新执行一次巡检**并重算摘要与调用方提供的令牌比对；不一致时 MUST 拒绝执行、零删除、零留痕。系统 MUST NOT 依赖调用方提供清单文件路径来定位「当前清单」。
 
@@ -735,11 +742,11 @@ MUST NOT 以「幂等」为由免除锁语义。
 
 ### Requirement: 巡检的「不可判定」隔离（REQ-DRG-23）
 
-巡检在某条引用的目标核对上因读取失败（IO 失败、解析失败、权限错误）而无法完成判定时，MUST 把该条记入**不可判定**计数：MUST NOT 计入悬空条目数，MUST NOT 计入归零计数，MUST NOT 被判为未归类。清单 MUST 逐条列出不可判定条目及其失败原因。存在不可判定条目时，系统 MUST NOT 宣称悬空引用已治理完成。
+巡检在某条引用的目标核对上**无法完成判定**时，MUST 记入**不可判定**计数：MUST NOT 计入悬空条目数，MUST NOT 计入归零，MUST NOT 判为未归类。清单 MUST 逐条列出条目与失败原因。存在不可判定条目时 MUST NOT 宣称治理完成。
 
-「不可判定」在本能力中**只指读取失败**；已判定为悬空但证据不足的情形归入「证据不足 / 删除未完成」（REQ-DRG-02），MUST NOT 归入不可判定。
+「无法完成判定」覆盖两种情形：① **读取失败**（IO / 解析 / 权限）；② **所需存在性数据源或作用域不可用**（如缺 LC 上下文、缺记录所属 project/issue 作用域），此时存在性判为 `Unknown`（REQ-DRG-01），MUST NOT 退化为 `Missing`。证据不足（已判 `Missing`）归「证据不足 / 删除未完成」（REQ-DRG-02），MUST NOT 归入不可判定。
 
-**巡检自身扫描到的记录**解析失败、或某个分区目录不可读时，同样 MUST 记入不可判定计数，MUST NOT 被静默跳过——否则会漏报条目，进而把「漏报」误算成「已归零」。
+巡检自身扫到的坏记录或不可读分区同样 MUST 记入不可判定，MUST NOT 被静默跳过。
 
 #### Scenario: 读失败不计入悬空
 
@@ -765,3 +772,8 @@ MUST NOT 以「幂等」为由免除锁语义。
 
 - **WHEN** 某条目已被判定为悬空但证据等级不足
 - **THEN** 该条目 MUST 归入只报不删残留节，MUST NOT 归入不可判定节
+
+#### Scenario: 存在性数据源不可用时记不可判定
+
+- **WHEN** 某条引用的目标类型所需的存在性数据源或作用域在本判定面不可用（例如判定面没有 LC 上下文却要核对 checkout / aggregate_index / logical_member，或没有记录所属的 project/issue 作用域却要核对 enrollment）
+- **THEN** 该条 MUST 判为「无法判定」（`Unknown`）并计入不可判定计数，MUST NOT 计入悬空条目数，MUST NOT 被判为「不存在」，MUST NOT 计入归零
