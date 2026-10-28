@@ -214,9 +214,11 @@
 
 读侧容错 MUST 只吞「引用目标记录不存在」这一种错。JSON 解析失败、schema 不符、IO 失败、权限错误 MUST 照旧上抛，MUST NOT 被降级为「跳过该条目」。
 
+**例外（reviewer 窗口面）**：reviewer 窗口清单 MUST 沿用既有 `ReviewerWindowStore::list_windows` 的既有语义——单条窗口记录读失败按既有语义「跳过该条并告警」，其目录级读取失败仍 MUST 照旧上抛；其余三面（intent / 快照 / 实体台账）读失败 MUST 一律以 `Err` 上抛，MUST NOT 被降级为「跳过该条目」。本例外 MUST NOT 扩展到其它面或目录级失败，MUST NOT 改写既有函数行为。
+
 #### Scenario: 解析失败照旧上抛
 
-- **WHEN** 列举过程中遇到一条 JSON 解析失败的旁支记录
+- **WHEN** 列举自动化 intent / reviewer 快照 / 实体身份台账时遇到一条 JSON 解析失败的旁支记录
 - **THEN** 系统 MUST 照旧报告该解析错误，MUST NOT 把它当作悬空条目跳过并告警
 
 #### Scenario: IO 失败照旧上抛
@@ -228,6 +230,16 @@
 
 - **WHEN** 某条旁支记录引用的目标记录确实不存在
 - **THEN** 系统 MUST 跳过该条目并产生告警，MUST NOT 报错
+
+#### Scenario: reviewer 窗口单条坏记录沿用既有跳过语义
+
+- **WHEN** 列举 reviewer 窗口，其中一条窗口记录自身 JSON 解析失败或 schema 不符
+- **THEN** 系统 MUST 沿用 `ReviewerWindowStore::list_windows`（`src/product/reviewer_window_store.rs:1160`）的既有语义：跳过该条并留下告警痕迹，MUST NOT 使整次列举失败，MUST NOT 把该条计为悬空条目，MUST NOT 产生 REQ-DRG-07 定义的 `dangling_reference_target_missing` 告警（该条无可判定的引用目标 id）
+
+#### Scenario: reviewer 窗口目录级失败仍上抛
+
+- **WHEN** 列举 reviewer 窗口时窗口分区目录不可读
+- **THEN** 系统 MUST 照旧上抛该 IO 错误，MUST NOT 静默返回部分结果
 
 ### Requirement: fail-closed 读路径不接入容错（REQ-DRG-06）
 
@@ -748,6 +760,8 @@ MUST NOT 以「幂等」为由免除锁语义。
 
 巡检自身扫到的坏记录或不可读分区同样 MUST 记入不可判定，MUST NOT 被静默跳过。
 
+**边界**：本条约束**巡检面**（容错列举面的窗口跳过见 REQ-DRG-05）。
+
 #### Scenario: 读失败不计入悬空
 
 - **WHEN** 巡检因读取失败无法判定某条引用的目标是否存在
@@ -777,3 +791,8 @@ MUST NOT 以「幂等」为由免除锁语义。
 
 - **WHEN** 某条引用的目标类型所需的存在性数据源或作用域在本判定面不可用（例如判定面没有 LC 上下文却要核对 checkout / aggregate_index / logical_member，或没有记录所属的 project/issue 作用域却要核对 enrollment）
 - **THEN** 该条 MUST 判为「无法判定」（`Unknown`）并计入不可判定计数，MUST NOT 计入悬空条目数，MUST NOT 被判为「不存在」，MUST NOT 计入归零
+
+#### Scenario: 容错列举面的窗口跳过不算静默
+
+- **WHEN** 同一条损坏的 reviewer 窗口记录分别被容错列举面（REQ-DRG-05 例外：沿用既有 `list_windows` 语义跳过并留下告警痕迹）与巡检面读到
+- **THEN** 容错列举面 MUST 按既有语义跳过该条并留下告警痕迹，MUST NOT 使整次列举失败；巡检面 MUST 逐条读出该条并记入不可判定，MUST NOT 被静默跳过

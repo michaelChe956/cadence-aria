@@ -6,9 +6,11 @@
 //! 失败（REQ-DRG-03）。全部为只读 IO（不写回、不取 lease）。
 //!
 //! 三条边界：
-//! 1. **只吞「目标已删」**（REQ-DRG-05）：JSON 解析失败 / schema 不符 /
-//!    IO 失败 / 权限错误一律以 `Err` 原样上抛，MUST NOT 被降级成「跳过该
-//!    条目」；
+//! 1. **只吞「目标已删」**（REQ-DRG-05）：本模块自身产生的读错（JSON 解析失败 /
+//!    schema 不符 / IO 失败 / 权限错误）一律以 `Err` 原样上抛，MUST NOT 被降级成
+//!    「跳过该条目」；唯一既有豁免是 reviewer 窗口面——`ReviewerWindowStore::list_windows`
+//!    （`src/product/reviewer_window_store.rs:1160`）对单条坏记录按既有语义
+//!    「warn + 跳过」，其目录级读取失败仍照旧上抛（本模块不改既有函数）；
 //! 2. **主记录缺失语义不变**（REQ-DRG-04）：本模块只新增旁支 / 记账类
 //!    记录的列举面，MUST NOT 改动任何既有主记录读路径（`story_spec_not_found`
 //!    等错误码与文案逐字不变），既有 fail-closed 读路径不接入容错
