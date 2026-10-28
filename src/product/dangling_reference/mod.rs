@@ -4,9 +4,12 @@
 //! 去重上界（REQ-DRG-01 / REQ-DRG-07）。全部为静态表与纯数据结构，**不做任何 IO**，
 //! 也不接线任何调用点；存在性核对、容错列举、巡检与销账由后续任务追加子模块。
 
-pub(crate) mod reference_table;
+// Task 1 只产出静态表与纯结构，调用点自 Task 2 起接线，故非测试构建下这些项
+// 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table`）。
+// **全部接线完成后（Task 9）删除本行**，让死代码重新回到门禁视野。
+#![allow(dead_code)]
 
-pub(crate) use reference_table::DanglingRecordType;
+pub(crate) mod reference_table;
 
 /// 悬空引用告警的单一稳定码（REQ-DRG-07）。
 pub(crate) const DANGLING_REFERENCE_WARNING_CODE: &str = "dangling_reference_target_missing";
@@ -21,7 +24,7 @@ pub(crate) struct DanglingReferenceWarning {
     pub(crate) code: String,
     /// 记录路径（相对状态根）。
     pub(crate) record_path: String,
-    /// 记录类型标识（[`DanglingRecordType::as_str`] 取值）。
+    /// 记录类型标识（[`reference_table::DanglingRecordType::as_str`] 取值）。
     pub(crate) record_type: String,
     /// 命中的引用字段路径。
     pub(crate) reference_field: String,
@@ -108,6 +111,16 @@ mod warning_tests {
             target_id: target_id.to_string(),
             action: "skipped".to_string(),
         }
+    }
+
+    #[test]
+    fn dangling_reference_warning_code_and_limit_lock_literal_values() {
+        // 逐字锁定契约字面值：改码或改上界必须显式改断言。
+        assert_eq!(
+            DANGLING_REFERENCE_WARNING_CODE,
+            "dangling_reference_target_missing"
+        );
+        assert_eq!(DANGLING_REFERENCE_WARNING_LIMIT, 64);
     }
 
     #[test]
