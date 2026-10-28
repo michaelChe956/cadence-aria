@@ -938,6 +938,107 @@ impl super::WorkspaceEngine {
             _ => CandidateRecoveryOutcome::NeedsHuman { facts },
         })
     }
+
+    /// 重启期收口（B）：durable `status=running` ∧ 引擎 stage `HumanConfirm`
+    /// ∧ **本进程无活动 run** 的会话，只可能是上一进程在飞 run 的 provider 已
+    /// 随进程消失（registry 单例契约：manager 创建时不存在幸存 run）。
+    ///
+    /// 为什么必须收口：F-23 僵尸臂的 stage 集合是
+    /// `Running/CrossReview/Revision`，**不含** `HumanConfirm`；委托返修孤儿臂
+    /// （`recover_delegated_author_rerun_failure`）只覆盖「phase=Generate 的
+    /// 委托接力」窄判据。两者都不命中时会话永久停在 `running`，而
+    /// `confirm`/`human_gate_feedback` 都要求 `waiting_for_human`——人工无从
+    /// 处置，且没有任何 provider 存在。
+    ///
+    /// 处置：回落**既有**可恢复终态 `waiting_for_human`（门重开，stage 不变），
+    /// **不启动 provider**——已开始过的 provider 工作不自动重跑（避免双跑
+    /// 副作用）；人可经既有 wire 动作继续（`human_gate_feedback` 重新提交
+    /// 反馈 / `confirm` 定稿 / `abandon_human_gate` 放弃）。
+    ///
+    /// 返回是否发生转移（调用方据此广播投影）。
+    pub(crate) async fn recover_human_confirm_lost_provider_at_restart(&mut self) -> bool {
+        if self.active_run_id.is_some()
+            || self.session.session_status
+                != crate::product::models::WorkspaceSessionStatus::Running
+            || self.session.stage != super::WorkspaceStage::HumanConfirm
+        {
+            return false;
+        }
+        let summary = "进程重启：在飞 provider 已不存在（本进程无活动 run），已回落人工门——\
+                       本轮 provider 工作未自动重跑，请重新提交反馈或确认/放弃"
+            .to_string();
+        eprintln!(
+            "[aria-recovery] human_confirm lost-provider run recovered to waiting_for_human session={}",
+            self.session.session_id
+        );
+        // 先经既有事件通道留痕（与委托孤儿回落同源），再走既有「回落人工门」
+        // 收口：`enter_human_confirm` 落 durable `waiting_for_human` + 门节点
+        // Active + HumanGateOpened 事件，stage 保持 HumanConfirm。
+        let _ = self
+            .event_tx
+            .send(super::EngineEvent::Error {
+                message: summary.clone(),
+            })
+            .await;
+        self.enter_human_confirm(Some(summary)).await;
+        // 幂等由此处上方的 `Running` 门承担：回落写完成后 status 已是
+        // `waiting_for_human`，再次调用直接返回 false。
+        true
+    }
+
+    /// 重启期收口（B）：`Running` 的 turn 意味着上一进程的 provider **已启动**、
+    /// 未收口，且其进程必已随进程消失。此处按既有终态
+    /// `Failed(ProviderErr)`（与 turn attempt 上限同族）收口，使既有恢复链
+    /// 不再为该 turn 安排 `ResumeSameTurn`——自动续跑＝重复执行已开始过的
+    /// provider 工作（双跑副作用）。人工可经既有 `human_gate_feedback` 提交
+    /// 新一轮（预算/hold 语义原样由该路径承担）。
+    ///
+    /// `Reserved`（durable 证明 provider 未启动）不在本范围：那类 turn 仍由
+    /// 既有恢复链安全续跑 attempt 1。
+    ///
+    /// 返回收口的 turn 数（调用方据此广播投影）。
+    pub(crate) async fn fail_human_gate_turns_lost_provider_at_restart(&mut self) -> usize {
+        if self.active_run_id.is_some() {
+            return 0;
+        }
+        let Some(store) = self.lifecycle_store.clone() else {
+            return 0;
+        };
+        let turns = match store.list_human_gate_turns(&self.session.session_id) {
+            Ok(turns) => turns,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %self.session.session_id,
+                    error = %error,
+                    "restart lost-provider turn scan failed"
+                );
+                return 0;
+            }
+        };
+        let mut closed = 0usize;
+        for turn in turns
+            .iter()
+            .filter(|turn| turn.status == HumanGateTurnStatus::Running)
+        {
+            match self
+                .fail_human_gate_turn(&turn.turn_id, HumanGateTurnFailureClass::ProviderErr)
+                .await
+            {
+                Ok(true) => closed += 1,
+                // 已被并发收口（Completed/Failed）：终态优先，不重复写。
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %self.session.session_id,
+                        turn_id = %turn.turn_id,
+                        error = %error,
+                        "restart lost-provider turn closure failed"
+                    );
+                }
+            }
+        }
+        closed
+    }
 }
 
 #[cfg(test)]

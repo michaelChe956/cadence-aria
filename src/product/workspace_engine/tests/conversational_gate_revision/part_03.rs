@@ -960,3 +960,176 @@ async fn sg_06a_3_unclaimed_rejections_close_turn_and_unlock_gate() {
         HumanGateCommandOutcome::TurnOpened { .. }
     ));
 }
+
+/// 进程重启恢复（B）：durable `status=running` ∧ 引擎 stage `human_confirm` ∧ 无
+/// 活动 run 的会话——上一进程的在飞 provider 已随进程消失。F-23 僵尸臂的 stage
+/// 集合（Running/CrossReview/Revision）不含 HumanConfirm，委托返修孤儿臂只覆盖
+/// 「phase=Generate 委托接力」窄判据，两者都不命中时会话永久停在 running：
+/// `confirm` 与 `human_gate_feedback` 都要求 `waiting_for_human`，人工无从处置。
+/// 必须回落**既有**可恢复终态 `waiting_for_human`（门重开），且**不启动 provider**
+/// （已开始过的 provider 工作不自动重跑，避免双跑副作用）。
+#[tokio::test]
+async fn restart_redeems_human_confirm_running_session_to_waiting_for_human() {
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("restart_lost_provider", 1);
+    let session_id = engine.session().session_id.clone();
+    let ledger_before = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("record before restart")
+        .provider_start_ledger
+        .len();
+    // 重启现场：上一进程在 confirm/修订在飞时死亡——durable 仍写在途族（running）。
+    lifecycle
+        .update_workspace_session_status(
+            &session_id,
+            crate::product::models::WorkspaceSessionStatus::Running,
+        )
+        .expect("persist running status");
+    engine.session.session_status = crate::product::models::WorkspaceSessionStatus::Running;
+    engine.session.stage = crate::product::workspace_engine::WorkspaceStage::HumanConfirm;
+    engine.active_run_id = None;
+
+    let mutated = engine.recover_human_confirm_lost_provider_at_restart().await;
+    assert!(
+        mutated,
+        "重启孤儿必须被回落，不得静默留在 running（人工无从操作）"
+    );
+
+    let after = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("record after restart");
+    assert_eq!(
+        after.status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman,
+        "durable 必须回落到既有可恢复终态 waiting_for_human"
+    );
+    assert_eq!(
+        engine.session().session_status,
+        crate::product::models::WorkspaceSessionStatus::WaitingForHuman
+    );
+    assert_eq!(
+        engine.session().stage,
+        crate::product::workspace_engine::WorkspaceStage::HumanConfirm,
+        "门保持开态（stage 不变，人工可 confirm/feedback）"
+    );
+    assert!(
+        engine.active_run_id.is_none(),
+        "回落不得启动任何 provider run"
+    );
+    assert_eq!(
+        after.provider_start_ledger.len(),
+        ledger_before,
+        "回落不得追加 provider 启动账本（= 未重跑已开始过的 provider 工作）"
+    );
+    assert!(
+        !engine.recover_human_confirm_lost_provider_at_restart().await,
+        "幂等：已回落的人工门不得重复写"
+    );
+}
+
+/// 进程重启恢复（B）：`Running` 的 turn 意味着上一进程的 provider **已启动**、
+/// 未收口。重启后其进程必不存在，不得自动 `ResumeSameTurn`（那会重复执行已经
+/// 开始过的 provider 工作），按既有终态 `Failed(provider_err)` 收口——人工可经
+/// 既有 `human_gate_feedback` 重新提交新一轮。`Reserved`（provider 可证明未
+/// 启动）不在本收口范围内，仍走既有安全续跑。
+#[tokio::test]
+async fn restart_never_auto_resumes_running_human_gate_turn() {
+    let (_root, lifecycle, mut engine) = durable_revision_fixture("restart_running_turn", 2);
+    let turn_id = open_running_revision_turn(&mut engine, "restart_running_turn_cmd").await;
+    let session_id = engine.session().session_id.clone();
+    // 上一进程在 turn Running 期间死亡：本进程内无该 turn 的活动 run。
+    engine.active_run_id = None;
+
+    let closed = engine.fail_human_gate_turns_lost_provider_at_restart().await;
+    assert_eq!(closed, 1, "Running turn 必须在重启恢复时收口");
+
+    let turn = lifecycle
+        .get_human_gate_turn(&session_id, &turn_id)
+        .expect("turn after restart");
+    assert_eq!(
+        turn.status,
+        crate::product::models::HumanGateTurnStatus::Failed,
+        "Running turn 必须落到既有终态 Failed"
+    );
+    assert_eq!(
+        turn.failure_class,
+        Some(crate::product::models::HumanGateTurnFailureClass::ProviderErr),
+        "原因类复用既有 provider_err（与 attempt 上限同族）"
+    );
+    assert_eq!(turn.attempt_no, 1, "收口不得增 attempt（不自动重跑）");
+
+    let actions = engine
+        .recover_human_gate_turns(false)
+        .expect("recovery after restart");
+    assert!(
+        actions.is_empty(),
+        "既有恢复链不得再为该 turn 安排自动续跑: {actions:?}"
+    );
+}
+
+/// 进程重启恢复（B）接线验收：manager 创建恢复链
+/// (`recover_on_creation`) 必须把「durable status=running ∧ stage=human_confirm
+/// ∧ 本进程无活动 run」的会话从静默 running 救回既有可恢复终态 waiting_for_human，
+/// 且**不启动任何 provider**（不双跑已开始过的 provider 工作）。
+#[tokio::test]
+async fn restart_creation_recovery_redeems_lost_provider_session_to_waiting_for_human() {
+    use crate::cross_cutting::provider_registry::ProviderRegistry;
+    use crate::product::models::WorkspaceSessionStatus;
+    use crate::web::workspace_session::WorkspaceSessionManager;
+
+    let (_root, lifecycle, engine) = durable_revision_fixture("restart_creation_recovery", 1);
+    let session_id = engine.session().session_id.clone();
+    // 重启现场：上一进程在飞（durable running），门 stage 取自活动门节点。
+    lifecycle
+        .update_workspace_session_status(&session_id, WorkspaceSessionStatus::Running)
+        .expect("persist running status");
+    let ledger_before = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("record")
+        .provider_start_ledger
+        .len();
+    let engine = std::sync::Arc::new(tokio::sync::Mutex::new(engine));
+    {
+        let mut engine = engine.lock().await;
+        engine.session.session_status = WorkspaceSessionStatus::Running;
+        engine.session.stage = crate::product::workspace_engine::WorkspaceStage::HumanConfirm;
+        engine.active_run_id = None;
+    }
+    let record = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("record before manager");
+    let manager = WorkspaceSessionManager::test_fixture_with_parts(
+        &session_id,
+        engine.clone(),
+        std::sync::Arc::new(ProviderRegistry::new()),
+        lifecycle.app_paths().clone(),
+        record,
+    );
+
+    manager.recover_on_creation().await;
+
+    let after = lifecycle
+        .get_workspace_session(&session_id)
+        .expect("record after recovery");
+    assert_eq!(
+        after.status,
+        WorkspaceSessionStatus::WaitingForHuman,
+        "创建恢复必须把静默 running 的人工门会话救回 waiting_for_human"
+    );
+    assert!(
+        manager.active_run().await.is_none(),
+        "重启恢复不得启动 provider run（不双跑已开始过的 provider 工作）"
+    );
+    assert_eq!(
+        after.provider_start_ledger.len(),
+        ledger_before,
+        "重启恢复不得追加 provider 启动账本"
+    );
+    {
+        let engine = engine.lock().await;
+        assert_eq!(
+            engine.session().stage,
+            crate::product::workspace_engine::WorkspaceStage::HumanConfirm,
+            "门保持开态，人工可 confirm/feedback"
+        );
+    }
+}

@@ -126,13 +126,11 @@ pub(crate) mod tests;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use provider_drive::PROVIDER_IDLE_WATCHDOG_TIMEOUT_PRODUCTION;
 
+/// provider 启动握手停滞界（生效值 + 测试期注入口）。plan author 启动口
+/// (`start_work_item_plan_author`) 消费，见 `provider_drive::watchdog` 的取值理由。
+pub(crate) use provider_drive::provider_launch_stall_timeout;
 #[cfg(test)]
 pub(crate) use provider_drive::set_provider_launch_stall_timeout_for_test;
-/// provider 启动握手停滞界（生效值 + 生产值 + 测试期注入口）。plan author 启动口
-/// (`start_work_item_plan_author`) 消费，见 `provider_drive::watchdog` 的取值理由。
-pub(crate) use provider_drive::{
-    PROVIDER_LAUNCH_STALL_TIMEOUT_PRODUCTION, provider_launch_stall_timeout,
-};
 
 pub use advance::{
     AdvanceInput, AdvanceOutcome, AdvancePlanAdmission, AdvanceRecord, AdvanceStatus,

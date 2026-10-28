@@ -280,6 +280,12 @@ impl WorkspaceSessionManager {
             return;
         }
         let run_context = self.provider_run_context(self.workspace_runs.clone());
+        // 重启期在飞运行收口（B）：`Running` 的 turn 意味着上一进程的 provider
+        // **已启动**且必已随进程消失——先按既有终态 `Failed(provider_err)` 收口，
+        // 既有恢复链才不会为本轮安排 `ResumeSameTurn`（那会重复执行已开始过的
+        // provider 工作）。`Reserved` turn（provider 可证明未启动）保持既有安全
+        // 续跑语义，随后由 `recover_human_gate_turns` 正常重启 attempt 1。
+        self.close_lost_provider_human_gate_turns().await;
         let recovery_error = match self.recover_human_gate_turns(&run_context).await {
             Ok(()) => self.recover_outline_run(&run_context).await,
             Err(error) => Err(error),
@@ -302,6 +308,13 @@ impl WorkspaceSessionManager {
         // 摘要携带原因），令会话恢复可操作（人工可再反馈或放弃）——优先于
         // AbortedByDisconnect 终态化。
         self.recover_delegated_rerun_orphan().await;
+        // 重启期在飞运行收口（B）：durable `status=running` ∧ stage `human_confirm`
+        // ∧ 无活动 run 的会话，F-23 僵尸臂（stage 集合不含 HumanConfirm）与委托
+        // 孤儿臂（只认 phase=Generate 委托接力）都不命中时会永久停在 running——
+        // `confirm`/`human_gate_feedback` 都要求 waiting_for_human，人工无从处置。
+        // 回落既有可恢复终态 waiting_for_human（门重开、不启动 provider、不双跑
+        // 已开始过的 provider 工作）；优先于下方 AbortedByDisconnect 终态化。
+        self.recover_human_confirm_lost_provider().await;
         // F-23（0482 跨重启僵尸）：恢复臂（human gate resume / outline resume）之后
         // 仍停留在 Running/CrossReview/Revision 且无活跃 run 的 durable 会话，只可能是
         // 进程重启孤儿——registry 单例契约保证 manager 创建时不存在幸存 run。落
@@ -540,6 +553,57 @@ impl WorkspaceSessionManager {
         if recovered {
             eprintln!(
                 "[aria-recovery] stale zombie run recovered to prepare_context session={}",
+                self.session_id
+            );
+            self.broadcast_current_session_state();
+        }
+    }
+
+    /// 重启期在飞运行收口（B）：把 `Running` 的 turn 收口为既有终态
+    /// `Failed(provider_err)`。
+    ///
+    /// 判据：本 manager 无活动 run（manager 单例契约 ⇒ 上一进程的在飞 provider
+    /// 必已不存在）。`Reserved` turn 不在此列——durable 证明 provider 未启动，
+    /// 既有恢复链可安全续跑 attempt 1。收口的 turn 不再被
+    /// `recover_human_gate_turns` 安排 `ResumeSameTurn`（避免双跑副作用），
+    /// 人工经既有 `human_gate_feedback` 提交新一轮继续。
+    async fn close_lost_provider_human_gate_turns(self: &Arc<Self>) {
+        if self.active_run().await.is_some() {
+            return;
+        }
+        let closed = {
+            let mut engine = self.engine.lock().await;
+            engine
+                .fail_human_gate_turns_lost_provider_at_restart()
+                .await
+        };
+        if closed > 0 {
+            eprintln!(
+                "[aria-recovery] lost-provider human gate turns closed at restart session={} count={closed}",
+                self.session_id
+            );
+            self.broadcast_current_session_state();
+        }
+    }
+
+    /// 重启期在飞运行收口（B）：durable `status=running` ∧ stage `human_confirm`
+    /// ∧ 无活动 run 的会话回落**既有**可恢复终态 `waiting_for_human`。
+    ///
+    /// 不启动 provider（已开始过的 provider 工作不自动重跑）；收口后人工可经
+    /// 既有 wire 动作继续（`human_gate_feedback` / `confirm` / `abandon`）。
+    async fn recover_human_confirm_lost_provider(self: &Arc<Self>) {
+        if self.active_run().await.is_some() {
+            return;
+        }
+        let mutated = {
+            let mut engine = self.engine.lock().await;
+            engine
+                .recover_human_confirm_lost_provider_at_restart()
+                .await
+        };
+        if mutated {
+            eprintln!(
+                "[aria-recovery] human_confirm lost-provider run recovered to waiting_for_human session={}",
                 self.session_id
             );
             self.broadcast_current_session_state();
