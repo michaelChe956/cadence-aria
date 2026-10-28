@@ -2487,6 +2487,54 @@ mod patrol_tests {
         assert!(report.findings[0].record_path.ends_with("manifest.json"));
     }
 
+    // -- 分区覆盖：坏记录 → 不可判定（REQ-DRG-23） ----------------------
+
+    #[test]
+    fn dangling_patrol_isolates_bad_records_per_partition() {
+        let temp = TempDir::new().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        // 分区三：快照 manifest 解析失败。
+        write(
+            &paths
+                .root()
+                .join("reviewer-snapshots/windows/win_bad/manifest.json"),
+            "{ not json",
+        );
+        // 分区四：台账条目解析失败。
+        write(
+            &paths
+                .root()
+                .join("state/entity-identity/sessions/workspace_session_auto_bad.json"),
+            "{ not json",
+        );
+
+        let report = patrol_state_root(&paths).expect("patrol");
+        assert_eq!(report.undetermined.len(), 2, "{:?}", report.undetermined);
+        assert!(
+            report.findings.is_empty(),
+            "坏记录不得计入悬空：{:?}",
+            report.findings
+        );
+        for entry in &report.undetermined {
+            assert!(entry.reason.contains("json"), "{}", entry.reason);
+        }
+        assert!(
+            report
+                .undetermined
+                .iter()
+                .any(|entry| entry.record_path.ends_with("manifest.json")),
+            "{:?}",
+            report.undetermined
+        );
+        assert!(
+            report.undetermined.iter().any(|entry| entry
+                .record_path
+                .ends_with("workspace_session_auto_bad.json")),
+            "{:?}",
+            report.undetermined
+        );
+    }
+
     // -- 墓碑不判悬空（REQ-DRG-09） --------------------------------------
 
     #[test]
