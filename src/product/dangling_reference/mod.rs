@@ -27,13 +27,21 @@
 //! `report` 子模块把 `patrol` 产出的三栏结果渲染成 Markdown 巡检清单并计算
 //! findings 摘要令牌（REQ-DRG-11 / 22）：令牌只对 findings 的规范化序列化取
 //! 摘要，不含巡检时间、令牌行自身与不可判定 / 未归类条目；清单落点为
-//! `cadence/analysis-docs/`。销账子模块由后续任务追加。
+//! `cadence/analysis-docs/`。
+//!
+//! `ledger` 子模块是销账留痕的落盘面（REQ-DRG-16；技术方案 §3.5.2）：状态根下
+//! **单一全局**追加式 JSONL 台账（`{state_root}/entity-deletions/dangling-reference/
+//! cleanup.jsonl`）。它**逐行追加**紧凑 JSON（不复用整文件覆盖的写语义）、按
+//! `record_path` + `target_id` + `action` 全量比对去重（同一清理动作重入不追加
+//! 重复行），并按大小轮转 + 保留期分片清理。它不判定删什么、也不执行删除。
+//! 销账规则与编排子模块由后续任务追加。
 
 // Task 1 只产出静态表与纯结构，调用点自 Task 2 起接线，故非测试构建下这些项
 // 暂时无用户；本行按词法覆盖整个模块树（含子模块 `reference_table` 与 `resolve`）。
 // **全部接线完成后（Task 9）删除本行**，让死代码重新回到门禁视野。
 #![allow(dead_code)]
 
+pub(crate) mod ledger;
 pub(crate) mod listing;
 pub(crate) mod patrol;
 pub(crate) mod reference_table;

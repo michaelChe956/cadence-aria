@@ -55,6 +55,14 @@ impl ProductAppPaths {
         self.issue_root(project_id, issue_id)
     }
 
+    /// 悬空引用销账留痕台账（状态根下单一全局 JSONL；目录由本能力新建）。
+    pub fn dangling_reference_ledger_path(&self) -> PathBuf {
+        self.state_root()
+            .join("entity-deletions")
+            .join("dangling-reference")
+            .join("cleanup.jsonl")
+    }
+
     pub fn project_provider_defaults_path(&self, project_id: &str) -> PathBuf {
         self.project_root(project_id).join("provider-defaults.json")
     }
