@@ -1175,3 +1175,6 @@ include!("lifecycle_tests_b2_p2.inc.rs");
 // D2.2（fix-cascade-deletion Task 3.2）：三类 DELETE 统一编排测试（拆分文件，
 // 同 mod include!，large_file_guard 1200 行红线）。
 include!("lifecycle_tests_d2_2.inc.rs");
+// 同 D2.2 拆分片段：失败重入/owned-index 与 F3/F5 占用级联（行数红线，纯移动）。
+include!("lifecycle_tests_d2_2_reentry.inc.rs");
+include!("lifecycle_tests_d2_2_f3_f5.inc.rs");
