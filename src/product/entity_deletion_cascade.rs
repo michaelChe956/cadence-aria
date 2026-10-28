@@ -635,6 +635,15 @@ pub(crate) fn cleanup_plan_shared_worktrees<'a>(
 
     let repositories = plan_shared_worktree_repository_ids(&lifecycle, scope, manifest, plan_run)?;
     let candidates = plan_shared_worktree_candidate_ids(&lifecycle, scope, manifest, plan_run)?;
+    // 归属判定的不变基准在循环外构造一次，逐记录只传记录本体与候选标记。
+    let ownership_context = SharedWorktreeOwnershipContext {
+        app_paths,
+        lifecycle: &lifecycle,
+        deletion_records: &deletion_records,
+        scope,
+        plan_run,
+        plan_attempt_ids,
+    };
 
     for repository_id in repositories {
         let logical_repository_id = repository_id.map(LogicalRepositoryId);
@@ -652,16 +661,8 @@ pub(crate) fn cleanup_plan_shared_worktrees<'a>(
             None => lifecycle.get_issue_shared_worktree(project_id, issue_id)?,
         };
         if let Some(record) = record {
-            let ownership = classify_shared_worktree_ownership(
-                app_paths,
-                &lifecycle,
-                &deletion_records,
-                scope,
-                &record,
-                plan_run,
-                plan_attempt_ids,
-                candidates.contains(&repository_id),
-            )?;
+            let ownership =
+                ownership_context.classify(&record, candidates.contains(&repository_id))?;
             match ownership {
                 SharedWorktreeOwnership::Unrelated => {}
                 SharedWorktreeOwnership::OtherLiveOwner => {
@@ -837,79 +838,93 @@ enum SharedWorktreeOwnership {
     Unrelated,
 }
 
-/// shared-worktree 归属判定：谁在用这条记录。
-fn classify_shared_worktree_ownership(
-    app_paths: &ProductAppPaths,
-    lifecycle: &LifecycleStore,
-    deletion_records: &EntityDeletionStore,
-    scope: &EntityScope,
-    record: &crate::product::models::IssueSharedWorktree,
-    plan_run: Option<&CodingPlanRun>,
-    plan_attempt_ids: &[String],
-    is_candidate: bool,
-) -> Result<SharedWorktreeOwnership, ProductStoreError> {
-    let mut claims_this_plan = false;
-    let mut has_other_owner = false;
-    for owner in lifecycle.resolve_shared_resource_owners(
-        &scope.project_id,
-        &scope.issue_id,
-        record.target_repository_id,
-    )? {
-        if owner == *scope {
-            claims_this_plan = true;
-            continue;
+/// shared-worktree 归属判定的**不变上下文**（一次 cleanup 调用内逐记录复用）。
+///
+/// 判定输入分两类：本次 cleanup 内不变的判定基准（路径、存活 owner 源、墓碑
+/// store、本 scope、本 plan 的 run 冻结集与 attempt 集合），以及随记录变化的
+/// 记录本体与候选标记。前者在 [`cleanup_plan_shared_worktrees`] 循环外构造一次，
+/// 逐记录只需 [`Self::classify`] 传入后两者。
+struct SharedWorktreeOwnershipContext<'a> {
+    app_paths: &'a ProductAppPaths,
+    lifecycle: &'a LifecycleStore,
+    deletion_records: &'a EntityDeletionStore,
+    scope: &'a EntityScope,
+    plan_run: Option<&'a CodingPlanRun>,
+    plan_attempt_ids: &'a [String],
+}
+
+impl SharedWorktreeOwnershipContext<'_> {
+    /// shared-worktree 归属判定：谁在用这条记录。
+    fn classify(
+        &self,
+        record: &crate::product::models::IssueSharedWorktree,
+        is_candidate: bool,
+    ) -> Result<SharedWorktreeOwnership, ProductStoreError> {
+        let mut claims_this_plan = false;
+        let mut has_other_owner = false;
+        for owner in self.lifecycle.resolve_shared_resource_owners(
+            &self.scope.project_id,
+            &self.scope.issue_id,
+            record.target_repository_id,
+        )? {
+            if owner == *self.scope {
+                claims_this_plan = true;
+                continue;
+            }
+            // 墓碑（purging/deleted）scope 不是存活引用方——同波删除或已删实体。
+            if self.deletion_records.get(&owner)?.is_some() {
+                continue;
+            }
+            has_other_owner = true;
         }
-        // 墓碑（purging/deleted）scope 不是存活引用方——同波删除或已删实体。
-        if deletion_records.get(&owner)?.is_some() {
-            continue;
+        if has_other_owner {
+            return Ok(SharedWorktreeOwnership::OtherLiveOwner);
         }
-        has_other_owner = true;
-    }
-    if has_other_owner {
-        return Ok(SharedWorktreeOwnership::OtherLiveOwner);
-    }
-    if let Some(owner_id) = record.current_lock_owner_id.as_deref() {
-        let own_lock = plan_attempt_ids
-            .iter()
-            .any(|attempt_id| attempt_id == owner_id);
-        // 本 plan 的 run 冻结集/selection 同样构成本 plan 持有的锁。
-        let frozen = plan_run.is_some_and(|run| {
-            run.target_attempts
+        if let Some(owner_id) = record.current_lock_owner_id.as_deref() {
+            let own_lock = self
+                .plan_attempt_ids
                 .iter()
-                .any(|frozen| frozen.attempt_id == owner_id)
-                || run
-                    .selection
-                    .as_ref()
-                    .is_some_and(|selection| selection.attempt_id == owner_id)
-        });
-        if own_lock || frozen {
+                .any(|attempt_id| attempt_id == owner_id);
+            // 本 plan 的 run 冻结集/selection 同样构成本 plan 持有的锁。
+            let frozen = self.plan_run.is_some_and(|run| {
+                run.target_attempts
+                    .iter()
+                    .any(|frozen| frozen.attempt_id == owner_id)
+                    || run
+                        .selection
+                        .as_ref()
+                        .is_some_and(|selection| selection.attempt_id == owner_id)
+            });
+            if own_lock || frozen {
+                return Ok(SharedWorktreeOwnership::ClaimedByThisPlan);
+            }
+            // 锁 owner 不属本 plan 的已知 attempt 集合：
+            // ① 记录归属未知（`claims_this_plan=false`）→ 按在途 writer 保留
+            //    （REQ-WPS-03 不误伤：他 plan 直接改写 owner 的记录绝不清）；
+            // ② 记录已被本 plan 的其他证据主张（`claims_this_plan`：记录 active/
+            //    last-completed WI 归属本 plan，或路径界定的 journal 归属本 plan）
+            //    且该 owner 已无 attempt 记录 → 半残现场的孤儿残留（attempt 主体被
+            //    外部清掉、锁 owner 悬空），随闭包清。判据可靠：真实 writer MUST 先
+            //    持久化 attempt 记录再取 worktree 锁（journal `AttemptPersisted`
+            //    先于 `WorktreeBound`），故「无 attempt 记录」的 owner 不可能是存活
+            //    writer；按「在途 writer」保留会让半残现场永远收敛不了
+            //    （违反 REQ-WPS-03「半残仍须清全」）。
+            if claims_this_plan && !lock_owner_attempt_exists(self.app_paths, self.scope, owner_id)?
+            {
+                return Ok(SharedWorktreeOwnership::ClaimedByThisPlan);
+            }
+            return Ok(SharedWorktreeOwnership::OtherLiveOwner);
+        }
+        if claims_this_plan {
             return Ok(SharedWorktreeOwnership::ClaimedByThisPlan);
         }
-        // 锁 owner 不属本 plan 的已知 attempt 集合：
-        // ① 记录归属未知（`claims_this_plan=false`）→ 按在途 writer 保留
-        //    （REQ-WPS-03 不误伤：他 plan 直接改写 owner 的记录绝不清）；
-        // ② 记录已被本 plan 的其他证据主张（`claims_this_plan`：记录 active/
-        //    last-completed WI 归属本 plan，或路径界定的 journal 归属本 plan）
-        //    且该 owner 已无 attempt 记录 → 半残现场的孤儿残留（attempt 主体被
-        //    外部清掉、锁 owner 悬空），随闭包清。判据可靠：真实 writer MUST 先
-        //    持久化 attempt 记录再取 worktree 锁（journal `AttemptPersisted`
-        //    先于 `WorktreeBound`），故「无 attempt 记录」的 owner 不可能是存活
-        //    writer；按「在途 writer」保留会让半残现场永远收敛不了
-        //    （违反 REQ-WPS-03「半残仍须清全」）。
-        if claims_this_plan && !lock_owner_attempt_exists(app_paths, scope, owner_id)? {
+        // 候选仓（manifest 目标仓 ∪ run 冻结 target）：本 plan 的目标资源，无他
+        // 存活 owner 即随闭包清（既有 D1.3c 语义）。
+        if is_candidate {
             return Ok(SharedWorktreeOwnership::ClaimedByThisPlan);
         }
-        return Ok(SharedWorktreeOwnership::OtherLiveOwner);
+        Ok(SharedWorktreeOwnership::Unrelated)
     }
-    if claims_this_plan {
-        return Ok(SharedWorktreeOwnership::ClaimedByThisPlan);
-    }
-    // 候选仓（manifest 目标仓 ∪ run 冻结 target）：本 plan 的目标资源，无他
-    // 存活 owner 即随闭包清（既有 D1.3c 语义）。
-    if is_candidate {
-        return Ok(SharedWorktreeOwnership::ClaimedByThisPlan);
-    }
-    Ok(SharedWorktreeOwnership::Unrelated)
 }
 
 /// 锁 owner 是否有对应的 attempt 记录（真实在途 writer 的前提）。
@@ -932,7 +947,8 @@ fn lock_owner_attempt_exists(
 /// 目标仓集合（shared-worktree 记录的候选 key）。
 ///
 /// manifest 目标仓 ∪ plan-run 冻结 target ∪ **本 issue 全部 repo 级
-/// shared-worktree 记录**（真实归属由 [`classify_shared_worktree_ownership`]
+/// shared-worktree 记录**（真实归属由
+/// [`SharedWorktreeOwnershipContext::classify`]
 /// 判定：与本 plan 无关者完全不动）。legacy issue 布局（None 键）记录存在
 /// 才含 None 键。
 pub(crate) fn plan_shared_worktree_repository_ids(
