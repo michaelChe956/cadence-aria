@@ -32,6 +32,11 @@
 > ④ **REQ-DRG-11** 补一句：清单由**服务启动时的巡检自动产出**。
 > 本轮**未放宽**任何删除边界：白名单 + L1 墓碑 / W-1..W-4 证据门不变，幂等 + 留痕 + 自证归零不变，主记录缺失语义不变。
 >
+> **r6 修订说明（2026-10-28，实施审查后）**：本轮只做**两处互斥消解**，落地 owner 已拍板的「①层接工作台」决定，不改任何删除边界。要点：
+> ① **REQ-DRG-06** 的 fail-closed 清单移除「实体身份台账按 owner 反查」，改为按 REQ-DRG-24 接入①层并加限定：MUST 仅跳过**指向已确认被删实体**的绑定，MUST NOT 跳过指向仍在实体的绑定，MUST NOT 使级联删除漏清；其余 fail-closed 路径（窗口租约列举 / reviewer 资源物理清理 / 实体 scope 准入与墓碑复核 / intent 版本化单条读）语义**不变**；
+> ② **REQ-DRG-19** 的「MUST NOT 改动已到行数上限的源码文件」改为「MUST NOT **增长**已达行数上限的源码文件的行数」——REQ-DRG-24 点名的读取点（`entity_owned_session_ids`）接入时行数未增长（1683 → 1682），原措辞与 REQ-DRG-24 字面互斥。
+> 本轮**未放宽**任何删除边界：白名单 + L1 墓碑 / W-1..W-4 证据门不变，幂等 + 留痕 + 自证归零不变，主记录缺失语义不变。
+>
 > **r4 修订说明（2026-10-28，实施审查后）**：本轮把**存在性判定的三态语义**写进契约，并落实此前挂「待核实」的读 API，**不改变任何 owner 边界**。要点：
 > ① **REQ-DRG-01 改为三态判定**（`Exists` / `Missing` / `Unknown`）：存在性数据源或所需作用域在本判定面不可用时 MUST 归「不可判定」（REQ-DRG-23），MUST NOT 判为「不存在」；目标类型名统一为 `logical_member`（正文原误写 `logical_repository(member)`，与 REQ-DRG-02 附表、设计 §3.1.2 / §3.3.2 及实现一致）。
 > ② **REQ-DRG-02 附表 #7–#10 的存在性来源落实为具体读 API 与作用域**：checkout / aggregate_index / logical_member 的记录落在 `logical-codebases/<lc_id>/`，核对 MUST 先按 `LogicalCodebaseStore::list(project_id)` 枚举 LC 再以 `for_lc` 作用域化读取；enrollment 的来源 `{issue_root}/automation-enrollment.json` 已可读（`IssueAutomationStore::get`），不再挂「待核实」。附表「两类非可删结论」的「证据不足」行补前提「**目标已判定为不存在**」。
@@ -251,7 +256,7 @@
 
 ### Requirement: fail-closed 读路径不接入容错（REQ-DRG-06）
 
-系统 MUST NOT 在任何 fail-closed 准入、反查或物理清理读路径上跳过悬空条目。窗口租约列举、reviewer 资源物理清理、实体身份台账按 owner 反查、实体 scope 准入与墓碑复核、intent 的版本化单条读 MUST 保持既有失败语义。
+系统 MUST NOT 在任何 fail-closed 准入、反查或物理清理读路径上跳过悬空条目。窗口租约列举、reviewer 资源物理清理、实体 scope 准入与墓碑复核、intent 的版本化单条读 MUST 保持既有失败语义。**实体身份台账按 owner 反查**按 REQ-DRG-24 接入①层：MUST 仅跳过**指向已确认被删实体**的绑定，MUST NOT 跳过指向仍在实体的绑定，MUST NOT 使级联删除漏清。
 
 #### Scenario: 租约读取不得 fail-open
 
@@ -266,7 +271,7 @@
 #### Scenario: 按 owner 反查不得静默漏清
 
 - **WHEN** 按 owner 反查会话归属时其中一条绑定指向已删实体
-- **THEN** 系统 MUST 仍按既有语义返回该绑定所属的会话 id，MUST NOT 因跳过而使级联删除漏清
+- **THEN** 系统 MUST NOT 因跳过而使级联删除漏清；按 REQ-DRG-24 接入①层的读取点 MUST 仅跳过**指向已确认被删实体**的绑定，MUST NOT 跳过指向仍在实体的绑定
 
 ### Requirement: 告警形状、去重与上界（REQ-DRG-07）
 
@@ -627,7 +632,7 @@ reviewer 窗口簇的 L2 条件 MUST 由窗口记录自身可算的四条构成�
 
 ### Requirement: 硬约束（REQ-DRG-19）
 
-本能力 MUST NOT 改变既有删除语义与既有级联清理覆盖面，MUST NOT 删除墓碑，MUST NOT 删除用户业务数据，MUST NOT 新增依赖，生产目录操作 MUST 只用标准库文件接口。本能力 MUST NOT 改动 provider 适配层、工具策略、网关信封与流式输入结构，MUST NOT 改动已到行数上限的源码文件。本能力 MUST NOT 删除任何**不具备 L1 证据、且不满足证据等级表中该类型的 L2 专属可算条件**的旁支记录。
+本能力 MUST NOT 改变既有删除语义与既有级联清理覆盖面，MUST NOT 删除墓碑，MUST NOT 删除用户业务数据，MUST NOT 新增依赖，生产目录操作 MUST 只用标准库文件接口。本能力 MUST NOT 改动 provider 适配层、工具策略、网关信封与流式输入结构，MUST NOT **增长**已达行数上限的源码文件的行数。本能力 MUST NOT 删除任何**不具备 L1 证据、且不满足证据等级表中该类型的 L2 专属可算条件**的旁支记录。
 
 #### Scenario: 既有删除语义零回归
 
@@ -644,10 +649,10 @@ reviewer 窗口簇的 L2 条件 MUST 由窗口记录自身可算的四条构成�
 - **WHEN** 对比启用本能力前后的工具策略摘要、网关信封与流式输入结构
 - **THEN** 三者 MUST 完全一致
 
-#### Scenario: 行数上限文件零改动
+#### Scenario: 行数上限文件不得增长
 
-- **WHEN** 检视本次改动的文件清单
-- **THEN** 已达行数上限的源码文件 MUST NOT 出现在改动清单中
+- **WHEN** 检视本次改动的文件清单与各文件行数
+- **THEN** 已达行数上限的源码文件 MUST NOT 增长行数；REQ-DRG-24 点名接入①层的读取点若被改动，其行数 MUST NOT 增长
 
 #### Scenario: 无证据的记录不被删除
 
