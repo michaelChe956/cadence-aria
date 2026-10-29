@@ -20,4 +20,5 @@ pub(crate) mod live_b45_t24;
 pub(crate) mod live_b45_t24_env;
 pub(crate) mod live_matrix;
 pub(crate) mod policy_dependency;
+pub(crate) mod policy_dependency_publication_chain;
 pub(crate) mod snapshot;
