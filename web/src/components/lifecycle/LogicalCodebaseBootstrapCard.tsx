@@ -1,8 +1,9 @@
 // C4 Task 9（LC 冷启动加固）：冷启动五步等待卡——只读 bootstrap 纯投影，
 // 展示每步状态/失败原因/可能外部副作用/下一步，并按 durable notice 的
 // allowed_actions 调用统一 action API（准备/继续/重试/核验）。
-// 按钮生成稳定 command id（notice key + action 派生），成功/重放后刷新
-// 同一 bootstrap GET；repair 动作提示去身份修复诊断（mapping 裁决表单）。
+// 按钮生成稳定 command id（notice key + action 派生），成功/重放后用响应里
+// 的最终投影刷新（响应缺投影时才补读同一 bootstrap GET）；repair 动作提示去
+// 身份修复诊断（mapping 裁决表单）。
 //
 // 2026-10-29（LC 冷启动自动推进）：步骤自身的 allowed_actions 也直接暴露
 // 为可点按钮（此前只有 notice 带动作时才可见，后三步「未开始」时无任何
@@ -44,6 +45,17 @@ const ACTION_BUTTON_LABELS: Record<BootstrapActionName, string> = {
   revalidate: "核验",
   repair: "去修复",
   republish: "重新生成政策",
+};
+
+// advance 停止原因的中文口径：in_progress = 长任务（provider turn / 索引构建）
+// 正在跑——不是错误，重放幂等（advanced_steps 为空也不代表失败）。
+const ADVANCE_STOP_LABELS: Record<string, string> = {
+  planning_ready: "已就绪（PlanningReady）",
+  in_progress: "进行中，稍后刷新",
+  failed: "已失败",
+  waiting_for_human: "等待人工处理",
+  no_actionable_step: "没有可推进的步骤",
+  iteration_limit: "已达单次推进上限",
 };
 
 // 规则漂移（provider 启动会被 PolicyDrift 拒）的三种稳定 failure.reason_code
@@ -100,7 +112,8 @@ function detectRuleDrift(
 type LogicalCodebaseBootstrapCardProps = {
   projectId: string | null;
   projection: LogicalCodebaseBootstrapProjection | null;
-  onChanged?: () => void;
+  /** 动作/推进成功后的刷新回调；传入响应里已含的最终投影可免一次 GET。 */
+  onChanged?: (projection?: LogicalCodebaseBootstrapProjection) => void;
 };
 
 export function LogicalCodebaseBootstrapCard({
@@ -175,7 +188,7 @@ export function LogicalCodebaseBootstrapCard({
     setBusyAction(`${actionKey}:${action}`);
     setActionError(null);
     try {
-      await postLogicalCodebaseBootstrapAction(
+      const result = await postLogicalCodebaseBootstrapAction(
         projectId,
         current.logical_codebase_id,
         {
@@ -188,7 +201,8 @@ export function LogicalCodebaseBootstrapCard({
             current.logical_codebase_id,
         },
       );
-      onChanged?.();
+      // 响应已含最终投影 → 直接采用（免一次 GET）；缺失时退回补读。
+      onChanged?.(result?.projection);
     } catch (error) {
       // 失败如实展示，等待事实保留（下轮 GET 刷新仍可见）。
       setActionError(error instanceof Error ? error.message : "动作失败");
@@ -211,12 +225,21 @@ export function LogicalCodebaseBootstrapCard({
         current.logical_codebase_id,
       );
       const advanced = result?.advanced_steps ?? [];
-      setAdvanceSummary(
-        advanced.length > 0
-          ? `已推进：${advanced.map((step) => STEP_LABELS[step] ?? step).join("、")}`
-          : `没有可推进的步骤（${result?.stopped_reason ?? "已就绪或等待人工"}）`,
-      );
-      onChanged?.();
+      if (advanced.length > 0) {
+        setAdvanceSummary(
+          `已推进：${advanced.map((step) => STEP_LABELS[step] ?? step).join("、")}`,
+        );
+      } else {
+        // 幂等重放/长任务在跑时 advanced_steps 为空——不是失败，如实说明停点。
+        const stoppedStep = result?.stopped_step
+          ? `（${STEP_LABELS[result.stopped_step] ?? result.stopped_step}）`
+          : "";
+        setAdvanceSummary(
+          `${ADVANCE_STOP_LABELS[result?.stopped_reason ?? ""] ?? `已停止（${result?.stopped_reason ?? "未知"}）`}${stoppedStep}`,
+        );
+      }
+      // advance 响应里的 projection 就是最终投影 → 直接采用（免一次 GET）。
+      onChanged?.(result?.projection);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "推进失败");
     } finally {

@@ -214,7 +214,7 @@ describe("LogicalCodebaseBootstrapCard recovery surface", () => {
         },
       ]);
     });
-    // 成功后经 onChanged 触发同一 bootstrap GET 补读（不乐观改状态）。
+    // 成功后经 onChanged 回传服务端最终投影（不乐观改状态；响应缺投影时才补读 GET）。
     expect(onChanged).toHaveBeenCalled();
     expect(
       screen.queryByTestId("lc-bootstrap-action-error"),

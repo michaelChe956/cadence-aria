@@ -43,7 +43,7 @@ type LogicalCodebaseScopeData = {
     SetStateAction<AggregateInitializationOperationSnapshot | null>
   >;
   bootstrapProjection: LogicalCodebaseBootstrapProjection | null;
-  refreshBootstrap: () => void;
+  refreshBootstrap: (projection?: LogicalCodebaseBootstrapProjection) => void;
   refreshScope: () => void;
   /** 登记完成后的自动推进：每个 LC 只自动调一次，失败只提示不重试。 */
   autoAdvanceBootstrap: (logicalCodebaseId: string) => Promise<string | null>;
@@ -235,9 +235,18 @@ export function useLogicalCodebaseScopeData({
     };
   }, [selectedProjectId, activeLogicalCodebaseId, bootstrapPolling]);
 
-  const refreshBootstrap = useCallback(() => {
-    setBootstrapRefreshTick((tick) => tick + 1);
-  }, []);
+  // 冷启动补读：动作/推进响应已含最终投影时直接采用（免一次 GET）；
+  // 无投影时按 tick 补读同一 GET。
+  const refreshBootstrap = useCallback(
+    (projection?: LogicalCodebaseBootstrapProjection) => {
+      if (projection) {
+        setBootstrapProjection(projection);
+        return;
+      }
+      setBootstrapRefreshTick((tick) => tick + 1);
+    },
+    [],
+  );
 
   // 登记完成等成员已变化的事件后整域补读：成员/指针发布/聚合索引与
   // bootstrap 投影一并重拉（后端在登记批内推进 identity/manifest_checkout

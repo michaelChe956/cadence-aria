@@ -37,7 +37,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function installFetchRouter(advanceStatus = 200): void {
+function installFetchRouter(advanceStatus = 200, advanceBody?: unknown): void {
   captured = [];
   const router = async (
     input: RequestInfo | URL,
@@ -65,13 +65,15 @@ function installFetchRouter(advanceStatus = 200): void {
           advanceStatus,
         );
       }
-      return jsonResponse({
-        project_id: PROJECT_ID,
-        logical_codebase_id: LC_ID,
-        advanced_steps: ["rules_policy", "member_index"],
-        stopped_reason: "planning_ready",
-        projection: projection(),
-      });
+      return jsonResponse(
+        advanceBody ?? {
+          project_id: PROJECT_ID,
+          logical_codebase_id: LC_ID,
+          advanced_steps: ["rules_policy", "member_index"],
+          stopped_reason: "planning_ready",
+          projection: projection(),
+        },
+      );
     }
     return jsonResponse(
       { code: "not_found", message: `no route for ${method} ${url}` },
@@ -266,7 +268,7 @@ describe("LogicalCodebaseBootstrapCard 步骤动作可见性", () => {
     expect(screen.queryByTestId("lc-bootstrap-action-error")).toBeNull();
   });
 
-  it("一键推进调用 advance 端点并补读同一 GET（失败如实提示）", async () => {
+  it("一键推进调用 advance 端点并回显推进结果", async () => {
     installFetchRouter();
     const onChanged = vi.fn();
     render(
@@ -290,6 +292,27 @@ describe("LogicalCodebaseBootstrapCard 步骤动作可见性", () => {
     expect(onChanged).toHaveBeenCalled();
   });
 
+  it("推进成功后把服务端最终投影回传给 onChanged（免一次 GET）", async () => {
+    installFetchRouter();
+    const onChanged = vi.fn();
+    render(
+      <LogicalCodebaseBootstrapCard
+        projectId={PROJECT_ID}
+        projection={projection()}
+        onChanged={onChanged}
+      />,
+    );
+
+    await userEvent.click(screen.getByTestId("lc-bootstrap-advance"));
+
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    // 响应里的 projection 就是最终投影 → 直接采用，不再补读 GET。
+    expect(onChanged.mock.calls[0]?.[0]).toMatchObject({
+      logical_codebase_id: LC_ID,
+      planning_ready: false,
+    });
+  });
+
   it("一键推进失败时如实展示错误且不吞成成功", async () => {
     installFetchRouter(500);
     const onChanged = vi.fn();
@@ -309,6 +332,36 @@ describe("LogicalCodebaseBootstrapCard 步骤动作可见性", () => {
       );
     });
     expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("长任务在跑（in_progress）时如实说明进行中，不当成失败", async () => {
+    // 幂等重放/长任务在跑：advanced_steps 为空 + stopped_reason=in_progress。
+    installFetchRouter(200, {
+      project_id: PROJECT_ID,
+      logical_codebase_id: LC_ID,
+      advanced_steps: [],
+      stopped_reason: "in_progress",
+      stopped_step: "rules_policy",
+      projection: projection(),
+    });
+    const onChanged = vi.fn();
+    render(
+      <LogicalCodebaseBootstrapCard
+        projectId={PROJECT_ID}
+        projection={projection()}
+        onChanged={onChanged}
+      />,
+    );
+
+    await userEvent.click(screen.getByTestId("lc-bootstrap-advance"));
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("lc-bootstrap-advance-summary").textContent,
+      ).toContain("进行中");
+    });
+    expect(screen.queryByTestId("lc-bootstrap-action-error")).toBeNull();
+    expect(onChanged).toHaveBeenCalled();
   });
 
   it("规则漂移渲染显眼提示并可一键重新生成政策", async () => {

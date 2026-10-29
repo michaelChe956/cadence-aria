@@ -16,7 +16,8 @@ type LogicalCodebaseManagementPanelProps = {
   logicalCodebases: CodebaseSummaryDto[];
   projectId: string | null;
   bootstrapProjection: LogicalCodebaseBootstrapProjection | null;
-  onBootstrapChanged: () => void;
+  /** 冷启动补读；传入投影则直接采用（动作/推进响应已含最终投影，免一次 GET）。 */
+  onBootstrapChanged: (projection?: LogicalCodebaseBootstrapProjection) => void;
   activeLogicalCodebaseId: string | null;
   onSelectLogicalCodebase: (logicalCodebaseId: string) => void;
   onOpenRegistration: () => void;

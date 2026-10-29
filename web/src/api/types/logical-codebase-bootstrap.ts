@@ -100,9 +100,11 @@ export type BootstrapActionRequest = {
 };
 
 // 冷启动一键推进（POST .../bootstrap/advance）的停止原因：服务端按依赖顺序
-// 推进到 planning_ready / 失败 / 等待人工 / 无可动步骤 / 达到循环上限为止。
+// 推进到 planning_ready / 进行中（长任务在跑）/ 失败 / 等待人工 / 无可动步骤
+// / 达到循环上限为止。
 export type BootstrapAdvanceStopReason =
   | "planning_ready"
+  | "in_progress"
   | "failed"
   | "waiting_for_human"
   | "no_actionable_step"

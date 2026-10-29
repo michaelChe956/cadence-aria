@@ -4,6 +4,7 @@ import type {
   CodebaseSummaryDto,
   CodingAttemptAddress,
   IssueDeliverySummaryDto,
+  LogicalCodebaseBootstrapProjection,
   LogicalCodebaseDto,
   LogicalCodebaseListEntryDto,
   PointerPublicationDto,
@@ -36,7 +37,9 @@ export type IssueLifecycleWorkbenchViewProps = {
   queueFilterText: string; logicalCodebases: CodebaseSummaryDto[]; activeLogicalCodebaseId: string | null;
   activeLogicalCodebaseName: string | null; lcSummaryExpanded: boolean; lcSummaryHasWarning: boolean;
   logicalCodebaseMembers: unknown[]; aggregateInitialization: unknown; aggregateInitializationBusy: boolean;
-  bootstrapProjection: unknown; onBootstrapChanged: () => void;
+  bootstrapProjection: unknown;
+  /** 冷启动补读；传入投影则直接采用（动作/推进响应已含最终投影，免一次 GET）。 */
+  onBootstrapChanged: (projection?: LogicalCodebaseBootstrapProjection) => void;
   aggregateIndex: unknown; aggregateIndexRebuilding: boolean; latestPointerPublication: PointerPublicationDto | null;
   pointerPublicationBusy: boolean; showIncrementalHint: boolean; focusedEntity: LifecycleCardData | null;
   isDrawerOpen: boolean; drawerWorkItems: unknown[];
