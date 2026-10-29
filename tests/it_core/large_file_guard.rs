@@ -234,7 +234,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("src/web/handlers/coding/plan_start_tests.rs", 4001),
     ("src/web/handlers/support.rs", 1204),
     ("src/web/handlers/support_parts/coding_cleanup.inc.rs", 1572),
-    ("src/web/types.rs", 1574),
     ("src/web/wiga_gate_fixture.rs", 1764),
     ("src/web/workspace_session/tests/part_01.rs", 1580),
     ("src/web/workspace_session/tests/part_07.rs", 1272),
