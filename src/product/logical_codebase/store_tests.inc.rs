@@ -739,6 +739,197 @@ mod tests {
         assert!(store.list_deleted("project_0001").unwrap().is_empty());
     }
 
+    /// 2026-10-29（k3 审查阻断项 A2）：legacy 别名的 purge 顺序必须是
+    /// 「清工作区产物 → 删 legacy 旧根 → 删子树条目 → 墓碑最后删」。旧实现先删
+    /// 墓碑再删旧根：删旧根失败后墓碑已消失（重试 404），旧根 `manifest.json`
+    /// 还在 → 下一次 `migrate_legacy` 把 LC 复活。这里用权限注入一次真实的 IO
+    /// 失败（旧根不可写 → 删其子项 EACCES），断言失败后墓碑仍在、LC 未复活，
+    /// 修好权限后**同一入口**重试即可完成删除。
+    #[test]
+    #[cfg(unix)]
+    fn logical_codebase_purge_of_legacy_alias_is_retryable_after_io_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let aggregate_root = temp.path().join("workspace/platform");
+        std::fs::create_dir_all(&aggregate_root).unwrap();
+        let legacy_root = paths.logical_codebase_root("project_0001");
+        std::fs::create_dir_all(&legacy_root).unwrap();
+        std::fs::write(
+            legacy_root.join("manifest.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "project_id": "project_0001",
+                "logical_codebase_id": Uuid::new_v4(),
+                "provider_context_root": aggregate_root,
+                "layout": "common_non_git_parent",
+                "membership_revision": 1,
+                "member_ids": [],
+                "created_at": "2026-08-18T00:00:00Z",
+                "updated_at": "2026-08-18T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let store = LogicalCodebaseStore::new(paths.clone());
+        let alias = store.migrate_legacy("project_0001").unwrap().unwrap();
+        store.delete_soft("project_0001", &alias.id).unwrap();
+
+        // 注入 IO 失败：旧根不可写，`remove_dir_all` 删不掉它的子项。
+        std::fs::set_permissions(&legacy_root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = store.purge("project_0001", &alias.id);
+        assert!(
+            matches!(failed, Err(ProductStoreError::Io(_))),
+            "purge must surface the legacy-root removal failure: {failed:?}"
+        );
+
+        // 顺序断言：旧根与墓碑都还在（墓碑 = 重试锚点），LC 没有被复活成存活。
+        assert!(
+            legacy_root.join("manifest.json").exists(),
+            "legacy root must still be there after the failed attempt"
+        );
+        assert_eq!(
+            store.list_deleted("project_0001").unwrap().len(),
+            1,
+            "tombstone must survive a failed purge so the same entry can retry"
+        );
+        assert!(
+            store.list("project_0001").unwrap().is_empty(),
+            "a failed purge must not resurrect the legacy alias"
+        );
+
+        // 权限修好后同一入口重试：删除完成，且不再复活。
+        std::fs::set_permissions(&legacy_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        store.purge("project_0001", &alias.id).unwrap();
+        assert!(!legacy_root.exists(), "legacy root must be purged on retry");
+        assert_eq!(store.migrate_legacy("project_0001").unwrap(), None);
+        assert!(store.list("project_0001").unwrap().is_empty());
+        assert!(store.list_deleted("project_0001").unwrap().is_empty());
+    }
+
+    /// 2026-10-29（k3 审查建议 B5）：`purge` 与 `restore` 共用同一把 LC 级生命
+    /// 周期锁。观察点：有人在临界区里摘掉墓碑（restore 的最后一件事）时，purge
+    /// 不得推进（旧实现无锁，会当场把 LC 删光）；锁释放后 purge 只能看到「没
+    /// 有墓碑」→ `logical_codebase_not_tombstoned`，LC 数据原样保留。
+    #[test]
+    fn concurrent_restore_and_purge_never_delete_a_restored_lc() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = LogicalCodebaseStore::new(paths.clone());
+        let record = store
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "Platform".to_string(),
+                    aggregate_root: temp.path().join("workspace"),
+                },
+            )
+            .unwrap();
+        store.delete_soft("project_0001", &record.id).unwrap();
+
+        let lock_path = store
+            .lc_lifecycle_lock_path("project_0001", &record.id)
+            .unwrap();
+        let tombstone_path = store.tombstone_path("project_0001", &record.id).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let purging = store.clone();
+        let project_id = "project_0001".to_string();
+        let lc_id = record.id.clone();
+
+        let (finished_early, worker) =
+            crate::product::coding_attempt_store::locking::with_exact_exclusive_lock(
+                &lock_path,
+                || {
+                    let worker = std::thread::spawn(move || {
+                        started_tx.send(()).unwrap();
+                        let _ = done_tx.send(purging.purge(&project_id, &lc_id));
+                    });
+                    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    // 旧行为（无生命周期锁）会在这个窗口里把 LC 删掉。
+                    let finished_early = done_rx.recv_timeout(Duration::from_millis(300)).is_ok();
+                    // 临界区内模拟 restore 的收尾：摘墓碑。
+                    std::fs::remove_file(&tombstone_path).unwrap();
+                    Ok((finished_early, worker))
+                },
+            )
+            .unwrap();
+
+        assert!(
+            !finished_early,
+            "purge must block on the LC lifecycle lock held by a restore in progress"
+        );
+
+        let result = done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            matches!(
+                result,
+                Err(ProductStoreError::Conflict {
+                    kind: "logical_codebase_not_tombstoned",
+                    ..
+                })
+            ),
+            "purge after restore must refuse: {result:?}"
+        );
+        assert_eq!(
+            store.get("project_0001", &record.id).unwrap(),
+            Some(record.clone()),
+            "the restored LC must still be alive with its subtree intact"
+        );
+        worker.join().unwrap();
+    }
+
+    /// 2026-10-29（k3 审查建议 B6）：唯一性必须在权威写点复核。per-LC 的
+    /// manifest 锁各管各的——两个 LC 并发「预检 → 提交」同一个根时，只有全局
+    /// 唯一性判定锁能串行化，后到的那个必被拒为 `aggregate_root_overlap`。
+    #[test]
+    fn concurrent_registration_commits_of_the_same_root_reject_the_second() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let root = temp.path().join("workspace/aggregate");
+        std::fs::create_dir_all(&root).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let spawn = |lc_id: &'static str| {
+            let paths = paths.clone();
+            let root = root.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let store = LogicalCodebaseStore::for_lc(paths, lc_id);
+                barrier.wait();
+                store.with_registration_manifest_writer("project_0001", &root, || Ok(()))
+            })
+        };
+        let first = spawn("lc-a");
+        let second = spawn("lc-b");
+        let results = [first.join().unwrap(), second.join().unwrap()];
+
+        let mut committed = 0;
+        let mut rejected = 0;
+        for result in results {
+            match result {
+                Ok(()) => committed += 1,
+                Err(ProductStoreError::Conflict {
+                    kind: "aggregate_root_overlap",
+                    ..
+                }) => rejected += 1,
+                other => panic!("unexpected registration outcome: {other:?}"),
+            }
+        }
+        assert_eq!(
+            (committed, rejected),
+            (1, 1),
+            "exactly one LC may commit the same aggregate root"
+        );
+    }
+
     /// 与 [`checkout_fixture`] 同形，但主 checkout 落在给定成员仓路径上
     /// （purge 清理成员指针需要真实目录）。
     fn checkout_fixture_at(

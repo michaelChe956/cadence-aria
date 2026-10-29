@@ -298,6 +298,16 @@ impl LogicalCodebaseStore {
         project_id: &str,
         logical_codebase_id: &str,
     ) -> Result<(), ProductStoreError> {
+        self.with_lc_lifecycle_lock(project_id, logical_codebase_id, || {
+            self.delete_soft_locked(project_id, logical_codebase_id)
+        })
+    }
+
+    fn delete_soft_locked(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<(), ProductStoreError> {
         if self.get(project_id, logical_codebase_id)?.is_none() {
             return Err(ProductStoreError::NotFound {
                 kind: "logical_codebase",
@@ -345,6 +355,16 @@ impl LogicalCodebaseStore {
     /// 登记占用 → Conflict 整体失败、墓碑保留；复活成功而摘墓碑失败时重跑
     /// restore 幂等收敛。
     pub fn restore(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<LogicalCodebaseRestoreOutcome, ProductStoreError> {
+        self.with_lc_lifecycle_lock(project_id, logical_codebase_id, || {
+            self.restore_locked(project_id, logical_codebase_id)
+        })
+    }
+
+    fn restore_locked(
         &self,
         project_id: &str,
         logical_codebase_id: &str,
@@ -516,6 +536,23 @@ impl LogicalCodebaseStore {
         Ok(record)
     }
 
+    /// 读 LC 的 `record.json`，**不按墓碑过滤**：软删的 LC 仍持有
+    /// `aggregate_root` 的归属（`restore` 语义要求保留到 `purge`），聚合根唯一性
+    /// 判定必须把这类「无 manifest 的 LC」也算进去。缺失 → `None`。
+    pub(crate) fn load_lc_record_including_tombstoned(
+        &self,
+        project_id: &str,
+        logical_codebase_id: &str,
+    ) -> Result<Option<LogicalCodebaseRecord>, ProductStoreError> {
+        let path = self.record_path(project_id, logical_codebase_id)?;
+        if !path_exists(&path)? {
+            return Ok(None);
+        }
+        let record: LogicalCodebaseRecord = read_json(&path)?;
+        self.validate_record(project_id, logical_codebase_id, &record)?;
+        Ok(Some(record))
+    }
+
     fn create_subtree(
         &self,
         project_id: &str,
@@ -682,25 +719,33 @@ impl LogicalCodebaseStore {
                 .scope_root(project_id)?
                 .join(".manifest-registration.lock"),
             || {
-                let created = if let Some(manifest) = self.load_manifest(project_id)? {
-                    if manifest.provider_context_root != provider_context_root {
-                        return Err(ProductStoreError::Conflict {
-                            kind: "aggregate_root_mismatch",
-                            id: project_id.to_string(),
-                        });
-                    }
-                    false
-                } else {
-                    self.save_manifest(
-                        project_id,
-                        &LogicalCodebaseManifest::new(
-                            project_id,
-                            provider_context_root.to_path_buf(),
-                            Vec::new(),
-                        ),
-                    )?;
-                    true
-                };
+                let created =
+                    with_exact_exclusive_lock(&self.aggregate_root_uniqueness_lock_path(), || {
+                        // B6（TOCTOU）：预检通过不等于提交安全。root 唯一性必须在
+                        // 权威写点复核，且与「manifest 落盘」同处一把全局判定锁内
+                        // ——per-LC 的 manifest 锁各管各的，两个 LC 并发「预检 →
+                        // 提交」只有全局锁能串行化。
+                        self.ensure_root_unowned_by_other_lc(project_id, provider_context_root)?;
+                        if let Some(manifest) = self.load_manifest(project_id)? {
+                            if manifest.provider_context_root != provider_context_root {
+                                return Err(ProductStoreError::Conflict {
+                                    kind: "aggregate_root_mismatch",
+                                    id: project_id.to_string(),
+                                });
+                            }
+                            Ok(false)
+                        } else {
+                            self.save_manifest(
+                                project_id,
+                                &LogicalCodebaseManifest::new(
+                                    project_id,
+                                    provider_context_root.to_path_buf(),
+                                    Vec::new(),
+                                ),
+                            )?;
+                            Ok(true)
+                        }
+                    })?;
 
                 match operation() {
                     Ok(value) => Ok(value),
@@ -728,6 +773,49 @@ impl LogicalCodebaseStore {
                 }
             },
         )
+    }
+
+    /// B6：聚合根唯一性判定锁。全局唯一（挂 state root，跨 project、跨 LC 子树），
+    /// 因为重叠判定本身跨 project 枚举——per-LC 或 per-project 锁都拦不住两个
+    /// 不同 LC 的并发提交。锁文件在 `state_root` 下，不随任何 LC/project 目录
+    /// 删除而消失，故不会出现「锁被删、双持有」。
+    fn aggregate_root_uniqueness_lock_path(&self) -> PathBuf {
+        self.paths
+            .state_root()
+            .join(".aggregate-root-uniqueness.lock")
+    }
+
+    /// B6：把候选 root 归一化后交给与预检共用的枚举判定；重叠 → `Conflict
+    /// { kind: "aggregate_root_overlap" }`（沿用预检的错误码，两个入口对外一致）。
+    /// 判定口径完全来自 [`crate::product::logical_codebase::registration::
+    /// ensure_aggregate_root_unowned`]，不由写点自行解释。
+    fn ensure_root_unowned_by_other_lc(
+        &self,
+        project_id: &str,
+        provider_context_root: &Path,
+    ) -> Result<(), ProductStoreError> {
+        let canonical_root = std::fs::canonicalize(provider_context_root).map_err(|error| {
+            ProductStoreError::InvalidRecord {
+                kind: "aggregate_root",
+                reason: format!(
+                    "aggregate root {} cannot be canonicalized: {error}",
+                    provider_context_root.display()
+                ),
+            }
+        })?;
+        let owner = self
+            .lc_id
+            .clone()
+            .unwrap_or_else(|| legacy_logical_codebase_id(project_id));
+        crate::product::logical_codebase::registration::ensure_aggregate_root_unowned(
+            &self.paths,
+            Some((project_id, owner.as_str())),
+            &canonical_root,
+        )
+        .map_err(|error| ProductStoreError::Conflict {
+            kind: "aggregate_root_overlap",
+            id: error.message().to_string(),
+        })
     }
 
     pub fn save_member(

@@ -249,6 +249,70 @@
         );
     }
 
+    /// k3 审查建议 B7（2026-10-29）：没有 manifest 的 LC（冷启动 / 空成员 /
+    /// 只跑过聚合初始化）也有 `record.json` 的 `aggregate_root`，必须参与唯一性
+    /// 判定——旧枚举只认 manifest，这类 LC 不占根，两个 LC 可以登记同一个根。
+    /// 墓碑状态同样占根（restore 语义要求归属保留到 purge），purge 之后才释放。
+    #[test]
+    fn aggregate_root_preflight_counts_manifest_less_and_tombstoned_lc_records() {
+        let fixture = aggregate_root_fixture();
+        let canonical_root = fs::canonicalize(&fixture.root).unwrap();
+        let store = LogicalCodebaseStore::new(fixture.paths.clone());
+        let record = store
+            .create(
+                "project_0001",
+                crate::product::logical_codebase::LogicalCodebaseCreateInput {
+                    name: "cold-start".to_string(),
+                    aggregate_root: canonical_root,
+                },
+            )
+            .unwrap();
+        // 只有 record.json、没有 manifest.json：这是冷启动/空成员 LC 的形态。
+        assert!(
+            LogicalCodebaseStore::for_lc(fixture.paths.clone(), &record.id)
+                .load_manifest("project_0001")
+                .unwrap()
+                .is_none()
+        );
+
+        // 别的 LC（含未指明自身身份的预检）不得再占用同一个根。
+        assert_eq!(
+            fixture
+                .preflight()
+                .validate("project_0001", &fixture.root, &[])
+                .unwrap_err()
+                .code(),
+            "aggregate_root_overlap"
+        );
+        // 自己复验（for_lc）跳过自身，放行。
+        assert!(
+            fixture
+                .preflight_for_lc(&record.id)
+                .validate("project_0001", &fixture.root, &[])
+                .is_ok()
+        );
+
+        // 软删后仍占根（墓碑 LC 的 record 还在）。
+        store.delete_soft("project_0001", &record.id).unwrap();
+        assert_eq!(
+            fixture
+                .preflight()
+                .validate("project_0001", &fixture.root, &[])
+                .unwrap_err()
+                .code(),
+            "aggregate_root_overlap"
+        );
+
+        // purge 之后归属才释放。
+        store.purge("project_0001", &record.id).unwrap();
+        assert!(
+            fixture
+                .preflight()
+                .validate("project_0001", &fixture.root, &[])
+                .is_ok()
+        );
+    }
+
     struct AggregateRootFixture {
         _temp: tempfile::TempDir,
         paths: ProductAppPaths,
