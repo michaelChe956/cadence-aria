@@ -249,9 +249,9 @@ fn trust_route_fixture_with(gate_fail: bool, options: RecipeFixtureOptions) -> T
         .unwrap();
     let aggregate_root = root_path.join("aggregate-root");
     std::fs::create_dir_all(&aggregate_root).unwrap();
-    // 注意：此处不预置根规则入口 AGENTS.md——aggregate preflight 会拒绝
-    // 已含 AGENTS.md 的聚合根（aggregate_root_ownership_conflict）；
-    // 根规则材料由测试 provider 在 RuleAndMcpConfig 命令时机生成。
+    // 说明：本夹具不预置根规则入口 AGENTS.md —— 聚合初始化的四命令由测试
+    // provider 在 RuleAndMcpConfig 时机生成该材料。登记预检**不再**以
+    // AGENTS.md / CLAUDE.md 的存在为门禁（2026-10-29 起），此处只是保持"未初始化根"语义。
     let lc_id = crate::product::logical_codebase::LogicalCodebaseStore::new(paths.clone())
         .create(
             "project_0001",

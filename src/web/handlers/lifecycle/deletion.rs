@@ -99,7 +99,11 @@ pub async fn delete_design_spec(
 /// run 本体 → advance 独立 checkpoint）→ 根最后 → `list_entity_owned_residue`
 /// 及 AdvanceStore list 复核目标独占内容为空 → remove pending → prune
 /// owned-index（已 purge 集合清出索引；Plan 保留 worktree 墓碑 claim 集）
-/// → complete。
+/// → complete → 内存面驱逐（workspace session manager）。
+///
+/// 内存面驱逐（⓪/⑪，v37 反馈 #3）：删除前收集该实体的 workspace session id
+/// （删除后磁盘记录已读不到），删除**成功后**驱逐其内存 manager；门禁拒绝或
+/// 中途失败一律不驱逐（失败零副作用）。
 ///
 /// 重入（purging 墓碑在位）先 pending＋owner 索引（§0.5 固定来源），不重复
 /// 门禁；根缺不 404；Deleted 幂等 200；任何实际 IO/JSON 错误不当空（fail-closed），
@@ -117,6 +121,17 @@ async fn cascade_delete_entity(
     let deletion_store = EntityDeletionStore::new(app_paths.clone());
     let operations = EntityOperationStore::new(app_paths.clone());
     let scope = EntityScope::new(project_id, issue_id, kind, entity_id);
+
+    // ⓪ 内存面驱逐准备（v37 反馈 #3）：级联删除会清掉该实体的 workspace
+    //    session 磁盘记录，但 WorkspaceSessionRegistry 缓存的 manager 不随之
+    //    失效——重新生成复用同 id session 时，WS 连接经 get_or_create_and_attach
+    //    命中旧 manager，把已删会话的旧状态（messages/artifact/stage）原样发给
+    //    前端。必须在磁盘删除前收集 session id（删除后
+    //    `list_workspace_sessions` 已读不到这些记录）；收集失败 → 删除不执行
+    //    （零副作用，与 `delete_work_item` 同纪律）。
+    let entity_ids = [entity_id.to_string()];
+    let mut session_ids =
+        workspace_session_ids_for_entities(&store, project_id, issue_id, &entity_ids)?;
 
     // ① 墓碑：Deleted → 幂等成功（零动作、不动 manager/记录）；Purging → 重入续清。
     let reentry = match deletion_store
@@ -290,6 +305,17 @@ async fn cascade_delete_entity(
     deletion_store
         .complete(&lease)
         .map_err(product_store_api_error)?;
+    // ⑪ 内存面驱逐（v37 反馈 #3）：删除已完成 → 驱逐该实体的 workspace
+    //    session manager。`manifest.session_ids` 覆盖 reentry（pending 原始
+    //    全量 ∪ 重新采集）与 Plan 归属的子 work item 会话；与 ⓪ 的删除前
+    //    快照取并集。驱逐只发生在删除成功之后——门禁拒绝/中途失败一律
+    //    不驱逐（失败零副作用）。
+    for session_id in &manifest.session_ids {
+        if !session_ids.contains(session_id) {
+            session_ids.push(session_id.clone());
+        }
+    }
+    evict_workspace_session_managers(state, &session_ids).await;
     Ok(())
 }
 

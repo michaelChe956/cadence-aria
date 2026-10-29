@@ -1,5 +1,10 @@
-//! Task 12a:#8 政策发布依赖面——缺发布 fail-closed、正文/revision/receipt
-//! 漂移 spawn 前阻断(实施计划 Task 12 段 513-541 行;REQ-LCG-02/07)。
+//! Task 12a:#8 政策发布依赖面——缺发布 fail-closed、正文/revision 漂移 spawn
+//! 前阻断(实施计划 Task 12 段 513-541 行;REQ-LCG-02/07)。
+//!
+//! receipt 链 digest 漂移**不**阻断:2026-10-27 的政策链改动(提交 85497679)
+//! 把政策权威收敛为「当前已发布政策」(artifact),回执只证明「已发布」这一
+//! 事实存在 → 见
+//! `lcg_t12_receipt_digest_drift_is_tolerated_because_published_policy_is_authoritative`。
 //!
 //! 消费契约(Global Constraints #8;#8 已于 2026-10-03 c4706aa9 收口交付):
 //! gateway 只消费最终 `artifact.policy_text` 原始 UTF-8 字节(= canonical
@@ -557,9 +562,15 @@ fn lcg_t12_missing_publication_blocks_every_provider_without_fixture_seed() {
 /// 计划 519 行 `lcg_t12_body_revision_receipt_drift_blocks_before_spawn`:
 /// validate→spawn 之间任一发布链维度漂移(正文篡改/正文缺失/政策升级/
 /// 根规则篡改),`start_streaming` 必须在 registry lookup 与真实 adapter
-/// spawn 之前 fail-closed;receipt 链 digest 漂移在 validate 阶段即拒。
+/// spawn 之前 fail-closed。
+///
+/// 注:原计划把「receipt 链 digest 漂移」也列为本用例的阻断维度;2026-10-27
+/// 的政策链改动(提交 85497679「集成测试适配 verify_published_policy_body 新
+/// 签名」)已把政策权威收敛为**当前已发布政策**(artifact),回执只证明
+/// 「已发布」这一事实存在 → receipt digest 漂移不再阻断,独立成例
+/// `lcg_t12_receipt_digest_drift_is_tolerated_because_published_policy_is_authoritative`。
 #[tokio::test]
-async fn lcg_t12_body_revision_receipt_drift_blocks_before_spawn() {
+async fn lcg_t12_body_revision_drift_blocks_before_spawn() {
     // ---- 场景 A:正文漂移(locator 原字节被篡改)→ policy_body ----
     {
         let chain = build_published_chain(None);
@@ -740,39 +751,68 @@ async fn lcg_t12_body_revision_receipt_drift_blocks_before_spawn() {
         );
     }
 
-    // ---- 场景 E:receipt 链漂移(policy_digest 与 artifact.digest 脱钩)
-    //      → validate 阶段 policy_digest_chain 即拒,spawn 无从发生 ----
-    {
-        let chain = build_published_chain(Some("sha256:t12-receipt-chain-drift"));
-        let fixture = t12_gateway(
-            chain.policies(),
-            Some(chain.receipts()),
-            &chain.canonical_root,
-        );
-        let error = fixture
-            .gateway
-            .prepare_streaming_launch(
-                t12_streaming_input(&chain.canonical_root),
-                t12_planning_request(
-                    ProviderRef::claude_code("t12-cap-claude"),
-                    &chain.canonical_root,
-                ),
-                t12_launch_audit_context(),
-            )
-            .expect_err("receipt 链 digest 漂移必须在 validate 阶段拒绝");
-        assert!(
-            matches!(&error, ProviderGatewayError::PolicyDrift { dimension } if dimension == "policy_digest_chain"),
-            "receipt 链漂移判别维度必须是 policy_digest_chain(得到 {error:?})"
-        );
-        assert_eq!(
-            fixture
-                .streaming_spawn_probe
-                .validated_starts
-                .load(Ordering::SeqCst),
-            0,
-            "receipt 链漂移被拒时 adapter 不得被 spawn"
-        );
-    }
+    // ---- 场景 E(receipt 链 digest 漂移)已独立成例 ----
+    //      见 `lcg_t12_receipt_digest_drift_is_tolerated_because_published_policy_is_authoritative`
+    //      (政策权威=当前已发布政策;回执只证明「已发布」存在,不参与 digest 权威)。
+}
+
+/// 计划 519 行 `lcg_t12_body_revision_receipt_drift_blocks_before_spawn` 的
+/// receipt 链 digest 漂移维度(独立成例):回执里冻结的 policy_digest 与
+/// artifact.digest 脱钩时,`prepare_streaming_launch` **必须成功**,且冻结的
+/// locator `policy_digest` 必须等于 `artifact.digest`(不得采用被篡改的回执
+/// digest)。
+///
+/// 依据(这是**产品行为**,不是缺陷——勿按缺陷改回):
+/// - 提交 85497679(2026-10-27,「fix(test): 集成测试适配
+///   verify_published_policy_body 新签名」)把政策链的权威收敛为**当前已发布
+///   政策**:该函数的签名从 `(authority_root, artifact, receipt)` 收敛为
+///   `(authority_root, artifact)`,只校验 artifact 身份 / 磁盘正文 ==
+//   artifact 正文 / `artifact.digest == sha256(正文)` / 根规则摘要。
+/// - `provider_gateway.rs` 的 `assemble_validated` 里
+///   `receipts.latest_finalized(...)` 的**回执值被丢弃**(`|_receipt|`),只用于
+///   判断「回执存在」;冻结的 `policy_digest` 直接取 `artifact.digest`。
+///
+/// 即:回执仅证明「已发布」这一事实存在,digest 权威=当前已发布政策——回执
+/// digest 漂移被容忍,且产出的 locator digest 必须是 artifact.digest。
+#[tokio::test]
+async fn lcg_t12_receipt_digest_drift_is_tolerated_because_published_policy_is_authoritative() {
+    let chain = build_published_chain(Some("sha256:t12-receipt-chain-drift"));
+    let fixture = t12_gateway(
+        chain.policies(),
+        Some(chain.receipts()),
+        &chain.canonical_root,
+    );
+    let launch = fixture
+        .gateway
+        .prepare_streaming_launch(
+            t12_streaming_input(&chain.canonical_root),
+            t12_planning_request(
+                ProviderRef::claude_code("t12-cap-claude"),
+                &chain.canonical_root,
+            ),
+            t12_launch_audit_context(),
+        )
+        .expect("回执 digest 漂移不被拒:政策权威=当前已发布政策(artifact)");
+    let (policy_digest, _rule_digest) = launch
+        .policy_locator_digests()
+        .expect("已发布链必须冻结 policy locator digest 事实");
+    assert_eq!(
+        policy_digest,
+        chain.artifact.digest.as_str(),
+        "冻结的 policy_digest 必须是当前已发布政策的 digest(不得采用被篡改的回执 digest)"
+    );
+    assert_ne!(
+        policy_digest, "sha256:t12-receipt-chain-drift",
+        "被篡改的回执 digest 不得进入 policy locator"
+    );
+    assert_eq!(
+        fixture
+            .streaming_spawn_probe
+            .validated_starts
+            .load(Ordering::SeqCst),
+        0,
+        "prepare 阶段不得触达 adapter spawn"
+    );
 }
 
 // ---------------------------------------------------------------------------

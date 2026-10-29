@@ -293,3 +293,289 @@ async fn work_item_plan_delete_rejects_zero_mutation_when_any_work_item_has_atte
         "拒删不改 manager：plan session 的内存 manager 不被驱逐"
     );
 }
+
+// ---- 三类实体级联删除的内存面驱逐（v37 反馈 #3 根因修复）----
+// `delete_work_item` 早已在删除后驱逐其 workspace session 的内存 manager，
+// 但 Story/Design/Plan 走的 `cascade_delete_entity` 只删磁盘记录——registry
+// 缓存的 manager 仍持有删除前的 engine 状态，重新生成复用同 id session 时
+// （max_workspace_session_sequence 只数磁盘 json，删除后序号回退）WS 连接经
+// get_or_create_and_attach 命中旧 manager，把已删会话的旧状态原样发给前端。
+// 契约：删除**成功后**驱逐；门禁拒绝/删除失败**不**驱逐（失败零副作用）。
+
+/// Design 级联删除成功后驱逐其 workspace session 的内存 manager。
+#[tokio::test]
+async fn design_spec_delete_evicts_cached_runtime_manager() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let app = build_web_router(state.clone());
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"EvictDesign","description":null}),
+    )
+    .await;
+    crate::create_repository_and_wait(
+        app.clone(),
+        "project_0001",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"EvictDesign","description":"描述","repository_id":"repository_0001"}),
+    )
+    .await;
+
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({"title":"Evict design story","author_provider":"fake"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // 下游 design 生成要求 story 已确凿确认（REQ：story 未确认不得生成 design）。
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/confirm",
+        json!({"confirmed_by":"human"}),
+    )
+    .await;
+
+    let (status, design) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/design-specs:generate",
+        json!({
+            "title":"Evict design",
+            "author_provider":"fake",
+            "story_spec_ids":["story_spec_0001"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let design_session_id = design["workspace_session"]["workspace_session_id"]
+        .as_str()
+        .expect("design session id")
+        .to_string();
+
+    // 模拟用户打开过 design workspace：manager 缓存进 registry。
+    let factory_state = state.clone();
+    let factory_session_id = design_session_id.clone();
+    state
+        .workspace_sessions
+        .get_or_create(&design_session_id, move || {
+            let state = factory_state.clone();
+            let session_id = factory_session_id.clone();
+            async move { WorkspaceSessionManager::create(&state, &session_id).await }
+        })
+        .await
+        .expect("design manager attached");
+
+    let (status, _) = request_json(
+        app.clone(),
+        Method::DELETE,
+        "/api/projects/project_0001/issues/issue_0001/design-specs/design_spec_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert!(
+        state.workspace_sessions.get(&design_session_id).await.is_none(),
+        "删除 design spec 后必须驱逐其 workspace session 的内存 manager"
+    );
+}
+
+/// Plan 级联删除成功后驱逐其 workspace session 的内存 manager。
+#[tokio::test]
+async fn work_item_plan_delete_evicts_cached_runtime_manager() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let app = build_web_router(state.clone());
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"EvictPlan","description":null}),
+    )
+    .await;
+    crate::create_repository_and_wait(
+        app.clone(),
+        "project_0001",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"EvictPlan","description":"描述","repository_id":"repository_0001"}),
+    )
+    .await;
+
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    // draft plan（never confirmed → 删除无需 confirmed=true；无 work item
+    // → 无 coding 门禁、无子会话）。
+    lifecycle
+        .create_issue_work_item_plan(CreateIssueWorkItemPlanInput {
+            id: Some("issue_work_item_plan_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            source_story_spec_ids: Vec::new(),
+            source_design_spec_ids: Vec::new(),
+            options: IssueWorkItemPlanOptions {
+                include_integration_tests: false,
+                include_e2e_tests: false,
+                force_frontend_backend_split: false,
+                require_execution_plan_confirm: false,
+            },
+            status: IssueWorkItemPlanStatus::Draft,
+            work_item_ids: Vec::new(),
+            repository_profile_ref: None,
+            verification_plan_ids: Vec::new(),
+            dependency_graph: Vec::new(),
+            created_from_provider_run: None,
+            validator_findings: Vec::new(),
+        })
+        .expect("create draft plan");
+
+    let session = lifecycle
+        .create_workspace_session(CreateWorkspaceSessionInput {
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            entity_id: "issue_work_item_plan_0001".to_string(),
+            workspace_type: WorkspaceType::WorkItemPlan,
+            author_provider: ProviderName::Fake,
+            reviewer_provider: Some(ProviderName::Fake),
+            review_rounds: 1,
+            superpowers_enabled: false,
+            openspec_enabled: false,
+            work_item_plan_options: None,
+        })
+        .expect("create plan session");
+
+    // 模拟用户打开过 plan workspace：manager 缓存进 registry。
+    let factory_state = state.clone();
+    let factory_session_id = session.id.clone();
+    state
+        .workspace_sessions
+        .get_or_create(&session.id, move || {
+            let state = factory_state.clone();
+            let session_id = factory_session_id.clone();
+            async move { WorkspaceSessionManager::create(&state, &session_id).await }
+        })
+        .await
+        .expect("plan manager attached");
+
+    let (status, _) = request_json(
+        app.clone(),
+        Method::DELETE,
+        "/api/projects/project_0001/issues/issue_0001/work-item-plans/issue_work_item_plan_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert!(
+        state.workspace_sessions.get(&session.id).await.is_none(),
+        "删除 work item plan 后必须驱逐其 workspace session 的内存 manager"
+    );
+}
+
+/// 删除被门禁拒绝（分级确认门禁）时**不得**驱逐内存 manager（失败零副作用）。
+#[tokio::test]
+async fn story_spec_delete_rejected_by_gate_keeps_cached_runtime_manager() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let state = WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    );
+    let app = build_web_router(state.clone());
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"EvictGate","description":null}),
+    )
+    .await;
+    crate::create_repository_and_wait(
+        app.clone(),
+        "project_0001",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues",
+        json!({"title":"EvictGate","description":"描述","repository_id":"repository_0001"}),
+    )
+    .await;
+
+    let (status, story) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/issues/issue_0001/story-specs:generate",
+        json!({"title":"Evict gate story","author_provider":"fake"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let story_session_id = story["workspace_session"]["workspace_session_id"]
+        .as_str()
+        .expect("story session id")
+        .to_string();
+
+    // 确凿确认过 → 删除走分级确认门禁（REQ-DEL-04）：无 confirmed=true 即拒删。
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/workspace-sessions/workspace_session_0001/confirm",
+        json!({"confirmed_by":"human"}),
+    )
+    .await;
+
+    let factory_state = state.clone();
+    let factory_session_id = story_session_id.clone();
+    state
+        .workspace_sessions
+        .get_or_create(&story_session_id, move || {
+            let state = factory_state.clone();
+            let session_id = factory_session_id.clone();
+            async move { WorkspaceSessionManager::create(&state, &session_id).await }
+        })
+        .await
+        .expect("story manager attached");
+
+    let (status, error) = request_json(
+        app.clone(),
+        Method::DELETE,
+        "/api/projects/project_0001/issues/issue_0001/story-specs/story_spec_0001",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["code"], "deletion_confirmation_required");
+
+    assert!(
+        state.workspace_sessions.get(&story_session_id).await.is_some(),
+        "拒删不改 manager：删除被门禁拒绝时不得驱逐其 workspace session 的内存 manager"
+    );
+}

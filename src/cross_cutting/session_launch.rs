@@ -85,6 +85,14 @@ impl ValidatedStreamingProviderInput {
         }
     }
 
+    /// #8 发布链在 validate 时点冻结的 locator digest 事实（只读投影；
+    /// `(policy_digest, rule_digest)`）。`None` = 本次 validate 未消费
+    /// 发布链。`policy_digest` 取**当前已发布政策**（artifact）的 digest
+    /// ——回执只证明「已发布」这一事实存在，不是 digest 权威。
+    pub fn policy_locator_digests(&self) -> Option<(&str, &str)> {
+        self.launch.policy_locator_digests()
+    }
+
     /// B1-1:绑定本次 launch 的受信资源归属(crate 内受信装配面——launch
     /// 分流点 `launch_provider_session` 的 validated+gateway 臂与同步桥接
     /// 透传消费)。字段 private、载体 crate 内铸造,caller/模型不可伪造。

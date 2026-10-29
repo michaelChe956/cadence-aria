@@ -307,8 +307,9 @@ mod tests {
     /// r57 E2E 缺陷钉死:确定性步骤失败也必须落 durable Failed 终态。
     /// worker(tokio::spawn)返回 Err 后 GET 是纯投影(C4 Task 6)只读
     /// durable 记录——不落终态的失败对外表现为永久 `running`(r57
-    /// attempt3 "preflight 挂死"真身:根所有权冲突被拒后 worker 静默
-    /// 退出,GET 200 running 轮询 28min)。
+    /// attempt3 "preflight 挂死"真身:预检被拒后 worker 静默
+    /// 退出,GET 200 running 轮询 28min)。此处用"根被其它 LC 占用"作为
+    /// 拒绝来源（所有权冲突门禁已于 2026-10-29 移除）。
     #[tokio::test]
     async fn preflight_failure_marks_operation_failed_terminal() {
         let temp = tempfile::tempdir().unwrap();

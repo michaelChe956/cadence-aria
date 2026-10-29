@@ -161,6 +161,19 @@ impl ValidatedSessionLaunchPolicy {
         &self.capability_snapshot_ref
     }
 
+    /// #8 发布链在 validate 时点冻结的 locator digest 事实（只读投影）。
+    ///
+    /// `None` = 本次 validate 未消费发布链（自举桩/RootRecipe 相位/未注入
+    /// 只读事实源）。`policy_digest` 取**当前已发布政策**（artifact）的
+    /// digest——回执只证明「已发布」这一事实存在，不参与 digest 权威
+    /// （权威=当前已发布政策，见提交 85497679）。getter 是外部唯一访问
+    /// 字段的方式；外部不可铸造。
+    pub fn policy_locator_digests(&self) -> Option<(&str, &str)> {
+        self.policy_locator
+            .as_ref()
+            .map(|locator| (locator.policy_digest.as_str(), locator.rule_digest.as_str()))
+    }
+
     /// 是否 root-recipe 相位(crate 内观测面;普通 validate 恒 false)。
     pub(crate) fn is_root_recipe_phase(&self) -> bool {
         matches!(self.phase, ValidatedSessionLaunchPhase::RootRecipe(_))
