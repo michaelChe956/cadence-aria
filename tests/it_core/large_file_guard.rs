@@ -145,10 +145,9 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         1553,
     ),
     ("src/product/logical_codebase/provider_trust.rs", 4484),
-    (
-        "src/product/logical_codebase/registration_tests.inc.rs",
-        1315,
-    ),
+    // 2026-10-29：registration_tests.inc.rs 已按主题拆分为 3 个片段
+    // （detect_preflight / attach / aggregate_root_and_cold_start，均 ≤1200 行），
+    // 按「拆分达标后必须移除」的登记回收先例移除本项。
     ("src/product/models/tests.rs", 1523),
     // 2026-10-25：reviewer_reconciliation.rs 已拆分至 507 行（< 1200 硬线），
     // 按「拆分达标后必须移除」的登记回收先例移除本项。
