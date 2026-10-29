@@ -3,6 +3,7 @@ import { ApiRequestError } from "./client";
 import {
   getLogicalCodebaseBootstrap,
   postLogicalCodebaseBootstrapAction,
+  postLogicalCodebaseBootstrapAdvance,
 } from "./logical-codebase-bootstrap";
 
 function projectionResponse() {
@@ -116,6 +117,40 @@ describe("logical codebase bootstrap api client", () => {
     });
     expect(result.outcome).toBe("accepted");
     expect(result.command_id).toBe("cmd-1");
+  });
+
+  it("POST 一键推进空体提交到 advance 端点并返回推进结果", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          project_id: "project_0001",
+          logical_codebase_id: "logical_codebase_0001",
+          advanced_steps: ["rules_policy", "member_index"],
+          stopped_reason: "planning_ready",
+          projection: projectionResponse(),
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await postLogicalCodebaseBootstrapAdvance(
+      "project_0001",
+      "logical_codebase_0001",
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/projects/project_0001/logical-codebases/logical_codebase_0001/bootstrap/advance",
+    );
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({});
+    expect(result.advanced_steps).toEqual(["rules_policy", "member_index"]);
+    expect(result.stopped_reason).toBe("planning_ready");
+    expect(result.projection.steps).toHaveLength(5);
   });
 
   it("409 冲突透传稳定码供 UI 呈现", async () => {

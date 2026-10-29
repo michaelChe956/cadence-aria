@@ -2,6 +2,7 @@ import { ApiRequestError, normalizeApiError } from "./client";
 import type {
   BootstrapActionRequest,
   BootstrapActionResult,
+  BootstrapAdvanceResult,
   LogicalCodebaseBootstrapProjection,
 } from "./types";
 
@@ -54,6 +55,24 @@ export function postLogicalCodebaseBootstrapAction(
         expected_revision: request.expected_revision ?? null,
         expected_object_id: request.expected_object_id,
       }),
+    },
+  );
+}
+
+/**
+ * 冷启动一键推进：服务端按 identity→manifest_checkout→rules_policy→
+ * member_index→aggregate_index_active 顺序推进到可动步骤耗尽或 PlanningReady。
+ * 幂等：重复调用不重复推进、不重复 provider turn（advanced_steps 为空）。
+ */
+export function postLogicalCodebaseBootstrapAdvance(
+  projectId: string,
+  logicalCodebaseId: string,
+): Promise<BootstrapAdvanceResult> {
+  return requestJson<BootstrapAdvanceResult>(
+    `${bootstrapPath(projectId, logicalCodebaseId)}/advance`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
     },
   );
 }

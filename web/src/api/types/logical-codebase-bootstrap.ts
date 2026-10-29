@@ -99,4 +99,27 @@ export type BootstrapActionRequest = {
   expected_object_id: string;
 };
 
+// 冷启动一键推进（POST .../bootstrap/advance）的停止原因：服务端按依赖顺序
+// 推进到 planning_ready / 失败 / 等待人工 / 无可动步骤 / 达到循环上限为止。
+export type BootstrapAdvanceStopReason =
+  | "planning_ready"
+  | "failed"
+  | "waiting_for_human"
+  | "no_actionable_step"
+  | "iteration_limit";
+
+export type BootstrapAdvanceResult = {
+  project_id: string;
+  logical_codebase_id: string;
+  /** 本次真正推进的步骤（依赖顺序，可能为空——重复调用即幂等空转）。 */
+  advanced_steps: LogicalCodebaseBootstrapStepName[];
+  stopped_reason: BootstrapAdvanceStopReason | string;
+  /** 停住的步骤（失败/等待人工时非空）。 */
+  stopped_step?: LogicalCodebaseBootstrapStepName | null;
+  /** 停住步骤的稳定原因码（既有投影 failure 或推进器稳定码）。 */
+  stopped_reason_code?: string | null;
+  /** 推进后的最新投影（与 GET .../bootstrap 同构）。 */
+  projection: LogicalCodebaseBootstrapProjection;
+};
+
 export type { ApiError };

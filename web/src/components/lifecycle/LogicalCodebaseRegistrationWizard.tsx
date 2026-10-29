@@ -53,7 +53,7 @@ export function LogicalCodebaseRegistrationWizard({
 }: {
   projectId: string;
   logicalCodebaseId: string;
-  onCompleted?: () => Promise<void> | void;
+  onCompleted?: (logicalCodebaseId: string) => Promise<void> | void;
   onClose?: () => void;
   /** 内嵌模式：不渲染遮罩/对话框壳，由宿主弹窗提供 chrome（添加代码库弹窗合并登记流）。 */
   embedded?: boolean;
@@ -159,7 +159,7 @@ export function LogicalCodebaseRegistrationWizard({
       });
       setBatch(result);
       if (result.status === "completed") {
-        await onCompleted?.();
+        await onCompleted?.(logicalCodebaseId);
       }
     } catch (reason) {
       setError(formatError(reason, "提交登记失败"));
@@ -178,7 +178,7 @@ export function LogicalCodebaseRegistrationWizard({
       const result = await resumeLogicalCodebaseRegistration(projectId, logicalCodebaseId, batch.batch_id);
       setBatch(result);
       if (result.status === "completed") {
-        await onCompleted?.();
+        await onCompleted?.(logicalCodebaseId);
       }
     } catch (reason) {
       setError(formatError(reason, "恢复登记失败"));

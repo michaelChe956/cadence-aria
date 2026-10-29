@@ -23,8 +23,9 @@ export function AddCodebaseDialog({
   projectId: string;
   onChooseSingle: () => void;
   onCreatedLogical: (codebase: LogicalCodebaseDto) => void;
-  /** 登记批完成后回调（成员已变化，宿主应刷新）；创建+登记合并在本弹窗内完成。 */
-  onRegistrationCompleted?: () => Promise<void> | void;
+  /** 登记批完成后回调（成员已变化，宿主应刷新并触发冷启动自动推进）；
+   *  参数为登记完成的 LC id。创建+登记合并在本弹窗内完成。 */
+  onRegistrationCompleted?: (logicalCodebaseId: string) => Promise<void> | void;
   onClose: () => void;
 }) {
   const [mode, setMode] = useState<AddCodebaseMode>("single_repo");

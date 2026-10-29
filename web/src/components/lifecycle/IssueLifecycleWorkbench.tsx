@@ -524,6 +524,7 @@ export function IssueLifecycleWorkbench({
     bootstrapProjection,
     refreshBootstrap,
     refreshScope,
+    autoAdvanceBootstrap,
     latestPointerPublication,
     showIncrementalHint,
   } = useLogicalCodebaseScopeData({
@@ -968,12 +969,19 @@ export function IssueLifecycleWorkbench({
             // 合并流：LC 创建后登记在弹窗内完成，这里只刷新列表（不再打开独立登记向导）。
             if (selectedProjectId) void refresh(selectedProjectId);
           }}
-          onRegistrationCompleted={() => {
+          onRegistrationCompleted={(logicalCodebaseId) => {
             // 登记批在后端落成员并推进 identity/manifest_checkout：目录与
             // LC 作用域（成员/发布/索引 + bootstrap 投影）都要重拉，否则
             // 管理抽屉沿用登记前的陈旧冷启动快照。
             void refresh(selectedProjectId);
             refreshScope();
+            // 冷启动自动推进：登记完成后按依赖顺序推进剩余步骤（每个 LC
+            // 只自动调一次；失败只提示不重试，可手动「一键推进」补）。
+            void autoAdvanceBootstrap(logicalCodebaseId).then((message) => {
+              if (message) {
+                setError(`冷启动自动推进失败：${message}`);
+              }
+            });
           }}
           onClose={() => setAddCodebaseDialogOpen(false)}
         />
@@ -984,10 +992,16 @@ export function IssueLifecycleWorkbench({
         <LogicalCodebaseRegistrationWizard
           projectId={selectedProjectId}
           logicalCodebaseId={activeLogicalCodebaseId}
-          onCompleted={() => {
+          onCompleted={(logicalCodebaseId) => {
             // 独立登记向导完成：与合并流同口径——目录 + LC 作用域重拉。
             void refresh(selectedProjectId);
             refreshScope();
+            // 冷启动自动推进（与合并流同口径）。
+            void autoAdvanceBootstrap(logicalCodebaseId).then((message) => {
+              if (message) {
+                setError(`冷启动自动推进失败：${message}`);
+              }
+            });
           }}
           onClose={() => setRegistrationDialogOpen(false)}
         />

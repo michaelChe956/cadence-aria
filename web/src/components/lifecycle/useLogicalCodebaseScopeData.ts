@@ -1,16 +1,20 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { getActiveAggregateIndex } from "../../api/aggregate-index";
 import {
   getActiveAggregateInitialization,
   getAggregateInitialization,
 } from "../../api/aggregate-initialization";
-import { getLogicalCodebaseBootstrap } from "../../api/logical-codebase-bootstrap";
+import {
+  getLogicalCodebaseBootstrap,
+  postLogicalCodebaseBootstrapAdvance,
+} from "../../api/logical-codebase-bootstrap";
 import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
 import { listPointerPublications } from "../../api/pointer-publication";
 import type {
   AggregateIndexActiveResponse,
   AggregateInitializationOperationSnapshot,
+  BootstrapActionName,
   LogicalCodebaseBootstrapProjection,
   LogicalCodebaseMemberDto,
   PointerPublicationDto,
@@ -41,9 +45,28 @@ type LogicalCodebaseScopeData = {
   bootstrapProjection: LogicalCodebaseBootstrapProjection | null;
   refreshBootstrap: () => void;
   refreshScope: () => void;
+  /** 登记完成后的自动推进：每个 LC 只自动调一次，失败只提示不重试。 */
+  autoAdvanceBootstrap: (logicalCodebaseId: string) => Promise<string | null>;
   latestPointerPublication: PointerPublicationDto | null;
   showIncrementalHint: boolean;
 };
+
+// 自动推进只认这两个动作（首建的 canonical 动作）：其余（retry/revalidate/
+// repair/republish）属人工介入面，不得在登记完成时自动触发。
+const AUTO_ADVANCE_ACTIONS = new Set<BootstrapActionName>(["prepare", "continue"]);
+
+function hasAutoAdvanceableStep(
+  projection: LogicalCodebaseBootstrapProjection | null,
+): boolean {
+  if (!projection) {
+    return false;
+  }
+  return (projection.steps ?? []).some((step) =>
+    (step.allowed_actions ?? []).some((action) =>
+      AUTO_ADVANCE_ACTIONS.has(action),
+    ),
+  );
+}
 
 /**
  * 选中 LC 作用域的数据加载 hook（纯搬运自 IssueLifecycleWorkbench，无行为改动）：
@@ -70,6 +93,8 @@ export function useLogicalCodebaseScopeData({
   const [bootstrapProjection, setBootstrapProjection] =
     useState<LogicalCodebaseBootstrapProjection | null>(null);
   const [bootstrapRefreshTick, setBootstrapRefreshTick] = useState(0);
+  // 已自动推进过的 LC：登记完成后的自动推进对每个 LC 只做一次。
+  const autoAdvancedRef = useRef<Set<string>>(new Set());
   // 作用域显式补读 tick：登记完成等「成员已变化」事件后整域重拉用；
   // 与 LC/Project 切换不同，补读不清空 aggregateInitialization 等进行面。
   const [scopeRefreshTick, setScopeRefreshTick] = useState(0);
@@ -222,6 +247,63 @@ export function useLogicalCodebaseScopeData({
     setBootstrapRefreshTick((tick) => tick + 1);
   }, []);
 
+  // 冷启动推进（2026-10-29）：服务端按 identity→manifest_checkout→
+  // rules_policy→member_index→aggregate_index_active 顺序推进到可动步骤
+  // 耗尽或 PlanningReady；端点幂等（重复调用不重复推进/不重复 provider turn）。
+  const advanceBootstrap = useCallback(
+    async (logicalCodebaseId: string): Promise<string | null> => {
+      if (!selectedProjectId) {
+        return "缺少 Project";
+      }
+      try {
+        const result = await postLogicalCodebaseBootstrapAdvance(
+          selectedProjectId,
+          logicalCodebaseId,
+        );
+        if (result?.projection && logicalCodebaseId === activeLogicalCodebaseId) {
+          setBootstrapProjection(result.projection);
+        }
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : "冷启动推进失败";
+      }
+    },
+    [selectedProjectId, activeLogicalCodebaseId],
+  );
+
+  // 登记完成后的自动推进：每个 LC 只自动调一次（登记重放/恢复不再重复触发）；
+  // 失败只如实返回错误消息，由宿主提示，不重试。
+  const autoAdvanceBootstrap = useCallback(
+    async (logicalCodebaseId: string): Promise<string | null> => {
+      if (!logicalCodebaseId || autoAdvancedRef.current.has(logicalCodebaseId)) {
+        return null;
+      }
+      autoAdvancedRef.current.add(logicalCodebaseId);
+      if (!selectedProjectId) {
+        return "缺少 Project";
+      }
+      // 先读最新投影（GET 只读、零副作用）：登记刚完成时客户端快照可能过期，
+      // 判定必须基于服务端当前事实（已就绪/无可动步骤则不推进）。
+      let projection: LogicalCodebaseBootstrapProjection | null = null;
+      try {
+        projection = await getLogicalCodebaseBootstrap(
+          selectedProjectId,
+          logicalCodebaseId,
+        );
+      } catch {
+        projection = null;
+      }
+      if (projection?.planning_ready) {
+        return null;
+      }
+      if (projection && !hasAutoAdvanceableStep(projection)) {
+        return null;
+      }
+      return advanceBootstrap(logicalCodebaseId);
+    },
+    [selectedProjectId, advanceBootstrap],
+  );
+
   useEffect(() => {
     if (
       !selectedProjectId ||
@@ -316,6 +398,7 @@ export function useLogicalCodebaseScopeData({
     bootstrapProjection,
     refreshBootstrap,
     refreshScope,
+    autoAdvanceBootstrap,
     latestPointerPublication,
     showIncrementalHint,
   };
