@@ -47,6 +47,12 @@ export type LifecycleFetchOptions = {
     name: string;
     member_count?: number;
   }>;
+  /** 2026-10-29：预置的已软删（墓碑）LC，渲染在「已删除」分区。 */
+  deletedLogicalCodebases?: Array<{
+    id: string;
+    name: string;
+    deleted_at?: string;
+  }>;
   logicalCodebaseMembers?: Array<{
     logical_repository_id: string;
     alias: string;

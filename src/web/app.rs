@@ -105,7 +105,7 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
         )
         .route(
             "/api/projects/{project_id}/logical-codebases",
-            post(handlers::create_logical_codebase),
+            post(handlers::create_logical_codebase).get(handlers::list_logical_codebases),
         )
         .route(
             "/api/projects/{project_id}/logical-codebases/{logical_codebase_id}",
@@ -114,6 +114,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
         .route(
             "/api/projects/{project_id}/logical-codebases/{logical_codebase_id}/restore",
             post(handlers::restore_logical_codebase),
+        )
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{logical_codebase_id}/purge",
+            delete(handlers::purge_logical_codebase),
         )
         .route(
             "/api/projects/{project_id}/logical-codebase/initializations",

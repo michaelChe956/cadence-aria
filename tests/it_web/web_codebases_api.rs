@@ -391,6 +391,167 @@ async fn logical_codebase_restore_restores_tombstoned_lc_idempotently() {
     assert_eq!(missing["code"], "logical_codebase_not_found");
 }
 
+/// 2026-10-29（owner）：彻底删除（硬删）LC 的两段式语义——
+/// 存活 LC 先 409（必须先软删）；软删后出现在 `include_deleted=true` 列表里；
+/// purge 不可恢复且重复调用 404。
+#[tokio::test]
+async fn logical_codebase_purge_requires_soft_delete_and_lists_deleted() {
+    let root = tempdir().expect("root");
+    let aggregate_root = tempdir().expect("aggregate root");
+    let state = WebAppState::with_events(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+        EventHub::new(),
+    );
+    let app = build_web_router(state);
+
+    let (status, _) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Purge","description":null}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, logical) = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects/project_0001/logical-codebases",
+        json!({"name":"Platform","aggregate_root":aggregate_root.path()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{logical}");
+    let logical_id = logical["id"].as_str().expect("logical id").to_string();
+
+    // 列表（含墓碑）：存活 LC deleted=false、无 deleted_at。
+    let (status, listed) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projects/project_0001/logical-codebases?include_deleted=true",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let entries = listed["logical_codebases"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["id"], logical_id.as_str());
+    assert_eq!(entries[0]["deleted"], json!(false));
+    assert_eq!(entries[0]["deleted_at"], Value::Null);
+
+    // 存活 LC 直接硬删 → 409（必须先软删，避免误删可恢复对象）。
+    let (status, rejected) = request_json(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/projects/project_0001/logical-codebases/{logical_id}/purge"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert_eq!(rejected["code"], "logical_codebase_not_tombstoned");
+
+    // 软删后才允许硬删；软删期间进入「已删除」分区。
+    let (status, deleted) = request_json(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/projects/project_0001/logical-codebases/{logical_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+
+    // 不传参：行为与旧语义一致（只返回存活 LC → 空列表）。
+    let (status, alive_only) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projects/project_0001/logical-codebases",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{alive_only}");
+    assert_eq!(alive_only["logical_codebases"], json!([]));
+
+    let (status, tombstones) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projects/project_0001/logical-codebases?include_deleted=true",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tombstones}");
+    let entries = tombstones["logical_codebases"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["deleted"], json!(true));
+    assert!(
+        entries[0]["deleted_at"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty()),
+        "{entries:?}"
+    );
+
+    // 硬删：不可恢复；墓碑与子树从 app 数据侧消失。
+    let (status, purged) = request_json(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/projects/project_0001/logical-codebases/{logical_id}/purge"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{purged}");
+    assert_eq!(purged["status"], "purged");
+    assert!(
+        !root
+            .path()
+            .join(".aria")
+            .join("projects")
+            .join("project_0001")
+            .join("logical-codebases")
+            .join(&logical_id)
+            .exists(),
+        "purged subtree must be gone"
+    );
+
+    let (status, after) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projects/project_0001/logical-codebases?include_deleted=true",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(after["logical_codebases"], json!([]));
+    let (status, codebases) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projects/project_0001/codebases",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{codebases}");
+    assert_eq!(codebases["codebases"], json!([]));
+
+    // 幂等：重复硬删 → 404 logical_codebase_not_found（与删除语义一致）。
+    let (status, missing) = request_json(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/projects/project_0001/logical-codebases/{logical_id}/purge"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    assert_eq!(missing["code"], "logical_codebase_not_found");
+
+    // 不可恢复：purge 后 restore 也只会 404。
+    let (status, restore) = request_json(
+        app,
+        Method::POST,
+        &format!("/api/projects/project_0001/logical-codebases/{logical_id}/restore"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{restore}");
+}
+
 async fn request_json(
     app: axum::Router,
     method: Method,

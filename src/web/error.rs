@@ -123,7 +123,9 @@ impl IntoResponse for ApiError {
             // source 被重新登记占用，均 409（墓碑保留、可人工裁决后重试）。
             | "logical_codebase_restore_subtree_incomplete"
             | "logical_codebase_restore_source_taken"
-            | "logical_codebase_name_conflict" => StatusCode::CONFLICT,
+            | "logical_codebase_name_conflict"
+            // 2026-10-29：硬删前置——存活 LC 必须先软删，可操作冲突 409。
+            | "logical_codebase_not_tombstoned" => StatusCode::CONFLICT,
             "cross_target_baseline_missing" | "cross_target_store_failure" => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

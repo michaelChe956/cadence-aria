@@ -350,6 +350,26 @@ pub struct CodebaseListResponse {
     pub codebases: Vec<CodebaseSummaryDto>,
 }
 
+/// 2026-10-29：逻辑代码库列表条目。`GET .../logical-codebases?include_deleted=true`
+/// 会同时带出墓碑 LC（`deleted=true` + `deleted_at`），供 UI 的「已删除」分区渲染。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LogicalCodebaseListEntryDto {
+    pub id: String,
+    pub name: String,
+    pub aggregate_root: String,
+    pub created_at: String,
+    pub deleted: bool,
+    /// 仅 `deleted=true` 时存在（软删时刻）。
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LogicalCodebaseListResponse {
+    pub logical_codebases: Vec<LogicalCodebaseListEntryDto>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CreateLogicalCodebaseRequest {

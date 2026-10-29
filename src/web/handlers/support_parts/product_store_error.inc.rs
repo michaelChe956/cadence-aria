@@ -149,6 +149,15 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
             "logical codebase not found",
             json!({}),
         ),
+        // 2026-10-29：硬删前置——存活 LC 不允许一键彻底删除（先软删再 purge）。
+        ProductStoreError::Conflict {
+            kind: "logical_codebase_not_tombstoned",
+            ..
+        } => ApiError::runtime(
+            "logical_codebase_not_tombstoned",
+            "logical codebase must be soft-deleted before it can be purged",
+            json!({}),
+        ),
         ProductStoreError::Conflict {
             kind: "logical_codebase_name",
             id,

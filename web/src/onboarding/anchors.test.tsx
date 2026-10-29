@@ -26,6 +26,7 @@ describe("onboarding 锚点契约（宿主组件渲染）", () => {
       <ProjectSidebar
         projects={[]}
         codebases={[]}
+        deletedLogicalCodebases={[]}
         repositories={[]}
         selectedProjectId={null}
         issueCount={0}
@@ -36,6 +37,8 @@ describe("onboarding 锚点契约（宿主组件渲染）", () => {
         onDeleteProject={() => {}}
         onDeleteRepository={() => {}}
         onDeleteLogicalCodebase={() => {}}
+        onRestoreLogicalCodebase={() => {}}
+        onPurgeLogicalCodebase={() => {}}
       />,
     );
     expect(screen.getByTestId("onboarding-anchor-project-create")).toHaveTextContent("新建 Project");

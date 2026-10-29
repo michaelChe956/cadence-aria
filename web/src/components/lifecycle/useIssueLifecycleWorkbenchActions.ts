@@ -2,7 +2,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { ApiRequestError, deleteProject, deleteRepository } from "../../api/client";
 import { rebuildAggregateIndex } from "../../api/aggregate-index";
 import { cancelAggregateInitialization, startAggregateInitialization } from "../../api/aggregate-initialization";
-import { deleteLogicalCodebase } from "../../api/codebases";
+import { deleteLogicalCodebase, purgeLogicalCodebase, restoreLogicalCodebase } from "../../api/codebases";
 import { createPointerPublication, retryPointerPublicationRepo, revokePointerPublication } from "../../api/pointer-publication";
 import type {
   AggregateIndexActiveResponse,
@@ -194,6 +194,41 @@ export function useIssueLifecycleWorkbenchActions({
     }
   }
 
+  // 2026-10-29：已软删 LC 的恢复——摘墓碑复原原子树（id 不变，引用不断裂）。
+  async function handleRestoreLogicalCodebase(logicalCodebaseId: string) {
+    if (!selectedProjectId) {
+      setError("缺少 Project");
+      return;
+    }
+    setError(null);
+    try {
+      await restoreLogicalCodebase(selectedProjectId, logicalCodebaseId);
+      await refresh(selectedProjectId);
+    } catch (reason) {
+      setError(errorMessage(reason, "恢复逻辑代码库失败"));
+    }
+  }
+
+  // 2026-10-29：彻底删除（硬删）——不可恢复。二次确认必须写明清理范围与
+  // 边界（清政策产物与成员指针，不动 Cadence-skills 文件）。
+  async function handlePurgeLogicalCodebase(logicalCodebaseId: string) {
+    if (!selectedProjectId) {
+      setError("缺少 Project");
+      return;
+    }
+    const confirmed = window.confirm(
+      "彻底删除不可恢复：将永久删除该逻辑代码库的应用数据、工作区里的政策产物（policy/<project>/<logical_codebase>）与成员仓的 .aria-pointer.md 指针文件；不会改动 AGENTS.md / CLAUDE.md / .claude/rules 等 Cadence-skills 文件。确认彻底删除？",
+    );
+    if (!confirmed) return;
+    setError(null);
+    try {
+      await purgeLogicalCodebase(selectedProjectId, logicalCodebaseId);
+      await refresh(selectedProjectId);
+    } catch (reason) {
+      setError(errorMessage(reason, "彻底删除逻辑代码库失败"));
+    }
+  }
+
   return {
     handlePublishFull: async () => {
       await handlePublish("full");
@@ -209,5 +244,7 @@ export function useIssueLifecycleWorkbenchActions({
     handleDeleteProject,
     handleDeleteRepository,
     handleDeleteLogicalCodebase,
+    handleRestoreLogicalCodebase,
+    handlePurgeLogicalCodebase,
   };
 }

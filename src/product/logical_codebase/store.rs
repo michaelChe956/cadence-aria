@@ -331,7 +331,8 @@ impl LogicalCodebaseStore {
         // 下次指针发布重新生成，不参与 restore 的任何不变量，软删即清。
         // 政策正文**不清**：restore 后 gateway 必须仍能读到已发布正文，删掉
         // 会让恢复后的 LC 缺政策（冲突处置见
-        // `aggregate_artifact_cleanup` 模块文档与删项目路径）。
+        // `aggregate_artifact_cleanup` 模块文档与删项目路径）。政策正文只在
+        // 不可恢复的硬删路径清：删项目，或 `purge`（单 LC 彻底删除）。
         cleanup_logical_codebase_pointer_files(&self.paths, project_id, logical_codebase_id);
         Ok(())
     }
@@ -1075,6 +1076,8 @@ fn validate_checkout_id(
     }
     Ok(())
 }
+
+include!("store_purge.inc.rs");
 
 #[cfg(test)]
 include!("store_tests.inc.rs");

@@ -506,6 +506,252 @@ mod tests {
         assert!(!store.has_any_storage("project_0001").unwrap());
     }
 
+    /// 2026-10-29（owner）：彻底删除（purge）必须先软删——存活 LC 拒绝直删，
+    /// 未知 id 仍是 NotFound（删除语义与 delete_soft 一致）。
+    #[test]
+    fn logical_codebase_purge_requires_tombstone() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LogicalCodebaseStore::new(ProductAppPaths::new(temp.path()));
+        let record = store
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "Platform".to_string(),
+                    aggregate_root: temp.path().to_path_buf(),
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.purge("project_0001", &record.id),
+            Err(ProductStoreError::Conflict {
+                kind: "logical_codebase_not_tombstoned",
+                ..
+            })
+        ));
+        // 拒绝后零副作用：LC 仍存活、可正常读取。
+        assert_eq!(
+            store.get("project_0001", &record.id).unwrap(),
+            Some(record.clone())
+        );
+        assert!(matches!(
+            store.purge("project_0001", "logical_codebase_missing"),
+            Err(ProductStoreError::NotFound {
+                kind: "logical_codebase",
+                ..
+            })
+        ));
+    }
+
+    /// 2026-10-29（owner）：软删后 purge → LC 子树（含墓碑）消失、政策正文与
+    /// 成员指针消失、Cadence-skills 产物（AGENTS.md/CLAUDE.md/.claude/rules）原样
+    /// 保留；第二次 purge → NotFound（与现有删除语义一致）。
+    #[test]
+    fn logical_codebase_purge_removes_subtree_and_workspace_artifacts_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let aggregate_root = temp.path().join("workspace/aggregate");
+        let member_repo = temp.path().join("workspace/api");
+        std::fs::create_dir_all(&aggregate_root).unwrap();
+        std::fs::create_dir_all(&member_repo).unwrap();
+
+        let store = LogicalCodebaseStore::new(paths.clone());
+        let record = store
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "Platform".to_string(),
+                    aggregate_root: aggregate_root.clone(),
+                },
+            )
+            .unwrap();
+        let member_id = LogicalRepositoryId(Uuid::new_v4());
+        let checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+        let manifest = LogicalCodebaseManifest::new(
+            "project_0001",
+            aggregate_root.clone(),
+            vec![member_id],
+        );
+        let scoped = LogicalCodebaseStore::for_lc(paths.clone(), &record.id);
+        scoped.save_manifest("project_0001", &manifest).unwrap();
+        scoped
+            .save_member("project_0001", &member_fixture(member_id, checkout_id))
+            .unwrap();
+        scoped
+            .save_checkout(
+                "project_0001",
+                &checkout_fixture_at(member_id, checkout_id, member_repo.clone()),
+            )
+            .unwrap();
+
+        // aria 产物：政策版本正文 + 成员仓指针。
+        let policy_dir = aggregate_root
+            .join("policy")
+            .join("project_0001")
+            .join(manifest.logical_codebase_id.to_string());
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        std::fs::write(policy_dir.join("1"), "# policy body\n").unwrap();
+        let pointer = member_repo.join(".aria-pointer.md");
+        std::fs::write(&pointer, "# pointer\n").unwrap();
+
+        // Cadence-skills 产物：purge 不得清理。
+        std::fs::write(aggregate_root.join("AGENTS.md"), "# agents\n").unwrap();
+        std::fs::write(aggregate_root.join("CLAUDE.md"), "# claude\n").unwrap();
+        std::fs::create_dir_all(aggregate_root.join(".claude/rules")).unwrap();
+        std::fs::write(
+            aggregate_root.join(".claude/rules/language.md"),
+            "# rule\n",
+        )
+        .unwrap();
+
+        store.delete_soft("project_0001", &record.id).unwrap();
+        assert_eq!(store.list_deleted("project_0001").unwrap().len(), 1);
+
+        store.purge("project_0001", &record.id).unwrap();
+
+        let subtree = paths.logical_codebases_root("project_0001").join(&record.id);
+        assert!(!subtree.exists(), "purged LC subtree must be gone");
+        assert_eq!(store.get("project_0001", &record.id).unwrap(), None);
+        assert!(store.list_deleted("project_0001").unwrap().is_empty());
+        assert!(!store.has_any_storage("project_0001").unwrap());
+
+        assert!(!policy_dir.exists(), "policy body must be purged");
+        assert!(!pointer.exists(), "member pointer must be purged");
+        assert!(aggregate_root.join("AGENTS.md").exists());
+        assert!(aggregate_root.join("CLAUDE.md").exists());
+        assert!(aggregate_root.join(".claude/rules/language.md").exists());
+
+        // 重复 purge：已不存在 → NotFound。
+        assert!(matches!(
+            store.purge("project_0001", &record.id),
+            Err(ProductStoreError::NotFound {
+                kind: "logical_codebase",
+                ..
+            })
+        ));
+    }
+
+    /// 2026-10-29（owner）：purge 只作用于自己 project 下的 LC——别的 project
+    /// 看到的是 NotFound，原 LC 的墓碑与子树原样保留（仍可 restore）。
+    #[test]
+    fn logical_codebase_purge_never_crosses_project_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = LogicalCodebaseStore::new(paths.clone());
+        let record = store
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "Platform".to_string(),
+                    aggregate_root: temp.path().to_path_buf(),
+                },
+            )
+            .unwrap();
+        store.delete_soft("project_0001", &record.id).unwrap();
+
+        assert!(matches!(
+            store.purge("project_0002", &record.id),
+            Err(ProductStoreError::NotFound {
+                kind: "logical_codebase",
+                ..
+            })
+        ));
+        assert_eq!(store.list_deleted("project_0001").unwrap()[0].id, record.id);
+        match store.restore("project_0001", &record.id).unwrap() {
+            LogicalCodebaseRestoreOutcome::Restored(restored) => {
+                assert_eq!(restored, record);
+            }
+            other => panic!("expected Restored, got {other:?}"),
+        }
+    }
+
+    /// 2026-10-29（owner）：list_deleted 只报墓碑 LC，并带出 deleted_at
+    /// （存活 LC 不在其中）。
+    #[test]
+    fn logical_codebase_list_deleted_reports_tombstones_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LogicalCodebaseStore::new(ProductAppPaths::new(temp.path()));
+        let alive = store
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "Alive".to_string(),
+                    aggregate_root: temp.path().join("alive"),
+                },
+            )
+            .unwrap();
+        let deleted = store
+            .create(
+                "project_0001",
+                LogicalCodebaseCreateInput {
+                    name: "Deleted".to_string(),
+                    aggregate_root: temp.path().join("deleted"),
+                },
+            )
+            .unwrap();
+        store.delete_soft("project_0001", &deleted.id).unwrap();
+
+        let listed = store.list_deleted("project_0001").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, deleted.id);
+        assert_eq!(listed[0].name, "Deleted");
+        assert_eq!(listed[0].aggregate_root, deleted.aggregate_root);
+        assert!(!listed[0].deleted_at.trim().is_empty());
+        assert!(!listed.iter().any(|entry| entry.id == alive.id));
+        assert_eq!(store.list_deleted("project_missing").unwrap(), Vec::new());
+    }
+
+    /// 2026-10-29（owner）：legacy 别名 LC 的权威数据仍在旧 `logical-codebase/`
+    /// 根下；purge 必须一并清掉，否则下次 migrate_legacy 会把它复活。
+    #[test]
+    fn logical_codebase_purge_of_legacy_alias_does_not_resurrect_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let aggregate_root = temp.path().join("workspace/platform");
+        std::fs::create_dir_all(&aggregate_root).unwrap();
+        let legacy_root = paths.logical_codebase_root("project_0001");
+        std::fs::create_dir_all(&legacy_root).unwrap();
+        std::fs::write(
+            legacy_root.join("manifest.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "project_id": "project_0001",
+                "logical_codebase_id": Uuid::new_v4(),
+                "provider_context_root": aggregate_root,
+                "layout": "common_non_git_parent",
+                "membership_revision": 1,
+                "member_ids": [],
+                "created_at": "2026-08-18T00:00:00Z",
+                "updated_at": "2026-08-18T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let store = LogicalCodebaseStore::new(paths.clone());
+        let alias = store.migrate_legacy("project_0001").unwrap().unwrap();
+        store.delete_soft("project_0001", &alias.id).unwrap();
+        store.purge("project_0001", &alias.id).unwrap();
+
+        assert!(!legacy_root.exists(), "legacy root must be purged");
+        assert_eq!(store.migrate_legacy("project_0001").unwrap(), None);
+        assert!(store.list("project_0001").unwrap().is_empty());
+        assert!(store.list_deleted("project_0001").unwrap().is_empty());
+    }
+
+    /// 与 [`checkout_fixture`] 同形，但主 checkout 落在给定成员仓路径上
+    /// （purge 清理成员指针需要真实目录）。
+    fn checkout_fixture_at(
+        logical_repository_id: LogicalRepositoryId,
+        checkout_id: RepositoryCheckoutId,
+        canonical_path: PathBuf,
+    ) -> RepositoryCheckoutRecord {
+        RepositoryCheckoutRecord {
+            canonical_path,
+            ..checkout_fixture(logical_repository_id, checkout_id)
+        }
+    }
+
     fn checkout_fixture(
         logical_repository_id: LogicalRepositoryId,
         checkout_id: RepositoryCheckoutId,

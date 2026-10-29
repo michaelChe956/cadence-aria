@@ -73,6 +73,14 @@ export function lifecycleFetch(
   const lifecycleByIssue = new Map<string, MockLifecycleData>();
   let pointerPublications = [...(options?.pointerPublications ?? [])];
   let logicalCodebasesList = [...(options?.logicalCodebases ?? [])];
+  // 2026-10-29：墓碑 LC（软删后进入「已删除」分区；purge 后彻底消失）。
+  let deletedLogicalCodebasesList = [
+    ...(options?.deletedLogicalCodebases ?? []).map((codebase) => ({
+      id: codebase.id,
+      name: codebase.name,
+      deleted_at: codebase.deleted_at ?? "2026-10-29T00:00:00Z",
+    })),
+  ];
   const aggregateInitializationRoutes =
     createAggregateInitializationRoutes(options);
 
@@ -953,6 +961,34 @@ export function lifecycleFetch(
       ];
       return jsonResponse({ codebases });
     }
+    const logicalCodebaseListMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases(?:\?.*)?$/,
+    );
+    if (logicalCodebaseListMatch && (init?.method ?? "GET") === "GET") {
+      const includeDeleted = url.includes("include_deleted=true");
+      return jsonResponse({
+        logical_codebases: [
+          ...logicalCodebasesList.map((codebase) => ({
+            id: codebase.id,
+            name: codebase.name,
+            aggregate_root: `/workspace/${codebase.name}`,
+            created_at: "2026-08-19T00:00:00Z",
+            deleted: false,
+            deleted_at: null,
+          })),
+          ...(includeDeleted
+            ? deletedLogicalCodebasesList.map((codebase) => ({
+                id: codebase.id,
+                name: codebase.name,
+                aggregate_root: `/workspace/${codebase.name}`,
+                created_at: "2026-08-19T00:00:00Z",
+                deleted: true,
+                deleted_at: codebase.deleted_at,
+              }))
+            : []),
+        ],
+      });
+    }
     const logicalCodebaseCreateMatch = url.match(
       /^\/api\/projects\/([^/]+)\/logical-codebases$/,
     );
@@ -977,10 +1013,60 @@ export function lifecycleFetch(
       !codebasesMatch
     ) {
       const lcId = decodeURIComponent(logicalCodebaseDeleteMatch[2]);
+      const removed = logicalCodebasesList.find(
+        (codebase) => codebase.id === lcId,
+      );
       logicalCodebasesList = logicalCodebasesList.filter(
         (codebase) => codebase.id !== lcId,
       );
+      if (removed) {
+        deletedLogicalCodebasesList = [
+          ...deletedLogicalCodebasesList,
+          {
+            id: removed.id,
+            name: removed.name,
+            deleted_at: "2026-10-29T00:00:00Z",
+          },
+        ];
+      }
       return jsonResponse({ status: "deleted" });
+    }
+    const logicalCodebaseRestoreMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/restore$/,
+    );
+    if (logicalCodebaseRestoreMatch && init?.method === "POST") {
+      const lcId = decodeURIComponent(logicalCodebaseRestoreMatch[2]);
+      const restored = deletedLogicalCodebasesList.find(
+        (codebase) => codebase.id === lcId,
+      );
+      deletedLogicalCodebasesList = deletedLogicalCodebasesList.filter(
+        (codebase) => codebase.id !== lcId,
+      );
+      if (restored) {
+        logicalCodebasesList = [
+          ...logicalCodebasesList,
+          { id: restored.id, name: restored.name },
+        ];
+      }
+      return jsonResponse({
+        status: "restored",
+        codebase: {
+          id: lcId,
+          name: restored?.name ?? lcId,
+          aggregate_root: `/workspace/${restored?.name ?? lcId}`,
+          created_at: "2026-08-19T00:00:00Z",
+        },
+      });
+    }
+    const logicalCodebasePurgeMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/purge$/,
+    );
+    if (logicalCodebasePurgeMatch && init?.method === "DELETE") {
+      const lcId = decodeURIComponent(logicalCodebasePurgeMatch[2]);
+      deletedLogicalCodebasesList = deletedLogicalCodebasesList.filter(
+        (codebase) => codebase.id !== lcId,
+      );
+      return jsonResponse({ status: "purged" });
     }
     const registrationPreflightMatch = url.match(
       /^\/api\/projects\/([^/]+)\/(?:logical-codebase|logical-codebases\/[^/]+)\/registrations\/preflight$/,

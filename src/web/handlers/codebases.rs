@@ -14,7 +14,8 @@ use crate::product::project_store::ProjectStore;
 use crate::product::repository_store::RepositoryStore;
 use crate::web::types::{
     CodebaseListResponse, CodebaseSummaryDto, CreateLogicalCodebaseRequest,
-    LogicalCodebaseDetailDto, LogicalCodebaseDto, LogicalCodebaseMemberDto,
+    LogicalCodebaseDetailDto, LogicalCodebaseDto, LogicalCodebaseListEntryDto,
+    LogicalCodebaseListResponse, LogicalCodebaseMemberDto,
 };
 
 pub async fn list_codebases(
@@ -148,6 +149,74 @@ pub async fn delete_logical_codebase(
         .delete_soft(&project_id, &logical_codebase_id)
         .map_err(product_store_api_error)?;
     Ok(Json(json!({"status":"deleted"})))
+}
+
+/// 2026-10-29（owner）：彻底删除（硬删）已软删的 LC。软删是可恢复态；本端点
+/// 不可恢复——清 app 数据侧 LC 子树 + 工作区政策正文 + 成员指针，不动
+/// AGENTS.md/CLAUDE.md 等 Cadence-skills 产物。存活 LC → 409
+/// `logical_codebase_not_tombstoned`；已不存在 → 404 `logical_codebase_not_found`。
+pub async fn purge_logical_codebase(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let app_paths = product_app_paths(&state);
+    ProjectStore::new(app_paths.clone())
+        .get(&project_id)
+        .map_err(product_store_api_error)?;
+    LogicalCodebaseStore::new(app_paths)
+        .purge(&project_id, &logical_codebase_id)
+        .map_err(product_store_api_error)?;
+    Ok(Json(json!({"status":"purged"})))
+}
+
+/// 2026-10-29（owner）：LC 列表。`include_deleted=true` 时追加已软删（墓碑）LC，
+/// 条目带 `deleted`/`deleted_at` 供 UI「已删除」分区；不传参只返回存活 LC。
+#[derive(serde::Deserialize, Default)]
+pub struct LogicalCodebaseListQuery {
+    #[serde(default)]
+    pub include_deleted: bool,
+}
+
+pub async fn list_logical_codebases(
+    State(state): State<WebAppState>,
+    Path(project_id): Path<String>,
+    Query(query): Query<LogicalCodebaseListQuery>,
+) -> ApiResult<Json<LogicalCodebaseListResponse>> {
+    let app_paths = product_app_paths(&state);
+    ProjectStore::new(app_paths.clone())
+        .get(&project_id)
+        .map_err(product_store_api_error)?;
+    let authority = LogicalCodebaseStore::new(app_paths);
+    let mut logical_codebases: Vec<LogicalCodebaseListEntryDto> = authority
+        .list(&project_id)
+        .map_err(product_store_api_error)?
+        .into_iter()
+        .map(|record| LogicalCodebaseListEntryDto {
+            id: record.id,
+            name: record.name,
+            aggregate_root: record.aggregate_root.to_string_lossy().into_owned(),
+            created_at: record.created_at,
+            deleted: false,
+            deleted_at: None,
+        })
+        .collect();
+    if query.include_deleted {
+        logical_codebases.extend(
+            authority
+                .list_deleted(&project_id)
+                .map_err(product_store_api_error)?
+                .into_iter()
+                .map(|record| LogicalCodebaseListEntryDto {
+                    id: record.id,
+                    name: record.name,
+                    aggregate_root: record.aggregate_root.to_string_lossy().into_owned(),
+                    created_at: record.created_at,
+                    deleted: true,
+                    deleted_at: Some(record.deleted_at),
+                }),
+        );
+    }
+    Ok(Json(LogicalCodebaseListResponse { logical_codebases }))
 }
 
 /// Bug3 修复①（2026-10-16）：软删 LC 恢复端点。摘墓碑恢复原子树（id 不变，

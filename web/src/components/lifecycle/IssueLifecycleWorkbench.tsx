@@ -23,7 +23,11 @@ import {
   startAggregateInitialization,
 } from "../../api/aggregate-initialization";
 import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
-import { deleteLogicalCodebase, listCodebases } from "../../api/codebases";
+import {
+  deleteLogicalCodebase,
+  listCodebases,
+  listLogicalCodebases,
+} from "../../api/codebases";
 import { LogicalCodebaseRegistrationWizard } from "./LogicalCodebaseRegistrationWizard";
 import { useLogicalCodebaseScopeData } from "./useLogicalCodebaseScopeData";
 import { useIssueLifecycleWorkbenchActions } from "./useIssueLifecycleWorkbenchActions";
@@ -34,6 +38,7 @@ import {
 } from "../../api/pointer-publication";
 import type {
   CodebaseSummaryDto,
+  LogicalCodebaseListEntryDto,
   CodingAttemptAddress,
   IssueLifecycleResponse,
   PointerPublicationDto,
@@ -156,6 +161,10 @@ export function IssueLifecycleWorkbench({
   const [projects, setProjects] = useState<Project[]>([]);
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [codebases, setCodebases] = useState<CodebaseSummaryDto[]>([]);
+  // 2026-10-29：已软删（墓碑）LC——「已删除」分区的数据源（含 deleted_at）。
+  const [deletedLogicalCodebases, setDeletedLogicalCodebases] = useState<
+    LogicalCodebaseListEntryDto[]
+  >([]);
   const [lifecycles, setLifecycles] = useState<IssueLifecycleResponse[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null,
@@ -290,6 +299,7 @@ export function IssueLifecycleWorkbench({
       if (!projectId) {
         setRepositories([]);
         setCodebases([]);
+        setDeletedLogicalCodebases([]);
         setLifecycles([]);
         setPointerPublications([]);
         setLogicalCodebaseMembers([]);
@@ -301,12 +311,17 @@ export function IssueLifecycleWorkbench({
         return;
       }
 
-      const [repositoryResponse, codebaseResponse, issueResponse] =
-        await Promise.all([
-          listRepositories(projectId),
-          listCodebases(projectId),
-          listProductIssues(projectId),
-        ]);
+      const [
+        repositoryResponse,
+        codebaseResponse,
+        logicalCodebaseResponse,
+        issueResponse,
+      ] = await Promise.all([
+        listRepositories(projectId),
+        listCodebases(projectId),
+        listLogicalCodebases(projectId, { includeDeleted: true }),
+        listProductIssues(projectId),
+      ]);
       if (!isLatestRefresh(requestId)) {
         return;
       }
@@ -341,6 +356,12 @@ export function IssueLifecycleWorkbench({
 
       setRepositories(repositoryResponse.repositories ?? []);
       setCodebases(codebaseResponse.codebases ?? []);
+      // 存活 LC 仍在 /codebases 投影里（顺序与选择语义不变），这里只取墓碑条目。
+      setDeletedLogicalCodebases(
+        (logicalCodebaseResponse.logical_codebases ?? []).filter(
+          (codebase) => codebase.deleted,
+        ),
+      );
       setLifecycles(lifecycleResponses);
       setFocusedIssueId(
         focusedIssueId &&
@@ -520,6 +541,8 @@ export function IssueLifecycleWorkbench({
     handleDeleteProject,
     handleDeleteRepository,
     handleDeleteLogicalCodebase,
+    handleRestoreLogicalCodebase,
+    handlePurgeLogicalCodebase,
   } = useIssueLifecycleWorkbenchActions({
     selectedProjectId,
     activeLogicalCodebaseId,
@@ -1025,6 +1048,7 @@ export function IssueLifecycleWorkbench({
     <IssueLifecycleWorkbenchView
       projects={projects}
       codebases={codebases}
+      deletedLogicalCodebases={deletedLogicalCodebases}
       repositories={repositories}
       selectedProjectId={selectedProjectId}
       issueCount={issueCount}
@@ -1072,6 +1096,8 @@ export function IssueLifecycleWorkbench({
       onDeleteProject={(projectId) => void handleDeleteProject(projectId)}
       onDeleteRepository={(repositoryId) => void handleDeleteRepository(repositoryId)}
       onDeleteLogicalCodebase={(logicalCodebaseId) => void handleDeleteLogicalCodebase(logicalCodebaseId)}
+      onRestoreLogicalCodebase={(logicalCodebaseId) => void handleRestoreLogicalCodebase(logicalCodebaseId)}
+      onPurgeLogicalCodebase={(logicalCodebaseId) => void handlePurgeLogicalCodebase(logicalCodebaseId)}
       onShowAll={() => setFocusedIssueId(null)}
       onRefresh={() => void refresh()}
       onCreateIssue={() => setDialogOpen(true)}

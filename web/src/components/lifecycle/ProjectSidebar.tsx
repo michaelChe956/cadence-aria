@@ -1,9 +1,10 @@
 import { FolderKanban, GitBranch, Plus, Trash2 } from "lucide-react";
-import type { CodebaseSummaryDto, Project, Repository } from "../../api/types";
+import type { CodebaseSummaryDto, LogicalCodebaseListEntryDto, Project, Repository } from "../../api/types";
 
 export function ProjectSidebar({
   projects,
   codebases,
+  deletedLogicalCodebases,
   repositories,
   selectedProjectId,
   issueCount,
@@ -14,9 +15,13 @@ export function ProjectSidebar({
   onDeleteProject,
   onDeleteRepository,
   onDeleteLogicalCodebase,
+  onRestoreLogicalCodebase,
+  onPurgeLogicalCodebase,
 }: {
   projects: Project[];
   codebases: CodebaseSummaryDto[];
+  /** 2026-10-29：已软删（墓碑）LC，渲染在「已删除」分区。 */
+  deletedLogicalCodebases: LogicalCodebaseListEntryDto[];
   repositories: Repository[];
   selectedProjectId: string | null;
   issueCount: number;
@@ -28,6 +33,10 @@ export function ProjectSidebar({
   onDeleteRepository: (repositoryId: string) => void;
   /// R8：逻辑代码库软删入口（调用方负责二次确认）。
   onDeleteLogicalCodebase: (logicalCodebaseId: string) => void;
+  /// 2026-10-29：已软删 LC 的恢复入口。
+  onRestoreLogicalCodebase: (logicalCodebaseId: string) => void;
+  /// 2026-10-29：已软删 LC 的彻底删除入口（调用方负责二次确认与不可恢复提示）。
+  onPurgeLogicalCodebase: (logicalCodebaseId: string) => void;
 }) {
   return (
     <nav
@@ -206,6 +215,59 @@ export function ProjectSidebar({
             </p>
           )}
         </section>
+
+        {/* 2026-10-29：已软删（墓碑）LC 分区——只有这里出现「恢复」与「彻底删除」，
+            存活条目绝无这两个按钮。 */}
+        {selectedProjectId && deletedLogicalCodebases.length > 0 ? (
+          <section
+            aria-label="已删除的逻辑代码库"
+            data-testid="deleted-logical-codebases"
+            className="rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3"
+          >
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h3 className="truncate text-sm font-semibold text-[var(--aria-ink-muted)]">已删除</h3>
+              <span className="rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">
+                {deletedLogicalCodebases.length}
+              </span>
+            </div>
+            <ul className="space-y-2">
+              {deletedLogicalCodebases.map((codebase) => (
+                <li
+                  key={codebase.id}
+                  data-testid="deleted-codebase-list-item"
+                  className="rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] p-2"
+                >
+                  <p className="truncate text-xs font-semibold text-[var(--aria-ink)]">
+                    {codebase.name}
+                  </p>
+                  <p className="mt-1 truncate font-mono text-[11px] text-[var(--aria-ink-muted)]">
+                    删除于 {codebase.deleted_at ?? "未知时间"}
+                  </p>
+                  <div className="mt-2 flex items-center gap-1">
+                    <button
+                      type="button"
+                      aria-label={`恢复逻辑代码库 ${codebase.name}`}
+                      disabled={busy}
+                      onClick={() => onRestoreLogicalCodebase(codebase.id)}
+                      className="inline-flex h-7 items-center rounded-md border border-[var(--aria-line)] px-2 text-[11px] font-semibold text-[var(--aria-ink)] hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] disabled:opacity-60"
+                    >
+                      恢复
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`彻底删除逻辑代码库 ${codebase.name}`}
+                      disabled={busy}
+                      onClick={() => onPurgeLogicalCodebase(codebase.id)}
+                      className="inline-flex h-7 items-center rounded-md border border-[var(--aria-line)] px-2 text-[11px] font-semibold text-[var(--aria-ink-muted)] hover:border-[var(--aria-danger)] hover:text-[var(--aria-danger)] disabled:opacity-60"
+                    >
+                      彻底删除
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
       </div>
 
       <div className="border-t border-[var(--aria-line)] p-3">

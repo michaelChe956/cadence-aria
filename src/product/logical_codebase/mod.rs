@@ -195,8 +195,9 @@ pub use root_recipe_receipt::{
 pub(crate) use store::lc_scope_root;
 pub(crate) use store::legacy_logical_codebase_id;
 pub use store::{
-    LogicalCodebaseCreateInput, LogicalCodebaseLayout, LogicalCodebaseManifest,
-    LogicalCodebaseRecord, LogicalCodebaseRestoreOutcome, LogicalCodebaseStore,
+    LogicalCodebaseCreateInput, LogicalCodebaseDeletedRecord, LogicalCodebaseLayout,
+    LogicalCodebaseManifest, LogicalCodebaseRecord, LogicalCodebaseRestoreOutcome,
+    LogicalCodebaseStore,
 };
 pub use types::{
     CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, EnrollmentTarget,

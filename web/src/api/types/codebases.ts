@@ -14,6 +14,23 @@ export type CodebaseListResponse = {
   codebases: CodebaseSummaryDto[];
 };
 
+/**
+ * 2026-10-29：LC 列表条目（`GET /logical-codebases?include_deleted=true`）。
+ * 墓碑 LC 带 `deleted=true` + `deleted_at`，供「已删除」分区渲染。
+ */
+export type LogicalCodebaseListEntryDto = {
+  id: string;
+  name: string;
+  aggregate_root: string;
+  created_at: string;
+  deleted: boolean;
+  deleted_at: string | null;
+};
+
+export type LogicalCodebaseListResponse = {
+  logical_codebases: LogicalCodebaseListEntryDto[];
+};
+
 export type CreateLogicalCodebaseRequest = {
   name: string;
   aggregate_root: string;

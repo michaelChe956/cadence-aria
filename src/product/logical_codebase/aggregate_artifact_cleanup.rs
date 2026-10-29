@@ -21,7 +21,8 @@
 //!
 //! 软删 vs 硬删的分工（见 `LogicalCodebaseStore::delete_soft` 注释）：
 //! 政策正文是 restore 的前提（restore 后 gateway 必须还能读到已发布正文），
-//! 因此**软删不清政策正文**，只在硬删（删项目）时清；软删只清成员仓指针
+//! 因此**软删不清政策正文**，只在不可恢复的硬删路径清——删项目，或
+//! `LogicalCodebaseStore::purge`（单 LC 彻底删除）；软删只清成员仓指针
 //! （指针可由下次指针发布重新生成，不参与 restore 的任何不变量）。
 
 use std::path::{Path, PathBuf};
