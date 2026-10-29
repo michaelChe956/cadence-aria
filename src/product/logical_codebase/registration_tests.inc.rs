@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn aggregate_root_preflight_rejects_git_root_symlink_escape_and_ownership_conflicts() {
+    fn aggregate_root_preflight_rejects_git_root_and_symlink_escape() {
         let fixture = aggregate_root_fixture();
         fixture.init_git_at_root();
         assert_eq!(
@@ -620,20 +620,6 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "member_symlink_escape"
-        );
-
-        fixture.create_file("CLAUDE.md", "user instructions");
-        assert_eq!(
-            fixture
-                .preflight()
-                .validate(
-                    "project_0001",
-                    &fixture.root,
-                    std::slice::from_ref(&fixture.member),
-                )
-                .unwrap_err()
-                .code(),
-            "aggregate_root_ownership_conflict"
         );
     }
 
@@ -717,6 +703,39 @@ mod tests {
         );
     }
 
+    /// owner 2026-10-29：根目录的 Cadence-skills 产物（`AGENTS.md` /
+    /// `CLAUDE.md` / `.claude/rules/*` / `.mcp.json` / `.gitignore`）不再是
+    /// 登记门禁——任何做过 skills 初始化的项目必然有这些文件，旧门禁让这类
+    /// 项目永远无法添加 LC。登记只保留 root 结构/成员/Git/重叠检查。
+    #[test]
+    #[cfg(unix)]
+    fn aggregate_root_preflight_accepts_initialized_root_with_user_rule_entries() {
+        let fixture = aggregate_root_fixture();
+        fixture.init_git_at_member();
+        for (relative_path, contents) in [
+            ("AGENTS.md", "# aggregate root rules\n"),
+            ("CLAUDE.md", "# claude root instructions\n"),
+            (".mcp.json", "{\"mcpServers\":{}}\n"),
+            (".gitignore", "target/\n"),
+            (".claude/rules/language.md", "# language rule\n"),
+        ] {
+            fixture.create_file(relative_path, contents);
+        }
+
+        assert_eq!(
+            fixture
+                .preflight()
+                .validate(
+                    "project_0001",
+                    &fixture.root,
+                    std::slice::from_ref(&fixture.member),
+                )
+                .unwrap()
+                .canonical_path,
+            fs::canonicalize(&fixture.root).unwrap()
+        );
+    }
+
     struct AggregateRootFixture {
         _temp: tempfile::TempDir,
         paths: ProductAppPaths,
@@ -732,7 +751,11 @@ mod tests {
         }
 
         fn create_file(&self, relative_path: &str, contents: &str) {
-            fs::write(self.root.join(relative_path), contents).unwrap();
+            let path = self.root.join(relative_path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(path, contents).unwrap();
         }
 
         fn init_git_at_root(&self) {
@@ -1308,8 +1331,4 @@ mod tests {
             2
         );
     }
-
-    // Task 3（aggregate-policy-root-publication）：首次登记冲突检查不被
-    // recipe 重跑证明放宽的专用测试（large_file_guard 1200 行上限，纯新增）。
-    include!("registration_tests_recipe_replay.inc.rs");
 }

@@ -255,8 +255,6 @@ impl AggregateRootPreflightError {
     }
 }
 
-/// Validates the filesystem ownership and containment invariants for an
-/// aggregate root before any member discovery or registration is performed.
 #[derive(Debug, Clone)]
 pub struct AttachOnlyRegistrationInput {
     pub project_id: String,
