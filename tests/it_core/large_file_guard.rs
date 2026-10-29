@@ -150,8 +150,13 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         1315,
     ),
     ("src/product/models/tests.rs", 1523),
+    // 2026-10-25：reviewer_reconciliation.rs 已拆分至 507 行（< 1200 硬线），
+    // 按「拆分达标后必须移除」的登记回收先例移除本项。
+    // 2026-10-23：既有债务登记（本批未改该文件，基线即 3362 行）
     ("src/product/reviewer_snapshot.rs", 3362),
+    // 2026-10-23：既有债务登记（本批未改该文件，基线即 4198 行）
     ("src/product/reviewer_window.rs", 4198),
+    // 2026-10-23：既有债务登记（本批未改该文件，基线即 1921 行）
     ("src/product/reviewer_window_store.rs", 1921),
     ("src/product/work_item_contract/tests/dependency.rs", 1204),
     ("src/product/work_item_plan_compiler/tests.rs", 1449),

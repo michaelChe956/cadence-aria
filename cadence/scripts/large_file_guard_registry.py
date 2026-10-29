@@ -68,16 +68,44 @@ def main() -> int:
 
     if apply and removable:
         drop = {rel for rel, _, _ in removable}
-        kept = [(rel, limit) for rel, limit, _ in keep]
-        start = text.index("const GRANDFATHERED")
-        # 取初始化器：`= &[` 之后（不是类型标注里的 `&[(&str, usize)]`）
-        eq = text.index("=", start)
-        arr_start = text.index("&[", eq)
-        arr_end = text.index("\n];", arr_start)
-        body = "".join(f'    ("{rel}", {limit}),\n' for rel, limit in kept)
-        new_text = text[:arr_start] + "&[\n" + body + text[arr_end:]
-        GUARD.write_text(new_text)
-        print(f"\n已从登记表移除 {len(drop)} 项，保留 {len(kept)} 项；请跑 `cargo fmt --all` 让 rustfmt 重排长行")
+        lines = text.splitlines()
+        out = []
+        i = 0
+        removed = 0
+        single = re.compile(r'^\s*\(\s*"([^"]+)"\s*,\s*(\d+)\s*,?\s*\),?\s*$')
+        while i < len(lines):
+            line = lines[i]
+            m = single.match(line)
+            if m:
+                if m.group(1) in drop:
+                    removed += 1
+                    i += 1
+                    continue
+                out.append(line)
+                i += 1
+                continue
+            # 多行写法：`(` / 路径 / 数字 / `),`
+            if line.strip() == "(":
+                span = []
+                j = i + 1
+                while j < len(lines) and lines[j].strip() != "),":
+                    span.append(lines[j])
+                    j += 1
+                span.append(lines[j]) if j < len(lines) else None
+                joined = "\n".join(span)
+                mp = re.search(r'"([^"]+)"\s*,\s*\n\s*(\d+)\s*,', joined)
+                if mp and mp.group(1) in drop:
+                    removed += 1
+                    i = j + 1
+                    continue
+                out.append(line)
+                out.extend(span)
+                i = j + 1
+                continue
+            out.append(line)
+            i += 1
+        GUARD.write_text("\n".join(out) + "\n")
+        print(f"\n已从登记表移除 {removed} 项（保留全部注释与既有格式）；请跑 `cargo fmt --all` 复查格式")
     elif removable:
         print("\n（未改动登记表；加 --apply 执行移除）")
     return 0
