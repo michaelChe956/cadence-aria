@@ -91,8 +91,12 @@ impl AggregatePreflightService for DeterministicAggregatePreflightService {
             })
             .collect::<Vec<_>>();
         // 登记/重跑共用同一入口：根上已有的用户规则文件不是门禁，预检只核
-        // root 结构、成员边界与 root 重叠，无需借用旧 receipt 证据。
-        let root_preflight = AggregateRootPreflight::new(self.paths.clone());
+        // root 结构、成员边界与 root 重叠，无需借用旧 receipt 证据。范围随
+        // `lc_id` 划定自身——重跑复验跳过自身 manifest，其余 LC 仍拦。
+        let root_preflight = match self.lc_id.as_deref() {
+            Some(lc_id) => AggregateRootPreflight::for_lc(self.paths.clone(), lc_id),
+            None => AggregateRootPreflight::new(self.paths.clone()),
+        };
         root_preflight
             .validate(
                 project_id,

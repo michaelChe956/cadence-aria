@@ -34,7 +34,7 @@ fn preflight_registration_for_lc(
     // stable seven classes. The admission validator still runs first, but is
     // intentionally given no candidates so one outside/missing candidate does
     // not reject the complete preflight request.
-    let canonical_root = AggregateRootPreflight::new(paths.clone())
+    let canonical_root = AggregateRootPreflight::for_lc(paths.clone(), logical_codebase_id.clone())
         .validate(&project_id, &root, &[])
         .map_err(aggregate_root_api_error)?;
     let candidate_paths = if request.auto_discover {

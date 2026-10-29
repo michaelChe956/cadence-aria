@@ -1,17 +1,32 @@
 /// 聚合根登记的判定入口：project id、root 结构（存在/目录/非 Git）、成员
 /// 边界（在 root 内、非 symlink 逃逸、非嵌套 worktree）与 root 与其他 LC
-/// 不重叠。根上已有的用户规则文件不参与判定。
+/// 不重叠（同项目或跨项目的其他 LC 一律拒绝，重跑时跳过 LC 自身）。
+/// 根上已有的用户规则文件不参与判定。
 pub struct AggregateRootPreflight {
     paths: ProductAppPaths,
+    /// 判定范围所属的 LC：重叠检查跳过该 LC 自己的 manifest。`None`
+    /// 表示未指明 LC，无从认定“自己”，不跳过任何 manifest。
+    lc_id: Option<String>,
 }
 
 impl AggregateRootPreflight {
     pub fn new(paths: ProductAppPaths) -> Self {
-        Self { paths }
+        Self { paths, lc_id: None }
+    }
+
+    /// 把判定范围限定到一个 LC：重叠检查跳过该 LC 自己的 manifest
+    /// （登记/聚合初始化复验不得把自己拦掉），其余任何 LC——同项目或跨
+    /// 项目——的 manifest 仍参与判定。
+    pub fn for_lc(paths: ProductAppPaths, lc_id: impl Into<String>) -> Self {
+        Self {
+            paths,
+            lc_id: Some(lc_id.into()),
+        }
     }
 
     /// 登记入口：project id 合法性、canonical non-Git root、成员 canonical/
-    /// 越界/worktree 边界、与其他 LC root 互不重叠。根上已存在的用户规则
+    /// 越界/worktree 边界、与其他 LC root 互不重叠（同项目/跨项目皆不
+    /// 允许；`for_lc` 划定自身后跳过自身 manifest）。根上已存在的用户规则
     /// 文件（`AGENTS.md`/`CLAUDE.md`/`.claude/**`/`.mcp.json`/`.gitignore`）
     /// 不参与判定：做过 skills 初始化的项目必然带这些文件，把它们当门禁
     /// 会让这类项目永远无法添加 LC。
@@ -115,24 +130,19 @@ impl AggregateRootPreflight {
         Ok(())
     }
 
+    /// 同一根目录不允许两个 LC（同项目或跨项目）：枚举所有项目的全部权威
+    /// LC manifest，除「当前 LC 自己」外任一 root 重叠即拒绝。软删
+    /// （tombstone）LC 的 manifest 仍占用根目录——restore 语义要求归属
+    /// 保留到 purge。
     fn reject_overlapping_manifest_root(
         &self,
         project_id: &str,
         canonical_root: &Path,
     ) -> Result<(), AggregateRootPreflightError> {
-        for manifest in LogicalCodebaseStore::new(self.paths.clone())
-            .list_manifests()
-            .map_err(|error| {
-                preflight_error(
-                    "aggregate_root_overlap",
-                    format!(
-                        "could not inspect existing logical-codebase manifests while validating {}: {error}; resolve the state-store error before retrying",
-                        canonical_root.display()
-                    ),
-                )
-            })?
-        {
-            if manifest.project_id == project_id {
+        for manifest in self.existing_lc_manifests(canonical_root)? {
+            if manifest.project_id == project_id
+                && self.lc_id.as_deref() == Some(manifest.lc_id.as_str())
+            {
                 continue;
             }
             let existing_root = canonicalize_for_preflight(
@@ -143,13 +153,157 @@ impl AggregateRootPreflight {
                 return Err(preflight_error(
                     "aggregate_root_overlap",
                     format!(
-                        "aggregate root {} overlaps logical codebase root {} owned by project {}; choose a disjoint common parent",
+                        "aggregate root {} overlaps logical codebase {} root {} owned by project {}; choose a disjoint common parent",
                         canonical_root.display(),
+                        manifest.lc_id,
                         existing_root.display(),
                         manifest.project_id
                     ),
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// 枚举所有项目的权威 LC manifest（legacy root ＋ `logical-codebases/*`
+    /// 子树；与 legacy 同名的迁移副本跳过，legacy root 才是权威源——口径与
+    /// `repository_routing_policy_reader` 一致）。返回每条 manifest 的 LC
+    /// 存储身份键（legacy root 记 `legacy_logical_codebase_id`，per-LC 子树
+    /// 记目录名）。任何读取/解析失败都 fail-closed。
+    fn existing_lc_manifests(
+        &self,
+        canonical_root: &Path,
+    ) -> Result<Vec<ExistingLcManifest>, AggregateRootPreflightError> {
+        let projects_root = self.paths.projects_root();
+        let entries = match std::fs::read_dir(&projects_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(inspect_failure(
+                    canonical_root,
+                    format!("read {}: {error}", projects_root.display()),
+                ));
+            }
+        };
+
+        let mut manifests = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                inspect_failure(
+                    canonical_root,
+                    format!("read {} entry: {error}", projects_root.display()),
+                )
+            })?;
+            if !entry
+                .file_type()
+                .map_err(|error| {
+                    inspect_failure(
+                        canonical_root,
+                        format!("stat {}: {error}", entry.path().display()),
+                    )
+                })?
+                .is_dir()
+            {
+                continue;
+            }
+            let project_id = entry.file_name().into_string().map_err(|value| {
+                inspect_failure(
+                    canonical_root,
+                    format!(
+                        "project directory name is not UTF-8: {}",
+                        PathBuf::from(value).display()
+                    ),
+                )
+            })?;
+            validate_relative_id(&project_id).map_err(|error| {
+                inspect_failure(
+                    canonical_root,
+                    format!(
+                        "project directory {project_id:?} is not a safe relative identifier: {error}"
+                    ),
+                )
+            })?;
+            self.collect_project_lc_manifests(&project_id, canonical_root, &mut manifests)?;
+        }
+        Ok(manifests)
+    }
+
+    /// 收集一个项目的全部权威 LC manifest：legacy root（身份键为
+    /// `legacy_logical_codebase_id(project_id)`）加 `logical-codebases/*`
+    /// 目录（身份键为目录名；legacy 同名的迁移副本跳过，避免重复计数）。
+    fn collect_project_lc_manifests(
+        &self,
+        project_id: &str,
+        canonical_root: &Path,
+        manifests: &mut Vec<ExistingLcManifest>,
+    ) -> Result<(), AggregateRootPreflightError> {
+        let legacy_id =
+            crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id);
+        let mut subtree_lc_ids = Vec::new();
+        let codebases_root = self.paths.logical_codebases_root(project_id);
+        match std::fs::read_dir(&codebases_root) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|error| {
+                        inspect_failure(
+                            canonical_root,
+                            format!("read {} entry: {error}", codebases_root.display()),
+                        )
+                    })?;
+                    if !entry
+                        .file_type()
+                        .map_err(|error| {
+                            inspect_failure(
+                                canonical_root,
+                                format!("stat {}: {error}", entry.path().display()),
+                            )
+                        })?
+                        .is_dir()
+                    {
+                        continue;
+                    }
+                    let lc_id = entry.file_name().into_string().map_err(|value| {
+                        inspect_failure(
+                            canonical_root,
+                            format!(
+                                "logical-codebase directory name is not UTF-8: {}",
+                                PathBuf::from(value).display()
+                            ),
+                        )
+                    })?;
+                    if lc_id != legacy_id {
+                        subtree_lc_ids.push(lc_id);
+                    }
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(inspect_failure(
+                    canonical_root,
+                    format!("read {}: {error}", codebases_root.display()),
+                ));
+            }
+        }
+
+        // legacy root 永远在列（`None` scope 即 legacy root）。
+        let mut scopes: Vec<Option<String>> = vec![None];
+        scopes.extend(subtree_lc_ids.into_iter().map(Some));
+        for scope in scopes {
+            let store = match scope.as_deref() {
+                Some(lc_id) => LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id),
+                None => LogicalCodebaseStore::new(self.paths.clone()),
+            };
+            let Some(manifest) = store
+                .load_manifest(project_id)
+                .map_err(|error| inspect_failure(canonical_root, format!("{error}")))?
+            else {
+                continue;
+            };
+            manifests.push(ExistingLcManifest {
+                lc_id: scope.unwrap_or_else(|| legacy_id.clone()),
+                project_id: manifest.project_id,
+                provider_context_root: manifest.provider_context_root,
+            });
         }
         Ok(())
     }
@@ -168,6 +322,24 @@ fn canonicalize_for_preflight(
             ),
         )
     })
+}
+
+/// 重叠枚举的一条权威 LC manifest 投影：LC 存储身份键、归属 project 与
+/// manifest 记录的 root。
+struct ExistingLcManifest {
+    lc_id: String,
+    project_id: String,
+    provider_context_root: PathBuf,
+}
+
+fn inspect_failure(canonical_root: &Path, detail: String) -> AggregateRootPreflightError {
+    preflight_error(
+        "aggregate_root_overlap",
+        format!(
+            "could not inspect existing logical-codebase manifests while validating {}: {detail}; resolve the state-store error before retrying",
+            canonical_root.display()
+        ),
+    )
 }
 
 fn is_git_root(path: &Path) -> Result<bool, AggregateRootPreflightError> {

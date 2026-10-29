@@ -1107,10 +1107,11 @@ mod tests {
         let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
             calls: Arc::new(Mutex::new(Vec::new())),
         });
-        // 用真实 `DeterministicAggregatePreflightService` 以产出可 canonicalize 的聚合根快照,
-        // 使 gateway spawn 前 cwd 复验能通过。
-        let preflight: Arc<dyn AggregatePreflightService> =
-            Arc::new(DeterministicAggregatePreflightService::new(paths.clone()));
+        // 真实 service 产出可 canonicalize 快照；按生产链路 rescope 到本 LC（legacy id）。
+        let legacy_lc = legacy_logical_codebase_id("project_0001");
+        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(
+            DeterministicAggregatePreflightService::new(paths.clone()).for_lc(legacy_lc),
+        );
         let driver =
             GatewayBackedAggregateProviderTurnDriver::claude_code(gateway, "cap_claude_code_1_4_0");
         let provider: Arc<dyn AggregateProviderTurnDriver> = Arc::new(match command_timeout {

@@ -736,6 +736,110 @@ mod tests {
         );
     }
 
+    /// owner 2026-10-29：同一根目录不允许出现两个 LC——同项目不同 LC、跨项目
+    /// 都拒绝（`new` 未指明 LC 时不跳过任何 manifest）。
+    #[test]
+    #[cfg(unix)]
+    fn aggregate_root_preflight_rejects_second_lc_on_same_root() {
+        let fixture = aggregate_root_fixture();
+        fixture.init_git_at_member();
+
+        // 同项目、不同 LC（per-LC 子树 manifest）、相同根 → 拒绝。
+        fixture.save_lc_manifest_for("lc-a", "project_0001", &fixture.root);
+        assert_eq!(
+            fixture
+                .preflight()
+                .validate(
+                    "project_0001",
+                    &fixture.root,
+                    std::slice::from_ref(&fixture.member),
+                )
+                .unwrap_err()
+                .code(),
+            "aggregate_root_overlap"
+        );
+
+        // 指明了别的 LC（`for_lc`）同样拒绝——只跳过“自己”。
+        assert_eq!(
+            fixture
+                .preflight_for_lc("lc-b")
+                .validate(
+                    "project_0001",
+                    &fixture.root,
+                    std::slice::from_ref(&fixture.member),
+                )
+                .unwrap_err()
+                .code(),
+            "aggregate_root_overlap"
+        );
+
+        // 跨项目、相同根（per-LC 子树 manifest）→ 拒绝。
+        fixture.save_lc_manifest_for("lc-c", "project_0002", &fixture.root);
+        assert_eq!(
+            fixture
+                .preflight()
+                .validate(
+                    "project_0002",
+                    &fixture.root,
+                    std::slice::from_ref(&fixture.member),
+                )
+                .unwrap_err()
+                .code(),
+            "aggregate_root_overlap"
+        );
+    }
+
+
+    /// owner 2026-10-29：聚合初始化复验（同一个 LC 重跑）不得把自己拦掉。
+    #[test]
+    #[cfg(unix)]
+    fn aggregate_root_preflight_rerun_for_same_lc_passes() {
+        let fixture = aggregate_root_fixture();
+        fixture.init_git_at_member();
+
+        // LC 自己的 manifest 落在同一根（登记后的复验形态）→ 放行。
+        fixture.save_lc_manifest_for("lc-a", "project_0001", &fixture.root);
+        assert_eq!(
+            fixture
+                .preflight_for_lc("lc-a")
+                .validate(
+                    "project_0001",
+                    &fixture.root,
+                    std::slice::from_ref(&fixture.member),
+                )
+                .unwrap()
+                .canonical_path,
+            fs::canonicalize(&fixture.root).unwrap()
+        );
+
+        // legacy 别名 LC 的复验同理：legacy manifest 以 legacy id 为自身键，
+        // 跳过自身、拦住别人。
+        let legacy_fixture = aggregate_root_fixture();
+        legacy_fixture.init_git_at_member();
+        legacy_fixture.save_manifest_for("project_0001", &legacy_fixture.root);
+        let legacy_id = crate::product::logical_codebase::legacy_logical_codebase_id("project_0001");
+        assert!(legacy_fixture
+            .preflight_for_lc(&legacy_id)
+            .validate(
+                "project_0001",
+                &legacy_fixture.root,
+                std::slice::from_ref(&legacy_fixture.member),
+            )
+            .is_ok());
+        assert_eq!(
+            legacy_fixture
+                .preflight_for_lc("lc-b")
+                .validate(
+                    "project_0001",
+                    &legacy_fixture.root,
+                    std::slice::from_ref(&legacy_fixture.member),
+                )
+                .unwrap_err()
+                .code(),
+            "aggregate_root_overlap"
+        );
+    }
+
     struct AggregateRootFixture {
         _temp: tempfile::TempDir,
         paths: ProductAppPaths,
@@ -750,6 +854,10 @@ mod tests {
             AggregateRootPreflight::new(self.paths.clone())
         }
 
+
+        fn preflight_for_lc(&self, lc_id: &str) -> AggregateRootPreflight {
+            AggregateRootPreflight::for_lc(self.paths.clone(), lc_id)
+        }
         fn create_file(&self, relative_path: &str, contents: &str) {
             let path = self.root.join(relative_path);
             if let Some(parent) = path.parent() {
@@ -818,8 +926,19 @@ mod tests {
                 .save_manifest(project_id, &manifest)
                 .unwrap();
         }
-    }
 
+        fn save_lc_manifest_for(&self, lc_id: &str, project_id: &str, root: &Path) {
+            let manifest = LogicalCodebaseManifest::new(
+                project_id,
+                fs::canonicalize(root).unwrap(),
+                Vec::new(),
+            );
+            LogicalCodebaseStore::for_lc(self.paths.clone(), lc_id)
+                .save_manifest(project_id, &manifest)
+                .unwrap();
+        }
+
+    }
     fn aggregate_root_fixture() -> AggregateRootFixture {
         let temp = tempfile::tempdir().unwrap();
         let paths = ProductAppPaths::new(temp.path().join("aria-state"));
