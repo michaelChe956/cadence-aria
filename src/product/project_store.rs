@@ -7,6 +7,7 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::id::next_sequential_id_in_directory;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::logical_codebase::LogicalCodebaseStore;
+use crate::product::logical_codebase::aggregate_artifact_cleanup::cleanup_project_artifacts;
 use crate::product::models::ProjectRecord;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +109,9 @@ impl ProjectStore {
                 id: project_id.to_string(),
             });
         }
+        // 硬删项目：先清掉 aria 放在用户工作区里的产物（本项目所有 LC 的政策
+        // 正文目录 + 成员仓指针文件）。清理幂等、失败只 warn，绝不阻断删除。
+        cleanup_project_artifacts(&self.paths, project_id);
         fs::remove_dir_all(&project_root).map_err(|error| {
             ProductStoreError::Io(format!("remove {}: {error}", project_root.display()))
         })?;

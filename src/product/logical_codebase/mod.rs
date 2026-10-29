@@ -1,3 +1,4 @@
+pub mod aggregate_artifact_cleanup;
 pub mod aggregate_index;
 pub mod aggregate_initialization;
 pub mod aggregate_initialization_coordinator;
