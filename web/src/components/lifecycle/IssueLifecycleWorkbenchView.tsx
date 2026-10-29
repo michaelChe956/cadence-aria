@@ -55,6 +55,7 @@ export type IssueLifecycleWorkbenchViewProps = {
   onCreateIssue: () => void; onToggleLcSummary: () => void; onReopenOnboarding?: () => void;
   onSelectLogicalCodebase: (id: string) => void; onOpenRegistration: () => void;
   onStartAggregateInitialization: () => void; onCancelAggregateInitialization: () => void;
+  onReinitializeAggregateInitialization: () => void;
   onRebuildAggregateIndex: () => void; onPublishFull: () => void; onPublishIncremental: () => void;
   onRetryRepo: (id: string) => void; onRevoke: () => void; onToggleQueueCollapsed: () => void;
   onToggleQueueGroup: (key: IssueQueueGroupKey) => void; onQueueFilterTextChange: (text: string) => void;
@@ -97,7 +98,8 @@ export function IssueLifecycleWorkbenchView({
   onDeleteRepository, onDeleteLogicalCodebase, deletedLogicalCodebases,
   onRestoreLogicalCodebase, onPurgeLogicalCodebase, onShowAll, onRefresh, onCreateIssue, onToggleLcSummary, onReopenOnboarding,
   onSelectLogicalCodebase, onOpenRegistration, onStartAggregateInitialization,
-  onCancelAggregateInitialization, onRebuildAggregateIndex, onPublishFull, onPublishIncremental,
+  onCancelAggregateInitialization, onReinitializeAggregateInitialization,
+  onRebuildAggregateIndex, onPublishFull, onPublishIncremental,
   onRetryRepo, onRevoke, onToggleQueueCollapsed, onToggleQueueGroup, onQueueFilterTextChange,
   onSelectIssue, onGenerateStorySpec, onDeleteIssue, onShowMoreQueueGroup, deletingIssueId, onSelectCard,
   onOpenFullIssue, onDeleteCard, onGenerateForStage, onCloseDrawer, onOpenWorkspaceFromDrawer,
@@ -120,7 +122,7 @@ export function IssueLifecycleWorkbenchView({
     {isDrawerOpen && focusedEntity ? <IssueLifecycleWorkbenchDrawer focusedEntity={focusedEntity} workItems={drawerWorkItems as never} codingAttempts={codingAttempts as never} deliverySummary={deliverySummary} onClose={onCloseDrawer} onOpenWorkspace={onOpenWorkspaceFromDrawer} onOpenCodingWorkspace={onOpenCodingWorkspaceFromDrawer} onGenerateNext={onGenerateNext} onDelete={onDeleteFromDrawer} onDeleteAllCodingWorkspaces={onDeleteAllCodingWorkspacesFromDrawer} groupCodingDeleteBusy={groupCodingDeleteBusy} /> : null}
     {selectedProjectId && logicalCodebases.length > 0 ? (
       <LogicalCodebaseManagementDrawer open={lcSummaryExpanded} onClose={onToggleLcSummary}>
-        <LogicalCodebaseManagementPanel projectId={selectedProjectId} bootstrapProjection={bootstrapProjection as never} onBootstrapChanged={onBootstrapChanged} logicalCodebases={logicalCodebases} activeLogicalCodebaseId={activeLogicalCodebaseId} onSelectLogicalCodebase={onSelectLogicalCodebase} onOpenRegistration={onOpenRegistration} logicalCodebaseMembers={logicalCodebaseMembers as never} aggregateInitialization={aggregateInitialization as never} aggregateInitializationBusy={aggregateInitializationBusy} onStartAggregateInitialization={onStartAggregateInitialization} onCancelAggregateInitialization={onCancelAggregateInitialization} aggregateIndex={aggregateIndex as never} aggregateIndexRebuilding={aggregateIndexRebuilding} onRebuildAggregateIndex={onRebuildAggregateIndex} latestPointerPublication={latestPointerPublication} pointerPublicationBusy={pointerPublicationBusy} showIncrementalHint={showIncrementalHint} onPublishFull={onPublishFull} onPublishIncremental={onPublishIncremental} onRetryRepo={onRetryRepo} onRevoke={onRevoke} />
+        <LogicalCodebaseManagementPanel projectId={selectedProjectId} bootstrapProjection={bootstrapProjection as never} onBootstrapChanged={onBootstrapChanged} logicalCodebases={logicalCodebases} activeLogicalCodebaseId={activeLogicalCodebaseId} onSelectLogicalCodebase={onSelectLogicalCodebase} onOpenRegistration={onOpenRegistration} logicalCodebaseMembers={logicalCodebaseMembers as never} aggregateInitialization={aggregateInitialization as never} aggregateInitializationBusy={aggregateInitializationBusy} onStartAggregateInitialization={onStartAggregateInitialization} onCancelAggregateInitialization={onCancelAggregateInitialization} onReinitializeAggregateInitialization={onReinitializeAggregateInitialization} aggregateIndex={aggregateIndex as never} aggregateIndexRebuilding={aggregateIndexRebuilding} onRebuildAggregateIndex={onRebuildAggregateIndex} latestPointerPublication={latestPointerPublication} pointerPublicationBusy={pointerPublicationBusy} showIncrementalHint={showIncrementalHint} onPublishFull={onPublishFull} onPublishIncremental={onPublishIncremental} onRetryRepo={onRetryRepo} onRevoke={onRevoke} />
       </LogicalCodebaseManagementDrawer>
     ) : null}
     {dialogs}

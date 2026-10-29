@@ -1,7 +1,7 @@
 import type { Dispatch, SetStateAction } from "react";
 import { ApiRequestError, deleteProject, deleteRepository } from "../../api/client";
 import { rebuildAggregateIndex } from "../../api/aggregate-index";
-import { cancelAggregateInitialization, startAggregateInitialization } from "../../api/aggregate-initialization";
+import { cancelAggregateInitialization, reinitializeAggregateInitialization, startAggregateInitialization } from "../../api/aggregate-initialization";
 import { deleteLogicalCodebase, purgeLogicalCodebase, restoreLogicalCodebase } from "../../api/codebases";
 import { createPointerPublication, retryPointerPublicationRepo, revokePointerPublication } from "../../api/pointer-publication";
 import type {
@@ -151,6 +151,27 @@ export function useIssueLifecycleWorkbenchActions({
     }
   }
 
+  /**
+   * 「重新初始化」：走 POST /reinitializations——服务端在创建期冻结「强制跑
+   * 完整五步」事实（无视聚合根是否已做过 Cadence-skills 初始化），适用于
+   * Cadence-skills 更新后重装。幂等键每次新生成（与初始化入口同构）。
+   */
+  async function handleReinitializeAggregateInitialization() {
+    if (!selectedProjectId || !activeLogicalCodebaseId) {
+      setError("缺少 Project 或逻辑代码库");
+      return;
+    }
+    setAggregateInitializationBusy(true);
+    setError(null);
+    try {
+      setAggregateInitialization(await reinitializeAggregateInitialization(selectedProjectId, activeLogicalCodebaseId, crypto.randomUUID()));
+    } catch (reason) {
+      setError(reason instanceof ApiRequestError ? reason.message : errorMessage(reason, "重新初始化失败"));
+    } finally {
+      setAggregateInitializationBusy(false);
+    }
+  }
+
   async function handleDeleteProject(projectId: string) {
     setError(null);
     await deleteProject(projectId);
@@ -241,6 +262,7 @@ export function useIssueLifecycleWorkbenchActions({
     handleRebuildAggregateIndex,
     handleStartAggregateInitialization,
     handleCancelAggregateInitialization,
+    handleReinitializeAggregateInitialization,
     handleDeleteProject,
     handleDeleteRepository,
     handleDeleteLogicalCodebase,

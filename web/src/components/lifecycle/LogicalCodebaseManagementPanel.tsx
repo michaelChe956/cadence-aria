@@ -26,6 +26,7 @@ type LogicalCodebaseManagementPanelProps = {
   aggregateInitializationBusy: boolean;
   onStartAggregateInitialization: () => void;
   onCancelAggregateInitialization: () => void;
+  onReinitializeAggregateInitialization: () => void;
   aggregateIndex: AggregateIndexActiveResponse | null;
   aggregateIndexRebuilding: boolean;
   onRebuildAggregateIndex: () => void;
@@ -55,6 +56,7 @@ export function LogicalCodebaseManagementPanel({
   aggregateInitializationBusy,
   onStartAggregateInitialization,
   onCancelAggregateInitialization,
+  onReinitializeAggregateInitialization,
   aggregateIndex,
   aggregateIndexRebuilding,
   onRebuildAggregateIndex,
@@ -129,6 +131,7 @@ export function LogicalCodebaseManagementPanel({
           busy={aggregateInitializationBusy}
           onStart={onStartAggregateInitialization}
           onCancel={onCancelAggregateInitialization}
+          onReinitialize={onReinitializeAggregateInitialization}
         />
       ) : null}
       {aggregateIndex ? (

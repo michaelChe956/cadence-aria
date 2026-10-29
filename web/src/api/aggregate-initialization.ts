@@ -45,6 +45,27 @@ export function startAggregateInitialization(
   );
 }
 
+/**
+ * 「重新初始化（聚合）」入口：与初始化同一操作模型、同一信道路径，唯一差别
+ * 是服务端在创建期冻结「强制跑完整五步」事实——执行期无视聚合根是否已做过
+ * Cadence-skills 初始化，四条命令照跑（Cadence-skills 更新后重装用）。
+ */
+export function reinitializeAggregateInitialization(
+  projectId: string,
+  logicalCodebaseId: string,
+  idempotencyKey: string,
+): Promise<AggregateInitializationOperationSnapshot> {
+  return requestJson<AggregateInitializationOperationSnapshot>(
+    `/api/projects/${encodeURIComponent(
+      projectId,
+    )}/logical-codebases/${encodeURIComponent(logicalCodebaseId)}/reinitializations`,
+    {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    },
+  );
+}
+
 export function getAggregateInitialization(
   projectId: string,
   logicalCodebaseId: string,

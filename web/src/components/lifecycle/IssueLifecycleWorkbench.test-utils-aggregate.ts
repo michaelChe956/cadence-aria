@@ -38,6 +38,8 @@ export type LifecycleFetchOptions = {
   aggregateInitializationSnapshots?: AggregateInitializationOperationSnapshot[];
   aggregateInitializationActive?: AggregateInitializationOperationSnapshot;
   aggregateInitializationCancel?: AggregateInitializationOperationSnapshot;
+  /** 2026-10-29：POST /reinitializations（重新初始化）的响应快照。 */
+  aggregateInitializationReinitialize?: AggregateInitializationOperationSnapshot;
   registrationPreflight?: RegistrationPreflightResponse;
   registrationSubmit?: RegistrationBatchDto;
   registrationResume?: RegistrationBatchDto;
@@ -200,6 +202,15 @@ export function createAggregateInitializationRoutes(
           }),
           { status: 404 },
         ),
+      );
+    }
+    const aggregateReinitializationMatch = url.match(
+      /^\/api\/projects\/([^/]+)\/logical-codebases\/([^/]+)\/reinitializations$/,
+    );
+    if (aggregateReinitializationMatch && init?.method === "POST") {
+      return jsonResponse(
+        options?.aggregateInitializationReinitialize ??
+          aggregateInitializationOperation("created"),
       );
     }
     const aggregateInitializationStartMatch = url.match(

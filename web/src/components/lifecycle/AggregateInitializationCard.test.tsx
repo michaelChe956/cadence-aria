@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AggregateInitializationOperationSnapshot } from "../../api/types";
 import { AggregateInitializationCard } from "./AggregateInitializationCard";
 
@@ -37,6 +37,10 @@ function operation(
 }
 
 describe("AggregateInitializationCard", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("renders the start action and disables it with a spinner while busy", () => {
     const onStart = vi.fn();
     const view = render(
@@ -45,6 +49,7 @@ describe("AggregateInitializationCard", () => {
         busy={false}
         onStart={onStart}
         onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
       />,
     );
 
@@ -59,6 +64,7 @@ describe("AggregateInitializationCard", () => {
         busy
         onStart={onStart}
         onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
       />,
     );
     expect(screen.getByRole("button", { name: "启动聚合初始化" })).toBeDisabled();
@@ -72,6 +78,7 @@ describe("AggregateInitializationCard", () => {
         busy={false}
         onStart={vi.fn()}
         onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
       />,
     );
 
@@ -97,6 +104,7 @@ describe("AggregateInitializationCard", () => {
         busy
         onStart={vi.fn()}
         onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
       />,
     );
 
@@ -104,13 +112,14 @@ describe("AggregateInitializationCard", () => {
     expect(screen.getByTestId("aggregate-initialization-spinner")).toBeInTheDocument();
   });
 
-  it("renders the completed status without a cancel or start action", () => {
+  it("renders the completed status with a reinitialize action and no cancel or start action", () => {
     render(
       <AggregateInitializationCard
         operation={operation("completed")}
         busy={false}
         onStart={vi.fn()}
         onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
       />,
     );
 
@@ -125,15 +134,19 @@ describe("AggregateInitializationCard", () => {
     expect(
       screen.queryByRole("button", { name: "启动聚合初始化" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "重新初始化" }),
+    ).toBeEnabled();
   });
 
-  it("renders the failed status with its error and keeps start available for retry", () => {
+  it("renders the failed status with its error and offers the reinitialize action", () => {
     render(
       <AggregateInitializationCard
         operation={operation("failed")}
         busy={false}
         onStart={vi.fn()}
         onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
       />,
     );
 
@@ -142,10 +155,16 @@ describe("AggregateInitializationCard", () => {
       "failed",
     );
     expect(screen.getByRole("alert")).toHaveTextContent("初始化命令执行失败");
-    expect(screen.getByRole("button", { name: "启动聚合初始化" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "重新初始化" }),
+    ).toBeEnabled();
+    // 四态互斥：失败态不再提供「启动聚合初始化」（重跑入口唯一）。
+    expect(
+      screen.queryByRole("button", { name: "启动聚合初始化" }),
+    ).not.toBeInTheDocument();
   });
 
-  it("renders the cancelled status with its cancellation detail", () => {
+  it("renders the cancelled status with its cancellation detail and the reinitialize action", () => {
     render(
       <AggregateInitializationCard
         operation={operation("cancelled", {
@@ -158,6 +177,7 @@ describe("AggregateInitializationCard", () => {
         busy={false}
         onStart={vi.fn()}
         onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
       />,
     );
 
@@ -166,7 +186,122 @@ describe("AggregateInitializationCard", () => {
       "cancelled",
     );
     expect(screen.getByText(/operator requested stop/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "启动聚合初始化" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "重新初始化" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "启动聚合初始化" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the four operation states mutually exclusive in the action bar", () => {
+    // null → 只给「启动聚合初始化」；created|running → 只给「取消初始化」；
+    // completed|failed|cancelled → 只给「重新初始化」。
+    const cases: Array<{
+      operation: AggregateInitializationOperationSnapshot | null;
+      visible: string;
+      absent: string[];
+    }> = [
+      { operation: null, visible: "启动聚合初始化", absent: ["取消初始化", "重新初始化"] },
+      {
+        operation: operation("created"),
+        visible: "取消初始化",
+        absent: ["启动聚合初始化", "重新初始化"],
+      },
+      {
+        operation: operation("running"),
+        visible: "取消初始化",
+        absent: ["启动聚合初始化", "重新初始化"],
+      },
+      {
+        operation: operation("completed"),
+        visible: "重新初始化",
+        absent: ["启动聚合初始化", "取消初始化"],
+      },
+      {
+        operation: operation("failed"),
+        visible: "重新初始化",
+        absent: ["启动聚合初始化", "取消初始化"],
+      },
+      {
+        operation: operation("cancelled"),
+        visible: "重新初始化",
+        absent: ["启动聚合初始化", "取消初始化"],
+      },
+    ];
+
+    for (const item of cases) {
+      const view = render(
+        <AggregateInitializationCard
+          operation={item.operation}
+          busy={false}
+          onStart={vi.fn()}
+          onCancel={vi.fn()}
+          onReinitialize={vi.fn()}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: item.visible }),
+      ).toBeInTheDocument();
+      for (const name of item.absent) {
+        expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+      }
+      view.unmount();
+    }
+  });
+
+  it("asks for confirmation with the full-recipe wording before reinitializing", () => {
+    const onReinitialize = vi.fn();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(
+      <AggregateInitializationCard
+        operation={operation("completed")}
+        busy={false}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onReinitialize={onReinitialize}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "重新初始化" }));
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    const confirmText = String(confirmSpy.mock.calls[0]?.[0] ?? "");
+    // 二次确认必须写明：强制重跑完整五步 / 四条 Cadence-skills 命令 /
+    // 适用于 skills 更新后重装 / 会发布新的聚合政策版本。
+    expect(confirmText).toMatch(/完整五步/);
+    expect(confirmText).toMatch(/Cadence-skills/);
+    expect(confirmText).toMatch(/更新后重装/);
+    expect(confirmText).toMatch(/版本/);
+    for (const command of [
+      "/pre-check",
+      "/rule-config",
+      "/mcp-configuration",
+      "/project-rules-examples",
+    ]) {
+      expect(confirmText).toContain(command);
+    }
+    // 取消确认 → 不触发重跑。
+    expect(onReinitialize).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "重新初始化" }));
+    expect(onReinitialize).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables the reinitialize action while busy", () => {
+    render(
+      <AggregateInitializationCard
+        operation={operation("completed")}
+        busy
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "重新初始化" })).toBeDisabled();
+    expect(screen.getByTestId("aggregate-initialization-spinner")).toBeInTheDocument();
   });
 
   it("renders skipped steps as skipped with a label instead of pending or running", () => {
@@ -186,6 +321,7 @@ describe("AggregateInitializationCard", () => {
         busy={false}
         onStart={vi.fn()}
         onCancel={vi.fn()}
+        onReinitialize={vi.fn()}
       />,
     );
 

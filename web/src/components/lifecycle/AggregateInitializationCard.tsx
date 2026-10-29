@@ -103,11 +103,20 @@ function stepIndicatorIcon(status: AggregateInitializationStepStatus) {
   );
 }
 
+/**
+ * 「重新初始化」的二次确认文案：必须写明三件不可逆/易误解的事实——
+ * ①强制重跑完整五步（含四条 Cadence-skills 命令，不因已初始化而跳过）；
+ * ②适用场景是 Cadence-skills 更新后重装；③会重新合成并发布新的聚合政策版本。
+ */
+const REINITIALIZE_CONFIRM_TEXT =
+  "重新初始化会强制重跑完整五步：/pre-check、/rule-config、/mcp-configuration、/project-rules-examples 四条 Cadence-skills 命令一律执行（不因聚合根已初始化而跳过），适用于 Cadence-skills 更新后重装；执行后会重新合成并发布新的聚合政策版本（policy/<项目>/<逻辑代码库>/<版本+1>）。确认重新初始化？";
+
 export type AggregateInitializationCardProps = {
   operation: AggregateInitializationOperationSnapshot | null;
   busy: boolean;
   onStart: () => void;
   onCancel: () => void;
+  onReinitialize: () => void;
 };
 
 export function AggregateInitializationCard({
@@ -115,15 +124,26 @@ export function AggregateInitializationCard({
   busy,
   onStart,
   onCancel,
+  onReinitialize,
 }: AggregateInitializationCardProps) {
   const active =
     operation !== null &&
     (operation.status === "created" || operation.status === "running");
-  const canStart =
-    operation === null ||
-    operation.status === "failed" ||
-    operation.status === "cancelled";
+  // 四态互斥：null→启动；created|running→取消；completed|failed|cancelled→重新初始化。
+  const canStart = operation === null;
+  const canReinitialize =
+    operation !== null &&
+    (operation.status === "completed" ||
+      operation.status === "failed" ||
+      operation.status === "cancelled");
   const statusLabel = operation ? STATUS_LABELS[operation.status] : "尚未初始化";
+
+  function handleReinitialize() {
+    if (!window.confirm(REINITIALIZE_CONFIRM_TEXT)) {
+      return;
+    }
+    onReinitialize();
+  }
 
   return (
     <section
@@ -180,6 +200,23 @@ export function AggregateInitializationCard({
               />
             ) : null}
             取消初始化
+          </button>
+        ) : null}
+        {canReinitialize ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={handleReinitialize}
+            className="inline-flex h-8 items-center rounded-md border border-[var(--aria-primary)] bg-[var(--aria-primary)] px-3 text-xs font-semibold text-white disabled:border-[var(--aria-line)] disabled:bg-[var(--aria-panel-muted)] disabled:text-[var(--aria-ink-muted)]"
+          >
+            {busy ? (
+              <LoaderCircle
+                data-testid="aggregate-initialization-spinner"
+                className="mr-1 h-4 w-4 animate-spin"
+                aria-hidden="true"
+              />
+            ) : null}
+            重新初始化
           </button>
         ) : null}
       </div>

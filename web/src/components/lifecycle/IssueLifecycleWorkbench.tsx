@@ -17,11 +17,6 @@ import {
   listRepositories,
   startPlanCoding,
 } from "../../api/client";
-import { rebuildAggregateIndex } from "../../api/aggregate-index";
-import {
-  cancelAggregateInitialization,
-  startAggregateInitialization,
-} from "../../api/aggregate-initialization";
 import { listLogicalCodebaseMembers } from "../../api/logicalCodebaseMembers";
 import {
   deleteLogicalCodebase,
@@ -539,6 +534,7 @@ export function IssueLifecycleWorkbench({
     handleRebuildAggregateIndex,
     handleStartAggregateInitialization,
     handleCancelAggregateInitialization,
+    handleReinitializeAggregateInitialization,
     handleDeleteProject,
     handleDeleteRepository,
     handleDeleteLogicalCodebase,
@@ -1121,6 +1117,7 @@ export function IssueLifecycleWorkbench({
       onOpenRegistration={() => setRegistrationDialogOpen(true)}
       onStartAggregateInitialization={() => void handleStartAggregateInitialization()}
       onCancelAggregateInitialization={() => void handleCancelAggregateInitialization()}
+      onReinitializeAggregateInitialization={() => void handleReinitializeAggregateInitialization()}
       onRebuildAggregateIndex={() => void handleRebuildAggregateIndex()}
       onPublishFull={() => void handlePublishFull()}
       onPublishIncremental={() => void handlePublishIncremental()}

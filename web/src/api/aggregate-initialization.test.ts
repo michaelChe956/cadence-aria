@@ -4,6 +4,7 @@ import {
   cancelAggregateInitialization,
   getActiveAggregateInitialization,
   getAggregateInitialization,
+  reinitializeAggregateInitialization,
   startAggregateInitialization,
 } from "./aggregate-initialization";
 
@@ -61,6 +62,35 @@ describe("aggregate initialization api client", () => {
     );
     expect(calls[0].init?.method).toBe("POST");
     expect(calls[0].init?.body).toBe(JSON.stringify({ idempotency_key: "key-1" }));
+  });
+
+  it("reinitializes an aggregate initialization on the reinitializations path", async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input: String(input), init });
+        return jsonResponse({ ...operationResponse(), status: "created" });
+      }),
+    );
+
+    const operation = await reinitializeAggregateInitialization(
+      "project/with space",
+      "lc-0001",
+      "key-reinit",
+    );
+
+    // 「重新初始化」必须打兄弟路径 /reinitializations（不是 /initializations）——
+    // 服务端在该端点才冻结「强制跑完整五步」事实。
+    expect(calls[0].input).toBe(
+      "/api/projects/project%2Fwith%20space/logical-codebases/lc-0001/reinitializations",
+    );
+    expect(calls[0].input).not.toContain("/initializations");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(calls[0].init?.body).toBe(
+      JSON.stringify({ idempotency_key: "key-reinit" }),
+    );
+    expect(operation.status).toBe("created");
   });
 
   it("gets an aggregate initialization with encoded ids", async () => {
