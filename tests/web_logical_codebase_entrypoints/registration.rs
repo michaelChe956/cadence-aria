@@ -622,20 +622,54 @@ async fn registration_submit_rejects_missing_preflight_snapshot() {
     );
 }
 
+/// fix-aggregate-lc-registration-gates A1：同一根登记第二个 LC → 409 +
+/// `aggregate_root_overlap` 自己的稳定码（HTTP 面不再把 overlap 折叠成
+/// `aggregate_root_ownership_conflict`），`details.reason` 含被占根与占用方。
+/// 原用例「根含 `.aria` 文件 → ownership_conflict」已随用户规则文件门禁移除
+/// 过时（change 决策 1：`.aria` 不再是门禁）。
 #[tokio::test]
-async fn registration_preflight_maps_aggregate_root_ownership_conflict_without_internal_code() {
+async fn registration_preflight_for_second_lc_on_occupied_root_returns_overlap_409() {
     let fixture = Fixture::new();
-    fs::write(fixture.root().join(".aria"), "owned").unwrap();
-    assert_error(
+    let (status, codebase) = request(
+        &fixture.app,
+        Method::POST,
+        "/api/projects/project_0001/logical-codebases",
+        json!({
+            "name": "second lc on occupied root",
+            "aggregate_root": fixture.root(),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create second LC: {codebase}");
+    let lc_id = codebase["logical_codebase_id"]
+        .as_str()
+        .or_else(|| codebase["id"].as_str())
+        .expect("second lc id")
+        .to_string();
+
+    let body = assert_error(
         request(
             &fixture.app,
             Method::POST,
-            "/api/projects/project_0001/logical-codebase/registrations/preflight",
+            &format!(
+                "/api/projects/project_0001/logical-codebases/{lc_id}/registrations/preflight"
+            ),
             json!({"aggregate_root": fixture.root(), "candidate_paths": []}),
         )
         .await,
         StatusCode::CONFLICT,
-        "aggregate_root_ownership_conflict",
+        "aggregate_root_overlap",
+    );
+
+    let reason = body["details"]["reason"].as_str().expect("overlap reason");
+    let canonical_root = fs::canonicalize(fixture.root()).unwrap();
+    assert!(
+        reason.contains(canonical_root.to_string_lossy().as_ref()),
+        "reason must name the occupied root: {reason}"
+    );
+    assert!(
+        reason.contains("logical_codebase_") && reason.contains("project_0001"),
+        "reason must name the occupying LC and project: {reason}"
     );
 }
 

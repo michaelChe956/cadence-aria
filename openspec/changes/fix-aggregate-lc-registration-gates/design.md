@@ -68,7 +68,7 @@
 operation 记录 | 新增 `full_recipe_requested`（创建期冻结）与 `skills_initialization`（`Option`），旧记录读作 `None` = 完整 recipe 语义不变 |
 回执 | 新增 `skills_initialization: Option<...>`（`serde(default)`，`None` = 完整 recipe） |
 列表接口 | 不传 `include_deleted` 时与旧行为完全一致 |
-错误码 | `aggregate_root_ownership_conflict` 已无生产者，但其映射臂与 `aggregate_root_overlap` 共用，保留 |
+| 错误码 | `aggregate_root_ownership_conflict` **内部**已无生产者，但该结论此前被误读为「HTTP 面亦无产出」——映射层把 `aggregate_root_overlap` 折叠成它，旧码一直持续到达客户端；本批（k3 审查 A1）拆分后 `aggregate_root_overlap` 用自己的稳定码透出（409），`aggregate_root_ownership_conflict` 映射臂保留以兼容历史客户端 |
 
 ## 未决 / 留给后续
 

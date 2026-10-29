@@ -11,9 +11,10 @@
 
 - [x] 2.1 `AggregateRootPreflight` 增加 `lc_id: Option<String>` 与 `for_lc(...)`；两个调用方（登记预检、聚合初始化复验）传具体 LC id
 - [x] 2.2 重叠检查去掉"同项目跳过"，改为"跳过自己"；身份按权威存储键（legacy id / per-LC 目录名）比对
-- [x] 2.3 枚举扩到所有项目的全部 LC 子树（legacy 迁移副本跳过），读取失败 fail-closed
-- [x] 2.4 软删墓碑期间仍占用该根（写入注释 + 用例覆盖）
+- [x] 2.3 枚举扩到所有项目的全部 LC 子树（legacy 迁移副本跳过），读取失败 fail-closed（实现见 `existing_lc_manifests`；用例覆盖同项目/跨项目 per-LC 子树 manifest——`aggregate_root_preflight_rejects_second_lc_on_same_root`；「legacy 迁移副本跳过」「读取失败 fail-closed」两分支的直接用例待补）
+- [x] 2.4 软删墓碑期间仍占用该根（注释见 `reject_overlapping_manifest_root`；用例见 `aggregate_root_preflight_counts_manifest_less_and_tombstoned_lc_records`——软删后仍拒、purge 后才释放）
 - [x] 2.5 用例：同项目不同 LC 同根 → 拒绝；跨项目同根 → 拒绝；同一 LC 复验 → 通过
+- [x] 2.6 k3 审查 A1：HTTP 面拆分 `aggregate_root_overlap` 稳定码（409），不再折叠成 `aggregate_root_ownership_conflict`（旧臂保留兼容历史客户端）；用例：`aggregate_root_api_error_maps_overlap_to_its_own_stable_code`、`aggregate_root_api_error_keeps_legacy_ownership_conflict_arm`（lib）与 `registration_preflight_for_second_lc_on_occupied_root_returns_overlap_409`（HTTP 面，`details.reason` 含被占根与占用方）
 
 ## 3. 聚合初始化按需跳过 skills
 

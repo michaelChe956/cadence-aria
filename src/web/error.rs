@@ -196,7 +196,10 @@ impl IntoResponse for ApiError {
             | "entity_busy"
             | "entity_deleting"
             | "entity_deleted"
-            | "aggregate_root_ownership_conflict" => StatusCode::CONFLICT,
+            // fix-aggregate-lc-registration-gates A1：overlap 拆分独立稳定码，
+            // 同族可操作冲突 409（与保留的 ownership_conflict 臂同码位）。
+            | "aggregate_root_ownership_conflict"
+            | "aggregate_root_overlap" => StatusCode::CONFLICT,
             // 级联删除 D2.3：N2 冻结错误族（fix-multi-repo-group-coding-start
             // REQ-CS-02/05/07）REST 面直达——冻结身份/revision/graph/相位/集合/
             // selection 冲突 409（post_plan_coding_start 等 product_store_error

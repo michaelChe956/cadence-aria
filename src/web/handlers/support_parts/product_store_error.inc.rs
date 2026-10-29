@@ -14,9 +14,12 @@ pub(crate) fn aggregate_root_api_error(
         "member_path_outside_root" => "aggregate_root_member_outside_root",
         "member_symlink_escape" => "aggregate_root_member_symlink_escape",
         "nested_worktree" => "aggregate_root_nested_worktree",
-        "aggregate_root_ownership_conflict" | "aggregate_root_overlap" => {
-            "aggregate_root_ownership_conflict"
-        }
+        // fix-aggregate-lc-registration-gates A1：`aggregate_root_overlap` 用自己
+        // 的稳定码透出（409），spec 与 HTTP 面一致；历史内部码
+        // `aggregate_root_ownership_conflict` 已无生产者，映射臂保留以兼容
+        // 曾经依赖折叠输出的客户端。
+        "aggregate_root_ownership_conflict" => "aggregate_root_ownership_conflict",
+        "aggregate_root_overlap" => "aggregate_root_overlap",
         "aggregate_root_missing" => "aggregate_root_missing",
         "aggregate_root_invalid_project_id" => "invalid_project_id",
         _ => "aggregate_root_internal_error",
@@ -420,5 +423,50 @@ pub(crate) fn product_store_api_error(error: ProductStoreError) -> ApiError {
                 details,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod aggregate_root_mapping_tests {
+    use super::*;
+
+    /// fix-aggregate-lc-registration-gates A1：`aggregate_root_overlap` 必须用
+    /// 自己的稳定码透出（409），不得折叠成 `aggregate_root_ownership_conflict`
+    /// ——spec 与 HTTP 面一致；`details.reason` 保留判定原文（含被占根与占用方）。
+    #[test]
+    fn aggregate_root_api_error_maps_overlap_to_its_own_stable_code() {
+        let error = aggregate_root_api_error(
+            crate::product::logical_codebase::AggregateRootPreflightError::new_for_test(
+                "aggregate_root_overlap",
+                "aggregate root /aggregate-root overlaps logical codebase \
+                 logical_codebase_abc root /aggregate-root owned by project project_0001",
+            ),
+        );
+
+        assert_eq!(error.code, "aggregate_root_overlap");
+        assert!(
+            error.details["reason"]
+                .as_str()
+                .expect("overlap reason")
+                .contains("overlaps logical codebase logical_codebase_abc"),
+            "reason must keep the occupying LC identity: {}",
+            error.details["reason"]
+        );
+        assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    /// 历史内部码 `aggregate_root_ownership_conflict` 已无生产者；映射臂保留
+    /// （历史客户端兼容），仍直达 409 稳定码，不被本批拆分破坏。
+    #[test]
+    fn aggregate_root_api_error_keeps_legacy_ownership_conflict_arm() {
+        let error = aggregate_root_api_error(
+            crate::product::logical_codebase::AggregateRootPreflightError::new_for_test(
+                "aggregate_root_ownership_conflict",
+                "aggregate root already owned by another workspace",
+            ),
+        );
+
+        assert_eq!(error.code, "aggregate_root_ownership_conflict");
+        assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
     }
 }
