@@ -1,8 +1,9 @@
 //! C4 Task 10：A03/A04 真实产品面故障注入与跨层验收（it_web）。
 //!
 //! - A03 `a03_new_lc_reaches_planning_ready_without_manual_seed_or_duplicate_provider_turn`：
-//!   全新 LC 经 REST（project/LC/preflight/confirmed registration/initialization/
-//!   bootstrap action）零手工 seed 达成 `planning_ready`；deterministic checkpoint
+//!   全新 LC 经 REST（project/LC/preflight/confirmed registration/登记后
+//!   自动推进（REQ-REG-10）/bootstrap action）零手工 seed 达成
+//!   `planning_ready`；deterministic checkpoint
 //!   （pre_check provider turn）注入一次中断；GET 只读投影不推进；带 expected
 //!   revision 的显式 Retry 由原编排链从 checkpoint 续跑（已完成 provider turn
 //!   不重跑）；同 command 重放 `replayed` 且 provider start count 不变；成员仓
@@ -613,8 +614,11 @@ async fn a03_new_lc_reaches_planning_ready_without_manual_seed_or_duplicate_prov
     let lc_id =
         register_lc_members(&app, &aggregate_root, &[member_a.clone(), member_b.clone()]).await;
 
-    // 冷启动投影：identity/manifest 完成（登记产物），rules_policy 尚无
-    // policy artifact（未开始），member_index/aggregate 未开始。
+    // 登记产物投影：identity/manifest 由登记提交同步完成（resume 产物）。
+    // REQ-REG-10 起登记提交成功即后台自动推进首建链（rules_policy prepare
+    // → 根配方 operation），后三步不再有可稳定观察的「全 not_started /
+    // planning_ready==false」窗口——过时前提删除，其状态改由下方
+    // 「注入中断 → failed 收敛」统一断言。
     let uri = bootstrap_uri(&lc_id);
     let initial = poll_until(
         &app,
@@ -626,19 +630,6 @@ async fn a03_new_lc_reaches_planning_ready_without_manual_seed_or_duplicate_prov
         "initial registration facts",
     )
     .await;
-    assert_eq!(
-        bootstrap_step(&initial, "rules_policy")["status"],
-        "not_started"
-    );
-    assert_eq!(
-        bootstrap_step(&initial, "member_index")["status"],
-        "not_started"
-    );
-    assert_eq!(
-        bootstrap_step(&initial, "aggregate_index_active")["status"],
-        "not_started"
-    );
-    assert_eq!(initial["planning_ready"], false);
     let membership_revision = initial["membership_revision"].as_u64().expect("revision");
     let authority_root = initial["authority_root"]
         .as_str()
@@ -652,23 +643,13 @@ async fn a03_new_lc_reaches_planning_ready_without_manual_seed_or_duplicate_prov
         "authority root must freeze the manifest aggregate root"
     );
 
-    // member index：经产品 initialization 端点启动（首 turn 的 gateway factory
-    // build 顺带 ensure_bootstrap 聚合 policy artifact）。
-    let (status, accepted) = request_json(
-        &app,
-        Method::POST,
-        &format!("/api/projects/{PROJECT_ID}/logical-codebases/{lc_id}/initializations"),
-        json!({"idempotency_key":"key-a03-cold-start"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
-    let operation_id = accepted["operation_id"]
-        .as_str()
-        .expect("operation id")
-        .to_string();
-
-    // deterministic checkpoint：pre_check provider turn 注入一次中断 →
-    // operation Failed；provider 启动计数仍为 0（中断先于成功启动）。
+    // deterministic checkpoint：首建 run 由 REQ-REG-10 登记后自动推进驱动
+    // （唯一根配方 operation，idempotency_key 服务端派生；不再手工 POST
+    // /initializations——那会开出第二个 operation，其完成态会把本检查点的
+    // failed 投影覆盖成 completed）。首个 provider turn 恒为 pre_check：
+    // 一次性中断被该 run 消费 → operation Failed，且自动推进对失败配方
+    // 绝不重试（失败步骤停住等待人工）；provider 启动计数仍为 0（中断
+    // 先于成功启动）。
     let interrupted = poll_until(
         &app,
         &uri,
@@ -681,6 +662,13 @@ async fn a03_new_lc_reaches_planning_ready_without_manual_seed_or_duplicate_prov
         member_index["failure"]["reason_code"], "aggregate_pre_check_failed",
         "failure must name the interrupted turn: {member_index}"
     );
+    // operation 身份从投影取回：自动推进派生的 idempotency_key 对应唯一
+    // 根配方 operation（member_index 步 object_id = 最新 operation id），
+    // 下方显式 Retry 以 expected_object_id 精确钉住它。
+    let operation_id = member_index["object_id"]
+        .as_str()
+        .expect("auto-advanced root recipe operation id")
+        .to_string();
     assert_eq!(factory.audit().stream_launches(), 0);
 
     // “关闭页面”后再 GET：纯投影，不推进、不重复执行（两次 GET 语义一致，
