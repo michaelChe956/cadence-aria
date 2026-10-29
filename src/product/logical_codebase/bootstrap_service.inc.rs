@@ -12,6 +12,10 @@ pub struct LogicalCodebaseBootstrapService {
     ///（web 层注入 LC 隔离的 `AggregateIndexOperation::build_with_command_id`
     /// 闭包；缺省 None 保持既有仅重放语义——NotFound fail-closed）。
     aggregate_index_rebuild: Option<AggregateIndexRebuildDispatcher>,
+    /// A（REQ-REG-10 自动推进）：rules/policy 与 member index 的 Prepare 是
+    ///「跑根配方 operation」这一 provider 长任务——web 层注入既有
+    /// aggregate-initialization 编排链；缺省 None 时 advance 不假装推进。
+    prepare_root_recipe: Option<BootstrapPrepareDispatcher>,
 }
 
 /// C4 Task 6 探针签名：`(project_id, lc_id, operation_id)` → 该 member-index
@@ -39,6 +43,7 @@ impl LogicalCodebaseBootstrapService {
             paths,
             member_index_run_active: None,
             aggregate_index_rebuild: None,
+            prepare_root_recipe: None,
         }
     }
 
@@ -57,6 +62,16 @@ impl LogicalCodebaseBootstrapService {
         dispatcher: AggregateIndexRebuildDispatcher,
     ) -> Self {
         self.aggregate_index_rebuild = Some(dispatcher);
+        self
+    }
+
+    /// 注入根配方准备派发器（A：首建自动推进的 rules/policy 与
+    /// member index Prepare 语义）。
+    pub fn with_root_recipe_prepare(
+        mut self,
+        dispatcher: BootstrapPrepareDispatcher,
+    ) -> Self {
+        self.prepare_root_recipe = Some(dispatcher);
         self
     }
 

@@ -32,7 +32,7 @@ mod tests {
         );
     }
 
-    fn init_git_repository_with_commit(path: &std::path::Path) {
+    pub(super) fn init_git_repository_with_commit(path: &std::path::Path) {
         std::fs::create_dir_all(path.join(".claude/rules")).unwrap();
         git(path, &["init", "-b", "main"]);
         git(path, &["config", "user.email", "bootstrap@test.local"]);
@@ -44,7 +44,7 @@ mod tests {
         git(path, &["commit", "-m", "init"]);
     }
 
-    fn aria_inventory(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    pub(super) fn aria_inventory(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
         let mut inventory = std::collections::BTreeMap::new();
         let mut stack = vec![root.join(".aria")];
         while let Some(dir) = stack.pop() {
@@ -691,7 +691,7 @@ mod tests {
 
     /// 用真实 auditor 走完四条命令审计并 `finalize` 最终 receipt（Task 1.5
     /// 生产链路的同构 fixture：命令无副作用 → 四条全部 Allowed）。
-    fn finalize_root_receipt(
+    pub(super) fn finalize_root_receipt(
         paths: &ProductAppPaths,
         lc_id: &str,
         operation_id: &str,

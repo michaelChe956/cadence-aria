@@ -39,10 +39,13 @@ use crate::product::logical_codebase::repository_routing::{
 // - bootstrap_types.inc.rs：投影/动作契约类型（五步枚举、checkpoint、notice、action 结果）。
 // - bootstrap_projector.inc.rs：readiness 只读投影状态机（LogicalCodebaseBootstrapProjector）。
 // - bootstrap_service.inc.rs：bootstrap action 状态机（LogicalCodebaseBootstrapService）。
+// - bootstrap_advance.inc.rs：首建五步的顺序自动推进器（REQ-REG-10 自动推进）。
 // - bootstrap_tests.inc.rs：tests 模块。
 // - bootstrap_tests_aggregate_index.inc.rs：aggregate index 重建/覆盖失败专用 tests 模块。
 include!("bootstrap_types.inc.rs");
 include!("bootstrap_projector.inc.rs");
 include!("bootstrap_service.inc.rs");
+include!("bootstrap_advance.inc.rs");
 include!("bootstrap_tests.inc.rs");
 include!("bootstrap_tests_aggregate_index.inc.rs");
+include!("bootstrap_advance_tests.inc.rs");

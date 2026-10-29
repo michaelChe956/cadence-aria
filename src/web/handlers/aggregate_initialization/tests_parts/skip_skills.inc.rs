@@ -1,10 +1,13 @@
 // -------------------------------------------------------------------
-// owner 2026-10-29：聚合初始化「跳过四条 Cadence-skills 命令」与
-// 「重新初始化（聚合）」入口的生产同构验收。
+// owner 2026-10-29 入口语义：聚合初始化「跳过四条 Cadence-skills 命令」
+// 只发生在**冷启动自动推进**（bootstrap/advance，full_recipe_requested =
+// false，走「根已初始化」检测）；**手动**「启动聚合初始化」与「重新初始化」
+// 一律跑完整五步（含四条命令）——skills 更新后的重装途径。
 //
 // fixture 复用 trust_route 的生产同形依赖图（gateway factory 携带
 // `Some(paths)` + 跳过式政策发布面）。差别只在聚合根是否预先具备两个
 // 判定文件（`AGENTS.md`、`.claude/rules/language.md`）。
+// 跳过式回执的断言在 `tests_parts/bootstrap_advance.inc.rs`（advance 路径）。
 // -------------------------------------------------------------------
 
 /// 预写「聚合根已做过 Cadence-skills 初始化」的两个判定文件（相对聚合根）。
@@ -45,11 +48,12 @@ async fn root_reinitialization_start(fixture: &TrustRouteFixture, idempotency_ke
         .to_string()
 }
 
-/// 验收 ①④：聚合根已初始化 → 跳过四条命令（零 provider 启动、零命令
-/// 审计、无跳过反证），聚合政策真实发布、跳过式 receipt 冻结，判定依据
-/// 可从 operation 记录读到。
+/// owner 2026-10-29 入口语义：**手动**点「启动聚合初始化」在**已初始化
+/// 根**上仍必须跑完整五步（含四条 Cadence-skills 命令）——skills 更新后
+/// 这是唯一的重装途径。跳过式检测只属于冷启动自动推进，见
+/// `tests_parts/bootstrap_advance.inc.rs` 的 advance 用例。
 #[tokio::test]
-async fn initialized_root_skips_the_recipe_but_publishes_the_aggregate_policy() {
+async fn manual_initialization_runs_every_command_on_an_initialized_root() {
     let fixture = trust_route_fixture(false);
     preinitialize_aggregate_root(&fixture);
     let operations = root_policy_operations(&fixture);
@@ -62,55 +66,46 @@ async fn initialized_root_skips_the_recipe_but_publishes_the_aggregate_policy() 
         "skipped initialization must still complete: {:?}",
         operation.error
     );
-    assert_eq!(
+    assert!(
+        operation
+            .steps
+            .iter()
+            .all(|step| step.status.as_str() == "completed"),
+        "a manual initialization always runs every step: {:?}",
         operation
             .steps
             .iter()
             .map(|step| step.status.as_str())
-            .collect::<Vec<_>>(),
-        vec!["completed", "completed", "skipped", "skipped", "skipped"]
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         fixture.factory.audit().stream_launches(),
-        0,
-        "an initialized root must start zero provider turns"
+        3,
+        "a manual initialization must run the full recipe even on an initialized root"
     );
-    assert!(
+    assert_eq!(
         root_policy_receipts(&fixture)
             .list_commands("project_0001", &operation_id)
             .expect("command receipts")
-            .is_empty(),
-        "no command may be audited when the four commands were skipped"
+            .len(),
+        4,
+        "all four recipe commands must be audited on the manual path"
     );
 
-    // ④ 判定依据：判定类别 + reason + 两个判定文件摘要。
+    // 手动路径记录 `forced` 判定（入口已是「用户明确要求跑完整五步」），
+    // 绝不落 `skipped`。
     let decision = operation
         .skills_initialization
         .clone()
-        .expect("skip decision must be durable on the operation");
+        .expect("a manual initialization must record its forced decision");
     assert_eq!(
         decision.kind,
-        crate::product::logical_codebase::aggregate_initialization::AggregateSkillsInitializationKind::Skipped
-    );
-    assert_eq!(
-        decision.reason_code,
-        crate::product::logical_codebase::aggregate_initialization::AGGREGATE_SKILLS_SKIPPED_REASON
-    );
-    assert_eq!(
-        decision
-            .markers
-            .iter()
-            .map(|marker| marker.relative_path.as_str())
-            .collect::<Vec<_>>(),
-        vec!["AGENTS.md", ".claude/rules/language.md"]
-    );
-    assert_eq!(
-        decision.markers[0].digest,
-        format!("sha256:{:x}", Sha256::digest(PREINITIALIZED_AGENTS.as_bytes()))
+        crate::product::logical_codebase::aggregate_initialization::AggregateSkillsInitializationKind::Forced
     );
 
     // 政策发布成功：artifact 是真正的聚合政策正文（非自举桩），locator
-    // 字节与正文一致。
+    // 字节与正文一致。完整 recipe 的 RuleAndMcpConfig 命令由 provider 重写
+    // 根规则材料，故冻结正文来自 provider 生成的两个来源。
     let canonical_root = root_policy_canonical_root(&fixture);
     let artifact = root_policy_store(&fixture)
         .get("project_0001")
@@ -118,25 +113,26 @@ async fn initialized_root_skips_the_recipe_but_publishes_the_aggregate_policy() 
         .expect("published policy artifact");
     assert!(
         !artifact.is_bootstrap_placeholder(),
-        "skipped initialization must publish the real aggregate policy"
+        "a manual initialization must publish the real aggregate policy"
     );
     assert_eq!(
         artifact.policy_text,
-        root_policy_expected_text(PREINITIALIZED_AGENTS, PREINITIALIZED_LANGUAGE)
+        root_policy_expected_text(ROOT_POLICY_TEST_AGENTS, ROOT_POLICY_TEST_LANGUAGE)
     );
     assert_eq!(
         std::fs::read(canonical_root.join(&artifact.policy_id)).expect("policy locator bytes"),
         artifact.policy_text.as_bytes()
     );
 
-    // 跳过式最终 receipt：无命令摘要、冻结 policy/rule 双摘要与判定依据。
+    // 完整 recipe receipt：四条命令摘要 + 冻结 policy/rule 双摘要，无跳过证据。
     let receipt = root_policy_receipts(&fixture)
         .get("project_0001", &operation_id)
         .expect("final receipt read")
-        .expect("skipped final receipt");
-    assert!(
-        receipt.commands.is_empty(),
-        "a skipped receipt must not claim any audited command"
+        .expect("finalized root receipt");
+    assert_eq!(
+        receipt.commands.len(),
+        4,
+        "a manual receipt must carry all four command audits"
     );
     assert_eq!(receipt.canonical_root, canonical_root);
     assert_eq!(receipt.policy_digest, artifact.digest);
@@ -146,28 +142,25 @@ async fn initialized_root_skips_the_recipe_but_publishes_the_aggregate_policy() 
             .expect("root rule digest")
             .expect("root rule entry")
     );
-    let receipt_decision = receipt
-        .skills_initialization
-        .as_ref()
-        .expect("skipped receipt must carry the skip evidence");
-    assert!(receipt_decision.is_skipped());
-    assert_eq!(receipt_decision.markers, decision.markers);
+    assert!(
+        receipt.skills_initialization.is_none(),
+        "a manual receipt must not carry skip evidence"
+    );
 
-    // 前端可读的步骤状态同样暴露 skipped（GET 投影）。
+    // 前端可读的步骤状态同样全 completed（GET 纯投影）。
     let uri = format!(
         "/api/projects/project_0001/logical-codebases/{}/initializations/{operation_id}",
         fixture.lc_id
     );
     let (status, body) = get_json(&fixture.app, &uri).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
+    assert!(
         body["steps"]
             .as_array()
             .expect("steps")
             .iter()
-            .map(|step| step["status"].as_str().unwrap_or_default())
-            .collect::<Vec<_>>(),
-        vec!["completed", "completed", "skipped", "skipped", "skipped"]
+            .all(|step| step["status"] == "completed"),
+        "manual initialization must project every step completed: {body}"
     );
 }
 
@@ -187,7 +180,16 @@ async fn uninitialized_root_still_runs_the_full_recipe() {
         operation.error
     );
     assert!(operation.steps.iter().all(|step| step.status.as_str() == "completed"));
-    assert!(operation.skills_initialization.is_none());
+    // 手动入口一律记录 `forced` 判定（入口本身即「跑完整五步」表达），
+    // 未初始化根的行为与之前一致：四条命令照跑。
+    let decision = operation
+        .skills_initialization
+        .clone()
+        .expect("a manual initialization must record its forced decision");
+    assert_eq!(
+        decision.kind,
+        crate::product::logical_codebase::aggregate_initialization::AggregateSkillsInitializationKind::Forced
+    );
     assert_eq!(fixture.factory.audit().stream_launches(), 3);
     root_policy_all_commands_allowed(&fixture, &operation_id);
     let receipt = root_policy_receipts(&fixture)

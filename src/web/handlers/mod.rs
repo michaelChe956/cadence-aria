@@ -152,7 +152,7 @@ pub use image_create::{
 };
 pub use logical_codebase_bootstrap::{
     get_lc_bootstrap_projection, get_logical_codebase_bootstrap, post_lc_bootstrap_action,
-    post_logical_codebase_bootstrap_action,
+    post_lc_bootstrap_advance, post_logical_codebase_bootstrap_action,
 };
 pub use logical_codebase_capabilities::{get_lc_capabilities, post_lc_capability_revalidate};
 pub use logical_codebase_members::{

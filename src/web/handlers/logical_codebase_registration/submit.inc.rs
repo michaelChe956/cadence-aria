@@ -92,5 +92,28 @@ fn submit_registration_for_lc(
     let completed = coordinator
         .resume_batch(&project_id, &batch.id)
         .map_err(product_store_api_error)?;
+    // A（REQ-REG-10 自动推进）：登记完成即触发一次首建链自动推进——服务端
+    // 后台执行，不阻塞/不改写本次提交响应；失败只 log（人工 advance 端点
+    // 仍然可用）。identity → manifest/checkout 已由上面的 resume 完成，这里
+    // 让 rules/policy 起的根配方长任务自动接管。
+    let state_for_advance = state.clone();
+    let project_for_advance = project_id.clone();
+    let lc_for_advance = logical_codebase_id.clone();
+    tokio::spawn(async move {
+        if let Err(error) = super::logical_codebase_bootstrap::advance_lc_bootstrap(
+            &state_for_advance,
+            &project_for_advance,
+            &lc_for_advance,
+        )
+        .await
+        {
+            tracing::warn!(
+                project_id = %project_for_advance,
+                logical_codebase_id = %lc_for_advance,
+                code = %error.code,
+                "bootstrap advance after registration submit stopped"
+            );
+        }
+    });
     Ok(Json(RegistrationBatchDto::from_record(&completed)))
 }

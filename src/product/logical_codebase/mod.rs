@@ -65,7 +65,9 @@ pub use aggregate_initialization_store::{
 };
 pub use bootstrap::{
     BootstrapActionError, BootstrapActionOutcome, BootstrapActionRequest, BootstrapActionResult,
-    BootstrapCheckpoint, BootstrapFailure, BootstrapStepProjection, LogicalCodebaseBootstrapNotice,
+    BootstrapAdvanceAttempt, BootstrapAdvanceRequest, BootstrapAdvanceResult, BootstrapAdvanceStop,
+    BootstrapCheckpoint, BootstrapFailure, BootstrapPrepareDispatcher, BootstrapPrepareOutcome,
+    BootstrapPrepareRequest, BootstrapStepProjection, LogicalCodebaseBootstrapNotice,
     LogicalCodebaseBootstrapProjection, LogicalCodebaseBootstrapProjector,
     LogicalCodebaseBootstrapService, LogicalCodebaseBootstrapStep,
     LogicalCodebaseBootstrapStepStatus,

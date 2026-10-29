@@ -1112,3 +1112,4 @@ include!("tests_parts/trust_route.inc.rs");
 include!("tests_parts/root_policy_publication.inc.rs");
 include!("tests_parts/root_safety.inc.rs");
 include!("tests_parts/skip_skills.inc.rs");
+include!("tests_parts/bootstrap_advance.inc.rs");

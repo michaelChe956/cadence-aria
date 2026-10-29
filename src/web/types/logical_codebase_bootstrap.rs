@@ -198,6 +198,42 @@ impl From<&ServiceResult> for BootstrapActionResultDto {
     }
 }
 
+/// A（REQ-REG-10 自动推进）响应：本次真正推进了哪些步骤 + 停在哪里 +
+/// 最终投影（与 GET 完全同构——前端不需要再发一次 GET）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BootstrapAdvanceResultDto {
+    pub project_id: String,
+    pub logical_codebase_id: String,
+    /// 本次真正产生 durable 进展的步骤名（依赖顺序；幂等重放时为空）。
+    pub advanced_steps: Vec<String>,
+    /// `planning_ready` / `in_progress` / `failed` / `waiting_for_human` /
+    /// `no_actionable_step` / `iteration_limit`。
+    pub stopped_reason: String,
+    pub stopped_step: Option<String>,
+    /// 停住步骤的稳定原因码（来自既有投影 failure 或推进器自身稳定码）。
+    pub stopped_reason_code: Option<String>,
+    pub projection: LogicalCodebaseBootstrapProjectionDto,
+}
+
+impl From<&crate::product::logical_codebase::BootstrapAdvanceResult> for BootstrapAdvanceResultDto {
+    fn from(result: &crate::product::logical_codebase::BootstrapAdvanceResult) -> Self {
+        Self {
+            project_id: result.project_id.clone(),
+            logical_codebase_id: result.logical_codebase_id.clone(),
+            advanced_steps: result
+                .advanced_steps
+                .iter()
+                .map(|attempt| attempt.step.as_str().to_string())
+                .collect(),
+            stopped_reason: result.stopped.reason().to_string(),
+            stopped_step: result.stopped.step().map(|step| step.as_str().to_string()),
+            stopped_reason_code: result.stopped.reason_code().map(str::to_string),
+            projection: LogicalCodebaseBootstrapProjectionDto::from(&result.projection),
+        }
+    }
+}
+
 /// C4 Task 6：显式 bootstrap 动作请求（canonical POST body）。step/action
 /// 直接复用 product 枚举的 snake_case 序列化，不引入第二套字符串协议。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

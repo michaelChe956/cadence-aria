@@ -163,6 +163,11 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             "/api/projects/{project_id}/logical-codebases/{lc_id}/bootstrap/actions",
             post(handlers::post_lc_bootstrap_action),
         )
+        // A（REQ-REG-10 自动推进）：五步顺序自动推进的显式入口（幂等）。
+        .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/bootstrap/advance",
+            post(handlers::post_lc_bootstrap_advance),
+        )
         .route(
             "/api/projects/{project_id}/logical-codebases/{lc_id}/capabilities",
             get(handlers::get_lc_capabilities),

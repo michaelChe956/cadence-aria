@@ -7,7 +7,7 @@
 /// `sha256:` 前缀），与 `AggregatePolicyArtifact::compute_digest` 一致；
 /// 正文与 `BOOTSTRAP_POLICY_TEXT` 完全不同。仅供原先必须 Completed/ready
 /// 的对照分支显式准备真正文——负例 fixture 一律保留桩正文。
-fn real_root_policy_revision_one(
+pub(super) fn real_root_policy_revision_one(
     project_id: &str,
     logical_codebase_id: &str,
 ) -> crate::product::logical_codebase::policy::AggregatePolicyArtifact {

@@ -377,9 +377,10 @@ pub use logical_codebase_registration::{
 
 mod logical_codebase_bootstrap;
 pub use logical_codebase_bootstrap::{
-    BootstrapActionRequestDto, BootstrapActionResultDto, BootstrapCheckpointDto,
-    BootstrapFailureDto, BootstrapPolicyReferenceDto, BootstrapStepProjectionDto,
-    LogicalCodebaseBootstrapNoticeDto, LogicalCodebaseBootstrapProjectionDto,
+    BootstrapActionRequestDto, BootstrapActionResultDto, BootstrapAdvanceResultDto,
+    BootstrapCheckpointDto, BootstrapFailureDto, BootstrapPolicyReferenceDto,
+    BootstrapStepProjectionDto, LogicalCodebaseBootstrapNoticeDto,
+    LogicalCodebaseBootstrapProjectionDto,
 };
 
 mod identity_repair;

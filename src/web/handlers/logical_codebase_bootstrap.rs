@@ -292,3 +292,118 @@ async fn post_bootstrap_action_for_lc(
     )
         .into_response())
 }
+
+/// A（REQ-REG-10 自动推进）：首建五步顺序推进的唯一显式入口。
+///
+/// `POST /api/projects/{project_id}/logical-codebases/{logical_codebase_id}/bootstrap/advance`
+/// 无请求体（幂等、无客户端状态）：读 durable 投影，按
+/// identity → manifest/checkout → rules/policy → member index → aggregate
+/// index active 的依赖顺序推进第一个可动步骤，复投影后继续，直到
+/// planning_ready / failed / waiting_for_human / 无动作可做 / 有界上限。
+/// 重复调用不重复推进（每步 command 身份稳定派生）；并发调用由 LC 级
+/// `.bootstrap-advance.lock` 串行化。GET 仍只读——推进只发生在 POST 上。
+pub async fn post_lc_bootstrap_advance(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let result = advance_lc_bootstrap(&state, &project_id, &logical_codebase_id).await?;
+    Ok((
+        StatusCode::OK,
+        Json(crate::web::types::BootstrapAdvanceResultDto::from(&result)),
+    )
+        .into_response())
+}
+
+/// 首建自动推进：HTTP 端点与「登记提交完成后」的服务端后台触发共用同一
+/// 实现（同一套依赖注入、同一套幂等/锁语义）。
+pub(crate) async fn advance_lc_bootstrap(
+    state: &WebAppState,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> ApiResult<crate::product::logical_codebase::BootstrapAdvanceResult> {
+    let paths = product_app_paths(state);
+    // 与 GET 同一 authority 解析：LC 不存在/冲突 fail-closed，不猜路径。
+    resolve_lc_authority(&paths, project_id, logical_codebase_id)?;
+
+    let dependencies = state
+        .aggregate_initialization_dependencies()
+        .for_lc(logical_codebase_id.to_string());
+    let runs = dependencies.runs().clone();
+    let index_operation = dependencies.index.clone();
+    let state_for_prepare = state.clone();
+    let service = LogicalCodebaseBootstrapService::new(paths)
+        .with_member_index_run_probe(Arc::new(
+            move |project_id: &str, lc_id: &str, operation_id: &str| {
+                runs.is_active(&InitializationRunKey::aggregate(
+                    project_id,
+                    lc_id,
+                    operation_id,
+                ))
+            },
+        ))
+        // A：rules/policy 与 member index 的 Prepare = 跑根配方 operation
+        //（provider 长任务）——复用既有 aggregate-initialization 编排链。
+        .with_root_recipe_prepare(Arc::new(
+            move |request: &crate::product::logical_codebase::BootstrapPrepareRequest| {
+                crate::web::handlers::aggregate_initialization::ensure_lc_initialization_started(
+                    &state_for_prepare,
+                    &request.project_id,
+                    &request.logical_codebase_id,
+                    &request.command_id,
+                )
+            },
+        ))
+        // aggregate_index_active 的 Prepare = 既有 LC 隔离索引重建
+        //（同 command 幂等、membership revision 冲突 fail-closed）。
+        .with_aggregate_index_rebuild(Arc::new(
+            move |project_id: &str, command_id: &str, expected_revision: u64| {
+                index_operation.build_with_command_id(project_id, expected_revision, command_id)
+            },
+        ));
+    let result = service
+        .advance(crate::product::logical_codebase::BootstrapAdvanceRequest {
+            project_id: project_id.to_string(),
+            logical_codebase_id: logical_codebase_id.to_string(),
+        })
+        .await
+        .map_err(|error| match error {
+            BootstrapActionError::Conflict { code, detail } => ApiError::runtime(
+                code,
+                "logical codebase bootstrap advance was rejected",
+                json!({
+                    "project_id": project_id,
+                    "logical_codebase_id": logical_codebase_id,
+                    "detail": detail,
+                }),
+            ),
+            BootstrapActionError::Store(error) => product_store_api_error(error),
+        })?;
+    // 事实已先落盘；EventHub 只承担通知/补读触发，发布失败不回滚。
+    publish_bootstrap_advance(state, &result);
+    Ok(result)
+}
+
+fn publish_bootstrap_advance(
+    state: &WebAppState,
+    result: &crate::product::logical_codebase::BootstrapAdvanceResult,
+) {
+    state.events.publish(
+        crate::web::events::WebEventType::ProjectionUpdated.as_str(),
+        None,
+        json!({
+            "scope": "logical_codebase_bootstrap",
+            "trigger": "advance",
+            "project_id": result.project_id,
+            "logical_codebase_id": result.logical_codebase_id,
+            "advanced_steps": result
+                .advanced_steps
+                .iter()
+                .map(|attempt| attempt.step.as_str())
+                .collect::<Vec<_>>(),
+            "stopped_reason": result.stopped.reason(),
+            "stopped_step": result.stopped.step().map(|step| step.as_str()),
+            "stopped_reason_code": result.stopped.reason_code(),
+            "planning_ready": result.projection.planning_ready,
+        }),
+    );
+}
