@@ -1,3 +1,4 @@
+import { ApiRequestError } from "../../api/client";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   preflightLogicalCodebaseRegistration,
@@ -22,6 +23,18 @@ const PREFLIGHT_CLASSES = [
 ] as const;
 
 function formatError(reason: unknown, fallback: string): string {
+  if (reason instanceof ApiRequestError) {
+    // 服务端把预检被拒的具体原因放在 details.reason（如 ownership_conflict 的处置指引），
+    // 优先展示它，避免用户只看到笼统的 "aggregate root preflight rejected"。
+    const detailReason = reason.details?.reason;
+    if (typeof detailReason === "string" && detailReason.trim() !== "") {
+      return `${fallback}：${detailReason}`;
+    }
+    if (reason.message) {
+      return `${reason.code}: ${reason.message}`;
+    }
+    return fallback;
+  }
   return reason instanceof Error ? reason.message : fallback;
 }
 

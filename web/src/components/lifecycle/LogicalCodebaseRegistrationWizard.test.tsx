@@ -31,6 +31,24 @@ function registrationFetch(preflightItems?: unknown[]) {
   });
 }
 
+async function manualPreflightAlert(payload: unknown): Promise<HTMLElement> {
+  vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(payload, 422)));
+  const user = userEvent.setup();
+  render(
+    <LogicalCodebaseRegistrationWizard
+      projectId="project_0001"
+      logicalCodebaseId="lc_0001"
+      onCompleted={vi.fn()}
+      onClose={vi.fn()}
+    />,
+  );
+  await user.click(screen.getByRole("button", { name: "改为手工预检" }));
+  await user.type(screen.getByLabelText("聚合根目录"), "/x");
+  await user.type(screen.getByLabelText("候选成员路径"), "/x/api");
+  await user.click(screen.getByRole("button", { name: "执行手工预检" }));
+  return screen.findByRole("alert");
+}
+
 describe("LogicalCodebaseRegistrationWizard", () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -107,7 +125,7 @@ describe("LogicalCodebaseRegistrationWizard", () => {
     await user.type(screen.getByLabelText("聚合根目录"), "/missing");
     await user.click(screen.getByRole("button", { name: "确认聚合根并自动发现" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("聚合根不存在");
+    expect(await screen.findByRole("alert")).toHaveTextContent("aggregate_root_missing: 聚合根不存在");
     expect(screen.getByLabelText("候选成员路径")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "执行手工预检" })).toBeInTheDocument();
   });
@@ -189,5 +207,49 @@ describe("LogicalCodebaseRegistrationWizard", () => {
     expect(
       screen.queryByLabelText("选择 /root/api（eligible）"),
     ).not.toBeInTheDocument();
+  });
+
+  it("手工预检失败时优先展示 details.reason（ownership_conflict 样例）", async () => {
+    const alert = await manualPreflightAlert({
+      code: "aggregate_root_ownership_conflict",
+      message: "aggregate root preflight rejected",
+      details: {
+        reason:
+          "aggregate root /x already contains user-owned /x/CLAUDE.md; move or merge it before aggregate initialization",
+      },
+    });
+    expect(alert).toHaveTextContent(
+      "预检失败：aggregate root /x already contains user-owned /x/CLAUDE.md; move or merge it before aggregate initialization",
+    );
+    expect(alert).not.toHaveTextContent("aggregate root preflight rejected");
+  });
+
+  it("手工预检失败时优先展示 details.reason（aggregate_root_missing 样例）", async () => {
+    const alert = await manualPreflightAlert({
+      code: "aggregate_root_missing",
+      message: "aggregate root preflight rejected",
+      details: {
+        reason: "could not inspect aggregate root /x: permission denied (os error 13)",
+      },
+    });
+    expect(alert).toHaveTextContent(
+      "预检失败：could not inspect aggregate root /x: permission denied (os error 13)",
+    );
+  });
+
+  it("details.reason 缺失时回落到 code 与 message", async () => {
+    const alert = await manualPreflightAlert({
+      code: "aggregate_root_missing",
+      message: "聚合根不存在",
+    });
+    expect(alert).toHaveTextContent("aggregate_root_missing: 聚合根不存在");
+  });
+
+  it("details.reason 与 message 均缺失时使用兜底文案", async () => {
+    const alert = await manualPreflightAlert({
+      code: "aggregate_root_missing",
+      details: {},
+    });
+    expect(alert).toHaveTextContent("预检失败");
   });
 });
