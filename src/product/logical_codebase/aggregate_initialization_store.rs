@@ -16,6 +16,7 @@ use super::aggregate_initialization::{
     AggregateInitializationErrorRecord, AggregateInitializationOperation,
     AggregateInitializationOperationStatus, AggregateInitializationStepKind,
     AggregateInitializationStepRecord, AggregateInitializationStepStatus,
+    AggregateSkillsInitialization, AggregateSkillsInitializationKind,
 };
 
 // 本文件按仓库惯例拆入 `.inc.rs`（同模块命名空间，符号路径与可见性不变），

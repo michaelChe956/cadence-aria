@@ -364,6 +364,113 @@ async fn finalize_published_root_recipe(
     })?
 }
 
+/// 跳过式聚合初始化的政策发布收口实现（owner 2026-10-29）：聚合根已完成
+/// Cadence-skills 初始化时四条命令确实没必要跑，只做聚合政策（读政策源 →
+/// 合成 → 发布 artifact）并签发「跳过式」最终 receipt。
+///
+/// 与末命令收口共用 [`publish_and_verify_root_policy`]：政策正文/来源/根
+/// 身份/rule digest 的复验一条不少；差别只在 receipt 语义（无命令审计事实，
+/// 代之以跳过判定依据的复验）。
+struct SkippedAggregatePolicyPublisher {
+    paths: ProductAppPaths,
+}
+
+#[async_trait::async_trait]
+impl crate::product::logical_codebase::aggregate_initialization_coordinator::AggregatePolicyPublication
+    for SkippedAggregatePolicyPublisher
+{
+    async fn publish_skipped(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        lc_id: &str,
+        canonical_root: &std::path::Path,
+        decision: &crate::product::logical_codebase::aggregate_initialization::AggregateSkillsInitialization,
+    ) -> Result<(), AggregateInitializationError> {
+        let paths = self.paths.clone();
+        let project_id = project_id.to_string();
+        let lc_id = lc_id.to_string();
+        let operation_id = operation_id.to_string();
+        let canonical_root = canonical_root.to_path_buf();
+        let decision = decision.clone();
+        tokio::task::spawn_blocking(move || {
+            publish_skipped_root_policy_blocking(
+                &paths,
+                &lc_id,
+                &project_id,
+                &operation_id,
+                &canonical_root,
+                decision,
+            )
+        })
+        .await
+        .map_err(|error| AggregateInitializationError::PolicyPublication {
+            reason: format!("skipped root policy publication task failed: {error}"),
+            retryable: true,
+        })?
+        .map_err(|error| AggregateInitializationError::PolicyPublication {
+            reason: format!("skipped root policy publication failed: {error}"),
+            retryable: true,
+        })
+    }
+
+    /// 本 operation 是否已有命令审计事实（跳过判定窗口的反证来源）。
+    fn has_audited_commands(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        lc_id: &str,
+    ) -> Result<bool, AggregateInitializationError> {
+        crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
+            self.paths.clone(),
+            lc_id.to_string(),
+        )
+        .list_commands(project_id, operation_id)
+        .map(|commands| !commands.is_empty())
+        .map_err(|error| AggregateInitializationError::PolicyPublication {
+            reason: format!("root recipe command receipts could not be read: {error}"),
+            retryable: true,
+        })
+    }
+}
+
+/// [`SkippedAggregatePolicyPublisher::publish_skipped`] 的同步主体（blocking
+/// 任务内执行）。
+fn publish_skipped_root_policy_blocking(
+    paths: &ProductAppPaths,
+    lc_id: &str,
+    project_id: &str,
+    operation_id: &str,
+    canonical_root: &std::path::Path,
+    decision: crate::product::logical_codebase::aggregate_initialization::AggregateSkillsInitialization,
+) -> Result<(), crate::product::json_store::ProductStoreError> {
+    let (artifact, rule_digest) = publish_and_verify_root_policy(
+        paths,
+        lc_id,
+        project_id,
+        operation_id,
+        canonical_root,
+    )?;
+    // 跳过式 receipt：签发时再复验两个判定文件摘要（store 内 fail-closed），
+    // 且本 operation 绝不允许已有命令审计事实。
+    crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
+        paths.clone(),
+        lc_id.to_string(),
+    )
+    .finalize_skipped(
+        crate::product::logical_codebase::root_recipe_receipt::RootRecipeSkipFinalization {
+            project_id,
+            operation_id,
+            canonical_root,
+            decision,
+            policy_digest: &artifact.digest,
+            rule_digest: &rule_digest,
+            finalized_at: artifact.created_at.clone(),
+        },
+    )?;
+    Ok(())
+}
+
 /// [`finalize_published_root_recipe`] 的同步主体（blocking 任务内执行）。
 fn finalize_published_root_policy_blocking(
     paths: &ProductAppPaths,
@@ -372,6 +479,59 @@ fn finalize_published_root_policy_blocking(
     operation_id: &str,
     canonical_root: &std::path::Path,
 ) -> Result<(), crate::product::json_store::ProductStoreError> {
+    let (artifact, rule_digest) = publish_and_verify_root_policy(
+        paths,
+        lc_id,
+        project_id,
+        operation_id,
+        canonical_root,
+    )?;
+    #[cfg(test)]
+    if root_policy_test_faults::trip(operation_id, root_policy_test_faults::Phase::ReceiptWrite) {
+        return Err(crate::product::json_store::ProductStoreError::Io(
+            "injected receipt write failure".to_string(),
+        ));
+    }
+    // I3：最终 receipt 只在复验全部通过后签发。
+    crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
+        paths.clone(),
+        lc_id.to_string(),
+    )
+    .finalize(
+        project_id,
+        operation_id,
+        &artifact.digest,
+        &rule_digest,
+        artifact.created_at.clone(),
+    )?;
+    #[cfg(test)]
+    if root_policy_test_faults::trip(
+        operation_id,
+        root_policy_test_faults::Phase::AfterFinalReceipt,
+    ) {
+        return Err(crate::product::json_store::ProductStoreError::Io(
+            "injected interruption after the final receipt".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 发布权威聚合政策正文并独立复验冻结事实（完整 recipe 收口与跳过式
+/// 收口共用同一条链）。返回 `(artifact, root rule digest)`；任何不一致
+/// 都上抛，绝不让未复验的内容冒充权威政策。
+fn publish_and_verify_root_policy(
+    paths: &ProductAppPaths,
+    lc_id: &str,
+    project_id: &str,
+    operation_id: &str,
+    canonical_root: &std::path::Path,
+) -> Result<
+    (
+        crate::product::logical_codebase::policy::AggregatePolicyArtifact,
+        String,
+    ),
+    crate::product::json_store::ProductStoreError,
+> {
     use crate::product::json_store::ProductStoreError;
     let invalid = |reason: String| ProductStoreError::InvalidRecord {
         kind: "aggregate_policy_publication",
@@ -471,34 +631,7 @@ fn finalize_published_root_policy_blocking(
             "injected interruption after policy publication".to_string(),
         ));
     }
-    #[cfg(test)]
-    if root_policy_test_faults::trip(operation_id, root_policy_test_faults::Phase::ReceiptWrite) {
-        return Err(ProductStoreError::Io(
-            "injected receipt write failure".to_string(),
-        ));
-    }
-    // I3：最终 receipt 只在复验全部通过后签发。
-    crate::product::logical_codebase::RootRecipeReceiptStore::for_lc(
-        paths.clone(),
-        lc_id.to_string(),
-    )
-    .finalize(
-        project_id,
-        operation_id,
-        &artifact.digest,
-        &rule_digest,
-        artifact.created_at.clone(),
-    )?;
-    #[cfg(test)]
-    if root_policy_test_faults::trip(
-        operation_id,
-        root_policy_test_faults::Phase::AfterFinalReceipt,
-    ) {
-        return Err(ProductStoreError::Io(
-            "injected interruption after the final receipt".to_string(),
-        ));
-    }
-    Ok(())
+    Ok((artifact, rule_digest))
 }
 
 /// Task 4：判断末命令是否已有同 operation 的 Allowed 审计（显式恢复的
@@ -756,7 +889,12 @@ impl AggregateInitializationDependencies {
             )
             // Task 1.4：生产 coordinator 携带 trust 硬前置门，使
             // `execute_with_trust` 在生产依赖图可用（handler 接线见 Task 1.8）。
-            .with_trust(trust.clone()),
+            .with_trust(trust.clone())
+            // owner 2026-10-29：聚合根已做过 Cadence-skills 初始化时跳过
+            // 四条命令，只发布聚合政策并签发跳过式 receipt。
+            .with_policy_publication(Arc::new(SkippedAggregatePolicyPublisher {
+                paths: paths.clone(),
+            })),
         );
         let index = Arc::new(AggregateIndexOperation::new(
             paths.clone(),

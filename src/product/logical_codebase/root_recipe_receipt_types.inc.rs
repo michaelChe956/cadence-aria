@@ -226,8 +226,15 @@ pub struct RootRecipeCommandSummary {
     pub after_snapshot_digest: String,
 }
 
-/// 整个 root recipe 的最终 receipt：仅在四命令全部审计通过且关联
-/// policy/rule digest 后由 [`RootRecipeReceiptStore::finalize`] 落盘。
+/// 整个 root recipe 的最终 receipt。两种合法形态（owner 2026-10-29）：
+///
+/// - 完整 recipe receipt：四命令全部审计通过（`commands` 四条，
+///   `skills_initialization = None`）；
+/// - 跳过式 receipt：聚合根已做过 Cadence-skills 初始化、四条命令确实
+///   没必要跑（`commands` 为空，`skills_initialization` 携带 `skipped`
+///   判定依据与两个判定文件摘要）。
+///
+/// 两种形态互斥：任一命令审计事实都与「跳过」是反证，反之亦然。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootRecipeReceipt {
     pub operation_id: String,
@@ -236,4 +243,8 @@ pub struct RootRecipeReceipt {
     pub policy_digest: String,
     pub rule_digest: String,
     pub finalized_at: String,
+    /// 跳过式 receipt 的判定依据；完整 recipe receipt 为 `None`（旧记录
+    /// 反序列化缺省 `None`，语义不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills_initialization: Option<AggregateSkillsInitialization>,
 }

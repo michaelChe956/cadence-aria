@@ -7,7 +7,8 @@ pub async fn create_aggregate_initialization(
 ) -> ApiResult<Response> {
     let paths = product_app_paths(&state);
     let logical_codebase_id = default_logical_codebase_id(&paths, &project_id)?;
-    create_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, request).await
+    create_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, request, false)
+        .await
 }
 
 /// v1.3 canonical endpoint: aggregate initialization is resolved per logical
@@ -19,7 +20,24 @@ pub async fn create_lc_aggregate_initialization(
 ) -> ApiResult<Response> {
     let paths = product_app_paths(&state);
     require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
-    create_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, request).await
+    create_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, request, false)
+        .await
+}
+
+/// owner 2026-10-29：「重新初始化（聚合）」入口。
+///
+/// 与初始化入口同一操作模型、同一条信道路径，唯一差别是创建期冻结
+/// 「强制跑完整五步」事实：执行期无视聚合根是否已做过 Cadence-skills
+/// 初始化，四条命令照跑（Cadence-skills 更新后重装用）。
+pub async fn create_lc_aggregate_reinitialization(
+    State(state): State<WebAppState>,
+    Path((project_id, logical_codebase_id)): Path<(String, String)>,
+    Json(request): Json<CreateAggregateInitializationRequest>,
+) -> ApiResult<Response> {
+    let paths = product_app_paths(&state);
+    require_logical_codebase(&paths, &project_id, &logical_codebase_id)?;
+    create_aggregate_initialization_for_lc(state, project_id, logical_codebase_id, request, true)
+        .await
 }
 
 async fn create_aggregate_initialization_for_lc(
@@ -27,6 +45,7 @@ async fn create_aggregate_initialization_for_lc(
     project_id: String,
     logical_codebase_id: String,
     request: CreateAggregateInitializationRequest,
+    full_recipe_requested: bool,
 ) -> ApiResult<Response> {
     let project_paths = product_app_paths(&state);
     validate_project_id(&project_id)?;
@@ -53,10 +72,16 @@ async fn create_aggregate_initialization_for_lc(
         &logical_codebase_id,
         &manifest.provider_context_root,
     )?;
-    let operation = dependencies
-        .coordinator
-        .begin(operation_id, &project_id, input)
-        .map_err(aggregate_initialization_api_error)?;
+    let operation = if full_recipe_requested {
+        dependencies
+            .coordinator
+            .begin_reinitialization(operation_id, &project_id, input)
+    } else {
+        dependencies
+            .coordinator
+            .begin(operation_id, &project_id, input)
+    }
+    .map_err(aggregate_initialization_api_error)?;
     // `begin` returns only a newly-created operation: an existing terminal
     // operation with the same key is reported as an idempotency conflict.
     let key =

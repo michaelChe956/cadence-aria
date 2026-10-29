@@ -78,6 +78,9 @@ fn aggregate_step_status(status: AggregateInitializationStepStatus) -> &'static 
         AggregateInitializationStepStatus::Running => "running",
         AggregateInitializationStepStatus::Completed => "completed",
         AggregateInitializationStepStatus::Failed => "failed",
+        // owner 2026-10-29：聚合根已做过 Cadence-skills 初始化时，三个
+        // provider-turn 步骤被判定跳过（判定依据在 operation 记录里）。
+        AggregateInitializationStepStatus::Skipped => "skipped",
     }
 }
 

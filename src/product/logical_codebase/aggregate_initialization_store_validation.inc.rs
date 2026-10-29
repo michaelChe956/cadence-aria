@@ -64,6 +64,7 @@ fn validate_initial_operation(
         || operation.cancellation.is_some()
         || operation.error.is_some()
         || operation.completed_at.is_some()
+        || operation.skills_initialization.is_some()
     {
         return Err(identity_mismatch(&operation.operation_id));
     }
@@ -100,6 +101,9 @@ fn has_supported_step_layout(operation: &AggregateInitializationOperation) -> bo
 }
 
 fn valid_operation_state(operation: &AggregateInitializationOperation) -> bool {
+    if !valid_skills_initialization(operation) {
+        return false;
+    }
     match operation.status {
         AggregateInitializationOperationStatus::Created => {
             operation.steps.iter().all(is_pending_step)
@@ -117,7 +121,7 @@ fn valid_operation_state(operation: &AggregateInitializationOperation) -> bool {
                 && operation.completed_at.is_none()
         }
         AggregateInitializationOperationStatus::Completed => {
-            operation.steps.iter().all(is_completed_step)
+            operation.steps.iter().all(is_completed_or_skipped_step)
                 && operation.current_step.is_none()
                 && operation.failed_step.is_none()
                 && operation.cancellation.is_none()
@@ -133,24 +137,48 @@ fn valid_operation_state(operation: &AggregateInitializationOperation) -> bool {
     }
 }
 
-fn valid_running_steps(operation: &AggregateInitializationOperation) -> bool {
-    match operation
+/// 「没必要跑」的判定与步骤状态必须互相可证：任何 `Skipped` 步骤都要求
+/// operation 记录里存在 `skipped` 判定依据（含两个判定文件摘要），反之
+/// 判定为 `skipped` 时三个 provider-turn 步骤必须全部 `Skipped`——绝不
+/// 静默忽略，也绝不出现「判定跳过但步骤还在等 provider」的混合态。
+fn valid_skills_initialization(operation: &AggregateInitializationOperation) -> bool {
+    let skipped_steps = operation
         .steps
         .iter()
-        .position(|step| step.status == AggregateInitializationStepStatus::Running)
-    {
-        Some(running_index) => {
-            operation.steps[..running_index]
-                .iter()
-                .all(is_completed_step)
-                && is_running_step(&operation.steps[running_index])
-                && operation.steps[running_index + 1..]
-                    .iter()
-                    .all(is_pending_step)
-                && operation.current_step == Some(operation.steps[running_index].step_id)
-        }
-        None => completed_prefix_pending_suffix(operation) && operation.current_step.is_none(),
+        .filter(|step| step.status == AggregateInitializationStepStatus::Skipped)
+        .count();
+    match operation.skills_initialization.as_ref() {
+        None => skipped_steps == 0,
+        Some(decision) => match decision.kind {
+            AggregateSkillsInitializationKind::Skipped => {
+                skipped_steps == provider_turn_steps().len()
+                    && provider_turn_steps().iter().all(|step| {
+                        operation.steps[step.index()].status
+                            == AggregateInitializationStepStatus::Skipped
+                    })
+                    && !decision.markers.is_empty()
+                    && !decision.reason_code.is_empty()
+            }
+            AggregateSkillsInitializationKind::Required
+            | AggregateSkillsInitializationKind::Forced => skipped_steps == 0,
+        },
     }
+}
+
+fn provider_turn_steps() -> [AggregateInitializationStepKind; 3] {
+    [
+        AggregateInitializationStepKind::PreCheck,
+        AggregateInitializationStepKind::RuleAndMcpConfig,
+        AggregateInitializationStepKind::OpenspecAndExamples,
+    ]
+}
+
+fn valid_running_steps(operation: &AggregateInitializationOperation) -> bool {
+    let Some(running_index) = completed_then_running_then_pending(&operation.steps) else {
+        return false;
+    };
+    let expected_current = running_index.map(|index| operation.steps[index].step_id);
+    operation.current_step == expected_current
 }
 
 fn valid_terminal_failed_state(operation: &AggregateInitializationOperation) -> bool {
@@ -163,7 +191,7 @@ fn valid_terminal_failed_state(operation: &AggregateInitializationOperation) -> 
             };
             operation.steps[..failed_index]
                 .iter()
-                .all(is_completed_step)
+                .all(is_completed_or_skipped_step)
                 && is_failed_step(failed_record)
                 && operation.steps[failed_index + 1..]
                     .iter()
@@ -174,25 +202,46 @@ fn valid_terminal_failed_state(operation: &AggregateInitializationOperation) -> 
         None => {
             operation.current_step.is_none()
                 && has_terminal
-                && (operation.steps.iter().all(is_completed_step)
-                    || completed_prefix_pending_suffix(operation))
+                && match completed_then_running_then_pending(&operation.steps) {
+                    Some(running_index) => running_index.is_none(),
+                    None => false,
+                }
         }
     }
 }
 
-fn completed_prefix_pending_suffix(operation: &AggregateInitializationOperation) -> bool {
+/// 校验「已完成/已跳过前缀 → 至多一个 Running → 全 Pending 后缀」的固定
+/// 形状。合法时返回 `Some(Some(index))`（Running 步在 index）或
+/// `Some(None)`（无 Running 步）；形状非法返回 `None`。
+fn completed_then_running_then_pending(
+    steps: &[AggregateInitializationStepRecord],
+) -> Option<Option<usize>> {
+    let mut running_index: Option<usize> = None;
     let mut pending_seen = false;
-    for step in &operation.steps {
-        if is_completed_step(step) && !pending_seen {
-            continue;
+    for (index, step) in steps.iter().enumerate() {
+        match step.status {
+            AggregateInitializationStepStatus::Completed
+            | AggregateInitializationStepStatus::Skipped => {
+                if !is_completed_or_skipped_step(step) || running_index.is_some() || pending_seen {
+                    return None;
+                }
+            }
+            AggregateInitializationStepStatus::Running => {
+                if !is_running_step(step) || running_index.is_some() || pending_seen {
+                    return None;
+                }
+                running_index = Some(index);
+            }
+            AggregateInitializationStepStatus::Pending => {
+                if !is_pending_step(step) {
+                    return None;
+                }
+                pending_seen = true;
+            }
+            AggregateInitializationStepStatus::Failed => return None,
         }
-        if is_pending_step(step) {
-            pending_seen = true;
-            continue;
-        }
-        return false;
     }
-    true
+    Some(running_index)
 }
 
 fn is_pending_step(step: &AggregateInitializationStepRecord) -> bool {
@@ -201,6 +250,7 @@ fn is_pending_step(step: &AggregateInitializationStepRecord) -> bool {
         && step.completed_at.is_none()
         && step.input_digest.is_none()
         && step.output_artifact_ref.is_none()
+        && step.skip_reason.is_none()
 }
 
 fn is_running_step(step: &AggregateInitializationStepRecord) -> bool {
@@ -208,6 +258,7 @@ fn is_running_step(step: &AggregateInitializationStepRecord) -> bool {
         && step.started_at.is_some()
         && step.completed_at.is_none()
         && step.input_digest.is_some()
+        && step.skip_reason.is_none()
 }
 
 fn is_completed_step(step: &AggregateInitializationStepRecord) -> bool {
@@ -215,12 +266,32 @@ fn is_completed_step(step: &AggregateInitializationStepRecord) -> bool {
         && step.started_at.is_some()
         && step.completed_at.is_some()
         && step.output_artifact_ref.is_some()
+        && step.skip_reason.is_none()
+}
+
+/// 已跳过步骤：没有执行痕迹（无 input digest / 无输出 artifact），只留下
+/// 判定原因与判定时间。
+fn is_skipped_step(step: &AggregateInitializationStepRecord) -> bool {
+    step.status == AggregateInitializationStepStatus::Skipped
+        && step.started_at.is_none()
+        && step.completed_at.is_some()
+        && step.input_digest.is_none()
+        && step.output_artifact_ref.is_none()
+        && step
+            .skip_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.is_empty())
+}
+
+fn is_completed_or_skipped_step(step: &AggregateInitializationStepRecord) -> bool {
+    is_completed_step(step) || is_skipped_step(step)
 }
 
 fn is_failed_step(step: &AggregateInitializationStepRecord) -> bool {
     step.status == AggregateInitializationStepStatus::Failed
         && step.started_at.is_some()
         && step.completed_at.is_some()
+        && step.skip_reason.is_none()
 }
 
 fn identity_mismatch(id: &str) -> ProductStoreError {

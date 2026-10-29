@@ -177,9 +177,9 @@ pub use aggregate_index::{
 pub use aggregate_initialization::{
     AggregateInitializationDependencies, cancel_aggregate_initialization,
     cancel_lc_aggregate_initialization, create_aggregate_initialization,
-    create_lc_aggregate_initialization, get_aggregate_initialization,
-    get_aggregate_initialization_active, get_lc_aggregate_initialization,
-    get_lc_aggregate_initialization_active,
+    create_lc_aggregate_initialization, create_lc_aggregate_reinitialization,
+    get_aggregate_initialization, get_aggregate_initialization_active,
+    get_lc_aggregate_initialization, get_lc_aggregate_initialization_active,
 };
 pub(crate) use coding::map_advance_outcome;
 pub(crate) use coding::ws_gate_response_routes_termination;

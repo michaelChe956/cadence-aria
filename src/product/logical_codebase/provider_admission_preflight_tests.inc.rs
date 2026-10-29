@@ -711,6 +711,7 @@ mod tests {
             policy_digest: artifact.digest.clone(),
             rule_digest,
             finalized_at: "2026-10-03T00:00:00Z".to_string(),
+            skills_initialization: None,
         };
         let scope = crate::product::logical_codebase::store::lc_scope_root(
             &fixture.paths,

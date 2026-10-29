@@ -140,6 +140,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             post(handlers::create_lc_aggregate_initialization),
         )
         .route(
+            "/api/projects/{project_id}/logical-codebases/{lc_id}/reinitializations",
+            post(handlers::create_lc_aggregate_reinitialization),
+        )
+        .route(
             "/api/projects/{project_id}/logical-codebases/{lc_id}/initializations/active",
             get(handlers::get_lc_aggregate_initialization_active),
         )

@@ -40,7 +40,8 @@ use crate::product::logical_codebase::aggregate_initialization::{
     AggregateCancellationRecord, AggregateInitializationErrorRecord,
     AggregateInitializationOperation, AggregateInitializationOperationInput,
     AggregateInitializationOperationStatus, AggregateInitializationProfile,
-    AggregateInitializationStepKind, AggregateInitializationStepStatus, RepositoryTypeEvidence,
+    AggregateInitializationStepKind, AggregateInitializationStepStatus,
+    AggregateSkillsInitialization, RepositoryTypeEvidence,
 };
 use crate::product::logical_codebase::aggregate_initialization_store::AggregateInitializationOperationStore;
 use crate::product::logical_codebase::legacy_logical_codebase_id;
@@ -69,6 +70,8 @@ pub enum AggregateInitializationError {
     SkillsPreparation { reason: String, retryable: bool },
     #[error("aggregate preflight failed: {reason}")]
     Preflight { reason: String, retryable: bool },
+    #[error("aggregate policy publication failed: {reason}")]
+    PolicyPublication { reason: String, retryable: bool },
     #[error("provider turn {step:?} failed: {reason}")]
     ProviderTurn {
         step: AggregateInitializationStepKind,
@@ -127,6 +130,11 @@ impl AggregateInitializationError {
                 *retryable,
                 reason.clone(),
             ),
+            Self::PolicyPublication { retryable, reason } => (
+                "aggregate_policy_publication_failed".to_string(),
+                *retryable,
+                reason.clone(),
+            ),
             Self::ProviderTurn {
                 step,
                 reason,
@@ -158,6 +166,18 @@ impl AggregateInitializationError {
 }
 
 type Clock = dyn Fn() -> String + Send + Sync;
+
+/// [`AggregateInitializationCoordinator::resolve_skills_initialization`] 的
+/// 两条收敛路径。
+#[derive(Debug, Clone)]
+enum AggregateSkillsHandling {
+    /// 聚合根尚未做过 Cadence-skills 初始化（或显式要求重新初始化）：
+    /// 走完整五步（含四条命令）。
+    RunFullRecipe,
+    /// 聚合根已做过 Cadence-skills 初始化：跳过三个 provider-turn 步骤，
+    /// 只做聚合政策发布。判定依据随此值一并携带。
+    Skip(crate::product::logical_codebase::aggregate_initialization::AggregateSkillsInitialization),
+}
 
 /// Drives `machine_skills`: prepares the shared Cadence skill set and reports
 /// the preparation result so the coordinator can persist the digests/paths and
@@ -230,6 +250,40 @@ pub struct AggregateProviderTurnRequest<'a> {
     pub cancellation: CancellationToken,
 }
 
+/// 跳过式聚合初始化（聚合根已完成 Cadence-skills 初始化，四条命令没
+/// 必要跑）的政策发布收口：读政策源 → 合成正文 → 发布不可变 artifact →
+/// 签发「跳过式」最终 receipt。
+///
+/// 实现必须复用与末命令收口同一发布链（`publish_recipe_policy`），只是
+/// receipt 语义换成「没跑命令」的证据形态；判定依据由 coordinator 落盘，
+/// 这里只负责证明「政策真的发布了、receipt 真的冻结了」。
+#[async_trait]
+pub trait AggregatePolicyPublication: Send + Sync {
+    /// `lc_id` 为 coordinator 的 LC scope（未 scope 时退化为 legacy 别名），
+    /// 与 provider-turn 收口使用同一 scope 语义。
+    async fn publish_skipped(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        lc_id: &str,
+        canonical_root: &std::path::Path,
+        decision: &AggregateSkillsInitialization,
+    ) -> Result<(), AggregateInitializationError>;
+
+    /// 本 operation 是否已有任何 root recipe 命令审计事实。`Ok(true)` 关闭
+    /// 跳过判定窗口：命令**已经跑过**是「没必要跑」的反证（典型来源：
+    /// 旧版本中断后被显式续跑的 operation）。实现读不到审计事实时
+    /// fail-closed 报错，绝不把不可观测当成「没跑过」。
+    fn has_audited_commands(
+        &self,
+        _project_id: &str,
+        _operation_id: &str,
+        _lc_id: &str,
+    ) -> Result<bool, AggregateInitializationError> {
+        Ok(false)
+    }
+}
+
 /// Drives a single provider turn for one of `pre_check`, `rule_and_mcp_config`
 /// or `openspec_and_examples`. Each call is one Claude turn rooted at the
 /// aggregate root; the driver must not run for `machine_skills` or
@@ -287,6 +341,10 @@ pub struct AggregateInitializationCoordinator {
     /// coordinator 未装配 trust 门——`execute_with_trust` 对此 fail-closed；
     /// 既有 `execute` 路径不受影响（handler 接线由 Task 1.8 完成）。
     trust: Option<Arc<dyn ProviderTrustPrecondition>>,
+    /// 跳过式聚合初始化（不需要四条 Cadence-skills 命令）的政策发布收口。
+    /// `None` 表示该依赖图没有发布面：一旦判定要跳过就 fail-closed，绝不
+    /// 静默跳过政策发布。
+    policy: Option<Arc<dyn AggregatePolicyPublication>>,
 }
 
 // 以下各职责模块通过文本包含(`include!`)进入此文件,保持模块命名空间与公开 API 不变。

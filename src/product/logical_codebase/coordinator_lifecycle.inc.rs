@@ -40,6 +40,7 @@ impl AggregateInitializationCoordinator {
             detector,
             clock,
             trust: None,
+            policy: None,
         }
     }
 
@@ -51,6 +52,17 @@ impl AggregateInitializationCoordinator {
         trust: Arc<dyn crate::product::logical_codebase::ProviderTrustPrecondition>,
     ) -> Self {
         self.trust = Some(trust);
+        self
+    }
+
+    /// owner 2026-10-29：注入「跳过式聚合初始化」的政策发布面。跳过判定
+    /// 后必须能发布政策 + 签发跳过式 receipt，否则 coordinator 对跳过
+    /// fail-closed（绝不静默跳过）；未注入时完整五步路径行为不变。
+    pub fn with_policy_publication(
+        mut self,
+        policy: Arc<dyn AggregatePolicyPublication>,
+    ) -> Self {
+        self.policy = Some(policy);
         self
     }
 
@@ -76,6 +88,7 @@ impl AggregateInitializationCoordinator {
             detector: Arc::clone(&self.detector),
             clock: Arc::clone(&self.clock),
             trust: self.trust.clone(),
+            policy: self.policy.clone(),
         }
     }
 
@@ -94,6 +107,28 @@ impl AggregateInitializationCoordinator {
         project_id: &str,
         input: AggregateInitializationOperationInput,
     ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
+        self.begin_with(operation_id, project_id, input, false)
+    }
+
+    /// owner 2026-10-29：「重新初始化（聚合）」入口——创建期冻结「强制跑
+    /// 完整五步（含四条 Cadence-skills 命令）」事实，执行期无视聚合根
+    /// 的已初始化检测。幂等身份与 [`Self::begin`] 同源。
+    pub fn begin_reinitialization(
+        &self,
+        operation_id: String,
+        project_id: &str,
+        input: AggregateInitializationOperationInput,
+    ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
+        self.begin_with(operation_id, project_id, input, true)
+    }
+
+    fn begin_with(
+        &self,
+        operation_id: String,
+        project_id: &str,
+        input: AggregateInitializationOperationInput,
+        full_recipe_requested: bool,
+    ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
         validate_relative_id(project_id).map_err(|error| {
             AggregateInitializationError::state(
                 operation_id.clone(),
@@ -111,7 +146,8 @@ impl AggregateInitializationCoordinator {
             project_id.to_string(),
             input,
             (self.clock)(),
-        );
+        )
+        .with_full_recipe_requested(full_recipe_requested);
         self.operations
             .create_idempotent(operation)
             .map_err(AggregateInitializationError::from)
@@ -365,6 +401,44 @@ impl AggregateInitializationCoordinator {
             return self.fail_interrupted(project_id, operation_id);
         }
 
+        // owner 2026-10-29：四条 Cadence-skills 命令是否必要的判定。
+        // 判定只发生在「三个 provider-turn 步骤都还是 Pending」的窗口里，
+        // 一旦开始跑就不再中途改道（续跑沿用已冻结的判定）。
+        match self.resolve_skills_initialization(project_id, operation_id, &preflight) {
+            Ok(AggregateSkillsHandling::RunFullRecipe) => {}
+            Ok(AggregateSkillsHandling::Skip(decision)) => {
+                if let Err(error) = self
+                    .publish_skipped_policy(project_id, operation_id, &preflight, &decision)
+                    .await
+                {
+                    tracing::warn!(
+                        project_id,
+                        operation_id,
+                        error = %error,
+                        "aggregate initialization failed during skipped policy publication"
+                    );
+                    return Err(self.persist_execution_failure(
+                        project_id,
+                        operation_id,
+                        None,
+                        error,
+                    ));
+                }
+                if cancellation.is_cancelled() {
+                    return self.fail_interrupted(project_id, operation_id);
+                }
+                return self.finish_operation(project_id, operation_id);
+            }
+            Err(error) => {
+                return Err(self.persist_execution_failure(
+                    project_id,
+                    operation_id,
+                    None,
+                    error,
+                ));
+            }
+        }
+
         // Three provider turns, all after the deterministic steps.
         for step in [
             AggregateInitializationStepKind::PreCheck,
@@ -390,11 +464,20 @@ impl AggregateInitializationCoordinator {
             }
         }
 
-        let operation = match self
+        self.finish_operation(project_id, operation_id)
+    }
+
+    /// 把所有步骤推进到终态（Completed 或已判定 Skipped）后收口 operation。
+    fn finish_operation(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<AggregateInitializationOperation, AggregateInitializationError> {
+        match self
             .operations
             .finish_completed(project_id, operation_id, (self.clock)())
         {
-            Ok(operation) => operation,
+            Ok(operation) => Ok(operation),
             Err(error) => {
                 let error = match error {
                     ProductStoreError::NotFound { id, .. } => {
@@ -402,10 +485,116 @@ impl AggregateInitializationCoordinator {
                     }
                     other => AggregateInitializationError::Store(other),
                 };
-                return Err(self.persist_execution_failure(project_id, operation_id, None, error));
+                Err(self.persist_execution_failure(project_id, operation_id, None, error))
             }
+        }
+    }
+
+    /// 判定四条 Cadence-skills 命令是否必要。三种结果：
+    ///
+    /// - operation 记录里已有判定 → 沿用（续跑/重放不改判）；
+    /// - 三个 provider-turn 步骤已开始（非全 Pending）→ 判定窗口已关闭，
+    ///   继续完整五步（绝不中途改道）；
+    /// - 全 Pending 窗口内：显式重新初始化（`full_recipe_requested`）→
+    ///   记录 `forced` 判定并跑完整五步；否则按聚合根的两个判定文件
+    ///   检测，命中即落盘 `skipped` 判定并把三个步骤标记 `Skipped`。
+    fn resolve_skills_initialization(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        preflight: &AggregatePreflightSnapshot,
+    ) -> Result<AggregateSkillsHandling, AggregateInitializationError> {
+        let operation = self.load_operation(project_id, operation_id)?;
+        if let Some(decision) = operation.skills_initialization.clone() {
+            return Ok(if decision.is_skipped() {
+                AggregateSkillsHandling::Skip(decision)
+            } else {
+                AggregateSkillsHandling::RunFullRecipe
+            });
+        }
+        let window_open = [
+            AggregateInitializationStepKind::PreCheck,
+            AggregateInitializationStepKind::RuleAndMcpConfig,
+            AggregateInitializationStepKind::OpenspecAndExamples,
+        ]
+        .iter()
+        .all(|step| {
+            operation.steps[step.index()].status == AggregateInitializationStepStatus::Pending
+        });
+        if !window_open {
+            return Ok(AggregateSkillsHandling::RunFullRecipe);
+        }
+        if operation.full_recipe_requested {
+            let decision = crate::product::logical_codebase::aggregate_initialization::AggregateSkillsInitialization::forced(
+                (self.clock)(),
+            );
+            self.operations
+                .record_skills_initialization(project_id, operation_id, decision, (self.clock)())?;
+            return Ok(AggregateSkillsHandling::RunFullRecipe);
+        }
+        // 本 operation 已经留下命令审计事实 ⇒ 命令真的跑过，跳过判定窗口
+        // 关闭（旧版本中断后被显式续跑的 operation 走完整路径，由完整
+        // receipt 证明）。
+        if let Some(policy) = self.policy.as_ref() {
+            let lc_id = self
+                .lc_id
+                .clone()
+                .unwrap_or_else(|| legacy_logical_codebase_id(project_id));
+            if policy.has_audited_commands(project_id, operation_id, &lc_id)? {
+                return Ok(AggregateSkillsHandling::RunFullRecipe);
+            }
+        }
+        let root = PathBuf::from(&preflight.aggregate_root);
+        let markers = crate::product::logical_codebase::aggregate_initialization::detect_skills_initialization(
+            &root,
+        )?;
+        let Some(markers) = markers else {
+            return Ok(AggregateSkillsHandling::RunFullRecipe);
         };
-        Ok(operation)
+        let decision = crate::product::logical_codebase::aggregate_initialization::AggregateSkillsInitialization::skipped(
+            (self.clock)(),
+            markers,
+        );
+        self.operations.skip_provider_turn_steps(
+            project_id,
+            operation_id,
+            decision.clone(),
+            (self.clock)(),
+        )?;
+        Ok(AggregateSkillsHandling::Skip(decision))
+    }
+
+    /// 跳过式收口：发布权威聚合政策并签发跳过式最终 receipt。跳过判定
+    /// 已 durable 落盘，因此这里任何失败都必须上抛（绝不 warn-only 吞掉
+    /// 一次真正需要的政策发布）。
+    async fn publish_skipped_policy(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        preflight: &AggregatePreflightSnapshot,
+        decision: &crate::product::logical_codebase::aggregate_initialization::AggregateSkillsInitialization,
+    ) -> Result<(), AggregateInitializationError> {
+        let Some(policy) = self.policy.clone() else {
+            return Err(AggregateInitializationError::PolicyPublication {
+                reason: "skipped aggregate initialization requires a configured aggregate \
+                         policy publication path"
+                    .to_string(),
+                retryable: false,
+            });
+        };
+        let lc_id = self
+            .lc_id
+            .clone()
+            .unwrap_or_else(|| legacy_logical_codebase_id(project_id));
+        policy
+            .publish_skipped(
+                project_id,
+                operation_id,
+                &lc_id,
+                std::path::Path::new(&preflight.aggregate_root),
+                decision,
+            )
+            .await
     }
 
     fn load_operation(

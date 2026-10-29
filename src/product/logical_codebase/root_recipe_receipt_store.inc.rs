@@ -258,6 +258,92 @@ impl RootRecipeReceiptStore {
                 policy_digest: policy_digest.to_string(),
                 rule_digest: rule_digest.to_string(),
                 finalized_at,
+                skills_initialization: None,
+            };
+            let path = self.receipt_path(project_id, operation_id)?;
+            if path.exists() {
+                let existing: RootRecipeReceipt = read_json(&path)?;
+                if existing == receipt {
+                    return Ok(existing);
+                }
+                return Err(ProductStoreError::Conflict {
+                    kind: "root_recipe_receipt",
+                    id: operation_id.to_string(),
+                });
+            }
+            write_receipt_durable(&path, &receipt)?;
+            Ok(receipt)
+        })
+    }
+
+    /// 签发「跳过式」最终 receipt：聚合根已做过 Cadence-skills 初始化，
+    /// 四条命令确实没必要跑（owner 2026-10-29）。
+    ///
+    /// fail-closed 合同：
+    /// - 本 operation 绝不允许已有任何命令审计事实——有命令就是「跑过」
+    ///   的反证，跳过声明不成立；
+    /// - `decision` 必须已是 `skipped`，且携带恰好两个判定文件（`AGENTS.md`、
+    ///   `.claude/rules/language.md`）的摘要；签发时重新读盘复验摘要，
+    ///   文件缺失或内容漂移即报错（证明「没必要跑」是当前事实）；
+    /// - policy/rule digest 与 `finalized_at` 非空；同参数重放幂等，已有
+    ///   不同 receipt（含完整 recipe receipt）冲突不覆盖。
+    pub fn finalize_skipped(
+        &self,
+        request: RootRecipeSkipFinalization<'_>,
+    ) -> Result<RootRecipeReceipt, ProductStoreError> {
+        let RootRecipeSkipFinalization {
+            project_id,
+            operation_id,
+            canonical_root,
+            decision,
+            policy_digest,
+            rule_digest,
+            finalized_at,
+        } = request;
+        validate_relative_id(project_id)?;
+        validate_relative_id(operation_id)?;
+        let invalid = |reason: String| ProductStoreError::InvalidRecord {
+            kind: "root_recipe_receipt",
+            reason,
+        };
+        if finalized_at.trim().is_empty() {
+            return Err(invalid("finalized_at must not be empty".to_string()));
+        }
+        if policy_digest.trim().is_empty() || rule_digest.trim().is_empty() {
+            return Err(invalid(
+                "policy/rule digest must be present to freeze receipt identity".to_string(),
+            ));
+        }
+        if !decision.is_skipped() {
+            return Err(invalid(format!(
+                "a skipped receipt requires a skipped skills decision, got {}",
+                decision.kind.as_str()
+            )));
+        }
+        let canonical_root = canonical_root.canonicalize().map_err(|error| {
+            ProductStoreError::Io(format!(
+                "canonicalize receipt root {}: {error}",
+                canonical_root.display()
+            ))
+        })?;
+        verify_skipped_markers(&canonical_root, &decision.markers)?;
+        with_exact_exclusive_lock(&self.lock_path(project_id)?, || {
+            let commands = self.list_commands(project_id, operation_id)?;
+            if !commands.is_empty() {
+                return Err(invalid(format!(
+                    "operation {operation_id} already has {} audited command receipt(s); \
+                     a skipped receipt cannot be issued after any command ran",
+                    commands.len()
+                )));
+            }
+            let receipt = RootRecipeReceipt {
+                operation_id: operation_id.to_string(),
+                canonical_root,
+                commands: Vec::new(),
+                policy_digest: policy_digest.to_string(),
+                rule_digest: rule_digest.to_string(),
+                finalized_at,
+                skills_initialization: Some(decision),
             };
             let path = self.receipt_path(project_id, operation_id)?;
             if path.exists() {
@@ -864,6 +950,62 @@ pub fn root_rule_digest(canonical_root: &Path) -> Result<Option<String>, Product
             entry.display()
         ))),
     }
+}
+
+/// [`RootRecipeReceiptStore::finalize_skipped`] 的入参（参数表超过 clippy
+/// 阈值后按语义收拢；字段语义与签名一一对应）。
+pub struct RootRecipeSkipFinalization<'a> {
+    pub project_id: &'a str,
+    pub operation_id: &'a str,
+    pub canonical_root: &'a Path,
+    pub decision: AggregateSkillsInitialization,
+    pub policy_digest: &'a str,
+    pub rule_digest: &'a str,
+    pub finalized_at: String,
+}
+
+/// 复验「聚合根已做过 Cadence-skills 初始化」的两个判定文件摘要：路径
+/// 必须恰好是冻结的两个常量（顺序固定），且当前盘上内容摘要与冻结摘要
+/// 一致。任何缺失/漂移都 fail-closed——跳过式 receipt 不许基于过期声明。
+fn verify_skipped_markers(
+    canonical_root: &Path,
+    markers: &[AggregateSkillsMarker],
+) -> Result<(), ProductStoreError> {
+    let invalid = |reason: String| ProductStoreError::InvalidRecord {
+        kind: "root_recipe_receipt",
+        reason,
+    };
+    let required = [
+        AGGREGATE_SKILLS_MARKER_ENTRY,
+        AGGREGATE_SKILLS_MARKER_LANGUAGE_RULE,
+    ];
+    if markers.len() != required.len()
+        || markers
+            .iter()
+            .zip(required)
+            .any(|(marker, expected)| marker.relative_path != expected)
+    {
+        return Err(invalid(format!(
+            "a skipped receipt requires digests for exactly {required:?}, got {:?}",
+            markers
+                .iter()
+                .map(|marker| marker.relative_path.as_str())
+                .collect::<Vec<_>>()
+        )));
+    }
+    let fresh = detect_skills_initialization(canonical_root)?.ok_or_else(|| {
+        invalid(format!(
+            "{} no longer proves an initialized aggregate root under {}",
+            required.join(" + "),
+            canonical_root.display()
+        ))
+    })?;
+    if fresh != markers {
+        return Err(invalid(
+            "aggregate skills markers drifted since the skip decision was frozen".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn receipt_conflict(operation_id: &str, command_index: usize) -> ProductStoreError {

@@ -132,7 +132,7 @@ impl AggregateInitializationOperationStore {
             let step_index = step_id.index();
             if operation.steps[..step_index]
                 .iter()
-                .any(|step| step.status != AggregateInitializationStepStatus::Completed)
+                .any(|step| !is_completed_or_skipped_step(step))
             {
                 return Err(identity_mismatch(operation_id));
             }
@@ -243,7 +243,7 @@ impl AggregateInitializationOperationStore {
                 || operation.cancellation.is_some()
                 || operation.error.is_some()
                 || operation.completed_at.is_some()
-                || !operation.steps.iter().all(is_completed_step)
+                || !operation.steps.iter().all(is_completed_or_skipped_step)
             {
                 return Err(identity_mismatch(operation_id));
             }
@@ -346,6 +346,108 @@ impl AggregateInitializationOperationStore {
             })?;
         }
         Ok(operation)
+    }
+
+    /// 记录「四条 Cadence-skills 命令是否必要」的判定依据（owner
+    /// 2026-10-29）。只用于不改变步骤状态的判定（`forced`：显式重新
+    /// 初始化）；`skipped` 判定必须走 [`Self::skip_provider_turn_steps`]，
+    /// 让判定与步骤状态在同一次 durable 写里互相可证。已记录判定重放时
+    /// 幂等返回，绝不改写冻结依据。
+    pub fn record_skills_initialization(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        decision: AggregateSkillsInitialization,
+        updated_at: String,
+    ) -> Result<AggregateInitializationOperation, ProductStoreError> {
+        self.update(project_id, operation_id, |operation| {
+            if operation.status != AggregateInitializationOperationStatus::Running {
+                return Err(identity_mismatch(operation_id));
+            }
+            if decision.kind == AggregateSkillsInitializationKind::Skipped {
+                return Err(identity_mismatch(operation_id));
+            }
+            match operation.skills_initialization.as_ref() {
+                None => {
+                    operation.skills_initialization = Some(decision);
+                    operation.updated_at = updated_at;
+                    Ok(())
+                }
+                Some(existing) if *existing == decision => Ok(()),
+                Some(_) => Err(identity_mismatch(operation_id)),
+            }
+        })
+    }
+
+    /// 跳过三个 provider-turn 步骤（`PreCheck`/`RuleAndMcpConfig`/
+    /// `OpenspecAndExamples`）：在**一次** durable 写里同时落盘判定依据与
+    /// 三个 `Skipped` 步骤，绝不出现「判定跳过但没有跳过痕迹」或反之的
+    /// 中间态。要求 operation Running、无进行中的步骤、两个确定性步骤
+    /// 已 `Completed`、三个 provider-turn 步骤都还是 `Pending`，且此前没有
+    /// 任何判定。判定后不可重判（重放幂等）。
+    pub fn skip_provider_turn_steps(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+        decision: AggregateSkillsInitialization,
+        updated_at: String,
+    ) -> Result<AggregateInitializationOperation, ProductStoreError> {
+        self.update(project_id, operation_id, |operation| {
+            if operation.status != AggregateInitializationOperationStatus::Running
+                || operation.current_step.is_some()
+                || decision.kind != AggregateSkillsInitializationKind::Skipped
+                || decision.markers.is_empty()
+            {
+                return Err(identity_mismatch(operation_id));
+            }
+            match operation.skills_initialization.as_ref() {
+                Some(existing) if *existing == decision => return Ok(()),
+                Some(_) => return Err(identity_mismatch(operation_id)),
+                None => {}
+            }
+            // 防御：判定前绝不允许已有 Skipped 步骤（正常走不到，但形状
+            // 不变量在这里再兜一次）。
+            if operation
+                .steps
+                .iter()
+                .any(|step| step.status == AggregateInitializationStepStatus::Skipped)
+            {
+                return Err(identity_mismatch(operation_id));
+            }
+            for step in [
+                AggregateInitializationStepKind::PreCheck,
+                AggregateInitializationStepKind::RuleAndMcpConfig,
+                AggregateInitializationStepKind::OpenspecAndExamples,
+            ] {
+                let record = &operation.steps[step.index()];
+                if record.status != AggregateInitializationStepStatus::Pending {
+                    return Err(identity_mismatch(operation_id));
+                }
+            }
+            if !operation.steps[..AggregateInitializationStepKind::PreCheck.index()]
+                .iter()
+                .all(is_completed_step)
+            {
+                return Err(identity_mismatch(operation_id));
+            }
+            let reason_code = decision.reason_code.clone();
+            operation.skills_initialization = Some(decision);
+            for step in [
+                AggregateInitializationStepKind::PreCheck,
+                AggregateInitializationStepKind::RuleAndMcpConfig,
+                AggregateInitializationStepKind::OpenspecAndExamples,
+            ] {
+                let record = &mut operation.steps[step.index()];
+                record.status = AggregateInitializationStepStatus::Skipped;
+                record.started_at = None;
+                record.completed_at = Some(updated_at.clone());
+                record.input_digest = None;
+                record.output_artifact_ref = None;
+                record.skip_reason = Some(reason_code.clone());
+            }
+            operation.updated_at = updated_at;
+            Ok(())
+        })
     }
 
     /// C4 Task 4：显式续跑前的 reopen——Failed operation 回到 Running，

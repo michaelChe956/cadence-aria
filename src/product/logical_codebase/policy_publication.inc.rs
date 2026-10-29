@@ -583,9 +583,15 @@ fn source_digests_of(sources: &[PolicySource]) -> Vec<AggregatePolicySourceDiges
         .collect()
 }
 
-/// 发布前的 operation 状态核验(锁外):同 project、Running、
-/// current_step=OpenspecAndExamples,manifest/operation/参数三方 canonical
-/// root 一致——不放宽生产状态核验,也不允许跨 root 发布。
+/// 发布前的 operation 状态核验(锁外):同 project、Running、且处于
+/// 「末命令 turn 进行中」或「已判定跳过四条命令」二选一的合法窗口,
+/// manifest/operation/参数三方 canonical root 一致——不放宽生产状态
+/// 核验,也不允许跨 root 发布。
+///
+/// 跳过式窗口（owner 2026-10-29）必须三者同时成立才被接受:
+/// operation 记录里有 `skipped` 判定依据、三个 provider-turn 步骤全部
+/// `Skipped`、且没有任何进行中的步骤——这是「命令确实没必要跑」的
+/// durable 证明,不是放宽。
 fn validate_publication_operation(
     operation: &AggregateInitializationOperation,
     manifest: &LogicalCodebaseManifest,
@@ -597,8 +603,10 @@ fn validate_publication_operation(
             id: operation.operation_id.clone(),
         });
     }
+    let at_final_command = operation.current_step
+        == Some(AggregateInitializationStepKind::OpenspecAndExamples);
     if operation.status != AggregateInitializationOperationStatus::Running
-        || operation.current_step != Some(AggregateInitializationStepKind::OpenspecAndExamples)
+        || !(at_final_command || skipped_command_window(operation))
     {
         return Err(invalid_publication(format!(
             "operation {} must be Running at step OpenspecAndExamples to publish policy",
@@ -612,6 +620,26 @@ fn validate_publication_operation(
         "operation",
     )?;
     Ok(())
+}
+
+/// 跳过式发布窗口:判定依据为 `skipped`、无进行中步骤、三个 provider-turn
+/// 步骤全部 `Skipped`。
+fn skipped_command_window(operation: &AggregateInitializationOperation) -> bool {
+    operation.current_step.is_none()
+        && operation
+            .skills_initialization
+            .as_ref()
+            .is_some_and(|decision| decision.is_skipped())
+        && [
+            AggregateInitializationStepKind::PreCheck,
+            AggregateInitializationStepKind::RuleAndMcpConfig,
+            AggregateInitializationStepKind::OpenspecAndExamples,
+        ]
+        .iter()
+        .all(|step| {
+            operation.steps[step.index()].status
+                == crate::product::logical_codebase::aggregate_initialization::AggregateInitializationStepStatus::Skipped
+        })
 }
 
 /// canonicalize `candidate` 并要求等于发布 canonical root——manifest/

@@ -116,6 +116,10 @@ pub enum AggregateInitializationStepStatus {
     Running,
     Completed,
     Failed,
+    /// 判定为「该步骤没有必要跑」后的终态（owner 2026-10-29）。只有
+    /// provider-turn 步骤可以 skip，且必须先有
+    /// [`AggregateSkillsInitialization`] 的跳过判定依据；绝不静默忽略。
+    Skipped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +139,10 @@ pub struct AggregateInitializationStepRecord {
     /// is marked completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_artifact_ref: Option<String>,
+    /// 步骤被跳过时的原因（reason code）。只对 `Skipped` 状态存在，是
+    /// 「确实没必要跑」的记录面证据；旧记录反序列化缺省 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
 }
 
 impl AggregateInitializationStepStatus {
@@ -144,6 +152,7 @@ impl AggregateInitializationStepStatus {
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Skipped => "skipped",
         }
     }
 }
@@ -199,6 +208,128 @@ impl AggregateInitializationErrorRecord {
             action: "服务在聚合初始化完成前中断；检查可能的部分修改后重新提交".to_string(),
         }
     }
+}
+
+/// 聚合根上「Cadence-skills 已初始化」的判定文件（相对聚合根路径）。
+///
+/// 判定只看这两个文件；产品自管的 `<聚合根>/.aria/` 绝不参与判定——该
+/// 目录不是 skills 跑过的证据。
+pub const AGGREGATE_SKILLS_MARKER_ENTRY: &str = "AGENTS.md";
+pub const AGGREGATE_SKILLS_MARKER_LANGUAGE_RULE: &str = ".claude/rules/language.md";
+
+/// 聚合根已初始化 → 判定四条 Cadence-skills 命令没必要的 reason code。
+pub const AGGREGATE_SKILLS_SKIPPED_REASON: &str = "aggregate_root_already_initialized";
+/// 显式「重新初始化（聚合）」强制走完整五步的 reason code。
+pub const AGGREGATE_SKILLS_FORCED_REASON: &str = "explicit_reinitialization_requested";
+
+/// 四条 Cadence-skills 命令（`PreCheck`/`RuleAndMcpConfig`/
+/// `OpenspecAndExamples`）是否必要的 durable 判定类别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AggregateSkillsInitializationKind {
+    /// 聚合根尚未做过 Cadence-skills 初始化：四条命令必须跑。
+    Required,
+    /// 聚合根已做过 Cadence-skills 初始化：跳过四条命令，只做聚合政策。
+    Skipped,
+    /// 显式重新初始化：即使已初始化也强制跑完四条命令。
+    Forced,
+}
+
+impl AggregateSkillsInitializationKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Skipped => "skipped",
+            Self::Forced => "forced",
+        }
+    }
+}
+
+/// 跳过判定的一条文件证据：相对聚合根路径 + 冻结的内容摘要。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregateSkillsMarker {
+    pub relative_path: String,
+    pub digest: String,
+}
+
+/// 聚合初始化对「四条 Cadence-skills 命令是否必要」的 durable 判定依据。
+///
+/// `kind = skipped` 时 `markers` 必须是两个判定文件各自的 `sha256` 摘要；
+/// 判定落盘后重放/续跑不覆盖（跳过必须在 operation 记录里可读到）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregateSkillsInitialization {
+    pub kind: AggregateSkillsInitializationKind,
+    pub reason_code: String,
+    pub detected_at: String,
+    #[serde(default)]
+    pub markers: Vec<AggregateSkillsMarker>,
+}
+
+impl AggregateSkillsInitialization {
+    /// 「聚合根已完成 Cadence-skills 初始化」的跳过判定。
+    pub fn skipped(detected_at: String, markers: Vec<AggregateSkillsMarker>) -> Self {
+        Self {
+            kind: AggregateSkillsInitializationKind::Skipped,
+            reason_code: AGGREGATE_SKILLS_SKIPPED_REASON.to_string(),
+            detected_at,
+            markers,
+        }
+    }
+
+    /// 「显式重新初始化」的强制判定：无视检测结果跑完整五步。
+    pub fn forced(detected_at: String) -> Self {
+        Self {
+            kind: AggregateSkillsInitializationKind::Forced,
+            reason_code: AGGREGATE_SKILLS_FORCED_REASON.to_string(),
+            detected_at,
+            markers: Vec::new(),
+        }
+    }
+
+    pub fn is_skipped(&self) -> bool {
+        self.kind == AggregateSkillsInitializationKind::Skipped
+    }
+}
+
+/// 检测聚合根是否已做过 Cadence-skills 初始化：两个判定文件都存在时返回
+/// 它们的冻结摘要（顺序固定为 `AGENTS.md`、`.claude/rules/language.md`），
+/// 任一缺失返回 `None`。
+///
+/// 不可观测（IO/权限失败）按 fail-closed 报错：绝不把读不到的文件静默
+/// 当成「未初始化」去重跑四条命令。
+pub fn detect_skills_initialization(
+    root: &std::path::Path,
+) -> Result<Option<Vec<AggregateSkillsMarker>>, crate::product::json_store::ProductStoreError> {
+    use crate::product::json_store::ProductStoreError;
+    use sha2::{Digest, Sha256};
+
+    let mut markers = Vec::with_capacity(2);
+    for relative_path in [
+        AGGREGATE_SKILLS_MARKER_ENTRY,
+        AGGREGATE_SKILLS_MARKER_LANGUAGE_RULE,
+    ] {
+        let path = root.join(relative_path);
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                let bytes = std::fs::read(&path).map_err(|error| {
+                    ProductStoreError::Io(format!("read {}: {error}", path.display()))
+                })?;
+                markers.push(AggregateSkillsMarker {
+                    relative_path: relative_path.to_string(),
+                    digest: format!("sha256:{:x}", Sha256::digest(&bytes)),
+                });
+            }
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "inspect {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(Some(markers))
 }
 
 /// C4 Task 6：显式 bootstrap 动作在既有 operation 上的可审计命令记录。
@@ -259,6 +390,15 @@ pub struct AggregateInitializationOperation {
     pub completed_at: Option<String>,
     #[serde(default)]
     pub action_records: Vec<AggregateInitializationActionRecord>,
+    /// 「重新初始化（聚合）」入口显式要求跑完整五步；创建时冻结，不受
+    /// 聚合根检测影响。`#[serde(default)]` 保持旧记录兼容。
+    #[serde(default)]
+    pub full_recipe_requested: bool,
+    /// 「四条 Cadence-skills 命令是否必要」的判定依据（owner 2026-10-29）。
+    /// `skipped` 时三个 provider-turn 步骤被标记 `Skipped`，判定与证据
+    /// 必须能从 operation 记录直接读到；旧记录缺省 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills_initialization: Option<AggregateSkillsInitialization>,
 }
 
 /// Layout version for the persisted aggregate-initialization record shape.
@@ -292,6 +432,7 @@ impl AggregateInitializationOperation {
                     completed_at: None,
                     input_digest: None,
                     output_artifact_ref: None,
+                    skip_reason: None,
                 })
                 .collect(),
             current_step: None,
@@ -303,7 +444,15 @@ impl AggregateInitializationOperation {
             created_at,
             completed_at: None,
             action_records: Vec::new(),
+            full_recipe_requested: false,
+            skills_initialization: None,
         }
+    }
+
+    /// 「重新初始化（聚合）」入口：冻结「强制跑完整五步」的创建期事实。
+    pub fn with_full_recipe_requested(mut self, full_recipe_requested: bool) -> Self {
+        self.full_recipe_requested = full_recipe_requested;
+        self
     }
 
     pub fn idempotency_identity(&self) -> AggregateInitializationIdempotencyIdentity {

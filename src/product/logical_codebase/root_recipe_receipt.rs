@@ -30,7 +30,11 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::coding_attempt_store::locking::with_exact_exclusive_lock;
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id};
 
-use super::aggregate_initialization::AggregateInitializationStepKind;
+use super::aggregate_initialization::{
+    AGGREGATE_SKILLS_MARKER_ENTRY, AGGREGATE_SKILLS_MARKER_LANGUAGE_RULE,
+    AggregateInitializationStepKind, AggregateSkillsInitialization, AggregateSkillsMarker,
+    detect_skills_initialization,
+};
 use super::aggregate_initialization_store::root_recipe_command_index;
 
 // 本文件按仓库惯例拆入 `.inc.rs`（同模块命名空间，符号路径与可见性不变），

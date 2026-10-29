@@ -141,69 +141,7 @@ mod tests {
     }
 
     fn aggregate_init_fixture() -> AggregateInitFixture {
-        let temp = tempfile::tempdir().unwrap();
-        let paths = ProductAppPaths::new(temp.path().join(".aria"));
-        let store = AggregateInitializationOperationStore::new(paths.clone());
-        let skills_calls = Arc::new(Mutex::new(Vec::new()));
-        let preflight_calls = Arc::new(Mutex::new(Vec::new()));
-        let provider = Arc::new(FakeProviderTurnDriver::new());
-
-        // Persist a logical codebase manifest so the coordinator can load it.
-        let mut manifest = LogicalCodebaseManifest::new(
-            "project_0001",
-            temp.path().join("aggregate-root"),
-            Vec::new(),
-        );
-        manifest.created_at = CREATED_AT.to_string();
-        manifest.updated_at = CREATED_AT.to_string();
-        LogicalCodebaseStore::new(paths.clone())
-            .save_manifest("project_0001", &manifest)
-            .unwrap();
-
-        let skills: Arc<dyn AggregateSkillsPreparation> = Arc::new(FakeSkillsPreparation {
-            calls: skills_calls.clone(),
-        });
-        let preflight: Arc<dyn AggregatePreflightService> = Arc::new(FakePreflightService::new(
-            preflight_calls.clone(),
-            manifest
-                .provider_context_root
-                .to_string_lossy()
-                .into_owned(),
-        ));
-        let clock: Arc<Clock> = Arc::new(|| CREATED_AT.to_string());
-        let coordinator = AggregateInitializationCoordinator::new(
-            paths.clone(),
-            store.clone(),
-            skills,
-            preflight,
-            provider.clone(),
-            clock,
-        );
-
-        // Begin an operation with the deterministic id the test references.
-        let input = AggregateInitializationOperationInput {
-            idempotency_key: "0001".to_string(),
-            manifest_revision: manifest.membership_revision,
-            policy_digest: "sha256:policy".to_string(),
-            profile_evidence_digest: Some("sha256:profile".to_string()),
-            provider_context_root: manifest.provider_context_root.clone(),
-            provider: "claude_code".to_string(),
-        };
-        coordinator
-            .begin(
-                "aggregate_initialization_0001".to_string(),
-                "project_0001",
-                input,
-            )
-            .unwrap();
-
-        AggregateInitFixture {
-            _temp: temp,
-            skills_calls,
-            preflight_calls,
-            provider,
-            coordinator,
-        }
+        aggregate_init_fixture_with(AggregateInitOptions::default())
     }
 
     #[tokio::test]
@@ -1197,4 +1135,5 @@ mod tests {
     // (large_file_guard 的 1200 行上限,纯移动,不改变任何行为)。
     include!("coordinator_tests_contract.inc.rs");
     include!("coordinator_tests_profile_trust.inc.rs");
+    include!("coordinator_tests_skills.inc.rs");
 }

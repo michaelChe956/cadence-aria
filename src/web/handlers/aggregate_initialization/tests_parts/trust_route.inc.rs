@@ -291,7 +291,12 @@ fn trust_route_fixture_with(gate_fail: bool, options: RecipeFixtureOptions) -> T
         provider,
         clock,
     )
-    .with_trust(gate.clone());
+    .with_trust(gate.clone())
+    // owner 2026-10-29：与生产依赖图同形——聚合根已做过 Cadence-skills
+    // 初始化时跳过四条命令，只发布聚合政策并签发跳过式 receipt。
+    .with_policy_publication(Arc::new(SkippedAggregatePolicyPublisher {
+        paths: paths.clone(),
+    }));
     // Task 4：index op 指向本 fixture 的 LC scope，并以必缺的 codegraph
     // 二进制令 detached build 确定性失败——不与并行测试共享 temp 根，
     // 也不依赖宿主是否安装 codegraph（recipe 完成后的索引门独立性可

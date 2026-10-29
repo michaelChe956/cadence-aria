@@ -75,6 +75,7 @@
             policy_digest: "sha256:policy".to_string(),
             rule_digest: "sha256:rule".to_string(),
             finalized_at: "2026-10-01T00:00:00Z".to_string(),
+            skills_initialization: None,
         };
         crate::product::json_store::write_json(
             &receipts.join(format!("{operation_id}.json")),
@@ -82,7 +83,6 @@
         )
         .expect("write root recipe receipt");
     }
-
     /// 显式 cwd 的 planning 只读请求（cwd 与 target 独立传递）。
     fn planning_request_with_cwd(
         project_id: &str,
