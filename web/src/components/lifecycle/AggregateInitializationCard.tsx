@@ -1,4 +1,10 @@
-import { CircleCheck, CircleX, LoaderCircle, TriangleAlert } from "lucide-react";
+import {
+  CircleCheck,
+  CircleMinus,
+  CircleX,
+  LoaderCircle,
+  TriangleAlert,
+} from "lucide-react";
 import type {
   AggregateInitializationOperationSnapshot,
   AggregateInitializationOperationStatus,
@@ -12,6 +18,14 @@ const STEP_LABELS: Record<string, string> = {
   rule_and_mcp_config: "规则与 MCP 配置",
   openspec_and_examples: "OpenSpec 与示例",
 };
+
+/**
+ * 「已跳过」步骤的说明文案：服务端判定该步骤本次不执行（对应命令未运行）。
+ * 具体判定依据只落在服务端 operation 记录里，不随步骤状态投影到前端，
+ * 故此处只陈述「被判定跳过 / 未执行」这一可观测事实。
+ */
+const SKIPPED_STEP_HINT =
+  "该步骤本次被判定跳过：服务端确认这一步无需执行，对应命令未运行。";
 
 const STATUS_LABELS: Record<AggregateInitializationOperationStatus, string> = {
   created: "等待启动",
@@ -38,6 +52,18 @@ const STATUS_BADGE_CLASSES: Record<
 };
 
 function StepIndicator({ status }: { status: AggregateInitializationStepStatus }) {
+  return (
+    <span
+      data-testid="aggregate-initialization-step-indicator"
+      data-status={status}
+      className="inline-flex h-4 w-4 shrink-0"
+    >
+      {stepIndicatorIcon(status)}
+    </span>
+  );
+}
+
+function stepIndicatorIcon(status: AggregateInitializationStepStatus) {
   if (status === "running") {
     return (
       <LoaderCircle
@@ -58,6 +84,16 @@ function StepIndicator({ status }: { status: AggregateInitializationStepStatus }
     return (
       <CircleX
         className="h-4 w-4 shrink-0 text-[var(--aria-danger)]"
+        aria-hidden="true"
+      />
+    );
+  }
+  if (status === "skipped") {
+    // 「已跳过」既不是进行中也不是成功：中性色减号圈，与 pending 的空心圈
+    // 区分开，避免用户把跳过误读成「未开始」。
+    return (
+      <CircleMinus
+        className="h-4 w-4 shrink-0 text-[var(--aria-ink-muted)]"
         aria-hidden="true"
       />
     );
@@ -164,6 +200,15 @@ export function AggregateInitializationCard({
               ) : null}
               {step.status === "failed" ? (
                 <span className="text-[var(--aria-danger)]">失败</span>
+              ) : null}
+              {step.status === "skipped" ? (
+                <span
+                  data-testid="aggregate-initialization-step-skipped-label"
+                  title={SKIPPED_STEP_HINT}
+                  className="text-[var(--aria-ink-muted)]"
+                >
+                  已跳过
+                </span>
               ) : null}
             </li>
           ))}

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { AggregateInitializationOperationSnapshot } from "../../api/types";
 import { AggregateInitializationCard } from "./AggregateInitializationCard";
@@ -167,5 +167,60 @@ describe("AggregateInitializationCard", () => {
     );
     expect(screen.getByText(/operator requested stop/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "启动聚合初始化" })).toBeEnabled();
+  });
+
+  it("renders skipped steps as skipped with a label instead of pending or running", () => {
+    // 聚合根已完成 Cadence-skills 初始化 → 后端把三个 provider-turn 步骤
+    // 标为 skipped（见后端 skip_skills 测试的 ["completed","completed","skipped",...]）。
+    render(
+      <AggregateInitializationCard
+        operation={operation("completed", {
+          steps: [
+            { step_id: "machine_skills", status: "completed" },
+            { step_id: "aggregate_preflight", status: "completed" },
+            { step_id: "pre_check", status: "skipped" },
+            { step_id: "rule_and_mcp_config", status: "skipped" },
+            { step_id: "openspec_and_examples", status: "skipped" },
+          ],
+        })}
+        busy={false}
+        onStart={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    for (const stepId of [
+      "pre_check",
+      "rule_and_mcp_config",
+      "openspec_and_examples",
+    ]) {
+      const step = screen.getByTestId(`aggregate-initialization-step-${stepId}`);
+      expect(step).toHaveAttribute("data-status", "skipped");
+      expect(
+        step.querySelector(
+          '[data-testid="aggregate-initialization-step-indicator"]',
+        ),
+      ).toHaveAttribute("data-status", "skipped");
+      expect(within(step).getByText("已跳过")).toBeInTheDocument();
+    }
+
+    // 「已跳过」不得被渲染成 running / completed 样式：指示器自身不带
+    // spinner（running）或成功色（completed）。
+    const skippedIndicator = screen
+      .getByTestId("aggregate-initialization-step-pre_check")
+      .querySelector('[data-testid="aggregate-initialization-step-indicator"]');
+    expect(skippedIndicator?.querySelector(".animate-spin")).toBeNull();
+    expect(skippedIndicator?.innerHTML).not.toContain("--aria-success");
+    expect(skippedIndicator?.innerHTML).not.toContain("--aria-primary");
+    expect(skippedIndicator?.innerHTML).toContain("--aria-ink-muted");
+
+    // 跳过的步骤带解释文案（tooltip），用户能看懂「为什么这三步没跑」。
+    const hints = screen.getAllByTestId(
+      "aggregate-initialization-step-skipped-label",
+    );
+    expect(hints).toHaveLength(3);
+    for (const hint of hints) {
+      expect(hint.getAttribute("title")).toContain("跳过");
+    }
   });
 });

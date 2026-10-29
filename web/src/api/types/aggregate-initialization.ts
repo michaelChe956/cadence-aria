@@ -15,7 +15,10 @@ export type AggregateInitializationStepStatus =
   | "pending"
   | "running"
   | "completed"
-  | "failed";
+  | "failed"
+  // 聚合根已完成 Cadence-skills 初始化时，三个 provider-turn 步骤被判定跳过
+  // （后端 `AggregateInitializationStepStatus::Skipped` → DTO "skipped"）。
+  | "skipped";
 
 export type AggregateInitializationStepDto = {
   step_id: string;
