@@ -4,6 +4,9 @@ use crate::product::cadence_skills::routing_reference::{
     RoutingReferenceContext, direct_cadence_routing_rules_reference,
 };
 use crate::product::coding_models::CodingAttemptScope;
+use crate::product::coding_work_item_context::{
+    WRITE_SCOPE_FORBIDDEN_LIST_HEADING, WRITE_SCOPE_SECTION_HEADING,
+};
 
 // `routing_reference_context_from_policy` 已迁至 `cadence_skills/routing_reference.rs`
 // 作为单一归属（WorkItemPlan T3 与 coding T2 共用）。此处 re-export 保持既有
@@ -92,6 +95,45 @@ impl CodingWorkspaceEngine {
             truncate_prompt_section(&diff, 30_000),
             retry_diagnostic_section
         ))
+    }
+
+    /// Reviewer 的实际 prompt 组装（group 渲染路径 + legacy 回落路径合一）。
+    ///
+    /// group（schema v2 投影渲染）路径的材料只有投影 section（Scope Policy
+    /// JSON），没有「判定基准／匹配语义非 glob／空列表语义／默认拒绝」的规范
+    /// 语义——追加一份与 legacy **逐字同源**的写入范围规范段：数据取 reviewer
+    /// projection 的 `scope_policy`（即 `canonical_contract.write_policy`，与机器门
+    /// `gates/schema_v2.rs` 同一份取值），文案由
+    /// `coding_work_item_context::write_scope_section_text` 渲染（legacy markdown
+    /// 与 group prompt 共用同一渲染器）。追加发生在 render→bind 哈希计算之后，
+    /// 执行上下文哈希不受影响；legacy 路径的范围段已随 Work Item markdown 进入
+    /// prompt，不重复渲染（同一 prompt 内两份范围会让 agent 读到两套口径）。
+    pub(crate) async fn build_reviewer_prompt(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        reviewer: &ProviderName,
+        worktree_path: &Path,
+        retry_diagnostic: Option<&str>,
+        routing_context: &RoutingReferenceContext,
+    ) -> Result<String, CodingWorkspaceEngineError> {
+        let mut prompt = match self.render_reviewer_unit_run_context(attempt, reviewer)? {
+            Some(rendered) => rendered.text,
+            None => {
+                self.build_code_review_prompt(
+                    attempt,
+                    worktree_path,
+                    retry_diagnostic,
+                    routing_context,
+                )
+                .await?
+            }
+        };
+        if let Some(scope_section) =
+            self.unit_run_write_scope_section(attempt, CodingProviderRole::CodeReviewer)?
+        {
+            prompt.push_str(&scope_section);
+        }
+        Ok(prompt)
     }
 
     // 多仓形态不再生成 group prompt；重复保留待清理（REQ-GFR-CR-01，Task 12）。
@@ -188,6 +230,10 @@ pub(crate) fn build_coding_prompt(
     if let Some(worktree_path) = attempt.worktree_path.as_ref() {
         prompt.push_str(&format!("Worktree Path: {}\n", worktree_path.display()));
     }
+    // ①（WI 越界根修）：写入范围段——markdown 已带规范范围段时此处不再追加，
+    // 只在 markdown 缺段时补 fail-closed 兜底。位置紧随文件定位信息、先于
+    // 任务正文，避免 agent 读完材料后仍不知道边界。
+    prompt.push_str(write_scope_section(context));
     if !context.verification_commands.is_empty() {
         prompt.push_str("\n验证命令:\n");
         for command in &context.verification_commands {
@@ -227,10 +273,34 @@ pub(crate) fn build_coding_prompt(
     append_coding_context_notes(&mut prompt, context_notes);
     prompt.push_str(&coding_execution_protocol(routing_context));
     prompt.push_str(no_default_stack_assumption_contract());
-    prompt.push_str(coding_completion_report_contract());
+    prompt.push_str(&coding_completion_report_contract());
     prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
     prompt
 }
+
+/// （WI 越界根修）：Coder prompt 的写入范围段。
+///
+/// 范围事实只由 `coding_work_item_context::write_scope_section_text` 渲染**一份**
+/// （legacy 记录渲染进已确认 Work Item markdown；group 投影渲染进最终 prompt，
+/// 追加在 render→bind 哈希计算之后），prompt 侧不再渲染第二份列表——同一
+/// prompt 内两份范围会让 agent 读到两套口径。
+///
+/// markdown 缺该段（未读到已确认记录、旧快照）时 fail-closed：不得把「文档未
+/// 提及范围」当成「不限制」。
+fn write_scope_section(context: &CodingExecutionContext) -> &'static str {
+    let has_scope = context
+        .work_item_markdown
+        .as_deref()
+        .is_some_and(|markdown| markdown.contains(WRITE_SCOPE_SECTION_HEADING));
+    if has_scope {
+        ""
+    } else {
+        FAIL_CLOSED_WRITE_SCOPE_SECTION
+    }
+}
+
+/// markdown 缺写入范围段时的 fail-closed 兜底句（逐字，勿改写）。
+const FAIL_CLOSED_WRITE_SCOPE_SECTION: &str = "\n修改范围（硬边界）：\n范围未知（未能读取已确认 Work Item 记录）：除 Work Item / Verification Plan 材料明确给出的文件与验证命令外，不得改动任何仓库文件（含 .gitignore、构建配置等全局文件）；若确有必要，请不要自行改动，在交付说明里标注，由平台裁决。\n";
 
 /// B-③（3.6 矩阵族③）：coder 完成报告 plan_defect_findings 解析失败后的
 /// 「恰一次教学重驱」prompt。仿 workspace_engine 的
@@ -317,7 +387,7 @@ pub(crate) fn build_coding_delta_prompt(
     append_coding_context_notes(&mut prompt, context_notes);
     prompt.push_str(&coding_delta_execution_protocol(routing_context));
     prompt.push_str(no_default_stack_assumption_contract());
-    prompt.push_str(coding_completion_report_contract());
+    prompt.push_str(&coding_completion_report_contract());
     prompt.push_str(crate::product::plan_repair::plan_defect_structured_output_contract());
     prompt
 }
@@ -335,14 +405,16 @@ pub(crate) fn reviewer_test_scope_contract() -> &'static str {
      - 即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述测试及其所需浏览器环境，也不得将其转换成 finding、verdict/summary 否决理由、Coder required_action 或任何返修要求。\n"
 }
 
-pub(crate) fn reviewer_process_evidence_boundary_contract() -> &'static str {
-    "\nReviewer 过程证据边界:\n\
+pub(crate) fn reviewer_process_evidence_boundary_contract() -> String {
+    format!(
+        "\nReviewer 过程证据边界:\n\
      - 过程事实同时满足两条：无法从当前 diff、验证命令输出、handoff 字段或人工检查结果观测；实现完成后即使 Coder 返修也无法产出该证据。\n\
      - 典型过程事实包括 red commit 的存在、失败到通过的提交序列、开发时序、提交拆分粒度、分支创建与 rebase 历史以及 Coder 会话内操作顺序。\n\
      - 不得创建以过程事实为目的的 finding。过程事实的缺失、不符合预期或缺少证据均不得成为 finding，不得导致 request_changes 或 blocked，不得作为 verdict 或 summary 中的否决理由，不得成为 Coder required_action 或任何返修要求。\n\
      - 即使 Work Item、Design Spec、Verification Plan、handoff 或 EvaluationContextPack 提到上述过程事实，也不得转换为 finding、verdict 或 summary 中的否决理由、Coder required_action 或任何返修要求。\n\
      - EvidenceKind 仅表示当前可观测证据：source_diff 表示最终代码状态；non_zero_test_execution 表示验证命令执行时实际运行了非零数量的测试，是当前可观测的执行结果；它不表达测试曾先失败、不表达提交顺序、不表达任何开发时序。manual_check 仅表示人工检查结果；handoff_field 仅表示交接字段的存在与内容。\n\
-     - 本边界不削弱可观测结果的审查：仍必须审查测试文件是否存在、测试是否覆盖需求场景、验证命令是否真实执行且非零、测试输出是否与实现自相矛盾，以及 Forbidden Write Scopes 是否被越过。\n"
+     - 本边界不削弱可观测结果的审查：仍必须审查测试文件是否存在、测试是否覆盖需求场景、验证命令是否真实执行且非零、测试输出是否与实现自相矛盾，以及 Forbidden Write Scopes 是否被越过（材料内的段标题为「{WRITE_SCOPE_FORBIDDEN_LIST_HEADING}」）。\n"
+    )
 }
 
 pub(crate) fn coding_execution_protocol(context: &RoutingReferenceContext) -> String {
@@ -380,17 +452,19 @@ pub(crate) fn coding_delta_execution_protocol(context: &RoutingReferenceContext)
     )
 }
 
-pub(crate) fn coding_completion_report_contract() -> &'static str {
-    "\n完成报告要求:\n\
+pub(crate) fn coding_completion_report_contract() -> String {
+    format!(
+        "\n完成报告要求:\n\
      - 先列出你从 Work Item / Final Compile / Verification Plan 提取出的执行清单。\n\
      - 列出实际修改文件。\n\
      - 列出实际执行的验证命令。\n\
      - 粘贴每条验证命令的完整输出。\n\
      - 报告 git status --short（含未跟踪文件）与 git diff --stat。\n\
-     - 基于两者明确说明是否触碰 Forbidden Write Scopes；若出现允许范围外的已修改或未跟踪文件，必须报告，不得声称未触碰。\n\
+     - 基于两者明确说明是否触碰 Forbidden Write Scopes（材料内的段标题为「{WRITE_SCOPE_FORBIDDEN_LIST_HEADING}」）所列路径；若出现允许范围外的已修改或未跟踪文件，必须报告，不得声称未触碰。\n\
      - 如果测试命令显示没有测试被执行或没有实际测试被执行，包括 \"0 tests\" 或 \"running 0 tests\"，不能直接视为已覆盖；必须说明处理方式或风险。\n\
      - 如果某项要求无法执行，说明阻塞原因、已尝试的诊断步骤和需要人工确认的内容。\n\
      - 必须单列“待人工处理”小节：逐项写明需要人工核对、人工测试或人工操作的事项及其执行方式；无此类事项时明确写“无”。该清单是交接内容，不是未完成项。\n"
+    )
 }
 
 /// 批2 Task 15（C5.1／D §7，REQ-ENV-CHECK-01）：HostCoding CHECK 自跑
@@ -412,9 +486,11 @@ pub(crate) fn host_coding_check_contract() -> &'static str {
 }
 pub(crate) fn code_review_material_protocol(context: &RoutingReferenceContext) -> String {
     with_cadence_routing_reference(
-        concat!(
-            "当前阶段：代码审查（ReviewerVerify）。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改交付源码。\n",
-            "首个用户可见消息必须是工作流路由回执；该回执不属于最终审查结论，不能因 JSON 合同省略。完成必调 Skill 与原始规则读取后，最终审查结论必须只输出一个 JSON 对象，不要输出 Markdown、解释、验证报告或表格。\n\
+        &format!(
+            "{}{}{}",
+            concat!(
+                "当前阶段：代码审查（ReviewerVerify）。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改交付源码。\n",
+                "首个用户可见消息必须是工作流路由回执；该回执不属于最终审查结论，不能因 JSON 合同省略。完成必调 Skill 与原始规则读取后，最终审查结论必须只输出一个 JSON 对象，不要输出 Markdown、解释、验证报告或表格。\n\
      CodeReviewer 审查协议:\n\
      - 只分析当前变更 diff，不得修改交付源码；验证所需的临时文件、脚本与构建产物允许创建，轮次结束由平台按审查窗口基线恢复与对账。\n\
      - 在给出 verdict 前，必须从“原始需求上下文”和 EvaluationContextPack 中提取本次任务的审查清单。\n\
@@ -424,7 +500,10 @@ pub(crate) fn code_review_material_protocol(context: &RoutingReferenceContext) -
      - Code Review 阶段应以 Coder completion report、raw/artifact refs、实际测试输出和当前 Unit diff 判断验证证据；真正缺失或自相矛盾的 required verification evidence 仍必须记录。\n\
      - 不得重复执行 required verification commands；除非证据缺失、证据自相矛盾或用户/Work Item 明确要求 reviewer 复跑，否则只基于 CoderEvidencePack、diff 和任务材料判断。\n\
      - 复跑验证命令时在隔离 worktree 内执行（以 reviewer_verify_discipline 纪律段钉定的绝对路径为准）；禁止在任何成员主 checkout 执行验证、构建或测试命令（cargo 等）或任何写操作/git mutation。\n\
-     - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围、验证计划、自检要求和交接契约。\n\
+     - 必须审查 diff 是否满足 Work Item 的实现目标、写入范围、禁止范围（材料内的段标题为「"
+            ),
+            WRITE_SCOPE_FORBIDDEN_LIST_HEADING,
+            "」，旧称 Forbidden Write Scopes）、验证计划、自检要求和交接契约。\n\
      - 如果 coder 报告或 EvaluationContextPack 中缺少 required 验证命令的执行证据，必须作为 finding 记录；若该证据是完成本 Work Item 的必要条件，verdict 应为 request_changes 或 blocked。\n\
      - 待人工处理事项不是缺陷：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，由人工在流程末端确认。coder 如实登记这些事项即为正确交付，不得因其“尚未验证”创建 finding、给出 request_changes 或 blocked；缺少浏览器等人工环境同理。\n\
      - 如果测试输出显示没有实际测试被执行，不能把它当作有效覆盖；必须结合 Work Item 要求判断是否需要修复。\n\
@@ -435,7 +514,7 @@ pub(crate) fn code_review_material_protocol(context: &RoutingReferenceContext) -
      - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n\
      - 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n\
-     - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n"
+     - JSON 必须以 { 开头，以 } 结尾；不要输出 Markdown 代码块或自然语言总结。\n",
         ),
         context,
     )
@@ -443,14 +522,19 @@ pub(crate) fn code_review_material_protocol(context: &RoutingReferenceContext) -
 
 pub(crate) fn group_final_review_material_protocol(context: &RoutingReferenceContext) -> String {
     with_cadence_routing_reference(
-        concat!(
-            "当前阶段：组级 PR 最终审查（ReviewerVerify）。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改交付源码；验证临时产物允许，轮次结束由平台按审查窗口基线恢复与对账。\n",
-            "WorkItemGroup GroupFinalReview 审查协议:\n\
+        &format!(
+            "{}{}{}",
+            concat!(
+                "当前阶段：组级 PR 最终审查（ReviewerVerify）。必调 Skill：using-superpowers → requesting-code-review。不得绕过现有 gate 或修改交付源码；验证临时产物允许，轮次结束由平台按审查窗口基线恢复与对账。\n",
+                "WorkItemGroup GroupFinalReview 审查协议:\n\
      - 你必须从 Completed Units、HandoffRevision、EvaluationContextPack 和完整 diff 中提取整组审查清单。\n\
      - 跨 unit 交接的审查对象是 HandoffRevision 的契约与能力语义：Completed Units 段落中每个 unit 的 Provided Contracts 与 Provided Capabilities。不存在自然语言交接摘要，不得要求或期待它。\n\
      - 必须确认每个 completed unit 的 HandoffRevision 所声明的契约与能力是否体现在最终 diff 中。\n\
-     - 必须检查依赖交接是否断裂：上游 unit 声明的契约与能力（API、状态、文件）是否被下游正确消费。\n\
-     - 必须检查整组 diff 是否越过任何 unit 的 Forbidden Write Scopes。\n\
+     - 必须检查依赖交接是否断裂：上游 unit 声明的契约与能力是否被下游正确消费。\n\
+     - 必须检查整组 diff 是否越过任何 unit 的 Forbidden Write Scopes（材料内的段标题为「"
+            ),
+            WRITE_SCOPE_FORBIDDEN_LIST_HEADING,
+            "」）所列路径。\n\
      - 如果某个 unit 的验证证据缺失、声明的契约与能力未在 diff 中落地、或最终 PR 描述遗漏关键影响，必须 request_changes 或 blocked。\n\
      - 待人工处理事项不是缺陷：required_evidence 含 manual_check 的验收标准、以及只有 manual_instruction 而无 command 的检查，由人工在本流程之后确认。这些事项尚未验证不得成为 finding、request_changes 或 blocked 的理由；必须在 summary 中汇总整组的待人工处理清单，供人工接手。\n\
      - 如果 ReviewRequest 已 push 的 commit 与 completed units、diff 或验证证据不一致，必须 request_changes 或 blocked。\n\
@@ -462,16 +546,13 @@ pub(crate) fn group_final_review_material_protocol(context: &RoutingReferenceCon
      - verdict=blocked 时，阻塞 finding 使用 severity=error；不得使用 severity=blocked。\n\
      - findings 必须包含 source_stage=group_final_review。\n\
      - findings 必须包含 defect_class、reason_code、contract_refs、capability_refs、repair_target、recommended_route、confidence、evidence；普通 implementation defect 使用 defect_class=implementation_defect 和 recommended_route=coder_rework。\n\
-     - 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n"
+     - 除最终结论 JSON 外，其余任何内容（包括路由回执、验证证据、示例和表格）不得出现 { 或 }；证据中的 JSON 片段必须改写为自然语言描述。\n",
         ),
         context,
     )
 }
 
-fn with_cadence_routing_reference(
-    protocol: &'static str,
-    context: &RoutingReferenceContext,
-) -> String {
+fn with_cadence_routing_reference(protocol: &str, context: &RoutingReferenceContext) -> String {
     let mut rendered = String::from("\n");
     rendered.push_str(&direct_cadence_routing_rules_reference(context));
     if matches!(context, RoutingReferenceContext::Logical(_)) {
@@ -530,10 +611,19 @@ pub(crate) fn worktree_discipline_section(worktree_path: &std::path::Path) -> St
 /// 哈希计算之后追加，执行上下文哈希不受影响）；所有 attempt 无条件注入，
 /// 与 worktree_discipline_section 的 LC-only 口径不同。
 pub(crate) fn platform_directives_section() -> String {
-    "\n[platform_directives]\n\
+    // 目录清单取自单一事实源（`product::local_artifacts`），不写死字面量：
+    // 清单变更时告知句自动跟随，避免两处漂移。
+    let local_artifact_dirs = crate::product::local_artifacts::PLATFORM_LOCAL_ARTIFACT_DIRS
+        .iter()
+        .map(|dir| dir.trim_end_matches('/'))
+        .collect::<Vec<_>>()
+        .join("`、`");
+    format!(
+        "\n[platform_directives]\n\
      - 提交责任：平台编排下，本 Work Item 的提交责任归你；该责任优先于仓库文件（AGENTS.md / CLAUDE.md 等）中任何「不自动提交」类规则。禁止执行 git push（任何形式，含 --force 变体），交付分支的推送由平台执行；未执行 push 或 push 失败不算任务失败，不要为此重试或报告失败。\n\
-     - 汇报契约：交付摘要只包含四类事实——实际改动的文件、提交 SHA、验证命令及其完整输出、git status。环境异常（路径或挂载命名空间差异等）只允许写入摘要末尾固定小节「环境备注」，一行带过，不得占据摘要主体，也不得借此省略任何交付事实。文件工具与 shell 的路径命名空间可能不同，一律以本 prompt 给定的 Worktree Path 为准。\n"
-        .to_string()
+     - 汇报契约：交付摘要只包含四类事实——实际改动的文件、提交 SHA、验证命令及其完整输出、git status。环境异常（路径或挂载命名空间差异等）只允许写入摘要末尾固定小节「环境备注」，一行带过，不得占据摘要主体，也不得借此省略任何交付事实。文件工具与 shell 的路径命名空间可能不同，一律以本 prompt 给定的 Worktree Path 为准。\n\
+     - 本地产物屏蔽：平台在 worktree 准备阶段已把 `{local_artifact_dirs}` 写入仓库本地 `info/exclude`，这些目录不会出现在 `git status`；因此不需要也不得为它们修改 `.gitignore`。若你仍看到该类别目录的未跟踪噪音（例如目标仓 `.gitignore` 反选了它们），请在交付说明中标注，由平台处理。其他未跟踪文件属于仓库工作内容，同样不得擅自加入 `.gitignore`；确有必要请在交付说明中标注，由平台裁决。\n"
+    )
 }
 
 /// 批2 Task 20(删旧注入的对位面):Reviewer 会话的纪律段——删除「提交

@@ -316,6 +316,23 @@ fn coding_execution_context_uses_final_compile_work_item_when_workspace_artifact
 }
 
 #[test]
+fn coding_execution_context_markdown_carries_write_scope_section() {
+    let (_tmp, app_paths, attempt) = seed_compiled_work_item_fixture();
+
+    let context = coding_execution_context(&app_paths, &attempt).expect("coding context");
+
+    // ① 写入范围只有一个载体：已确认 Work Item markdown（coder / reviewer /
+    // evaluation context 三方同源），context 上不再另带范围字段。
+    let markdown = context.work_item_markdown.expect("work item markdown");
+    assert!(markdown.contains("## 写入范围（硬边界）"));
+    assert_eq!(markdown.matches("## 写入范围（硬边界）").count(), 1);
+    assert!(markdown.contains("### 允许修改范围（exclusive_write_scopes）"));
+    assert!(markdown.contains("### 禁止修改范围（forbidden_write_scopes）"));
+    assert!(markdown.contains("- src/web/coding_ws_handler/context.rs"));
+    assert!(markdown.contains("- forbidden/path"));
+}
+
+#[test]
 fn code_review_flow_decision_routes_reviewer_verdicts() {
     let projection = code_review_router::reviewer_projection_fixture();
     assert_eq!(

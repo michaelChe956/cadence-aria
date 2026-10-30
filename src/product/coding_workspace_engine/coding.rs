@@ -205,6 +205,21 @@ impl CodingWorkspaceEngine {
             ));
         }
         full_prompt.push_str(&forced_replay_section);
+        // group 主路径（schema v2 投影渲染）的 prompt 不含 legacy markdown 的
+        // 范围规范段——渲染只输出投影 section（Write Policy JSON），没有
+        // 「判定基准／匹配语义非 glob／空列表语义／默认拒绝」的规范语义。
+        // 此处追加一份与 legacy **逐字同源**的规范段：数据取 coder projection
+        // 的 write_policy（即 canonical_contract.write_policy，与机器门
+        // gates/schema_v2.rs 同一份取值），文案由
+        // coding_work_item_context::write_scope_section_text 渲染（legacy 与
+        // group 共用同一渲染器）。追加发生在 render→bind 哈希计算之后，执行
+        // 上下文哈希不受影响；legacy 路径返回 None（范围段已随 Work Item
+        // markdown 进入 prompt，不重复渲染）。
+        if let Some(scope_section) =
+            self.unit_run_write_scope_section(&attempt, CodingProviderRole::Coder)?
+        {
+            full_prompt.push_str(&scope_section);
+        }
         // r54 越界根修:LC attempt(target_snapshot 在场,与 cross_target_check
         // 同口径)的 coder prompt 硬钉 worktree 纪律段(见
         // worktree_discipline_section 文档);legacy 单仓 cwd 本就在 worktree,

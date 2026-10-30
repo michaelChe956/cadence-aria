@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS;
 use crate::cross_cutting::process_manager::ManagedProcessChild;
 use crate::product::coding_models::{PushStatus, RemoteKind};
+use crate::product::local_artifacts::is_platform_local_artifact_path;
 
 mod reconcile;
 mod test_pause;
@@ -1022,9 +1023,14 @@ fn parse_porcelain_z_status(bytes: &[u8]) -> Result<Vec<FileStatus>, GitWorkspac
     Ok(statuses)
 }
 
+/// Work Item commit 前从暂存区剔除的路径：平台本地产物走
+/// [`is_platform_local_artifact_path`]（目录列表单一事实源
+/// [`crate::product::local_artifacts::PLATFORM_LOCAL_ARTIFACT_DIRS`]，与
+/// exclude 写入同源——exclude 未就位/产物已被跟踪时的第二道防线，旧过滤只认
+/// `.aria` 与 `.aria/coding-artifacts/`，`.aria/evidence-token`、
+/// `.codegraph/…`、`.verify/…` 全部漏网）；Python 工具链噪音维持原剔除。
 fn should_exclude_from_work_item_commit(path: &str) -> bool {
-    path == ".aria"
-        || path.starts_with(".aria/coding-artifacts/")
+    is_platform_local_artifact_path(path)
         || path == "__pycache__"
         || path.starts_with("__pycache__/")
         || path.contains("/__pycache__/")

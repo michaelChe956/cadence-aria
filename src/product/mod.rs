@@ -26,6 +26,7 @@ pub mod issue_baseline;
 pub mod issue_store;
 pub mod json_store;
 pub mod lifecycle_store;
+pub(crate) mod local_artifacts;
 pub mod logical_codebase;
 pub mod models;
 pub mod plan_generation_supersede;

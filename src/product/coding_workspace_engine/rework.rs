@@ -214,6 +214,16 @@ impl CodingWorkspaceEngine {
         // 强制回放段进实际 prompt 与 fresh prompt 各恰一次（认领绑定实际
         // prompt 全文，含强制回放内容）。
         full_prompt.push_str(&forced_replay_section);
+        // group 主路径（schema v2 投影渲染）的返修轮同样不带 legacy markdown
+        // 的范围规范段——与 coding.rs 同源同语义：追加一份与 legacy 逐字同源的
+        // 规范段（数据取 coder projection 的 write_policy，与机器门同一份取值）。
+        // 追加发生在 render→bind 哈希计算之后，执行上下文哈希不受影响；仅
+        // full 臂追加，delta 臂不带（与 legacy「首轮 full 已带」同口径）。
+        if let Some(scope_section) =
+            self.unit_run_write_scope_section(&updated, CodingProviderRole::Coder)?
+        {
+            full_prompt.push_str(&scope_section);
+        }
         // r54 越界根修:LC attempt 的 rework coder prompt 硬钉 worktree 纪律段
         //(同 coding.rs;oracle 裁决 delta/rework 变体必带禁线)。
         if updated.target_snapshot.is_some() {

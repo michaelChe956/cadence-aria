@@ -52,15 +52,57 @@ pub(super) fn seed_group_attempt_fixture(
     initialize_attempt: bool,
     with_dependency: bool,
 ) {
-    seed_group_attempt_fixture_with_legacy_work_items(
+    seed_group_attempt_fixture_with_options(
         store,
         attempt,
         initialize_attempt,
         with_dependency,
-        true,
-        &[],
-        false,
+        GroupAttemptFixtureOptions::default(),
     );
+}
+
+/// 写入范围事实可配置的 group 夹具（F1：group prompt 的范围规范段必须与
+/// `projection.write_policy` 逐字一致——夹具带非空 scope 才有判别力，空表
+/// 只会渲染「未声明」占位）。
+pub(super) fn seed_group_attempt_fixture_with_write_policy(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    initialize_attempt: bool,
+    with_dependency: bool,
+    write_policy: WorkItemWritePolicy,
+) {
+    seed_group_attempt_fixture_with_options(
+        store,
+        attempt,
+        initialize_attempt,
+        with_dependency,
+        GroupAttemptFixtureOptions {
+            write_policy,
+            ..GroupAttemptFixtureOptions::default()
+        },
+    );
+}
+
+/// group attempt 夹具的可变项（写入范围事实等）。
+pub(super) struct GroupAttemptFixtureOptions {
+    pub include_legacy_work_items: bool,
+    pub verification_checks: Vec<VerificationCheck>,
+    pub compact_routing: bool,
+    pub write_policy: WorkItemWritePolicy,
+}
+
+impl Default for GroupAttemptFixtureOptions {
+    fn default() -> Self {
+        Self {
+            include_legacy_work_items: true,
+            verification_checks: Vec::new(),
+            compact_routing: false,
+            write_policy: WorkItemWritePolicy {
+                exclusive_scopes: Vec::new(),
+                forbidden_scopes: Vec::new(),
+            },
+        }
+    }
 }
 
 fn seed_schema_v2_group_attempt_fixture(
@@ -70,18 +112,20 @@ fn seed_schema_v2_group_attempt_fixture(
     with_dependency: bool,
     verification_checks: &[VerificationCheck],
 ) {
-    seed_group_attempt_fixture_with_legacy_work_items(
+    seed_group_attempt_fixture_with_options(
         store,
         attempt,
         initialize_attempt,
         with_dependency,
-        false,
-        verification_checks,
-        false,
+        GroupAttemptFixtureOptions {
+            include_legacy_work_items: false,
+            verification_checks: verification_checks.to_vec(),
+            ..GroupAttemptFixtureOptions::default()
+        },
     );
 }
 
-fn seed_group_attempt_fixture_with_legacy_work_items(
+pub(super) fn seed_group_attempt_fixture_with_legacy_work_items(
     store: &CodingAttemptStore,
     attempt: &CodingExecutionAttempt,
     initialize_attempt: bool,
@@ -90,13 +134,34 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
     verification_checks: &[VerificationCheck],
     compact_routing: bool,
 ) {
+    seed_group_attempt_fixture_with_options(
+        store,
+        attempt,
+        initialize_attempt,
+        with_dependency,
+        GroupAttemptFixtureOptions {
+            include_legacy_work_items,
+            verification_checks: verification_checks.to_vec(),
+            compact_routing,
+            ..GroupAttemptFixtureOptions::default()
+        },
+    );
+}
+
+fn seed_group_attempt_fixture_with_options(
+    store: &CodingAttemptStore,
+    attempt: &CodingExecutionAttempt,
+    initialize_attempt: bool,
+    with_dependency: bool,
+    options: GroupAttemptFixtureOptions,
+) {
     let lifecycle = LifecycleStore::new(store.paths());
     let work_items = [
         ("work_item_0001", "work_item_revision_0001"),
         ("work_item_0002", "work_item_revision_0002"),
         ("work_item_0003", "work_item_revision_0003"),
     ];
-    if include_legacy_work_items {
+    if options.include_legacy_work_items {
         for (index, (work_item_id, _)) in work_items.iter().enumerate() {
             lifecycle
                 .create_work_item(CreateWorkItemInput {
@@ -188,18 +253,15 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
                 capabilities: vec![format!("capability_{work_item_id}")],
             }],
             tasks: Vec::new(),
-            write_policy: WorkItemWritePolicy {
-                exclusive_scopes: Vec::new(),
-                forbidden_scopes: Vec::new(),
-            },
+            write_policy: options.write_policy.clone(),
             acceptance_criteria: Vec::new(),
-            verification_checks: verification_checks.to_vec(),
+            verification_checks: options.verification_checks.clone(),
             handoff_contract: HandoffContract {
                 required_fields: Vec::new(),
                 provided_contract_refs: vec![format!("contract_{work_item_id}")],
                 reviewer_check_refs: Vec::new(),
             },
-            blocker_rules: if compact_routing {
+            blocker_rules: if options.compact_routing {
                 vec![BlockerRule {
                     reason_code: "route".to_string(),
                     route: BlockerRoute::VerificationRetry,
@@ -285,7 +347,7 @@ fn seed_group_attempt_fixture_with_legacy_work_items(
                     logical_work_item_id: logical.id.clone(),
                     canonical_contract_candidate: contract.clone(),
                     verification_plan: WorkItemDraftVerificationPlan {
-                        checks: verification_checks.to_vec(),
+                        checks: options.verification_checks.clone(),
                     },
                 },
                 status: WorkItemDraftStatus::Accepted,
@@ -574,6 +636,7 @@ mod sc_group_dependency_gate;
 
 mod schema_v2_runtime;
 mod worktree_discipline;
+mod write_scope_prompt;
 
 #[tokio::test]
 async fn start_attempt_enters_running_through_admission_ticket() {

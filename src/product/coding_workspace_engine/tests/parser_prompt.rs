@@ -1,7 +1,9 @@
 use super::*;
 use crate::product::cadence_skills::routing_reference::RoutingReferenceContext;
+use crate::product::coding_work_item_context::load_coding_work_item_context;
 use crate::product::lifecycle_store::{
-    CreateIssueWorkItemPlanInput, CreateVerificationPlanInput, CreateWorkspaceSessionInput,
+    CreateIssueWorkItemPlanInput, CreateVerificationPlanInput, CreateWorkItemInput,
+    CreateWorkspaceSessionInput,
 };
 use crate::product::models::{
     IssueWorkItemPlanOptions, IssueWorkItemPlanStatus, RepositoryProfileConfidence,
@@ -262,6 +264,125 @@ fn coding_prompt_preserves_stack_terms_when_they_come_from_work_item_material() 
     assert!(prompt.contains("cargo fmt --check"));
     assert!(prompt.contains("mvn test"));
     assert!(prompt.contains("已确认 Work Item"));
+}
+
+/// 写入范围的唯一载体是已确认 Work Item markdown（coder / reviewer /
+/// evaluation context 三方同源）：prompt 只透传 markdown，不再渲染第二份列表。
+/// 这里用与渲染器同形的 markdown 固定「透传且只出现一次」。
+const WRITE_SCOPE_MARKDOWN_FIXTURE: &str = "\
+# Final Compile Work Item\n\n\
+公告删除交互。\n\n\
+## 写入范围（硬边界）\n\n\
+- 判定基准：工作树根相对路径。\n\n\
+### 允许修改范围（exclusive_write_scopes）\n\n\
+- frontend/src/App.vue\n\
+- frontend/src/api.js\n\n\
+### 禁止修改范围（forbidden_write_scopes）\n\n\
+- frontend/package.json\n";
+
+#[test]
+fn coding_prompt_declares_work_item_write_scopes_with_global_file_boundary() {
+    let attempt = test_attempt("coding_attempt_0001");
+    let context = CodingExecutionContext {
+        work_item_markdown: Some(WRITE_SCOPE_MARKDOWN_FIXTURE.to_string()),
+        verification_commands: Vec::new(),
+    };
+
+    let prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
+
+    assert!(prompt.contains("## 写入范围（硬边界）"));
+    assert!(prompt.contains("- frontend/src/App.vue"));
+    assert!(prompt.contains("- frontend/src/api.js"));
+    assert!(prompt.contains("- frontend/package.json"));
+    // markdown 是唯一载体：标题与每个 scope 项在 prompt 里恰好出现一次。
+    assert_eq!(prompt.matches("## 写入范围（硬边界）").count(), 1);
+    assert_eq!(prompt.matches("- frontend/src/App.vue").count(), 1);
+    assert_eq!(prompt.matches("- frontend/package.json").count(), 1);
+    // 范围段确实来自 markdown：位于「已确认 Work Item」段内。
+    let work_item_block = prompt
+        .find("已确认 Work Item:")
+        .expect("已确认 Work Item 段");
+    let scope_section = prompt.find("## 写入范围（硬边界）").expect("写入范围段");
+    assert!(scope_section > work_item_block);
+    // markdown 已带范围段时不得再追加 fail-closed 兜底句。
+    assert!(!prompt.contains("范围未知"));
+    assert!(!prompt.contains("（未声明"));
+}
+
+#[test]
+fn coding_prompt_marks_unknown_write_scopes_as_fail_closed() {
+    let attempt = test_attempt("coding_attempt_0001");
+    // markdown 缺失（未读到已确认 Work Item 记录）→ 范围未知，fail-closed：
+    // 不得把「文档未提及范围」当成「不限制」。
+    let context = CodingExecutionContext::default();
+
+    let prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
+
+    assert!(prompt.contains("修改范围（硬边界）："));
+    assert!(prompt.contains("范围未知（未能读取已确认 Work Item 记录）"));
+    assert!(prompt.contains("不得改动任何仓库文件（含 .gitignore、构建配置等全局文件）"));
+    // 未知时不得渲染规范范围段，也不得出现「（未声明」措辞。
+    assert!(!prompt.contains("## 写入范围"));
+    assert!(!prompt.contains("（未声明"));
+}
+
+#[test]
+fn coding_prompt_declares_empty_write_scopes_as_non_restricting() {
+    let tmp = tempdir().expect("tempdir");
+    let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(paths.clone());
+    lifecycle
+        .create_work_item(CreateWorkItemInput {
+            id: Some("work_item_0001".to_string()),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            repository_id: "repository_0001".to_string(),
+            title: "Empty write scopes".to_string(),
+            planned_implementation_context: Some("no scope restriction".to_string()),
+            kind: WorkItemKind::Backend,
+            plan_status: WorkItemPlanStatus::Confirmed,
+            ..Default::default()
+        })
+        .expect("create work item");
+    let attempt = test_attempt("coding_attempt_0001");
+
+    // 真实 record fixture：两个 scope 列表都为空 → 不限制可写范围 / 无额外禁止。
+    let compiled = load_coding_work_item_context(&paths, &attempt).expect("coding context");
+    let markdown = compiled.markdown.clone().expect("work item markdown");
+    assert!(markdown.contains("## 写入范围（硬边界）"));
+    assert!(markdown.contains("- （未声明：exclusive 为空 = 不限制可写范围）"));
+    assert!(markdown.contains("- （未声明：forbidden 为空 = 无额外禁止）"));
+
+    let context = CodingExecutionContext {
+        work_item_markdown: compiled.markdown,
+        verification_commands: compiled.verification_commands,
+    };
+    let prompt = build_coding_prompt(
+        &attempt,
+        &context,
+        None,
+        None,
+        &RoutingReferenceContext::Legacy,
+    );
+
+    assert!(prompt.contains("- （未声明：exclusive 为空 = 不限制可写范围）"));
+    assert!(prompt.contains("- （未声明：forbidden 为空 = 无额外禁止）"));
+    assert!(prompt.contains("- 默认拒绝：以上范围之外的仓库文件一律不得修改"));
+    assert_eq!(prompt.matches("## 写入范围（硬边界）").count(), 1);
+    // 空列表是「范围已知」：不得出现未知范围的兜底句。
+    assert!(!prompt.contains("范围未知"));
 }
 
 #[test]
@@ -904,6 +1025,32 @@ fn assert_platform_directives(prompt: &str) {
         prompt.contains("以本 prompt 给定的 Worktree Path 为准"),
         "S6:文件工具与 shell 路径命名空间必须以 Worktree Path 为准:\n{prompt}"
     );
+    // 段落③（P1-3 / REQ-PROMPT-07）：本地产物屏蔽告知 + .gitignore 禁令。
+    // 平台已在 worktree 准备阶段把本地产物写入仓库本地 `info/exclude`，
+    // agent 不得为产物噪音改 `.gitignore`（改它本身就是越界）。
+    assert!(
+        prompt.contains("本地产物屏蔽"),
+        "P1-3:平台指令段必须告知本地产物已由平台屏蔽:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("info/exclude"),
+        "P1-3:告知句必须点明屏蔽落点是仓库本地 info/exclude:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("不需要也不得为它们修改 `.gitignore`"),
+        "P1-3:必须禁止为产物噪音修改 .gitignore:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("其他未跟踪文件属于仓库工作内容，同样不得擅自加入 `.gitignore`"),
+        "P1-3:其他未跟踪文件同样不得擅自加入 .gitignore:\n{prompt}"
+    );
+    // 目录清单取自单一事实源，不写死字面量。
+    for dir in crate::product::local_artifacts::PLATFORM_LOCAL_ARTIFACT_DIRS {
+        assert!(
+            prompt.contains(dir.trim_end_matches('/')),
+            "P1-3:告知句必须点名本地产物目录 {dir}:\n{prompt}"
+        );
+    }
 }
 
 #[test]

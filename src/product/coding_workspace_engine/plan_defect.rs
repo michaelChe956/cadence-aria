@@ -448,6 +448,40 @@ impl CodingWorkspaceEngine {
         Ok(Some(rendered))
     }
 
+    /// group attempt 当前 unit 的写入范围规范段（与 legacy markdown 路径逐字
+    /// 同源、数据与机器门同源）。
+    ///
+    /// 数据取当前 unit 投影的写入范围事实：coder 角色取 coder projection 的
+    /// `write_policy`，reviewer 角色取 reviewer projection 的 `scope_policy`
+    /// ——两者都是 `canonical_contract.write_policy` 的克隆，与机器门
+    /// `gates/schema_v2.rs::validate_changed_files_for_runtime` 同一份取值。
+    /// 文案由 `coding_work_item_context::write_scope_section_text` 渲染（legacy
+    /// markdown 与 group prompt 共用同一渲染器，不漂移）。
+    ///
+    /// 非 group attempt 返回 `None`：legacy 路径的范围规范段由已确认 Work Item
+    /// markdown 承载，不在此重复渲染（同一 prompt 内两份范围会让 agent 读到
+    /// 两套口径）。
+    pub(crate) fn unit_run_write_scope_section(
+        &self,
+        attempt: &CodingExecutionAttempt,
+        role: CodingProviderRole,
+    ) -> Result<Option<String>, CodingWorkspaceEngineError> {
+        let Some((_run, bundle)) = self.active_unit_run_projection(attempt)? else {
+            return Ok(None);
+        };
+        let policy = match role {
+            CodingProviderRole::Coder => &bundle.coder_projection.write_policy,
+            CodingProviderRole::CodeReviewer => &bundle.reviewer_projection.scope_policy,
+            CodingProviderRole::InternalReviewer => return Ok(None),
+        };
+        Ok(Some(
+            crate::product::coding_work_item_context::write_scope_section_text(
+                &policy.exclusive_scopes,
+                &policy.forbidden_scopes,
+            ),
+        ))
+    }
+
     pub(crate) fn authoritative_resolved_handoff_revision_ids(
         &self,
         attempt: &CodingExecutionAttempt,

@@ -574,18 +574,15 @@ impl CodingWorkspaceEngine {
                 .as_ref()
                 .map(routing_reference_context_from_policy)
                 .unwrap_or_default();
-            let mut prompt = match self.render_reviewer_unit_run_context(attempt, reviewer)? {
-                Some(rendered) => rendered.text,
-                None => {
-                    self.build_code_review_prompt(
-                        attempt,
-                        worktree_path,
-                        retry_diagnostic.as_deref(),
-                        &routing_context,
-                    )
-                    .await?
-                }
-            };
+            let mut prompt = self
+                .build_reviewer_prompt(
+                    attempt,
+                    reviewer,
+                    worktree_path,
+                    retry_diagnostic.as_deref(),
+                    &routing_context,
+                )
+                .await?;
             // r54 越界根修残留→批2 Task 20a-fix(F5):Reviewer prompt 不再
             // 注入「必须worktree内复跑」与平台提交责任段(旧注入删除);
             // ReviewerVerify 纪律段(禁 Git mutation/平台交付/资源登记

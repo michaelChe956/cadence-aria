@@ -28,23 +28,8 @@ pub(crate) fn with_exact_exclusive_lock<T>(
     lock_path: &Path,
     operation: impl FnOnce() -> Result<T, ProductStoreError>,
 ) -> Result<T, ProductStoreError> {
-    if let Some(parent) = lock_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            ProductStoreError::Io(format!("create {}: {error}", parent.display()))
-        })?;
-    }
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)
-        .map_err(|error| {
-            ProductStoreError::Io(format!("open lock {}: {error}", lock_path.display()))
-        })?;
-    lock_file_exclusive(&file, lock_path)?;
+    let (file, lock_path) = open_lock_file_at(lock_path)?;
+    lock_file_exclusive(&file, &lock_path)?;
     let result = operation();
     unlock_file(&file);
     result
@@ -57,7 +42,17 @@ pub(crate) struct ExclusiveFileLock {
 
 impl ExclusiveFileLock {
     pub(crate) fn acquire(target_path: &Path) -> Result<Self, ProductStoreError> {
-        let (file, lock_path) = open_lock_file(target_path)?;
+        Self::acquire_at(&lock_path_for(target_path))
+    }
+
+    /// 在调用方显式指定的锁文件路径上取排它锁（guard 形态）。
+    ///
+    /// 锁文件位置/命名需按约定落位、或临界区错误类型不是
+    /// `ProductStoreError` 的调用方使用（guard 由调用方持有，错误自行映射；
+    /// 如 `evidence_token` 的 `<common-gitdir>/aria-exclude.lock`——
+    /// `.{name}.lock` 兄弟文件派生规则表达不了）。
+    pub(crate) fn acquire_at(lock_path: &Path) -> Result<Self, ProductStoreError> {
+        let (file, lock_path) = open_lock_file_at(lock_path)?;
         #[cfg(test)]
         notify_lock_attempt(&lock_path);
         lock_file_exclusive(&file, &lock_path)?;
@@ -92,7 +87,10 @@ impl ExclusiveFileLock {
 }
 
 fn open_lock_file(target_path: &Path) -> Result<(File, PathBuf), ProductStoreError> {
-    let lock_path = lock_path_for(target_path);
+    open_lock_file_at(&lock_path_for(target_path))
+}
+
+fn open_lock_file_at(lock_path: &Path) -> Result<(File, PathBuf), ProductStoreError> {
     if let Some(parent) = lock_path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -105,11 +103,11 @@ fn open_lock_file(target_path: &Path) -> Result<(File, PathBuf), ProductStoreErr
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&lock_path)
+        .open(lock_path)
         .map_err(|error| {
             ProductStoreError::Io(format!("open lock {}: {error}", lock_path.display()))
         })?;
-    Ok((file, lock_path))
+    Ok((file, lock_path.to_path_buf()))
 }
 
 #[cfg(test)]

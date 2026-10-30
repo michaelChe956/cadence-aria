@@ -158,11 +158,19 @@ async fn coding_unit_run_provider_execution_context_binds_authoritative_coder_an
     // 本精确断言）及 platform_directives 段的精确拼接（前缀零改写、
     // 中段零插入）；执行上下文哈希仍等于渲染 content_hash（追加不动冻结
     // 哈希面）。
+    // 写入范围规范段（WI 越界根修 F1）：group 主路径的投影渲染不带 legacy
+    // markdown 的范围段，最终 prompt 在 render→bind 之后追加一份与 legacy
+    // 逐字同源的规范段（数据取 coder projection 的 write_policy）。
+    let expected_write_scope = crate::product::coding_work_item_context::write_scope_section_text(
+        &bundle.coder_projection.write_policy.exclusive_scopes,
+        &bundle.coder_projection.write_policy.forbidden_scopes,
+    );
     assert_eq!(
         coder.input().prompt,
         format!(
-            "{}{}{}",
+            "{}{}{}{}",
             expected_coder.text,
+            expected_write_scope,
             host_coding_check_contract(),
             platform_directives_section()
         )

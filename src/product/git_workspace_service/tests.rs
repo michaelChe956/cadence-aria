@@ -735,6 +735,113 @@ async fn git_add_work_item_changes_fails_closed_when_owner_read_bit_missing_but_
         .expect("self-healed 644 stages normally");
 }
 
+/// P1-1：commit 前的第二道防线必须覆盖全部平台本地产物路径——旧过滤只认
+/// `.aria` 与 `.aria/coding-artifacts/`，`.aria/evidence-token`、
+/// `.codegraph/…`、`.verify/…` 全部漏网（exclude 未就位/产物已被跟踪时
+/// 会随 `git add -A` 进 commit）；`__pycache__`/`.pyc` 剔除保持不变。
+#[tokio::test]
+async fn git_add_work_item_changes_unstages_platform_local_artifacts() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::create_dir_all(repo.join("src")).expect("create src dir");
+    fs::write(repo.join("src/main.rs"), "fn main() {}\n").expect("write main");
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-m", "base"]);
+
+    // exclude 未就位的现场形态：平台产物以 untracked 进入 `git add -A`
+    // （令牌文件按真实形态 0600，属主可读不触发 F-15）。
+    let token = repo.join(".aria").join("evidence-token");
+    fs::create_dir_all(token.parent().expect("aria dir")).expect("create aria dir");
+    fs::write(&token, "session-token").expect("write token");
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).expect("chmod 600 token");
+    fs::create_dir_all(repo.join(".codegraph")).expect("create codegraph dir");
+    fs::write(repo.join(".codegraph").join("index.db"), b"x").expect("write codegraph");
+    fs::create_dir_all(repo.join(".verify")).expect("create verify dir");
+    fs::write(repo.join(".verify").join("report.txt"), b"x").expect("write verify");
+    fs::create_dir_all(repo.join("__pycache__")).expect("create pycache dir");
+    fs::write(repo.join("__pycache__").join("mod.pyc"), b"x").expect("write pyc");
+    // 正常业务改动必须留在暂存区。
+    fs::write(repo.join("src/main.rs"), "fn main() { changed }\n").expect("modify main");
+
+    let service = GitWorkspaceService::new();
+    service
+        .git_add_work_item_changes(repo)
+        .await
+        .expect("stage work item changes");
+
+    let staged = staged_files(repo);
+    assert!(
+        staged.iter().any(|path| path == "src/main.rs"),
+        "business change must stay staged, got: {staged:?}"
+    );
+    for leaked in [
+        ".aria/evidence-token",
+        ".codegraph/index.db",
+        ".verify/report.txt",
+        "__pycache__/mod.pyc",
+    ] {
+        assert!(
+            !staged.iter().any(|path| path == leaked),
+            "`{leaked}` must be unstaged before the work item commit, got: {staged:?}"
+        );
+    }
+}
+
+/// F3：仓内名为 `.verify` / `.aria` 的**普通文件**（不是目录）不是平台产物
+/// ——git 的 `.verify/`（尾斜杠）只匹配目录，提交过滤按目录语义判定，
+/// 同名普通文件必须留在暂存区（否则交付事实与实际提交不一致）。
+#[tokio::test]
+async fn git_add_work_item_changes_keeps_same_named_plain_files_staged() {
+    let tmp = tempdir().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test User"]);
+    fs::create_dir_all(repo.join("src")).expect("create src dir");
+    fs::write(repo.join("src/main.rs"), "fn main() {}\n").expect("write main");
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-m", "base"]);
+
+    // 同名普通文件（不是目录）：`.verify` / `.aria` 是仓内真实文件。
+    fs::write(repo.join(".verify"), b"plain file\n").expect("write .verify file");
+    fs::write(repo.join(".aria"), b"plain file\n").expect("write .aria file");
+
+    let service = GitWorkspaceService::new();
+    service
+        .git_add_work_item_changes(repo)
+        .await
+        .expect("stage work item changes");
+
+    let staged = staged_files(repo);
+    for kept in [".verify", ".aria"] {
+        assert!(
+            staged.iter().any(|path| path == kept),
+            "same-named plain file `{kept}` must stay staged, got: {staged:?}"
+        );
+    }
+}
+
+fn staged_files(repo: &Path) -> Vec<String> {
+    let output = StdCommand::new("git")
+        .args(["diff", "--cached", "--name-only", "-z"])
+        .current_dir(repo)
+        .output()
+        .expect("read staged files");
+    assert!(
+        output.status.success(),
+        "git diff --cached: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 #[tokio::test]
 async fn git_remote_configured_distinguishes_missing_from_unreachable_remote() {
     let tmp = tempdir().expect("tempdir");
