@@ -62,6 +62,7 @@ mod f60_exit_contract_matrix;
 mod logical_codebase_review_e2e;
 mod plan_gate_terminate;
 mod provider_idle_watchdog;
+mod review_disposition_platform;
 mod review_repair_prompt;
 mod run_boundary_detection;
 mod run_boundary_prompt;

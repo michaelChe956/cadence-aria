@@ -102,7 +102,7 @@ fn anchor_t17_fresh_revision_prompt_carries_previous_source_and_review_context()
             machine_repair: None,
             owner_question: None,
             owner_options: None,
-        }],
+        disposition: None, target_work_item_id: None, finding_key: None, }],
         review_gate: ReviewGate::RequiresRevision,
         work_item_plan_review: None,
         structured_output_diagnostic: None,

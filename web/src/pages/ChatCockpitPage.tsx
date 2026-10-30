@@ -513,6 +513,7 @@ export function ChatCockpitPage({
     routeGateConfirm,
     sendRevisionFeedback,
     sendHumanActionRest,
+    sendRevokeFindingExclusions,
   } = useCockpitGateConfirm({
     sessionId,
     workspaceWs,
@@ -556,6 +557,9 @@ export function ChatCockpitPage({
         },
         sendLcBootstrapAction,
         sendRegisterTrustEntry: workspaceWs.sendRegisterTrustEntry,
+        // REQ-WSC-13/14（k3 P0-2C）：门卡「撤销排除」REST 发送器（撤销
+        // durable 已处置清单，会话级事实，不经 WS 门命令）。
+        sendRevokeFindingExclusions,
       }),
     [
       state.flowKind,
@@ -573,6 +577,7 @@ export function ChatCockpitPage({
       sendC1Action,
       sendLcBootstrapAction,
       workspaceWs.sendRegisterTrustEntry,
+      sendRevokeFindingExclusions,
     ],
   );
   const auditRows = useMemo(

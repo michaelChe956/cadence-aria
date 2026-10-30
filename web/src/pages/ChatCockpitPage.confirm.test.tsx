@@ -750,10 +750,13 @@ describe("ChatCockpitPage", () => {
         useWorkspaceStore.getState().setStage("running");
       });
 
-      expect(within(gateCard).getByText("已离开人工确认门")).toBeVisible();
       expect(
-        within(gateCard).queryByRole("button", { name: "确认当前版本" }),
-      ).toBeNull();
+        within(gateCard).getByTestId("gate-confirm-blocked-reason"),
+      ).toHaveTextContent("暂不可确认：已离开人工确认门");
+      // owner 2026-10-30：确认按钮以禁用态+原因留卡，不再无声消失。
+      expect(
+        within(gateCard).getByRole("button", { name: "确认当前版本" }),
+      ).toBeDisabled();
       // 即便遗留按钮被点到（防御），确认/终止零发送。
       expect(workspaceWs.sendConfirmGate).not.toHaveBeenCalled();
       expect(workspaceWs.sendAbandonGate).not.toHaveBeenCalled();

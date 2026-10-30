@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::product::work_item_plan_policy::{FindingClassHint, ReviewFindingCategory};
 
@@ -16,6 +17,49 @@ pub enum ReviewFindingSeverity {
     Blocking,
     MustFix,
     Suggestion,
+}
+
+impl ReviewFindingSeverity {
+    /// wire 词表（finding_key 身份成分与呈现共用，不另造第二口径）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Blocking => "blocking",
+            Self::MustFix => "must_fix",
+            Self::Suggestion => "suggestion",
+        }
+    }
+}
+
+/// REQ-WSC-12（owner 2026-10-30 裁定，取舍 1=B）：finding 的处置归属。
+/// `Actionable`＝本 Work Item 可通过修订自身收敛；`Advisory`＝只作提示
+/// （其它文档的当前状态、产品侧规范/流程待办、与本 Work Item 无关的外部
+/// 事实）。平台只把 `Actionable` 计入阻断/返修/门卡必处理计数——模型标错
+/// 也不会让 advisory 卡住流程。
+///
+/// 缺失语义＝`Actionable`（fail-safe：宁可多阻断不可漏阻断）；历史记录
+/// （wire 无该字段）因此保持逐字兼容。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewFindingDisposition {
+    Actionable,
+    Advisory,
+}
+
+impl ReviewFindingDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Actionable => "actionable",
+            Self::Advisory => "advisory",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "actionable" => Some(Self::Actionable),
+            "advisory" => Some(Self::Advisory),
+            _ => None,
+        }
+    }
 }
 
 /// SG7（plan v1.1 §0.5/§0.6.3）：机器修复 finding 的服务端只读状态。本包
@@ -83,6 +127,74 @@ pub struct ReviewFinding {
     /// REQ-WSC-11：owner 可选的互斥处置项（2–3 项）；每项含选项名与后果。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_options: Option<Vec<OwnerOption>>,
+    /// REQ-WSC-12：处置归属。`None`（含全部历史记录）语义＝`actionable`，
+    /// fail-safe。历史记录（wire 无该字段）因此保持逐字兼容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ReviewFindingDisposition>,
+    /// REQ-WSC-12：能指到具体 Work Item 时填写；指不到留空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_work_item_id: Option<String>,
+    /// REQ-WSC-13：平台计算的 finding 内容指纹（sha256(severity␁message)
+    /// 前 16 位小写 hex）——owner「排除此项」与呈现共用的稳定身份。模型
+    /// MUST NOT 生成该值；live 与 rebuild 两条投影路径由同一函数算出。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finding_key: Option<String>,
+}
+
+impl ReviewFinding {
+    /// REQ-WSC-13 的身份算法（唯一实现）：`sha256(severity + "\u{1}" + message)`
+    /// 取前 16 位小写 hex。live 解析与 rebuild 归一化都调用本函数，保证同一
+    /// 份 findings 两条路径算出同一个 key。
+    pub fn finding_key_for(severity: &ReviewFindingSeverity, message: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(severity.as_str().as_bytes());
+        hasher.update([0x1u8]);
+        hasher.update(message.as_bytes());
+        hex::encode(hasher.finalize())[..16].to_string()
+    }
+
+    /// 本 finding 的平台身份（按内容现算，不信任持久化值）。
+    pub fn computed_finding_key(&self) -> String {
+        Self::finding_key_for(&self.severity, &self.message)
+    }
+
+    /// REQ-WSC-13：投影点补全 finding 身份（durable 记录不写该字段，保持存量
+    /// 字节；rebuild 走同一算法，两条路径逐字同 key）。
+    pub fn with_computed_finding_key(mut self) -> Self {
+        if self.finding_key.is_none() {
+            self.finding_key = Some(self.computed_finding_key());
+        }
+        self
+    }
+    /// 缺失＝`actionable`（fail-safe：宁可多阻断不可漏阻断）。
+    pub fn disposition_or_fail_safe(&self) -> ReviewFindingDisposition {
+        self.disposition
+            .unwrap_or(ReviewFindingDisposition::Actionable)
+    }
+
+    /// REQ-WSC-12 平台硬规则：只有 `actionable` 计入阻断/返修/必关闭清单。
+    pub fn is_actionable(&self) -> bool {
+        self.disposition_or_fail_safe() == ReviewFindingDisposition::Actionable
+    }
+
+    /// P0-1 加固（REQ-WSC-12 平台硬规则）：`advisory` 不得成为「本 Work Item
+    /// 真缺口」的后门。`contract_gap` / `self_contradiction` 都是本 WI 可通过
+    /// 修订自身收敛的契约类缺口——模型把这类 finding 标成 advisory 时平台
+    /// 按 `actionable` 处理（判定在平台侧，不依赖模型自觉标对）。
+    ///
+    /// owner 的显式排除仍然优先：会话级归一（`ReviewVerdict` 的 owner 处置
+    /// 投影）在此之后把同一 finding 改回 advisory，按 owner 事实裁决。
+    pub fn with_platform_disposition_rules(mut self) -> Self {
+        if matches!(self.disposition, Some(ReviewFindingDisposition::Advisory))
+            && matches!(
+                self.category,
+                Some(ReviewFindingCategory::ContractGap | ReviewFindingCategory::SelfContradiction)
+            )
+        {
+            self.disposition = Some(ReviewFindingDisposition::Actionable);
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +292,18 @@ pub struct ReviewVerdict {
 
 fn default_review_gate() -> ReviewGate {
     ReviewGate::UserConfirmAllowed
+}
+
+impl ReviewVerdict {
+    /// REQ-WSC-13：投影点补全 finding 身份（durable 记录不写该字段，保持存量
+    /// 字节；rebuild 走同一算法，两条路径逐字同 key）。
+    pub fn with_computed_finding_keys(&self) -> Vec<ReviewFinding> {
+        self.findings
+            .iter()
+            .cloned()
+            .map(ReviewFinding::with_computed_finding_key)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

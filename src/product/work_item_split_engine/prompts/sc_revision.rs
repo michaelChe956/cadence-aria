@@ -7,6 +7,11 @@
 //! `build_revision_delta_prompt`（trusted_review_comments + summary），
 //! 并附加硬性逐条修复指令。首轮（无 verdict）路径完全不经过本模块，
 //! 其 prompt 逐字节不变。
+//!
+//! REQ-WSC-14（作者返修输入面）：`[review_findings]` 与「必须逐条修复」指令只覆盖
+//! `actionable` finding；被平台降级为 advisory（owner 已处置 / 范围外事实）的条目只以
+//! `[review_advisory_findings]` 的条数提示出现（「仅供提示，本轮不要修改」），绝不带
+//! 原文 message/required_action，避免把「改不动」的事实当成必须修复项命令作者。
 
 use super::{
     IssueRecord, RepositoryRecord, WORK_ITEM_PLAN_MARKDOWN_OUTPUT_DIRECTIVE,
@@ -110,11 +115,26 @@ fn render_review_revision_block(review: &ReviewVerdict) -> String {
     }
     block.push_str("\n\nReviewer 摘要:\n");
     block.push_str(&review.summary);
+    let actionable_count = review
+        .findings
+        .iter()
+        .filter(|finding| finding.is_actionable())
+        .count();
+    let advisory_count = review.findings.len() - actionable_count;
     block.push_str("\n\n[review_findings]\n");
     if review.findings.is_empty() {
         block.push_str("（本轮无可注入的结构化 findings；按 Reviewer 审核意见逐条修复。）");
+    } else if actionable_count == 0 {
+        block.push_str(
+            "（本轮无可注入的 actionable findings；本轮不要修改 source，按上一版原样输出完整 markdown。）",
+        );
     } else {
-        for (index, finding) in review.findings.iter().enumerate() {
+        for (index, finding) in review
+            .findings
+            .iter()
+            .filter(|finding| finding.is_actionable())
+            .enumerate()
+        {
             block.push_str(&format!(
                 "{}. severity: {}\n   message: {}\n   evidence: {}\n   required_action: {}\n",
                 index + 1,
@@ -124,15 +144,31 @@ fn render_review_revision_block(review: &ReviewVerdict) -> String {
                 finding.required_action.trim(),
             ));
         }
-        block.push_str("（severity=suggestion 的条目为建议项；must_fix/blocking 条目全部为本轮必须修复项。）\n");
+        block.push_str("（[review_findings] 内 severity=suggestion 的条目为建议项；must_fix/blocking 条目为本轮必须修复项。）\n");
+    }
+    // REQ-WSC-14（作者返修输入面）：owner 已处置 / 范围外的 finding 已被平台降级为
+    // advisory——只列条数并声明「仅供提示，本轮不要修改」，绝不把它们的
+    // message/required_action 或「必须逐条修复」指令交给作者。
+    if advisory_count > 0 {
+        block.push_str(&format!(
+            "\n[review_advisory_findings]\n\
+             本轮另有 {advisory_count} 条 finding 已被平台判定为 advisory（owner 已处置或落在本 Work Item 范围之外）：\
+             仅供提示，本轮不要修改；不得把它们当作必须修复项，也不得为它们改写任何 section。\n"
+        ));
     }
     block.push_str(
         "\n[revision_directives]\n\
          - 返修=逐字应用：每条 required_action 给出的补丁行/删除操作逐字应用到上一版 source 的对应位置；除该行外，已通过部分逐字节保持不变，禁止重写、重排或润色未涉及的 section。\n\
-         - 必须在本轮内逐条修复全部 must_fix/blocking findings，逐条对齐其 required_action；不得只修复其中部分。\n\
+         - 必须在本轮内逐条修复全部 must_fix/blocking findings（仅限 [review_findings] 列出的 actionable 条目），逐条对齐其 required_action；不得只修复其中部分。\n\
          - 不得新增与上述 findings 无关的其他变更；未涉及的 section 保持与上一版一致。\n\
-         - 若某条 finding 无法在本轮内修复，不要静默跳过：在对应 Work Item 的 Blockers 中如实登记 blocker 及原因。\n\n",
+         - 若某条 finding 无法在本轮内修复，不要静默跳过：在对应 Work Item 的 Blockers 中如实登记 blocker 及原因。\n",
     );
+    if advisory_count > 0 {
+        block.push_str(
+            "- [review_advisory_findings] 提及的 advisory 事实仅供提示：本轮不要修改、不得当作必须修复项、不得为其虚构改动。\n",
+        );
+    }
+    block.push('\n');
     block
 }
 

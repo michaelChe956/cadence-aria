@@ -280,108 +280,7 @@ pub(crate) fn recover_pending_author_choice(
     })
 }
 
-pub(crate) fn latest_review_verdict_from_messages(
-    messages: &[SessionMessage],
-    workspace_type: &WorkspaceType,
-) -> Option<ReviewVerdict> {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message.role == "reviewer")
-        .map(|message| {
-            WorkspaceEngine::parse_review_verdict_for_workspace(&message.content, workspace_type)
-        })
-}
-
-pub(crate) fn latest_review_verdict_from_node_details(
-    lifecycle_store: &LifecycleStore,
-    project_id: &str,
-    issue_id: &str,
-    session_id: &str,
-    timeline_nodes: &[TimelineNode],
-) -> Option<ReviewVerdict> {
-    timeline_nodes
-        .iter()
-        .rev()
-        .filter(|node| {
-            matches!(
-                node.node_type,
-                TimelineNodeType::ReviewerRun
-                    | TimelineNodeType::WorkItemPlanOutlineReview
-                    | TimelineNodeType::WorkItemDraftReview
-                    | TimelineNodeType::WorkItemBatchReview
-            )
-        })
-        .find_map(|node| {
-            let mut detail = lifecycle_store
-                .load_node_detail_for_issue_session(project_id, issue_id, session_id, &node.node_id)
-                .ok()?;
-            let persisted_verdict = detail.verdict.clone()?;
-            let verdict = match deserialize_historical_review_verdict(persisted_verdict.clone()) {
-                Ok(verdict) => verdict,
-                Err(error) => {
-                    tracing::warn!(
-                        node_id = %node.node_id,
-                        %error,
-                        "persisted review verdict failed normalization; entering user triage"
-                    );
-                    failed_historical_review_verdict(error.to_string())
-                }
-            };
-            let normalized_verdict =
-                serde_json::to_value(&verdict).expect("ReviewVerdict serialization must succeed");
-            if normalized_verdict != persisted_verdict {
-                detail.verdict = Some(normalized_verdict);
-                if let Err(error) =
-                    lifecycle_store.save_node_detail(session_id, &node.node_id, &detail)
-                {
-                    tracing::warn!(
-                        node_id = %node.node_id,
-                        %error,
-                        "failed to persist normalized review verdict"
-                    );
-                }
-            }
-            Some(verdict)
-        })
-}
-
-fn failed_historical_review_verdict(error: String) -> ReviewVerdict {
-    ReviewVerdict {
-        verdict: ReviewVerdictType::NeedsHuman,
-        comments: "历史审核记录无法归一化，请人工确认。".to_string(),
-        summary: "历史审核记录需要人工确认".to_string(),
-        findings: Vec::new(),
-        review_gate: ReviewGate::UserTriageRequired,
-        work_item_plan_review: None,
-        structured_output_diagnostic: Some(StructuredOutputDiagnostic {
-            code: "historical_review_normalization_failed".to_string(),
-            message: error,
-            repair_attempted: false,
-            repair_succeeded: false,
-            raw_output_preview: None,
-        }),
-    }
-}
-
-pub(crate) fn review_complete_event_from_verdict(
-    node_id: String,
-    round: u32,
-    verdict: &ReviewVerdict,
-) -> EngineEvent {
-    EngineEvent::ReviewComplete {
-        node_id,
-        round,
-        verdict: verdict.verdict.clone(),
-        comments: verdict.comments.clone(),
-        summary: verdict.summary.clone(),
-        findings: verdict.findings.clone(),
-        review_gate: verdict.review_gate.clone(),
-        work_item_plan_review: verdict.work_item_plan_review.clone(),
-        structured_output_diagnostic: verdict.structured_output_diagnostic.clone(),
-    }
-}
-
+include!("session_state_parts/historical_review.inc.rs");
 impl WorkspaceEngine {
     pub fn build_session_state(&self) -> WsOutMessage {
         let messages: Vec<WsMessageDto> = self
@@ -508,6 +407,7 @@ impl WorkspaceEngine {
             run_history: self.session.run_history.clone(),
             review_invocation_scope: self.session.review_invocation_scope.clone().map(Box::new),
             human_gate_snapshot: self.session.human_gate_snapshot.clone(),
+            human_gate_turn_rejection: self.latest_human_gate_turn_rejection_projection(),
             repair_reservation: self.session.repair_reservation.clone().map(Box::new),
             policy_diagnostics: self.session.policy_diagnostics.clone(),
             provider_start_ledger: self.session.provider_start_ledger.clone(),

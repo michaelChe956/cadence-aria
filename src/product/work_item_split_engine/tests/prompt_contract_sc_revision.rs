@@ -3,7 +3,8 @@
 // tests/prompt_contract.rs（include 进 prompt_contract_sc_revision 模块）。
 
 use crate::web::workspace_ws_types::{
-    ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict, ReviewVerdictType,
+    ReviewFinding, ReviewFindingDisposition, ReviewFindingSeverity, ReviewGate, ReviewVerdict,
+    ReviewVerdictType,
 };
 
 const TEST_SINGLE_CANDIDATE_LANGUAGE_RULES: &str =
@@ -39,7 +40,7 @@ fn must_fix_finding(message: &str, required_action: &str) -> ReviewFinding {
         machine_repair: None,
         owner_question: None,
         owner_options: None,
-    }
+    disposition: None, target_work_item_id: None, finding_key: None, }
 }
 
 fn suggestion_finding(message: &str) -> ReviewFinding {
@@ -54,6 +55,25 @@ fn suggestion_finding(message: &str) -> ReviewFinding {
         machine_repair: None,
         owner_question: None,
         owner_options: None,
+    disposition: None, target_work_item_id: None, finding_key: None, }
+}
+
+/// owner 已处置、被平台强制降级为 advisory 的 finding：severity 仍是 must_fix。
+fn advisory_must_fix_finding(message: &str, required_action: &str) -> ReviewFinding {
+    ReviewFinding {
+        severity: ReviewFindingSeverity::MustFix,
+        message: message.to_string(),
+        evidence: "docs/frontend-spec.md:12".to_string(),
+        required_action: required_action.to_string(),
+        category: None,
+        class_hint: None,
+        contract_field: None,
+        machine_repair: None,
+        owner_question: None,
+        owner_options: None,
+        disposition: Some(ReviewFindingDisposition::Advisory),
+        target_work_item_id: None,
+        finding_key: None,
     }
 }
 
@@ -149,6 +169,67 @@ fn sc_revision_prompt_injects_findings_and_directives_on_top_of_byte_identical_b
             "revision prompt must carry the hard repair directive {required}: {revision}"
         );
     }
+}
+
+/// REQ-WSC-14（作者返修输入面）：owner 已处置、被平台强制降级为 advisory 的
+/// finding（severity 仍是 must_fix）MUST NOT 出现在 `[review_findings]`，也
+/// MUST NOT 进入 `[revision_directives]` 的「必须逐条修复」清单；充其量以
+/// 「仅供提示，本轮不要修改」单列。
+#[test]
+fn sc_revision_prompt_excludes_owner_downgraded_findings_from_repair_surface() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let verdict = revise_verdict_fixture(
+        "本轮只修可收敛项。",
+        "范围外事实已被 owner 排除",
+        vec![
+            must_fix_finding(
+                "WI-002 required_capabilities 缺 capability.field-constraints",
+                "在 CT-001 显式声明 capability.field-constraints。",
+            ),
+            advisory_must_fix_finding("中文 locale 尚未配置（产品侧文档事实）", "回写产品侧文档"),
+        ],
+    );
+    let revision =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_revision_prompt(
+            &request, &issue, &repository, author_context(), &verdict,
+        )
+        .expect("revision markdown author prompt with owner-downgraded finding");
+
+    assert!(
+        revision.contains("message: WI-002 required_capabilities 缺 capability.field-constraints"),
+        "actionable finding 必须进入 [review_findings]: {revision}"
+    );
+    assert!(
+        !revision.contains("中文 locale 尚未配置（产品侧文档事实）"),
+        "降级后的 finding message 不得进入注入 provider 的 prompt: {revision}"
+    );
+    assert!(
+        !revision.contains("回写产品侧文档"),
+        "降级后的 finding required_action 不得进入注入 provider 的 prompt: {revision}"
+    );
+    // advisory 只允许单列提示，并写明本轮不要修改。
+    let advisory_at = revision
+        .find("[review_advisory_findings]")
+        .expect("advisory findings 必须单列提示段");
+    let directives_at = revision
+        .find("[revision_directives]")
+        .expect("revision directives section");
+    assert!(
+        advisory_at < directives_at,
+        "advisory 提示段必须位于 [revision_directives] 之前"
+    );
+    let advisory_section = &revision[advisory_at..directives_at];
+    assert!(
+        advisory_section.contains("仅供提示，本轮不要修改"),
+        "advisory 段必须写明仅供提示、本轮不要修改: {advisory_section}"
+    );
+    // 「必须逐条修复」只覆盖 [review_findings] 里的 actionable 条目。
+    assert!(
+        revision.contains(
+            "必须在本轮内逐条修复全部 must_fix/blocking findings（仅限 [review_findings] 列出的 actionable 条目）"
+        ),
+        "修复指令必须把范围钉在 actionable findings 上: {revision}"
+    );
 }
 
 #[test]

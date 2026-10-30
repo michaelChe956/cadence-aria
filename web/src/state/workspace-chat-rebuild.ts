@@ -630,7 +630,9 @@ export function buildGatePromptEntry(
   const reviewFindings = Array.isArray(latestReview?.metadata?.findings)
     ? latestReview.metadata.findings
     : [];
-  const findings = reviewFindings.length > 0 ? reviewFindings : projection.findings;
+  const findings = (reviewFindings.length > 0 ? reviewFindings : projection.findings).map(
+    withFindingViewAliases,
+  );
   const reviewGate = latestReview?.metadata?.review_gate?.toString() ?? "";
   const contextBlockerGate = isWorkItemPlanContextBlockerGate(state);
   const metadata: GateEntryMetadata = {
@@ -652,6 +654,16 @@ export function buildGatePromptEntry(
       ? { failure_message: projection.turn.failure_message }
       : {}),
     ...(projection.turn?.inlineError ? { inline_error: projection.turn.inlineError } : {}),
+    // REQ-WSC-14（owner 2026-10-30 反馈「用户不知道如何往下继续了」）：终态
+    // validation_reject 的可操作事实——门卡据此说清「发生了什么 + 下一步」。
+    ...(projection.turn?.rejection
+      ? {
+          rejectedFeedback: projection.turn.rejection.rejected_feedback,
+          rejectionReason: projection.turn.rejection.rejection_reason,
+          rejectionNextActions: projection.turn.rejection.rejection_next_actions,
+          rejectionDiagnostics: projection.turn.rejection.rejection_diagnostics,
+        }
+      : {}),
     gate_status: projection.closed ?? projection.status,
     action_block_reason: projection.action_block_reason,
     // F-21：终止专属阻断持久化（null=允许终止）——门卡离场兜底分支读取。
@@ -678,6 +690,26 @@ export function buildGatePromptEntry(
     node_id: gatePromptNode?.node_id,
     metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     ...(projection.closed ? { resolved: true, resolution: projection.closed } : {}),
+  };
+}
+
+/**
+ * REQ-WSC-12/13：findings 的 UI 读取契约——wire 原样字段（snake_case）之外，
+ * 追加 camelCase 别名（`findingKey`/`targetWorkItemId`；`disposition` 两处同名），
+ * 让门卡与「排除此项」用同一身份，不需要前端自己算 key。
+ */
+function withFindingViewAliases(finding: unknown): Record<string, unknown> {
+  if (!finding || typeof finding !== "object") {
+    return {};
+  }
+  const record = finding as Record<string, unknown>;
+  const findingKey = typeof record.finding_key === "string" ? record.finding_key : undefined;
+  const targetWorkItemId =
+    typeof record.target_work_item_id === "string" ? record.target_work_item_id : undefined;
+  return {
+    ...record,
+    ...(findingKey ? { findingKey } : {}),
+    ...(targetWorkItemId ? { targetWorkItemId } : {}),
   };
 }
 

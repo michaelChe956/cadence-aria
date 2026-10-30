@@ -187,7 +187,7 @@ pub(crate) use compile::WorkItemPlanCompileFinalizerCheckpoint;
 pub(crate) use compile_parse::*;
 pub(crate) use conversational_gate::{
     HumanGateCloseDecision, HumanGateCloseOutcome, HumanGateCommandOutcome, HumanGateFeedbackInput,
-    ScManualRevisionResult,
+    ScManualRevisionResult, exclude_only_feedback_requested, normalized_finding_keys,
 };
 pub(crate) use conversational_gate_recovery::{
     CandidateRecoveryCommand, CandidateRecoveryOutcome, HUMAN_GATE_PROVIDER_MAX_ATTEMPTS,

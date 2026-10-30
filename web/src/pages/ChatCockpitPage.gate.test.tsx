@@ -262,7 +262,7 @@ describe("ChatCockpitPage", () => {
     });
     renderCockpit("session_001", false);
 
-    expect(screen.getAllByText("已离开人工确认门").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/已离开人工确认门/).length).toBeGreaterThan(0);
     fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.confirm.code, ctrlKey: true });
     fireEvent.keyDown(document, { code: COCKPIT_HOTKEYS.advance.code, ctrlKey: true });
     expect(sendHumanConfirm).not.toHaveBeenCalled();

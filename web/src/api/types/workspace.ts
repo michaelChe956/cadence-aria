@@ -520,7 +520,13 @@ export type WsInMessage =
       reason?: string | null;
     }
   | { type: "abandon_human_gate"; command_id: string }
-  | { type: "human_gate_feedback"; command_id: string; feedback: string }
+  | {
+      type: "human_gate_feedback";
+      command_id: string;
+      feedback: string;
+      /** REQ-WSC-13：逐条「排除此项」的 finding key；缺省/空＝旧行为。 */
+      excluded_finding_ids?: string[];
+    }
   | { type: "advance"; command_id: string }
   | { type: "confirm_plan_amendment"; amendment_id: string }
   | {
@@ -612,7 +618,20 @@ export type WorkspaceReviewFinding = {
   owner_question?: string | null;
   /** REQ-WSC-11：owner 可选的互斥处置项（2–3 项）。 */
   owner_options?: WorkspaceOwnerOption[] | null;
+  /** REQ-WSC-12：处置归属。`advisory` 只作提示（其它文档当前状态、产品侧
+   * 规范/流程待办、与 Work Item 无关的外部事实）——平台只把 `actionable`
+   * 计入阻断与返修；缺省语义＝`actionable`（兼容历史记录）。 */
+  disposition?: WorkspaceReviewFindingDisposition;
+  /** REQ-WSC-13：平台算的 finding 内容身份（sha256(severity␁message) 前
+   * 16 位小写 hex）；owner「排除此项」与呈现共用的稳定 key。 */
+  finding_key?: string;
+  /** REQ-WSC-12：能指到具体 Work Item 时填写（如 `WI-001`）。 */
+  target_work_item_id?: string;
 };
+
+/** REQ-WSC-12：finding 处置归属（wire 词表，与 Rust
+ * `ReviewFindingDisposition` 逐字同源）。 */
+export type WorkspaceReviewFindingDisposition = "actionable" | "advisory";
 
 export type StructuredOutputDiagnostic = {
   code: string;
@@ -733,6 +752,22 @@ export type ChoiceAnswer = {
 };
 
 /**
+ * REQ-WSC-14（k3 REQ-WSC-14 不符合项）：门 turn 以 validation_reject 失败时的
+ * 可操作事实（durable 投影）。`session_state` 全量投影携带最近一次，刷新后
+ * 门卡仍能说清「发生了什么、下一步怎么做」；与 `human_gate_turn_rejected`
+ * 帧字段同形。
+ */
+export type HumanGateTurnRejectionProjection = {
+  turn_id: string;
+  rejected_feedback: string;
+  rejection_reason: string;
+  rejection_next_actions: string[];
+  rejection_diagnostics: string[];
+  /** 拒收落盘时间（RFC3339）；旧投影缺省。 */
+  recorded_at?: string;
+};
+
+/**
  * P0 1.3（REQ-WIGA-05）Task 10：无 driver 的人工门命令族（wire 与服务端
  * `HumanActionRequest` 同形，serde tag="type" snake_case）。`expected_gate_id`
  * 与服务端当前 active gate/timeline node 比对（不匹配 409 零副作用）；
@@ -746,6 +781,8 @@ export type WorkspaceHumanAction =
       command_id: string;
       expected_gate_id: string;
       feedback: string;
+      /** REQ-WSC-13：owner 逐条「排除此项」的 finding key（旧客户端缺省＝空）。 */
+      excluded_finding_ids?: string[];
     }
   | {
       type: "compile_recovery";
@@ -761,7 +798,18 @@ export type WorkspaceHumanAction =
       command_id: string;
       expected_gate_id: string;
       action: "recover" | "rebuild";
-    };
+    }
+  /** REQ-WSC-13/14（k3 P0-2C）：撤销 owner 的「排除此项」——会话级 durable
+   * 事实，与门身份无关（因此不带 `expected_gate_id`）；撤销后该 finding 恢复
+   * 可被报为 actionable。 */
+  | { type: "revoke_finding_exclusions"; command_id: string; finding_keys: string[] };
+
+/** 撤销排除的回执：`remaining_finding_keys` 是撤销后仍生效的排除项。 */
+export type RevokeFindingExclusionsResult = {
+  command_id: string;
+  state: WorkspaceHumanActionState;
+  remaining_finding_keys: string[];
+};
 
 /** 人工命令回执状态（snake_case wire）：accepted=已受理（含幂等重放/AlreadyClosed）；busy=门/轮次占用（409）；rejected=引擎语义拒绝（422）。 */
 export type WorkspaceHumanActionState = "accepted" | "busy" | "rejected";
@@ -978,6 +1026,23 @@ export type WsOutMessage = WithEventSeq<
       failure_class: string;
       message: string;
     }
+  /** REQ-WSC-14：门 turn 以 validation_reject 失败时的可操作回执（已 durable
+   * 落盘）——被拒反馈原文、可读原因、下一步动作与逐字诊断。 */
+  | {
+      type: "human_gate_turn_rejected";
+      turn_id: string;
+      rejected_feedback: string;
+      rejection_reason: string;
+      rejection_next_actions: string[];
+      rejection_diagnostics: string[];
+    }
+  /** REQ-WSC-13（k3 P0-2A）：排除-only 帧（`feedback` 为空 + 平台 key）的
+   * 受理回执——引擎已落 durable 已处置清单，不建修订 turn。 */
+  | {
+      type: "human_gate_exclusions_accepted";
+      command_id: string;
+      excluded_finding_ids: string[];
+    }
   | { type: "human_gate_busy"; turn_id: string }
   | {
       type: "advance_completed";
@@ -1034,6 +1099,9 @@ export type WsOutMessage = WithEventSeq<
       run_history: WorkItemPlanRunHistory;
       review_invocation_scope?: unknown | null;
       human_gate_snapshot?: WorkItemPlanHumanGateSnapshot | null;
+      /** REQ-WSC-14：该会话最近一次门 turn 拒收（四要素，与
+       * `human_gate_turn_rejected` 帧同源）——刷新后重建门卡用；缺席省略。 */
+      human_gate_turn_rejection?: HumanGateTurnRejectionProjection | null;
       repair_reservation?: WorkItemPlanRepairReservation | null;
       policy_diagnostics?: WorkItemPlanPolicyDiagnostic[];
       provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];

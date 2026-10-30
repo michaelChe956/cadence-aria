@@ -5,6 +5,7 @@ fn conversational_gate_stage_matrix_accepts_only_typed_gate_commands_and_advance
     let feedback = WsInMessage::HumanGateFeedback {
         command_id: "cmd-feedback".to_string(),
         feedback: "请修订候选".to_string(),
+        excluded_finding_ids: vec![],
     };
     let confirm = WsInMessage::Confirm;
     let abandon = WsInMessage::AbandonHumanGate {
@@ -142,6 +143,7 @@ fn conversational_gate_unknown_stage_message_is_zero_side_effect_protocol_error(
     let feedback = WsInMessage::HumanGateFeedback {
         command_id: "cmd-feedback".to_string(),
         feedback: "请修订候选".to_string(),
+        excluded_finding_ids: vec![],
     };
     let error = conversational_gate_stage_error(
         WorkItemPlanFlowKind::SingleCandidate,

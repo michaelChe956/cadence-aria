@@ -258,6 +258,7 @@ fn conversational_gate_inbound_wire_contract_roundtrips() {
     let feedback = WsInMessage::HumanGateFeedback {
         command_id: "cmd-001".to_string(),
         feedback: "原文保留，不在协议层剪裁".to_string(),
+        excluded_finding_ids: vec![],
     };
     let feedback_json = serde_json::to_string(&feedback).unwrap();
     assert_eq!(
@@ -866,6 +867,7 @@ fn session_state_artifact_accepts_markdown_payload() {
         run_history: crate::product::work_item_plan_policy::RunHistory::default(),
         review_invocation_scope: None,
         human_gate_snapshot: None,
+        human_gate_turn_rejection: None,
         repair_reservation: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),
@@ -999,6 +1001,7 @@ fn anchor_t03_recovery_snapshot_and_operation_result_wire() {
             run_history: crate::product::work_item_plan_policy::RunHistory::default(),
             review_invocation_scope: None,
             human_gate_snapshot: None,
+            human_gate_turn_rejection: None,
             repair_reservation: None,
             policy_diagnostics: Vec::new(),
             provider_start_ledger: Vec::new(),

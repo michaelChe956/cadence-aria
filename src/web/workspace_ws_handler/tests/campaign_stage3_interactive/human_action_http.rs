@@ -418,7 +418,7 @@ async fn workspace_human_action_observer_ws_writes_stay_rejected() {
         WsInMessage::HumanGateFeedback {
             command_id: "cmd-obs-1".to_string(),
             feedback: "观察者反馈".to_string(),
-        },
+        excluded_finding_ids: vec![], },
         WsInMessage::Confirm,
         WsInMessage::AbandonHumanGate {
             command_id: "cmd-obs-2".to_string(),

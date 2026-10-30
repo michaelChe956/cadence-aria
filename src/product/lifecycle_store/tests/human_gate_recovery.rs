@@ -942,3 +942,180 @@ fn sg_04a_old_record_no_backfill_and_started_is_not_actual_launch() {
     let raw: serde_json::Value = read_json(&session_path).unwrap();
     assert!(raw.get("structural_governance_state").is_none());
 }
+
+// REQ-WSC-13/14（owner 2026-10-30 反馈）：门卡两种 durable 事实的落盘回归——
+// 已处置事实清单（按 finding_key 幂等）与门 turn 的拒收可操作信息。
+
+use crate::product::models::{
+    HumanDispositionRecord, HumanFindingDispositionKind, HumanGateTurnRejection,
+};
+
+fn disposition(key: &str, summary: &str) -> HumanDispositionRecord {
+    HumanDispositionRecord {
+        finding_key: key.to_string(),
+        message_summary: summary.to_string(),
+        disposition: HumanFindingDispositionKind::Excluded,
+        recorded_at: "2026-10-30T00:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn human_dispositions_are_durable_and_idempotent_by_finding_key() {
+    let (_tmp, store) = setup();
+    let session = create_session(&store, "work_item_plan_disposition", WorkspaceType::WorkItemPlan);
+
+    // 首次排除：落盘一条。
+    let merged = store
+        .record_human_dispositions(
+            &session.id,
+            &[disposition("0123456789abcdef", "中文 locale 尚未配置")],
+        )
+        .unwrap();
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].finding_key, "0123456789abcdef");
+
+    // 重复提交同一 key：幂等零增（摘要不被新值覆盖）。
+    let merged = store
+        .record_human_dispositions(
+            &session.id,
+            &[disposition("0123456789abcdef", "另一段措辞")],
+        )
+        .unwrap();
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].message_summary, "中文 locale 尚未配置");
+
+    // 第二条不同 key：追加。
+    let merged = store
+        .record_human_dispositions(
+            &session.id,
+            &[disposition("fedcba9876543210", "缺 loading 契约")],
+        )
+        .unwrap();
+    assert_eq!(merged.len(), 2);
+
+    // 重读（重启语义）：durable 清单可读回同样的两条。
+    let reread = store.list_human_dispositions(&session.id).unwrap();
+    assert_eq!(reread, merged);
+}
+
+/// REQ-WSC-13/14（k3 P0-2C）：撤销排除——清单条目删除后该 finding 恢复可报
+/// 为 actionable；幂等（无匹配 key 零写、结果不变）。
+#[test]
+fn human_dispositions_can_be_revoked() {
+    let (_tmp, store) = setup();
+    let session = create_session(&store, "work_item_plan_revoke", WorkspaceType::WorkItemPlan);
+
+    store
+        .record_human_dispositions(
+            &session.id,
+            &[
+                disposition("0123456789abcdef", "中文 locale 尚未配置"),
+                disposition("fedcba9876543210", "缺 loading 契约"),
+            ],
+        )
+        .unwrap();
+
+    let remaining = store
+        .revoke_human_dispositions(&session.id, &["0123456789abcdef".to_string()])
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].finding_key, "fedcba9876543210");
+    assert_eq!(store.list_human_dispositions(&session.id).unwrap(), remaining);
+
+    // 幂等：再次撤销同一 key（已不存在）零写、结果不变。
+    let again = store
+        .revoke_human_dispositions(&session.id, &["0123456789abcdef".to_string()])
+        .unwrap();
+    assert_eq!(again, remaining);
+
+    // 清单缺席时撤销＝空清单（不报错）。
+    let empty_session = create_session(&store, "work_item_plan_revoke_empty", WorkspaceType::WorkItemPlan);
+    assert!(
+        store
+            .revoke_human_dispositions(&empty_session.id, &["0123456789abcdef".to_string()])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn human_dispositions_reject_malformed_finding_key() {
+    let (_tmp, store) = setup();
+    let session = create_session(&store, "work_item_plan_bad_key", WorkspaceType::WorkItemPlan);
+
+    let error = store
+        .record_human_dispositions(&session.id, &[disposition("NOT-A-KEY", "x")])
+        .unwrap_err();
+    assert!(
+        matches!(error, ProductStoreError::InvalidRecord { .. }),
+        "{error:?}"
+    );
+    assert!(store.list_human_dispositions(&session.id).unwrap().is_empty());
+}
+
+#[test]
+fn human_gate_turn_rejection_is_durable_and_readable() {
+    let (_tmp, store) = setup();
+    let session = create_session(&store, "work_item_plan_rejection", WorkspaceType::WorkItemPlan);
+
+    // 缺失时读 None（不报错，旧会话零回归）。
+    assert!(
+        store
+            .load_human_gate_turn_rejection(&session.id, "turn_0001")
+            .unwrap()
+            .is_none()
+    );
+
+    let rejection = HumanGateTurnRejection {
+        turn_id: "turn_0001".to_string(),
+        rejected_feedback: "计划里不写文档更新任务，本次只交付代码".to_string(),
+        reason: "本轮反馈未通过平台校验，没有被采纳；门仍停在原处。".to_string(),
+        next_actions: vec!["把反馈收窄成一条可执行的修改后重新提交".to_string()],
+        diagnostics: vec!["STRUCTURAL_EXISTING_GATE: failure requires the original human gate".to_string()],
+        recorded_at: "2026-10-30T00:00:00Z".to_string(),
+    };
+    store
+        .save_human_gate_turn_rejection(&session.id, &rejection)
+        .unwrap();
+
+    let loaded = store
+        .load_human_gate_turn_rejection(&session.id, "turn_0001")
+        .unwrap()
+        .expect("rejection must be durable");
+    assert_eq!(loaded, rejection);
+    assert_eq!(
+        store
+            .latest_human_gate_turn_rejection(&session.id)
+            .unwrap()
+            .map(|latest| latest.turn_id),
+        Some("turn_0001".to_string())
+    );
+
+    // 同 turn 幂等：二次写入零改（保留首份逐字诊断）。
+    let mut second = rejection.clone();
+    second.reason = "改写原因".to_string();
+    store
+        .save_human_gate_turn_rejection(&session.id, &second)
+        .unwrap();
+    let again = store
+        .load_human_gate_turn_rejection(&session.id, "turn_0001")
+        .unwrap()
+        .expect("rejection must be durable");
+    assert_eq!(again.reason, rejection.reason);
+}
+
+#[test]
+fn rejection_guidance_is_readable_and_actionable_per_stable_code() {
+    use crate::product::lifecycle_store::human_dispositions::human_gate_rejection_guidance;
+
+    let (reason, next) = human_gate_rejection_guidance(&[
+        "STRUCTURAL_ATTEMPTS_EXHAUSTED: physical attempt cap consumed".to_string(),
+    ]);
+    assert!(reason.contains("自动修复次数"), "{reason}");
+    assert!(!next.is_empty());
+
+    // 未知诊断也给可行动兜底：绝不把错误码当唯一呈现。
+    let (reason, next) = human_gate_rejection_guidance(&["SOMETHING_UNKNOWN".to_string()]);
+    assert!(!reason.contains("SOMETHING_UNKNOWN"), "{reason}");
+    assert!(!next.is_empty());
+}

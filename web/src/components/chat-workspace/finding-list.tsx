@@ -23,7 +23,31 @@ export type ReviewFinding = {
   owner_question?: string;
   /** REQ-WSC-11：owner 可选的互斥处置项（2–3 项）。 */
   owner_options?: ReviewOwnerOption[];
+  /**
+   * REQ-WSC-12：WI 范围判定——actionable=可由本 Work Item 修订收敛；
+   * advisory=范围外事实，只作「仅供参考」提示。缺失 = actionable（与解析层
+   * fail-safe 同口径，兼容旧记录）。
+   */
+  disposition?: "actionable" | "advisory";
+  /**
+   * REQ-WSC-13：平台算的内容指纹（sha256(severity+\x1+message) 前 16 hex）。
+   * 排除动作的唯一身份；缺失（旧记录）= 不渲染「排除此项」（fail-closed）。
+   */
+  findingKey?: string;
+  /** REQ-WSC-12：finding 指到的具体 Work Item（指不到时缺席）。 */
+  targetWorkItemId?: string;
 };
+
+/**
+ * REQ-WSC-13 §6 契约：门面 feedback 的扩展签名——排除项随
+ * HumanGateFeedback 出站（camelCase `excludedFindingIds`；排除-only 帧
+ * feedback 为空串）。少参函数天然可赋值本类型：门面未升级到双参签名时按
+ * 「发送失败」呈现（fail-closed，不静默丢排除项）。
+ */
+export type FeedbackSenderWithOptions = (
+  feedback: string,
+  options?: { excludedFindingIds?: string[] },
+) => boolean | void;
 
 export type ReviewOwnerGuidance = {
   question: string;
@@ -112,22 +136,90 @@ export function isBlockingFinding(finding: ReviewFinding) {
   return isRequiredFindingSeverity(finding.severity);
 }
 
+/** REQ-WSC-12：advisory = 仅提示（不阻断、不计数、不要求作者执行）；缺失 = actionable。 */
+export function isAdvisoryDisposition(finding: ReviewFinding): boolean {
+  return finding.disposition === "advisory";
+}
+
+/**
+ * REQ-WSC-12 §2 平台硬规则的前端镜像：只有 actionable 计入「需要解决」的
+ * 计数与分组——disposition=advisory 即使 class_hint/severity 判阻断也不进
+ * 需处理面（展示侧不依赖模型把 disposition 标对）。
+ */
+export function isActionableBlockingFinding(finding: ReviewFinding): boolean {
+  return !isAdvisoryDisposition(finding) && isBlockingFinding(finding);
+}
+
 const CLASS_HINT_LABELS: Record<string, string> = {
   repairable: "需处理",
   human_required: "需人工",
   advisory: "建议",
 };
 
-export function ReviewFindingGroups({ findings }: { findings: ReviewFinding[] }) {
-  const requiredFindings = findings.filter((finding) => isBlockingFinding(finding));
-  const optionalFindings = findings.filter((finding) => !isBlockingFinding(finding));
+export function ReviewFindingGroups({
+  findings,
+  excludedFindingKeys,
+  onExcludeFinding,
+  onRevokeExclusion,
+  revokingFindingKeys,
+  revokingAll,
+}: {
+  findings: ReviewFinding[];
+  /** REQ-WSC-13：owner 已成功出站排除的 finding key 集（本地即时反馈）。 */
+  excludedFindingKeys?: ReadonlySet<string>;
+  /** REQ-WSC-13：排除发送器（门卡接线）；缺席（结论卡等只读面）不渲染排除按钮。 */
+  onExcludeFinding?: (finding: ReviewFinding) => boolean;
+  /** REQ-WSC-13/14（k3 P0-2C）：撤销排除发送器（REST，按平台 findingKey）；缺席不渲染撤销按钮。 */
+  onRevokeExclusion?: (findingKey: string) => void;
+  /** 撤销在途的 key（行级禁用+「撤销中…」，防重复点击）。 */
+  revokingFindingKeys?: ReadonlySet<string>;
+  /** 全量撤销在途（期间所有行级撤销按钮一并禁用）。 */
+  revokingAll?: boolean;
+}) {
+  // REQ-WSC-12 §2 前端镜像：advisory（范围外事实）整组落「仅供参考（不阻断）」，
+  // 不参与「需要解决」的阻断分组——即使 class_hint/severity 判阻断。
+  const advisoryFindings = findings.filter(isAdvisoryDisposition);
+  const actionableFindings = findings.filter((finding) => !isAdvisoryDisposition(finding));
+  const requiredFindings = actionableFindings.filter((finding) => isBlockingFinding(finding));
+  const optionalFindings = actionableFindings.filter((finding) => !isBlockingFinding(finding));
   return (
     <>
       {requiredFindings.length > 0 ? (
-        <FindingGroup title="需要解决" tone="required" findings={requiredFindings} />
+        <FindingGroup
+          title="需要解决"
+          tone="required"
+          findings={requiredFindings}
+          excludedFindingKeys={excludedFindingKeys}
+          onExcludeFinding={onExcludeFinding}
+          onRevokeExclusion={onRevokeExclusion}
+          revokingFindingKeys={revokingFindingKeys}
+          revokingAll={revokingAll}
+        />
       ) : null}
       {optionalFindings.length > 0 ? (
-        <FindingGroup title="可选建议" tone="optional" findings={optionalFindings} />
+        <FindingGroup
+          title="可选建议"
+          tone="optional"
+          findings={optionalFindings}
+          excludedFindingKeys={excludedFindingKeys}
+          onExcludeFinding={onExcludeFinding}
+          onRevokeExclusion={onRevokeExclusion}
+          revokingFindingKeys={revokingFindingKeys}
+          revokingAll={revokingAll}
+        />
+      ) : null}
+      {advisoryFindings.length > 0 ? (
+        <FindingGroup
+          title="仅供参考（不阻断）"
+          tone="optional"
+          findings={advisoryFindings}
+          advisory={true}
+          excludedFindingKeys={excludedFindingKeys}
+          onExcludeFinding={onExcludeFinding}
+          onRevokeExclusion={onRevokeExclusion}
+          revokingFindingKeys={revokingFindingKeys}
+          revokingAll={revokingAll}
+        />
       ) : null}
     </>
   );
@@ -137,10 +229,23 @@ function FindingGroup({
   title,
   tone,
   findings,
+  advisory = false,
+  excludedFindingKeys,
+  onExcludeFinding,
+  onRevokeExclusion,
+  revokingFindingKeys,
+  revokingAll,
 }: {
   title: string;
   tone: "required" | "optional";
   findings: ReviewFinding[];
+  /** REQ-WSC-12：本组是否为 advisory（仅供参考）呈现。 */
+  advisory?: boolean;
+  excludedFindingKeys?: ReadonlySet<string>;
+  onExcludeFinding?: (finding: ReviewFinding) => boolean;
+  onRevokeExclusion?: (findingKey: string) => void;
+  revokingFindingKeys?: ReadonlySet<string>;
+  revokingAll?: boolean;
 }) {
   const titleClass = tone === "required" ? "text-amber-900" : "text-[var(--aria-ink-muted)]";
   const borderClass = tone === "required" ? "border-amber-200" : "border-[var(--aria-line)]";
@@ -154,28 +259,121 @@ function FindingGroup({
       </div>
       <div className="space-y-2">
         {findings.map((finding, index) => (
-          <div
+          <FindingRow
             key={`${finding.severity}-${index}`}
-            className="space-y-1"
-            data-testid="review-finding"
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <EffectiveClassBadge classHint={finding.class_hint} severity={finding.severity} />
-              <SeverityBadge severity={finding.severity} />
-              <div className="text-sm font-medium text-[var(--aria-ink)]">{finding.message}</div>
-            </div>
-            {finding.evidence ? (
-              <div className="text-xs text-[var(--aria-ink-muted)]">{finding.evidence}</div>
-            ) : null}
-            {finding.required_action ? (
-              <div className="text-xs font-medium text-[var(--aria-ink)]">
-                {finding.required_action}
-              </div>
-            ) : null}
-          </div>
+            finding={finding}
+            advisory={advisory}
+            excluded={Boolean(
+              finding.findingKey && excludedFindingKeys?.has(finding.findingKey),
+            )}
+            onExcludeFinding={onExcludeFinding}
+            onRevokeExclusion={onRevokeExclusion}
+            revoking={
+              revokingAll === true ||
+              (finding.findingKey !== undefined &&
+                revokingFindingKeys?.has(finding.findingKey) === true)
+            }
+          />
         ))}
       </div>
     </section>
+  );
+}
+
+function FindingRow({
+  finding,
+  advisory,
+  excluded,
+  onExcludeFinding,
+  onRevokeExclusion,
+  revoking = false,
+}: {
+  finding: ReviewFinding;
+  advisory: boolean;
+  excluded: boolean;
+  onExcludeFinding?: (finding: ReviewFinding) => boolean;
+  /** REQ-WSC-13/14（k3 P0-2C）：撤销排除发送器（已排除行专属入口）。 */
+  onRevokeExclusion?: (findingKey: string) => void;
+  /** 撤销在途：按钮禁用并显示「撤销中…」（防重复点击）。 */
+  revoking?: boolean;
+}) {
+  return (
+    <div className="space-y-1" data-testid="review-finding">
+      <div className="flex flex-wrap items-center gap-2">
+        {advisory ? <AdvisoryBadge /> : null}
+        <EffectiveClassBadge classHint={finding.class_hint} severity={finding.severity} />
+        <SeverityBadge severity={finding.severity} />
+        <div className="text-sm font-medium text-[var(--aria-ink)]">{finding.message}</div>
+      </div>
+      {finding.evidence ? (
+        <div className="text-xs text-[var(--aria-ink-muted)]">{finding.evidence}</div>
+      ) : null}
+      {finding.required_action ? (
+        <div
+          data-testid={advisory ? "advisory-required-action" : undefined}
+          // REQ-WSC-12：advisory 的 required_action 只作提示——不得加粗成
+          // 「要求作者执行」的祈使样式。
+          className={
+            advisory
+              ? "text-xs text-[var(--aria-ink-muted)]"
+              : "text-xs font-medium text-[var(--aria-ink)]"
+          }
+        >
+          {finding.required_action}
+        </div>
+      ) : null}
+      {/* REQ-WSC-13（owner 裁定取舍 2）：逐条「排除此项」——身份用平台算的
+          findingKey；旧记录无 key 不渲染按钮（fail-closed：无法 durable 引用）。
+          REQ-WSC-13/14（k3 P0-2C）：已排除行旁给「撤销排除」——排错后能重新
+          提出为 actionable；在途禁用防重复出站。 */}
+      {excluded ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            data-testid="finding-excluded-badge"
+            className="inline-flex shrink-0 items-center rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[11px] font-semibold text-emerald-700"
+          >
+            已排除
+          </span>
+          {onRevokeExclusion && finding.findingKey ? (
+            <button
+              type="button"
+              data-testid="finding-revoke-exclusion-button"
+              disabled={revoking}
+              onClick={() => {
+                if (finding.findingKey) {
+                  onRevokeExclusion(finding.findingKey);
+                }
+              }}
+              className="text-xs font-medium text-slate-600 underline underline-offset-2 transition-colors hover:text-slate-900 disabled:pointer-events-none disabled:opacity-50"
+            >
+              {revoking ? "撤销中…" : "撤销排除"}
+            </button>
+          ) : null}
+        </div>
+      ) : onExcludeFinding && finding.findingKey ? (
+        <button
+          type="button"
+          data-testid="finding-exclude-button"
+          onClick={() => onExcludeFinding(finding)}
+          className="text-xs font-medium text-slate-600 underline underline-offset-2 transition-colors hover:text-slate-900"
+        >
+          排除此项
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/** REQ-WSC-12：advisory（非本 Work Item 范围事实）行的「仅供参考」徽章。 */
+function AdvisoryBadge() {
+  return (
+    <span
+      data-testid="finding-advisory-badge"
+      title="disposition: advisory（不阻断、不计数、不要求作者执行）"
+      className="inline-flex shrink-0 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[11px] font-semibold text-slate-600"
+    >
+      仅供参考
+    </span>
   );
 }
 

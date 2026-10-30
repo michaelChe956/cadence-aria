@@ -102,7 +102,7 @@ impl WorkspaceEngine {
             schema_name: "work_item_plan_item_review".to_string(),
         };
         let schema = format!(
-            r#"{{"verdict":"pass|revise|needs_human|plan_reopen_required","review_scope":"item","target_outline_id":"{}","generation_round_id":"{}","draft_id":"{}","summary":"一句话摘要","affects_items":[{{"target_outline_id":"{}"}}],"findings":[{{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"当前 draft 或依赖上下文中的具体证据","required_action":"需要当前 item author 执行的最小动作","owner_question":"面向用户的一句话提问（仅 needs_human 必填）","owner_options":[{{"label":"选项名（人话）","consequence":"选它之后会发生什么"}}]}}]}}"#,
+            r#"{{"verdict":"pass|revise|needs_human|plan_reopen_required","review_scope":"item","target_outline_id":"{}","generation_round_id":"{}","draft_id":"{}","summary":"一句话摘要","affects_items":[{{"target_outline_id":"{}"}}],"findings":[{{"severity":"blocking|must_fix|suggestion","disposition":"actionable|advisory","target_work_item_id":"WI-001","message":"问题描述（含影响）","evidence":"当前 draft 或依赖上下文中的具体证据","required_action":"需要当前 item author 执行的最小动作","owner_question":"面向用户的一句话提问（仅 needs_human 必填）","owner_options":[{{"label":"选项名（人话）","consequence":"选它之后会发生什么"}}]}}]}}"#,
             draft_candidate.draft_record.outline_id,
             draft_candidate.draft_record.generation_round_id,
             draft_candidate.draft_record.draft_id,

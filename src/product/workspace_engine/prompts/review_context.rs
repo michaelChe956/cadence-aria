@@ -516,7 +516,7 @@ fn validate_plan_projection_hashes(projection: &PlanProjectionBundle) -> Result<
 /// fingerprint 显式标注 repeated，不再依赖措辞巧合判重。首轮（无前轮
 /// verdict 或前轮无非 advisory finding）返回 None；prompt 字节预算由
 /// `ensure_single_candidate_review_prompt_budget`（96KiB）兜底。
-pub(super) fn single_candidate_previous_round_findings_section(
+pub(crate) fn single_candidate_previous_round_findings_section(
     engine: &WorkspaceEngine,
     current_ir_ref: &str,
 ) -> Option<String> {
@@ -545,9 +545,14 @@ pub(super) fn single_candidate_previous_round_findings_section(
             let persisted = detail.verdict?;
             crate::product::workspace_engine::deserialize_historical_review_verdict(persisted).ok()
         })?;
+    // REQ-WSC-14（作者/评审输入面一致性）：`previous` 是 durable 原始 verdict（未按
+    // 已处置清单归一），此处 MUST 再按 owner 已处置清单过滤——否则同一 prompt 既说
+    // 「这是上一轮未收敛 finding」又说「该事实已被 owner 排除」，自相矛盾。
+    let excluded_keys = engine.session_human_disposition_keys();
     let previous_findings: Vec<_> = previous
         .findings
         .iter()
+        .filter(|finding| !excluded_keys.contains(&finding.computed_finding_key()))
         .map(|finding| {
             crate::product::work_item_plan_policy::classify::classify_finding(
                 previous.verdict.clone(),
@@ -631,5 +636,87 @@ impl WorkspaceEngine {
                 .map_err(|error| format!("working directory error: {error}"))?,
         };
         Ok((working_dir, None))
+    }
+}
+
+/// REQ-WSC-13/14：把该会话 durable 的「owner 已处置事实清单」注入 reviewer
+/// prompt。清单为空（owner 从未排除）→ None，输入面零变化。
+///
+/// 只喂**能拿到上轮上下文**的审查路径（单候选 Plan 复评、带
+/// `latest_review_verdict` 的通用评审）；全新候选的 Outline/Draft/Batch/
+/// Projection 路径不注入——那些轮次没有「上一轮处置」事实可对账。
+pub(crate) fn human_dispositions_section(engine: &WorkspaceEngine) -> Option<String> {
+    let lifecycle = engine.lifecycle_store.as_ref()?;
+    let records = lifecycle
+        .list_human_dispositions(&engine.session.session_id)
+        .ok()?;
+    render_human_dispositions_section(&records)
+}
+
+/// 纯渲染（单测入口）：把 durable 清单投影为 reviewer prompt 段落；空清单
+/// → None（输入面零变化）。
+pub(super) fn render_human_dispositions_section(
+    records: &[crate::product::models::HumanDispositionRecord],
+) -> Option<String> {
+    if records.is_empty() {
+        return None;
+    }
+    let mut rendered =
+        String::from("\n[human_dispositions]\nowner 已处置、不得重复报为 actionable 的事实：\n");
+    for record in records {
+        let summary = record.message_summary.trim();
+        let summary = if summary.is_empty() {
+            "<无摘要>"
+        } else {
+            summary
+        };
+        rendered.push_str(&format!(
+            "- {}：{}（owner 排除/已处置）\n",
+            record.finding_key, summary
+        ));
+    }
+    rendered.push_str(
+        "上述事实 MUST NOT 再报为 actionable；如仍要提及，只能 disposition=advisory 且 required_action 不得要求作者执行。\n",
+    );
+    Some(rendered)
+}
+
+#[cfg(test)]
+mod disposition_section_tests {
+    use super::*;
+    use crate::product::models::{HumanDispositionRecord, HumanFindingDispositionKind};
+
+    fn record(key: &str, summary: &str) -> HumanDispositionRecord {
+        HumanDispositionRecord {
+            finding_key: key.to_string(),
+            message_summary: summary.to_string(),
+            disposition: HumanFindingDispositionKind::Excluded,
+            recorded_at: "2026-10-30T00:00:00Z".to_string(),
+        }
+    }
+
+    /// REQ-WSC-13：清单渲染逐条列 key + 摘要，并声明不得再报为 actionable。
+    #[test]
+    fn renders_dispositions_with_key_and_summary() {
+        let rendered = render_human_dispositions_section(&[
+            record("0123456789abcdef", "中文 locale 尚未配置"),
+            record("fedcba9876543210", ""),
+        ])
+        .expect("non-empty ledger renders");
+
+        assert!(rendered.contains("[human_dispositions]"), "{rendered}");
+        assert!(rendered.contains("0123456789abcdef"), "{rendered}");
+        assert!(rendered.contains("中文 locale 尚未配置"), "{rendered}");
+        assert!(rendered.contains("<无摘要>"), "{rendered}");
+        assert!(
+            rendered.contains("MUST NOT 再报为 actionable"),
+            "{rendered}"
+        );
+    }
+
+    /// REQ-WSC-13：owner 从未排除 → 零注入（输入面逐字不变）。
+    #[test]
+    fn empty_ledger_injects_nothing() {
+        assert!(render_human_dispositions_section(&[]).is_none());
     }
 }

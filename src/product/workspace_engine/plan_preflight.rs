@@ -310,6 +310,13 @@ fn preflight_finding_to_review_finding(
         machine_repair,
         owner_question: None,
         owner_options: None,
+        // REQ-WSC-12：机械预检 finding 由本候选自身可修（Error→MustFix 阻断、
+        // Warning→Suggestion 不阻断）；disposition 留 None 即 actionable 语义，
+        // 不额外写值（保持既有 finding 字节与断言一致）。
+        disposition: None,
+        target_work_item_id: None,
+        // REQ-WSC-13：finding_key 在解析/重建投影点按内容填充。
+        finding_key: None,
     }
 }
 

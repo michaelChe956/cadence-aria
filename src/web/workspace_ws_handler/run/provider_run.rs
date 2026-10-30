@@ -1494,25 +1494,24 @@ pub(super) async fn spawn_provider_run_with_start_mode(
                             break;
                         }
                         Ok(crate::product::workspace_engine::ScManualRevisionResult::ValidationRejected { diagnostics, claim }) => {
-                            let message = diagnostics.join("; ");
                             let carry = match claim {
                                 // 唯一 claim 恰消费一次：attempt2 的再拒收
                                 // 恒不携案（Replayed/Exhausted 零新 claim）。
                                 Some(carry) if !structural_claim_consumed => carry,
                                 _ => {
-                                    // SG6a.2 in-band 回显：turn 非终态
-                                    // （REQ-CG-03「修订不过校验」），不冒充
-                                    // HumanGateTurnFailed 终态帧；机器修复
-                                    // 窗口/原门/等待面承接，终结收口归
-                                    // SG6a.3。
-                                    let _ = send_json_outbound(
-                                        &outbound_tx_for_task,
-                                        &WsOutMessage::ProtocolError {
-                                            code: SC_MANUAL_REVISION_VALIDATION_REJECTED_CODE.to_string(),
-                                            message,
-                                            context: None,
-                                        },
-                                    ).await;
+                                    // SG6a.2 in-band 回显 + REQ-WSC-14 终态可操作回执
+                                    // （帧构造与 durable 落盘在 engine 侧单点）。
+                                    for frame in engine
+                                        .rejection_frames_for_terminal(
+                                            &turn_id,
+                                            SC_MANUAL_REVISION_VALIDATION_REJECTED_CODE,
+                                            &diagnostics,
+                                        )
+                                        .await
+                                    {
+                                        let _ = send_json_outbound(&outbound_tx_for_task, &frame)
+                                            .await;
+                                    }
                                     break;
                                 }
                             };

@@ -362,6 +362,9 @@ fn single_candidate_review_prompt_injects_previous_round_finding_identities() {
         machine_repair: None,
         owner_question: None,
         owner_options: None,
+        disposition: None,
+        target_work_item_id: None,
+        finding_key: None,
     };
     let previous_verdict = ReviewVerdict {
         verdict: ReviewVerdictType::Revise,

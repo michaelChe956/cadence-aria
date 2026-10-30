@@ -9,6 +9,7 @@ import {
   getWorkspaceContentCacheValue,
   setWorkspaceContentCacheEntry,
 } from "./workspace-content-cache";
+import { durableRejectionTurnFromSession, humanGateActions } from "./workspace-ws-store-human-gate";
 import { refreshPreparedContextAuthorGuidance } from "./workspace-ws-store-guidance";
 import { setProviderSelection } from "./workspace-ws-store-providers";
 import {
@@ -165,6 +166,10 @@ const initialState: WorkspaceWsState = {
   pendingReviewDecision: null,
   pendingReviewerSummary: null,
   humanGateTurn: null,
+  // P2（REQ-WSC-15 归因扩展）：error 帧归因线索与排除失败事实（瞬态，
+  // 动作/回执/关门/reset 清空）。
+  lastGateLocalAction: null,
+  gateExclusionFailure: null,
   planRepair: null,
   // P0 1.2：durable automation 归属；reset/首帧前保持 null（未知）。
   automation: null,
@@ -307,6 +312,12 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
             ? prev.previousGateFindings
             : null;
       const durableGateStillOpen = humanGateSnapshot !== null;
+      // REQ-WSC-14（k3 REQ-WSC-14 不符合项）：刷新/重建后仍要读到「最近一次
+      // 拒收」——否则 owner 换一次页面，被拒原因就只剩一条失败行。
+      const durableRejectionTurn = durableRejectionTurnFromSession(state, prev, sameSession, {
+        changed: snapshotGateChanged,
+        openedAt: snapshotGateOpenedAt,
+      });
       // 重建口径：durable snapshot 在场即门仍开；否则要求仍处 legacy human_confirm 阶段。
       const gateProjectionStillOpen = durableGateStillOpen || state.stage === "human_confirm";
       // F-47 REQ-NDR-01：快照应用是 merge 而非重建——原实现整表重建 nodeDetails，
@@ -432,8 +443,11 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         trustMissingGuidance: null,
         // D8：同会话重连保留 turn/command 去重集与诊断（不丢弃）；
         // 跨会话一律清空，避免上一会话的门与推进记忆串到新会话。
-        humanGateTurn:
-          sameSession && gateProjectionStillOpen && prev.humanGateClosure === null
+        // REQ-WSC-14：durable 最近拒收优先重建终态 turn（刷新后四要素仍可读）；
+        // 否则沿用同会话的 live turn。
+        humanGateTurn: durableRejectionTurn
+          ? durableRejectionTurn
+          : sameSession && gateProjectionStillOpen && prev.humanGateClosure === null
             ? prev.humanGateTurn
             : null,
         humanGateClosure:
@@ -564,87 +578,8 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
       return { chatEntries: next };
     }),
 
-  // F-49 A4/B5：记下本卡提交的反馈文本——提交成功后清空输入（A4）与旧轮留档摘要
-  // （B5）都以此为准，不在渲染层重读输入框。
-  recordGateFeedbackSubmission: (entryId, feedback) =>
-    set((prev) => {
-      const index = prev.chatEntries.findIndex((entry) => entry.id === entryId);
-      if (index === -1) {
-        return {};
-      }
-      const next = [...prev.chatEntries];
-      next[index] = {
-        ...next[index],
-        metadata: { ...next[index].metadata, submitted_feedback: feedback },
-      };
-      return { chatEntries: next };
-    }),
-
-  applyHumanGateTurnOpen: (turnId, commandId, remainingBudget) =>
-    set((prev) => {
-      if (prev.humanGateTurn?.turn_id === turnId) {
-        // 引擎同 turn_id 重放（decisions.rs Replayed）→ 幂等消费：
-        // 不新建条目、不重算预算、不刷新 opened_at。
-        return {};
-      }
-      return {
-        humanGateTurn: {
-          turn_id: turnId,
-          command_id: commandId,
-          remaining_budget: remainingBudget,
-          status: "open",
-          artifact_ref: null,
-          failure_class: null,
-          failure_message: null,
-          opened_at: new Date().toISOString(),
-          inlineError: null,
-          // F-49 A8：记下本 turn 开出时的门快照身份——门以新快照重建（修订成功后
-          // Evaluate 重置预算）后，预算以新快照为准，见 selectGateProjection。
-          opened_snapshot_identity: prev.snapshotGateIdentity,
-        },
-        humanGateClosure: null,
-      };
-    }),
-
-  applyHumanGateTurnCompleted: (turnId, artifactRef) =>
-    set((prev) => {
-      if (prev.humanGateTurn?.turn_id !== turnId) {
-        return {};
-      }
-      return {
-        humanGateTurn: {
-          ...prev.humanGateTurn,
-          status: "awaiting_confirm",
-          artifact_ref: artifactRef,
-        },
-      };
-    }),
-
-  applyHumanGateTurnFailed: (turnId, failureClass, message) =>
-    set((prev) => {
-      if (prev.humanGateTurn?.turn_id !== turnId) {
-        return {};
-      }
-      return {
-        humanGateTurn: {
-          ...prev.humanGateTurn,
-          status: "failed",
-          failure_class: failureClass,
-          failure_message: message,
-        },
-      };
-    }),
-
-  applyHumanGateBusy: (turnId) =>
-    set((prev) => {
-      if (prev.humanGateTurn?.turn_id !== turnId) {
-        return {};
-      }
-      return { humanGateTurn: { ...prev.humanGateTurn, status: "busy" } };
-    }),
-
-  applyHumanGateClosed: (decision, stage) =>
-    set({ humanGateClosure: { decision, stage } }),
+  // REQ-WSC-13/14：人工门动作族拆到独立模块（单文件行数门禁）。
+  ...humanGateActions(set),
 
   applyAdvanceCompleted: (commandId, attemptId, workspaceEntry) =>
     set((prev) => {
@@ -718,22 +653,6 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
             },
           }
         : {};
-    }),
-
-  // F-49 A3：关门决定必须收口「全部」未决门卡。此前只 resolve 倒序命中的第一张：
-  // 门内轮次切换后残留的旧卡永不被收口（human_gate_closed 只在 approve/abandon
-  // 时发出），关门后对话流仍留可点旧卡。
-  resolveGateEntry: (resolution) =>
-    set((prev) => {
-      let changed = false;
-      const entries = prev.chatEntries.map((entry) => {
-        if (entry.type !== "gate_prompt" || entry.resolved === true) {
-          return entry;
-        }
-        changed = true;
-        return { ...entry, resolved: true, resolution };
-      });
-      return changed ? { chatEntries: entries } : {};
     }),
 
   updateStreamingEntry: (entryId, content) =>
@@ -1228,3 +1147,4 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
     set({ acknowledgedAbortedNodes: Array.from(new Set(nodeIds)) }),
   reset: () => set(initialState),
 }));
+

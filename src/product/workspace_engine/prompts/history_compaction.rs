@@ -96,7 +96,9 @@ pub(super) fn render_open_required_findings(
         .findings
         .iter()
         .enumerate()
-        .filter(|(_, finding)| is_required(&finding.severity))
+        // REQ-WSC-12 平台硬规则：必关闭清单只列 `actionable` finding；
+        // `disposition` 缺失（历史记录）视作 actionable，fail-safe。
+        .filter(|(_, finding)| finding.is_actionable() && is_required(&finding.severity))
         .map(|(index, finding)| {
             format!(
                 "- finding_id: finding-{}\n  severity: {}\n  message: {}\n  evidence: {}\n  required_action: {}\n",
@@ -699,11 +701,37 @@ mod tests {
                 machine_repair: None,
                 owner_question: None,
                 owner_options: None,
+                disposition: None,
+                target_work_item_id: None,
+                finding_key: None,
             }],
             review_gate: ReviewGate::RequiresRevision,
             work_item_plan_review: None,
             structured_output_diagnostic: None,
         }
+    }
+
+    /// REQ-WSC-12 平台硬规则：`disposition=advisory` 的 finding 不进入
+    /// 「未关闭 blocking/must_fix finding（全文）」必关闭清单——owner 已裁定
+    /// 范围外的事实不返修，也不该让 author 反复修。
+    #[test]
+    fn open_required_findings_skip_advisory_disposition() {
+        let mut verdict = open_must_fix();
+        verdict.findings[0].disposition =
+            Some(crate::web::workspace_ws_types::ReviewFindingDisposition::Advisory);
+
+        let rendered = render_open_required_findings(Some(&verdict));
+        assert!(
+            !rendered.contains("ROUND-1-MUST-FIX-FULL-TEXT"),
+            "advisory finding must not enter the required-closure list: {rendered}"
+        );
+
+        // 同一份 payload 去掉 disposition（历史记录）→ 仍按 actionable 列入。
+        let mut legacy = open_must_fix();
+        legacy.findings[0].disposition = None;
+        assert!(
+            render_open_required_findings(Some(&legacy)).contains("ROUND-1-MUST-FIX-FULL-TEXT")
+        );
     }
 
     #[test]

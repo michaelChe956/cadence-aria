@@ -4,6 +4,10 @@ import type {
   WorkspaceHumanAction,
   WorkspaceProviderName,
 } from "../api/types";
+import type {
+  RevokeFindingExclusionsAction,
+  RevokeFindingExclusionsOutcome,
+} from "./workspace-finding-exclusions";
 import {
   gateActionBlockReason,
   gateKindOf,
@@ -92,7 +96,15 @@ export type CockpitActionFacade = {
    * 通道携带 with_review=true（HTTP confirm 端点），与主区门卡语义一致。
    */
   confirmReview(): boolean | void;
-  feedback(feedback: string): boolean | void;
+  /**
+   * REQ-WSC-13（owner 2026-10-30 裁定，取舍 2=A）：`excludedFindingIds` 非空
+   * 时把「排除此项」一并提交（反馈与排除可同时发生；仅排除时 feedback 为空
+   * 串）。空串且无排除项＝拒发（旧行为不变）。
+   */
+  feedback(
+    feedback: string,
+    options?: { excludedFindingIds?: string[] },
+  ): boolean | void;
   terminate(): boolean | void;
   advance(): boolean | void;
   /**
@@ -151,6 +163,15 @@ export type CockpitActionFacade = {
   /** 「登记并重试」按钮（owner 2026-10-12 直批）：WS register_trust_entry
    * 显式授权登记（root 服务端解析）；可选面——未接线零出站 fail-closed。 */
   registerTrustEntry?(provider: WorkspaceProviderName): boolean;
+  /**
+   * REQ-WSC-13/14（k3 P0-2C）：撤销 owner 的「排除此项」——REST human-actions
+   * 的 `revoke_finding_exclusions`（会话级 durable 事实，**不带**
+   * expected_gate_id，与门身份无关；门可能已换/已关）。可选面——未接线
+   * （legacy/只读页面）时门卡不渲染撤销按钮（fail-closed 零出站）。
+   * `findingKeys` 传空数组 = 零写只读列表（回执 remaining 即 durable 清单
+   * 全量，刷新后恢复「已排除」呈现用）。
+   */
+  revokeFindingExclusions?(findingKeys: string[]): Promise<RevokeFindingExclusionsOutcome>;
 };
 
 
@@ -184,7 +205,11 @@ export function createCockpitActionFacade(input: {
   getState: () => WorkspaceWsState;
   sendConfirm: (withReview?: boolean) => boolean;
   sendAbandonGate: (commandId: string) => boolean;
-  sendHumanGateFeedback: (feedback: string, commandId?: string) => boolean;
+  sendHumanGateFeedback: (
+    feedback: string,
+    commandId?: string,
+    excludedFindingIds?: string[],
+  ) => boolean;
   sendAdvance: (commandId?: string) => boolean;
   /** v40 复验 #3：客户端采纳通道（预填修订反馈+切视图），由页面接线。 */
   adoptReview: () => void;
@@ -218,7 +243,15 @@ export function createCockpitActionFacade(input: {
   /** 「登记并重试」发送器（useWorkspaceWs.sendRegisterTrustEntry 页面接线；
    * 未接线零出站 fail-closed）。 */
   sendRegisterTrustEntry?: (provider: WorkspaceProviderName) => boolean;
+  /** REQ-WSC-13/14（k3 P0-2C）：撤销排除的 REST 发送器（页面接线，含
+   * sessionId 现读）；未接线时门面不暴露撤销面（fail-closed 零出站）。 */
+  sendRevokeFindingExclusions?: (
+    action: RevokeFindingExclusionsAction,
+  ) => Promise<RevokeFindingExclusionsOutcome>;
 }): CockpitActionFacade {
+  // REQ-WSC-13/14（k3 P0-2C）：撤销排除发送器的 const 捕获（闭包内保持
+  // 「已接线」收窄；未接线时下方条件展开直接省略整个方法）。
+  const sendRevokeFindingExclusions = input.sendRevokeFindingExclusions;
   return {
     confirm() {
       if (gateActionBlockReason(input.getState()) !== null) {
@@ -233,8 +266,16 @@ export function createCockpitActionFacade(input: {
       }
       return input.sendConfirm(true);
     },
-    feedback(feedback) {
+    feedback(feedback, options) {
       const state = input.getState();
+      const excludedFindingIds = (options?.excludedFindingIds ?? []).filter(
+        (key) => typeof key === "string" && key.trim().length > 0,
+      );
+      // REQ-WSC-13：空反馈只在「同时排除某些 finding」时放行——纯排除动作
+      // 也是 owner 的处置表达；两者皆空＝旧拒发行为。
+      if (!feedback.trim() && excludedFindingIds.length === 0) {
+        return false;
+      }
       if (gateActionBlockReason(state) !== null) {
         return false;
       }
@@ -252,6 +293,9 @@ export function createCockpitActionFacade(input: {
             command_id: newCommandId(),
             expected_gate_id: restRoute.gateId,
             feedback,
+            ...(excludedFindingIds.length > 0
+              ? { excluded_finding_ids: excludedFindingIds }
+              : {}),
           }) ?? false
         );
       }
@@ -265,10 +309,17 @@ export function createCockpitActionFacade(input: {
       // 终态（failed/awaiting_confirm）turn 的 command_id 已被 durable 消费，复用
       // 会被服务端查重吞掉——必须 newCommandId() 开新回合。点击时现读 store，
       // 不吃 memo 闭包过期。
-      return input.sendHumanGateFeedback(
-        feedback,
-        replayableGateCommandId(state) ?? newCommandId(),
-      );
+      // 无排除项时保持旧 2 参调用形态（既有 mock/断言零改）。
+      return excludedFindingIds.length > 0
+        ? input.sendHumanGateFeedback(
+            feedback,
+            replayableGateCommandId(state) ?? newCommandId(),
+            excludedFindingIds,
+          )
+        : input.sendHumanGateFeedback(
+            feedback,
+            replayableGateCommandId(state) ?? newCommandId(),
+          );
     },
     terminate() {
       const state = input.getState();
@@ -403,6 +454,17 @@ export function createCockpitActionFacade(input: {
     registerTrustEntry(provider) {
       return input.sendRegisterTrustEntry?.(provider) ?? false;
     },
+    // REQ-WSC-13/14（k3 P0-2C）：撤销排除透传页面发送器（可选面——未接线
+    // 不暴露 revokeFindingExclusions，门卡不渲染撤销按钮）；command_id 每次
+    // 现生成（服务端幂等按 key 清单承担，无按 command_id 查重的重放语义）。
+    ...(sendRevokeFindingExclusions && {
+      revokeFindingExclusions: (findingKeys: string[]) =>
+        sendRevokeFindingExclusions({
+          type: "revoke_finding_exclusions",
+          command_id: newCommandId(),
+          finding_keys: findingKeys,
+        }),
+    }),
   };
 }
 
@@ -449,6 +511,32 @@ export function classifyProtocolError(
   }
 
   return { kind: "hard_error" };
+}
+
+/**
+ * P2（REQ-WSC-15 归因扩展）：排除-only 帧落盘失败时服务端回 `WsOutMessage::Error`
+ * （`{"type":"error","message":"排除项没有落盘，请重试：…"}`，无 turn/command 关联
+ * 字段，非 protocol_error）——归因唯一线索是「最近本地门动作是排除」。窗口外的
+ * 陈旧动作不归因（防无关错误误撤销已成功的排除）；归因成立的落库由
+ * `applyGateExclusionFailure` 消费动作记录（同一错误只归因一次）。
+ */
+export const GATE_EXCLUSION_ATTRIBUTION_WINDOW_MS = 15_000;
+
+/** 归因成立时写入失败事实的前端稳定码（服务端 error 帧无 code 字段）。 */
+export const GATE_EXCLUSION_ERROR_CODE = "EXCLUSION_NOT_RECORDED";
+
+export function classifyGateExclusionError(
+  state: Pick<WorkspaceWsState, "lastGateLocalAction">,
+  now: number = Date.now(),
+): { gateKey: string } | null {
+  const action = state.lastGateLocalAction;
+  if (action === null || action.kind !== "exclusion") {
+    return null;
+  }
+  if (now - action.at > GATE_EXCLUSION_ATTRIBUTION_WINDOW_MS) {
+    return null;
+  }
+  return { gateKey: action.gateKey };
 }
 
 export function gateIdentityFromState(

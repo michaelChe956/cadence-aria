@@ -1,6 +1,6 @@
 #[path = "routing_scope.rs"]
 mod routing_scope;
-use super::feedback::format_review_feedback;
+use super::feedback::{format_actionable_review_feedback, format_review_feedback};
 use super::policy_routing::{RoutingAction, carry_forward_open_gate_budget};
 use super::*;
 use crate::product::lifecycle_store::PolicyRoutePersist;
@@ -118,13 +118,12 @@ impl WorkspaceEngine {
             .unwrap_or_else(|| "review_unknown".to_string());
         let round = self.active_review_round().unwrap_or(1);
         let active_node_type = self.active_node_type();
-        self.record_review_message(completion.readable_output);
-        self.latest_review_verdict = Some(verdict.clone());
+        let verdict = self
+            .finalize_review_verdict(&node_id, completion.readable_output, verdict)
+            .await;
         let reviewer = self
             .active_node_agent()
             .or_else(|| self.session.reviewer_provider.clone());
-        let verdict_value = serde_json::to_value(&verdict).unwrap_or(serde_json::Value::Null);
-        let _ = self.persist_review_verdict(&node_id, verdict_value).await;
         let _ = self
             .event_tx
             .send(review_complete_event_from_verdict(
@@ -1083,7 +1082,7 @@ impl WorkspaceEngine {
                     .await;
                     return;
                 }
-                self.pending_revision_context = Some(format_review_feedback(&verdict));
+                self.pending_revision_context = Some(format_actionable_review_feedback(&verdict));
                 if let Err(message) = self
                     .start_serial_work_item_draft_run_for(&current_outline_id)
                     .await

@@ -457,6 +457,7 @@ impl super::WorkspaceEngine {
 }
 
 include!("conversational_gate_parts/revision_turn.inc.rs");
+include!("conversational_gate_parts/dispositions.inc.rs");
 
 impl super::WorkspaceEngine {
     pub(crate) async fn handle_human_gate_feedback(
@@ -1005,5 +1006,145 @@ impl super::WorkspaceEngine {
         &self,
     ) -> Option<&HumanGateCloseCompileFailure> {
         self.last_gate_close_compile_failure.as_ref()
+    }
+}
+
+impl super::WorkspaceEngine {
+    /// REQ-WSC-13（owner 2026-10-30 裁定，取舍 2=A）：把 owner 的逐条
+    /// 「排除此项」落成 durable 已处置事实清单。`finding_keys` 是平台算的
+    /// finding 身份；非空才写。摘要取本轮（最近一次）评审 verdict 的同一
+    /// 内容身份 finding，供下一轮 reviewer 复述。
+    pub(crate) async fn record_owner_finding_exclusions(
+        &mut self,
+        finding_keys: &[String],
+    ) -> Result<usize, String> {
+        let Some(store) = self.lifecycle_store.clone() else {
+            return Ok(0);
+        };
+        let keys = finding_keys
+            .iter()
+            .map(|key| key.trim().to_string())
+            .filter(|key| crate::product::models::HumanDispositionRecord::is_valid_finding_key(key))
+            .collect::<Vec<_>>();
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let summaries: std::collections::BTreeMap<String, String> = self
+            .latest_review_verdict
+            .as_ref()
+            .map(|verdict| {
+                verdict
+                    .findings
+                    .iter()
+                    .map(|finding| {
+                        (
+                            finding.computed_finding_key(),
+                            finding_summary(&finding.message),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let now = Utc::now().to_rfc3339();
+        let records = keys
+            .into_iter()
+            .map(|key| crate::product::models::HumanDispositionRecord {
+                message_summary: summaries.get(&key).cloned().unwrap_or_default(),
+                finding_key: key,
+                disposition: crate::product::models::HumanFindingDispositionKind::Excluded,
+                recorded_at: now.clone(),
+            })
+            .collect::<Vec<_>>();
+        let merged = store
+            .record_human_dispositions(&self.session.session_id, &records)
+            .map_err(|error| error.to_string())?;
+        Ok(merged.len())
+    }
+
+    /// REQ-WSC-14（根因 E）：门 turn 已终态 Failed(validation_reject) 时，
+    /// 把可读原因、下一步动作与逐字诊断落 durable 并回传，供界面告诉
+    /// owner「发生了什么、下一步怎么做」。非终态（in-band 等待/授权面）
+    /// 返回 None——不冒充终态事实。
+    pub(crate) async fn record_terminal_rejection(
+        &mut self,
+        turn_id: &str,
+        diagnostics: &[String],
+    ) -> Result<Option<crate::product::models::HumanGateTurnRejection>, String> {
+        use crate::product::models::{HumanGateTurnFailureClass, HumanGateTurnStatus};
+
+        let Some(store) = self.lifecycle_store.clone() else {
+            return Ok(None);
+        };
+        let turn = store
+            .get_human_gate_turn(&self.session.session_id, turn_id)
+            .map_err(|error| error.to_string())?;
+        if turn.status != HumanGateTurnStatus::Failed
+            || turn.failure_class != Some(HumanGateTurnFailureClass::ValidationReject)
+        {
+            return Ok(None);
+        }
+        let rejection =
+            crate::product::lifecycle_store::human_dispositions::build_human_gate_turn_rejection(
+                turn_id,
+                &turn.feedback_text,
+                diagnostics,
+            );
+        if let Err(error) =
+            store.save_human_gate_turn_rejection(&self.session.session_id, &rejection)
+        {
+            // durable 审计失败不吞掉回执：owner 仍要看到发生了什么，日志留证。
+            eprintln!(
+                "[aria-gate-rejection] save rejection failed session_id={} turn_id={turn_id} error={error}",
+                self.session.session_id
+            );
+        }
+        Ok(Some(rejection))
+    }
+
+    /// REQ-WSC-14（根因 E）：SC 修订被拒时的出站帧单一构造点。
+    ///
+    /// **严格加法**：既有稳定码 `ProtocolError` 照旧先发（不替换、不改序——
+    /// 既有客户端与测试的等待面零变化）；turn 已终态
+    /// `Failed(validation_reject)` 时再**追加**一条可操作回执帧（原因/下一步/
+    /// 逐字诊断，且已落 durable）。非终态（in-band 等待/授权面）只有原帧。
+    pub(crate) async fn rejection_frames_for_terminal(
+        &mut self,
+        turn_id: &str,
+        stable_code: &str,
+        diagnostics: &[String],
+    ) -> Vec<crate::web::workspace_ws_types::WsOutMessage> {
+        use crate::web::workspace_ws_types::WsOutMessage;
+
+        let mut frames = vec![WsOutMessage::ProtocolError {
+            code: stable_code.to_string(),
+            message: diagnostics.join("; "),
+            context: None,
+        }];
+        if let Ok(Some(rejection)) = self.record_terminal_rejection(turn_id, diagnostics).await {
+            frames.push(human_gate_turn_rejected_frame(&rejection));
+        }
+        frames
+    }
+}
+/// finding message 的单行人话摘要（已处置清单复述用；不是身份）。
+fn finding_summary(message: &str) -> String {
+    let first_line = message.lines().next().unwrap_or_default().trim();
+    let mut summary = first_line.chars().take(120).collect::<String>();
+    if first_line.chars().count() > 120 {
+        summary.push('…');
+    }
+    summary
+}
+
+/// REQ-WSC-14：把 durable 拒收记录投影为出站回执帧（逐字，不加工）。
+pub(crate) fn human_gate_turn_rejected_frame(
+    rejection: &crate::product::models::HumanGateTurnRejection,
+) -> crate::web::workspace_ws_types::WsOutMessage {
+    crate::web::workspace_ws_types::WsOutMessage::HumanGateTurnRejected {
+        turn_id: rejection.turn_id.clone(),
+        rejected_feedback: rejection.rejected_feedback.clone(),
+        rejection_reason: rejection.reason.clone(),
+        rejection_next_actions: rejection.next_actions.clone(),
+        rejection_diagnostics: rejection.diagnostics.clone(),
     }
 }

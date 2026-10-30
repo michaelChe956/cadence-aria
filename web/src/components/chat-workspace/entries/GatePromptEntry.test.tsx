@@ -58,9 +58,10 @@ describe("GatePromptEntry actionability", () => {
 
     render(<GatePromptEntry entry={gateEntry("terminal_stage")} actions={gateActions} />);
 
-    expect(screen.getByText("已离开人工确认门")).toBeVisible();
+    // owner 2026-10-30：阻断不再无声消失按钮——确认以禁用态+人话原因留卡。
+    expect(screen.getByText("暂不可确认：已离开人工确认门")).toBeVisible();
     expect(screen.queryByTestId("gate-feedback-editor")).toBeNull();
-    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
+    expect(screen.getByRole("button", { name: "确认当前版本" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "终止此门" })).toBeNull();
     expect(gateActions.confirm).not.toHaveBeenCalled();
     expect(gateActions.feedback).not.toHaveBeenCalled();
@@ -80,8 +81,8 @@ describe("GatePromptEntry actionability", () => {
 
     act(() => useWorkspaceStore.getState().setStage("compile_plan"));
 
-    expect(screen.getByText("已离开人工确认门")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
+    expect(screen.getByText("暂不可确认：已离开人工确认门")).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认当前版本" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "终止此门" })).toBeNull();
   });
   it("locks a rebuilt typed gate card when the live stage leaves human confirmation", () => {
@@ -109,8 +110,8 @@ describe("GatePromptEntry actionability", () => {
       ),
     );
 
-    expect(screen.getByText("已离开人工确认门")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
+    expect(screen.getByText("暂不可确认：已离开人工确认门")).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认当前版本" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "终止此门" })).toBeNull();
   });
 
@@ -251,7 +252,14 @@ describe("GatePromptEntry actionability", () => {
     );
 
     expect(screen.getByRole("button", { name: "终止此门" })).toBeVisible();
-    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
+    // owner 2026-10-30：确认不再无声消失——相位阻断时以禁用态+人话原因留卡
+    //（title 与原因行同源；「门相位」黑话措辞退役）。
+    const confirm = screen.getByRole("button", { name: "确认当前版本" });
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveAttribute("title", "会话已进入下一阶段，这扇门不再接收操作");
+    expect(screen.getByTestId("gate-confirm-blocked-reason")).toHaveTextContent(
+      "会话已进入下一阶段，这扇门不再接收操作；可终止此门后重新发起",
+    );
     expect(screen.queryByTestId("gate-feedback-editor")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "终止此门" }));
@@ -279,9 +287,9 @@ describe("GatePromptEntry actionability", () => {
       />,
     );
 
-    expect(screen.getByText("该人工确认门已关闭")).toBeVisible();
+    expect(screen.getByText("暂不可确认：该人工确认门已关闭")).toBeVisible();
     expect(screen.queryByTestId("gate-feedback-editor")).toBeNull();
-    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
+    expect(screen.getByRole("button", { name: "确认当前版本" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "终止此门" })).toBeNull();
     expect(gateActions.confirm).not.toHaveBeenCalled();
     expect(gateActions.feedback).not.toHaveBeenCalled();
@@ -292,8 +300,8 @@ describe("GatePromptEntry actionability", () => {
 
     render(<GatePromptEntry entry={gateEntry(null, "turn_1")} actions={gateActions} />);
 
-    expect(screen.getByText("该人工确认门已关闭")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "确认当前版本" })).toBeNull();
+    expect(screen.getByText("暂不可确认：该人工确认门已关闭")).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认当前版本" })).toBeDisabled();
   });
 
   // F-49 A4：提交成功后清空输入并给出成功反馈；此前文本永久留在输入框（用户以
@@ -700,8 +708,8 @@ describe("GatePromptEntry actionability", () => {
       render(<GatePromptEntry entry={layoutEntry()} actions={actions()} />);
 
       const meta = screen.getByTestId("gate-meta");
-      expect(meta).toHaveTextContent("触发：引擎判定需人工");
-      expect(meta).toHaveTextContent("剩余修复轮次 3");
+      expect(meta).toHaveTextContent("为什么找你：引擎自动评审拿不准，需要你来定");
+      expect(meta).toHaveTextContent("还可自动修复 3 次");
       expect(meta.className).not.toContain("aria-chip");
       expect(screen.queryByTestId("gate-trigger-label")).toBeNull();
       expect(screen.queryByTestId("gate-budget")).toBeNull();
@@ -1013,7 +1021,7 @@ describe("C2 gate accepted feedback turns budget line", () => {
     };
   }
 
-  it("有反馈轮次时预算行呈现「已反馈 N 轮」与剩余预算同行", () => {
+  it("有反馈轮次时预算行呈现「你已回复过 N 轮」与剩余预算同行", () => {
     useWorkspaceStore.setState({
       workspaceType: "work_item_plan",
       humanGateSnapshot: planSnapshot(2),
@@ -1022,8 +1030,8 @@ describe("C2 gate accepted feedback turns budget line", () => {
     render(<GatePromptEntry entry={turnsEntry()} actions={actions()} />);
 
     const meta = screen.getByTestId("gate-meta");
-    expect(meta).toHaveTextContent("已反馈 2 轮");
-    expect(meta).toHaveTextContent("剩余修复轮次 3");
+    expect(meta).toHaveTextContent("你已回复过 2 轮");
+    expect(meta).toHaveTextContent("还可自动修复 3 次");
   });
 
   it("零轮次与旧会话缺席都维持既有预算行（不渲染已反馈段）", () => {
@@ -1033,15 +1041,15 @@ describe("C2 gate accepted feedback turns budget line", () => {
     });
     const { unmount } = render(<GatePromptEntry entry={turnsEntry()} actions={actions()} />);
     const meta = screen.getByTestId("gate-meta");
-    expect(meta).toHaveTextContent("剩余修复轮次 3");
-    expect(meta).not.toHaveTextContent("已反馈");
+    expect(meta).toHaveTextContent("还可自动修复 3 次");
+    expect(meta).not.toHaveTextContent("回复过");
     unmount();
 
     useWorkspaceStore.setState({ humanGateSnapshot: planSnapshot() });
     render(<GatePromptEntry entry={turnsEntry()} actions={actions()} />);
     const metaAbsent = screen.getByTestId("gate-meta");
-    expect(metaAbsent).toHaveTextContent("剩余修复轮次 3");
-    expect(metaAbsent).not.toHaveTextContent("已反馈");
+    expect(metaAbsent).toHaveTextContent("还可自动修复 3 次");
+    expect(metaAbsent).not.toHaveTextContent("回复过");
   });
 });
 

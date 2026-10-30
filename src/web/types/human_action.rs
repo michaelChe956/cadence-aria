@@ -19,6 +19,10 @@ pub enum HumanActionRequest {
         command_id: String,
         expected_gate_id: String,
         feedback: String,
+        /// REQ-WSC-13：owner 逐条「排除此项」的 finding key（旧客户端缺省＝空，
+        /// 行为与改动前逐字相同）。
+        #[serde(default)]
+        excluded_finding_ids: Vec<String>,
     },
     CompileRecovery {
         command_id: String,
@@ -33,6 +37,23 @@ pub enum HumanActionRequest {
         expected_gate_id: String,
         action: CandidateRecoveryActionDto,
     },
+    /// REQ-WSC-13/14（k3 P0-2C）：撤销 owner 的「排除此项」。排除是会话级
+    /// durable 事实（门可能已换或已关），因此**不要求 `expected_gate_id`**；
+    /// 撤销后该 finding 恢复可被报为 actionable。
+    RevokeFindingExclusions {
+        command_id: String,
+        finding_keys: Vec<String>,
+    },
+}
+
+/// 撤销排除的回执：`state` 恒 `accepted`；`remaining_finding_keys` 是撤销后
+/// 仍生效的排除项（前端据此更新「已排除」徽章，不必整页刷新）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RevokeFindingExclusionsResult {
+    pub command_id: String,
+    pub state: HumanActionState,
+    pub remaining_finding_keys: Vec<String>,
 }
 
 /// C1 Task 4：恢复动作 wire 枚举（`recover`＝恢复原门；`rebuild`＝从权威

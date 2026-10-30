@@ -533,7 +533,7 @@ describe("chat workspace p1 entries", () => {
       expect(screen.queryByRole("button", { name: confirmName })).not.toBeInTheDocument();
     }
     expect(
-      screen.getByText("请在下方输入补充上下文后发送（对应 provide_context），或选择终止"),
+      screen.getByText("请在下方输入补充上下文后发送，或终止此门"),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "终止此门" }));
@@ -556,7 +556,7 @@ describe("chat workspace p1 entries", () => {
 
     expect(screen.getByText("已终止")).toBeInTheDocument();
     expect(
-      screen.queryByText("请在下方输入补充上下文后发送（对应 provide_context），或选择终止"),
+      screen.queryByText("请在下方输入补充上下文后发送，或终止此门"),
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "终止此门" })).not.toBeInTheDocument();
   });
@@ -582,7 +582,7 @@ describe("chat workspace p1 entries", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认当前版本" }));
     expect(screen.getByRole("button", { name: "终止此门" })).toBeInTheDocument();
     expect(
-      screen.queryByText("请在下方输入补充上下文后发送（对应 provide_context），或选择终止"),
+      screen.queryByText("请在下方输入补充上下文后发送，或终止此门"),
     ).not.toBeInTheDocument();
     expect(onDecision).toHaveBeenCalledWith("confirm");
   });
@@ -615,11 +615,12 @@ function makeEntry(overrides: Partial<ChatEntry>): ChatEntry {
 }
 
 describe("gate prompt read-only truth", () => {
+  // owner 2026-10-30：触发原因人话化（原「引擎判定需人工」等内部措辞退役）。
   const triggerCases = [
-    ["native_human_required", "引擎判定需人工"],
-    ["repeated_fingerprint", "同一问题重复出现"],
-    ["verification_new_findings", "复验发现新问题"],
-    ["repair_budget_exhausted", "修复轮次已用尽"],
+    ["native_human_required", "引擎自动评审拿不准，需要你来定"],
+    ["repeated_fingerprint", "同一问题又出现了，需要你来定"],
+    ["verification_new_findings", "复验又发现新问题，需要你来定"],
+    ["repair_budget_exhausted", "自动修复次数已用完，需要你来定"],
   ] as const;
 
   const gateEntry = (metadata: Record<string, unknown>): ChatEntry =>
@@ -635,15 +636,17 @@ describe("gate prompt read-only truth", () => {
   it.each(triggerCases)("renders the %s gate trigger label in the merged meta line", (trigger, label) => {
     render(<GatePromptEntry entry={gateEntry({ gate_trigger: trigger })} />);
 
-    expect(screen.getByTestId("gate-meta")).toHaveTextContent(`触发：${label}`);
+    const meta = screen.getByTestId("gate-meta");
+    expect(meta).toHaveTextContent(`为什么找你：${label}`);
+    expect(meta.textContent).not.toContain("触发：");
   });
 
   it("always shows the remaining manual repair budget next to the gate", () => {
     render(<GatePromptEntry entry={gateEntry({ remaining_budget: 1 })} />);
 
     const meta = screen.getByTestId("gate-meta");
-    expect(meta).toHaveTextContent("剩余修复轮次 1");
-    expect(meta.className).not.toContain("aria-chip");
+    expect(meta).toHaveTextContent("还可自动修复 1 次");
+    expect(meta.textContent).not.toContain("剩余修复轮次");
   });
 
   it("renders the turn failure inline while the gate stays visible", () => {

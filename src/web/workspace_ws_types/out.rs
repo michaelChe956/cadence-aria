@@ -65,6 +65,37 @@ fn default_pending_choice_role() -> String {
     "author".to_string()
 }
 
+/// REQ-WSC-14（k3 P0-2B 同批）：刷新后仍可读的「最近一次门 turn 拒收」投影。
+///
+/// 与 `HumanGateTurnRejected` 出站帧字段同形（同一份 durable 拒收记录），
+/// 供重建路径在 `session_state` 全量投影里恢复门卡的四要素——否则 owner
+/// 刷新一次，被拒原因就消失（现场「不知道发生了什么」的第二条根因）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanGateTurnRejectionDto {
+    pub turn_id: String,
+    pub rejected_feedback: String,
+    pub rejection_reason: String,
+    #[serde(default)]
+    pub rejection_next_actions: Vec<String>,
+    #[serde(default)]
+    pub rejection_diagnostics: Vec<String>,
+    /// 拒收落盘时间（RFC3339 UTC）——重建门卡的等待/时间戳锚点。
+    pub recorded_at: String,
+}
+
+impl From<&crate::product::models::HumanGateTurnRejection> for HumanGateTurnRejectionDto {
+    fn from(rejection: &crate::product::models::HumanGateTurnRejection) -> Self {
+        Self {
+            turn_id: rejection.turn_id.clone(),
+            rejected_feedback: rejection.rejected_feedback.clone(),
+            rejection_reason: rejection.reason.clone(),
+            rejection_next_actions: rejection.next_actions.clone(),
+            rejection_diagnostics: rejection.diagnostics.clone(),
+            recorded_at: rejection.recorded_at.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoverableInterruptedRun {
     pub failed_node_id: String,
@@ -523,6 +554,25 @@ pub enum WsOutMessage {
         failure_class: String,
         message: String,
     },
+    /// REQ-WSC-14（owner 2026-10-30 反馈「用户不知道如何往下继续了」）：
+    /// 门 turn 以 `validation_reject` 失败时的可操作回执——被拒反馈原文、
+    /// 可读原因、下一步动作与逐字诊断。与 durable 拒收记录同源，界面据此
+    /// 告诉 owner 发生了什么、下一步怎么做。
+    HumanGateTurnRejected {
+        turn_id: String,
+        rejected_feedback: String,
+        rejection_reason: String,
+        rejection_next_actions: Vec<String>,
+        rejection_diagnostics: Vec<String>,
+    },
+    /// REQ-WSC-13（k3 P0-2A）：排除-only 帧的**受理回执**——`feedback` 为空、
+    /// 只带排除项的 `human_gate_feedback` 不建修订 turn，落 durable 清单后
+    /// 以本帧确认。界面据此把「已排除」视为已受理，不再出现
+    /// `INVALID_HUMAN_GATE_FEEDBACK`。
+    HumanGateExclusionsAccepted {
+        command_id: String,
+        excluded_finding_ids: Vec<String>,
+    },
     HumanGateBusy {
         turn_id: String,
     },
@@ -578,6 +628,11 @@ pub enum WsOutMessage {
         review_invocation_scope: Option<Box<ReviewInvocationScope>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         human_gate_snapshot: Option<HumanGateSnapshot>,
+        /// REQ-WSC-14：该会话最近一次门 turn 拒收（四要素，与
+        /// `human_gate_turn_rejected` 帧同源）——刷新/重建后门卡仍能说清
+        /// 「发生了什么、下一步怎么做」。缺席（从未拒收/旧会话）省略。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        human_gate_turn_rejection: Option<HumanGateTurnRejectionDto>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repair_reservation: Option<Box<RepairReservation>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -740,6 +795,7 @@ mod tests {
             run_history: RunHistory::default(),
             review_invocation_scope: None,
             human_gate_snapshot: None,
+            human_gate_turn_rejection: None,
             repair_reservation: None,
             policy_diagnostics: Vec::new(),
             provider_start_ledger: Vec::new(),

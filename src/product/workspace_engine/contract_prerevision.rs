@@ -135,54 +135,8 @@ pub(crate) fn contract_prerevision_readable_output(verdict: &ReviewVerdict) -> S
     output
 }
 
-/// `ContractValidationFinding` → `ReviewFinding` 适配：
-/// - Error → MustFix + category=ContractGap + class_hint=Repairable（policy 侧
-///   归入自动返修通道，与 reviewer 契约缺口同池消费预算）；
-/// - Warning → Suggestion + class_hint=Advisory（advisory：不参与指纹闸门/预算）；
-/// - `code` 拼进 message 前缀（机械可识别）；`logical_work_item_id`/
-///   `contract_ref`/`capability_ref` 拼进 evidence；`required_action` 按 code
-///   模板化（provider 从 graph 反查补全）。
-fn contract_finding_to_review_finding(
-    finding: &ContractValidationFinding,
-    graph: Option<&DependencyContractGraph>,
-    machine_repair: Option<MachineRepairDto>,
-) -> ReviewFinding {
-    let logical_id = finding.logical_work_item_id.as_deref();
-    let contract_ref = finding.contract_ref.as_deref();
-    let capability_ref = finding.capability_ref.as_deref();
-    let provider = graph.and_then(|graph| {
-        let consumer = logical_id?;
-        let contract_id = contract_ref?;
-        provider_for_consumer_contract(graph, consumer, contract_id)
-    });
-    let (severity, category, class_hint) = match finding.severity {
-        ContractFindingSeverity::Error => (
-            ReviewFindingSeverity::MustFix,
-            Some(ReviewFindingCategory::ContractGap),
-            Some(FindingClassHint::Repairable),
-        ),
-        ContractFindingSeverity::Warning => (
-            ReviewFindingSeverity::Suggestion,
-            None,
-            Some(FindingClassHint::Advisory),
-        ),
-    };
-    ReviewFinding {
-        severity,
-        message: format!("{}: {}", finding.code, finding.message),
-        evidence: evidence_text(logical_id, contract_ref, capability_ref),
-        required_action: required_action_text(finding, provider),
-        category,
-        class_hint,
-        contract_field: contract_field_text(finding),
-        // SG7（§0.6.3）：machine_repair 只由服务端已证 L1 的同 source/
-        // context 显式配对产生（`machine_repair_dto_for_instruction`），
-        // 不从 message/class_hint/severity 猜资格；无配对恒 None。
-        machine_repair,
-        owner_question: None,
-        owner_options: None,
-    }
-}
+// `ContractValidationFinding` → `ReviewFinding` 适配（实现见下方 include 的 part 文件）：
+include!("contract_prerevision_parts/finding_projection.inc.rs");
 
 /// SG7（plan v1.1 §0.6.3）：服务端 L1 指令 → wire `MachineRepairDto` 的
 /// 纯投影兼显式配对闸——仅当指令与当前候选的 source hash/context

@@ -394,6 +394,7 @@ pub use human_action::{
     AutomationContinuePlanRequest, AutomationContinuePlanStatus, AutomationControlStatus,
     CandidateRecoveryActionDto, CandidateRecoveryResult, HumanActionRequest, HumanActionState,
     HumanActionStatus, RetryFailedScRunRequest, RetryFailedScRunStatus,
+    RevokeFindingExclusionsResult,
 };
 
 mod plan_coding;

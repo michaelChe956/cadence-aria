@@ -134,3 +134,58 @@ pub enum BudgetLayer {
     Structural,
     Mechanical,
 }
+
+/// REQ-WSC-13（owner 2026-10-30 裁定，取舍 2=A）：owner 对某条 finding 的
+/// 处置方式。当前唯一生产值 `Excluded`（门卡「排除此项」）；后续 owner
+/// 需要新语义时按 wire 兼容纪律追加变体。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanFindingDispositionKind {
+    Excluded,
+}
+
+/// REQ-WSC-13：durable「已处置事实清单」条目——owner 已裁定不必再处理的
+/// 审查事实。`finding_key` 是平台按 finding 内容算的稳定身份；`message_summary`
+/// 是该 finding 的 message 摘要（供下一轮 reviewer 与界面复述，不作身份）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanDispositionRecord {
+    pub finding_key: String,
+    pub message_summary: String,
+    pub disposition: HumanFindingDispositionKind,
+    /// 处置落盘时间（RFC3339 UTC）。
+    pub recorded_at: String,
+}
+
+impl HumanDispositionRecord {
+    /// finding_key 形态：16 位小写 hex（REQ-WSC-13 算法输出）。
+    pub fn is_valid_finding_key(value: &str) -> bool {
+        value.len() == 16
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+}
+
+/// REQ-WSC-13/14（owner 反馈「用户不知道如何往下继续」）：门 turn 以
+/// `validation_reject` 失败时的可操作信息——被拒反馈原文、可读原因、下一步
+/// 动作与逐字编译/校验诊断。durable 落盘（重启后可读），并按同族落点与
+/// 门 turn 记录并列。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanGateTurnRejection {
+    pub turn_id: String,
+    /// 被拒的是哪一条反馈（原文逐字）。
+    pub rejected_feedback: String,
+    /// 可读原因（人话，不是错误码）。
+    pub reason: String,
+    /// 下一步动作（至少一条人话）。
+    #[serde(default)]
+    pub next_actions: Vec<String>,
+    /// 编译/校验诊断（`compile markdown source` / `validate plan candidate
+    /// IR` 的 diagnostics，逐字，不加工）。
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
+    /// 落盘时间（RFC3339 UTC）。
+    pub recorded_at: String,
+}

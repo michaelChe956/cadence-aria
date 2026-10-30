@@ -34,7 +34,11 @@ import { stageChangeContent } from "../state/workspace-stage-labels";
 import { structuredOutputDiagnosticFromUnknown } from "../state/structured-output-diagnostic";
 import { buildGatePromptEntry } from "../state/workspace-chat-rebuild";
 import { isStoryDesignAuthorConfirm } from "../state/workspace-cockpit-projection";
-import { classifyProtocolError } from "../state/cockpit-action-routing";
+import {
+  GATE_EXCLUSION_ERROR_CODE,
+  classifyGateExclusionError,
+  classifyProtocolError,
+} from "../state/cockpit-action-routing";
 
 export type WsServerMessage = WsOutMessage & Record<string, unknown>;
 
@@ -394,23 +398,37 @@ const store = useWorkspaceStore.getState();
       break;
     // 退役留档（T5/REQ-RET-02）：human_presentation_revision_saved/save_failed
     // 出站消息随保存命令族删除（wp5-attribution-table.md §2）。
-    case "error":
-      store.setError(msg.message as string);
+    case "error": {
+      const errorMessage = msg.message as string;
+      // P2（REQ-WSC-15 归因扩展）：排除-only 帧落盘失败回的是 WsOutMessage::Error
+      //（无 turn/command 关联字段，非 protocol_error）——「最近本地门动作是排除」
+      // 即归因到该门卡：落失败事实，门卡据此撤销乐观「已排除」并就地呈现原因。
+      // 归因一次即消费动作记录；全局 error 面行为保持不变（双呈现，不互相吞）。
+      const exclusionAttribution = classifyGateExclusionError(store);
+      if (exclusionAttribution !== null) {
+        store.applyGateExclusionFailure({
+          code: GATE_EXCLUSION_ERROR_CODE,
+          message: errorMessage,
+          gateKey: exclusionAttribution.gateKey,
+        });
+      }
+      store.setError(errorMessage);
       // 指引卡简化（owner 2026-10-12 直批）：结构化指导只配对最近一次
       // 错误——新 error 帧先清空旧指导；若本错误是 trust 缺失，服务端
       // 紧随其后的 trust_missing_guidance 帧会立即重建。
       store.applyTrustMissingGuidance(null);
       store.appendChatEntry({
-        id: chatEntryId("error", msg.message as string),
+        id: chatEntryId("error", errorMessage),
         type: "error",
         role: "system",
-        content: msg.message as string,
+        content: errorMessage,
         timestamp: new Date().toISOString(),
         metadata: {
-          message: msg.message as string,
+          message: errorMessage,
         },
       });
       break;
+    }
     case "trust_missing_guidance":
       {
         // 指引卡结构化指导（owner 2026-10-12 直批卡简化）：镜像 wire 字段
@@ -526,6 +544,35 @@ const store = useWorkspaceStore.getState();
         }
       }
       break;
+    case "human_gate_turn_rejected":
+      {
+        // REQ-WSC-14：终态 validation_reject 的可操作事实（原因/下一步/逐字
+        // 诊断），门卡据此告诉 owner 发生了什么、下一步怎么做。
+        store.applyHumanGateTurnRejected(msg.turn_id as string, {
+          rejected_feedback: String(msg.rejected_feedback ?? ""),
+          rejection_reason: String(msg.rejection_reason ?? ""),
+          rejection_next_actions: Array.isArray(msg.rejection_next_actions)
+            ? (msg.rejection_next_actions as string[])
+            : [],
+          rejection_diagnostics: Array.isArray(msg.rejection_diagnostics)
+            ? (msg.rejection_diagnostics as string[])
+            : [],
+        });
+        const gatePrompt = buildGatePromptEntry(useWorkspaceStore.getState());
+        if (gatePrompt) {
+          store.upsertGatePromptEntry(gatePrompt);
+        }
+      }
+      break;
+    case "human_gate_exclusions_accepted": {
+      // REQ-WSC-13（k3 P0-2A）：排除-only 帧的受理回执——引擎已把排除项落
+      // durable 已处置清单（未建修订 turn）。门卡「已排除」由点击时的乐观
+      // 置位呈现（REQ-WSC-15），此帧只是确认，findings 出站不变，无需重建。
+      // P2（REQ-WSC-15 归因扩展）：回执同时消费归因标记并清残留失败事实——
+      // 排除已 durable 成立，紧随其后的无关 error 帧不得被误归因成排除失败。
+      store.resolveGateExclusion();
+      break;
+    }
     case "human_gate_busy":
       store.applyHumanGateBusy(msg.turn_id as string);
       break;

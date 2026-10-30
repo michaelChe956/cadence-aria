@@ -946,3 +946,37 @@ fn merge_into_unions_cycle_original_fingerprints_idempotently() {
         "duplicate deltas must not duplicate members"
     );
 }
+
+/// REQ-WSC-12（k3「返修触发路径不看 disposition」）：`advisory` finding 不进
+/// actionable 指纹集合、不驱返修、不占 transition budget；同一 payload 作为
+/// actionable 时照旧进人工/返修通道（对照组证明判据真的只认 disposition）。
+#[test]
+fn advisory_findings_produce_no_fingerprints_and_no_repair_transition() {
+    let advisory = vec![finding(FindingClass::Advisory, "范围外文档缺口")];
+    let decision = evaluate_findings(
+        &[],
+        &advisory,
+        ReviewPhase::Initial,
+        &RunHistory::default(),
+        &RunBudgets::default(),
+    );
+    assert_eq!(decision.outcome, PlanOutcome::Valid);
+    assert!(
+        decision.history_delta.seen_fingerprints_to_add.is_empty(),
+        "advisory 不得进 actionable 指纹集合"
+    );
+    assert_eq!(decision.history_delta.transitions_used_delta, 0);
+
+    let actionable = vec![finding(FindingClass::HumanRequired, "范围外文档缺口")];
+    let decision = evaluate_findings(
+        &[],
+        &actionable,
+        ReviewPhase::Initial,
+        &RunHistory::default(),
+        &RunBudgets::default(),
+    );
+    assert!(
+        matches!(decision.outcome, PlanOutcome::HumanRequired { .. }),
+        "对照组：非 advisory 仍走人工/返修通道"
+    );
+}

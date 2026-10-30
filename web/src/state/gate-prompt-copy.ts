@@ -18,6 +18,26 @@ export function gateWhyRequiredCopy(requiredCount: number): string {
 }
 
 /**
+ * REQ-WSC-12 平台硬规则（前端侧同口径）：只有 `disposition=actionable` 的
+ * finding 计入阻断/必处理计数；`advisory` 只呈现不阻断。缺失＝actionable
+ * （与后端 fail-safe 一致，历史记录不受影响）。
+ */
+export function isActionableFinding(finding: {
+  disposition?: string | null;
+  class_hint?: string | null;
+  severity?: string;
+}): boolean {
+  return finding.disposition !== "advisory";
+}
+
+/** REQ-WSC-12：advisory 过滤后的有效 findings。 */
+export function actionableFindings<T extends { disposition?: string | null }>(
+  findings: ReadonlyArray<T>,
+): T[] {
+  return findings.filter((finding) => isActionableFinding(finding));
+}
+
+/**
  * C2（REQ-HGC-02 场景 1/F-54）：批次确认门（compile 成功后等待发布确认）
  * 专属标题——与候选修订确认门「需要人工确认」在标题层级可区分。
  */
@@ -48,15 +68,19 @@ export function gateDistanceToPass(input: {
   findings: ReadonlyArray<{
     severity: string;
     class?: string;
+    disposition?: string | null;
   }>;
   trigger: string | null;
   approveAvailable: boolean;
 }): GateDistanceItem[] {
-  const blockers = input.findings.filter((finding) =>
-    ["blocking", "must_fix", "error"].includes(finding.severity),
+  // REQ-WSC-12：advisory 不算「必须处理项」（只作提示）。
+  const blockers = input.findings.filter(
+    (finding) =>
+      isActionableFinding(finding) &&
+      ["blocking", "must_fix", "error"].includes(finding.severity),
   );
   const preflightGaps = input.findings.filter(
-    (finding) => finding.class === "mechanical_error",
+    (finding) => isActionableFinding(finding) && finding.class === "mechanical_error",
   );
   const hasClassFact = input.findings.some((finding) => typeof finding.class === "string");
   return [

@@ -125,10 +125,18 @@ pub(crate) fn classify_finding(
     raw_verdict: ReviewVerdictType,
     finding: &ReviewFinding,
 ) -> ClassifiedFinding {
-    let class = finding
-        .class_hint
-        .map(class_for_hint)
-        .unwrap_or_else(|| fallback_class(raw_verdict, finding));
+    // REQ-WSC-12 平台硬规则：`disposition != actionable` 的 finding 一律落
+    // `Advisory`，**先于** `class_hint` / 旧轴 fallback——否则模型把范围外
+    // 事实标成 `human_required`/`repairable` 时，仍是旧轴说了算，指纹闸门与
+    // 自动返修预算会照旧被 advisory 消耗。
+    let class = if !finding.is_actionable() {
+        FindingClass::Advisory
+    } else {
+        finding
+            .class_hint
+            .map(class_for_hint)
+            .unwrap_or_else(|| fallback_class(raw_verdict, finding))
+    };
     let contract_field = finding.contract_field.clone();
     let (fingerprint, identity_unstable) = FindingFingerprint::identity_for_finding(
         finding.category,

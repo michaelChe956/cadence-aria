@@ -808,17 +808,24 @@ impl WorkspaceEngine {
     /// ReviewerRun 持久化 verdict 的非 advisory findings 指纹集合完全相同且非空时，
     /// 返回重复指纹数量；否则返回 None（首轮、指纹变化、advisory-only、无法读取
     /// 上一轮均不触发）。复用 policy 的 classify_finding 指纹口径，不触碰 policy CAS 主链。
+    ///
+    /// REQ-WSC-12/14：两侧都先按 owner 已处置清单归一（`finding_key ∈ 清单` →
+    /// advisory）——durable 里存的是 provider 原始 verdict，不归一就会把 owner
+    /// 已裁定不归本 WI 的事实继续算进「同一问题再现」，重新卡住返修循环。
     pub(super) fn single_candidate_consecutive_repeated_finding_count(
         &self,
         current: &ReviewVerdict,
     ) -> Option<usize> {
-        let current_set = non_advisory_finding_fingerprints(current);
+        let excluded = self.session_human_disposition_keys();
+        let mut current_normalized = current.clone();
+        super::super::normalize_review_verdict_for_dispositions(&mut current_normalized, &excluded);
+        let current_set = non_advisory_finding_fingerprints(&current_normalized);
         if current_set.is_empty() {
             return None;
         }
         let active_node_id = self.active_node_id.as_ref()?;
         let lifecycle = self.lifecycle_store.as_ref()?;
-        let previous = self
+        let mut previous = self
             .timeline_nodes
             .iter()
             .rev()
@@ -836,6 +843,7 @@ impl WorkspaceEngine {
                 let persisted = detail.verdict?;
                 deserialize_historical_review_verdict(persisted).ok()
             })?;
+        super::super::normalize_review_verdict_for_dispositions(&mut previous, &excluded);
         let previous_set = non_advisory_finding_fingerprints(&previous);
         (previous_set == current_set).then_some(current_set.len())
     }

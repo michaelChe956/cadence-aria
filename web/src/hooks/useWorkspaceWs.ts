@@ -608,15 +608,21 @@ export function useWorkspaceWs(sessionId: string | null) {
     [recordSentOperation, sendJson],
   );
   const sendHumanGateFeedback = useCallback(
-    (feedback: string, commandId?: string) => {
+    (feedback: string, commandId?: string, excludedFindingIds?: string[]) => {
       const trimmed = feedback.trim();
-      if (!trimmed) {
+      const excluded = (excludedFindingIds ?? []).filter(
+        (key) => typeof key === "string" && key.trim().length > 0,
+      );
+      // REQ-WSC-13：空反馈只在携带排除项时放行（纯「排除此项」也是 owner 的
+      // 处置表达）；两者皆空＝旧拒发行为。
+      if (!trimmed && excluded.length === 0) {
         return false;
       }
       const sent = sendJson({
         type: "human_gate_feedback",
         command_id: commandId ?? newCommandId(),
         feedback: trimmed,
+        ...(excluded.length > 0 ? { excluded_finding_ids: excluded } : {}),
       });
       if (sent) {
         recordSentOperation("feedback", trimmed);

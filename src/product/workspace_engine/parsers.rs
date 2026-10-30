@@ -140,6 +140,26 @@ pub(crate) fn normalize_historical_review_findings(
                 );
             }
         }
+        // REQ-WSC-13：rebuild 路径（durable verdict → 前端）与 live 路径必须
+        // 得到同一个 finding_key——按归一化后的 (severity, message) 现算，
+        // 不信任持久化值；历史记录（字段缺席）由此补齐。
+        let severity = finding
+            .get("severity")
+            .and_then(|value| value.as_str())
+            .and_then(parse_live_review_finding_severity)
+            .ok_or_else(|| "historical review finding severity is invalid".to_string())?;
+        let message = finding
+            .get("message")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "historical review finding message is missing".to_string())?;
+        finding.insert(
+            "finding_key".to_string(),
+            serde_json::Value::String(
+                crate::web::workspace_ws_types::review::ReviewFinding::finding_key_for(
+                    &severity, message,
+                ),
+            ),
+        );
     }
     Ok(())
 }
@@ -412,12 +432,16 @@ fn effective_work_item_plan_review_verdict(
     if parsed_findings.malformed {
         return WorkItemPlanReviewVerdict::NeedsHuman;
     }
+    // REQ-WSC-12 平台硬规则：只有 `actionable` finding 能把 pass 重开为返修。
+    // `advisory`（含模型误标为 blocking/must_fix 的 advisory）不阻断——
+    // 判定落在平台侧，不依赖模型自觉标对。
     if verdict == &WorkItemPlanReviewVerdict::Pass
         && parsed_findings.findings.iter().any(|finding| {
-            matches!(
-                finding.severity,
-                ReviewFindingSeverity::Blocking | ReviewFindingSeverity::MustFix
-            )
+            finding.is_actionable()
+                && matches!(
+                    finding.severity,
+                    ReviewFindingSeverity::Blocking | ReviewFindingSeverity::MustFix
+                )
         })
     {
         return match scope {
@@ -667,6 +691,8 @@ fn parse_raw_review_finding(
                 | "work_item_ids"
                 | "owner_question"
                 | "owner_options"
+                | "disposition"
+                | "target_work_item_id"
         ) {
             return Err(invalid_finding_field(
                 format!("{prefix}.{field}"),
@@ -681,6 +707,9 @@ fn parse_raw_review_finding(
     optional_string_or_null_field(object, &prefix, "category")?;
     optional_string_or_null_field(object, &prefix, "class_hint")?;
     optional_string_or_null_field(object, &prefix, "contract_field")?;
+    optional_string_or_null_field(object, &prefix, "target_work_item_id")?;
+    let disposition = parse_optional_finding_disposition(object, &prefix)?;
+    let target_work_item_id = parse_optional_target_work_item_id(object, &prefix);
     let owner_question = parse_optional_owner_question(object, &prefix)?;
     let owner_options = parse_optional_owner_options(object, &prefix)?;
 
@@ -713,7 +742,12 @@ fn parse_raw_review_finding(
         machine_repair: None,
         owner_question,
         owner_options,
-    })
+        disposition,
+        target_work_item_id,
+        finding_key: None,
+    }
+    // P0-1 加固：advisory 不得成为本 WI 真缺口（契约类）的后门。
+    .with_platform_disposition_rules())
 }
 
 fn parse_finding_category(
@@ -816,24 +850,40 @@ pub(crate) fn review_gate_for(
     verdict: &ReviewVerdictType,
     parsed_findings: &ParsedReviewFindings,
 ) -> ReviewGate {
-    if parsed_findings.findings.iter().any(|finding| {
-        matches!(
-            finding.severity,
-            ReviewFindingSeverity::Blocking | ReviewFindingSeverity::MustFix
-        )
+    review_gate_for_findings(
+        verdict,
+        &parsed_findings.findings,
+        parsed_findings.malformed,
+    )
+}
+
+/// 同一判定的纯入口（不依赖 `ParsedReviewFindings` 包装）：会话级
+/// disposition 归一再算门时复用，避免出现第二份判定口径。
+pub(crate) fn review_gate_for_findings(
+    verdict: &ReviewVerdictType,
+    findings: &[ReviewFinding],
+    malformed: bool,
+) -> ReviewGate {
+    // REQ-WSC-12 平台硬规则：`disposition=advisory` 的 finding 不进入阻断
+    // 判定（即便模型把它标成 blocking/must_fix）；缺失 disposition 视作
+    // actionable（fail-safe）。
+    if findings.iter().any(|finding| {
+        finding.is_actionable()
+            && matches!(
+                finding.severity,
+                ReviewFindingSeverity::Blocking | ReviewFindingSeverity::MustFix
+            )
     }) {
         return ReviewGate::RequiresRevision;
     }
-    if parsed_findings.malformed {
+    if malformed {
         return ReviewGate::UserTriageRequired;
     }
 
     match verdict {
         ReviewVerdictType::Pass => ReviewGate::UserConfirmAllowed,
         ReviewVerdictType::NeedsHuman => ReviewGate::UserTriageRequired,
-        ReviewVerdictType::Revise if parsed_findings.findings.is_empty() => {
-            ReviewGate::UserTriageRequired
-        }
+        ReviewVerdictType::Revise if findings.is_empty() => ReviewGate::UserTriageRequired,
         ReviewVerdictType::Revise => ReviewGate::UserConfirmAllowed,
     }
 }
@@ -1051,4 +1101,6 @@ mod tests {
             "dropped forged machine_repair must not resurface as repair authority"
         );
     }
+
+    include!("parsers/finding_disposition_tests.inc.rs");
 }

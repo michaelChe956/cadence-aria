@@ -511,6 +511,28 @@ export function reduceObserverMessage(
             },
           }
         : state;
+    case "human_gate_turn_rejected":
+      return state.humanGateTurn?.turn_id === message.turn_id
+        ? {
+            ...state,
+            humanGateTurn: {
+              ...state.humanGateTurn,
+              status: "failed",
+              failure_class: "validation_reject",
+              failure_message: String(message.rejection_reason ?? ""),
+              rejection: {
+                rejected_feedback: String(message.rejected_feedback ?? ""),
+                rejection_reason: String(message.rejection_reason ?? ""),
+                rejection_next_actions: Array.isArray(message.rejection_next_actions)
+                  ? (message.rejection_next_actions as string[])
+                  : [],
+                rejection_diagnostics: Array.isArray(message.rejection_diagnostics)
+                  ? (message.rejection_diagnostics as string[])
+                  : [],
+              },
+            },
+          }
+        : state;
     case "human_gate_busy":
       return state.humanGateTurn?.turn_id === message.turn_id
         ? { ...state, humanGateTurn: { ...state.humanGateTurn, status: "busy" } }

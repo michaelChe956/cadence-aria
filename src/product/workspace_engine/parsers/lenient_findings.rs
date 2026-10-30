@@ -92,29 +92,49 @@ pub(crate) fn parse_review_findings(value: Option<&serde_json::Value>) -> Parsed
                 };
             }
         };
+        // REQ-WSC-12：disposition 缺失＝actionable（fail-safe）；值非法＝既有
+        // `invalid_finding_field` 不合规路径。
+        let disposition = match parse_optional_finding_disposition(object, &prefix) {
+            Ok(disposition) => disposition,
+            Err(error) => {
+                return ParsedReviewFindings {
+                    findings: Vec::new(),
+                    malformed: false,
+                    structured_error: Some(error),
+                };
+            }
+        };
+        let target_work_item_id = parse_optional_target_work_item_id(object, &prefix);
 
-        findings.push(ReviewFinding {
-            severity,
-            message: message.to_string(),
-            evidence: object
-                .get("evidence")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            required_action: object
-                .get("required_action")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            category,
-            class_hint,
-            contract_field,
-            // SG7（§0.6.3）：Raw 宽松入口对伪造 machine_repair 一律丢弃，
-            // 不从 provider 输入建立修复许可。
-            machine_repair: None,
-            owner_question,
-            owner_options,
-        });
+        findings.push(
+            ReviewFinding {
+                severity,
+                message: message.to_string(),
+                evidence: object
+                    .get("evidence")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                required_action: object
+                    .get("required_action")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                category,
+                class_hint,
+                contract_field,
+                // SG7（§0.6.3）：Raw 宽松入口对伪造 machine_repair 一律丢弃，
+                // 不从 provider 输入建立修复许可。
+                machine_repair: None,
+                owner_question,
+                owner_options,
+                disposition,
+                target_work_item_id,
+                finding_key: None,
+            }
+            // P0-1 加固：advisory 不得成为本 WI 真缺口（契约类）的后门。
+            .with_platform_disposition_rules(),
+        );
     }
 
     ParsedReviewFindings {
@@ -169,5 +189,47 @@ pub(crate) fn parse_optional_contract_field(
             format!("{prefix}.contract_field"),
             "must be a string or null",
         )),
+    }
+}
+
+/// REQ-WSC-12：`disposition` 缺失/`null` → `None`（语义＝actionable，
+/// fail-safe）；只接受 `actionable`/`advisory`，其它值走既有
+/// `invalid_finding_field` 不合规路径。
+pub(crate) fn parse_optional_finding_disposition(
+    object: &serde_json::Map<String, serde_json::Value>,
+    prefix: &str,
+) -> Result<
+    Option<crate::web::workspace_ws_types::review::ReviewFindingDisposition>,
+    ReviewStructuredOutputError,
+> {
+    use crate::web::workspace_ws_types::review::ReviewFindingDisposition;
+
+    match object.get("disposition") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => ReviewFindingDisposition::parse(value)
+            .map(Some)
+            .ok_or_else(|| {
+                invalid_finding_field(
+                    format!("{prefix}.disposition"),
+                    "must be actionable or advisory",
+                )
+            }),
+        Some(_) => Err(invalid_finding_field(
+            format!("{prefix}.disposition"),
+            "must be a string or null",
+        )),
+    }
+}
+
+/// REQ-WSC-12：`target_work_item_id` 解析为 `Option<String>`（空串/`null`
+/// → `None`）。类型不符是非致命描述性字段错误——宽松入口按缺席处理，严格
+/// 入口由白名单外的类型复核拒绝。
+pub(crate) fn parse_optional_target_work_item_id(
+    object: &serde_json::Map<String, serde_json::Value>,
+    _prefix: &str,
+) -> Option<String> {
+    match object.get("target_work_item_id") {
+        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
+        _ => None,
     }
 }

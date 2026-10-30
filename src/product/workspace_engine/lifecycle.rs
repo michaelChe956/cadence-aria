@@ -538,16 +538,10 @@ impl WorkspaceEngine {
     ) -> PersistentDerivation {
         // 存量 Story/Design 会话若停留在已退役的 HumanConfirm/ReviewDecision 阶段，恢复时迁移回 AuthorConfirm。
         session = recover_story_design_retired_stage_fallback(session);
-        let latest_review_verdict = latest_review_verdict_from_node_details(
-            lifecycle_store,
-            &session.project_id,
-            &session.issue_id,
-            &session.session_id,
-            &timeline_nodes,
-        )
-        .or_else(|| {
-            latest_review_verdict_from_messages(&session.messages, &session.workspace_type)
-        });
+        // REQ-WSC-14：恢复派生的最新 review verdict 同样经平台裁决（owner 已
+        // 处置事实在刷新/重启后不得复活成 actionable）。
+        let latest_review_verdict =
+            latest_review_verdict_for_session(lifecycle_store, &session, &timeline_nodes);
         let pending_author_choice =
             recover_pending_author_choice(&session, active_node_id.as_deref(), &timeline_nodes);
         let mut plan_repair_snapshot = load_plan_repair_snapshot_fail_closed(

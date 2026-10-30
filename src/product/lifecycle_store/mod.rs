@@ -1,6 +1,7 @@
 use crate::product::app_paths::ProductAppPaths;
 
 pub mod amendment_gate;
+pub mod human_dispositions;
 pub mod human_gate;
 pub mod inputs;
 pub mod paths;

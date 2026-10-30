@@ -125,7 +125,7 @@ async fn workspace_ws_sc_human_gate_feedback_reaches_dispatch_after_socket_stage
         &WsInMessage::HumanGateFeedback {
             command_id: "cmd-socket-gate".to_string(),
             feedback: "请保留完整候选，仅修正此处".to_string(),
-        },
+        excluded_finding_ids: vec![], },
     )
     .await;
 
@@ -137,6 +137,151 @@ async fn workspace_ws_sc_human_gate_feedback_reaches_dispatch_after_socket_stage
             ..
         } if command_id == "cmd-socket-gate"
     ));
+
+    let _ = ws.close(None).await;
+    server.abort();
+}
+
+/// REQ-WSC-13（k3 P0-2A 修法 A）：排除-only 帧（`feedback` 为空 + 平台
+/// `finding_key`）必须被**受理**——落 durable 已处置清单、回受理回执、
+/// **不发 `INVALID_HUMAN_GATE_FEEDBACK`**（现场：门卡已显示「已排除」，聊天里
+/// 却冒出原始错误码 = 本 change 要消灭的「用户不知道如何继续」）。
+#[tokio::test]
+async fn workspace_ws_sc_exclude_only_feedback_is_accepted_without_gate_turn() {
+    let root = tempdir().expect("root");
+    let _repo = create_workspace_session_fixture(&root).await;
+    let lifecycle = LifecycleStore::new(ProductAppPaths::new(root.path().join(".aria")));
+    let plan = lifecycle
+        .create_issue_work_item_plan(
+            cadence_aria::product::lifecycle_store::CreateIssueWorkItemPlanInput {
+                id: Some("issue_work_item_plan_sc_exclude_only".to_string()),
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                source_story_spec_ids: vec![],
+                source_design_spec_ids: vec![],
+                options: cadence_aria::product::models::IssueWorkItemPlanOptions {
+                    include_integration_tests: false,
+                    include_e2e_tests: false,
+                    force_frontend_backend_split: false,
+                    require_execution_plan_confirm: false,
+                },
+                status: cadence_aria::product::models::IssueWorkItemPlanStatus::Draft,
+                work_item_ids: vec![],
+                repository_profile_ref: None,
+                verification_plan_ids: vec![],
+                dependency_graph: vec![],
+                created_from_provider_run: None,
+                validator_findings: vec![],
+            },
+        )
+        .expect("create plan");
+    let session = lifecycle
+        .create_workspace_session(
+            cadence_aria::product::lifecycle_store::CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: plan.id,
+                workspace_type: cadence_aria::product::models::WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+                review_rounds: 0,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: Some(
+                    cadence_aria::product::lifecycle_store::WorkItemPlanSessionOptions {
+                        flow_kind:
+                            cadence_aria::product::work_item_plan_policy::WorkItemPlanFlowKind::SingleCandidate,
+                        run_policy: cadence_aria::product::work_item_plan_policy::RunPolicy::Interactive,
+                        rollout_snapshot: true,
+                    },
+                ),
+            },
+        )
+        .expect("create SC session");
+    let mut session_record = lifecycle
+        .get_workspace_session(&session.id)
+        .expect("load SC session");
+    session_record.status = cadence_aria::product::models::WorkspaceSessionStatus::WaitingForHuman;
+    session_record.single_candidate_phase = Some(
+        cadence_aria::product::models::SingleCandidatePhase::Approval,
+    );
+    session_record.human_gate_snapshot = Some(
+        cadence_aria::product::work_item_plan_policy::HumanGateSnapshot {
+            findings: vec![],
+            repeated_fingerprints: vec![],
+            attempts_used: 0,
+            manual_repairs_remaining: 1,
+            trigger: cadence_aria::product::work_item_plan_policy::HumanReason::NativeHumanRequired,
+            resumable: false,
+            accepted_feedback_turns: None,
+            candidate_recovery: None,
+        },
+    );
+    session_record.messages.push(cadence_aria::product::models::WorkspaceMessageRecord {
+        role: "assistant".to_string(),
+        content: SC_HUMAN_GATE_CANDIDATE.to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    });
+    let session_path = lifecycle
+        .app_paths()
+        .issue_root(&session_record.project_id, &session_record.issue_id)
+        .join("workspace-sessions")
+        .join(format!("{}.json", session_record.id));
+    cadence_aria::product::json_store::write_json(&session_path, &session_record)
+        .expect("persist SC approval state");
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/api/workspace-sessions/{}/ws", session.id);
+    let (mut ws, _) = connect_async(url).await.expect("connect ws");
+    assert!(matches!(recv_json(&mut ws).await, WsOutMessage::SessionState { .. }));
+    send_json(
+        &mut ws,
+        &WsInMessage::HumanGateFeedback {
+            command_id: "cmd-socket-exclude-only".to_string(),
+            feedback: String::new(),
+            excluded_finding_ids: vec!["0123456789abcdef".to_string()],
+        },
+    )
+    .await;
+
+    match recv_json(&mut ws).await {
+        WsOutMessage::HumanGateExclusionsAccepted {
+            command_id,
+            excluded_finding_ids,
+        } => {
+            assert_eq!(command_id, "cmd-socket-exclude-only");
+            assert_eq!(
+                excluded_finding_ids,
+                vec!["0123456789abcdef".to_string()],
+                "受理回执回传同一批平台 key"
+            );
+        }
+        other => panic!("排除-only 帧必须被受理（无错误帧），实际 {other:?}"),
+    }
+
+    // durable 已处置清单已落盘（引擎受理事实；重启后同一清单可读）。
+    let dispositions = lifecycle
+        .list_human_dispositions(&session.id)
+        .expect("read human dispositions");
+    assert_eq!(dispositions.len(), 1);
+    assert_eq!(dispositions[0].finding_key, "0123456789abcdef");
+
+    // 未建修订 turn：没有任何 HumanGateTurn 记录被开出。
+    assert!(
+        lifecycle
+            .list_human_gate_turns(&session.id)
+            .expect("list human gate turns")
+            .is_empty(),
+        "排除-only 帧不得建修订 turn"
+    );
 
     let _ = ws.close(None).await;
     server.abort();

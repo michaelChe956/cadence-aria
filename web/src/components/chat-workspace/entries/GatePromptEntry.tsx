@@ -1,12 +1,10 @@
 import { Check, ChevronRight, FileText } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { ChatEntry } from "../../../state/chat-entries";
 import {
-  gateActionBlockCopy,
   selectGateProjection,
   type GateActionBlockReason,
   type GateProjection,
-  GATE_TRIGGER_LABELS,
 } from "../../../state/workspace-cockpit-projection";
 import {
   GATE_ADOPT_FINDINGS_BUTTON_LABEL,
@@ -50,16 +48,31 @@ import {
   GATE_TITLE_CLASS,
 } from "../gate-visual-tokens";
 import {
+  isActionableBlockingFinding,
+  isAdvisoryDisposition,
   isBlockingFinding,
   ReviewFindingGroups,
   ReviewOwnerGuidanceBlock,
   reviewFindingsFromEntry,
   reviewOwnerGuidance,
+  type FeedbackSenderWithOptions,
 } from "../finding-list";
+import {
+  GateExclusionStatusBar,
+  useGateFindingExclusions,
+} from "./gate-finding-exclusion-state";
 import {
   gateFindingsCrossRoundDelta,
   gateFindingsDeltaCopy,
 } from "../../../state/gate-prompt-copy";
+import {
+  GATE_CONFIRM_CONSEQUENCE_REJECTED,
+  GATE_HUMAN_TRIGGER_LABELS,
+  GateNextStepGuidance,
+  gateBlockReasonHuman,
+  gateNextStepGuidance,
+  humanizeGateProse,
+} from "./gate-next-step";
 
 /** F-38：门卡产物行的种类名（与生命周期卡片同一套称呼）。 */
 const GATE_ARTIFACT_LABELS: Record<string, string> = {
@@ -94,7 +107,9 @@ export function GatePromptEntry({
   // C2（REQ-HGC-03 场景 1）：阻断口径以 effective class（class_hint 优先，
   // severity 保底）为准——severity=suggestion 而 class_hint=repairable 时
   // 原因行不得再写「不阻断发布」。
-  const requiredFindings = findings.filter((finding) => isBlockingFinding(finding));
+  // REQ-WSC-12 §2 前端镜像：只数 actionable——advisory（非本 Work Item 范围
+  // 事实）不进「必须处理 N 项」计数，即使 severity/class_hint 判阻断。
+  const requiredFindings = findings.filter(isActionableBlockingFinding);
   const requiresTriage = reviewGate === "user_triage_required";
   // F-38：确认者必须知道在确认什么——门卡说明区带出待确认产物版本与入口。
   // 没有产物版本即不渲染（fail-closed 不猜）；版本取 is_current，缺省退最新一轮。
@@ -120,6 +135,10 @@ export function GatePromptEntry({
   const remainingBudget = remainingBudgetFromEntry(entry);
   const failureMessage = failureMessageFromEntry(entry);
   const inlineError = inlineErrorFromEntry(entry);
+  // 根因 E（REQ-WSC-15 前端面）：validation_reject 失败门的可操作化事实——
+  // 被拒反馈原文/可读原因/下一步动作/编译诊断（§6 camelCase 契约；旧失败门
+  // 缺席 = 无该块，仍走既有 failure 行，不猜）。
+  const rejectionInfo = gateRejectionInfoFromEntry(entry);
   const isContextBlockerGate =
     gateKindFromEntry(entry) === WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND;
   const actionFacade =
@@ -239,7 +258,18 @@ export function GatePromptEntry({
       : liveTurnStatus === "awaiting_confirm"
         ? GATE_REVISION_REVIEWING_NOTE
         : null;
+  // P2（REQ-WSC-15 归因扩展）：本卡的门身份——store 级排除失败事实按它匹配
+  //（buildGatePromptEntry 写入的 gate_identity；旧卡/测试夹具缺省回退卡 id）。
+  const rawGateIdentity = (entry.metadata as Record<string, unknown> | undefined)
+    ?.gate_identity;
+  const gateKey = typeof rawGateIdentity === "string" ? rawGateIdentity : entry.id;
+
   const handleFeedbackSubmit = (value: string) => {
+    // REQ-WSC-15 失败兜底归因：记录「本卡最近一次本地门动作」——后续到达的
+    // 门内协议错误据此归因（见 exclusionFrameRefused）。P2：同步记到 store——
+    // WsOutMessage::Error 无 turn/command 关联字段，error 帧归因只认它。
+    latestLocalGateActionRef.current = "feedback";
+    useWorkspaceStore.getState().recordGateLocalAction(gateKey, "feedback");
     if (!actions || !actions.feedback(value)) {
       return;
     }
@@ -265,6 +295,80 @@ export function GatePromptEntry({
     );
   };
 
+  // REQ-WSC-13（owner 裁定取舍 2）：owner 的「这不归本 WI」走结构化排除——
+  // 门卡每条 finding 一键「排除此项」，身份用平台算的 findingKey（前端不自
+  // 算），出站 = HumanGateFeedback 的 excludedFindingIds（排除-only 帧
+  // feedback 为空串）。发送成功即本地置已排除（durable 回执由下一轮投影携
+  // 带，本地态只作即时反馈）；失败保持可点（fail-closed，不静默丢）。
+  // REQ-WSC-13/14（k3 P0-2C）：排除/撤销排除的本地状态单一事实源拆至
+  // gate-finding-exclusion-state.tsx（含刷新后 durable 引导与 REST 撤销）。
+  const latestLocalGateActionRef = useRef<"exclusion" | "feedback" | null>(null);
+  // P2（REQ-WSC-15 归因扩展）：排除-only 帧落盘失败回的是 WsOutMessage::Error
+  //（非 protocol_error）——handler 按 store 的「最近本地门动作」归因后落
+  // gateExclusionFailure；本门卡按 gateKey 匹配消费（store 级事实，不随门卡
+  // upsert/rebuild 丢失），与 inlineError/拒收证据同款撤销乐观「已排除」。
+  const gateExclusionFailure = useWorkspaceStore(
+    (state) =>
+      state.gateExclusionFailure !== null &&
+      state.gateExclusionFailure.gateKey === gateKey
+        ? state.gateExclusionFailure
+        : null,
+  );
+  const exclusionFrameRefused =
+    (rejectionInfo !== null && rejectionInfo.rejectedFeedback.trim() === "") ||
+    (inlineError !== null && latestLocalGateActionRef.current === "exclusion") ||
+    gateExclusionFailure !== null;
+  // §6 契约：门面 feedback 的双参扩展签名；旧门面（单参）天然可赋值，对空串
+  // 返回 false → 排除按发送失败呈现，升级后自动走 excludedFindingIds 出站。
+  const sendFeedbackWithOptions: FeedbackSenderWithOptions | undefined = actions?.feedback;
+  const exclusions = useGateFindingExclusions({
+    cardId: entry.id,
+    sendFeedbackWithOptions,
+    revokeSender: actions?.revokeFindingExclusions,
+    exclusionFrameRefused,
+    markLocalAction: (kind) => {
+      latestLocalGateActionRef.current = kind;
+      // P2：归因线索同步入 store（error 帧 handler 侧可读；同时清旧失败事实）。
+      useWorkspaceStore.getState().recordGateLocalAction(gateKey, kind);
+    },
+    // 收口/无带 key finding 的卡不发只读引导 POST（留档卡不逐张打端点）。
+    enabled:
+      !isResolved && findings.some((finding) => Boolean(finding.findingKey)),
+  });
+  // 本卡口径的已排除 key：durable 引导带回的清单可能含其他轮次/卡片的 key，
+  // 门卡徽章/计数/全部撤销只认本卡 findings 的 key（与本地排除时代同口径）。
+  const cardFindingKeys = new Set(
+    findings.flatMap((finding) => (finding.findingKey ? [finding.findingKey] : [])),
+  );
+  const cardExcludedFindingKeys = exclusions.effectiveExcludedFindingKeys.filter((key) =>
+    cardFindingKeys.has(key),
+  );
+  // owner 2026-10-30 真机反馈：门卡最上方给一行「现在请做 X」——按门的状态
+  // 分支给出下一步动作（选什么/写什么/点哪个按钮），不再只复述状态。
+  const nextStepCopy = gateNextStepGuidance({
+    resolved: isResolved,
+    rejected: rejectionInfo !== null,
+    revisionInProgress: revisionProgressCopy !== null,
+    batchConfirm: isBatchConfirmGate,
+    contextBlocker: isContextBlockerGate,
+    actionBlockReason,
+    terminateAvailable: terminateBlockReason === null,
+    ownerQuestion: ownerGuidance !== null,
+    requiredFindings: requiredFindings.length,
+    // k3 瑕疵 ②：归因要准——advisory 只数 disposition=advisory（范围外事实），
+    // 建议级 actionable（非阻断 suggestion）单独计 optional，不再用
+    // 「总数 − 必处理数」差值把 actionable 冒充 advisory。
+    advisoryFindings: findings.filter(isAdvisoryDisposition).length,
+    optionalFindings: findings.filter(
+      (finding) => !isAdvisoryDisposition(finding) && !isBlockingFinding(finding),
+    ).length,
+    excludedFindings: cardExcludedFindingKeys.length,
+  });
+  // 后端投递的 content/summary 可能带机器短语（如「需先处理预判」）——人话化
+  // （片段级：已知码映射、黑话只摘除命中片段）后再进同义判定和渲染（见
+  // gate-next-step.tsx）。
+  const displayContent = humanizeGateProse(entry.content);
+  const displaySummary = summary === null ? null : humanizeGateProse(summary);
   return (
     <ChatEntryContainer
       role="system"
@@ -280,6 +384,8 @@ export function GatePromptEntry({
       {/* F-50 §4.1-3（第一批布局减负）：门卡固定「原因→正文→产物→证据→
           metadata→进度→局部错误→动作」顺序，确认对象（产物）不再被状态行压下去。 */}
       <div className="space-y-3">
+        {/* owner 2026-10-30 真机反馈：最上方先给「现在请做 X」，原因/证据随后。 */}
+        {nextStepCopy && !isResolved ? <GateNextStepGuidance copy={nextStepCopy} /> : null}
         {whyCopy && !isResolved ? (
           <div
             data-testid="gate-why"
@@ -289,12 +395,14 @@ export function GatePromptEntry({
           </div>
         ) : null}
         {/* F-50 裁决 1：entry.content/summary 与标题同义（人工介入同义句）时
-            不渲染——单标题制下不让正文重复标题；独立事实保留。 */}
-        {isGateTitleSynonymousCopy(entry.content) ? null : (
-          <div className="text-sm text-slate-900">{entry.content}</div>
+            不渲染——单标题制下不让正文重复标题；独立事实保留（人话化后判定）。 */}
+        {isGateTitleSynonymousCopy(displayContent) ? null : (
+          <div className="text-sm text-slate-900">{displayContent}</div>
         )}
-        {summary && !isGateTitleSynonymousCopy(summary) && summary !== entry.content ? (
-          <div className={`text-xs ${GATE_META_TEXT_CLASS}`}>{summary}</div>
+        {displaySummary &&
+        !isGateTitleSynonymousCopy(displaySummary) &&
+        displaySummary !== displayContent ? (
+          <div className={`text-xs ${GATE_META_TEXT_CLASS}`}>{displaySummary}</div>
         ) : null}
         {!isResolved && pendingArtifactVersion && onOpenArtifact ? (
           <div
@@ -343,7 +451,42 @@ export function GatePromptEntry({
                   </button>
                 </div>
               ) : null}
-              <ReviewFindingGroups findings={findings} />
+              {/* REQ-WSC-13：排除面随反馈编辑器同一放行判据（门面可用且未被
+                  阻断）；已排除徽章不依赖发送器——出站成功即保留呈现，但引擎
+                  未受理证据在场时按未排除呈现（exclusionFrameRefused）。
+                  REQ-WSC-13/14（k3 P0-2C）：已排除行的「撤销排除」走 REST，
+                  与门的阻断/收口状态无关（会话级 durable 事实），门面提供即露。 */}
+              <ReviewFindingGroups
+                findings={findings}
+                excludedFindingKeys={new Set(cardExcludedFindingKeys)}
+                onExcludeFinding={feedbackEditorVisible ? exclusions.handleExcludeFinding : undefined}
+                onRevokeExclusion={
+                  actions?.revokeFindingExclusions ? exclusions.handleRevokeExclusion : undefined
+                }
+                revokingFindingKeys={new Set(exclusions.revokingFindingKeys)}
+                revokingAll={exclusions.revokingAll}
+              />
+              {exclusionFrameRefused && exclusions.excludedFindingKeys.length > 0 ? (
+                <p
+                  data-testid="gate-finding-exclusion-refused"
+                  className="text-xs font-medium text-red-700"
+                >
+                  刚才的「排除此项」未被引擎受理，以上条目仍为需处理：可重试排除，或在下方写明说明后提交
+                </p>
+              ) : null}
+              {/* REQ-WSC-13/14（k3 P0-2C）：已排除计数注记 + 撤销反馈条
+                  （成功即时反馈/失败如实原因/全部撤销）。 */}
+              <GateExclusionStatusBar
+                excludedCount={cardExcludedFindingKeys.length}
+                revokeKeys={cardExcludedFindingKeys}
+                revokeAvailable={actions?.revokeFindingExclusions !== undefined}
+                revokingAll={
+                  exclusions.revokingAll || exclusions.revokingFindingKeys.length > 0
+                }
+                onRevokeAll={exclusions.handleRevokeAllExclusions}
+                failure={exclusions.revokeFailure}
+                notice={exclusions.revokeNotice}
+              />
             </div>
           </details>
         ) : null}
@@ -358,17 +501,19 @@ export function GatePromptEntry({
           </p>
         ) : null}
         {/* F-50 §4.1-4：trigger 与预算合并为一条弱化元数据行（不再两个胶囊
-            抢主视觉）——「引擎判定需人工」不作为独立大胶囊重复人工介入语义。
-            C2K3 P3：已接受反馈轮次并入本行（「已反馈 N 轮 · 剩余 M」），
-            零轮次/旧会话缺席维持既有形态。 */}
+            抢主视觉）。owner 2026-10-30：计数保留、措辞人话——「触发：引擎
+            判定需人工 · 已反馈 N 轮 · 剩余修复轮次 M」改为 owner 能懂的说法；
+            零轮次/旧会话缺席维持既有形态（缺席段不渲染）。 */}
         {gateTrigger || remainingBudget !== null || (acceptedFeedbackTurns ?? 0) > 0 ? (
           <p data-testid="gate-meta" className={`text-xs ${GATE_META_TEXT_CLASS}`}>
             {[
-              gateTrigger ? `触发：${GATE_TRIGGER_LABELS[gateTrigger]}` : null,
-              acceptedFeedbackTurns !== null && acceptedFeedbackTurns > 0
-                ? `已反馈 ${acceptedFeedbackTurns} 轮`
+              gateTrigger
+                ? `为什么找你：${GATE_HUMAN_TRIGGER_LABELS[gateTrigger]}`
                 : null,
-              remainingBudget !== null ? `剩余修复轮次 ${remainingBudget}` : null,
+              acceptedFeedbackTurns !== null && acceptedFeedbackTurns > 0
+                ? `你已回复过 ${acceptedFeedbackTurns} 轮`
+                : null,
+              remainingBudget !== null ? `还可自动修复 ${remainingBudget} 次` : null,
             ]
               .filter((part): part is string => Boolean(part))
               .join(" · ")}
@@ -408,6 +553,7 @@ export function GatePromptEntry({
             {failureMessage}
           </div>
         ) : null}
+        {rejectionInfo ? <GateRejectionBlock info={rejectionInfo} /> : null}
         {inlineError ? (
           <div
             data-testid="gate-inline-protocol-error"
@@ -416,9 +562,20 @@ export function GatePromptEntry({
             {inlineError.code} · {inlineError.message}
           </div>
         ) : null}
+        {/* P2（REQ-WSC-15 归因扩展）：归因到本门的排除失败——服务端 error 帧
+            原文即 owner 可读原因；乐观「已排除」已随 exclusionFrameRefused
+            撤销（排除按钮回到可用，可重试）。 */}
+        {gateExclusionFailure ? (
+          <div
+            data-testid="gate-exclusion-failure"
+            className="text-xs font-medium text-red-700"
+          >
+            排除未生效（{gateExclusionFailure.code}）：{gateExclusionFailure.message}
+          </div>
+        ) : null}
         {isContextBlockerGate && !isResolved ? (
           <div className={`text-xs ${GATE_META_TEXT_CLASS}`}>
-            请在下方输入补充上下文后发送（对应 provide_context），或选择终止
+            请在下方输入补充上下文后发送，或终止此门
           </div>
         ) : null}
         {isResolved ? (
@@ -436,12 +593,18 @@ export function GatePromptEntry({
           // 终止（二次确认惯例），confirm/反馈编辑器维持相位纪律不渲染。
           // F-50 §4.1-5：动作区以分隔线成组，与说明区视觉分层。
           <div className={`space-y-2 ${GATE_DIVIDER_CLASS}`}>
-            {/* C2（REQ-HGC-02/plan T2 ④，F-54 §4.2）：phase_mismatch 的通用相位
-                提示行删除（0009 现场误导——编译失败残留被读成同步问题）；
-                其余阻断理由（已离开门/已关闭）仍如实呈现。 */}
-            {actionBlockReason !== null && actionBlockReason !== "phase_mismatch" ? (
-              <p className={`text-xs ${GATE_META_TEXT_CLASS}`}>
-                {gateActionBlockCopy(actionBlockReason)}，可终止后重新发起
+            {/* C2（REQ-HGC-02/plan T2 ④，F-54 §4.2）：phase_mismatch 旧「门相位
+                与当前阶段不一致」提示行退役（0009 现场误导）。owner 2026-10-30：
+                阻断必须有可见原因——本行给人话原因（phase 用陈述事实的措辞），
+                与下方禁用的确认按钮 title 同源。 */}
+            {actionBlockReason !== null ? (
+              <p
+                data-testid="gate-confirm-blocked-reason"
+                className={`text-xs ${GATE_META_TEXT_CLASS}`}
+              >
+                {isContextBlockerGate ? "" : "暂不可确认："}
+                {gateBlockReasonHuman(actionBlockReason)}
+                {terminateBlockReason === null ? "；可终止此门后重新发起" : ""}
               </p>
             ) : null}
             {actionFacade === "typed" && actionBlockReason === null ? (
@@ -478,12 +641,24 @@ export function GatePromptEntry({
                 未同步门命令，将以新命令提交
               </p>
             ) : null}
-            <div className="flex flex-wrap justify-end gap-2">
-              {isContextBlockerGate || actionBlockReason !== null ? null : (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {/* owner 2026-10-30 反馈（不知道怎么继续）：确认按钮不再无声消失——
+                  阻断时以禁用态留在卡上（title 与上方原因行给人话原因）；反馈
+                  被拒时它是明确出路，保持可点并给后果说明。 */}
+              {isContextBlockerGate ? null : (
                 // C2（REQ-HGC-02）：批次门确认=HTTP confirmBatch（发布语义）；
                 // 候选修订门维持 WS confirm（确认当前版本）。
                 <button
                   type="button"
+                  data-testid="gate-confirm-button"
+                  disabled={actionBlockReason !== null}
+                  title={
+                    actionBlockReason !== null
+                      ? gateBlockReasonHuman(actionBlockReason)
+                      : rejectionInfo && !isBatchConfirmGate
+                        ? GATE_CONFIRM_CONSEQUENCE_REJECTED
+                        : undefined
+                  }
                   onClick={() => {
                     if (isBatchConfirmGate) {
                       void actions.confirmBatch();
@@ -491,12 +666,20 @@ export function GatePromptEntry({
                       actions.confirm();
                     }
                   }}
-                  className={BTN_PRIMARY_CLASS}
+                  className={`${BTN_PRIMARY_CLASS} disabled:pointer-events-none disabled:opacity-50`}
                 >
                   <Check className="h-4 w-4" aria-hidden="true" />
                   {isBatchConfirmGate ? gateBatchConfirmTitle() : confirmLabel}
                 </button>
               )}
+              {rejectionInfo && actionBlockReason === null && !isBatchConfirmGate ? (
+                <span
+                  data-testid="gate-confirm-consequence"
+                  className={`text-xs ${GATE_META_TEXT_CLASS}`}
+                >
+                  {GATE_CONFIRM_CONSEQUENCE_REJECTED}
+                </span>
+              ) : null}
               <ConfirmTwiceButton
                 variant="ghost"
                 label={GATE_TERMINATE_BUTTON_LABEL}
@@ -505,10 +688,53 @@ export function GatePromptEntry({
               />
             </div>
           </div>
-        ) : actionBlockReason && actionBlockReason !== "phase_mismatch" ? (
-          <p className={`text-xs ${GATE_META_TEXT_CLASS}`}>
-            {gateActionBlockCopy(actionBlockReason)}
-          </p>
+        ) : actions ? (
+          // 终止亦被阻断（典型：阶段离开后的残留卡）——此前动作面整块消失，
+          // owner 面对「无声死结」。现在确认按钮以禁用态+原因留在卡上；终止
+          // 不可用时不渲染。actions 缺席（legacy 只读页）维持零按钮。
+          <div className={`space-y-2 ${GATE_DIVIDER_CLASS}`}>
+            {actionBlockReason !== null ? (
+              <p
+                data-testid="gate-confirm-blocked-reason"
+                className={`text-xs ${GATE_META_TEXT_CLASS}`}
+              >
+                暂不可确认：{gateBlockReasonHuman(actionBlockReason)}
+              </p>
+            ) : isContextBlockerGate ? (
+              <p className={`text-xs ${GATE_META_TEXT_CLASS}`}>
+                终止暂不可用；请以页面最新状态为准
+              </p>
+            ) : (
+              <p className={`text-xs ${GATE_META_TEXT_CLASS}`}>
+                终止暂不可用；仍可确认当前版本继续
+              </p>
+            )}
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {isContextBlockerGate ? null : (
+                <button
+                  type="button"
+                  data-testid="gate-confirm-button"
+                  disabled={actionBlockReason !== null}
+                  title={
+                    actionBlockReason !== null
+                      ? gateBlockReasonHuman(actionBlockReason)
+                      : GATE_CONFIRM_CONSEQUENCE_REJECTED
+                  }
+                  onClick={() => {
+                    if (isBatchConfirmGate) {
+                      void actions.confirmBatch();
+                    } else {
+                      actions.confirm();
+                    }
+                  }}
+                  className={`${BTN_PRIMARY_CLASS} disabled:pointer-events-none disabled:opacity-50`}
+                >
+                  <Check className="h-4 w-4" aria-hidden="true" />
+                  {isBatchConfirmGate ? gateBatchConfirmTitle() : confirmLabel}
+                </button>
+              )}
+            </div>
+          </div>
         ) : null}
       </div>
     </ChatEntryContainer>
@@ -655,4 +881,93 @@ function inlineErrorFromEntry(entry: ChatEntry): { code: string; message: string
 function archiveNoteFromEntry(entry: ChatEntry): string | null {
   const value = (entry.metadata as Record<string, unknown> | undefined)?.gate_archive_note;
   return typeof value === "string" ? value : null;
+}
+
+/** 根因 E：validation_reject 可操作化呈现所需的最小事实（全部可缺席）。 */
+type GateRejectionInfo = {
+  rejectedFeedback: string;
+  rejectionReason: string;
+  rejectionNextActions: string[];
+  rejectionDiagnostics: string[];
+};
+
+function gateRejectionInfoFromEntry(entry: ChatEntry): GateRejectionInfo | null {
+  const metadata = entry.metadata as Record<string, unknown> | undefined;
+  const rejectedFeedback =
+    typeof metadata?.rejectedFeedback === "string" ? metadata.rejectedFeedback : null;
+  // owner 2026-10-30：被拒原因是 REQ-WSC-14「可读原因」——已知机器码映射，
+  // 未解释术语逐字保留（jargon: "keep"，不套黑话兜底：整段/片段改写都会
+  // 丢真实原因）；下一步动作仍按默认片段摘除；rejectedFeedback 是 owner
+  // 自己的话、diagnostics 是逐字诊断，均保持原文。
+  const rejectionReason =
+    typeof metadata?.rejectionReason === "string"
+      ? humanizeGateProse(metadata.rejectionReason, { jargon: "keep" })
+      : null;
+  const rejectionNextActions = Array.isArray(metadata?.rejectionNextActions)
+    ? metadata.rejectionNextActions
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => humanizeGateProse(item))
+    : [];
+  const rejectionDiagnostics = Array.isArray(metadata?.rejectionDiagnostics)
+    ? metadata.rejectionDiagnostics.filter((item): item is string => typeof item === "string")
+    : [];
+  if (
+    !rejectedFeedback &&
+    !rejectionReason &&
+    rejectionNextActions.length === 0 &&
+    rejectionDiagnostics.length === 0
+  ) {
+    return null;
+  }
+  return {
+    rejectedFeedback: rejectedFeedback ?? "",
+    rejectionReason: rejectionReason ?? "",
+    rejectionNextActions,
+    rejectionDiagnostics,
+  };
+}
+
+/**
+ * 根因 E（REQ-WSC-15 前端面）：validation_reject 门 turn 的可操作化呈现——
+ * 此前失败门只有 `failure_class · failure_message` 一行，owner 不知道被拒的是
+ * 哪条反馈、为什么、下一步做什么（现场卡死主因）。被拒反馈与原因可读呈现，
+ * 诊断逐字（不改写、不截断）。
+ */
+function GateRejectionBlock({ info }: { info: GateRejectionInfo }) {
+  return (
+    <section
+      data-testid="gate-rejection-block"
+      className="space-y-2 rounded-md border border-red-200 bg-red-50 px-3 py-2"
+    >
+      <div className="text-xs font-semibold text-red-800">上一条反馈被拒收</div>
+      {info.rejectedFeedback ? (
+        <div data-testid="gate-rejected-feedback" className="text-sm text-slate-900">
+          被拒反馈：{info.rejectedFeedback}
+        </div>
+      ) : null}
+      {info.rejectionReason ? (
+        <div data-testid="gate-rejection-reason" className="text-sm text-slate-900">
+          原因：{info.rejectionReason}
+        </div>
+      ) : null}
+      {info.rejectionNextActions.length > 0 ? (
+        <ul
+          data-testid="gate-rejection-next-actions"
+          className="list-disc space-y-1 pl-5 text-sm text-slate-900"
+        >
+          {info.rejectionNextActions.map((action, index) => (
+            <li key={`${action}-${index}`}>{action}</li>
+          ))}
+        </ul>
+      ) : null}
+      {info.rejectionDiagnostics.length > 0 ? (
+        <pre
+          data-testid="gate-rejection-diagnostics"
+          className="aria-mono overflow-x-auto whitespace-pre-wrap text-xs text-[var(--aria-ink)]"
+        >
+          {info.rejectionDiagnostics.join("\n")}
+        </pre>
+      ) : null}
+    </section>
+  );
 }

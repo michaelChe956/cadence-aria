@@ -261,13 +261,18 @@ impl WorkspaceEngine {
         {
             prompt.push_str(&previous_round);
         }
+        // REQ-WSC-13/14：owner 逐条排除的已处置事实——本路径有上一轮评审
+        // 上下文，可对账；清单为空时零注入。
+        if let Some(dispositions) = human_dispositions_section(self) {
+            prompt.push_str(&dispositions);
+        }
         let nonce = structured_output_nonce();
         let contract = StructuredOutputContract {
             nonce: nonce.clone(),
             schema_name: "single_candidate_work_item_plan_review".to_string(),
         };
         let schema = format!(
-            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"具体证据","required_action":"需要作者执行的最小动作","owner_question":"面向用户的一句话提问（仅 needs_human 必填）","owner_options":[{{"label":"选项名（人话）","consequence":"选它之后会发生什么"}}]}}]}}"#,
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|suggestion","disposition":"actionable|advisory","target_work_item_id":"WI-001","message":"问题描述（含影响）","evidence":"具体证据","required_action":"需要作者执行的最小动作","owner_question":"面向用户的一句话提问（仅 needs_human 必填）","owner_options":[{{"label":"选项名（人话）","consequence":"选它之后会发生什么"}}]}}]}}"#,
             ir_record.id
         );
         prompt.push_str(&reviewer_output_contract(

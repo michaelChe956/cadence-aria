@@ -2,6 +2,7 @@ import type {
   AutomationOwnership,
   ChoiceOption,
   ChoiceQuestion,
+  HumanGateTurnRejectionProjection,
   LcResumeRecoveryDto,
   UsageReportPayload,
 } from "../api/types/workspace";
@@ -357,6 +358,18 @@ export type HumanGateTurnStatus = "open" | "awaiting_confirm" | "failed" | "busy
 export type GateClosureDecision = "confirm" | "terminate";
 export type AdvanceCommandStatus = "pending" | "completed" | "rejected";
 
+/**
+ * REQ-WSC-14（owner 2026-10-30 反馈「用户不知道如何往下继续了」）：门 turn
+ * 以 validation_reject 失败时的可操作事实——被拒反馈原文、可读原因、下一步
+ * 动作与逐字诊断（后端 durable 落盘后投影的同一份内容）。
+ */
+export interface HumanGateTurnRejectionState {
+  rejected_feedback: string;
+  rejection_reason: string;
+  rejection_next_actions: string[];
+  rejection_diagnostics: string[];
+}
+
 export interface HumanGateTurnState {
   turn_id: string;
   command_id: string | null;
@@ -365,6 +378,8 @@ export interface HumanGateTurnState {
   artifact_ref: string | null;
   failure_class: string | null;
   failure_message: string | null;
+  /** REQ-WSC-14：终态 validation_reject 的可操作事实；其它失败/未失败为 null。 */
+  rejection?: HumanGateTurnRejectionState | null;
   opened_at: string;
   inlineError: InlineProtocolError | null;
   /**
@@ -374,6 +389,32 @@ export interface HumanGateTurnState {
    * 无快照凭据，此时维持 turn 值（fail-closed）。
    */
   opened_snapshot_identity?: string | null;
+}
+
+/**
+ * P2（REQ-WSC-15 归因扩展，change: bound-review-findings-to-work-item-scope）：
+ * 排除-only 帧落盘失败时服务端回的是 `WsOutMessage::Error`——无 turn/command
+ * 关联字段（非 protocol_error），前端只能按「最近本地门动作」归因。
+ */
+export type GateLocalActionKind = "exclusion" | "feedback";
+
+/** 最近一次本地门动作（点击排除/提交反馈时记录，error 帧归因线索）。 */
+export interface GateLocalActionState {
+  kind: GateLocalActionKind;
+  /** 动作发生的门卡身份（门卡 metadata.gate_identity，缺省卡 id）。 */
+  gateKey: string;
+  /** epoch ms——归因仅认短窗口内的动作，陈旧动作不归因。 */
+  at: number;
+}
+
+/** 归因成立的排除失败事实：门卡据此撤销乐观「已排除」并就地呈现原因。 */
+export interface GateExclusionFailureState {
+  code: string;
+  /** 服务端 error 帧原文（可读原因，如「排除项没有落盘，请重试：…」）。 */
+  message: string;
+  /** 归因到的门卡身份（与 GateLocalActionState.gateKey 同源）。 */
+  gateKey: string;
+  at: number;
 }
 
 export interface InlineProtocolError {
@@ -552,6 +593,14 @@ export interface WorkspaceWsState {
   pendingReviewDecision: { verdict: string; summary: string } | null;
   pendingReviewerSummary: { verdict: string; points: string[] } | null;
   humanGateTurn: HumanGateTurnState | null;
+  /**
+   * P2（REQ-WSC-15 归因扩展）：最近一次本地门动作（排除/反馈提交）——
+   * WsOutMessage::Error 无关联字段，error 帧归因只能按它；归因成立或排除
+   * 受理回执即消费（null=无在窗动作）。
+   */
+  lastGateLocalAction: GateLocalActionState | null;
+  /** P2：归因成立的排除失败事实；重试新动作/受理回执/关门清空（null=无）。 */
+  gateExclusionFailure: GateExclusionFailureState | null;
   planRepair: PlanRepairSessionSnapshot | null;
   /**
    * P0 1.2（REQ-WIGA-08）：durable automation 归属（与 REST summary 同形）。
@@ -581,6 +630,8 @@ export interface WorkspaceSessionStatePayload {
   run_history: WorkItemPlanRunHistory;
   review_invocation_scope?: unknown | null;
   human_gate_snapshot?: WorkItemPlanHumanGateSnapshot | null;
+  /** REQ-WSC-14：该会话最近一次门 turn 拒收（四要素）；刷新后重建门卡用。 */
+  human_gate_turn_rejection?: HumanGateTurnRejectionProjection | null;
   repair_reservation?: WorkItemPlanRepairReservation | null;
   policy_diagnostics?: WorkItemPlanPolicyDiagnostic[];
   provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];
@@ -691,6 +742,11 @@ export interface WorkspaceWsActions {
     failureClass: string,
     message: string,
   ) => void;
+  /** REQ-WSC-14：记录终态拒收的可操作事实（同一 turn 幂等覆盖）。 */
+  applyHumanGateTurnRejected: (
+    turnId: string,
+    rejection: HumanGateTurnRejectionState,
+  ) => void;
   applyHumanGateBusy: (turnId: string) => void;
   applyHumanGateClosed: (decision: GateClosureDecision, stage: string) => void;
   applyAdvanceCompleted: (
@@ -704,6 +760,17 @@ export interface WorkspaceWsActions {
 
   applyGateProtocolError: (turnId: string, error: InlineProtocolError) => void;
   applyAdvanceProtocolError: (commandId: string, error: InlineProtocolError) => void;
+
+  /** P2（REQ-WSC-15 归因扩展）：记录最近本地门动作（同时清旧失败事实）。 */
+  recordGateLocalAction: (gateKey: string, kind: GateLocalActionKind) => void;
+  /** P2：归因成立的排除失败落库（消费动作记录，防同一错误重复归因）。 */
+  applyGateExclusionFailure: (failure: {
+    code: string;
+    message: string;
+    gateKey: string;
+  }) => void;
+  /** P2：排除受理回执对账——清失败事实与动作记录（durable 已确认）。 */
+  resolveGateExclusion: () => void;
 
   /** 「登记并重试」回执对账：幂等覆盖最近回执（不自动重新生成）。 */
   applyTrustEntryRegistered: (receipt: TrustRegistrationReceipt) => void;

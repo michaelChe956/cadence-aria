@@ -12,7 +12,9 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde_json::json;
 
-use crate::product::workspace_engine::{HumanGateCloseDecision, HumanGateFeedbackInput};
+use crate::product::workspace_engine::{
+    HumanGateCloseDecision, HumanGateFeedbackInput, exclude_only_feedback_requested,
+};
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::handlers::workspace_choice::resolve_session_manager;
 use crate::web::state::WebAppState;
@@ -36,6 +38,36 @@ pub async fn post_workspace_human_action(
             "command_id must not be blank",
             json!({ "session_id": session_id }),
         ));
+    }
+    // REQ-WSC-13/14（k3 P0-2C）：撤销排除是会话级 durable 事实，与门身份
+    // 无关（门可能已换/已关），先于门 id 比对处理；幂等（无匹配 key 零写）。
+    if let HumanActionRequest::RevokeFindingExclusions {
+        command_id,
+        finding_keys,
+    } = &request
+    {
+        let engine = manager.engine();
+        let remaining_finding_keys = engine
+            .lock()
+            .await
+            .revoke_owner_finding_exclusions(finding_keys)
+            .await
+            .map_err(|message| {
+                ApiError::runtime(
+                    "human_action_rejected",
+                    message,
+                    json!({ "command_id": command_id, "session_id": session_id }),
+                )
+            })?;
+        return Ok((
+            StatusCode::OK,
+            Json(crate::web::types::RevokeFindingExclusionsResult {
+                command_id: command_id.clone(),
+                state: HumanActionState::Accepted,
+                remaining_finding_keys,
+            }),
+        )
+            .into_response());
     }
     // 门身份比对在引擎调用前完成：不匹配零副作用（不误答过期门）。
     let gate_id = {
@@ -175,8 +207,41 @@ async fn handle_request(
         HumanActionRequest::Feedback {
             command_id,
             feedback,
+            excluded_finding_ids,
             ..
         } => {
+            // REQ-WSC-13：owner 的逐条「排除此项」先落 durable 已处置事实
+            // 清单（空＝旧客户端，零副作用）。
+            //
+            // k3 P0-2A（修法 A）：`feedback` 为空 + 合法排除 key = 排除-only
+            // 命令——落 durable 后即受理（200 accepted），不建修订 turn、不跑
+            // `validate_feedback`；否则回 422 `INVALID_HUMAN_GATE_FEEDBACK`，
+            // 与 WS 侧同源。落盘失败不得宣称受理。
+            let exclude_only = exclude_only_feedback_requested(&feedback, &excluded_finding_ids);
+            let mut exclusion_error = None;
+            if !excluded_finding_ids.is_empty() {
+                let recorded = engine
+                    .lock()
+                    .await
+                    .record_owner_finding_exclusions(&excluded_finding_ids)
+                    .await;
+                if let Err(error) = recorded {
+                    eprintln!(
+                        "[aria-gate-disposition] record exclusions failed session_id={session_id} error={error}"
+                    );
+                    exclusion_error = Some(error);
+                }
+            }
+            if exclude_only {
+                return match exclusion_error {
+                    None => Ok(accepted(command_id, gate_id)),
+                    Some(error) => Err(ApiError::runtime(
+                        "human_action_engine_error",
+                        error,
+                        json!({ "command_id": command_id, "session_id": session_id }),
+                    )),
+                };
+            }
             let effect = apply_human_gate_feedback(
                 engine,
                 HumanGateFeedbackInput {
@@ -308,6 +373,12 @@ async fn handle_request(
             "candidate recovery is dispatched before handle_request".to_string(),
             json!({ "command_id": command_id, "gate_id": gate_id }),
         )),
+        // REQ-WSC-13/14（k3 P0-2C）：撤销排除同样在门 id 比对之前分流，此处不可达。
+        HumanActionRequest::RevokeFindingExclusions { command_id, .. } => Err(ApiError::runtime(
+            "human_action_rejected",
+            "finding exclusion revocation is dispatched before handle_request".to_string(),
+            json!({ "command_id": command_id, "session_id": session_id }),
+        )),
     }
 }
 
@@ -336,6 +407,10 @@ fn command_and_gate(request: &HumanActionRequest) -> (String, String) {
             expected_gate_id,
             ..
         } => (command_id.clone(), expected_gate_id.clone()),
+        // 撤销排除与门身份无关（会话级 durable 事实），门 id 不参与比对。
+        HumanActionRequest::RevokeFindingExclusions { command_id, .. } => {
+            (command_id.clone(), String::new())
+        }
     }
 }
 

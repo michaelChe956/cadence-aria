@@ -111,7 +111,7 @@ fn t17_revise_verdict() -> crate::web::workspace_ws_types::ReviewVerdict {
             machine_repair: None,
             owner_question: None,
             owner_options: None,
-        }],
+        disposition: None, target_work_item_id: None, finding_key: None, }],
         review_gate: crate::web::workspace_ws_types::ReviewGate::RequiresRevision,
         work_item_plan_review: None,
         structured_output_diagnostic: None,

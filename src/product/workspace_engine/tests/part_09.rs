@@ -359,7 +359,7 @@ fn work_item_plan_outline_revision_feedback_assembles_review_and_context() {
             machine_repair: None,
             owner_question: None,
             owner_options: None,
-        }],
+        disposition: None, target_work_item_id: None, finding_key: None, }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
         structured_output_diagnostic: None,
@@ -409,7 +409,7 @@ fn work_item_plan_outline_revision_feedback_skips_contract_for_optional_only_fin
             machine_repair: None,
             owner_question: None,
             owner_options: None,
-        }],
+        disposition: None, target_work_item_id: None, finding_key: None, }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
         structured_output_diagnostic: None,
@@ -420,6 +420,74 @@ fn work_item_plan_outline_revision_feedback_skips_contract_for_optional_only_fin
         .expect("optional feedback");
 
     assert!(!feedback.contains("[impact_closure_contract]"));
+}
+
+/// REQ-WSC-14（作者返修输入面）：owner 已处置、被平台强制降级为 advisory 的
+/// finding MUST NOT 以「必须处理」的形态进入 outline 返修反馈；impact closure
+/// 契约也不得由它触发。
+#[test]
+fn work_item_plan_outline_revision_feedback_omits_owner_downgraded_findings() {
+    let (_tmp, _checkpoint_store, _lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_draft_candidate("sess_wip_outline_feedback_excluded");
+    engine.latest_review_verdict = Some(ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "本轮只修可收敛项".to_string(),
+        summary: "范围外事实已被 owner 排除".to_string(),
+        findings: vec![
+            ReviewFinding {
+                severity: ReviewFindingSeverity::MustFix,
+                message: "本 Work Item 验收标准缺口".to_string(),
+                evidence: "CT-001 acceptance".to_string(),
+                required_action: "补齐验收标准".to_string(),
+                category: None,
+                class_hint: None,
+                contract_field: None,
+                machine_repair: None,
+                owner_question: None,
+                owner_options: None,
+                disposition: None,
+                target_work_item_id: None,
+                finding_key: None,
+            },
+            ReviewFinding {
+                severity: ReviewFindingSeverity::MustFix,
+                message: "中文 locale 尚未配置".to_string(),
+                evidence: "docs/frontend-spec.md".to_string(),
+                required_action: "回写产品侧文档".to_string(),
+                category: None,
+                class_hint: None,
+                contract_field: None,
+                machine_repair: None,
+                owner_question: None,
+                owner_options: None,
+                disposition: Some(
+                    crate::web::workspace_ws_types::review::ReviewFindingDisposition::Advisory,
+                ),
+                target_work_item_id: None,
+                finding_key: None,
+            },
+        ],
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    });
+
+    let feedback = engine
+        .work_item_plan_outline_revision_feedback(None)
+        .expect("revision feedback");
+
+    assert!(
+        feedback.contains("本 Work Item 验收标准缺口"),
+        "actionable finding 必须保留: {feedback}"
+    );
+    assert!(
+        !feedback.contains("中文 locale 尚未配置"),
+        "降级后的 finding message 不得进入 outline 返修反馈: {feedback}"
+    );
+    assert!(
+        !feedback.contains("回写产品侧文档"),
+        "降级后的 finding required_action 不得进入 outline 返修反馈: {feedback}"
+    );
 }
 
 #[test]

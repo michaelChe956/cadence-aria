@@ -10,9 +10,15 @@ mod baseline_teaching;
 mod history_compaction;
 mod human_gate_revision;
 mod owner_guidance_rules;
-use owner_guidance_rules::OWNER_GUIDANCE_RULES;
+use owner_guidance_rules::{FINDING_SCOPE_RULES, OWNER_GUIDANCE_RULES};
 mod review;
 mod review_context;
+
+// REQ-WSC-13/14：已处置事实段的构造器对同 crate 的测试面可见（生产调用点
+// 仍在 `review` 与 `single_candidate_input` 两处，故非测试构建下该 re-export
+// 视为未使用）。
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use review_context::human_dispositions_section;
 mod review_repair;
 mod reviewer_boundary_examples;
 mod reviewer_context_filter;
@@ -39,6 +45,7 @@ pub(crate) use review::review_scope_instructions;
 #[cfg(test)]
 pub(crate) use review_context::{
     SINGLE_CANDIDATE_REVIEW_PROMPT_MAX_BYTES, ensure_single_candidate_review_prompt_budget,
+    single_candidate_previous_round_findings_section,
 };
 
 /// 聚合视野材料块的唯一 marker（`aggregate_scope_material_prompt` 以 `## 聚合代码库成员清单`
@@ -307,6 +314,7 @@ pub(crate) fn reviewer_output_contract(
          输出硬约束：实际 nonce 开始标签必须是输出第一行；此前禁止任何前言、声明、路由回执、说明、空白行或代码围栏。\n\
          {intro}\
          {OWNER_GUIDANCE_RULES}\
+         {FINDING_SCOPE_RULES}\
          完整示例（仅用于理解结构，绝不可照抄 nonce）：\n\
          <ARIA_STRUCTURED_OUTPUT nonce=\"EXAMPLE_NONCE\">\n\
          {}\n\

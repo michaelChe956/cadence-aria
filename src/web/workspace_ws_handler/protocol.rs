@@ -467,6 +467,7 @@ mod tests {
             WsInMessage::HumanGateFeedback {
                 command_id: "cmd_1".to_string(),
                 feedback: "补充异常场景".to_string(),
+                excluded_finding_ids: vec![],
             },
         ] {
             assert!(

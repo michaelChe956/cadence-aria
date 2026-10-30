@@ -90,6 +90,11 @@ pub enum WsInMessage {
     HumanGateFeedback {
         command_id: String,
         feedback: String,
+        /// REQ-WSC-13：owner 逐条「排除此项」的 finding 平台身份
+        /// （`finding_key`）。空（含旧客户端不发）= 旧行为；非空时先落
+        /// durable 已处置事实清单，下一轮评审 prompt 携带它。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        excluded_finding_ids: Vec<String>,
     },
     Advance {
         command_id: String,

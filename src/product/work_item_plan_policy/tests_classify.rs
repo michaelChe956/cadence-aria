@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::{
     ClassificationError, FindingClass, FindingClassHint, FindingFingerprint, ParsedReviewEnvelope,
-    ReviewFindingCategory, ReviewInvocationScope, classify_review,
+    ReviewFindingCategory, ReviewInvocationScope, classify_finding, classify_review,
 };
 use crate::web::workspace_ws_types::review::{
     ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdictType,
@@ -234,5 +234,39 @@ fn finding(
         machine_repair: None,
         owner_question: None,
         owner_options: None,
+        disposition: None,
+        target_work_item_id: None,
+        finding_key: None,
     }
+}
+
+/// REQ-WSC-12 平台硬规则（k3 REQ-WSC-12 不符合项）：`disposition != actionable`
+/// 先于 `class_hint` / 旧轴 fallback 生效——模型把范围外事实标成
+/// `repairable`/`human_required` 也不再进指纹集合、不驱返修、不占 transition
+/// budget（`actionable_findings` 的 `class != Advisory` 过滤才真正吃掉它）。
+#[test]
+fn advisory_disposition_preempts_class_hint_for_classification() {
+    let mut advisory = finding(
+        "仓库里那份前端规范文档的『中文 locale 尚未配置』缺口",
+        Some(ReviewFindingCategory::Other),
+        Some(FindingClassHint::HumanRequired),
+        None,
+    );
+    advisory.disposition =
+        Some(crate::web::workspace_ws_types::review::ReviewFindingDisposition::Advisory);
+
+    let classified = classify_finding(ReviewVerdictType::Revise, &advisory);
+    assert_eq!(
+        classified.class,
+        FindingClass::Advisory,
+        "advisory 判定必须压过 class_hint，否则指纹闸门/返修预算照旧被消耗"
+    );
+
+    // 对照组：同一 payload 去掉 disposition → 旧轴照旧 human_required。
+    let mut actionable = advisory.clone();
+    actionable.disposition = None;
+    assert_eq!(
+        classify_finding(ReviewVerdictType::Revise, &actionable).class,
+        FindingClass::HumanRequired
+    );
 }

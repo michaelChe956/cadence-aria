@@ -19,7 +19,7 @@ async fn campaign_stage3_interactive_multi_turn_revision_then_approve_confirms_p
         .send(WsInMessage::HumanGateFeedback {
             command_id: "cmd-campaign-fb-1".to_string(),
             feedback: "反馈A：补充验收条件".to_string(),
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let open1 = harness.await_gate_event("human_gate_turn_open").await;
     let WsOutMessage::HumanGateTurnOpen {
@@ -52,7 +52,7 @@ async fn campaign_stage3_interactive_multi_turn_revision_then_approve_confirms_p
         .send(WsInMessage::HumanGateFeedback {
             command_id: "cmd-campaign-fb-2".to_string(),
             feedback: "反馈B：修正写域范围".to_string(),
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let open2 = harness.await_gate_event("human_gate_turn_open").await;
     let WsOutMessage::HumanGateTurnOpen {
@@ -201,7 +201,7 @@ async fn campaign_stage3_budget_exhaustion_rejects_feedback_but_allows_approve_o
         .send(WsInMessage::HumanGateFeedback {
             command_id: "cmd-campaign-exhausted".to_string(),
             feedback: "预算耗尽后的反馈".to_string(),
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let rejected = harness.await_gate_event("protocol_error").await;
     let WsOutMessage::ProtocolError { code, message, .. } = rejected else {
@@ -329,7 +329,7 @@ async fn campaign_stage3_oversized_feedback_rejects_before_turn_reservation() {
         .send(WsInMessage::HumanGateFeedback {
             command_id: "cmd-campaign-oversized-feedback".to_string(),
             feedback: oversized_feedback,
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let rejected = harness.await_gate_event("protocol_error").await;
     let WsOutMessage::ProtocolError { code, .. } = &rejected else {
@@ -345,7 +345,7 @@ async fn campaign_stage3_oversized_feedback_rejects_before_turn_reservation() {
         .send(WsInMessage::HumanGateFeedback {
             command_id: "c".repeat(257),
             feedback: "短反馈".to_string(),
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let rejected = harness.await_gate_event("protocol_error").await;
     let WsOutMessage::ProtocolError { code, .. } = &rejected else {
@@ -369,7 +369,7 @@ async fn campaign_stage3_oversized_feedback_rejects_before_turn_reservation() {
         .send(WsInMessage::HumanGateFeedback {
             command_id: "cmd-campaign-oversized-prompt".to_string(),
             feedback: "短反馈".to_string(),
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let rejected = harness.await_gate_event("protocol_error").await;
     let WsOutMessage::ProtocolError { code, .. } = &rejected else {
@@ -395,7 +395,7 @@ async fn campaign_stage3_oversized_feedback_rejects_before_turn_reservation() {
         .send(WsInMessage::HumanGateFeedback {
             command_id: "cmd-campaign-shortened".to_string(),
             feedback: "缩短后的反馈".to_string(),
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let opened = harness.await_gate_event("human_gate_turn_open").await;
     let WsOutMessage::HumanGateTurnOpen {
@@ -425,7 +425,7 @@ async fn campaign_stage3_inflight_rejects_feedback_approve_and_abandon_as_busy()
         .send(WsInMessage::HumanGateFeedback {
             command_id: "cmd-campaign-inflight-1".to_string(),
             feedback: "第一轮反馈".to_string(),
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let open = harness.await_gate_event("human_gate_turn_open").await;
     let WsOutMessage::HumanGateTurnOpen { turn_id, .. } = open else {
@@ -445,7 +445,7 @@ async fn campaign_stage3_inflight_rejects_feedback_approve_and_abandon_as_busy()
         .send_isolated_worker(WsInMessage::HumanGateFeedback {
             command_id: "cmd-campaign-inflight-2".to_string(),
             feedback: "并发反馈".to_string(),
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let busy_feedback = harness.await_gate_event("human_gate_busy").await;
     harness.send_isolated_worker(WsInMessage::Confirm).await;
@@ -485,7 +485,7 @@ async fn campaign_stage3_inflight_rejects_feedback_approve_and_abandon_as_busy()
         .send(WsInMessage::HumanGateFeedback {
             command_id: "cmd-campaign-inflight-2".to_string(),
             feedback: "释放后的第二轮反馈".to_string(),
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let open2 = harness.await_gate_event("human_gate_turn_open").await;
     let WsOutMessage::HumanGateTurnOpen {
@@ -727,7 +727,7 @@ async fn campaign_stage3_turn_reservation_crash_recovers_exactly_once() {
             .send(WsInMessage::HumanGateFeedback {
                 command_id: format!("cmd-campaign-{scenario}"),
                 feedback: "故障 flavor 反馈".to_string(),
-            })
+            excluded_finding_ids: vec![], })
             .await;
         let open = harness.await_gate_event("human_gate_turn_open").await;
         let WsOutMessage::HumanGateTurnOpen { .. } = open else {
@@ -920,7 +920,7 @@ async fn campaign_stage3_takeover_auto_stopped_reuses_snapshot_budget_and_candid
             WsInMessage::HumanGateFeedback {
                 command_id: "cmd-campaign-child-feedback".to_string(),
                 feedback: "child 上的反馈".to_string(),
-            },
+            excluded_finding_ids: vec![], },
         )
         .await;
         let outbound = timeout(Duration::from_secs(10), outbound_rx.recv())
@@ -1019,7 +1019,7 @@ async fn campaign_stage3_interactive_gate_round_records_author_revision_facts() 
         .send(WsInMessage::HumanGateFeedback {
             command_id: "cmd-f49-gate-round".to_string(),
             feedback: "反馈A：补充验收条件".to_string(),
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let open = harness.await_gate_event("human_gate_turn_open").await;
     let WsOutMessage::HumanGateTurnOpen { turn_id, .. } = open else {
@@ -1142,7 +1142,7 @@ async fn campaign_stage3_gate_revision_turn_resumes_recorded_author_native_sessi
         .send(WsInMessage::HumanGateFeedback {
             command_id: "cmd-campaign-r50-resume".to_string(),
             feedback: "按矩阵反馈修订拆分方案".to_string(),
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let _ = harness.await_gate_event("human_gate_turn_open").await;
     let _ = harness.await_gate_event("human_gate_turn_completed").await;
@@ -1196,7 +1196,7 @@ async fn campaign_stage3_gate_revision_resumes_from_spawn_audit_when_conversatio
         .send(WsInMessage::HumanGateFeedback {
             command_id: "cmd-campaign-r51-audit-resume".to_string(),
             feedback: "按矩阵反馈修订拆分方案".to_string(),
-        })
+        excluded_finding_ids: vec![], })
         .await;
     let _ = harness.await_gate_event("human_gate_turn_open").await;
     let _ = harness.await_gate_event("human_gate_turn_completed").await;

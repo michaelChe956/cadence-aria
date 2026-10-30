@@ -1,5 +1,6 @@
 use super::*;
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+use crate::product::workspace_engine::{exclude_only_feedback_requested, normalized_finding_keys};
 use std::pin::Pin;
 
 #[derive(Clone)]
@@ -108,9 +109,71 @@ async fn handle_workspace_inbound_message_inner(
         WsInMessage::HumanGateFeedback {
             command_id,
             feedback,
+            excluded_finding_ids,
         } => {
             if let Err(err) = validate_command_id(&command_id) {
                 let _ = send_json_outbound(&outbound_tx, &err).await;
+                return;
+            }
+            // REQ-WSC-13：owner 的逐条「排除此项」先落 durable 已处置事实
+            // 清单（下一轮评审 prompt 携带它）；空＝旧客户端，零副作用。
+            //
+            // k3 P0-2A（修法 A）：`feedback` 为空且带合法排除 key 的帧是
+            // **只表达处置事实**的排除-only 命令——落 durable 后即受理，不建
+            // 修订 turn、不跑 `validate_feedback`。否则它必然撞上
+            // `INVALID_HUMAN_GATE_FEEDBACK · feedback must not be blank`，而
+            // 门卡已经显示「已排除」——正是本 change 要消灭的「不知道如何
+            // 继续」。反馈非空时行为逐字不变。
+            let exclude_only = exclude_only_feedback_requested(&feedback, &excluded_finding_ids);
+            let mut exclusion_error = None;
+            if !excluded_finding_ids.is_empty() {
+                let recorded = engine
+                    .lock()
+                    .await
+                    .record_owner_finding_exclusions(&excluded_finding_ids)
+                    .await;
+                match recorded {
+                    Ok(0) => {}
+                    Ok(count) => eprintln!(
+                        "[aria-gate-disposition] owner excluded findings session_id={} count={count}",
+                        run_context.session_record.id
+                    ),
+                    Err(error) => {
+                        eprintln!(
+                            "[aria-gate-disposition] record exclusions failed session_id={} error={error}",
+                            run_context.session_record.id
+                        );
+                        exclusion_error = Some(error);
+                    }
+                }
+            }
+            if exclude_only {
+                match exclusion_error {
+                    // 受理回执：界面据此确认「已排除」成立（不是失败的乐观态）。
+                    None => {
+                        let _ = send_json_outbound(
+                            &outbound_tx,
+                            &WsOutMessage::HumanGateExclusionsAccepted {
+                                command_id,
+                                excluded_finding_ids: normalized_finding_keys(
+                                    &excluded_finding_ids,
+                                ),
+                            },
+                        )
+                        .await;
+                    }
+                    // 落盘失败不得冒充已受理（REQ-WSC-15「发起失败不显示为
+                    // 已排除」）。
+                    Some(error) => {
+                        let _ = send_json_outbound(
+                            &outbound_tx,
+                            &WsOutMessage::Error {
+                                message: format!("排除项没有落盘，请重试：{error}"),
+                            },
+                        )
+                        .await;
+                    }
+                }
                 return;
             }
             handle_human_gate_feedback_from_handler(

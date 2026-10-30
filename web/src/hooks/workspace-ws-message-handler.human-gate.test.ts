@@ -512,4 +512,88 @@ describe("workspace websocket human gate protocol branches", () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toMatchObject({ code: "SEED" });
   });
+
+  // P2（REQ-WSC-15 归因扩展）：排除-only 帧落盘失败回的是 WsOutMessage::Error
+  //（src/web/workspace_ws_handler/decisions/inbound.rs，无 code/turn/command 关联
+  // 字段、非 protocol_error）——归因唯一线索是「最近本地门动作是排除」。
+  it("attributes a WsOutMessage::Error to the gate when exclusion is the latest local action", () => {
+    useWorkspaceStore.getState().recordGateLocalAction("turn_9:gate-prompt", "exclusion");
+
+    handleWorkspaceWsMessage(
+      {
+        type: "error",
+        message: "排除项没有落盘，请重试：durable write failed",
+      } as WsServerMessage,
+      options(),
+    );
+
+    expect(useWorkspaceStore.getState().gateExclusionFailure).toMatchObject({
+      code: "EXCLUSION_NOT_RECORDED",
+      message: "排除项没有落盘，请重试：durable write failed",
+      gateKey: "turn_9:gate-prompt",
+    });
+    // 归因即消费：后续无关 error 帧不得重复归因（全局 error 面仍如实更新）。
+    expect(useWorkspaceStore.getState().lastGateLocalAction).toBeNull();
+    expect(useWorkspaceStore.getState().error).toBe(
+      "排除项没有落盘，请重试：durable write failed",
+    );
+    expect(
+      useWorkspaceStore.getState().chatEntries.some((entry) => entry.type === "error"),
+    ).toBe(true);
+
+    handleWorkspaceWsMessage(
+      { type: "error", message: "生成失败：provider 超时" } as WsServerMessage,
+      options(),
+    );
+
+    expect(useWorkspaceStore.getState().gateExclusionFailure).toMatchObject({
+      message: "排除项没有落盘，请重试：durable write failed",
+    });
+    expect(useWorkspaceStore.getState().error).toBe("生成失败：provider 超时");
+  });
+
+  it("does not attribute an error frame when the latest local gate action is feedback", () => {
+    useWorkspaceStore.getState().recordGateLocalAction("turn_9:gate-prompt", "feedback");
+
+    handleWorkspaceWsMessage(
+      { type: "error", message: "生成失败：provider 超时" } as WsServerMessage,
+      options(),
+    );
+
+    expect(useWorkspaceStore.getState().gateExclusionFailure).toBeNull();
+  });
+
+  it("does not attribute an error frame to a stale exclusion action", () => {
+    useWorkspaceStore.getState().recordGateLocalAction("turn_9:gate-prompt", "exclusion");
+    useWorkspaceStore.setState({
+      lastGateLocalAction: {
+        kind: "exclusion",
+        gateKey: "turn_9:gate-prompt",
+        at: Date.now() - 60_000,
+      },
+    });
+
+    handleWorkspaceWsMessage(
+      { type: "error", message: "生成失败：provider 超时" } as WsServerMessage,
+      options(),
+    );
+
+    expect(useWorkspaceStore.getState().gateExclusionFailure).toBeNull();
+  });
+
+  it("consumes the attribution marker on the exclusions accepted receipt", () => {
+    useWorkspaceStore.getState().recordGateLocalAction("turn_9:gate-prompt", "exclusion");
+
+    handleWorkspaceWsMessage(
+      {
+        type: "human_gate_exclusions_accepted",
+        command_id: "cmd_1",
+        excluded_finding_ids: ["0123456789abcdef"],
+      } as WsServerMessage,
+      options(),
+    );
+
+    expect(useWorkspaceStore.getState().gateExclusionFailure).toBeNull();
+    expect(useWorkspaceStore.getState().lastGateLocalAction).toBeNull();
+  });
 });
