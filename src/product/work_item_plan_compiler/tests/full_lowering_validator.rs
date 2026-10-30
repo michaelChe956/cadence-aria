@@ -54,6 +54,7 @@ fn rep4_validation_context<'a>(
         existing_work_item_ids: &[],
         enrollment_target: None,
         member_targets: None,
+        member_checkout_prefixes: None,
 
         now: "2026-08-27T00:00:00Z",
     }

@@ -1040,6 +1040,7 @@ fn c1_serial_context<'a>(
         existing_work_item_ids: existing_ids,
         enrollment_target: Some(&BOUND_TARGET),
         member_targets: None,
+        member_checkout_prefixes: None,
         now: "2026-09-29T00:00:00Z",
     }
 }

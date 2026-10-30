@@ -49,7 +49,13 @@ import {
   GATE_SECONDARY_TEXT_CLASS,
   GATE_TITLE_CLASS,
 } from "../gate-visual-tokens";
-import { isBlockingFinding, ReviewFindingGroups, reviewFindingsFromEntry } from "../finding-list";
+import {
+  isBlockingFinding,
+  ReviewFindingGroups,
+  ReviewOwnerGuidanceBlock,
+  reviewFindingsFromEntry,
+  reviewOwnerGuidance,
+} from "../finding-list";
 import {
   gateFindingsCrossRoundDelta,
   gateFindingsDeltaCopy,
@@ -81,6 +87,10 @@ export function GatePromptEntry({
   const verdict = verdictFromEntry(entry);
   const reviewGate = reviewGateFromEntry(entry);
   const findings = reviewFindingsFromEntry(entry);
+  // REQ-WSC-11（F1 修正）：门卡是 owner 真正「要动手」的地方——只要本轮
+  // review 携带人话裁决（问题 + ≥2 个互斥选项），就在技术 findings 折叠区
+  // 之前呈现人话区；未携带时整块不出现（不渲染空白块）。
+  const ownerGuidance = reviewOwnerGuidance(findings);
   // C2（REQ-HGC-03 场景 1）：阻断口径以 effective class（class_hint 优先，
   // severity 保底）为准——severity=suggestion 而 class_hint=repairable 时
   // 原因行不得再写「不阻断发布」。
@@ -308,6 +318,7 @@ export function GatePromptEntry({
             </button>
           </div>
         ) : null}
+        {ownerGuidance ? <ReviewOwnerGuidanceBlock guidance={ownerGuidance} /> : null}
         {findings.length > 0 && !isResolved ? (
           <details
             data-testid="gate-findings"

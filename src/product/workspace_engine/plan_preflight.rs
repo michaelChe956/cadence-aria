@@ -71,11 +71,11 @@ pub(crate) fn preflight_review_verdict(
         .filter(|finding| finding.severity == ReviewFindingSeverity::MustFix)
         .count();
     let summary = format!(
-        "计划 preflight 机械校验发现 {error_count} 项 Error 级缺口（options×items / AC 路径×基线树），候选必须返修"
+        "计划 preflight 机械校验发现 {error_count} 项 Error 级缺口（options×items / AC 路径×基线树 / 检查目标×forbidden / 意图合同 / 写范围×被授权仓），候选必须返修"
     );
     let mut comments = String::new();
     comments.push_str(&format!(
-        "计划 preflight 机械校验（存储 plan options 与基线树 × 候选交付交叉核对）发现 {error_count} 项 Error 级缺口：\n"
+        "计划 preflight 机械校验（存储 plan options、基线树、forbidden 写域、意图与成员 checkout 归属 × 候选交付交叉核对）发现 {error_count} 项 Error 级缺口：\n"
     ));
     for finding in &findings {
         if finding.severity == ReviewFindingSeverity::MustFix {
@@ -259,6 +259,10 @@ fn preflight_required_action(code: &str) -> String {
             crate::product::work_item_plan_compiler::WORK_ITEM_CHECK_TARGET_FORBIDDEN_REPAIR_ACTION
                 .to_string()
         }
+        "write_scope_outside_bound_repository" => {
+            crate::product::work_item_plan_compiler::WRITE_SCOPE_OUTSIDE_BOUND_REPOSITORY_REPAIR_ACTION
+                .to_string()
+        }
         other => format!("按 finding 消息修复 {other}"),
     }
 }
@@ -304,6 +308,8 @@ fn preflight_finding_to_review_finding(
         // 排除），生产恒 None；签名沿 §0.6.3 定案保留显式配对入口，
         // Some 只能由已证同 source/context 绑定的服务端指令产生。
         machine_repair,
+        owner_question: None,
+        owner_options: None,
     }
 }
 
@@ -408,6 +414,31 @@ mod tests {
         assert_eq!(
             finding.required_action,
             crate::product::work_item_plan_compiler::WORK_ITEM_CHECK_TARGET_FORBIDDEN_REPAIR_ACTION,
+            "required_action 与共享常量逐字同源（REQ-WSC-06 口径一致）"
+        );
+    }
+
+    /// REQ-WSC-10：写范围×被授权仓归属 finding 同属 preflight 族——适配为
+    /// 机械返修 verdict，required_action 与编译器共享常量逐字同源
+    ///（REQ-WSC-06 口径一致）。
+    #[test]
+    fn write_scope_outside_bound_repository_gap_adapts_to_mechanical_revision_verdict() {
+        let report = report_with(
+            "write_scope_outside_bound_repository",
+            "work item WI-001 的写范围 [scripts/dev.sh（聚合根非成员区，不属于任何成员仓 checkout）] 落在被授权仓 phys-busi 之外",
+        );
+        let verdict = preflight_review_verdict(&report).expect("gap must produce verdict");
+        assert_eq!(verdict.verdict, ReviewVerdictType::Revise);
+        assert_eq!(verdict.review_gate, ReviewGate::RequiresRevision);
+        let finding = &verdict.findings[0];
+        assert_eq!(finding.severity, ReviewFindingSeverity::MustFix);
+        assert_eq!(
+            finding.contract_field.as_deref(),
+            Some("plan_preflight.write_scope_outside_bound_repository")
+        );
+        assert_eq!(
+            finding.required_action,
+            crate::product::work_item_plan_compiler::WRITE_SCOPE_OUTSIDE_BOUND_REPOSITORY_REPAIR_ACTION,
             "required_action 与共享常量逐字同源（REQ-WSC-06 口径一致）"
         );
     }

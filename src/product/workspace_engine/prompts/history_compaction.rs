@@ -697,6 +697,8 @@ mod tests {
                 class_hint: None,
                 contract_field: None,
                 machine_repair: None,
+                owner_question: None,
+                owner_options: None,
             }],
             review_gate: ReviewGate::RequiresRevision,
             work_item_plan_review: None,

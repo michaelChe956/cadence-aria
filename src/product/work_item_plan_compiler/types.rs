@@ -95,8 +95,18 @@ pub const PREFLIGHT_FINDING_CODES: &[&str] = &[
     // bug45/t25（P1 计划自洽）：检查目标×本项 forbidden 写域冲突——Error
     // 留在报告里经既有修订轮回灌，不硬失败、不清既有 finding。
     "work_item_check_target_forbidden",
+    // REQ-WSC-10：写范围×被授权仓归属——多仓（LC 聚合根）会话的 exclusive
+    // 写面落在被授权成员仓 checkout 之外（聚合根非成员区/其他成员 checkout）
+    // ——Error 留在报告里经既有修订轮回灌，不硬失败、不清既有 finding。
+    "write_scope_outside_bound_repository",
 ];
 
+/// 写范围×被授权仓归属（REQ-WSC-10，owner 2026-10-30 真机现场）的共享
+/// 修复路径文案：把写范围改写为落在被授权成员仓 checkout 内的聚合根相对
+/// 路径（成员目录前缀形式）；确需写其他路径的，移交给拥有该路径的 work
+/// item 或调整归属声明，不得以扩大写域或删除声明绕过。与 finding 消息、
+/// plan_preflight 的 required_action 适配（REQ-WSC-06）逐字同源。
+pub const WRITE_SCOPE_OUTSIDE_BOUND_REPOSITORY_REPAIR_ACTION: &str = "把该写范围改写为落在本 work item 被授权成员仓 checkout 内的聚合根相对路径（带成员目录前缀，如 busi/src/...）；若交付确需写聚合根非成员区或其他成员仓的路径，把该部分移交给拥有对应成员仓的 work item 并声明依赖，或修正本项归属声明，不得以扩大写域或删除写范围声明绕过";
 /// 检查目标×本项 forbidden 写域冲突（bug45/t25，P1 计划自洽）的共享修复
 /// 路径文案：删除/改写该检查、改引域外路径、或移交给允许写该路径的工作
 /// 项；不得以扩大写域或删除 forbidden 声明绕过。与 finding 消息、
@@ -137,6 +147,13 @@ pub struct PlanCandidateValidationContext<'a> {
     /// 集合绑定的 IR 物理 ID 核对消费；None＝非 enrolled/Manual——集合
     /// 上界核对所需的映射缺失时 fail-closed 出诊断，不以 None 吞错。
     pub member_targets: Option<&'a super::PlanMemberTargets>,
+    /// REQ-WSC-10（写范围×被授权仓归属）：多仓（LC 聚合根）会话的成员
+    /// checkout 前缀表——物理成员仓 ID → 该成员 checkout 相对聚合根的
+    /// 目录（如 `busi`；空串＝成员 checkout 即聚合根本身）。仅 enrolled
+    /// 多仓会话提供（与 member_targets 同装载条件/同源 manifest）；None＝
+    /// 单仓/Manual——写范围归属核对不触发（零回归）。表在场而 item 的
+    /// 被授权仓不在表内 → fail-closed 出诊断，不以跳过吞错。
+    pub member_checkout_prefixes: Option<&'a std::collections::BTreeMap<String, String>>,
     pub now: &'a str,
 }
 

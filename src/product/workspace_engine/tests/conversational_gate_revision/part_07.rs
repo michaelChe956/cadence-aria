@@ -234,6 +234,8 @@ fn sg06b_repairable_revise_verdict() -> crate::web::workspace_ws_types::ReviewVe
             class_hint: Some(FindingClassHint::Repairable),
             contract_field: Some("work_item_plan.wi_001".to_string()),
             machine_repair: None,
+            owner_question: None,
+            owner_options: None,
         }],
         review_gate: crate::web::workspace_ws_types::ReviewGate::RequiresRevision,
         work_item_plan_review: None,

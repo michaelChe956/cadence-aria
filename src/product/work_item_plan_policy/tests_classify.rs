@@ -232,5 +232,7 @@ fn finding(
         class_hint,
         contract_field: contract_field.map(ToString::to_string),
         machine_repair: None,
+        owner_question: None,
+        owner_options: None,
     }
 }

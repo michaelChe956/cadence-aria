@@ -187,7 +187,12 @@ fn batch_review_keeps_legacy_affects_items_as_authoritative_source() {
             "target_outline_id": "outline_missing",
             "message": "旧版 batch finding 携带了非协议目标字段",
             "evidence": "辅助字段不应覆盖 affects_items",
-            "required_action": "无"
+            "required_action": "无",
+            "owner_question": "这一组 Work Item 要继续按当前拆分推进吗？",
+            "owner_options": [
+                { "label": "继续推进", "consequence": "系统保留当前拆分并继续后续阶段" },
+                { "label": "重新拆分", "consequence": "系统重开 Outline 再拆一次" }
+            ]
         }]
     }"#;
 

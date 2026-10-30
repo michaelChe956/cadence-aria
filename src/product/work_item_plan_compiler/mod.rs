@@ -7,6 +7,7 @@ pub mod normalize;
 mod parse;
 pub mod types;
 mod validate;
+mod write_scope_bound;
 
 pub use freshness::{FreshnessError, verify_publish_freshness};
 pub use grammar::*;

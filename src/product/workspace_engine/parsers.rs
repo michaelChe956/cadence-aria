@@ -4,6 +4,12 @@ use crate::product::work_item_plan_policy::{ParsedReviewEnvelope, ReviewStructur
 
 mod choice;
 pub(crate) use choice::*;
+mod error_codes;
+mod lenient_findings;
+mod owner_guidance;
+pub(crate) use error_codes::ReviewStructuredOutputErrorCode;
+pub(crate) use lenient_findings::*;
+pub(crate) use owner_guidance::*;
 
 /// Extracts the final sentinel through the cross-cutting single parser. The parser
 /// authenticates the JSON envelope nonce and strips it before returning JSON to the
@@ -30,64 +36,6 @@ pub(crate) fn extract_markdown_fence_json(output: &str) -> Option<(String, Strin
         json = stripped.trim().to_string();
     }
     Some((comments, json))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReviewStructuredOutputErrorCode {
-    MissingVerdict,
-    InvalidVerdict,
-    InvalidReviewScope,
-    MalformedFindings,
-    InvalidOutlineReference,
-    InvalidGenerationRound,
-    UnknownFindingCategory,
-    UnknownFindingClassHint,
-    InvalidFindingField,
-}
-
-impl ReviewStructuredOutputErrorCode {
-    pub(crate) fn as_str(&self) -> &'static str {
-        match self {
-            Self::MissingVerdict => "missing_verdict",
-            Self::InvalidVerdict => "invalid_verdict",
-            Self::InvalidReviewScope => "invalid_review_scope",
-            Self::MalformedFindings => "malformed_findings",
-            Self::InvalidOutlineReference => "invalid_outline_reference",
-            Self::InvalidGenerationRound => "invalid_generation_round",
-            Self::UnknownFindingCategory => "unknown_finding_category",
-            Self::UnknownFindingClassHint => "unknown_class_hint",
-            Self::InvalidFindingField => "invalid_finding_field",
-        }
-    }
-
-    pub(crate) fn message(&self) -> &'static str {
-        match self {
-            Self::MissingVerdict => "审核结论缺失或不是字符串",
-            Self::InvalidVerdict => "审核结论不符合当前范围的 schema",
-            Self::InvalidReviewScope => "审核 review_scope 缺失、无效或与当前范围不一致",
-            Self::MalformedFindings => "审核 findings 结构不合法",
-            Self::InvalidOutlineReference => "审核引用了无效的 outline",
-            Self::InvalidGenerationRound => "审核 generation round 缺失或为空",
-            Self::UnknownFindingCategory => "审核 finding category 不在允许枚举内",
-            Self::UnknownFindingClassHint => "审核 finding class_hint 不在允许枚举内",
-            Self::InvalidFindingField => "审核 finding 字段结构不合法",
-        }
-    }
-}
-
-impl From<ReviewStructuredOutputError> for ReviewStructuredOutputErrorCode {
-    fn from(error: ReviewStructuredOutputError) -> Self {
-        match error {
-            ReviewStructuredOutputError::UnknownFindingCategory(_) => Self::UnknownFindingCategory,
-            ReviewStructuredOutputError::UnknownFindingClassHint(_) => {
-                Self::UnknownFindingClassHint
-            }
-            ReviewStructuredOutputError::InvalidFindingField { .. }
-            | ReviewStructuredOutputError::VerificationScopeViolation { .. } => {
-                Self::InvalidFindingField
-            }
-        }
-    }
 }
 
 /// 唯一的 reviewer JSON adapter：保留原始 verdict，并对 finding 的新枚举字段作显式转换。
@@ -130,10 +78,13 @@ fn parse_raw_review_verdict(
     }
 }
 
+/// REQ-WSC-11（F3）：存量 reviewer 消息文本在本 change 之前不可能带人话字段，
+/// 历史入口必须按「不强制」解析——否则恢复链会把既有 needs_human 的
+/// findings/summary 全丢成兜底摘要，作者修订轮也拿不到待关闭 finding。
 pub(crate) fn parse_historical_review_json(json: &str, comments: &str) -> Option<ReviewVerdict> {
     let mut value: serde_json::Value = serde_json::from_str(json).ok()?;
     normalize_historical_review_findings(&mut value).ok()?;
-    parse_review_value(&value, comments).ok()
+    parse_review_value_with_owner_policy(&value, comments, OwnerGuidancePolicy::Historical).ok()
 }
 
 pub(crate) fn deserialize_historical_review_verdict(
@@ -193,9 +144,25 @@ pub(crate) fn normalize_historical_review_findings(
     Ok(())
 }
 
+/// REQ-WSC-11 的强制面按入口区分：live reviewer 输出强制人话字段；历史重解析
+/// 不强制（存量记录无从满足，且失败会吞掉既有 findings）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerGuidancePolicy {
+    Live,
+    Historical,
+}
+
 pub(crate) fn parse_review_value(
     value: &serde_json::Value,
     comments: &str,
+) -> Result<ReviewVerdict, ReviewStructuredOutputErrorCode> {
+    parse_review_value_with_owner_policy(value, comments, OwnerGuidancePolicy::Live)
+}
+
+pub(crate) fn parse_review_value_with_owner_policy(
+    value: &serde_json::Value,
+    comments: &str,
+    owner_policy: OwnerGuidancePolicy,
 ) -> Result<ReviewVerdict, ReviewStructuredOutputErrorCode> {
     let verdict = value
         .get("verdict")
@@ -234,6 +201,20 @@ pub(crate) fn parse_review_value(
         },
         ReviewGate::UserTriageRequired => ReviewVerdictType::NeedsHuman,
     };
+    // REQ-WSC-11 fail-closed：模型明确宣称 `needs_human` 时，owner 必须能读懂
+    // 并答完——缺 `owner_question`/`owner_options` 判结构化输出不合规，由既有
+    // `structured_output_diagnostic` 通道收口。判定放在 gate 归一之后：静默
+    // 空值视同未提供，先报 `missing_owner_guidance`（可行动的那个码），再查
+    // 半截字段。派生分诊（`revise` 无 finding 被升级为人工分诊）不在本条
+    // 强制面：模型自称 revise 时并未宣称"需要人决定"，行为逐字不变。
+    if let Some(error) = owner_guidance_error(
+        owner_policy == OwnerGuidancePolicy::Live
+            && parsed_verdict == ReviewVerdictType::NeedsHuman,
+        &parsed_findings.findings,
+    ) {
+        return Err(error);
+    }
+    validate_owner_guidance_pairing(&parsed_findings.findings)?;
     Ok(ReviewVerdict {
         verdict,
         comments: comments.trim().to_string(),
@@ -264,7 +245,14 @@ pub(crate) fn parse_historical_work_item_plan_review_json(
 ) -> Option<ReviewVerdict> {
     let mut value: serde_json::Value = serde_json::from_str(json).ok()?;
     normalize_historical_review_findings(&mut value).ok()?;
-    parse_work_item_plan_review_value(&value, comments, valid_outline_ids, scope).ok()
+    parse_work_item_plan_review_value_with_owner_policy(
+        &value,
+        comments,
+        valid_outline_ids,
+        scope,
+        OwnerGuidancePolicy::Historical,
+    )
+    .ok()
 }
 
 pub(crate) fn parse_work_item_plan_review_value(
@@ -272,6 +260,22 @@ pub(crate) fn parse_work_item_plan_review_value(
     comments: &str,
     valid_outline_ids: &[String],
     scope: WorkItemPlanReviewScope,
+) -> Result<ReviewVerdict, ReviewStructuredOutputErrorCode> {
+    parse_work_item_plan_review_value_with_owner_policy(
+        value,
+        comments,
+        valid_outline_ids,
+        scope,
+        OwnerGuidancePolicy::Live,
+    )
+}
+
+pub(crate) fn parse_work_item_plan_review_value_with_owner_policy(
+    value: &serde_json::Value,
+    comments: &str,
+    valid_outline_ids: &[String],
+    scope: WorkItemPlanReviewScope,
+    owner_policy: OwnerGuidancePolicy,
 ) -> Result<ReviewVerdict, ReviewStructuredOutputErrorCode> {
     let payload_scope = value
         .get("review_scope")
@@ -365,6 +369,17 @@ pub(crate) fn parse_work_item_plan_review_value(
         .map(ToString::to_string);
     let (generic_verdict, review_gate, review_action, gates) =
         work_item_plan_review_routing(&effective_verdict, &scope);
+    // REQ-WSC-11 fail-closed：WorkItemPlan 中只有 `needs_human` 是"需要 owner
+    // 决定"（revise_batch / plan_reopen_required 是系统自动返修动作，不向
+    // owner 提问）。缺人话提问与选项即判不合规，走既有诊断通道。
+    if let Some(error) = owner_guidance_error(
+        owner_policy == OwnerGuidancePolicy::Live
+            && effective_verdict == WorkItemPlanReviewVerdict::NeedsHuman,
+        &parsed_findings.findings,
+    ) {
+        return Err(error);
+    }
+    validate_owner_guidance_pairing(&parsed_findings.findings)?;
     let extension = WorkItemPlanReviewComplete {
         verdict: effective_verdict,
         review_scope: scope,
@@ -650,6 +665,8 @@ fn parse_raw_review_finding(
                 | "finding_id"
                 | "code"
                 | "work_item_ids"
+                | "owner_question"
+                | "owner_options"
         ) {
             return Err(invalid_finding_field(
                 format!("{prefix}.{field}"),
@@ -664,6 +681,8 @@ fn parse_raw_review_finding(
     optional_string_or_null_field(object, &prefix, "category")?;
     optional_string_or_null_field(object, &prefix, "class_hint")?;
     optional_string_or_null_field(object, &prefix, "contract_field")?;
+    let owner_question = parse_optional_owner_question(object, &prefix)?;
+    let owner_options = parse_optional_owner_options(object, &prefix)?;
 
     let raw = serde_json::from_value::<RawReviewFinding>(value.clone()).map_err(|error| {
         invalid_finding_field(prefix.clone(), format!("cannot be decoded: {error}"))
@@ -692,6 +711,8 @@ fn parse_raw_review_finding(
         // SG7（§0.6.3）：Raw 适配入口恒 None——machine_repair 只由服务端
         // L1 配对产生；provider 伪造字段在 strict 白名单处已被拒。
         machine_repair: None,
+        owner_question,
+        owner_options,
     })
 }
 
@@ -779,154 +800,6 @@ fn invalid_finding_field(
     ReviewStructuredOutputError::InvalidFindingField {
         field: field.into(),
         details: details.into(),
-    }
-}
-
-pub(crate) fn parse_review_findings(value: Option<&serde_json::Value>) -> ParsedReviewFindings {
-    let Some(value) = value else {
-        return ParsedReviewFindings {
-            findings: Vec::new(),
-            malformed: false,
-            structured_error: None,
-        };
-    };
-    let Some(items) = value.as_array() else {
-        return ParsedReviewFindings {
-            findings: Vec::new(),
-            malformed: true,
-            structured_error: None,
-        };
-    };
-
-    let mut findings = Vec::new();
-    let mut malformed = false;
-    for (index, item) in items.iter().enumerate() {
-        let Some(object) = item.as_object() else {
-            malformed = true;
-            continue;
-        };
-        if object.contains_key("impact") {
-            malformed = true;
-            continue;
-        }
-        let Some(severity) = object
-            .get("severity")
-            .and_then(serde_json::Value::as_str)
-            .and_then(parse_live_review_finding_severity)
-        else {
-            malformed = true;
-            continue;
-        };
-        let Some(message) = object.get("message").and_then(serde_json::Value::as_str) else {
-            malformed = true;
-            continue;
-        };
-        let prefix = format!("findings[{index}]");
-        let category = match parse_optional_finding_category(object, &prefix) {
-            Ok(category) => category,
-            Err(error) => {
-                return ParsedReviewFindings {
-                    findings: Vec::new(),
-                    malformed: false,
-                    structured_error: Some(error),
-                };
-            }
-        };
-        let class_hint = match parse_optional_finding_class_hint(object, &prefix) {
-            Ok(class_hint) => class_hint,
-            Err(error) => {
-                return ParsedReviewFindings {
-                    findings: Vec::new(),
-                    malformed: false,
-                    structured_error: Some(error),
-                };
-            }
-        };
-        let contract_field = match parse_optional_contract_field(object, &prefix) {
-            Ok(contract_field) => contract_field,
-            Err(error) => {
-                return ParsedReviewFindings {
-                    findings: Vec::new(),
-                    malformed: false,
-                    structured_error: Some(error),
-                };
-            }
-        };
-
-        findings.push(ReviewFinding {
-            severity,
-            message: message.to_string(),
-            evidence: object
-                .get("evidence")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            required_action: object
-                .get("required_action")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            category,
-            class_hint,
-            contract_field,
-            // SG7（§0.6.3）：Raw 宽松入口对伪造 machine_repair 一律丢弃，
-            // 不从 provider 输入建立修复许可。
-            machine_repair: None,
-        });
-    }
-
-    ParsedReviewFindings {
-        findings,
-        malformed,
-        structured_error: None,
-    }
-}
-
-fn parse_optional_finding_category(
-    object: &serde_json::Map<String, serde_json::Value>,
-    prefix: &str,
-) -> Result<
-    Option<crate::product::work_item_plan_policy::ReviewFindingCategory>,
-    ReviewStructuredOutputError,
-> {
-    match object.get("category") {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(value)) => parse_finding_category(value).map(Some),
-        Some(_) => Err(invalid_finding_field(
-            format!("{prefix}.category"),
-            "must be a string or null",
-        )),
-    }
-}
-
-fn parse_optional_finding_class_hint(
-    object: &serde_json::Map<String, serde_json::Value>,
-    prefix: &str,
-) -> Result<
-    Option<crate::product::work_item_plan_policy::FindingClassHint>,
-    ReviewStructuredOutputError,
-> {
-    match object.get("class_hint") {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(value)) => parse_finding_class_hint(value).map(Some),
-        Some(_) => Err(invalid_finding_field(
-            format!("{prefix}.class_hint"),
-            "must be a string or null",
-        )),
-    }
-}
-
-fn parse_optional_contract_field(
-    object: &serde_json::Map<String, serde_json::Value>,
-    prefix: &str,
-) -> Result<Option<String>, ReviewStructuredOutputError> {
-    match object.get("contract_field") {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
-        Some(_) => Err(invalid_finding_field(
-            format!("{prefix}.contract_field"),
-            "must be a string or null",
-        )),
     }
 }
 

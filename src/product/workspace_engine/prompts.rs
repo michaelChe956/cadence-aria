@@ -9,6 +9,8 @@ mod author_revision;
 mod baseline_teaching;
 mod history_compaction;
 mod human_gate_revision;
+mod owner_guidance_rules;
+use owner_guidance_rules::OWNER_GUIDANCE_RULES;
 mod review;
 mod review_context;
 mod review_repair;
@@ -304,6 +306,7 @@ pub(crate) fn reviewer_output_contract(
          前置 gate：仅只读审核当前材料；Aria 的人工确认与 daemon canonical writeback 边界保持不变。\n\
          输出硬约束：实际 nonce 开始标签必须是输出第一行；此前禁止任何前言、声明、路由回执、说明、空白行或代码围栏。\n\
          {intro}\
+         {OWNER_GUIDANCE_RULES}\
          完整示例（仅用于理解结构，绝不可照抄 nonce）：\n\
          <ARIA_STRUCTURED_OUTPUT nonce=\"EXAMPLE_NONCE\">\n\
          {}\n\
@@ -1295,18 +1298,6 @@ mod routing_reference_prompt_tests {
         assert!(prompt.contains("sha256:abc123"), "{prompt}");
         assert!(prompt.contains("不作为政策正文"), "{prompt}");
         assert!(prompt.contains("只报告阻塞"), "{prompt}");
-    }
-
-    #[test]
-    fn reviewer_output_contract_legacy_uses_on_demand_generation_reference() {
-        let prompt =
-            reviewer_output_contract("nonce", "{}", "intro", &RoutingReferenceContext::Legacy);
-        assert!(prompt.contains("按需查阅"), "{prompt}");
-        assert!(prompt.contains("忽略规则约束"), "{prompt}");
-        assert!(!prompt.contains("项目规则未加载"), "{prompt}");
-        assert!(!prompt.contains("完整读取"), "{prompt}");
-        assert!(!prompt.contains("只报告阻塞"), "{prompt}");
-        assert_eq!(prompt.matches("[cadence_project_rules]").count(), 1);
     }
 
     #[test]

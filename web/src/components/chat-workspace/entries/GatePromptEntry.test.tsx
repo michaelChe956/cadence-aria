@@ -1072,3 +1072,80 @@ describe("C2 REQ-HGC-03 gate card dual-track classification", () => {
     expect(screen.getByTestId("gate-why")).not.toContainHTML("不阻断发布");
   });
 });
+
+// REQ-WSC-11（观察 1 致命缺口修正）：owner 真正「要动手」的是门卡——带人话裁决
+// 的 review 必须在门卡上先给人话问题与选项，技术 findings 折叠区原样保留。
+describe("GatePromptEntry owner-readable needs_human", () => {
+  installWorkspaceStoreTestHooks();
+
+  const ownerFindings = [
+    {
+      severity: "suggestion",
+      message: "WI-004 的 write_policy.exclusive_scopes 仍声明 scripts/dev.sh",
+      evidence: "exclusive_write_scopes=[scripts/dev.sh]",
+      required_action: "由人工裁决 WI-004 归属",
+      owner_question: "WI-004 还要不要继续负责 scripts/dev.sh 的改动？",
+      owner_options: [
+        { label: "不负责，只做验证", consequence: "WI-004 变成纯验证项，脚本改动另行安排" },
+        { label: "继续负责", consequence: "把 scripts/ 纳入可写入范围" },
+      ],
+    },
+  ];
+
+  it("门卡渲染人话问题、选项与后果，技术 findings 折叠区保留", () => {
+    render(
+      <GatePromptEntry
+        entry={gateEntry(null, undefined, {
+          review_gate: "user_triage_required",
+          verdict: "needs_human",
+          findings: ownerFindings,
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId("owner-question")).toHaveTextContent(
+      "WI-004 还要不要继续负责 scripts/dev.sh 的改动？",
+    );
+    const options = screen.getAllByTestId("owner-option");
+    expect(options).toHaveLength(2);
+    expect(options[0]).toHaveTextContent("不负责，只做验证");
+    expect(options[0]).toHaveTextContent("WI-004 变成纯验证项，脚本改动另行安排");
+    expect(screen.getByTestId("owner-option-guidance")).toHaveTextContent(
+      "把选项名原文作为补充指令发回去",
+    );
+    expect(screen.getByTestId("gate-findings")).toHaveTextContent("exclusive_write_scopes");
+  });
+
+  it("findings 不带人话字段时门卡不渲染人话区（零空白块）", () => {
+    render(
+      <GatePromptEntry
+        entry={gateEntry(null, undefined, {
+          review_gate: "user_triage_required",
+          findings: [{ severity: "must_fix", message: "缺少验证命令" }],
+        })}
+      />,
+    );
+
+    expect(screen.queryByTestId("owner-guidance")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("owner-question")).not.toBeInTheDocument();
+  });
+
+  it("只有 1 个选项时按 fail-closed 下限不渲染人话区（与服务端同口径）", () => {
+    render(
+      <GatePromptEntry
+        entry={gateEntry(null, undefined, {
+          findings: [
+            {
+              severity: "suggestion",
+              message: "m",
+              owner_question: "要不要继续？",
+              owner_options: [{ label: "继续", consequence: "保持当前拆分" }],
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.queryByTestId("owner-guidance")).not.toBeInTheDocument();
+  });
+});

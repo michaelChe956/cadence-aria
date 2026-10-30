@@ -593,6 +593,13 @@ export type ExecutionEventStatus =
   | "failed"
   | "aborted";
 
+/** REQ-WSC-11：`needs_human` 结论面向 owner 的单条互斥选项——`label` 是
+ * 选项名（人话），`consequence` 是「选它之后会发生什么」。 */
+export type WorkspaceOwnerOption = {
+  label: string;
+  consequence: string;
+};
+
 export type WorkspaceReviewFinding = {
   severity: WorkspaceReviewFindingSeverity;
   message: string;
@@ -601,6 +608,10 @@ export type WorkspaceReviewFinding = {
   /** SG7：服务端已证 L1 且同 source/context 显式配对的机器修复投影；
    * 旧记录/provider Raw 输出恒缺省（wire 不携带）。 */
   machine_repair?: MachineRepairPresentation | null;
+  /** REQ-WSC-11：面向 owner 的一句话人话提问（仅 needs_human 携带）。 */
+  owner_question?: string | null;
+  /** REQ-WSC-11：owner 可选的互斥处置项（2–3 项）。 */
+  owner_options?: WorkspaceOwnerOption[] | null;
 };
 
 export type StructuredOutputDiagnostic = {

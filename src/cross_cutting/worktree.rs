@@ -376,6 +376,36 @@ pub(crate) fn scope_allows_member_path(
         })
 }
 
+/// scope 的固定路径锚点提取（REQ-WSC-10 归属判定辅助）：给出该 scope
+/// 钉死的根相对路径域——首个 `*` 之前的固定段（顿号方言按 F-25 分隔符
+/// 逐段展开、逐段归一），`busi/src/**` → `busi/src`、`scripts/dev.sh` →
+/// `scripts/dev.sh`、`web/src/` → `web/src`。无固定锚点的 scope（`*`、
+/// `**/x` 等无确定路径域）不产出锚点——「锚不住」不是错误，由调用方按
+/// 各自规则处置，不得据此判违规。归一与 [`ScopePattern::parse`] 同源
+///（反斜杠/`./` 前缀/重复斜杠/大小写），不另立第二套语义。
+pub(crate) fn scope_fixed_path_anchors(scope: &str, case_sensitive: bool) -> Vec<String> {
+    if scope.contains('、') {
+        return scope
+            .split('、')
+            .flat_map(|part| scope_fixed_path_anchors(part, case_sensitive))
+            .collect();
+    }
+    let normalized = normalize_scope_text(scope, case_sensitive);
+    if normalized == "*" {
+        return Vec::new();
+    }
+    let base = if normalized.contains('*') {
+        normalized.split('*').next().unwrap_or_default()
+    } else {
+        normalized.as_str()
+    };
+    let anchor = base.trim_end_matches('/');
+    if anchor.is_empty() {
+        Vec::new()
+    } else {
+        vec![anchor.to_string()]
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScopePattern {
     base: String,
@@ -464,7 +494,7 @@ fn now_iso() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{scope_allows_member_path, scope_allows_path};
+    use super::{scope_allows_member_path, scope_allows_path, scope_fixed_path_anchors};
 
     /// F-25（kimi author 方言，现场 attempt 9298fe0b）：author 把
     /// exclusive_scopes 产成顿号单串（"server/**、data/levels.json、
@@ -563,5 +593,36 @@ mod tests {
                 scope_allows_path(scope, path, true)
             );
         }
+    }
+
+    /// REQ-WSC-10 归属判定的锚点提取：固定段、顿号方言、归一与「锚不住
+    /// 不判」三类边界。
+    #[test]
+    fn scope_fixed_path_anchors_extract_normalized_fixed_prefixes() {
+        assert_eq!(
+            scope_fixed_path_anchors("busi/src/**", true),
+            vec!["busi/src".to_string()]
+        );
+        assert_eq!(
+            scope_fixed_path_anchors("scripts/dev.sh", true),
+            vec!["scripts/dev.sh".to_string()]
+        );
+        // 目录形 scope 去尾部斜杠；`./` 前缀与反斜杠归一。
+        assert_eq!(
+            scope_fixed_path_anchors("web/src/", true),
+            vec!["web/src".to_string()]
+        );
+        assert_eq!(
+            scope_fixed_path_anchors(r".\busi\src\x", true),
+            vec!["busi/src/x".to_string()]
+        );
+        // 顿号方言逐段展开。
+        assert_eq!(
+            scope_fixed_path_anchors("busi/a.ts、web/b.ts", true),
+            vec!["busi/a.ts".to_string(), "web/b.ts".to_string()]
+        );
+        // 无固定锚点（`*`、`**/x`）不产出锚点。
+        assert!(scope_fixed_path_anchors("*", true).is_empty());
+        assert!(scope_fixed_path_anchors("**/x.ts", true).is_empty());
     }
 }

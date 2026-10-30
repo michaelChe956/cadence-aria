@@ -252,5 +252,8 @@ pub(crate) fn work_item_plan_confirmed_member_order_teaching(
     lines.push_str(
         "成员归属纪律：intent_target_kind=logical_codebase 时 intent_target_logical_repo 只能逐字取上列成员 logical UUID；intent_target_kind=single_repository 时 intent_target_repo 只能逐字取上列物理成员仓 ID；会话根仓/聚合根视图 ID 不得替代业务成员 target（→ work_item_target_missing 拒绝）。LC 多仓限定（本段在场即生效）：intent_target_repo 改为逐字取本段上列物理成员仓 ID，不取 [issue] 头 repo=——grammar 段「逐字取 [issue] 头 repo= 的 repository id」仅是单仓默认取值。Plan Intent 仍为可选 section——本段不改变其可选性，也不新增任何创建/入站授权。\n\n",
     );
+    lines.push_str(
+        "写范围路径基准（LC 多仓限定，本段在场即生效）：Write Policy 的 exclusive_scopes/forbidden_scopes 必须写成「<成员目录>/<仓内路径>」的聚合根相对形式（成员目录=该成员仓 checkout 在聚合根下的目录，如 busi/src/**）；裸仓内相对写法（如 src/**）仅被执行期兼容，plan 期归属校验会按越界拒收（write_scope_outside_bound_repository）；聚合根本地文件区（不属于任何成员仓的路径，如 scripts/dev.sh）任何 Work Item 都不可写，不得写入写范围。\n\n",
+    );
     lines
 }

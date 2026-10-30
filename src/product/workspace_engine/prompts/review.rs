@@ -200,7 +200,7 @@ impl WorkspaceEngine {
         };
         prompt.push_str(&reviewer_output_contract(
             &nonce,
-            r#"{"verdict":"pass|revise|needs_human","summary":"一句话摘要","findings":[{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"当前产物中的具体证据","required_action":"需要作者执行的最小动作"}]}"#,
+            r#"{"verdict":"pass|revise|needs_human","summary":"一句话摘要","findings":[{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"当前产物中的具体证据","required_action":"需要作者执行的最小动作","owner_question":"面向用户的一句话提问（仅 needs_human 必填）","owner_options":[{"label":"选项名（人话）","consequence":"选它之后会发生什么"}]}]}"#,
             "\n\n请输出审核意见；可以先输出简短可读说明，最终 JSON 必须放在 nonce sentinel block 中，不得使用 Markdown code fence：\n\
              - 只有影响下一阶段可用性的 finding 才能标记为 `blocking` 或 `must_fix`。\n\
              - 风格、措辞、文档美化、未来扩展、非必要补充只能标记为 `suggestion`。\n\
@@ -400,7 +400,7 @@ impl WorkspaceEngine {
             schema_name: "work_item_plan_review".to_string(),
         };
         let schema = format!(
-            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"当前产物中的具体证据","required_action":"需要作者执行的最小动作"}}]}}"#,
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"当前产物中的具体证据","required_action":"需要作者执行的最小动作","owner_question":"面向用户的一句话提问（仅 needs_human 必填）","owner_options":[{{"label":"选项名（人话）","consequence":"选它之后会发生什么"}}]}}]}}"#,
             generation_round_id
         );
         prompt.push_str(&reviewer_output_contract(
@@ -541,7 +541,7 @@ impl WorkspaceEngine {
             schema_name: "work_item_plan_review".to_string(),
         };
         let schema = format!(
-            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[]}}"#,
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"具体证据","required_action":"需要作者执行的最小动作","owner_question":"面向用户的一句话提问（仅 needs_human 必填）","owner_options":[{{"label":"选项名（人话）","consequence":"选它之后会发生什么"}}]}}]}}"#,
             generation_round_id
         );
         prompt.push_str(&reviewer_output_contract(
@@ -727,7 +727,7 @@ impl WorkspaceEngine {
             schema_name: "work_item_plan_outline_review".to_string(),
         };
         let schema = format!(
-            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|suggestion","target_outline_id":"outline id","message":"问题描述（含影响）","evidence":"Outline 中的具体证据","required_action":"需要 Outline author 执行的最小动作"}}]}}"#,
+            r#"{{"verdict":"pass|revise|needs_human","review_scope":"outline","generation_round_id":"{}","summary":"一句话摘要","findings":[{{"severity":"blocking|must_fix|suggestion","target_outline_id":"outline id","message":"问题描述（含影响）","evidence":"Outline 中的具体证据","required_action":"需要 Outline author 执行的最小动作","owner_question":"面向用户的一句话提问（仅 needs_human 必填）","owner_options":[{{"label":"选项名（人话）","consequence":"选它之后会发生什么"}}]}}]}}"#,
             generation_round_id
         );
         prompt.push_str(&reviewer_output_contract(
@@ -816,7 +816,7 @@ impl WorkspaceEngine {
         prompt.push_str("\n\n");
         prompt.push_str(&reviewer_output_contract(
             &nonce,
-            r#"{"verdict":"pass|revise_batch|needs_human|plan_reopen_required","review_scope":"batch","generation_round_id":"round id","summary":"一句话摘要","affects_items":[{"target_outline_id":"outline id"}],"findings":[{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"整组 draft 或依赖上下文中的具体证据","required_action":"需要 batch author 执行的最小动作"}]}"#,
+            r#"{"verdict":"pass|revise_batch|needs_human|plan_reopen_required","review_scope":"batch","generation_round_id":"round id","summary":"一句话摘要","affects_items":[{"target_outline_id":"outline id"}],"findings":[{"severity":"blocking|must_fix|suggestion","message":"问题描述（含影响）","evidence":"整组 draft 或依赖上下文中的具体证据","required_action":"需要 batch author 执行的最小动作","owner_question":"面向用户的一句话提问（仅 needs_human 必填）","owner_options":[{"label":"选项名（人话）","consequence":"选它之后会发生什么"}]}]}"#,
             "\n\n审核规则：自动模式只能整组通过、整组返修或要求重开 Outline；不得要求单项重写。最终 JSON 必须放在 nonce sentinel block 中。\n",
             &self.routing_reference_context(),
         ));

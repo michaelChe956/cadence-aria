@@ -355,6 +355,8 @@ fn single_candidate_recovery_repairable_verdict(message: &str) -> ReviewVerdict 
             class_hint: Some(FindingClassHint::Repairable),
             contract_field: Some("contract.field".to_string()),
             machine_repair: None,
+            owner_question: None,
+            owner_options: None,
         }],
         review_gate: ReviewGate::RequiresRevision,
         work_item_plan_review: None,

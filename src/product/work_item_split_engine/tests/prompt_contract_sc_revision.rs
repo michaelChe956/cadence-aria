@@ -37,6 +37,8 @@ fn must_fix_finding(message: &str, required_action: &str) -> ReviewFinding {
         class_hint: None,
         contract_field: None,
         machine_repair: None,
+        owner_question: None,
+        owner_options: None,
     }
 }
 
@@ -50,6 +52,8 @@ fn suggestion_finding(message: &str) -> ReviewFinding {
         class_hint: None,
         contract_field: None,
         machine_repair: None,
+        owner_question: None,
+        owner_options: None,
     }
 }
 

@@ -109,6 +109,8 @@ fn t17_revise_verdict() -> crate::web::workspace_ws_types::ReviewVerdict {
             class_hint: None,
             contract_field: None,
             machine_repair: None,
+            owner_question: None,
+            owner_options: None,
         }],
         review_gate: crate::web::workspace_ws_types::ReviewGate::RequiresRevision,
         work_item_plan_review: None,

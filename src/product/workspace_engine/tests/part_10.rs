@@ -809,7 +809,7 @@ fn parse_review_verdict_does_not_upgrade_actionable_comments_without_strong_find
         **主要问题**\n\n\
         - **High**：进度接口无法区分并发安装、重试安装、页面刷新后重连到哪一次任务。\n\n\
         ```json\n\
-        {\"verdict\":\"needs_human\",\"summary\":\"安装任务 API 设计需修正。\"}\n\
+        {\"verdict\":\"needs_human\",\"summary\":\"安装任务 API 设计需修正。\",\"findings\":[{\"severity\":\"suggestion\",\"message\":\"安装任务 API 设计存在实现级歧义\",\"evidence\":\"进度接口无法区分并发安装\",\"required_action\":\"由人工决定是否按当前设计继续\",\"owner_question\":\"安装任务 API 要先按当前设计继续，还是先改设计？\",\"owner_options\":[{\"label\":\"先改设计\",\"consequence\":\"返修 Design 后重新评审\"},{\"label\":\"按当前设计继续\",\"consequence\":\"带着已知歧义进入下一阶段\"}]}]}\n\
         ```";
 
     let verdict = WorkspaceEngine::parse_review_verdict(output);

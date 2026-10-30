@@ -2,6 +2,7 @@
 // scope fail-closed 校验测试从 mod.rs 移入；测试逻辑与断言零改动。
 
 use super::*;
+use crate::cross_cutting::structured_output::StructuredOutputState;
 
 #[test]
 fn verification_scope_missing_mechanical_report_fails_protocol_and_durably_marks_failed() {
@@ -496,4 +497,44 @@ fn verification_scope_new_fingerprint_requires_human_without_second_repair() {
         "new fingerprint must preserve evaluator reason, got {action:?}"
     );
     assert!(engine.session().provider_start_ledger.is_empty());
+}
+
+/// REQ-WSC-11（F4）：复评轮模型漏写人话字段时，verification scope 的
+/// 「解析失败一律协议致命」纪律**不得**吞掉它——该码是「结论合法、呈现不
+/// 合规」，必须保留 `missing_owner_guidance` 走 needs_human + 诊断卡。
+#[tokio::test]
+async fn verification_scope_missing_owner_guidance_stays_schema_error_not_protocol_fatal() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::super::make_work_item_plan_engine_with_draft_candidate(
+            "verification_scope_owner_guidance",
+        );
+    let (ir_ref, report_ref) = persist_verification_artifacts(&lifecycle, &plan_id);
+    persist_verification_scope(
+        &lifecycle,
+        &mut engine,
+        ReviewInvocationScope::verification(BTreeSet::new(), ir_ref, report_ref, None),
+    );
+    let completion = ProviderCompletion {
+        full_output: String::new(),
+        readable_output: String::new(),
+        structured_output: StructuredOutputState::Parsed(serde_json::json!({
+            "verdict": "needs_human",
+            "review_scope": "outline",
+            "generation_round_id": "round_0001",
+            "summary": "需要人工确认",
+            "findings": [{
+                "severity": "suggestion",
+                "message": "需要 owner 判断",
+                "evidence": "evidence",
+                "required_action": "decide"
+            }]
+        })),
+        provider_session_id: None,
+    };
+
+    let error = engine
+        .parse_review_completion_for_active_node(&completion)
+        .expect_err("missing owner guidance must still be rejected");
+
+    assert_eq!(error.code(), "missing_owner_guidance");
 }

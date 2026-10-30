@@ -250,10 +250,7 @@ fn build_work_item_plan_streaming_input_uses_splitter_role() {
     // stub prompt」的原意）并追加块恰好一次。
     assert!(input.prompt.starts_with("split prompt"), "{}", input.prompt);
     assert_eq!(
-        input
-            .prompt
-            .matches(RUN_BOUNDARY_HEADING)
-            .count(),
+        input.prompt.matches(RUN_BOUNDARY_HEADING).count(),
         1,
         "{}",
         input.prompt
@@ -360,6 +357,8 @@ fn work_item_plan_outline_revision_feedback_assembles_review_and_context() {
             class_hint: None,
             contract_field: None,
             machine_repair: None,
+            owner_question: None,
+            owner_options: None,
         }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,
@@ -408,6 +407,8 @@ fn work_item_plan_outline_revision_feedback_skips_contract_for_optional_only_fin
             class_hint: None,
             contract_field: None,
             machine_repair: None,
+            owner_question: None,
+            owner_options: None,
         }],
         review_gate: ReviewGate::UserConfirmAllowed,
         work_item_plan_review: None,

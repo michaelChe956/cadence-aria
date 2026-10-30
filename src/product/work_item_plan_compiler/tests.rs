@@ -17,6 +17,7 @@ mod preflight_options;
 mod publish_freshness;
 mod repeated_field_accumulation;
 mod reviewer_finding_channel_boundary;
+mod write_scope_bound;
 
 fn assert_ast_traits<T: std::fmt::Debug + Clone + PartialEq + Eq>() {}
 

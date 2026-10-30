@@ -242,6 +242,7 @@ fn c1_context_with_target<'a>(
         existing_work_item_ids: existing_ids,
         enrollment_target,
         member_targets: None,
+        member_checkout_prefixes: None,
         now: "2026-09-29T00:00:00Z",
     }
 }
@@ -606,6 +607,7 @@ fn c1_members_target_intent_contract_set_bound_and_set_intent_rejected() {
                 existing_work_item_ids: &[],
                 enrollment_target,
                 member_targets,
+                member_checkout_prefixes: None,
                 now: "2026-10-16T00:00:00Z",
             },
         )

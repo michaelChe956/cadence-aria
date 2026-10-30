@@ -179,6 +179,8 @@ fn contract_finding_to_review_finding(
         // context 显式配对产生（`machine_repair_dto_for_instruction`），
         // 不从 message/class_hint/severity 猜资格；无配对恒 None。
         machine_repair,
+        owner_question: None,
+        owner_options: None,
     }
 }
 

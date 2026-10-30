@@ -1,6 +1,7 @@
 use super::*;
 use crate::product::work_item_plan_compiler::grammar;
 use crate::product::workspace_engine::PlanAuthorOutputContract;
+use crate::product::workspace_engine::draft_batch::member_checkout_prefixes;
 
 pub(crate) enum SingleCandidateProviderRunOutcome {
     Completed,
@@ -348,6 +349,12 @@ fn prevalidate_plan_candidate_ir(
         }
         None => None,
     };
+    // REQ-WSC-10（写范围×被授权仓归属）：enrolled 装载成员 checkout 前缀表（失败转预检诊断；单仓保持 None 零回归）。
+    let eb = enrollment_binding.as_ref();
+    let mc_prefixes = match member_checkout_prefixes::for_validation(lifecycle, &plan, eb) {
+        Ok(prefixes) => prefixes,
+        Err(e) => return Some(vec![format!("member checkout prefixes: {e}")]),
+    };
     let validation_now = chrono::Utc::now().to_rfc3339();
     let validation = crate::product::work_item_plan_compiler::validate_plan_candidate_ir(
         ir,
@@ -364,6 +371,7 @@ fn prevalidate_plan_candidate_ir(
             existing_work_item_ids: &existing_work_item_ids,
             enrollment_target: enrollment_binding.as_ref().map(|binding| &binding.target),
             member_targets: validation_member_targets.as_ref(),
+            member_checkout_prefixes: mc_prefixes.as_ref(),
             now: &validation_now,
         },
     );

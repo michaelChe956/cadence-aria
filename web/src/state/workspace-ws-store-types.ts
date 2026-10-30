@@ -213,11 +213,21 @@ export type ReviewGate =
   | "user_confirm_allowed"
   | "user_triage_required";
 
+/** REQ-WSC-11：`needs_human` 结论面向 owner 的单条互斥选项。 */
+export interface ReviewOwnerOption {
+  label: string;
+  consequence: string;
+}
+
 export interface ReviewFinding {
   severity: ReviewFindingSeverity;
   message: string;
   evidence: string;
   required_action: string;
+  /** REQ-WSC-11：面向 owner 的一句话人话提问（仅 needs_human 携带）。 */
+  owner_question?: string | null;
+  /** REQ-WSC-11：owner 可选的互斥处置项（2–3 项）。 */
+  owner_options?: ReviewOwnerOption[] | null;
 }
 
 export interface ArtifactVersionSummary {

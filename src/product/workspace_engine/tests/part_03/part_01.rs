@@ -173,6 +173,19 @@ fn work_item_plan_review_drops_invalid_affects_items_below_threshold() {
         "affects_items": [
             { "target_outline_id": "outline_api" },
             { "target_outline_id": "outline_missing" }
+        ],
+        "findings": [
+            {
+                "severity": "suggestion",
+                "message": "整组是否继续按当前拆分推进需要人工判断",
+                "evidence": "affects_items 引用了不存在 item",
+                "required_action": "由人工确认拆分边界",
+                "owner_question": "这一组 Work Item 要继续按当前拆分推进吗？",
+                "owner_options": [
+                    { "label": "继续推进", "consequence": "系统保留当前拆分并继续后续阶段" },
+                    { "label": "重新拆分", "consequence": "系统重开 Outline 再拆一次" }
+                ]
+            }
         ]
     }"#;
 

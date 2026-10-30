@@ -7,6 +7,11 @@
 // 为 repairable/human_required 时不再被归入「可选建议」造成「建议不阻断」误导。
 import type { ChatEntry } from "../../state/chat-entries";
 
+export type ReviewOwnerOption = {
+  label: string;
+  consequence: string;
+};
+
 export type ReviewFinding = {
   severity: string;
   message: string;
@@ -14,7 +19,71 @@ export type ReviewFinding = {
   required_action?: string;
   /** 策略分类提示（wire snake_case：repairable/human_required/advisory）。 */
   class_hint?: string;
+  /** REQ-WSC-11：面向 owner 的一句话人话提问（仅 needs_human 携带）。 */
+  owner_question?: string;
+  /** REQ-WSC-11：owner 可选的互斥处置项（2–3 项）。 */
+  owner_options?: ReviewOwnerOption[];
 };
+
+export type ReviewOwnerGuidance = {
+  question: string;
+  options: ReviewOwnerOption[];
+};
+
+/**
+ * REQ-WSC-11：从 findings 里取第一条完整的人话裁决（问题 + 至少两个互斥
+ * 选项）。缺任一字段、或有效选项不足 2 条即视为没有——与服务端 fail-closed
+ * 下限（`options.len() >= 2`）同口径，前端不拼接猜测：没有事实就不画人话
+ * 区，退回既有技术呈现。
+ */
+export function reviewOwnerGuidance(findings: ReviewFinding[]): ReviewOwnerGuidance | null {
+  for (const finding of findings) {
+    const question = finding.owner_question?.trim();
+    const options = (finding.owner_options ?? []).filter((option) => {
+      const label = option?.label?.trim();
+      const consequence = option?.consequence?.trim();
+      return Boolean(label && consequence);
+    });
+    if (question && options.length >= 2) {
+      return { question, options };
+    }
+  }
+  return null;
+}
+
+/**
+ * REQ-WSC-11（owner 可读的人工裁决）：结论卡与门卡共用的唯一人话区块——
+ * 「问题 + 选项名 + 后果 + 一句作答指引」。答案由 owner 手写补充指令完成，
+ * 本块不出站、不生成命令；选项名原文就是可粘贴的补充指令。
+ */
+export function ReviewOwnerGuidanceBlock({ guidance }: { guidance: ReviewOwnerGuidance }) {
+  return (
+    <section
+      className="space-y-2 rounded-md border border-amber-200 bg-white px-3 py-2"
+      data-testid="owner-guidance"
+    >
+      <div className="text-xs font-semibold text-amber-900">需要你决定一件事</div>
+      <div className="text-sm font-medium text-slate-900" data-testid="owner-question">
+        {guidance.question}
+      </div>
+      <ul className="space-y-2">
+        {guidance.options.map((option, index) => (
+          <li
+            key={`${option.label}-${index}`}
+            className="rounded border border-[var(--aria-line)] bg-white px-2 py-1.5"
+            data-testid="owner-option"
+          >
+            <div className="text-sm font-medium text-[var(--aria-ink)]">{option.label}</div>
+            <div className="text-xs text-[var(--aria-ink-muted)]">{option.consequence}</div>
+          </li>
+        ))}
+      </ul>
+      <div className="text-xs text-slate-600" data-testid="owner-option-guidance">
+        选一个，把选项名原文作为补充指令发回去即可（例如：「{guidance.options[0].label}」）。
+      </div>
+    </section>
+  );
+}
 
 export function reviewFindingsFromEntry(entry: ChatEntry): ReviewFinding[] {
   const metadata = entry.metadata as Record<string, unknown> | undefined;

@@ -3,6 +3,7 @@ use super::*;
 mod authoring;
 pub(crate) mod compile_support;
 mod decisions;
+pub(crate) mod member_checkout_prefixes;
 mod runs;
 
 pub(crate) fn combine_draft_validation_feedback(

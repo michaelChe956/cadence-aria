@@ -158,7 +158,8 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     // 2026-10-23：既有债务登记（本批未改该文件，基线即 1921 行）
     ("src/product/reviewer_window_store.rs", 1921),
     ("src/product/work_item_contract/tests/dependency.rs", 1204),
-    ("src/product/work_item_plan_compiler/tests.rs", 1449),
+    // 2026-10-30（REQ-WSC-10，待 owner 裁决）：新增 write_scope_bound 测试模块声明 +1。
+    ("src/product/work_item_plan_compiler/tests.rs", 1450),
     (
         "src/product/work_item_split_engine/tests/engine_gateway_guard.rs",
         1486,
@@ -170,17 +171,21 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("src/product/work_item_split_validator/tests.rs", 1259),
     ("src/product/workspace_engine/compile.rs", 1651),
     ("src/product/workspace_engine/contract_autorepair.rs", 1651),
-    ("src/product/workspace_engine/contract_prerevision.rs", 1911),
+    // 2026-10-30（fix-owner-readable-human-gate）：REQ-WSC-11 findings 增 owner_question/owner_options +2。
+    ("src/product/workspace_engine/contract_prerevision.rs", 1913),
+    // 2026-10-30（REQ-WSC-10，待 owner 裁决）：门内修订路径接线成员 checkout 前缀表
+    // 装载（装载器独立成模块，此处仅门控调用）+17；深嵌套缩进下已是物理下限。
     (
         "src/product/workspace_engine/conversational_gate_parts/revision_turn.inc.rs",
-        1488,
+        1505,
     ),
     (
         "src/product/workspace_engine/draft_batch/compile_support.rs",
         2310,
     ),
     ("src/product/workspace_engine/lifecycle.rs", 2167),
-    ("src/product/workspace_engine/prompts.rs", 1665),
+    // 2026-10-30（fix-owner-readable-human-gate）：REQ-WSC-11 reviewer 输出契约增 owner 呈现硬约束 +16。
+    ("src/product/workspace_engine/prompts.rs", 1681),
     (
         "src/product/workspace_engine/prompts/human_gate_revision.rs",
         1464,
@@ -201,9 +206,10 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "src/product/workspace_engine/tests/conversational_gate_close.rs",
         2891,
     ),
+    // 2026-10-30（REQ-WSC-10，待 owner 裁决）：上下文字面量补 member_checkout_prefixes 字段 +2。
     (
         "src/product/workspace_engine/tests/conversational_gate_recovery.rs",
-        1565,
+        1567,
     ),
     (
         "src/product/workspace_engine/tests/conversational_gate_revision/part_02.rs",
@@ -211,9 +217,10 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ),
     ("src/product/workspace_engine/tests/part_31.rs", 1233),
     ("src/product/workspace_engine/tests/recovery_task7.rs", 1295),
+    // 2026-10-30（fix-owner-readable-human-gate）：REQ-WSC-11 finding 字面量补两字段 +6。
     (
         "src/product/workspace_engine/tests/single_candidate.rs",
-        1545,
+        1551,
     ),
     ("src/web/advance_plan.rs", 1644),
     ("src/web/app.rs", 2222),
@@ -238,7 +245,9 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("src/web/workspace_session/tests/part_01.rs", 1580),
     ("src/web/workspace_session/tests/part_07.rs", 1272),
     ("src/web/workspace_ws_handler/run/provider_run.rs", 1678),
-    ("src/web/workspace_ws_handler/run/single_candidate.rs", 1658),
+    // 2026-10-30（REQ-WSC-10，待 owner 裁决）：运行期预校验接线成员 checkout
+    // 前缀表装载（共享门控，单块调用）+8。
+    ("src/web/workspace_ws_handler/run/single_candidate.rs", 1666),
     ("src/web/workspace_ws_handler/socket.rs", 1893),
     (
         "src/web/workspace_ws_handler/tests/campaign_stage3_interactive/cases.rs",

@@ -45,6 +45,16 @@ pub struct MachineRepairDto {
     pub instruction_ref: String,
 }
 
+/// REQ-WSC-11（owner 可读的人工裁决）：`needs_human` 结论面向 owner 的
+/// 单条互斥选项——`label` 是选项名（人话），`consequence` 是「选它之后会
+/// 发生什么」。与 `owner_question` 一起构成 owner 一句话即可回答的契约。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerOption {
+    pub label: String,
+    pub consequence: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewFinding {
@@ -65,6 +75,14 @@ pub struct ReviewFinding {
     /// 不变）。provider 伪造字段按封闭策略拒/丢，不建许可。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_repair: Option<MachineRepairDto>,
+    /// REQ-WSC-11：面向 owner 的一句话人话提问（仅 `needs_human` 结论必须
+    /// 携带）。`needs_human` 缺失时服务端判结构化输出不合规并走既有诊断
+    /// 通道；`pass`/`revise` 恒 None（skip 保持旧 wire 字节不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_question: Option<String>,
+    /// REQ-WSC-11：owner 可选的互斥处置项（2–3 项）；每项含选项名与后果。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_options: Option<Vec<OwnerOption>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

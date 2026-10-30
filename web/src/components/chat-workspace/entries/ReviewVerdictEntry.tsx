@@ -1,14 +1,20 @@
-import { MessageSquareText } from "lucide-react";
+import { ChevronRight, MessageSquareText } from "lucide-react";
 import type { ChatEntry } from "../../../state/chat-entries";
 import { ChatEntryContainer } from "../ChatEntryContainer";
 import {
   isRequiredFindingSeverity,
   ReviewFindingGroups,
+  ReviewOwnerGuidanceBlock,
   reviewFindingsFromEntry,
+  reviewOwnerGuidance,
 } from "../finding-list";
 import { structuredOutputDiagnosticFromUnknown } from "../../../state/structured-output-diagnostic";
 import { StructuredOutputDiagnosticView } from "./StructuredOutputDiagnostic";
-import { GATE_CARD_CLASS } from "../gate-visual-tokens";
+import {
+  DISCLOSURE_CHEVRON_CLASS,
+  DISCLOSURE_SUMMARY_CLASS,
+  GATE_CARD_CLASS,
+} from "../gate-visual-tokens";
 
 export function ReviewVerdictEntry({
   entry,
@@ -24,6 +30,11 @@ export function ReviewVerdictEntry({
     (finding) => !isRequiredFindingSeverity(finding.severity),
   );
   const round = verdict.round;
+  // REQ-WSC-11：人话区以「是否携带人话字段」为准，不以 verdict 字面为准——
+  // 模型宣称 needs_human 却被 blocking finding 归一成 revise 时，其被强制
+  // 要求写的字段仍必须可见（F2）。不携带字段的 pass/revise（即全部契约合规
+  // 与存量记录）呈现逐字不变。
+  const ownerGuidance = reviewOwnerGuidance(findings);
 
   return (
     <ChatEntryContainer
@@ -71,13 +82,34 @@ export function ReviewVerdictEntry({
             ) : null}
           </div>
         ) : null}
+        {ownerGuidance ? <ReviewOwnerGuidanceBlock guidance={ownerGuidance} /> : null}
         {diagnostic ? (
           <StructuredOutputDiagnosticView
             diagnostic={diagnostic}
             comments={verdict?.comments ?? null}
           />
         ) : null}
-        {findings.length > 0 ? <ReviewFindingGroups findings={findings} /> : null}
+        {ownerGuidance && findings.length > 0 ? (
+          // REQ-WSC-11：技术 findings 保留但不占据主区——owner 先答人话问题，
+          // 需要核对原文时再展开「技术细节」。
+          <details
+            className="group text-xs text-[var(--aria-ink-muted)]"
+            data-testid="review-technical-details"
+          >
+            <summary
+              className={`${DISCLOSURE_SUMMARY_CLASS} flex items-center gap-1 font-medium text-slate-700`}
+            >
+              <ChevronRight className={DISCLOSURE_CHEVRON_CLASS} aria-hidden="true" />
+              技术细节（{findings.length} 条审核发现原文）
+            </summary>
+            <div className="mt-2">
+              <ReviewFindingGroups findings={findings} />
+            </div>
+          </details>
+        ) : null}
+        {!ownerGuidance && findings.length > 0 ? (
+          <ReviewFindingGroups findings={findings} />
+        ) : null}
         {/* 退役留档（T5/REQ-RET-02）：review_decision 路径按钮随消息族删除。 */}
       </div>
     </ChatEntryContainer>

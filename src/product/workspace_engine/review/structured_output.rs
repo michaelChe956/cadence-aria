@@ -207,12 +207,22 @@ impl WorkspaceEngine {
         }
     }
 
+    /// REQ-WSC-11（F4）：`missing_owner_guidance` 是「结论合法但呈现不合规」，
+    /// 不是协议违规——单候选复评轮（owner 真机会连跑多轮）漏写人话字段时必须
+    /// 落 needs_human + 可行动诊断卡，MUST NOT 升级成 durable failed 并掩掉
+    /// 诊断码。故在此精确豁免；`is_classification_fatal` 不动（`drive.rs` 也用
+    /// 它，改那里会把该码在所有阶段变成 abort）。
     fn verification_scope_error_if_needed(
         &self,
         error: ReviewCompletionError,
     ) -> ReviewCompletionError {
+        let owner_guidance_pending = matches!(
+            &error,
+            ReviewCompletionError::Schema(ReviewStructuredOutputErrorCode::MissingOwnerGuidance)
+        );
         if self.review_parse_error_requires_verification_protocol_fatal()
             && !error.is_classification_fatal()
+            && !owner_guidance_pending
         {
             ReviewCompletionError::VerificationScopeViolation(format!(
                 "verification review output rejected: {}",

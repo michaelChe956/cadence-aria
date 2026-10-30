@@ -96,6 +96,21 @@ pub fn validate_plan_candidate_ir(
     // 内 → Error finding（preflight 族，回灌修订）。自洽性核对不依赖基线
     // 树可用性（域冲突是 plan 内部矛盾）。
     findings.extend(super::check_target_forbidden::check_target_forbidden_findings(ir));
+    // REQ-WSC-10（写范围×被授权仓归属，owner 2026-10-30 真机现场）：多仓
+    //（LC 聚合根）会话的 exclusive 写面必须落在本 WI 被授权成员仓的
+    // checkout 内——聚合根非成员区（根不是 git 仓库）与其他成员 checkout
+    // 本项执行期均无法写入。只判归属不判存在（新建文件不误伤）；前缀表
+    // 缺席（单仓/Manual）不触发（零回归）；表在场而被授权仓不在表内 →
+    // fail-closed（不以跳过吞错）。属 preflight 族（Error 留在报告里经
+    // 既有修订轮回灌，不硬失败 author 轮次）。
+    if let Some(member_checkout_prefixes) = context.member_checkout_prefixes {
+        findings.extend(
+            super::write_scope_bound::write_scope_bound_repository_findings(
+                ir,
+                member_checkout_prefixes,
+            ),
+        );
+    }
     // C1 Task 5（REQ-C1-PLAN-01）：existing/create 意图合同校验——未声明
     //（intent_undeclared）与不能执行（intent_unexecutable）分开停等修订，
     // 作为 preflight 族 Error 保留在报告里（不清既有 finding、不硬失败）。

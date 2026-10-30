@@ -14,6 +14,7 @@ use crate::product::work_item_plan_source_store::{
     PlanCandidateIrRecord, PlanCandidateMechanicalReportRecord, SourceRevisionRecord,
     WorkItemPlanSourceStore,
 };
+use crate::product::workspace_engine::draft_batch::member_checkout_prefixes;
 use crate::web::workspace_ws_types::WorkItemGenerationModeDto;
 use crate::web::workspace_ws_types::{ReviewGate, ReviewVerdict, ReviewVerdictType};
 
@@ -558,6 +559,15 @@ impl WorkspaceEngine {
             Some(_) => member_targets.as_ref(),
             None => None,
         };
+        // REQ-WSC-10（写范围×被授权仓归属）：enrolled 装载成员 checkout 前缀表（失败显式错误不吞错；单仓保持 None 零回归）。
+        let validation_member_checkout_prefixes = member_checkout_prefixes::for_validation(
+            &lifecycle,
+            &plan,
+            enrollment_binding.as_ref(),
+        )
+        .map_err(|error| {
+            format!("load member checkout prefixes for candidate validation failed: {error}")
+        })?;
         let validation_now = chrono::Utc::now().to_rfc3339();
         let report = validate_plan_candidate_ir(
             &ir_record.ir,
@@ -575,6 +585,7 @@ impl WorkspaceEngine {
                 existing_work_item_ids: &existing_work_item_ids,
                 enrollment_target: enrollment_binding.as_ref().map(|binding| &binding.target),
                 member_targets: validation_member_targets,
+                member_checkout_prefixes: validation_member_checkout_prefixes.as_ref(),
                 now: &validation_now,
             },
         )

@@ -1296,9 +1296,25 @@ impl super::WorkspaceEngine {
                                     ),
                                 )
                             })?;
-                        let validation_member_targets = match &enrollment_binding {
-                            Some(_) => member_targets.as_ref(),
-                            None => None,
+                        use crate::product::workspace_engine::draft_batch::member_checkout_prefixes;
+                        // 批 2 R1 + REQ-WSC-10：enrolled 会话装载成员映射与成员 checkout
+                        // 前缀表（装载失败 operational 不吞错）；单仓/非 enrolled 双 None 零回归。
+                        let (validation_member_targets, mc_prefixes) = match &enrollment_binding {
+                            Some(_) => (
+                                member_targets.as_ref(),
+                                member_checkout_prefixes::for_validation(
+                                    &lifecycle,
+                                    &plan,
+                                    enrollment_binding.as_ref(),
+                                )
+                                .map_err(|e| {
+                                    operational(
+                                        "sc_revision_member_checkout_prefixes_failed",
+                                        e.to_string(),
+                                    )
+                                })?,
+                            ),
+                            None => (None, None),
                         };
                         let validation_now = chrono::Utc::now().to_rfc3339();
                         match validate_plan_candidate_ir(
@@ -1319,6 +1335,7 @@ impl super::WorkspaceEngine {
                                     .as_ref()
                                     .map(|binding| &binding.target),
                                 member_targets: validation_member_targets,
+                                member_checkout_prefixes: mc_prefixes.as_ref(),
                                 now: &validation_now,
                             },
                         ) {
