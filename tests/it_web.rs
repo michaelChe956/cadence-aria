@@ -106,6 +106,8 @@ pub(crate) async fn create_repository_and_wait(
     panic!("repository initialization did not reach a terminal state: {last_snapshot}");
 }
 
+#[path = "it_web/candidate_attempt_metrics_api.rs"]
+mod candidate_attempt_metrics_api;
 #[path = "it_web/evidence_query.rs"]
 mod evidence_query;
 #[path = "it_web/issue_delivery_summary.rs"]

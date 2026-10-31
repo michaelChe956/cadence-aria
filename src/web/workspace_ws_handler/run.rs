@@ -30,6 +30,8 @@ pub(crate) use gateway_start::{
 mod provider_run;
 #[path = "run/single_candidate.rs"]
 mod single_candidate;
+#[path = "run/single_candidate_structure_reredrive.rs"]
+mod single_candidate_structure_reredrive;
 pub(crate) use provider_run::{
     spawn_provider_run_claiming_idle, spawn_provider_run_from_event,
     spawn_provider_run_from_handler,

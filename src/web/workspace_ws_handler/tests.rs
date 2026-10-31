@@ -43,6 +43,7 @@ mod single_candidate_ir_reredrive;
 mod single_candidate_lc_admission;
 mod single_candidate_provider_run;
 mod single_candidate_scope_rejection;
+mod single_candidate_structure_reredrive;
 
 fn provider_config() -> ProviderConfigSnapshot {
     ProviderConfigSnapshot {

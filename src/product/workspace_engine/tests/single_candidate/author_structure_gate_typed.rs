@@ -44,6 +44,7 @@ mod author_structure_gate_typed {
                 candidate,
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("SG3a.1 拒收不得再硬失败（Err）——已按 typed 失败收口");
@@ -242,6 +243,7 @@ mod author_structure_gate_typed {
                 clean_candidate(),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("clean candidate must pass the structure gate");

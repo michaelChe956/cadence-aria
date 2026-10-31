@@ -57,6 +57,7 @@ mod preflight_options_loop {
                 no_integration_candidate(1),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("options gap candidate must compile, persist and route (not hard-fail)");
@@ -132,6 +133,7 @@ mod preflight_options_loop {
                 no_integration_candidate(1),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("first gapped round completes");
@@ -145,6 +147,7 @@ mod preflight_options_loop {
                 ),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("fixed candidate must complete");
@@ -200,6 +203,7 @@ mod preflight_options_loop {
                 no_integration_candidate(1),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("first gapped round completes");
@@ -209,6 +213,7 @@ mod preflight_options_loop {
                 no_integration_candidate(2),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("second gapped round completes");
@@ -250,6 +255,7 @@ mod preflight_options_loop {
                 no_integration_candidate(1),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("candidate without options intent completes");
@@ -284,6 +290,7 @@ mod preflight_options_loop {
                 no_integration_candidate(1),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("first gapped round completes");
@@ -324,6 +331,7 @@ mod preflight_options_loop {
                 ),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("fixed candidate must complete");

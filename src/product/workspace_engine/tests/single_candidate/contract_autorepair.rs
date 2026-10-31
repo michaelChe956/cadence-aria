@@ -75,6 +75,7 @@ mod contract_autorepair {
                 capability_gap_candidate(1),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("gapped candidate must complete author round after autorepair");
@@ -135,6 +136,7 @@ mod contract_autorepair {
                 REP4_FIXTURE.to_string(),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("unconsumed-handoff candidate must complete after autorepair");
@@ -183,6 +185,7 @@ mod contract_autorepair {
                 missing_contract_candidate(1),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("missing-contract candidate must still complete");
@@ -222,6 +225,7 @@ mod contract_autorepair {
                 mixed_gap_candidate(1),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("mixed-gap candidate must still complete");

@@ -1242,6 +1242,22 @@ mod sg3a1_structure_gate {
         )
     }
 
+    /// 作者阶段收口调用助手：固定本文件既有的仓库夹具与「不重驱」参数，
+    /// 让每个用例只表达「喂哪个候选」这一件事（同时守住行数上限）。
+    async fn complete_author(
+        engine: &mut WorkspaceEngine,
+        candidate: String,
+    ) -> Result<crate::product::workspace_engine::SingleCandidateAuthorCompletion, String> {
+        engine
+            .complete_single_candidate_work_item_plan_author(
+                candidate,
+                "repo_fixture".to_string(),
+                None,
+                false,
+            )
+            .await
+    }
+
     /// SG3a.1（plan Step1：`sg_03a_1_bad_candidate_zero_review`）：R1/parser/
     /// scope 坏 output 保留 typed evidence，但 current refs/version 不提升、
     /// review start 0、无 confirm；target 未授权由同一纯评估门单测覆盖；
@@ -1258,12 +1274,7 @@ mod sg3a1_structure_gate {
         let (reviewer_before, confirm_before) = reviewer_and_confirm_node_counts(&engine);
         // REQ-SG-02 语义不变（零提升/零评审），但收尾从「硬失败 Err」改为
         // typed 失败路：durable 诊断 + 尝试流水 + 人工门（REQ-WSC-18/25）。
-        let completion = engine
-            .complete_single_candidate_work_item_plan_author(
-                cycle_candidate(),
-                "repo_fixture".to_string(),
-                None,
-            )
+        let completion = complete_author(&mut engine, cycle_candidate())
             .await
             .expect("R1 cycle candidate must be gate-rejected without hard-failing");
         assert_eq!(
@@ -1298,12 +1309,7 @@ mod sg3a1_structure_gate {
             .expect("session before parser candidate");
         // parser 拒收仍走 compiler 硬失败（不落门）：confirm 节点数刻意不与本用例比较。
         let (reviewer2_before, _confirm2_before) = reviewer_and_confirm_node_counts(&engine2);
-        let error2 = engine2
-            .complete_single_candidate_work_item_plan_author(
-                illegal_heading_candidate(),
-                "repo_fixture".to_string(),
-                None,
-            )
+        let error2 = complete_author(&mut engine2, illegal_heading_candidate())
             .await
             .expect_err("illegal heading candidate must fail closed at compile");
         assert!(
@@ -1320,12 +1326,7 @@ mod sg3a1_structure_gate {
             .get_workspace_session(&engine3.session().session_id)
             .expect("session before scope candidate");
         let (reviewer3_before, confirm3_before) = reviewer_and_confirm_node_counts(&engine3);
-        let completion3 = engine3
-            .complete_single_candidate_work_item_plan_author(
-                unknown_provider_candidate(),
-                "repo_fixture".to_string(),
-                None,
-            )
+        let completion3 = complete_author(&mut engine3, unknown_provider_candidate())
             .await
             .expect("unknown-provider candidate must be gate-rejected without hard-failing");
         assert_eq!(
@@ -1412,12 +1413,7 @@ mod sg3a1_structure_gate {
         let (_tmp5, lifecycle5, _plan_id5, mut engine5) =
             make_work_item_plan_engine_with_accepted_contract_drafts();
         author_round_record(&lifecycle5, &mut engine5);
-        let completion5 = engine5
-            .complete_single_candidate_work_item_plan_author(
-                clean_candidate(),
-                "repo_fixture".to_string(),
-                None,
-            )
+        let completion5 = complete_author(&mut engine5, clean_candidate())
             .await
             .expect("clean candidate must pass the structure gate");
         assert_eq!(
@@ -1545,3 +1541,5 @@ include!("single_candidate/preflight_options_loop.rs");
 include!("single_candidate/p2_reviewer_failure.rs");
 // B2c（Task 5.5）：SC 显式 fresh 返修 prompt 契约（大文件守卫拆分）。
 include!("single_candidate/anchor_t17.rs");
+// 作者阶段结构门拒收的恰一次教学重驱（与 compile/IR 重驱共享唯一槽位）。
+include!("single_candidate/author_structure_gate_reredrive.rs");

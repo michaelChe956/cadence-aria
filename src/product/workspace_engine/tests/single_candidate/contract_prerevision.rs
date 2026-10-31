@@ -87,6 +87,7 @@ mod contract_prerevision {
                 missing_contract_candidate(1),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("gapped candidate must still compile and persist");
@@ -188,6 +189,7 @@ mod contract_prerevision {
                 clean_candidate(),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("clean candidate must complete author round");
@@ -226,6 +228,7 @@ mod contract_prerevision {
                 missing_contract_candidate(1),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("first gapped round completes");
@@ -242,6 +245,7 @@ mod contract_prerevision {
                 missing_contract_candidate(2),
                 "repo_fixture".to_string(),
                 None,
+                false,
             )
             .await
             .expect("second gapped round completes");

@@ -81,6 +81,7 @@ pub(crate) mod automation_enrollment_reenable;
 pub(crate) mod automation_enrollment_test_support;
 mod automation_gateway_preflight;
 mod automation_target;
+mod candidate_attempt_metrics;
 mod codebases;
 mod coding;
 mod coding_choice;
@@ -132,6 +133,7 @@ pub use automation_enrollment::{
     put_automation_enrollment,
 };
 pub use automation_target::get_automation_target;
+pub use candidate_attempt_metrics::get_issue_candidate_attempt_metrics;
 pub use codebases::{
     create_logical_codebase, delete_logical_codebase, get_logical_codebase, list_codebases,
     list_logical_codebases, purge_logical_codebase, restore_logical_codebase,

@@ -100,6 +100,7 @@ async fn compile_failure_fixture(
             clean_candidate(),
             "repo_fixture".to_string(),
             None,
+            false,
         )
         .await
         .expect("clean candidate must compile and persist");

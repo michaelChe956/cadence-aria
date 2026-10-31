@@ -49,14 +49,14 @@ mod structure_parity {
         LogicalRepositoryId(uuid::Uuid::from_bytes(bytes))
     }
 
-    struct Repos {
+    pub(super) struct Repos {
         a: LogicalRepositoryId,
         b: LogicalRepositoryId,
         c: LogicalRepositoryId,
     }
 
     impl Repos {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 a: repo(0x0A),
                 b: repo(0x0B),
@@ -65,7 +65,7 @@ mod structure_parity {
         }
 
         /// 授权成员表（逻辑成员 → 物理仓），与 `physical_by_logical` 同向。
-        fn table(&self) -> BTreeMap<LogicalRepositoryId, String> {
+        pub(super) fn table(&self) -> BTreeMap<LogicalRepositoryId, String> {
             BTreeMap::from([
                 (self.a, "repository_a".to_string()),
                 (self.b, "repository_b".to_string()),
@@ -74,7 +74,7 @@ mod structure_parity {
         }
 
         /// confirmed design 的仓级执行顺序：A → B → C。
-        fn change_order(&self) -> Vec<LogicalRepositoryId> {
+        pub(super) fn change_order(&self) -> Vec<LogicalRepositoryId> {
             vec![self.a, self.b, self.c]
         }
     }
@@ -109,7 +109,7 @@ mod structure_parity {
     }
 
     /// 现场形态（D2）：每个 WI 都用 `single_repository` 声明自己托管的物理仓。
-    fn item(logical_id: &str, physical: &str, provider: Option<&str>) -> PlanCandidateItemIr {
+    pub(super) fn item(logical_id: &str, physical: &str, provider: Option<&str>) -> PlanCandidateItemIr {
         PlanCandidateItemIr {
             target_repository_id: physical.to_string(),
             contract: contract(
@@ -124,7 +124,7 @@ mod structure_parity {
         }
     }
 
-    fn ir_of(items: Vec<PlanCandidateItemIr>) -> PlanCandidateIr {
+    pub(super) fn ir_of(items: Vec<PlanCandidateItemIr>) -> PlanCandidateIr {
         PlanCandidateIr {
             source_revision_hash: SOURCE_HASH.to_string(),
             compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
@@ -132,7 +132,7 @@ mod structure_parity {
         }
     }
 
-    fn structure_context(
+    pub(super) fn structure_context(
         table: BTreeMap<LogicalRepositoryId, String>,
         change_order: Vec<LogicalRepositoryId>,
     ) -> PlanningStructureContext {

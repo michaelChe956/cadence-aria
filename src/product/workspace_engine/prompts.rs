@@ -18,6 +18,8 @@ mod review_context;
 // REQ-WSC-13/14：已处置事实段的构造器对同 crate 的测试面可见（生产调用点
 // 仍在 `review` 与 `single_candidate_input` 两处，故非测试构建下该 re-export
 // 视为未使用）。
+/// 作者阶段结构拒收教学重驱的修复指令复用同一修订教学口径（单源）。
+pub(crate) use human_gate_revision::REVISION_TEACHING;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use review_context::human_dispositions_section;
 mod review_repair;

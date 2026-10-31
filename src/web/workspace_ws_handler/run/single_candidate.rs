@@ -492,7 +492,7 @@ fn build_work_item_plan_ir_reredrive_prompt(
 /// 并返回 AlreadyFinished，与首轮驱动失败处理一致。
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::result_large_err)] // 上述枚举是运行收尾的唯一 typed 出口。
-async fn drive_single_candidate_reredrive(
+pub(super) async fn drive_single_candidate_reredrive(
     engine: &mut WorkspaceEngine,
     launch: &crate::web::workspace_ws_handler::run::gateway_start::PlanAuthorLaunch,
     provider_for_run: Arc<dyn StreamingProviderAdapter>,
@@ -1375,11 +1375,40 @@ pub(crate) async fn run_single_candidate_author(
             .complete_single_candidate_work_item_plan_author(
                 compile_source,
                 repository.id.clone(),
-                member_targets,
+                member_targets.clone(),
+                // 恰一次教学重驱槽位（first_round_failure 单槽，与 compile/IR
+                // 重驱共享）：空闲时结构门拒收先教学重驱作者一次，占用后
+                // 直接落人工门（引擎侧收口，runner 不再判）。
+                first_round_failure.is_none(),
             )
             .await
         {
             Ok(SingleCandidateAuthorCompletion::Candidate { item_count }) => item_count,
+            // SG3a.1 拒收 + 槽位空闲：占用单槽并带着可执行修复指令重驱作者
+            // 一次（provider 通道复用，不新造 attempt 通道），回循环重走
+            // compile → IR 预校验 → 结构门；重驱后再拒由引擎落人工门。
+            Ok(SingleCandidateAuthorCompletion::Rejected { repair_prompt }) => {
+                first_round_failure = Some(format!(
+                    "candidate structure gate rejected ({})",
+                    crate::product::workspace_engine::single_candidate_structure_failure::
+                        STRUCTURE_STABLE_CODE
+                ));
+                compile_source =
+                    super::single_candidate_structure_reredrive::drive_structure_gate_reredrive(
+                        engine,
+                        &lifecycle,
+                        &launch,
+                        Arc::clone(&provider_for_run),
+                        &run_cancel,
+                        command_rx,
+                        &node_id,
+                        &author_provider,
+                        &repair_prompt,
+                        &repository.path,
+                    )
+                    .await?;
+                continue;
+            }
             // SG3a.1 拒收已按 typed 失败收口（durable + 尝试流水 + 重写/人工门）：
             // 引擎已在重写或人工门态，本次 provider run 正常结束，**不落 failed**。
             Ok(SingleCandidateAuthorCompletion::Routed) => {

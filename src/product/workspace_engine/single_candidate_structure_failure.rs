@@ -34,6 +34,7 @@ use crate::product::workspace_engine::draft_batch::compile_support::{
 };
 use crate::product::workspace_engine::draft_batch::cycle_diagnostic;
 use crate::product::workspace_engine::plan_projection;
+use crate::product::workspace_engine::prompts::REVISION_TEACHING;
 use crate::product::workspace_engine::single_candidate::SingleCandidateAuthorCompletion;
 use crate::product::workspace_engine::types::PlanningCompileFailure;
 
@@ -96,6 +97,62 @@ pub(crate) fn author_gate_summary(failure: &PlanningCompileFailure) -> String {
         "候选没有通过候选结构门，已停在人工门等你决定（不会静默重试）：{message}\n{hint}",
         message = durable.message,
     )
+}
+
+/// 作者阶段结构拒收的**教学重驱修复指令**（给 author 的可执行 prompt）。
+///
+/// 与 [`author_gate_summary`]（面 owner）同源派生，但收件人是 author：
+/// - 环在哪（durable `message` 的人话段，与终编译同一共享环模板）；
+/// - 两个合法修法**各带后果**（witness 完整时，`cycle_owner_options` 同源；
+///   witness 不完整时退化为 `rewrite_guidance` 的通用消环要点，不虚构位次）；
+/// - 非环结构拒收给通用结构修正指令（不套用「环」措辞——不虚构原因）；
+/// - 保护项（不得删除真实业务数据流、不得改仓序）；
+/// - 输出口径沿用 [`REVISION_TEACHING`]（完整修订版 markdown，不得输出
+///   diff/patch）——与门内修订同一教学，不另立第二套修订纪律。
+pub(crate) fn author_structure_repair_prompt(failure: &PlanningCompileFailure) -> String {
+    let durable = durable_failure(failure);
+    let mut prompt = format!(
+        "候选没有通过候选结构门（稳定码 {code}），请立即修复后重新输出完整候选。\n\
+         失败原因：{message}",
+        code = durable.code,
+        message = durable.message,
+    );
+    if durable.message.contains("依赖环") {
+        match compile_failure_surface::cycle_witness_facts(&durable.message) {
+            Some(facts) => {
+                prompt.push_str("\n两个合法修法（业务取舍，二选一，各自后果如下）：");
+                for (index, option) in compile_failure_surface::cycle_owner_options(&facts)
+                    .iter()
+                    .enumerate()
+                {
+                    prompt.push_str(&format!(
+                        "\n{}. {}——后果：{}",
+                        index + 1,
+                        option.label,
+                        option.consequence
+                    ));
+                }
+            }
+            None => {
+                prompt.push_str("\n消环要点（环 witness 不完整，不给位次与选项，不虚构）：");
+                for line in compile_failure_surface::rewrite_guidance(&durable) {
+                    prompt.push_str(&format!("\n- {line}"));
+                }
+            }
+        }
+    } else {
+        prompt.push_str(
+            "\n请按上面的结构校验原因修正 Work Item 的依赖与契约声明\
+             （provider_logical_work_item_id 必须指向本候选内真实存在的 work item；\
+             不得删除该真实 Inputs 引用来消除缺口）。",
+        );
+    }
+    prompt.push_str(
+        "\n保护项：不得删除真实业务数据流（canonical Inputs 引用）来消除校验失败；\
+         不得改动仓序本身（仓序由 owner 在 design 侧决定，plan 内只能调整归属与依赖）。",
+    );
+    prompt.push_str(REVISION_TEACHING);
+    prompt
 }
 
 /// typed 失败 → durable 失败事实（与 `candidate_compile_status` 同一派生，
@@ -260,19 +317,28 @@ fn work_item_display(ir: &PlanCandidateIr, id: &str) -> String {
 
 impl crate::product::workspace_engine::WorkspaceEngine {
     /// 作者阶段候选结构门拒收的 typed 收口：seal → durable 候选编译事实 +
-    /// append-only 尝试流水（REQ-WSC-18/25）→ 既有路由（自动重写 / 人工门）。
+    /// append-only 尝试流水（REQ-WSC-18/25，**每次尝试都进流水**）→
+    /// 恰一次教学重驱（`allow_structure_rerun=true`）或既有路由（人工门）。
     ///
     /// **候选零提升**：本路径不改写会话 current refs、不落机械报告、不开评审，
     /// 只把「这次候选被结构门拒收」变成可观测事实并交出一条下一步。
     ///
-    /// 返回 [`SingleCandidateAuthorCompletion::Routed`]：调用方不得再按硬失败
-    /// 处理（现场缺口：owner 只看到「生成失败」，没有修法也没有流水）。
+    /// - 重驱槽位空闲（runner 的 `first_round_failure` 单槽决定，与 compile/IR
+    ///   重驱共享）：返回 [`SingleCandidateAuthorCompletion::Rejected`]，修复
+    ///   指令交还 runner 经 provider 通道重驱作者一次——**不开人工门**。
+    ///   重驱走 runner 通道而非引擎 prerevision 路由（候选 refs 未提升，
+    ///   重写通道不可达）：不虚记自动重写预算，durable `auto_rewrite` 不留
+    ///   running（未委托即对账，REQ-WSC-25）。
+    /// - 槽位已占用：保持既有落门收口，返回
+    ///   [`SingleCandidateAuthorCompletion::Routed`]：调用方不得再按硬失败
+    ///   处理（现场缺口：owner 只看到「生成失败」，没有修法也没有流水）。
     pub(crate) async fn route_author_structure_gate_failure(
         &mut self,
         lifecycle: &crate::product::lifecycle_store::LifecycleStore,
         mut failure: PlanningCompileFailure,
         source_ref: &str,
         ir_ref: &str,
+        allow_structure_rerun: bool,
     ) -> SingleCandidateAuthorCompletion {
         let session: Option<WorkspaceSessionRecord> = lifecycle
             .get_workspace_session(&self.session.session_id)
@@ -287,8 +353,18 @@ impl crate::product::workspace_engine::WorkspaceEngine {
         );
         let summary = author_gate_summary(&failure);
         // durable 诊断 + 尝试流水：只要走到这里，`candidate-attempts.jsonl`
-        // 必有一次真实尝试记录（此前该缺口完全空白）。
+        // 必有一次真实尝试记录（重驱轮同样落一行——通过率读数靠它）。
         self.record_candidate_compile_failure(&failure);
+        if allow_structure_rerun {
+            // 恰一次教学重驱槽位仍空闲：不开人工门、不硬失败，把可执行修复
+            // 指令交还 runner 重驱作者一次。重驱是 runner 的 provider 通道，
+            // 不是引擎 prerevision 路由——此处同样不虚记自动重写预算，且
+            // durable `auto_rewrite` 不得留 running（未委托即对账）。
+            self.reconcile_auto_rewrite_not_delegated().await;
+            return SingleCandidateAuthorCompletion::Rejected {
+                repair_prompt: author_structure_repair_prompt(&failure),
+            };
+        }
         // 与 Final Compile 同一条路由出口。作者阶段的候选 refs **尚未提升**，
         // `current_candidate_compile_status` 按候选 ref 绑定（`belongs_to_
         // candidate` 要求两侧都在场且相等）——绑定不成立时重写通道不可达
