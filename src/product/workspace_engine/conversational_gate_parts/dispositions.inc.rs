@@ -43,6 +43,82 @@ impl super::WorkspaceEngine {
             })
     }
 
+    /// REQ-WSC-18/19：门卡上的「当前候选编译失败」只读投影。
+    ///
+    /// 判据全部在平台侧：读 durable 候选编译事实 + 按会话当前候选绑定
+    /// （source revision + candidate IR）比较；只有「这个候选确实编译不过」
+    /// 才投影，失败属于旧候选或任一侧 ref 缺席时整体省略。
+    pub(crate) fn candidate_compile_failure_projection(
+        &self,
+    ) -> Option<crate::web::workspace_ws_types::CandidateCompileFailureDto> {
+        let status = self.current_candidate_compile_status()?;
+        let failure = status.failure.as_ref()?;
+        // 只有「候选自身无效」（编译类）才上牌；store/IO/failpoint 这类
+        // operational 失败不是「这个候选无效」，把它标成无效会制造新的死路。
+        if !crate::product::workspace_engine::compile_failure_surface::is_candidate_invalid_code(
+            &failure.code,
+        ) {
+            return None;
+        }
+        Some(
+            crate::web::workspace_ws_types::CandidateCompileFailureDto::from_status(
+                &status, failure,
+            ),
+        )
+    }
+
+    /// REQ-WSC-19：当前候选的完整候选编译事实（durable 读取 + 候选绑定比较）。
+    pub(crate) fn current_candidate_compile_status(
+        &self,
+    ) -> Option<crate::product::models::CandidateCompileStatus> {
+        let store = self.lifecycle_store.as_ref()?;
+        let record = store
+            .get_workspace_session(&self.session.session_id)
+            .ok()?;
+        store.current_candidate_compile_status(&record).ok().flatten()
+    }
+
+    /// REQ-WSC-19：durable 判定——该会话**当前候选**是否已确定编译不过。
+    pub(crate) fn current_candidate_compile_failure(
+        &self,
+    ) -> Option<crate::product::models::CandidateCompileFailure> {
+        let store = self.lifecycle_store.as_ref()?;
+        let record = store
+            .get_workspace_session(&self.session.session_id)
+            .ok()?;
+        store.current_candidate_compile_failure(&record).ok().flatten()
+    }
+
+    /// REQ-WSC-19：确认动作的平台侧 fail-closed 判据——当前候选编译不过时
+    /// 一律拒绝放行（确认必然重跑同一次编译、必然再失败，是死路）。
+    /// 判据只认 durable 事实，前端禁用按钮只是同一判据的呈现面。
+    pub(crate) fn ensure_current_candidate_compile_not_failed(&self) -> Result<(), String> {
+        match self.current_candidate_compile_failure() {
+            // 只有「候选自身无效」才拦确认；operational 失败（store/IO/failpoint）
+            // 允许重试——否则一次瞬态错误会把门永久锁死（新的死路）。
+            Some(failure)
+                if crate::product::workspace_engine::compile_failure_surface::is_candidate_invalid_code(
+                    &failure.code,
+                ) =>
+            {
+                Err(crate::product::workspace_engine::compile_failure_surface::approve_rejected_message(
+                    &failure,
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// REQ-WSC-19：给 author 的教学块（进入 SC 门内修订提示词）——当前候选
+    /// 已确定编译不过时携带具体重写要点；无失败时 None，既有 prompt 逐字不变。
+    pub(crate) fn candidate_compile_failure_author_teaching(&self) -> Option<String> {
+        self.current_candidate_compile_failure().map(|failure| {
+            crate::product::workspace_engine::compile_failure_surface::author_teaching_block(
+                &failure,
+            )
+        })
+    }
+
     /// REQ-WSC-13/14（k3 P0-2C）：撤销 owner 的排除——清单条目删除后，该
     /// finding 恢复为「可报为 actionable」（下一轮 prompt 不再携带、平台裁决
     /// 不再降级）。返回撤销后的剩余清单 key。

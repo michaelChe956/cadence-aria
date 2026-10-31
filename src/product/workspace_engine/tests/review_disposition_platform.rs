@@ -295,6 +295,7 @@ fn latest_gate_turn_rejection_survives_session_state_projection() {
     match plain.engine().build_session_state() {
         WsOutMessage::SessionState {
             human_gate_turn_rejection: None,
+            candidate_compile_failure: None,
             ..
         } => {}
         other => panic!("expected session_state without rejection, got {other:?}"),

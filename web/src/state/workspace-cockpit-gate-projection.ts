@@ -1,5 +1,8 @@
 import { gateIdentityFromState } from "./cockpit-action-routing";
-import type { WorkItemPlanHumanGateSnapshot } from "../api/types";
+import type {
+  WorkItemPlanCandidateCompileFailure,
+  WorkItemPlanHumanGateSnapshot,
+} from "../api/types";
 import type { ChatEntry } from "./chat-entries";
 import type {
   GateClosureDecision,
@@ -256,6 +259,12 @@ export interface GateProjection {
   /** 终止专属阻断（F-21）：null 即终止可发；缺席时回退 action_block_reason。 */
   terminate_block_reason?: GateActionBlockReason;
   /**
+   * REQ-WSC-18：当前候选 Final Compile 失败事实（store 归一；null=候选
+   * 可编译）——门卡据此进「候选编译不过」态（指引/原因/距通过/确认判据
+   * 同一份事实派生）。仅 human_gate 分支携带。
+   */
+  candidate_compile_failure?: WorkItemPlanCandidateCompileFailure | null;
+  /**
    * F-31（v37 复验 #2）：author 门可否「确认并评审」（with_review=true）——
    * = reviewerEnabled；仅 story/design author_confirm 分支设置，其余门缺省。
    */
@@ -363,6 +372,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       turn,
       action_block_reason: actionBlockReason,
       terminate_block_reason: terminateBlockReason,
+      candidate_compile_failure: state.candidateCompileFailure ?? null,
     };
   }
 
@@ -416,6 +426,7 @@ export function selectGateProjection(state: WorkspaceWsState): GateProjection | 
       turn: null,
       action_block_reason: actionBlockReason,
       terminate_block_reason: terminateBlockReason,
+      candidate_compile_failure: state.candidateCompileFailure ?? null,
     };
   }
   // F-20：story/design legacy 流 author_confirm 即人工门（无 typed turn/durable

@@ -725,9 +725,9 @@ fn structure_failure(
 /// 确定性 DFS 提取有向环 witness（固定 ID/邻接序）：遇到指向栈内节点的
 /// 回边即返回栈片段+回边；每一跳都确在有效图邻接中。只取首个环，
 /// 不枚举全部环，也不把 Kahn 残余节点集合画成环（REQ-PLN-10）。
-// 尚未接线：SG2/SG3a 消费前仅测试引用。
-#[allow(dead_code)]
-fn find_cycle_witness<'a>(
+/// REQ-WSC-18：除 SG 结构门外，Final Compile 的 change_order 环诊断也用它
+/// 产出人话链（真实有向路径，不是残余集合）。
+pub(super) fn find_cycle_witness<'a>(
     sorted_ids: &BTreeSet<&'a str>,
     adjacency: &BTreeMap<&'a str, BTreeSet<&'a str>>,
 ) -> Option<Vec<(&'a str, &'a str)>> {
@@ -818,10 +818,9 @@ fn apply_change_order_cross_repo_depends_on(
     }
     // 规则④：环检测 → blocker dependency_cycle。
     if let Some(cycle_ids) = detect_dependency_cycle(work_items) {
-        return Err(format!(
-            "dependency_cycle: change_order 与既有 WorkItem 依赖构成环: {}",
-            cycle_ids.join(", ")
-        ));
+        let diagnostic =
+            super::cycle_diagnostic::dependency_cycle_error(work_items, change_order, &cycle_ids);
+        return Err(diagnostic);
     }
     Ok(())
 }

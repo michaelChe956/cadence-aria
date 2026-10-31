@@ -3,6 +3,7 @@ import type { WsServerMessage } from "../hooks/workspace-ws-message-handler";
 import { handleWorkspaceWsMessage } from "../hooks/workspace-ws-message-handler";
 import { selectCockpitInbox } from "./workspace-cockpit-projection";
 import { useWorkspaceStore } from "./workspace-ws-store";
+import type { WorkItemPlanCandidateCompileFailure } from "../api/types";
 import type { WorkspaceSessionStatePayload } from "./workspace-ws-store-types";
 import {
   installWorkspaceStoreTestHooks,
@@ -106,6 +107,66 @@ describe("workspace ws store gate rebuild", () => {
       remaining_budget: 1,
       gate_status: "open",
     });
+  });
+
+  it("REQ-WSC-18: session_state candidate_compile_failure 落到门卡 metadata，字段缺席即清除", () => {
+    const sessionPayload = (
+      compileFailure?: WorkItemPlanCandidateCompileFailure,
+    ): WorkspaceSessionStatePayload => ({
+      session_id: "session_compile_failure_gate",
+      workspace_type: "work_item_plan",
+      stage: "human_confirm",
+      session_status: "waiting_for_human" as const,
+      flow_kind: "single_candidate" as const,
+      run_policy: "auto_if_valid" as const,
+      run_history: {
+        seen_fingerprints: [],
+        repairs_used: 0,
+        manual_repairs_used: 1,
+        transitions_used: 0,
+        initial_review_count: 1,
+        verification_review_count: 0,
+      },
+      human_gate_snapshot: {
+        findings: [],
+        repeated_fingerprints: [],
+        attempts_used: 1,
+        manual_repairs_remaining: 3,
+        trigger: "native_human_required" as const,
+        resumable: true,
+      },
+      ...(compileFailure ? { candidate_compile_failure: compileFailure } : {}),
+      messages: [],
+      checkpoints: [],
+      artifact: null,
+      providers: { author: "claude_code", reviewer: null },
+    });
+    const compileFailureFact = {
+      code: "final_compile_prepare_failed",
+      message: "WI-003 的 provider 指向了后仓的 WI-005，形成依赖环",
+      detail: "dependency_cycle: chain [WI-003, WI-005, WI-003] (failure_id=fc_1)",
+      rewrite_guidance: ["provider 只能指向前序仓的 Work Item"],
+      owner_hint: "design 可能需要一起重写",
+    };
+
+    // 开门帧携带编译失败事实 → 门卡 entry metadata 完整携带（刷新后仍在）。
+    useWorkspaceStore.getState().setSessionState(sessionPayload(compileFailureFact));
+    useWorkspaceStore.getState().rebuildChatEntries();
+    let gatePrompt = useWorkspaceStore
+      .getState()
+      .chatEntries.filter((entry) => entry.type === "gate_prompt");
+    expect(gatePrompt).toHaveLength(1);
+    expect(gatePrompt[0]?.metadata).toMatchObject({
+      candidate_compile_failure: compileFailureFact,
+    });
+
+    // 后续帧整体省略该字段（失败属旧候选/已重生成）→ 不保留旧失败事实。
+    useWorkspaceStore.getState().setSessionState(sessionPayload(undefined));
+    useWorkspaceStore.getState().rebuildChatEntries();
+    gatePrompt = useWorkspaceStore
+      .getState()
+      .chatEntries.filter((entry) => entry.type === "gate_prompt");
+    expect(gatePrompt[0]?.metadata?.candidate_compile_failure).toBeUndefined();
   });
 
   // F-42（复验）：实测 workspace_session_0003 的持久形态是「session confirmed +

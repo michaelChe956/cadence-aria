@@ -494,7 +494,7 @@ async fn conversational_gate_concurrent_feedback_reserves_exactly_one_turn() {
 /// ContinueToCompleted 路由只落 (Running, None)，见 policy_route_record_values）、
 /// run_history 已有 repairs_used=2 / manual_repairs_used=1 计数，用于断言补建
 /// 预算「接续而非重置」（默认 max_manual_repairs=3 − 1 = 2）。
-fn compile_failure_gate_fixture(
+pub(super) fn compile_failure_gate_fixture(
     flow_kind: WorkItemPlanFlowKind,
     run_policy: RunPolicy,
 ) -> (TempDir, LifecycleStore, WorkspaceEngine) {

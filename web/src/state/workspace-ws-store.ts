@@ -113,6 +113,8 @@ const initialState: WorkspaceWsState = {
   policyDiagnostics: [],
   providerStartLedger: [],
   singleCandidatePhase: null,
+  // REQ-WSC-18：候选编译失败事实（session_state 归一；null=无/旧失败）。
+  candidateCompileFailure: null,
   workItemPlanSourceRevisionRef: null,
   planCandidateIrRef: null,
   mechanicalReportRef: null,
@@ -371,6 +373,9 @@ export const useWorkspaceStore = create<WorkspaceWsState & WorkspaceWsActions>((
         policyDiagnostics: state.policy_diagnostics ?? [],
         providerStartLedger: state.provider_start_ledger ?? [],
         singleCandidatePhase: state.single_candidate_phase ?? null,
+        // REQ-WSC-18：候选编译失败事实全量替换（后端对旧候选失败整体省略
+        // 该字段——缺席即回 null，不保留旧值，防「已重生成仍显示失败」）。
+        candidateCompileFailure: state.candidate_compile_failure ?? null,
         workItemPlanSourceRevisionRef: state.work_item_plan_source_revision_ref ?? null,
         planCandidateIrRef: state.plan_candidate_ir_ref ?? null,
         mechanicalReportRef: state.mechanical_report_ref ?? null,

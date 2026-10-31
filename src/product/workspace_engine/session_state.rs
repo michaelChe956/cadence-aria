@@ -408,6 +408,7 @@ impl WorkspaceEngine {
             review_invocation_scope: self.session.review_invocation_scope.clone().map(Box::new),
             human_gate_snapshot: self.session.human_gate_snapshot.clone(),
             human_gate_turn_rejection: self.latest_human_gate_turn_rejection_projection(),
+            candidate_compile_failure: self.candidate_compile_failure_projection(),
             repair_reservation: self.session.repair_reservation.clone().map(Box::new),
             policy_diagnostics: self.session.policy_diagnostics.clone(),
             provider_start_ledger: self.session.provider_start_ledger.clone(),

@@ -138,6 +138,7 @@ fn session_state_serde_roundtrip_preserves_work_item_plan_candidate() {
         review_invocation_scope: None,
         human_gate_snapshot: None,
         human_gate_turn_rejection: None,
+        candidate_compile_failure: None,
         repair_reservation: None,
         policy_diagnostics: Vec::new(),
         provider_start_ledger: Vec::new(),

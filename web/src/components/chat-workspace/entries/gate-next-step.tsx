@@ -99,6 +99,81 @@ export const GATE_NEXT_STEP_REJECTED =
 export const GATE_NEXT_STEP_REVISION_RUNNING =
   "引擎正在按你的反馈修订并复评，请稍候；期间也可直接点「确认当前版本」用当前候选继续";
 
+/**
+ * REQ-WSC-18（owner 2026-10-31 意见 1/2）：候选编译不过态的顶部指引——
+ * 此候选**无效**，「确认当前版本」不会放行（本态绝不说「可继续」；owner
+ * 0009 现场三处指引互相矛盾的根因修复：指引/原因/状态行/按钮判据同一份
+ * 事实派生）。出路=让 author 重新生成（反馈框写修订意见）或终止此门。
+ */
+export const GATE_NEXT_STEP_COMPILE_FAILURE =
+  "当前候选编译未通过、此候选无效，「确认当前版本」不会放行：请在下方反馈框写明修订意见，让 author 按下方要点重新生成；无法修复时终止此门后重新发起";
+
+/** REQ-WSC-18：编译不过态「确认当前版本」的禁用原因（含出路，不无声变灰）。 */
+export const GATE_CONFIRM_BLOCKED_COMPILE_FAILURE =
+  "暂不可确认：当前候选编译未通过，此候选无效，点了也只会再次失败；请按下方要点让 author 重新生成，或终止此门后重新发起";
+
+/**
+ * REQ-WSC-18：「确认当前版本」禁用原因（含出路，不无声变灰）——两阶段
+ * 与顶部指引/红框同一份事实：running=平台自动重写中；stopped=请改 design。
+ */
+export function gateConfirmBlockedCompileFailureCopy(
+  autoRewrite: GateCompileFailureAutoRewriteInput | null,
+): string {
+  if (autoRewrite?.phase === "running") {
+    return "暂不可确认：当前候选编译未通过，此候选无效，点了也只会再次失败；平台正在自动重写，无需你手动推进";
+  }
+  if (autoRewrite?.phase === "stopped") {
+    return "暂不可确认：自动重写无法解决同一依赖环；请修改 design 的依赖顺序后重新发起（要点见下方红框）";
+  }
+  return GATE_CONFIRM_BLOCKED_COMPILE_FAILURE;
+}
+
+/**
+ * REQ-WSC-18（owner 2026-10-31 追加裁定）：自动重写两阶段事实——数字全部
+ * 来自后端权威投影（auto_rewrite.remaining/repeated），前端不自数；缺席
+ * （null）= 无自动重写信息（旧记录/非编译类失败），按单阶段呈现，不猜。
+ */
+export type GateCompileFailureAutoRewriteInput = {
+  phase: "running" | "stopped";
+  remaining: number | null;
+  repeated: number | null;
+};
+
+/**
+ * 阶段一（首次编译失败，自动重写进行中）——owner 答复问题 1：第一次失败
+ * 就出提示，且必须体现「平台正在自动重写 / 还剩 N 次」，别让 owner 以为
+ * 要自己手动推；同时埋 design 根因提醒。
+ */
+export function gateCompileFailureRunningCopy(remaining: number | null): string {
+  return `当前候选编译未通过、此候选无效，「确认当前版本」不会放行：平台正在自动重写${
+    remaining !== null ? `（还剩 ${remaining} 次）` : ""
+  }，无需你手动推进；依赖环根因可能在 design 的依赖顺序——请留意是否需要修改 design（要点见下方红框）`;
+}
+
+/**
+ * 阶段二（同一依赖环重复，自动重写提前停）——owner 答复问题 2：提示升级
+ * 且明确指向 owner 要动手（改 design），醒目呈现（红框内加粗行）。
+ */
+export function gateCompileFailureStoppedCopy(repeated: number | null): string {
+  return `自动重写无法解决同一依赖环${
+    repeated !== null ? `（已重复 ${repeated} 次）` : ""
+  }，此候选无效，「确认当前版本」不会放行：请修改 design 的依赖顺序——在下方反馈框写明要怎么改后提交（author 会按要点重新生成），或终止此门后修改 design 再重新发起`;
+}
+
+/** 红框内的阶段事实行（陈述句；阶段二加粗红字，见 GateCandidateCompileFailureBlock）。 */
+export function gateCompileFailureAutoRewriteStatusCopy(
+  autoRewrite: GateCompileFailureAutoRewriteInput,
+): string {
+  if (autoRewrite.phase === "running") {
+    return `平台已启动自动重写${
+      autoRewrite.remaining !== null ? `，还剩 ${autoRewrite.remaining} 次` : ""
+    }；无需你手动推进`;
+  }
+  return `自动重写无法解决：同一依赖环${
+    autoRewrite.repeated !== null ? `已重复 ${autoRewrite.repeated} 次` : "重复出现"
+  }；请修改 design 后重新发起`;
+}
+
 export const GATE_NEXT_STEP_BATCH_CONFIRM =
   "确认发布后整组 Work Item 将进入执行阶段，此门关闭";
 
@@ -132,6 +207,14 @@ export type GateNextStepInput = {
   resolved: boolean;
   /** 反馈被拒（rejectedFeedback/rejectionReason 等 metadata 任一在场）。 */
   rejected: boolean;
+  /**
+   * REQ-WSC-18：当前候选编译不过（entry metadata `candidate_compile_failure`
+   * 在场）——最高优先事实：此候选无效、确认不放行，被拒/修订中等分支里
+   * 「点确认继续」的出路在本态失真，故先于 rejected 判定。
+   */
+  compileFailure: boolean;
+  /** REQ-WSC-18：自动重写两阶段事实（后端权威投影；null=无该信息，不猜）。 */
+  compileFailureAutoRewrite: GateCompileFailureAutoRewriteInput | null;
   /** 修订进行中（typed turn busy/open）。 */
   revisionInProgress: boolean;
   batchConfirm: boolean;
@@ -154,13 +237,29 @@ export type GateNextStepInput = {
 
 /**
  * 门卡「现在请做 X」：按状态取一句明确的下一步动作（不能只复述状态）。
- * 优先级：已收口不指引 → 被拒（owner 最需要知道出路）→ 修订中 → 批次确认 →
- * 上下文阻断 → 动作被阻断 → 人话裁决 → 必须处理项 → 仅建议（advisory 或
- * 建议级 actionable）→ 只有结论。
+ * 优先级：已收口不指引 → 候选编译不过（REQ-WSC-18：候选无效、确认不放
+ * 行，须先于一切把「确认继续」当出路的分支）→ 被拒（owner 最需要知道
+ * 出路）→ 修订中 → 批次确认 → 上下文阻断 → 动作被阻断 → 人话裁决 →
+ * 必须处理项 → 仅建议（advisory 或建议级 actionable）→ 只有结论。
  */
 export function gateNextStepGuidance(input: GateNextStepInput): string | null {
   if (input.resolved) {
     return null;
+  }
+  // REQ-WSC-18：先于 rejected——被拒分支把「确认当前版本」当出路，而本态
+  // 确认不放行（平台侧 fail-closed），那句出路在此失真。
+  if (input.compileFailure) {
+    // REQ-WSC-18 两阶段（owner 2026-10-31 答复）：running=自动重写进行中
+    //（提示「还剩 N 次/无需手动推」）；stopped=同一环重复提前停（提示升级
+    // 「请修改 design」）；无 auto_rewrite 事实=单阶段通用文案。
+    const autoRewrite = input.compileFailureAutoRewrite;
+    if (autoRewrite?.phase === "running") {
+      return gateCompileFailureRunningCopy(autoRewrite.remaining);
+    }
+    if (autoRewrite?.phase === "stopped") {
+      return gateCompileFailureStoppedCopy(autoRewrite.repeated);
+    }
+    return GATE_NEXT_STEP_COMPILE_FAILURE;
   }
   if (input.rejected) {
     return GATE_NEXT_STEP_REJECTED;

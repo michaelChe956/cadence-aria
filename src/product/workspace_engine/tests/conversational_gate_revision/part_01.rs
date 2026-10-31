@@ -11,6 +11,7 @@ fn conversational_gate_revision_prompt_includes_candidate_feedback_grammar_langu
         feedback,
         grammar_boundary: grammar,
         language_rule: LANGUAGE_RULE_FIXTURE,
+        compile_failure_teaching: None,
     })
     .expect("revision prompt should fit the contract budget");
 
@@ -73,6 +74,7 @@ fn conversational_gate_revision_teaching_carries_structural_escape_clause() {
         feedback: "把 TASK-003 移动到 WI-002，并同步受影响的完成判据",
         grammar_boundary: "[markdown_grammar]\n标题必须逐字为 # Work Item Plan；Handoff Schema 必须保留三个字段。",
         language_rule: LANGUAGE_RULE_FIXTURE,
+        compile_failure_teaching: None,
     })
     .expect("revision prompt should fit the contract budget");
 

@@ -794,7 +794,7 @@ impl WorkspaceEngine {
                         "Final Compile strict validator 失败：{message}"
                     )))
                     .await;
-                } else {
+                } else if !self.route_compile_failure_to_rewrite().await {
                     // R3（oracle 裁决）：落门持久化 WaitingForHuman 之前先补建
                     // SC 门快照，保证 HumanGateOpened 事件对应的 SessionState
                     // 广播已带门快照（反馈入口读内存/持久快照）。
@@ -807,7 +807,7 @@ impl WorkspaceEngine {
         }
     }
 
-    async fn complete_policy_valid_work_item_plan(
+    pub(crate) async fn complete_policy_valid_work_item_plan(
         &mut self,
         work_item_count: usize,
     ) -> Result<(), String> {

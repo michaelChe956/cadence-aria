@@ -83,6 +83,7 @@ mod artifact_constraints;
 mod artifact_selection;
 mod author_confirm;
 mod compile;
+pub(crate) mod compile_failure_surface;
 mod compile_parse;
 pub(crate) mod contract_autorepair;
 pub(crate) mod contract_prerevision;

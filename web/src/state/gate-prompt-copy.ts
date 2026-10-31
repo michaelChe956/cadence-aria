@@ -18,6 +18,31 @@ export function gateWhyRequiredCopy(requiredCount: number): string {
 }
 
 /**
+ * REQ-WSC-18（owner 2026-10-31 意见 1）：候选 Final Compile 未通过时唯一
+ * 原因行——与顶部指引/距通过清单/确认按钮判据同源（store
+ * `candidateCompileFailure` 同一份事实），此态下绝不说「可直接确认」。
+ */
+export function gateWhyCompileFailureCopy(): string {
+  return "原因：当前候选 Final Compile 未通过，此候选无效，不能确认放行；需按下方要点让 author 重新生成。";
+}
+
+/**
+ * REQ-WSC-18 两阶段（owner 2026-10-31 答复问题 1）：首次失败、平台正在
+ * 自动重写——原因行明示「后台自动重写中，无需手动推进」，与顶部指引同源。
+ */
+export function gateWhyCompileFailureRewriteRunningCopy(): string {
+  return "原因：当前候选 Final Compile 未通过，此候选无效，不能确认放行；平台正在后台自动重写，无需你手动推进。";
+}
+
+/**
+ * REQ-WSC-18 两阶段（owner 2026-10-31 答复问题 2）：同一依赖环重复、自动
+ * 重写提前停——原因行升级为「自动重写无法解决，需修改 design」。
+ */
+export function gateWhyCompileFailureRewriteStoppedCopy(): string {
+  return "原因：当前候选 Final Compile 未通过，此候选无效；自动重写无法解决同一依赖环，需修改 design 后重新生成。";
+}
+
+/**
  * REQ-WSC-12 平台硬规则（前端侧同口径）：只有 `disposition=actionable` 的
  * finding 计入阻断/必处理计数；`advisory` 只呈现不阻断。缺失＝actionable
  * （与后端 fail-safe 一致，历史记录不受影响）。
@@ -72,6 +97,11 @@ export function gateDistanceToPass(input: {
   }>;
   trigger: string | null;
   approveAvailable: boolean;
+  /**
+   * REQ-WSC-18：候选编译失败态在场时，approve 行不得再说「可直接确认」
+   * （owner 2026-10-31 截图三处指引互相矛盾的其一）——同一份事实驱动。
+   */
+  candidateCompileFailure?: boolean;
 }): GateDistanceItem[] {
   // REQ-WSC-12：advisory 不算「必须处理项」（只作提示）。
   const blockers = input.findings.filter(
@@ -114,8 +144,12 @@ export function gateDistanceToPass(input: {
     },
     {
       key: "approve",
-      label: input.approveAvailable ? "可直接确认（或先反馈修订）" : "门动作当前被阻断",
-      status: input.approveAvailable ? "ok" : "pending",
+      label: input.candidateCompileFailure
+        ? "候选编译未通过，不能确认放行"
+        : input.approveAvailable
+          ? "可直接确认（或先反馈修订）"
+          : "门动作当前被阻断",
+      status: input.approveAvailable && !input.candidateCompileFailure ? "ok" : "pending",
     },
   ];
 }

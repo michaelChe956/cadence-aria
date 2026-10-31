@@ -1,4 +1,4 @@
-//! REQ-WSC-13/14（owner 2026-10-30 反馈）：门卡的两种 durable 事实——
+//! REQ-WSC-13/14/18（owner 2026-10-30/10-31 反馈）：门卡的三种 durable 事实——
 //!
 //! 1. **已处置事实清单**（`human-dispositions.json`）：owner 逐条「排除此项」
 //!    后落盘的处置事实；下一轮 reviewer prompt 携带它，声明已处置事实不得
@@ -6,15 +6,18 @@
 //! 2. **门 turn 拒收信息**（`human-gate-rejections/{turn_id}.json`）：门 turn
 //!    以 `validation_reject` 失败时的可读原因、下一步动作与逐字诊断——现场
 //!    此前只有 `failure_class`，全盘 grep 不到诊断，owner 无法行动。
+//! 3. **候选编译事实**（`candidate-compile-status.json`）：该会话最近一次
+//!    SC Final Compile 尝试的候选绑定与完整诊断——现场此前只有 timeline
+//!    node 的截断 summary 与内存 stash，门卡上读不到任何报错内容。
 //!
-//! 两者与既有 gate turn / session 记录同族落点：都在
+//! 三者与既有 gate turn / session 记录同族落点：都在
 //! `workspace-sessions/{session_id}/` 之下，走同一 live-write 准入。
 
 use chrono::Utc;
 
 use crate::product::json_store::{ProductStoreError, read_json, validate_relative_id, write_json};
 use crate::product::models::{
-    HumanDispositionRecord, HumanGateTurnRejection, WorkspaceSessionRecord,
+    CandidateCompileStatus, HumanDispositionRecord, HumanGateTurnRejection, WorkspaceSessionRecord,
 };
 
 use super::LifecycleStore;
@@ -204,6 +207,78 @@ impl LifecycleStore {
             }
         }
         Ok(latest)
+    }
+
+    /// REQ-WSC-18：落盘该会话最近一次 SC Final Compile 尝试的候选绑定与结果
+    /// （单文件覆盖写）。失败时不截断（`detail` 为完整诊断原文）；成功尝试
+    /// 以 `failure=None` 覆盖——清除「当前候选编译不过」事实，避免瞬态失败
+    /// 恢复后仍把确认动作挡死。
+    ///
+    /// 落点与门卡其它 durable 事实同族：`workspace-sessions/{session}/`，走
+    /// 同一 live-write 准入。
+    pub fn save_candidate_compile_status(
+        &self,
+        session_id: &str,
+        status: &CandidateCompileStatus,
+    ) -> Result<(), ProductStoreError> {
+        validate_relative_id(session_id)?;
+        if let Some(failure) = status.failure.as_ref() {
+            validate_relative_id(&failure.failure_id)?;
+        }
+        let (_, scope) = self.resolve_session_scope(session_id)?;
+        let status = status.clone();
+        self.with_optional_entity_live_write(scope.as_ref(), move || {
+            let session = self.get_workspace_session(session_id)?;
+            let path = self
+                .workspace_session_root(&session)
+                .join("candidate-compile-status.json");
+            write_json(&path, &status)
+        })
+    }
+
+    /// REQ-WSC-18：读该会话最近一次 SC Final Compile 尝试事实（缺席＝None，
+    /// 旧会话/从未运行过 SC compile 的情形，不报错）。
+    pub fn load_candidate_compile_status(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<CandidateCompileStatus>, ProductStoreError> {
+        validate_relative_id(session_id)?;
+        let session = self.get_workspace_session(session_id)?;
+        let path = self
+            .workspace_session_root(&session)
+            .join("candidate-compile-status.json");
+        if !super::path_exists(&path)? {
+            return Ok(None);
+        }
+        read_json(&path).map(Some)
+    }
+
+    /// REQ-WSC-19：该会话**当前候选**是否已确定编译不过——判据单源（durable
+    /// 候选绑定 vs 会话 durable 当前 refs 逐字相等）。门卡投影与确认动作的
+    /// fail-closed 判据共用本入口，前端不重复实现。
+    pub fn current_candidate_compile_failure(
+        &self,
+        session: &WorkspaceSessionRecord,
+    ) -> Result<Option<crate::product::models::CandidateCompileFailure>, ProductStoreError> {
+        Ok(self
+            .current_candidate_compile_status(session)?
+            .and_then(|status| status.failure))
+    }
+
+    /// REQ-WSC-18/21：当前候选的完整候选编译事实（含自动重写阶段），仅在
+    /// 候选绑定匹配且确有失败时返回；否则 None（旧候选/成功尝试/旧会话）。
+    pub fn current_candidate_compile_status(
+        &self,
+        session: &WorkspaceSessionRecord,
+    ) -> Result<Option<CandidateCompileStatus>, ProductStoreError> {
+        let Some(status) = self.load_candidate_compile_status(&session.id)? else {
+            return Ok(None);
+        };
+        let matches = status.belongs_to_candidate(
+            session.work_item_plan_source_revision_ref.as_deref(),
+            session.plan_candidate_ir_ref.as_deref(),
+        ) && status.failure.is_some();
+        Ok(matches.then_some(status))
     }
 }
 

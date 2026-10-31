@@ -93,6 +93,41 @@ export type WorkItemPlanHumanGateSnapshot = {
   resumable: boolean;
 };
 
+/**
+ * REQ-WSC-18（surface-compile-failure-on-human-gate）：**当前候选**的
+ * Final Compile 失败事实（Rust `session_state` 顶层字段，与
+ * `human_gate_turn_rejection` 同族同层）——失败属于旧候选/旧会话或无失败
+ * 时整体省略（serde skip），不构成「候选编译不过」态。
+ * - `code`：稳定机器码（如 `final_compile_prepare_failed`）。
+ * - `message`：完整人话原因（不截断）。
+ * - `detail`：完整诊断原文（含 failure_id），可选。
+ * - `rewrite_guidance` / `owner_hint`：owner 2026-10-31 意见 2——重新生成
+ *   着重要点与 design 可能需重写的提醒（与 author 教学重驱同源）。
+ */
+export type WorkItemPlanCandidateCompileFailure = {
+  code: string;
+  message: string;
+  detail?: string;
+  rewrite_guidance?: string[];
+  owner_hint?: string;
+  /**
+   * owner 2026-10-31 追加裁定（后端已确认为最终形状）：自动重写两阶段
+   * 事实，与失败事实同一载体（同一「当前候选」判据）；数字均为后端权威
+   * 值，前端不自数。缺席=无自动重写信息（旧记录/非编译类失败），按单阶
+   * 段呈现，不兜底猜 running。
+   * - `running`：首次候选无效失败即出现（与是否还在重写无关，第一次就给
+   *   owner 看）；`remaining` = 该会话剩余自动重写预算。
+   * - `stopped`：同一依赖环结构指纹（成员+边集合规范化摘要）重复出现 →
+   *   plan 层修不了，提前停剩余预算；`repeated` = 该环已出现次数；此态
+   *   进人工门 + 升级提示「自动重写无法解决，请改 design」。
+   */
+  auto_rewrite?: {
+    phase: "running" | "stopped";
+    remaining?: number | null;
+    repeated?: number | null;
+  };
+};
+
 export type WorkItemPlanRepairReservation = {
   token: string;
   owner_session_id: string;
@@ -1102,6 +1137,8 @@ export type WsOutMessage = WithEventSeq<
       /** REQ-WSC-14：该会话最近一次门 turn 拒收（四要素，与
        * `human_gate_turn_rejected` 帧同源）——刷新后重建门卡用；缺席省略。 */
       human_gate_turn_rejection?: HumanGateTurnRejectionProjection | null;
+      /** REQ-WSC-18：当前候选 Final Compile 失败事实（缺席=无失败/旧候选）。 */
+      candidate_compile_failure?: WorkItemPlanCandidateCompileFailure | null;
       repair_reservation?: WorkItemPlanRepairReservation | null;
       policy_diagnostics?: WorkItemPlanPolicyDiagnostic[];
       provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];

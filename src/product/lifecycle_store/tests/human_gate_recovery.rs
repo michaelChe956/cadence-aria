@@ -1119,3 +1119,6 @@ fn rejection_guidance_is_readable_and_actionable_per_stable_code() {
     assert!(!reason.contains("SOMETHING_UNKNOWN"), "{reason}");
     assert!(!next.is_empty());
 }
+
+// REQ-WSC-18：候选编译失败事实的 durable 回归（拆文件满足 1200 行红线，不压缩空行）。
+include!("candidate_compile_status.rs");

@@ -759,6 +759,13 @@ impl super::WorkspaceEngine {
 
         match decision {
             HumanGateCloseDecision::Approve => {
+                // REQ-WSC-19（owner 2026-10-31）：「确认当前版本」不是「跳过
+                // 编译」——approve 之后必然重跑同一次 Final Compile。当前候选
+                // 已确定编译不过时，放行只会原样再失败一次（owner 点多少次都
+                // 一样），因此平台侧 fail-closed：零 durable 写、门保持打开，
+                // 并给出原因与出路。判据是 durable 候选编译事实 × 当前候选
+                // 绑定，前端禁用按钮只是同一判据的呈现面。
+                self.ensure_current_candidate_compile_not_failed()?;
                 // Task 1.1：静态资格预检（零副作用）——无效资格在任何带写
                 // close CAS 与（Task 4 接线的）trust 登记之前拒收，沿原
                 // Conflict 既有翻译；不调用 CAS 充当预检。

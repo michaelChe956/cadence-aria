@@ -53,6 +53,10 @@ impl WorkspaceEngine {
                             && self.session.single_candidate_phase
                                 == Some(crate::product::models::SingleCandidatePhase::Approval) =>
                     {
+                        // REQ-WSC-19：确认＝必然重跑 Final Compile。当前候选已
+                        // 确定编译不过时 fail-closed（与 close_human_gate 的
+                        // Approve 臂同一判据、同一文案），零 compile 副作用。
+                        self.ensure_current_candidate_compile_not_failed()?;
                         self.enter_policy_valid_work_item_plan_compile_trust_ready()
                             .await;
                         return Ok(WorkspaceConfirmOutcome::None);

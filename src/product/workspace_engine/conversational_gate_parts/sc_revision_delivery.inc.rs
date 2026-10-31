@@ -53,12 +53,14 @@ impl super::WorkspaceEngine {
         })?;
         let grammar_boundary =
             crate::product::work_item_split_engine::prompts::work_item_plan_markdown_grammar();
+        let teaching = self.candidate_compile_failure_author_teaching();
         super::prompts::build_sc_manual_revision_prompt(
             super::prompts::ScManualRevisionPromptInput {
                 candidate_markdown: candidate_markdown.as_str(),
                 feedback,
                 grammar_boundary: &grammar_boundary,
                 language_rule: super::prompts::LANGUAGE_RULE_FILE_CONTENT,
+                compile_failure_teaching: teaching.as_deref(),
             },
         )
     }

@@ -9,6 +9,7 @@ mod author_revision;
 mod baseline_teaching;
 mod history_compaction;
 mod human_gate_revision;
+mod human_gate_revision_prompt;
 mod owner_guidance_rules;
 use owner_guidance_rules::{FINDING_SCOPE_RULES, OWNER_GUIDANCE_RULES};
 mod review;

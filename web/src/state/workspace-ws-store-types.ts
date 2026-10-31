@@ -1,4 +1,5 @@
 import type {
+  WorkItemPlanCandidateCompileFailure,
   AutomationOwnership,
   ChoiceOption,
   ChoiceQuestion,
@@ -523,6 +524,12 @@ export interface WorkspaceWsState {
   policyDiagnostics: WorkItemPlanPolicyDiagnostic[];
   providerStartLedger: WorkItemPlanProviderStartLedgerEntry[];
   singleCandidatePhase: WorkItemPlanSingleCandidatePhase | null;
+  /**
+   * REQ-WSC-18：当前候选 Final Compile 失败事实（`session_state` 顶层
+   * `candidate_compile_failure` 归一；帧缺席即置回 null——失败属于旧候选
+   * 时后端整体省略该字段）。null=候选可编译，门卡不进「候选编译不过」态。
+   */
+  candidateCompileFailure: WorkItemPlanCandidateCompileFailure | null;
   workItemPlanSourceRevisionRef: string | null;
   planCandidateIrRef: string | null;
   mechanicalReportRef: string | null;
@@ -632,6 +639,8 @@ export interface WorkspaceSessionStatePayload {
   human_gate_snapshot?: WorkItemPlanHumanGateSnapshot | null;
   /** REQ-WSC-14：该会话最近一次门 turn 拒收（四要素）；刷新后重建门卡用。 */
   human_gate_turn_rejection?: HumanGateTurnRejectionProjection | null;
+  /** REQ-WSC-18：当前候选 Final Compile 失败事实；缺席=无失败/旧候选。 */
+  candidate_compile_failure?: WorkItemPlanCandidateCompileFailure | null;
   repair_reservation?: WorkItemPlanRepairReservation | null;
   policy_diagnostics?: WorkItemPlanPolicyDiagnostic[];
   provider_start_ledger?: WorkItemPlanProviderStartLedgerEntry[];

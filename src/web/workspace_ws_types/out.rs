@@ -96,6 +96,92 @@ impl From<&crate::product::models::HumanGateTurnRejection> for HumanGateTurnReje
     }
 }
 
+/// REQ-WSC-18（owner 2026-10-31 反馈「点了之后会报错，但看不到报错内容」）：
+/// 门卡上的「当前候选编译失败」事实。与 `HumanGateTurnRejectionDto` 同族
+/// ——同一份 durable 事实的 wire 形态，刷新/重连后重建门卡仍可读。
+///
+/// `message` 是完整人话（不截断），`detail` 是完整诊断原文；`owner_hint` 与
+/// `rewrite_guidance` 是同一事实派生的可行动指引（形状由 owner 2026-10-31
+/// 裁定：不拆成独立顶层字段——否则会出现第二个「当前候选」判据）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateCompileFailureDto {
+    /// 稳定诊断码（如 `final_compile_prepare_failed`）。
+    pub code: String,
+    /// 完整人话原因（不截断）。
+    pub message: String,
+    /// 完整诊断原文（failure_id + 运行身份 + typed 渲染）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// 给 owner 的醒目提示：候选无效 + 让 author 重新生成 + design 可能需重写。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_hint: Option<String>,
+    /// 重写要点（与 author 教学同一组事实）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rewrite_guidance: Vec<String>,
+    /// REQ-WSC-21/22：平台侧自动重写事实（阶段 / 剩余次数 / 同环重复次数）；
+    /// 仅候选自身无效类失败出现。前端只呈现，不自数、不猜。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_rewrite: Option<CandidateAutoRewriteDto>,
+}
+
+/// REQ-WSC-21/22：自动重写阶段事实的 wire 形态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateAutoRewriteDto {
+    /// `running`＝首次失败即可自动重写（阶段一）；`stopped`＝同一依赖环重复
+    /// 或预算用尽，提前停止并升级为「请改 design」（阶段二）。
+    pub phase: crate::product::models::CandidateAutoRewritePhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeated: Option<u32>,
+}
+
+impl From<&crate::product::models::CandidateAutoRewrite> for CandidateAutoRewriteDto {
+    fn from(auto_rewrite: &crate::product::models::CandidateAutoRewrite) -> Self {
+        Self {
+            phase: auto_rewrite.phase,
+            remaining: auto_rewrite.remaining,
+            repeated: auto_rewrite.repeated,
+        }
+    }
+}
+
+impl CandidateCompileFailureDto {
+    /// REQ-WSC-21/22：由「失败事实 + 同记录的自动重写阶段事实」构造 wire 形态
+    /// （阶段/剩余/重复次数是同一记录的字段，拆成两个载体必然漂移）。
+    pub fn from_status(
+        status: &crate::product::models::CandidateCompileStatus,
+        failure: &crate::product::models::CandidateCompileFailure,
+    ) -> Self {
+        let mut dto = Self::from(failure);
+        dto.auto_rewrite = status
+            .auto_rewrite
+            .as_ref()
+            .map(CandidateAutoRewriteDto::from);
+        dto
+    }
+}
+
+impl From<&crate::product::models::CandidateCompileFailure> for CandidateCompileFailureDto {
+    fn from(failure: &crate::product::models::CandidateCompileFailure) -> Self {
+        Self {
+            code: failure.code.clone(),
+            message: failure.message.clone(),
+            detail: Some(failure.detail.clone()),
+            owner_hint: Some(
+                crate::product::workspace_engine::compile_failure_surface::owner_hint(
+                    &failure.code,
+                ),
+            ),
+            rewrite_guidance:
+                crate::product::workspace_engine::compile_failure_surface::rewrite_guidance(
+                    &failure.code,
+                ),
+            auto_rewrite: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoverableInterruptedRun {
     pub failed_node_id: String,
@@ -633,6 +719,13 @@ pub enum WsOutMessage {
         /// 「发生了什么、下一步怎么做」。缺席（从未拒收/旧会话）省略。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         human_gate_turn_rejection: Option<HumanGateTurnRejectionDto>,
+        /// REQ-WSC-18/19：**当前候选** Final Compile 失败事实（与同会话
+        /// durable 候选绑定一致才算当前）。字段在时门卡据此把候选标为
+        /// **无效**并禁用「确认当前版本」——后端在两次确认入口上同样
+        /// fail-closed（`CANDIDATE_COMPILE_FAILED`），前端不猜、不缓存。
+        /// 缺席（无失败/失败属于旧候选/旧会话）整体省略。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_compile_failure: Option<CandidateCompileFailureDto>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repair_reservation: Option<Box<RepairReservation>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -796,6 +889,7 @@ mod tests {
             review_invocation_scope: None,
             human_gate_snapshot: None,
             human_gate_turn_rejection: None,
+            candidate_compile_failure: None,
             repair_reservation: None,
             policy_diagnostics: Vec::new(),
             provider_start_ledger: Vec::new(),

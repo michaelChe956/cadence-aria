@@ -664,6 +664,13 @@ export function buildGatePromptEntry(
           rejectionDiagnostics: projection.turn.rejection.rejection_diagnostics,
         }
       : {}),
+    // REQ-WSC-18（owner 2026-10-31 意见 1/2）：当前候选编译失败事实——门卡
+    // 据此呈现「候选无效需重新生成」红框（醒目、不折叠）并把「确认当前
+    // 版本」判为不可用（fail-closed）；与 author 教学重驱同源的 rewrite
+    // 要点/owner 提醒一并投影。缺席=候选可编译，零行为变化。
+    ...(projection.candidate_compile_failure
+      ? { candidate_compile_failure: projection.candidate_compile_failure }
+      : {}),
     gate_status: projection.closed ?? projection.status,
     action_block_reason: projection.action_block_reason,
     // F-21：终止专属阻断持久化（null=允许终止）——门卡离场兜底分支读取。

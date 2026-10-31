@@ -150,7 +150,13 @@ impl WorkspaceEngine {
     > {
         let result = self.run_single_candidate_initial_plan_compile_inner().await;
         match result {
-            Ok(outcome) => Ok(outcome),
+            Ok(outcome) => {
+                // REQ-WSC-18：成功尝试覆盖候选编译事实——清除同候选的
+                // 「编译不过」残留，否则一次瞬态失败恢复后确认动作会被
+                // 过期失败永久挡死（新的死路）。
+                self.record_candidate_compile_success();
+                Ok(outcome)
+            }
             Err(mut failure) => {
                 if failure.failure_id.is_empty() {
                     let identity = self
@@ -194,9 +200,61 @@ impl WorkspaceEngine {
                         validator_findings: Vec::new(),
                     },
                 );
+                // REQ-WSC-18：完整诊断 durable 落盘（与门卡同族落点）——
+                // 现场此前只有 timeline summary 与内存 stash，owner 在门卡上
+                // 读不到任何报错内容；plain `?` 站点（如
+                // `final_compile_prepare_failed`）原本连 policy_diagnostics
+                // 都不落。这里是 SC initial compile 的唯一返回边界，失败与
+                // 成功两侧都在此收口，无跨路径遗漏。
+                // REQ-WSC-21/22：路由裁定（自动重写 / 提前停）随 durable 事实
+                // 一并落盘并随门卡投影；本边界不改写既有失败返回语义。
+                let _route = self.record_candidate_compile_failure(&failure);
                 Err(failure)
             }
         }
+    }
+
+    /// REQ-WSC-18/21/22：把 typed 失败完整落成 durable 候选编译事实（不截断），
+    /// 并返回自动重写路由裁定。写失败只降级为可观测静默——不得因诊断落盘失败
+    /// 改写既有失败语义。
+    fn record_candidate_compile_failure(
+        &self,
+        failure: &crate::product::workspace_engine::types::PlanningCompileFailure,
+    ) -> crate::product::workspace_engine::compile_failure_surface::CandidateCompileRoute {
+        use crate::product::workspace_engine::compile_failure_surface::CandidateCompileRoute;
+        let Some(lifecycle) = self.lifecycle_store.as_ref() else {
+            return CandidateCompileRoute::Gate;
+        };
+        let previous = lifecycle
+            .load_candidate_compile_status(&self.session.session_id)
+            .ok()
+            .flatten();
+        let (status, route) =
+            crate::product::workspace_engine::compile_failure_surface::candidate_compile_status(
+                previous.as_ref(),
+                failure,
+                chrono::Utc::now().to_rfc3339(),
+            );
+        let _ = lifecycle.save_candidate_compile_status(&self.session.session_id, &status);
+        route
+    }
+
+    /// REQ-WSC-18：编译成功 → 以「无失败」覆盖同一会话的候选编译事实，避免
+    /// 过期失败把确认动作永久挡死。
+    fn record_candidate_compile_success(&self) {
+        let Some(lifecycle) = self.lifecycle_store.as_ref() else {
+            return;
+        };
+        let Ok(record) = lifecycle.get_workspace_session(&self.session.session_id) else {
+            return;
+        };
+        let status =
+            crate::product::workspace_engine::compile_failure_surface::cleared_candidate_compile_status(
+                record.work_item_plan_source_revision_ref.clone(),
+                record.plan_candidate_ir_ref.clone(),
+                chrono::Utc::now().to_rfc3339(),
+            );
+        let _ = lifecycle.save_candidate_compile_status(&self.session.session_id, &status);
     }
 
     /// SG3b typed 失败站点：构造（携 run/digest 身份）→ seal → durable
