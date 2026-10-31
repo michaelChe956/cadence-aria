@@ -460,7 +460,7 @@ impl LogicalCodebaseRegistrationCoordinator {
     #[cfg(test)]
     fn should_interrupt_after_completed_item(&self) -> bool {
         self.failure_after_completed_items
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 if remaining == usize::MAX || remaining == 0 {
                     None
                 } else {

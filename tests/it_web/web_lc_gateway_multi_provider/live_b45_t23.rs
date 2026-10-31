@@ -340,13 +340,12 @@ fn verify_failure_cell(cell: &EvidenceCell) -> Result<(), String> {
     // 被拒格:除 session child 外,协议握手与 MCP/native 方法维也不得在场
     //(失败矩阵五维口径;握手失败已创建 child 的 kill/reap 格不属被拒格)。
     let cell_json = cell.to_cell_json();
-    for key in ["native_handshake_count"] {
-        if cell_accounting_dimension(&cell_json, key) != 0 {
-            return Err(format!(
-                "失败场景 {scenario}:被拒格 {key}={} 非零(握手/method 不应发生在拒绝格)",
-                cell_accounting_dimension(&cell_json, key)
-            ));
-        }
+    let key = "native_handshake_count";
+    if cell_accounting_dimension(&cell_json, key) != 0 {
+        return Err(format!(
+            "失败场景 {scenario}:被拒格 {key}={} 非零(握手/method 不应发生在拒绝格)",
+            cell_accounting_dimension(&cell_json, key)
+        ));
     }
     Ok(())
 }

@@ -191,7 +191,7 @@ impl CursorWriteStats {
     #[cfg(test)]
     pub(crate) fn trip_failpoint(&self) -> bool {
         self.failpoint_after_writes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 if value == usize::MAX {
                     None
                 } else {
