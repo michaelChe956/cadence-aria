@@ -178,8 +178,7 @@ async fn candidate_attempt_metrics_endpoint_returns_series_and_readonly_metrics(
     let attempts_file = root
         .path()
         .join(".aria")
-        .join("projects/project_0001/issues/issue_0001/workspace-sessions")
-        .join(&session.id)
+        .join("projects/project_0001/issues/issue_0001")
         .join("candidate-attempts.jsonl");
     let before = fs::read(&attempts_file).expect("attempts file must exist after seeding");
 
@@ -253,4 +252,181 @@ async fn candidate_attempt_metrics_endpoint_rejects_invalid_ids() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     assert_eq!(body["code"], "invalid_project_id");
+}
+
+/// REQ-WSC-25 **项目级**读数：按单个 issue 算出来的 `first_pass_rate` 只能是
+/// 0.0 或 1.0（`issue_count` 恒为 1）——那不是「率」。项目级出口把该项目下
+/// **所有 issue** 的尝试序列喂进**同一个**既有 metrics 函数 → `issue_count`
+/// = N → 真率，并给出 issue 维度明细（定位拖后腿的 issue）。
+#[tokio::test]
+async fn candidate_attempt_metrics_project_endpoint_aggregates_issues_into_real_rate() {
+    let root = tempdir().expect("root");
+    let repo = git_repo();
+    let app = build_web_router(WebAppState::new(
+        root.path().to_path_buf(),
+        WebRuntime::new_fake(root.path().to_path_buf()),
+    ));
+
+    request_json(
+        app.clone(),
+        Method::POST,
+        "/api/projects",
+        json!({"name":"Metrics","description":null}),
+    )
+    .await;
+    crate::create_repository_and_wait(
+        app.clone(),
+        "project_0001",
+        json!({"name":"Repo","path":repo.path()}),
+    )
+    .await;
+    let mut issue_ids = Vec::new();
+    for title in ["首次通过", "首次失败"] {
+        let (status, issue) = request_json(
+            app.clone(),
+            Method::POST,
+            "/api/projects/project_0001/issues",
+            json!({
+                "title":title,
+                "description":null,
+                "repository_id":"repository_0001"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {issue}");
+        issue_ids.push(issue["issue_id"].as_str().expect("issue id").to_string());
+    }
+    assert_eq!(issue_ids.len(), 2, "两个 issue 是项目级聚合的最小样本");
+
+    let app_paths = ProductAppPaths::new(root.path().join(".aria"));
+    let lifecycle = LifecycleStore::new(app_paths.clone());
+    // issue A：首次即通过。
+    let passed_session = lifecycle
+        .create_workspace_session(
+            cadence_aria::product::lifecycle_store::CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: issue_ids[0].clone(),
+                entity_id: "plan_project_passed".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: None,
+                review_rounds: 0,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            },
+        )
+        .expect("create passed session");
+    assert!(
+        lifecycle
+            .append_candidate_attempt(
+                &passed_session.id,
+                &attempt_record(
+                    "pass/project-first",
+                    "2026-10-31T00:00:00Z",
+                    CandidateAttemptStage::Final,
+                    CandidateAttemptOutcome::Passed,
+                    None,
+                ),
+            )
+            .expect("append passed row")
+    );
+    // issue B：首次即失败（结构拒收）。
+    let failed_session = lifecycle
+        .create_workspace_session(
+            cadence_aria::product::lifecycle_store::CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: issue_ids[1].clone(),
+                entity_id: "plan_project_failed".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: None,
+                review_rounds: 0,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            },
+        )
+        .expect("create failed session");
+    assert!(
+        lifecycle
+            .append_candidate_attempt(
+                &failed_session.id,
+                &attempt_record(
+                    "fail/project-first",
+                    "2026-10-31T00:00:00Z",
+                    CandidateAttemptStage::Structure,
+                    CandidateAttemptOutcome::Failed,
+                    Some(CandidateAttemptFailure {
+                        failure_id: "planning_compile_failure_project_fixture".to_string(),
+                        code: "final_compile_structure_rejected".to_string(),
+                        typed_kinds: Vec::new(),
+                        cycle_fingerprint: None,
+                    }),
+                ),
+            )
+            .expect("append failed row")
+    );
+
+    let ledger_paths: Vec<std::path::PathBuf> = issue_ids
+        .iter()
+        .map(|issue_id| {
+            root.path()
+                .join(".aria")
+                .join("projects/project_0001/issues")
+                .join(issue_id)
+                .join("candidate-attempts.jsonl")
+        })
+        .collect();
+    let before: Vec<Vec<u8>> = ledger_paths
+        .iter()
+        .map(|path| fs::read(path).expect("ledger file must exist after seeding"))
+        .collect();
+
+    let (status, body) = request_json(
+        app.clone(),
+        Method::GET,
+        "/api/projects/project_0001/candidate-attempt-metrics",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    // 项目级读数：issue_count = 2 → first_pass_rate 是真率（0.5）。
+    let metrics = &body["metrics"];
+    assert_eq!(metrics["issue_count"], 2, "body: {body}");
+    assert_eq!(metrics["first_pass_issue_count"], 1);
+    assert_eq!(metrics["first_pass_rate"], 0.5);
+    assert_eq!(
+        metrics["failure_code_ranking"][0]["code"],
+        "final_compile_structure_rejected"
+    );
+    assert_eq!(metrics["failure_code_ranking"][0]["count"], 1);
+
+    // issue 维度明细：定位到是哪个 issue 在拖后腿。
+    let per_issue = body["per_issue"].as_array().expect("per_issue array");
+    assert_eq!(per_issue.len(), 2, "body: {body}");
+    let passed_entry = per_issue
+        .iter()
+        .find(|entry| entry["issue_id"] == json!(issue_ids[0]))
+        .expect("首次通过的 issue 明细");
+    assert_eq!(passed_entry["attempts"], 1);
+    assert_eq!(passed_entry["first_pass"], true);
+    assert_eq!(passed_entry["consecutive_failures"], 0);
+    let failed_entry = per_issue
+        .iter()
+        .find(|entry| entry["issue_id"] == json!(issue_ids[1]))
+        .expect("首次失败的 issue 明细");
+    assert_eq!(failed_entry["attempts"], 1);
+    assert_eq!(failed_entry["first_pass"], false);
+    assert_eq!(failed_entry["consecutive_failures"], 1);
+
+    // 只读：调用前后 durable 流水逐字节不变。
+    for (path, bytes) in ledger_paths.iter().zip(before.iter()) {
+        assert_eq!(
+            &fs::read(path).expect("ledger file after GET"),
+            bytes,
+            "项目级度量端点必须只读，不得改写 append-only 尝试流水"
+        );
+    }
 }

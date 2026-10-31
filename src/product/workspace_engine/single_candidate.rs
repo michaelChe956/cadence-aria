@@ -23,10 +23,11 @@ use crate::web::workspace_ws_types::{ReviewGate, ReviewVerdict, ReviewVerdictTyp
 /// - [`Self::Candidate`]：候选合法并通过结构门，已提升 current refs 并进入
 ///   既有评审/确认链（`item_count` 为编译出的候选 item 数）；
 /// - [`Self::Rejected { repair_prompt }]`：候选被 SG3a.1 系统门拒收，但
-///   **恰一次教学重驱槽位仍空闲**（`allow_structure_rerun=true`，槽位由
-///   runner 的 `first_round_failure` 单槽决定）——durable 诊断 + 尝试流水
-///   已落盘，可执行修复指令随本形态上交 runner 重驱作者一次；不开人工门；
-/// - [`Self::Routed`]：拒收且重驱槽位已占用——平台已在自动重写或人工门
+///   **结构门类教学重驱槽位仍空闲**（`allow_structure_rerun=true`，槽位由
+///   runner 的 `structure_rerun_used` 独立槽决定——与 compile/IR 槽互不
+///   挤占）——durable 诊断 + 尝试流水已落盘，可执行修复指令随本形态上交
+///   runner 重驱作者一次；不开人工门；
+/// - [`Self::Routed`]：拒收且结构门重驱槽位已占用——平台已在自动重写或人工门
 ///   态，调用方**不得**再把它当硬失败（现场缺口：owner 只看到「生成失败」）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SingleCandidateAuthorCompletion {
@@ -419,7 +420,8 @@ impl WorkspaceEngine {
     /// 落盘，并在 durable Evaluate 后启动阶段 1 的 reviewer 路由。
     ///
     /// `allow_structure_rerun`：结构门拒收时是否还有「恰一次教学重驱」机会
-    /// ——槽位（runner 的 `first_round_failure` 单槽）与 compile/IR 重驱共享；
+    /// ——**结构门类自己的槽位**（runner 的 `structure_rerun_used`），与
+    /// compile/IR 槽互不挤占（每类至多一次，总上限有界）；
     /// true 时拒收返回 `Rejected`（不开人工门），false 时保持既有落门收口。
     pub(crate) async fn complete_single_candidate_work_item_plan_author(
         &mut self,

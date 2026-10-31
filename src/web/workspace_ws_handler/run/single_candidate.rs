@@ -1198,13 +1198,20 @@ pub(crate) async fn run_single_candidate_author(
     // 同样享有恰一次教学重驱——在持久化前预跑同源 validate_plan_candidate_ir
     // 分类，重驱 prompt 附错误原文与修正引用/补齐字段指令；重驱再败→终态含
     // 两轮；非 IR/非白名单的其他失败（如内部错误/lowering 类）不触发重驱。
-    // 重驱机会在 compile/IR 两类间共享（first_round_failure 单槽）。
+    // 重驱机会在 compile/IR 两类间共享（`compile_ir_rerun_used` 单槽）。
+    // 4. 分槽（2026-10-31 真机修订）：结构门重驱有**自己的**槽位
+    // （`structure_rerun_used`）——两类槽互不挤占、每类至多一次 → 额外
+    // provider 驱动总上限 2 次（有界，不是无限自愈）。
     let compile_context = crate::product::work_item_plan_compiler::WorkItemPlanSourceContext {
         target_repository_id: repository.id.clone(),
         member_targets: member_targets.clone(),
     };
     let mut compile_source = full_output;
+    // `first_round_failure`：首个失败类的描述（只用于终态错误文案，不再兼作槽位标记）。
     let mut first_round_failure: Option<String> = None;
+    // 槽位：compile/IR 两类共享一个，结构门类独立一个——互不挤占、每类至多一次。
+    let mut compile_ir_rerun_used = false;
+    let mut structure_rerun_used = false;
     let candidate_item_count = loop {
         let (ir, repaired_source, _autorepair_log) =
             match crate::product::workspace_engine::contract_autorepair::converge_work_item_plan_source(
@@ -1214,12 +1221,13 @@ pub(crate) async fn run_single_candidate_author(
                 Ok(outcome) => outcome,
                 Err(diagnostics) => {
                     let reasons = format_compile_failure_reasons(&diagnostics);
-                    if first_round_failure.is_none()
+                    if !compile_ir_rerun_used
                         && diagnostics
                             .iter()
                             .any(|diagnostic| is_teachable_parse_failure(&diagnostic.code))
                     {
-                        first_round_failure = Some(reasons.join("; "));
+                        compile_ir_rerun_used = true;
+                        first_round_failure.get_or_insert_with(|| reasons.join("; "));
                         let reredrive_prompt =
                             crate::product::workspace_engine::build_work_item_plan_compile_reredrive_prompt(
                                 &reasons,
@@ -1297,8 +1305,9 @@ pub(crate) async fn run_single_candidate_author(
         compile_source = repaired_source;
 
         if let Some(reasons) = prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir) {
-            if first_round_failure.is_none() {
-                first_round_failure = Some(reasons.join("; "));
+            if !compile_ir_rerun_used {
+                compile_ir_rerun_used = true;
+                first_round_failure.get_or_insert_with(|| reasons.join("; "));
                 let reredrive_prompt =
                     build_work_item_plan_ir_reredrive_prompt(&reasons, &design_requirement_ids);
                 engine
@@ -1376,23 +1385,21 @@ pub(crate) async fn run_single_candidate_author(
                 compile_source,
                 repository.id.clone(),
                 member_targets.clone(),
-                // 恰一次教学重驱槽位（first_round_failure 单槽，与 compile/IR
-                // 重驱共享）：空闲时结构门拒收先教学重驱作者一次，占用后
-                // 直接落人工门（引擎侧收口，runner 不再判）。
-                first_round_failure.is_none(),
+                // 结构门类重驱槽（**独立槽**，与 compile/IR 槽互不挤占）：
+                // 空闲时结构门拒收先教学重驱作者一次，占用后直接落人工门
+                // （引擎侧收口，runner 不再判）。
+                !structure_rerun_used,
             )
             .await
         {
             Ok(SingleCandidateAuthorCompletion::Candidate { item_count }) => item_count,
-            // SG3a.1 拒收 + 槽位空闲：占用单槽并带着可执行修复指令重驱作者
-            // 一次（provider 通道复用，不新造 attempt 通道），回循环重走
-            // compile → IR 预校验 → 结构门；重驱后再拒由引擎落人工门。
+            // SG3a.1 拒收 + 结构门槽空闲：占用**结构门自己的**槽并带着可执行
+            // 修复指令重驱作者一次（provider 通道复用，不新造 attempt 通道）。
             Ok(SingleCandidateAuthorCompletion::Rejected { repair_prompt }) => {
-                first_round_failure = Some(format!(
-                    "candidate structure gate rejected ({})",
-                    crate::product::workspace_engine::single_candidate_structure_failure::
-                        STRUCTURE_STABLE_CODE
-                ));
+                structure_rerun_used = true;
+                first_round_failure.get_or_insert_with(
+                    super::single_candidate_structure_reredrive::structure_gate_first_round_failure,
+                );
                 compile_source =
                     super::single_candidate_structure_reredrive::drive_structure_gate_reredrive(
                         engine,

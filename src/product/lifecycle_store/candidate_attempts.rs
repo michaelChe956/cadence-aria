@@ -1,8 +1,20 @@
 //! REQ-WSC-25（owner 2026-10-31「不可控性太高」）：候选生成/编译尝试的
 //! **append-only 流水**。
 //!
-//! 落点：`workspace-sessions/{session_id}/candidate-attempts.jsonl`——与门卡同族
-//! 落点、同一 live-write 准入，**每次候选生成/编译尝试追加一行**，永不覆盖。
+//! 落点：**issue 级单文件** `projects/{project}/issues/{issue}/candidate-attempts.jsonl`
+//! ——每次候选生成/编译尝试追加一行，永不覆盖。
+//!
+//! ## 为什么落 issue 级（2026-10-31 真机修订）
+//!
+//! 原落点是会话目录 `workspace-sessions/{session_id}/candidate-attempts.jsonl`。
+//! 但「终止自动化 + 重开」会**删掉旧会话目录**（连带其流水），于是通过率读数
+//! 被重跑擦掉：同一个 issue 上一次跑 `first_pass_rate=1.0`，重跑一次后变成
+//! `0.0`——上一次那条 `outcome=passed` 的记录**被删没了**。通过率读数的意义
+//! 就是**跨时间**看趋势，历史不该被重跑擦掉。
+//!
+//! 会话清理只删 `workspace-sessions/{session_id}/` 目录与同名记录
+//! （`delete_workspace_sessions_for_entity` 与实体删除级联 ④ 皆如此），**不删**
+//! issue 目录本身 → 流水落 issue 级即耐得住会话清理。
 //!
 //! 与既有 `candidate-compile-status.json` 的分工（两者互不替代、互不覆盖）：
 //! - `candidate-compile-status.json` = **当前状态**：该会话最近一次尝试的覆盖写
@@ -20,10 +32,10 @@
 //! ## 度量读数（可复制的查法）
 //!
 //! 程序化入口：[`compute_candidate_attempt_metrics`]（Rust API，口径见其文档）。
-//! 命令行等价查法（jq，跨会话跨 issue 聚合；口径与 Rust API 一致）：
+//! 命令行等价查法（jq，跨 issue 聚合；口径与 Rust API 一致）：
 //!
 //! ```bash
-//! cat .aria/projects/*/issues/*/workspace-sessions/*/candidate-attempts.jsonl \
+//! cat .aria/projects/*/issues/*/candidate-attempts.jsonl \
 //! | jq -s --argjson n 5 '
 //!   def pct($p): if length == 0 then null else .[(($p * length) | ceil) - 1] end;
 //!   (group_by(.issue_id) | map(sort_by(.recorded_at, .attempt_seq))) as $issues
@@ -54,7 +66,8 @@ use crate::product::planning_failure::PlanningFailureKind;
 
 use super::LifecycleStore;
 
-/// 流水文件名（与 `candidate-compile-status.json` 同目录同族）。
+/// 流水文件名（落 issue 目录：与门卡同族文件，但**不在会话目录内**——
+/// 会话目录会被「终止+重开」清掉，流水必须活过它）。
 pub const CANDIDATE_ATTEMPTS_FILE_NAME: &str = "candidate-attempts.jsonl";
 
 /// lowering 类失败的稳定码（design §9.3「lowering 类终态失败数」的判据）。
@@ -199,16 +212,24 @@ pub struct CandidateAttemptMetrics {
 }
 
 impl LifecycleStore {
-    /// 该会话的尝试流水路径（`workspace-sessions/{session}/candidate-attempts.jsonl`）。
-    fn candidate_attempts_path(&self, session: &WorkspaceSessionRecord) -> PathBuf {
-        self.workspace_session_root(session)
+    /// 该 issue 的尝试流水路径（`issues/{issue_id}/candidate-attempts.jsonl`）。
+    ///
+    /// **issue 级单文件**（2026-10-31 真机修订）：落点从会话目录上移到 issue
+    /// 目录——会话目录会被「终止自动化 + 重开」删掉（连带其流水），落会话
+    /// 目录的读数会被重跑擦掉（同一 issue 上一次 `first_pass_rate=1.0`，重跑
+    /// 一次后变成 0.0）。issue 目录不在会话清理范围内（清理只删
+    /// `workspace-sessions/{sid}/` 目录与同名记录），故流水耐得住会话清理。
+    fn issue_candidate_attempts_path(&self, project_id: &str, issue_id: &str) -> PathBuf {
+        self.paths
+            .issue_lifecycle_root(project_id, issue_id)
             .join(CANDIDATE_ATTEMPTS_FILE_NAME)
     }
 
     /// REQ-WSC-25：追加一次候选生成/编译尝试（append-only，一行一次尝试）。
     ///
-    /// 幂等：同一 `attempt_key` 重复落盘**零膨胀**（不写第二行，返回 false）。
-    /// 序号 `attempt_seq`、会话/issue 身份由 store 盖印（调用方写错也不会错）。
+    /// 幂等：同一会话内同一 `attempt_key` 重复落盘**零膨胀**（不写第二行，
+    /// 返回 false）。序号 `attempt_seq`、会话/issue 身份由 store 盖印（调用方
+    /// 写错也不会错）。
     ///
     /// 返回 true＝本次真的追加了一行；false＝同键已存在（幂等空操作）。
     pub fn append_candidate_attempt(
@@ -222,21 +243,22 @@ impl LifecycleStore {
         self.with_optional_entity_live_write(scope.as_ref(), move || {
             let _guard = lock_attempt_log()?;
             let session = self.get_workspace_session(session_id)?;
-            let path = self.candidate_attempts_path(&session);
+            let path = self.issue_candidate_attempts_path(&session.project_id, &session.issue_id);
             let existing = read_candidate_attempt_lines(&path)?;
+            // 幂等只看 **issue 级权威文件**（同会话同 attempt_key）：旧版落点
+            // （会话目录）里的同键行不得把新行吃掉——否则那条新行会随会话
+            // 清理一起消失（正是本次要修的「读数被擦掉」）。
             if existing
                 .iter()
-                .any(|item| item.attempt_key == record.attempt_key)
+                .any(|item| item.session_id == session.id && item.attempt_key == record.attempt_key)
             {
                 return Ok(false);
             }
+            // 序号会话内单调递增；跨旧版落点续号（同一会话在升级前后各写过）。
+            let legacy =
+                read_candidate_attempt_lines(&self.legacy_session_attempts_path(&session))?;
             let mut persisted = record;
-            persisted.attempt_seq = existing
-                .iter()
-                .map(|item| item.attempt_seq)
-                .max()
-                .unwrap_or(0)
-                .saturating_add(1);
+            persisted.attempt_seq = next_attempt_seq(&existing, &legacy, &session.id);
             persisted.session_id = session.id.clone();
             persisted.issue_id = session.issue_id.clone();
             append_candidate_attempt_line(&path, &persisted)?;
@@ -245,20 +267,26 @@ impl LifecycleStore {
     }
 
     /// REQ-WSC-25：读该会话的尝试流水（按 `attempt_seq` 升序；坏行跳过）。
+    ///
+    /// 语义不变：**只返回该会话自己的记录**（issue 级文件按记录里的
+    /// `session_id` 过滤——该字段由 store 盖印）。
     pub fn list_candidate_attempts(
         &self,
         session_id: &str,
     ) -> Result<Vec<CandidateAttemptRecord>, ProductStoreError> {
         validate_relative_id(session_id)?;
         let session = self.get_workspace_session(session_id)?;
-        let path = self.candidate_attempts_path(&session);
-        let mut records = read_candidate_attempt_lines(&path)?;
+        let mut records = self.issue_candidate_attempt_records(&session)?;
         records.sort_by_key(|record| record.attempt_seq);
         Ok(records)
     }
 
     /// REQ-WSC-25：读该 issue 下**全部会话**的尝试流水（按落盘时间升序）——
     /// 度量读数（首次通过率 / 同 issue 连续失败次数）需要跨会话看同一 issue。
+    ///
+    /// 权威来源是 issue 级单文件（耐得住会话清理）；旧版落点（会话目录内）
+    /// 的历史行一并读入，升级前已落盘的记录不得从读数里消失，也不得双计
+    /// （按 `(session_id, attempt_key)` 去重）。
     pub fn list_issue_candidate_attempts(
         &self,
         project_id: &str,
@@ -266,6 +294,107 @@ impl LifecycleStore {
     ) -> Result<Vec<CandidateAttemptRecord>, ProductStoreError> {
         validate_relative_id(project_id)?;
         validate_relative_id(issue_id)?;
+        let mut records = read_candidate_attempt_lines(
+            &self.issue_candidate_attempts_path(project_id, issue_id),
+        )?;
+        let legacy = self.legacy_session_candidate_attempt_records(project_id, issue_id)?;
+        records = merge_attempt_records(records, legacy);
+        records.sort_by(|left, right| {
+            (
+                left.recorded_at.as_str(),
+                left.session_id.as_str(),
+                left.attempt_seq,
+            )
+                .cmp(&(
+                    right.recorded_at.as_str(),
+                    right.session_id.as_str(),
+                    right.attempt_seq,
+                ))
+        });
+        Ok(records)
+    }
+
+    /// REQ-WSC-25：读该项目下**全部 issue** 的尝试流水序列（每个 issue 一条
+    /// 序列）——项目级通过率读数（`issue_count` = N，`first_pass_rate` 才是
+    /// 真率；按单个 issue 算出来只能是 0.0/1.0，那不是「率」）。
+    ///
+    /// 枚举方式＝流水的最终落点（`issues/{issue_id}/candidate-attempts.jsonl`）：
+    /// 项目 `issues/` 目录下的子目录逐个读；没有流水的 issue 不产生序列
+    /// （分母＝有尝试记录的 issue 数，与既有 metrics 口径一致）。
+    pub fn list_project_candidate_attempt_series(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CandidateIssueAttemptSeries>, ProductStoreError> {
+        validate_relative_id(project_id)?;
+        let issues_root = self.paths.project_root(project_id).join("issues");
+        let entries = match std::fs::read_dir(&issues_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(ProductStoreError::Io(format!(
+                    "read {}: {error}",
+                    issues_root.display()
+                )));
+            }
+        };
+        let mut issue_ids = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                ProductStoreError::Io(format!("read {} entry: {error}", issues_root.display()))
+            })?;
+            let is_dir = entry.file_type().map_err(|error| {
+                ProductStoreError::Io(format!(
+                    "read {} entry type: {error}",
+                    issues_root.display()
+                ))
+            })?;
+            if !is_dir.is_dir() {
+                continue;
+            }
+            if let Some(issue_id) = entry.path().file_name().and_then(|name| name.to_str()) {
+                issue_ids.push(issue_id.to_string());
+            }
+        }
+        issue_ids.sort();
+        let mut series = Vec::new();
+        for issue_id in issue_ids {
+            let records = self.list_issue_candidate_attempts(project_id, &issue_id)?;
+            if records.is_empty() {
+                continue;
+            }
+            series.push(CandidateIssueAttemptSeries { issue_id, records });
+        }
+        Ok(series)
+    }
+
+    /// 该会话在 issue 级权威文件里的记录 + 旧版落点（会话目录）里的记录
+    /// （去重合并）——会话级读的完整来源。
+    fn issue_candidate_attempt_records(
+        &self,
+        session: &WorkspaceSessionRecord,
+    ) -> Result<Vec<CandidateAttemptRecord>, ProductStoreError> {
+        let issue_records: Vec<CandidateAttemptRecord> = read_candidate_attempt_lines(
+            &self.issue_candidate_attempts_path(&session.project_id, &session.issue_id),
+        )?
+        .into_iter()
+        .filter(|record| record.session_id == session.id)
+        .collect();
+        let legacy = read_candidate_attempt_lines(&self.legacy_session_attempts_path(session))?;
+        Ok(merge_attempt_records(issue_records, legacy))
+    }
+
+    /// 旧版落点（会话目录内的流水文件）——只读兼容面，升级后不再写入。
+    fn legacy_session_attempts_path(&self, session: &WorkspaceSessionRecord) -> PathBuf {
+        self.workspace_session_root(session)
+            .join(CANDIDATE_ATTEMPTS_FILE_NAME)
+    }
+
+    /// 该 issue 下**全部会话**的旧版落点流水（只读兼容面）。
+    fn legacy_session_candidate_attempt_records(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Vec<CandidateAttemptRecord>, ProductStoreError> {
         let root = self.workspace_sessions_root(project_id, issue_id);
         let entries = match std::fs::read_dir(&root) {
             Ok(entries) => entries,
@@ -291,20 +420,41 @@ impl LifecycleStore {
             let path = entry.path().join(CANDIDATE_ATTEMPTS_FILE_NAME);
             records.extend(read_candidate_attempt_lines(&path)?);
         }
-        records.sort_by(|left, right| {
-            (
-                left.recorded_at.as_str(),
-                left.session_id.as_str(),
-                left.attempt_seq,
-            )
-                .cmp(&(
-                    right.recorded_at.as_str(),
-                    right.session_id.as_str(),
-                    right.attempt_seq,
-                ))
-        });
         Ok(records)
     }
+}
+
+/// 该会话的下一个尝试序号（会话内单调递增；跨旧版落点续号）。
+fn next_attempt_seq(
+    issue_records: &[CandidateAttemptRecord],
+    legacy_records: &[CandidateAttemptRecord],
+    session_id: &str,
+) -> u32 {
+    issue_records
+        .iter()
+        .chain(legacy_records.iter())
+        .filter(|record| record.session_id == session_id)
+        .map(|record| record.attempt_seq)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+/// 合并两组流水记录并按 `(session_id, attempt_key)` 去重——issue 级权威文件
+/// 优先（旧版落点的同键行不重复计入，读数既不丢也不双计）。
+fn merge_attempt_records(
+    primary: Vec<CandidateAttemptRecord>,
+    legacy: Vec<CandidateAttemptRecord>,
+) -> Vec<CandidateAttemptRecord> {
+    let mut merged: Vec<CandidateAttemptRecord> = Vec::with_capacity(primary.len() + legacy.len());
+    let mut seen: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::with_capacity(primary.len() + legacy.len());
+    for record in primary.into_iter().chain(legacy) {
+        if seen.insert((record.session_id.clone(), record.attempt_key.clone())) {
+            merged.push(record);
+        }
+    }
+    merged
 }
 
 /// REQ-WSC-25：由 typed 编译失败派生一条尝试记录。

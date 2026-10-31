@@ -2,7 +2,8 @@
 //
 // 上一批（author_structure_gate_typed.rs）把拒收从硬失败改成 typed 失败路
 // （durable + 尝试流水 + 人工门），owner 拿到了人话原因与两个修法，但仍要
-// owner 自己动手。本文件钉住与 compile/IR 重驱共享唯一槽位后的三件事：
+// owner 自己动手。本文件钉住结构门重驱**自己的槽位**（2026-10-31 真机修订：
+// 与 compile/IR 槽互不挤占，每类至多一次）下的三件事：
 // 1. 槽位空闲（allow_structure_rerun=true）：不开人工门、不硬失败，返回
 //    `Rejected { repair_prompt }`（环在哪 + 两个合法修法各带后果 + 保护项 +
 //    完整修订版 markdown 输出口径）；

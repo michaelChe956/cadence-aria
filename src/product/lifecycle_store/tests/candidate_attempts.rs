@@ -132,13 +132,7 @@ fn candidate_attempt_stream_appends_records_and_is_idempotent() {
     // 前者是历史序列（只追加）——两者落点同族、内容互不覆盖。
     let path = store
         .app_paths()
-        .root()
-        .join("projects")
-        .join(PROJECT_ID)
-        .join("issues")
-        .join(ISSUE_ID)
-        .join("workspace-sessions")
-        .join(&session.id)
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
         .join("candidate-attempts.jsonl");
     let raw = std::fs::read_to_string(&path).unwrap();
     assert_eq!(
@@ -238,13 +232,7 @@ fn candidate_attempt_stream_survives_restart_and_skips_broken_lines() {
     // 坏行跳过（不因一行损坏丢掉其余历史）。
     let path = store
         .app_paths()
-        .root()
-        .join("projects")
-        .join(PROJECT_ID)
-        .join("issues")
-        .join(ISSUE_ID)
-        .join("workspace-sessions")
-        .join(&session.id)
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
         .join("candidate-attempts.jsonl");
     let mut raw = std::fs::read_to_string(&path).unwrap();
     raw.push_str("{not-json\n");
@@ -278,13 +266,7 @@ fn candidate_attempt_append_failure_does_not_corrupt_existing_stream() {
     // 制造写失败：把流水文件占成目录。
     let path = store
         .app_paths()
-        .root()
-        .join("projects")
-        .join(PROJECT_ID)
-        .join("issues")
-        .join(ISSUE_ID)
-        .join("workspace-sessions")
-        .join(&session.id)
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
         .join("candidate-attempts.jsonl");
     std::fs::remove_file(&path).unwrap();
     std::fs::create_dir_all(&path).unwrap();
@@ -412,4 +394,193 @@ fn candidate_attempt_metrics_aggregate_issue_level_streams() {
     assert_eq!(metrics.first_pass_issue_count, 0);
     assert_eq!(metrics.first_pass_rate, Some(0.0));
     assert_eq!(metrics.consecutive_failure_p50, Some(1.0));
+}
+
+/// REQ-WSC-25 修订（2026-10-31 真机）：「终止自动化 + 重开」会**删掉旧会话
+/// 目录**（连带其流水）——落会话目录的读数会被重跑擦掉：同一个 issue 上一次
+/// 跑 `first_pass_rate=1.0`，重跑一次后变成 `0.0`，上一次那条
+/// `outcome=passed` 的记录被删没了。流水必须耐得住会话清理：
+///
+/// 1. issue 级读数仍包含**已删会话**的尝试（含旧的 `outcome=passed`）；
+/// 2. `first_pass_rate` 不因重跑回退；
+/// 3. 会话级读（`list_candidate_attempts`）语义不变：只返回该会话的记录。
+#[test]
+fn candidate_attempt_stream_survives_session_directory_cleanup() {
+    let (_tmp, store) = setup();
+    // 第一次跑：通过（`first_pass_rate=1.0` 的来源）。
+    let passed_session = create_session(
+        &store,
+        "work_item_plan_candidate_attempts_cleanup_passed",
+        WorkspaceType::WorkItemPlan,
+    );
+    // 第二次跑：失败。
+    let failed_session = create_session(
+        &store,
+        "work_item_plan_candidate_attempts_cleanup_failed",
+        WorkspaceType::WorkItemPlan,
+    );
+    store
+        .append_candidate_attempt(
+            &passed_session.id,
+            &attempt_record(
+                "pass/first-run",
+                CandidateAttemptOutcome::Passed,
+                "2026-10-31T00:00:00Z",
+            ),
+        )
+        .unwrap();
+    store
+        .append_candidate_attempt(
+            &failed_session.id,
+            &attempt_record(
+                "fail/second-run",
+                CandidateAttemptOutcome::Failed,
+                "2026-10-31T00:01:00Z",
+            ),
+        )
+        .unwrap();
+
+    // 「终止 + 重开」：旧会话目录（连同其流水）被删除。
+    let session_dir = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-sessions")
+        .join(&passed_session.id);
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(session_dir.join("session-marker.txt"), "old session").unwrap();
+    std::fs::remove_dir_all(&session_dir).unwrap();
+    assert!(
+        !session_dir.exists(),
+        "旧会话目录必须已被删除（模拟「终止+重开」）"
+    );
+
+    // ① issue 级读数：旧会话的尝试仍在（流水不随会话清理消失）。
+    let records = store
+        .list_issue_candidate_attempts(PROJECT_ID, ISSUE_ID)
+        .unwrap();
+    assert_eq!(
+        records.len(),
+        2,
+        "会话目录被删后旧会话的尝试仍须可读：{records:?}"
+    );
+    assert!(
+        records.iter().any(|record| {
+            record.session_id == passed_session.id
+                && record.outcome == CandidateAttemptOutcome::Passed
+        }),
+        "旧会话的 passed 记录必须仍在（读数不得被重跑擦掉）：{records:?}"
+    );
+
+    // ② 读数不回退：首次通过率仍是 1.0（重跑不得把它拉回 0.0）。
+    let metrics = compute_candidate_attempt_metrics(&[CandidateIssueAttemptSeries {
+        issue_id: ISSUE_ID.to_string(),
+        records,
+    }]);
+    assert_eq!(
+        metrics.first_pass_rate,
+        Some(1.0),
+        "重跑后首次通过率不得回退"
+    );
+    assert_eq!(
+        metrics
+            .failure_code_ranking
+            .first()
+            .map(|item| item.code.as_str()),
+        Some("final_compile_prepare_failed"),
+        "第二次跑的失败事实仍须进失败码分布"
+    );
+
+    // ③ 会话级读语义不变：只返回该会话自己的记录。
+    let failed_rows = store.list_candidate_attempts(&failed_session.id).unwrap();
+    assert_eq!(failed_rows.len(), 1);
+    assert_eq!(failed_rows[0].outcome, CandidateAttemptOutcome::Failed);
+    let passed_rows = store.list_candidate_attempts(&passed_session.id).unwrap();
+    assert_eq!(passed_rows.len(), 1, "会话级读仍只返回该会话的记录");
+    assert_eq!(passed_rows[0].outcome, CandidateAttemptOutcome::Passed);
+}
+
+/// 升级兼容面：旧版落点（会话目录内的 `candidate-attempts.jsonl`）里**已落盘**
+/// 的历史行不得从读数里消失（升级前写下的记录不能因为改了落点就看不见），
+/// 也不得与 issue 级权威文件里的同键行双计；序号跨两个落点连续。
+#[test]
+fn candidate_attempt_stream_keeps_legacy_session_level_rows_without_double_counting() {
+    let (_tmp, store) = setup();
+    let session = create_session(
+        &store,
+        "work_item_plan_candidate_attempts_legacy",
+        WorkspaceType::WorkItemPlan,
+    );
+
+    // 升级前：流水落会话目录（store 盖印的会话/issue 身份照旧）。
+    let legacy_path = store
+        .app_paths()
+        .issue_lifecycle_root(PROJECT_ID, ISSUE_ID)
+        .join("workspace-sessions")
+        .join(&session.id)
+        .join("candidate-attempts.jsonl");
+    std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    let mut legacy = attempt_record(
+        "fail/legacy",
+        CandidateAttemptOutcome::Failed,
+        "2026-10-31T00:00:00Z",
+    );
+    legacy.session_id = session.id.clone();
+    legacy.issue_id = ISSUE_ID.to_string();
+    legacy.attempt_seq = 1;
+    std::fs::write(
+        &legacy_path,
+        format!("{}\n", serde_json::to_string(&legacy).unwrap()),
+    )
+    .unwrap();
+
+    // 升级后：新的尝试落 issue 级权威文件，序号跨两个落点连续（2，不是 1）。
+    store
+        .append_candidate_attempt(
+            &session.id,
+            &attempt_record(
+                "fail/new",
+                CandidateAttemptOutcome::Failed,
+                "2026-10-31T00:01:00Z",
+            ),
+        )
+        .unwrap();
+
+    let issue_records = store
+        .list_issue_candidate_attempts(PROJECT_ID, ISSUE_ID)
+        .unwrap();
+    assert_eq!(
+        issue_records.len(),
+        2,
+        "旧版落点的历史行不得从读数里消失，也不得双计：{issue_records:?}"
+    );
+    let session_records = store.list_candidate_attempts(&session.id).unwrap();
+    assert_eq!(session_records.len(), 2, "会话级读同样并入旧版落点的行");
+    assert_eq!(
+        session_records
+            .iter()
+            .map(|record| record.attempt_seq)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "尝试序号必须跨两个落点连续（不撞号）"
+    );
+
+    // 同一尝试（旧版落点已有同键行）不得在读数里出现两次。
+    store
+        .append_candidate_attempt(
+            &session.id,
+            &attempt_record(
+                "fail/legacy",
+                CandidateAttemptOutcome::Failed,
+                "2026-10-31T00:00:00Z",
+            ),
+        )
+        .unwrap();
+    let merged = store
+        .list_issue_candidate_attempts(PROJECT_ID, ISSUE_ID)
+        .unwrap();
+    assert_eq!(
+        merged.len(),
+        2,
+        "同键行只算一次（issue 级权威文件优先）：{merged:?}"
+    );
 }

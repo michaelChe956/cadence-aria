@@ -28,8 +28,8 @@ use super::automation_enrollment::{ensure_issue_exists, validate_request_ids};
 use super::support::{product_app_paths, product_store_api_error};
 
 /// 失败码 Top N 的缺省条数与上界（读数可复制口径，jq 等价查法同 n=5）。
-const DEFAULT_FAILURE_CODE_TOP_N: usize = 5;
-const MAX_FAILURE_CODE_TOP_N: usize = 50;
+pub(super) const DEFAULT_FAILURE_CODE_TOP_N: usize = 5;
+pub(super) const MAX_FAILURE_CODE_TOP_N: usize = 50;
 
 /// 只读查询参数：`top_n` 缺省 5（失败码 Top N 条数）。
 #[derive(Debug, Default, Deserialize)]
@@ -56,6 +56,33 @@ pub struct CandidateAttemptMetricsDto {
     pub consecutive_failure_p90: Option<f64>,
     pub failure_code_ranking: Vec<CandidateFailureCodeCountDto>,
     pub lowering_terminal_failure_count: usize,
+}
+
+impl CandidateAttemptMetricsDto {
+    /// 由既有 `CandidateAttemptMetrics` 投影（字段一一对应，**不另造指标
+    /// 口径**）；失败码 Top N 按 `top_n` 截断。
+    pub(super) fn from_metrics(
+        metrics: crate::product::lifecycle_store::candidate_attempts::CandidateAttemptMetrics,
+        top_n: usize,
+    ) -> Self {
+        Self {
+            issue_count: metrics.issue_count,
+            first_pass_issue_count: metrics.first_pass_issue_count,
+            first_pass_rate: metrics.first_pass_rate,
+            consecutive_failure_p50: metrics.consecutive_failure_p50,
+            consecutive_failure_p90: metrics.consecutive_failure_p90,
+            failure_code_ranking: metrics
+                .failure_code_ranking
+                .into_iter()
+                .take(top_n)
+                .map(|entry| CandidateFailureCodeCountDto {
+                    code: entry.code,
+                    count: entry.count,
+                })
+                .collect(),
+            lowering_terminal_failure_count: metrics.lowering_terminal_failure_count,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -93,22 +120,6 @@ pub async fn get_issue_candidate_attempt_metrics(
         project_id,
         issue_id,
         attempts,
-        metrics: CandidateAttemptMetricsDto {
-            issue_count: metrics.issue_count,
-            first_pass_issue_count: metrics.first_pass_issue_count,
-            first_pass_rate: metrics.first_pass_rate,
-            consecutive_failure_p50: metrics.consecutive_failure_p50,
-            consecutive_failure_p90: metrics.consecutive_failure_p90,
-            failure_code_ranking: metrics
-                .failure_code_ranking
-                .into_iter()
-                .take(top_n)
-                .map(|entry| CandidateFailureCodeCountDto {
-                    code: entry.code,
-                    count: entry.count,
-                })
-                .collect(),
-            lowering_terminal_failure_count: metrics.lowering_terminal_failure_count,
-        },
+        metrics: CandidateAttemptMetricsDto::from_metrics(metrics, top_n),
     }))
 }

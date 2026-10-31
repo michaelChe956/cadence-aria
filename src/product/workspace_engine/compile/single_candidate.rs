@@ -279,7 +279,8 @@ impl WorkspaceEngine {
     }
 
     /// REQ-WSC-25：把本次尝试追加进 append-only 流水
-    /// （`workspace-sessions/{session}/candidate-attempts.jsonl`）。
+    /// （`issues/{issue}/candidate-attempts.jsonl`——issue 级落点：会话目录
+    /// 会被「终止+重开」删掉，流水必须活过它）。
     ///
     /// 写失败只降级为静默：错误记入运行日志（policy diagnostics），**不得**因
     /// 此使候选生成或确认失败（REQ-WSC-25 场景 2）。

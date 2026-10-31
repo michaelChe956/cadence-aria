@@ -11,7 +11,13 @@
 //!    provider 恰好驱动两次（不再第三次）；
 //! 3. 每次尝试都进 candidate-attempts.jsonl；durable auto_rewrite 不留
 //!    running 记录、auto_rewrites_used 不变。
+//!
+//! 4. **分槽**（2026-10-31 真机修订）：结构门重驱有**自己的**槽位——
+//!    IR 校验失败（用掉 compile/IR 槽）之后又遇结构门拒收时，结构门重驱
+//!    真的发生（provider 被驱动第三次、`..._prompt_structure_reredrive`
+//!    事件落盘）；重驱后候选合法 → 正常提升 current refs、进入既有确认链。
 
+use super::single_candidate_ir_reredrive::markdown_with_unknown_requirement_ref;
 use super::single_candidate_provider_run::{
     ProviderRunFixture, SequenceOutputProvider, next_provider_input, no_more_provider_inputs,
     single_candidate_context, single_candidate_markdown, wait_for_stage,
@@ -251,4 +257,104 @@ async fn single_candidate_structure_rejection_reredrive_failure_lands_human_gate
         .expect("durable candidate compile status must exist");
     assert!(status.auto_rewrite.is_none());
     assert_eq!(status.auto_rewrites_used, 0);
+}
+
+/// ③ **分槽**（2026-10-31 真机修订）：IR 校验失败（用掉 compile/IR 槽）
+///    之后又遇结构门拒收 → 结构门重驱**真的发生**（自己的槽位不被 IR 挤掉）：
+///    provider 被驱动第三次、结构门重驱提示词事件落盘；重驱后候选合法 →
+///    正常提升 current refs、进入既有确认链（不是 failed、不是人工门）。
+#[tokio::test]
+async fn single_candidate_structure_rerun_slot_is_independent_from_ir_rerun_slot() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let provider = Arc::new(SequenceOutputProvider {
+        outputs: vec![
+            // 第 1 轮：IR 校验失败（unknown_requirement_ref）→ 占用 compile/IR 槽。
+            markdown_with_unknown_requirement_ref(&fixture.story_id, &fixture.design_id),
+            // 第 2 轮：IR 过了，但候选结构门拒收（依赖环）→ 结构门自己的槽位。
+            markdown_with_self_cycle(&fixture.story_id, &fixture.design_id),
+            // 第 3 轮：结构门重驱后的合法候选。
+            single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        ],
+        inputs: input_tx,
+        next: AtomicUsize::new(0),
+    });
+    let (context, _outbound_rx) = single_candidate_context(&fixture, provider);
+
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+            resume_recovery: None,
+        },
+    )
+    .await;
+
+    // provider 被驱动三次：首轮 + IR 重驱 + 结构门重驱（两类槽互不挤占）。
+    let _first_input = next_provider_input(&mut input_rx).await;
+    let ir_input = next_provider_input(&mut input_rx).await;
+    assert!(
+        ir_input.prompt.contains("unknown_requirement_ref"),
+        "第二轮必须是 IR 教学重驱：{}",
+        ir_input.prompt
+    );
+    let structure_input = next_provider_input(&mut input_rx).await;
+    for required in [
+        "候选没有通过候选结构门",
+        "final_compile_structure_rejected",
+        "依赖环",
+    ] {
+        assert!(
+            structure_input.prompt.contains(required),
+            "结构门重驱 prompt 必须包含 {required}: {}",
+            structure_input.prompt
+        );
+    }
+    no_more_provider_inputs(&mut input_rx).await;
+
+    // 事件落盘：IR 重驱与结构门重驱各有一条提示词事件（结构门那一槽没被挤掉）。
+    let event_ids: Vec<String> = fixture
+        .lifecycle
+        .load_timeline_nodes(&fixture.record.id)
+        .expect("load timeline nodes")
+        .iter()
+        .flat_map(|node| {
+            fixture
+                .lifecycle
+                .load_node_detail(&fixture.record.id, &node.node_id)
+                .map(|detail| detail.execution_events)
+                .unwrap_or_default()
+        })
+        .filter_map(|event| event["event_id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        event_ids
+            .iter()
+            .any(|event_id| event_id.ends_with("_prompt_ir_reredrive")),
+        "IR 重驱提示词事件必须落盘：{event_ids:?}"
+    );
+    assert!(
+        event_ids
+            .iter()
+            .any(|event_id| event_id.ends_with("_prompt_structure_reredrive")),
+        "结构门重驱提示词事件必须落盘（分槽后不再被 IR 挤掉）：{event_ids:?}"
+    );
+
+    // 重驱后候选合法 → 正常提升 current refs、进入既有确认链。
+    wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("reload single-candidate session");
+    assert_eq!(
+        durable.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Approval),
+        "结构门重驱恢复后必须回到既有审批链"
+    );
+    assert!(
+        durable.work_item_plan_source_revision_ref.is_some()
+            && durable.plan_candidate_ir_ref.is_some(),
+        "重驱后的合法候选必须正常提升 current refs"
+    );
 }

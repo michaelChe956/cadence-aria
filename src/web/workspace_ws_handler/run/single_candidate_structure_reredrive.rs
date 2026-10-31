@@ -4,12 +4,21 @@
 //! 从 `run/single_candidate.rs` 拆出以守住 large_file_guard 登记上限：本文件
 //! 只做「修复指令 prompt 的可观测呈现 + 复用既有重驱通道」——事件发射与
 //! provider 驱动和 compile/IR 教学重驱同一形状（同 node 再驱一次 provider），
-//! **不新造第二个 provider attempt 通道**；槽位（`first_round_failure` 单槽）
-//! 由调用方占用，与 compile/IR 重驱共享唯一一次机会。
+//! **不新造第二个 provider attempt 通道**；槽位（结构门类**独立槽**
+//! `structure_rerun_used`）由调用方占用，与 compile/IR 槽互不挤占（每类
+//! 至多一次）。
 
 use super::gateway_start::PlanAuthorLaunch;
 use super::single_candidate::SingleCandidateProviderRunError;
 use super::*;
+
+/// 结构门拒收的首轮失败描述（终态错误文案用；只述事实，不虚构原因）。
+pub(super) fn structure_gate_first_round_failure() -> String {
+    format!(
+        "candidate structure gate rejected ({})",
+        crate::product::workspace_engine::single_candidate_structure_failure::STRUCTURE_STABLE_CODE
+    )
+}
 
 /// 结构门拒收教学重驱：发一条可观测的 prompt 事件（与 compile/IR 重驱的
 /// 事件同形），随后复用 `drive_single_candidate_reredrive` 同一 provider 通道
@@ -39,7 +48,7 @@ pub(super) async fn drive_structure_gate_reredrive(
                 detail: Some(
                     "候选结构门拒收（final_compile_structure_rejected）的教学重驱\
                      （环在哪 + 两个合法修法各带后果 + 保护项 + 完整修订版输出指令），\
-                     与 compile/IR 重驱共享恰一次机会"
+                     结构门类自己的恰一次机会（与 compile/IR 槽互不挤占）"
                         .to_string(),
                 ),
                 command: None,

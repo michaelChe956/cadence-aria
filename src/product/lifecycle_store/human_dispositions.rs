@@ -33,7 +33,8 @@ struct HumanDispositionLedger {
 impl LifecycleStore {
     /// 该会话的 durable 事实目录（`workspace-sessions/{session}/`）——门卡同族
     /// 落点的唯一入口（`human-dispositions.json` / `candidate-compile-status.json`
-    /// / `candidate-attempts.jsonl` 都在其下）。
+    /// 都在其下；`candidate-attempts.jsonl` **不在**其下——它落 issue 目录，
+    /// 必须活过会话清理，见 `candidate_attempts`）。
     pub(super) fn workspace_session_root(
         &self,
         session: &WorkspaceSessionRecord,

@@ -299,6 +299,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             get(handlers::get_issue_candidate_attempt_metrics),
         )
         .route(
+            "/api/projects/{project_id}/candidate-attempt-metrics",
+            get(handlers::get_project_candidate_attempt_metrics),
+        )
+        .route(
             "/api/issues/{issue_id}/lifecycle",
             get(handlers::issue_lifecycle),
         )

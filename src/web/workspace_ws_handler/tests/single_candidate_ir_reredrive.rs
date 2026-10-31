@@ -17,7 +17,7 @@ use std::sync::atomic::AtomicUsize;
 
 /// task 引用 Traceability 未登记（输入 spec 不存在）的 REQ-002——rep1c 现场
 /// 错误族；markdown 语法仍合法，失败发生在 IR 校验层。
-fn markdown_with_unknown_requirement_ref(story_id: &str, design_id: &str) -> String {
+pub(super) fn markdown_with_unknown_requirement_ref(story_id: &str, design_id: &str) -> String {
     single_candidate_markdown(story_id, design_id).replacen(
         "- requirement_refs: REQ-001",
         "- requirement_refs: REQ-002",

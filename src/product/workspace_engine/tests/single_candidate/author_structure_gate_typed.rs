@@ -267,4 +267,50 @@ mod author_structure_gate_typed {
             "合法候选不应留下候选编译失败事实"
         );
     }
+
+    /// ④ 尝试流水写失败只降级为**可观测静默**（REQ-WSC-25 场景 2）：把 issue
+    ///    级流水落点占成目录 → 追加必失败 → 候选生成/确认**不得**因此失败、
+    ///    不得 panic；失败被记入运行日志（policy diagnostics），会话仍落人工门
+    ///    （不是 failed）。
+    #[tokio::test]
+    async fn attempt_log_write_failure_degrades_to_silent_without_failing_candidate() {
+        let (_tmp, lifecycle, _plan_id, mut engine) =
+            make_work_item_plan_engine_with_accepted_contract_drafts();
+        author_round_record(&lifecycle, &mut engine);
+        let ledger_path = lifecycle
+            .app_paths()
+            .issue_lifecycle_root(&engine.session().project_id, &engine.session().issue_id)
+            .join("candidate-attempts.jsonl");
+        std::fs::create_dir_all(&ledger_path).expect("occupy ledger path with a directory");
+        let completion = engine
+            .complete_single_candidate_work_item_plan_author(
+                cycle_candidate(),
+                "repo_fixture".to_string(),
+                None,
+                false,
+            )
+            .await
+            .expect("流水写失败不得让候选生成/确认失败");
+        assert_eq!(
+            completion,
+            SingleCandidateAuthorCompletion::Routed,
+            "流水写失败不改变既有落门收口语义"
+        );
+        let persisted = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("reload session after ledger write failure");
+        assert_eq!(
+            persisted.status,
+            WorkspaceSessionStatus::WaitingForHuman,
+            "流水写失败不得把会话打成 failed"
+        );
+        assert!(
+            persisted
+                .policy_diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "candidate_attempt_log_write_failed"),
+            "流水写失败必须降级为可观测静默（记入运行日志）：{:?}",
+            persisted.policy_diagnostics
+        );
+    }
 }

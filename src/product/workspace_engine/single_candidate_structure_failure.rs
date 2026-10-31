@@ -323,8 +323,9 @@ impl crate::product::workspace_engine::WorkspaceEngine {
     /// **候选零提升**：本路径不改写会话 current refs、不落机械报告、不开评审，
     /// 只把「这次候选被结构门拒收」变成可观测事实并交出一条下一步。
     ///
-    /// - 重驱槽位空闲（runner 的 `first_round_failure` 单槽决定，与 compile/IR
-    ///   重驱共享）：返回 [`SingleCandidateAuthorCompletion::Rejected`]，修复
+    /// - 结构门重驱槽位空闲（runner 的 `structure_rerun_used` 独立槽决定，
+    ///   与 compile/IR 槽互不挤占）：返回
+    ///   [`SingleCandidateAuthorCompletion::Rejected`]，修复
     ///   指令交还 runner 经 provider 通道重驱作者一次——**不开人工门**。
     ///   重驱走 runner 通道而非引擎 prerevision 路由（候选 refs 未提升，
     ///   重写通道不可达）：不虚记自动重写预算，durable `auto_rewrite` 不留
