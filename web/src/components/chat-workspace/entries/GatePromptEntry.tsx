@@ -30,7 +30,6 @@ import {
 } from "../../../state/gate-prompt-copy";
 import type { WorkspaceWsState } from "../../../state/workspace-ws-store-types";
 import { useWorkspaceStore } from "../../../state/workspace-ws-store";
-import type { WorkItemPlanHumanGateSnapshot } from "../../../api/types";
 import { WORK_ITEM_PLAN_CONTEXT_BLOCKER_GATE_KIND } from "../../../state/workspace-chat-rebuild";
 import type { CockpitActionFacade } from "../../../state/cockpit-action-routing";
 import { ConfirmTwiceButton } from "../cockpit/ConfirmTwiceButton";
@@ -71,6 +70,7 @@ import {
 import {
   GATE_CONFIRM_CONSEQUENCE_REJECTED,
   GATE_HUMAN_TRIGGER_LABELS,
+  GATE_STALE_COMPLETED_COPY,
   GateNextStepGuidance,
   gateBlockReasonHuman,
   gateNextStepGuidance,
@@ -79,6 +79,18 @@ import {
   gateConfirmBlockedCompileFailureCopy,
   type GateCompileFailureAutoRewriteInput,
 } from "./gate-next-step";
+import {
+  archiveNoteFromEntry,
+  blockReasonFromEntry,
+  failureMessageFromEntry,
+  gateKindFromEntry,
+  gateTriggerFromEntry,
+  inlineErrorFromEntry,
+  remainingBudgetFromEntry,
+  reviewGateFromEntry,
+  summaryFromEntry,
+  verdictFromEntry,
+} from "./gate-card-metadata";
 
 /** F-38：门卡产物行的种类名（与生命周期卡片同一套称呼）。 */
 const GATE_ARTIFACT_LABELS: Record<string, string> = {
@@ -185,6 +197,13 @@ export function GatePromptEntry({
         : (projection.action_block_reason ?? null),
     ),
   );
+  // owner 2026-10-31 真机（会话 workspace_session_auto_111eafb6…）：计划已确认完成，
+  // 对话流里的过期门卡仍写「这扇门不再接收操作…只能终止此门后重新发起」——owner
+  // 读成「我卡死了，只能重来」。该卡是历史记录、不是待办门：文案直说「无需处理」。
+  // 判据单一来源：durable session_status（confirmed）；只对过期卡（action_block_reason
+  // 非空）分流——活门与未完成会话一律沿用既有措辞。
+  const sessionCompleted = useWorkspaceStore((state) => state.sessionStatus === "confirmed");
+  const staleCompleted = sessionCompleted && actionBlockReason !== null;
   // C2（REQ-HGC-02 场景 1/F-54）：批次确认门专属标题/why——与候选修订门在
   // 标题/原因行层级可区分；确认动作走 confirmBatch（HTTP），无反馈编辑器。
   const isBatchConfirmGate = gateKindFromEntry(entry) === "batch_confirm";
@@ -382,6 +401,7 @@ export function GatePromptEntry({
     batchConfirm: isBatchConfirmGate,
     contextBlocker: isContextBlockerGate,
     actionBlockReason,
+    staleCompleted,
     terminateAvailable: terminateBlockReason === null,
     ownerQuestion: ownerGuidance !== null,
     requiredFindings: requiredFindings.length,
@@ -415,7 +435,11 @@ export function GatePromptEntry({
           metadata→进度→局部错误→动作」顺序，确认对象（产物）不再被状态行压下去。 */}
       <div className="space-y-3">
         {/* owner 2026-10-30 真机反馈：最上方先给「现在请做 X」，原因/证据随后。 */}
-        {nextStepCopy && !isResolved ? <GateNextStepGuidance copy={nextStepCopy} /> : null}
+        {nextStepCopy && !isResolved ? (
+          // 过期且已完成的门卡没有「现在该做什么」——不套「现在请做：」前缀，
+          // 直说无需处理（避免把历史记录读成待办）。
+          <GateNextStepGuidance copy={nextStepCopy} prefix={staleCompleted ? "" : undefined} />
+        ) : null}
         {whyCopy && !isResolved ? (
           <div
             data-testid="gate-why"
@@ -633,7 +657,7 @@ export function GatePromptEntry({
                 与当前阶段不一致」提示行退役（0009 现场误导）。owner 2026-10-30：
                 阻断必须有可见原因——本行给人话原因（phase 用陈述事实的措辞），
                 与下方禁用的确认按钮 title 同源。 */}
-            {confirmBlockedByCompileFailure ? (
+            {confirmBlockedByCompileFailure && !staleCompleted ? (
               // REQ-WSC-18：候选编译不过——确认禁用的可见原因（含出路），
               // 优先于通用阻断原因（本态是更具体的事实）。
               <p
@@ -647,9 +671,15 @@ export function GatePromptEntry({
                 data-testid="gate-confirm-blocked-reason"
                 className={`text-xs ${GATE_META_TEXT_CLASS}`}
               >
-                {isContextBlockerGate ? "" : "暂不可确认："}
-                {gateBlockReasonHuman(actionBlockReason)}
-                {terminateBlockReason === null ? "；可终止此门后重新发起" : ""}
+                {staleCompleted ? (
+                  GATE_STALE_COMPLETED_COPY
+                ) : (
+                  <>
+                    {isContextBlockerGate ? "" : "暂不可确认："}
+                    {gateBlockReasonHuman(actionBlockReason)}
+                    {terminateBlockReason === null ? "；可终止此门后重新发起" : ""}
+                  </>
+                )}
               </p>
             ) : null}
             {actionFacade === "typed" && actionBlockReason === null ? (
@@ -702,15 +732,18 @@ export function GatePromptEntry({
                   data-testid="gate-confirm-button"
                   disabled={actionBlockReason !== null || confirmBlockedByCompileFailure}
                   title={
-                    confirmBlockedByCompileFailure
-                      ? // REQ-WSC-18：平台侧判据（metadata candidate_compile_failure
-                        // 在场即该态）——fail-closed：确认此候选只会再次编译失败。
-                        confirmBlockedByCompileFailureCopy
-                      : actionBlockReason !== null
-                        ? gateBlockReasonHuman(actionBlockReason)
-                        : rejectionInfo && !isBatchConfirmGate
-                          ? GATE_CONFIRM_CONSEQUENCE_REJECTED
-                          : undefined
+                    staleCompleted
+                      ? // 过期且已完成：直说无需处理（不指向终止/重新发起）。
+                        GATE_STALE_COMPLETED_COPY
+                      : confirmBlockedByCompileFailure
+                        ? // REQ-WSC-18：平台侧判据（metadata candidate_compile_failure
+                          // 在场即该态）——fail-closed：确认此候选只会再次编译失败。
+                          confirmBlockedByCompileFailureCopy
+                        : actionBlockReason !== null
+                          ? gateBlockReasonHuman(actionBlockReason)
+                          : rejectionInfo && !isBatchConfirmGate
+                            ? GATE_CONFIRM_CONSEQUENCE_REJECTED
+                            : undefined
                   }
                   onClick={() => {
                     if (isBatchConfirmGate) {
@@ -736,12 +769,16 @@ export function GatePromptEntry({
                   {GATE_CONFIRM_CONSEQUENCE_REJECTED}
                 </span>
               ) : null}
-              <ConfirmTwiceButton
-                variant="ghost"
-                label={GATE_TERMINATE_BUTTON_LABEL}
-                confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
-                onConfirm={actions.terminate}
-              />
+              {/* 过期且已完成的门卡是历史记录——不挂终止按钮（终态会话终止
+                  无意义、服务端也会拒；留着就是假按钮）。 */}
+              {staleCompleted ? null : (
+                <ConfirmTwiceButton
+                  variant="ghost"
+                  label={GATE_TERMINATE_BUTTON_LABEL}
+                  confirmLabel={GATE_TERMINATE_CONFIRM_LABEL}
+                  onConfirm={actions.terminate}
+                />
+              )}
             </div>
           </div>
         ) : actions ? (
@@ -754,7 +791,9 @@ export function GatePromptEntry({
                 data-testid="gate-confirm-blocked-reason"
                 className={`text-xs ${GATE_META_TEXT_CLASS}`}
               >
-                暂不可确认：{gateBlockReasonHuman(actionBlockReason)}
+                {staleCompleted
+                  ? GATE_STALE_COMPLETED_COPY
+                  : `暂不可确认：${gateBlockReasonHuman(actionBlockReason)}`}
               </p>
             ) : confirmBlockedByCompileFailure ? (
               // REQ-WSC-18：此态不得说「仍可确认当前版本继续」——与主分支
@@ -781,11 +820,13 @@ export function GatePromptEntry({
                   data-testid="gate-confirm-button"
                   disabled={actionBlockReason !== null || confirmBlockedByCompileFailure}
                   title={
-                    confirmBlockedByCompileFailure
-                      ? confirmBlockedByCompileFailureCopy
-                      : actionBlockReason !== null
-                        ? gateBlockReasonHuman(actionBlockReason)
-                        : GATE_CONFIRM_CONSEQUENCE_REJECTED
+                    staleCompleted
+                      ? GATE_STALE_COMPLETED_COPY
+                      : confirmBlockedByCompileFailure
+                        ? confirmBlockedByCompileFailureCopy
+                        : actionBlockReason !== null
+                          ? gateBlockReasonHuman(actionBlockReason)
+                          : GATE_CONFIRM_CONSEQUENCE_REJECTED
                   }
                   onClick={() => {
                     if (isBatchConfirmGate) {
@@ -843,36 +884,6 @@ function ResolutionBadge({ resolution }: { resolution?: string }) {
   return null;
 }
 
-function summaryFromEntry(entry: ChatEntry) {
-  const metadata = entry.metadata as Record<string, unknown> | undefined;
-  return typeof metadata?.summary === "string" ? metadata.summary : null;
-}
-
-function verdictFromEntry(entry: ChatEntry) {
-  const metadata = entry.metadata as Record<string, unknown> | undefined;
-  return typeof metadata?.verdict === "string" ? metadata.verdict : null;
-}
-
-function reviewGateFromEntry(entry: ChatEntry) {
-  const metadata = entry.metadata as Record<string, unknown> | undefined;
-  return typeof metadata?.review_gate === "string" ? metadata.review_gate : null;
-}
-
-function gateKindFromEntry(entry: ChatEntry) {
-  const metadata = entry.metadata as Record<string, unknown> | undefined;
-  return typeof metadata?.gate_kind === "string" ? metadata.gate_kind : null;
-}
-
-function blockReasonFromEntry(
-  entry: ChatEntry,
-  key: "action_block_reason" | "terminate_block_reason",
-): Exclude<GateActionBlockReason, null> | null {
-  const value = (entry.metadata as Record<string, unknown> | undefined)?.[key];
-  return value === "terminal_stage" || value === "phase_mismatch" || value === "closed"
-    ? value
-    : null;
-}
-
 // 通用 stage 前缀门离场兜底（k3 P2-1）：门卡不随 stage_change 重建（仅
 // setStage），阶段离开后投影消失——按 gateIdentity 与当前 stage 不一致判
 // terminal_stage，避免重渲染出可点但被静默拦截的假按钮（human_confirm 与
@@ -905,51 +916,6 @@ function gateCardBlockReason(
   }
   return "closed";
 }
-function gateTriggerFromEntry(
-  entry: ChatEntry,
-): WorkItemPlanHumanGateSnapshot["trigger"] | null {
-  const metadata = entry.metadata as Record<string, unknown> | undefined;
-  const value = metadata?.gate_trigger;
-  return value === "native_human_required" ||
-    value === "repeated_fingerprint" ||
-    value === "verification_new_findings" ||
-    value === "repair_budget_exhausted"
-    ? value
-    : null;
-}
-
-function remainingBudgetFromEntry(entry: ChatEntry): number | null {
-  const metadata = entry.metadata as Record<string, unknown> | undefined;
-  return typeof metadata?.remaining_budget === "number" ? metadata.remaining_budget : null;
-}
-
-function failureMessageFromEntry(entry: ChatEntry): string | null {
-  const metadata = entry.metadata as Record<string, unknown> | undefined;
-  const failureClass =
-    typeof metadata?.failure_class === "string" ? metadata.failure_class : null;
-  const message = typeof metadata?.failure_message === "string" ? metadata.failure_message : null;
-  if (!failureClass && !message) {
-    return null;
-  }
-  return [failureClass, message].filter((part): part is string => Boolean(part)).join(" · ");
-}
-
-function inlineErrorFromEntry(entry: ChatEntry): { code: string; message: string } | null {
-  const value = (entry.metadata as Record<string, unknown> | undefined)?.inline_error;
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-  const { code, message } = value as Record<string, unknown>;
-  return typeof code === "string" && typeof message === "string" ? { code, message } : null;
-}
-
-// F-49 B5：旧轮留档文案（由 store 的 upsertGatePromptEntry 写入 metadata）。留档卡
-// 是只读的——不复用 action_block_reason 面，只呈现轮次与摘要。
-function archiveNoteFromEntry(entry: ChatEntry): string | null {
-  const value = (entry.metadata as Record<string, unknown> | undefined)?.gate_archive_note;
-  return typeof value === "string" ? value : null;
-}
-
 /** 根因 E：validation_reject 可操作化呈现所需的最小事实（全部可缺席）。 */
 type GateRejectionInfo = {
   rejectedFeedback: string;

@@ -76,6 +76,17 @@ export function gateBlockReasonHuman(reason: Exclude<GateActionBlockReason, null
   return gateActionBlockCopy(reason);
 }
 
+/**
+ * owner 2026-10-31 真机（会话 workspace_session_auto_111eafb6…）：计划已确认完成
+ * （durable status=confirmed、相位 completed、Work Item 已建），对话流里第一轮评审
+ * 的过期门卡仍写「会话已进入下一阶段，这扇门不再接收操作…此时只能终止此门后重新
+ * 发起」+「终止此门」按钮——owner 读成「我卡死了，只能重来」。这张卡是历史记录、
+ * 不是待办门：文案直说「无需处理」，且不出现「终止此门」「重新发起」这类指向动作
+ * 的话（终态会话终止无意义，服务端也会拒——不挂假按钮）。
+ */
+export const GATE_STALE_COMPLETED_COPY =
+  "这一版已确认完成，此卡是历史记录，无需处理";
+
 /** 「确认当前版本」按钮的后果说明（反馈被拒时它是明确出路）。 */
 export const GATE_CONFIRM_CONSEQUENCE_REJECTED = "确认后将用当前候选继续，不再等你的修改";
 
@@ -220,6 +231,12 @@ export type GateNextStepInput = {
   batchConfirm: boolean;
   contextBlocker: boolean;
   actionBlockReason: Exclude<GateActionBlockReason, null> | null;
+  /**
+   * 过期门卡（卡身份与当前门/阶段不一致）且会话已成功完成（durable
+   * confirmed）——此卡是历史记录，不是待办门：直说「无需处理」，不指向
+   * 「终止此门/重新发起」（owner 2026-10-31 真机误导源）。
+   */
+  staleCompleted: boolean;
   /** 终止是否仍可用（阻断指引的出路措辞据此分支）。 */
   terminateAvailable: boolean;
   /** 带人话裁决（owner_question + ≥2 选项）。 */
@@ -237,14 +254,20 @@ export type GateNextStepInput = {
 
 /**
  * 门卡「现在请做 X」：按状态取一句明确的下一步动作（不能只复述状态）。
- * 优先级：已收口不指引 → 候选编译不过（REQ-WSC-18：候选无效、确认不放
- * 行，须先于一切把「确认继续」当出路的分支）→ 被拒（owner 最需要知道
+ * 优先级：已收口不指引 → 过期门卡且会话已成功完成（历史记录：直说无需处理，
+ * 先于一切把「确认/终止」当出路的分支）→ 候选编译不过（REQ-WSC-18：候选无效、
+ * 确认不放行，须先于一切把「确认继续」当出路的分支）→ 被拒（owner 最需要知道
  * 出路）→ 修订中 → 批次确认 → 上下文阻断 → 动作被阻断 → 人话裁决 →
  * 必须处理项 → 仅建议（advisory 或建议级 actionable）→ 只有结论。
  */
 export function gateNextStepGuidance(input: GateNextStepInput): string | null {
   if (input.resolved) {
     return null;
+  }
+  // 过期门卡 + 会话已成功完成：没有「现在该做什么」——直说无需处理（历史记录）。
+  // 先于一切把「确认当前版本/终止此门」当出路的分支：终态会话里那些出路是假的。
+  if (input.staleCompleted) {
+    return GATE_STALE_COMPLETED_COPY;
   }
   // REQ-WSC-18：先于 rejected——被拒分支把「确认当前版本」当出路，而本态
   // 确认不放行（平台侧 fail-closed），那句出路在此失真。
@@ -294,14 +317,24 @@ export function gateNextStepGuidance(input: GateNextStepInput): string | null {
   return base;
 }
 
-/** 门卡顶部的「现在请做 X」行（置于原因行之前，owner 第一眼可扫到）。 */
-export function GateNextStepGuidance({ copy }: { copy: string }) {
+/**
+ * 门卡顶部的「现在请做 X」行（置于原因行之前，owner 第一眼可扫到）。
+ * prefix 缺省为「现在请做：」；空串=本卡没有「现在该做什么」（过期且已完成
+ * 的门卡：直说无需处理，不套动作前缀）。
+ */
+export function GateNextStepGuidance({
+  copy,
+  prefix = GATE_NEXT_STEP_PREFIX,
+}: {
+  copy: string;
+  prefix?: string;
+}) {
   return (
     <div
       data-testid="gate-next-step"
       className="text-sm font-semibold text-slate-900"
     >
-      <span className="text-amber-700">{GATE_NEXT_STEP_PREFIX}</span>
+      {prefix ? <span className="text-amber-700">{prefix}</span> : null}
       {copy}
     </div>
   );
