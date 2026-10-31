@@ -82,7 +82,7 @@ mod contract_prerevision {
             make_work_item_plan_engine_with_accepted_contract_drafts();
         author_round_record(&lifecycle, &mut engine);
 
-        let item_count = engine
+        let completion = engine
             .complete_single_candidate_work_item_plan_author(
                 missing_contract_candidate(1),
                 "repo_fixture".to_string(),
@@ -91,7 +91,13 @@ mod contract_prerevision {
             .await
             .expect("gapped candidate must still compile and persist");
 
-        assert_eq!(item_count, 3, "rep4 fixture compiles three work items");
+        assert_eq!(
+            completion,
+            crate::product::workspace_engine::SingleCandidateAuthorCompletion::Candidate {
+                item_count: 3,
+            },
+            "rep4 fixture compiles three work items"
+        );
 
         // F5-A：机械 verdict 注入 latest_review_verdict，修订轮判定命中。
         let pending = engine

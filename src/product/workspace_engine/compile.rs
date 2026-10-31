@@ -1087,7 +1087,7 @@ impl WorkspaceEngine {
     /// repeated_fingerprints 为空（编译失败门无 review 分类语境，同 approval
     /// 门「不新增决策协议」的理由），resumable=true（与 SC 门快照的既有
     /// 可续语义一致）。
-    async fn ensure_human_gate_snapshot_after_compile_failure(&mut self) {
+    pub(crate) async fn ensure_human_gate_snapshot_after_compile_failure(&mut self) {
         if self.session.workspace_type != WorkspaceType::WorkItemPlan
             || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
             || self.session.human_gate_snapshot.is_some()

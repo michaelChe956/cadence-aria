@@ -18,7 +18,7 @@ use crate::product::models::LifecycleWorkItemRecord;
 /// REQ-WSC-18：依赖环失败的 cause 由**人话段**在前、机器 id 段在后组成，
 /// 二者以 [`CYCLE_IDS_MARKER`] 分隔——门卡据此把「message（人话）」与
 /// 「detail（完整原文/机器 id）」分开呈现，不必二次解析自由文本。
-pub(super) fn dependency_cycle_error(
+pub(crate) fn dependency_cycle_error(
     work_items: &[LifecycleWorkItemRecord],
     change_order: &[LogicalRepositoryId],
     cycle_ids: &[String],
@@ -26,9 +26,26 @@ pub(super) fn dependency_cycle_error(
     let fingerprint = dependency_cycle_witness(work_items)
         .map(|hops| cycle_structure_fingerprint(work_items, &hops))
         .unwrap_or_else(|| fallback_cycle_fingerprint(cycle_ids));
+    dependency_cycle_cause(
+        cycle_reason(work_items, change_order),
+        fingerprint,
+        cycle_ids,
+    )
+}
+
+/// REQ-WSC-18/25：`dependency_cycle: <人话段><结构指纹行><机器 id 行>` 的**单源
+/// 装配**——终编译（`dependency_cycle_error`）与作者阶段候选结构门拒收
+/// （`single_candidate_structure_failure`）共用同一段模板与同一组标记，任何
+/// 一侧改格式都会同时改到另一侧，`compile_failure_surface::cycle_witness_facts`
+/// 的锚点因此不会分叉。
+pub(crate) fn dependency_cycle_cause(
+    reason: String,
+    fingerprint: String,
+    cycle_ids: &[String],
+) -> String {
     format!(
         "dependency_cycle: {}{}{}{}{}",
-        cycle_reason(work_items, change_order),
+        reason,
         crate::product::workspace_engine::compile_failure_surface::CYCLE_FINGERPRINT_MARKER,
         fingerprint,
         crate::product::workspace_engine::compile_failure_surface::CYCLE_IDS_MARKER,
@@ -48,23 +65,41 @@ fn cycle_structure_fingerprint(
     work_items: &[LifecycleWorkItemRecord],
     hops: &[(&str, &str)],
 ) -> String {
-    use sha2::{Digest, Sha256};
-    let mut members: Vec<String> = hops
+    let members: Vec<String> = hops
         .iter()
         .flat_map(|(provider, consumer)| [*provider, *consumer])
         .map(|id| cycle_node_key(work_items, id))
         .collect();
-    members.sort();
-    members.dedup();
-    let mut edges: Vec<String> = hops
+    let edges: Vec<(String, String)> = hops
         .iter()
         .map(|(provider, consumer)| {
-            format!(
-                "{}>{}",
+            (
                 cycle_node_key(work_items, provider),
-                cycle_node_key(work_items, consumer)
+                cycle_node_key(work_items, consumer),
             )
         })
+        .collect();
+    cycle_structure_fingerprint_from(&members, &edges)
+}
+
+/// REQ-WSC-22：**结构**指纹的唯一定义点——成员集合（`序号@仓`）+ 边集合的
+/// 规范化摘要。终编译（`cycle_structure_fingerprint`）与作者阶段结构门拒收
+/// 共用本函数：同一依赖环在两处得到同一摘要，`decide_route` 的「同环重复」
+/// 判定不会因来路不同被当成新环。
+///
+/// 只吃**结构身份**（不含文案/行号/运行 id），集合排序后序列化，跨编译与跨
+/// 作者尝试均可复现。
+pub(crate) fn cycle_structure_fingerprint_from(
+    members: &[String],
+    edges: &[(String, String)],
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut members = members.to_vec();
+    members.sort();
+    members.dedup();
+    let mut edges: Vec<String> = edges
+        .iter()
+        .map(|(provider, consumer)| format!("{provider}>{consumer}"))
         .collect();
     edges.sort();
     let payload = serde_json::json!({ "members": members, "edges": edges });
@@ -94,6 +129,57 @@ fn cycle_node_key(work_items: &[LifecycleWorkItemRecord], id: &str) -> String {
     format!("{ordinal}@{repository}")
 }
 
+/// 环人话段的箭头说明（模板常量：两处产者共用，措辞不可分叉）。
+pub(crate) const CYCLE_ARROW_NOTE: &str =
+    "（箭头为产出流向：左边 Work Item 的产出被右边消费，即右边依赖左边）";
+
+/// 环链渲染：每个展示名以「」包裹，` → ` 连接。
+pub(crate) fn cycle_chain(chain_labels: &[String]) -> String {
+    chain_labels
+        .iter()
+        .map(|label| format!("「{label}」"))
+        .collect::<Vec<_>>()
+        .join(" → ")
+}
+
+/// **逆仓序一跳**的完整人话模板（`compile_failure_surface::cycle_witness_facts`
+/// 按字面锚点解析本模板，格式不可单侧改动）：环链 + 「谁把谁写成 provider」+
+/// 两个真实仓序位次 + 方向规则 + 两个修法。
+///
+/// 终编译（`cycle_reason` 的 offending 分支）与作者阶段候选结构门拒收共用本
+/// 函数——两处产者同一模板，owner 面与解析面只有一份真相。
+pub(crate) fn cycle_message(
+    chain_labels: &[String],
+    consumer: &str,
+    provider: &str,
+    provider_order: usize,
+    consumer_order: usize,
+) -> String {
+    format!(
+        "{chain} 构成依赖环{arrow_note}。其中「{consumer}」把「{provider}」写成 provider，但「{provider}」所在仓是 change_order 第 {provider_order} 个仓、「{consumer}」所在仓是第 {consumer_order} 个仓——跨仓依赖只允许后仓 Work Item 消费前仓 Work Item 的产出，这条依赖逆了仓序，因此与仓序自动边合成环。请让「{consumer}」改由仓序在前的 Work Item 提供产出，或删掉这条 depends_on。",
+        chain = cycle_chain(chain_labels),
+        arrow_note = CYCLE_ARROW_NOTE,
+    )
+}
+
+/// 有环但**没有**逆仓序一跳（同仓互等 / 仓序位次不可得）时的人话模板：
+/// 只陈述真实环链与消环方向，不说谁是「逆了仓序」的那一跳（不虚构事实）。
+pub(crate) fn cycle_closure_message(chain_labels: &[String]) -> String {
+    format!(
+        "{chain} 构成依赖环{arrow_note}：环上每个 Work Item 都在等环上另一个先完成，谁都无法先执行。请打断环：删掉其中一条 depends_on，或改成不互相等待的先后顺序。",
+        chain = cycle_chain(chain_labels),
+        arrow_note = CYCLE_ARROW_NOTE,
+    )
+}
+
+/// 连 witness 都没有时的通用可行动文案（不虚构环形状）。
+pub(crate) fn cycle_unwitnessed_message() -> String {
+    format!(
+        "Work Item 之间的 depends_on 构成依赖环{arrow_note}：环上每个 Work Item 都在等环上另一个先完成，谁都无法先执行。请打断环：删掉其中一条 depends_on，或改成不互相等待的先后顺序。",
+        arrow_note = CYCLE_ARROW_NOTE,
+    )
+}
+
 /// 环的人话描述：只写真实事实（环 witness 的有向链、各自所在仓的 change_order
 /// 位次、逆仓序的那条显式依赖）。找不到 witness 时退化为通用可行动文案，
 /// 不虚构环形状。
@@ -101,19 +187,15 @@ fn cycle_reason(
     work_items: &[LifecycleWorkItemRecord],
     change_order: &[LogicalRepositoryId],
 ) -> String {
-    let arrow_note = "（箭头为产出流向：左边 Work Item 的产出被右边消费，即右边依赖左边）";
     let Some(hops) = dependency_cycle_witness(work_items) else {
-        return format!(
-            "Work Item 之间的 depends_on 构成依赖环{arrow_note}：环上每个 Work Item 都在等环上另一个先完成，谁都无法先执行。请打断环：删掉其中一条 depends_on，或改成不互相等待的先后顺序。"
-        );
+        return cycle_unwitnessed_message();
     };
     let mut nodes: Vec<&str> = vec![hops[0].0];
     nodes.extend(hops.iter().map(|(_, consumer)| *consumer));
-    let chain = nodes
+    let chain: Vec<String> = nodes
         .iter()
-        .map(|id| format!("「{}」", work_item_display(work_items, id)))
-        .collect::<Vec<_>>()
-        .join(" → ");
+        .map(|id| work_item_display(work_items, id).to_string())
+        .collect();
     let repo_index = |id: &str| -> Option<usize> {
         let repository = work_items
             .iter()
@@ -134,14 +216,14 @@ fn cycle_reason(
         ))
     });
     match offending {
-        Some((provider, consumer, provider_index, consumer_index)) => format!(
-            "{chain} 构成依赖环{arrow_note}。其中「{consumer}」把「{provider}」写成 provider，但「{provider}」所在仓是 change_order 第 {provider_order} 个仓、「{consumer}」所在仓是第 {consumer_order} 个仓——跨仓依赖只允许后仓 Work Item 消费前仓 Work Item 的产出，这条依赖逆了仓序，因此与仓序自动边合成环。请让「{consumer}」改由仓序在前的 Work Item 提供产出，或删掉这条 depends_on。",
-            provider_order = provider_index + 1,
-            consumer_order = consumer_index + 1,
+        Some((provider, consumer, provider_index, consumer_index)) => cycle_message(
+            &chain,
+            work_item_display(work_items, consumer),
+            work_item_display(work_items, provider),
+            provider_index + 1,
+            consumer_index + 1,
         ),
-        None => format!(
-            "{chain} 构成依赖环{arrow_note}：环上每个 Work Item 都在等环上另一个先完成，谁都无法先执行。请打断环：删掉其中一条 depends_on，或改成不互相等待的先后顺序。"
-        ),
+        None => cycle_closure_message(&chain),
     }
 }
 

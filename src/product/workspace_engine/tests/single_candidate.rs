@@ -1127,7 +1127,7 @@ mod sg3a1_structure_gate {
 
     /// R1 环候选：干净基线 + WI-001 反向消费 WI-002（canonical 输入环——
     /// SG1 有效图两个方向的真实边互相等待）。
-    fn cycle_candidate() -> String {
+    pub(super) fn cycle_candidate() -> String {
         clean_candidate().replace(
             "### Inputs\n\n### Outputs\n- contract_id: contract.levels-api",
             "### Inputs\n- contract_id: contract.level-selector\n- provider_logical_work_item_id: WI-002\n- required_capabilities: ui.level-selector.rendered\n- compatibility_policy: require_all\n\n### Outputs\n- contract_id: contract.levels-api",
@@ -1135,7 +1135,7 @@ mod sg3a1_structure_gate {
     }
 
     /// scope 坏候选：WI-002 的 canonical 输入引用不在本批的 provider。
-    fn unknown_provider_candidate() -> String {
+    pub(super) fn unknown_provider_candidate() -> String {
         clean_candidate().replace(
             "- provider_logical_work_item_id: WI-001\n- required_capabilities: api.levels.read",
             "- provider_logical_work_item_id: WI-009\n- required_capabilities: api.levels.read",
@@ -1156,7 +1156,6 @@ mod sg3a1_structure_gate {
         engine: &WorkspaceEngine,
         before: &crate::product::models::WorkspaceSessionRecord,
         before_reviewer_nodes: usize,
-        before_confirm_nodes: usize,
     ) {
         let after = lifecycle
             .get_workspace_session(&engine.session().session_id)
@@ -1185,11 +1184,6 @@ mod sg3a1_structure_gate {
             Some(crate::product::models::SingleCandidatePhase::Generate),
             "phase must stay in Generate; no confirm surface is opened"
         );
-        assert_ne!(
-            after.status,
-            crate::product::models::WorkspaceSessionStatus::WaitingForHuman,
-            "gate rejection is not a human gate"
-        );
         let reviewer_nodes = engine
             .timeline_nodes
             .iter()
@@ -1199,14 +1193,37 @@ mod sg3a1_structure_gate {
             reviewer_nodes, before_reviewer_nodes,
             "no new reviewer node may appear for a gate-rejected candidate"
         );
+    }
+
+    /// SG3a.1 拒收的**收尾面**（2026-10-31 现场缺口修法）：不再硬失败，而是
+    /// 落人工门——会话 WaitingForHuman（不是 failed）、门快照在场、恰好一扇
+    /// 门节点。零提升/零评审由 `assert_zero_promotion_and_zero_review` 继续钉。
+    fn assert_rejection_landed_on_human_gate(
+        lifecycle: &LifecycleStore,
+        engine: &WorkspaceEngine,
+        before_confirm_nodes: usize,
+    ) {
+        let after = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .expect("load session after rejected candidate");
+        assert_eq!(
+            after.status,
+            crate::product::models::WorkspaceSessionStatus::WaitingForHuman,
+            "gate rejection must stop on the human gate instead of hard-failing"
+        );
+        assert!(
+            after.human_gate_snapshot.is_some(),
+            "gate rejection must persist a human gate snapshot"
+        );
         let confirm_nodes = engine
             .timeline_nodes
             .iter()
             .filter(|node| matches!(node.node_type, TimelineNodeType::HumanConfirm))
             .count();
         assert_eq!(
-            confirm_nodes, before_confirm_nodes,
-            "no new human confirm node may appear for a gate-rejected candidate"
+            confirm_nodes,
+            before_confirm_nodes + 1,
+            "gate rejection opens exactly one human confirm node"
         );
     }
 
@@ -1239,29 +1256,38 @@ mod sg3a1_structure_gate {
             .get_workspace_session(&engine.session().session_id)
             .expect("session before cycle candidate");
         let (reviewer_before, confirm_before) = reviewer_and_confirm_node_counts(&engine);
-        let error = engine
+        // REQ-SG-02 语义不变（零提升/零评审），但收尾从「硬失败 Err」改为
+        // typed 失败路：durable 诊断 + 尝试流水 + 人工门（REQ-WSC-18/25）。
+        let completion = engine
             .complete_single_candidate_work_item_plan_author(
                 cycle_candidate(),
                 "repo_fixture".to_string(),
                 None,
             )
             .await
-            .expect_err("R1 cycle candidate must be gate-rejected");
+            .expect("R1 cycle candidate must be gate-rejected without hard-failing");
+        assert_eq!(
+            completion,
+            crate::product::workspace_engine::SingleCandidateAuthorCompletion::Routed,
+            "拒收必须表达「已路由」（重写/人工门），而不是生成了候选"
+        );
+        let durable = lifecycle
+            .load_candidate_compile_status(&engine.session().session_id)
+            .expect("load candidate compile status")
+            .expect("gate rejection must leave a durable typed failure");
+        let durable_failure = durable.failure.expect("durable failure present");
         assert!(
-            error.contains("structure gate rejected"),
-            "typed gate stop point required: {error}"
+            durable_failure.message.contains("构成依赖环"),
+            "typed gate stop point required: {}",
+            durable_failure.message
         );
         assert!(
-            error.contains("dependency_cycle[WI-001->WI-002]"),
-            "witness-path evidence must ride the typed stop: {error}"
+            durable_failure.detail.contains("WI-001") && durable_failure.detail.contains("WI-002"),
+            "witness-path evidence must ride the typed stop: {}",
+            durable_failure.detail
         );
-        assert_zero_promotion_and_zero_review(
-            &lifecycle,
-            &engine,
-            &before,
-            reviewer_before,
-            confirm_before,
-        );
+        assert_zero_promotion_and_zero_review(&lifecycle, &engine, &before, reviewer_before);
+        assert_rejection_landed_on_human_gate(&lifecycle, &engine, confirm_before);
 
         // —— parser：非法 heading 在 compiler 期 fail-closed（同一零提升面）——
         let (_tmp2, lifecycle2, _plan_id2, mut engine2) =
@@ -1270,7 +1296,8 @@ mod sg3a1_structure_gate {
         let before2 = lifecycle2
             .get_workspace_session(&engine2.session().session_id)
             .expect("session before parser candidate");
-        let (reviewer2_before, confirm2_before) = reviewer_and_confirm_node_counts(&engine2);
+        // parser 拒收仍走 compiler 硬失败（不落门）：confirm 节点数刻意不与本用例比较。
+        let (reviewer2_before, _confirm2_before) = reviewer_and_confirm_node_counts(&engine2);
         let error2 = engine2
             .complete_single_candidate_work_item_plan_author(
                 illegal_heading_candidate(),
@@ -1283,13 +1310,7 @@ mod sg3a1_structure_gate {
             error2.contains("compile markdown source failed"),
             "parser evidence surfaces the compiler diagnostics: {error2}"
         );
-        assert_zero_promotion_and_zero_review(
-            &lifecycle2,
-            &engine2,
-            &before2,
-            reviewer2_before,
-            confirm2_before,
-        );
+        assert_zero_promotion_and_zero_review(&lifecycle2, &engine2, &before2, reviewer2_before);
 
         // —— scope：canonical 输入引用批外 provider → 系统门拒收 ——
         let (_tmp3, lifecycle3, _plan_id3, mut engine3) =
@@ -1299,25 +1320,32 @@ mod sg3a1_structure_gate {
             .get_workspace_session(&engine3.session().session_id)
             .expect("session before scope candidate");
         let (reviewer3_before, confirm3_before) = reviewer_and_confirm_node_counts(&engine3);
-        let error3 = engine3
+        let completion3 = engine3
             .complete_single_candidate_work_item_plan_author(
                 unknown_provider_candidate(),
                 "repo_fixture".to_string(),
                 None,
             )
             .await
-            .expect_err("unknown-provider candidate must be gate-rejected");
+            .expect("unknown-provider candidate must be gate-rejected without hard-failing");
+        assert_eq!(
+            completion3,
+            crate::product::workspace_engine::SingleCandidateAuthorCompletion::Routed,
+            "scope 拒收同样必须表达「已路由」"
+        );
+        let durable3 = lifecycle3
+            .load_candidate_compile_status(&engine3.session().session_id)
+            .expect("load candidate compile status")
+            .expect("scope rejection must leave a durable typed failure");
+        let durable_failure3 = durable3.failure.expect("durable failure present");
         assert!(
-            error3.contains("unknown_provider_logical_work_item[WI-009->WI-002]"),
-            "scope evidence must carry provider/consumer ids: {error3}"
+            durable_failure3.detail.contains("unknown_provider")
+                && durable_failure3.detail.contains("WI-009"),
+            "scope evidence must carry provider/consumer ids: {}",
+            durable_failure3.detail
         );
-        assert_zero_promotion_and_zero_review(
-            &lifecycle3,
-            &engine3,
-            &before3,
-            reviewer3_before,
-            confirm3_before,
-        );
+        assert_zero_promotion_and_zero_review(&lifecycle3, &engine3, &before3, reviewer3_before);
+        assert_rejection_landed_on_human_gate(&lifecycle3, &engine3, confirm3_before);
 
         // —— target：未授权 logical target → 同一纯评估门 typed 拒收 ——
         // （legacy 单仓不裁归属——与 lowering 同口径；本例用非空成员表
@@ -1384,7 +1412,7 @@ mod sg3a1_structure_gate {
         let (_tmp5, lifecycle5, _plan_id5, mut engine5) =
             make_work_item_plan_engine_with_accepted_contract_drafts();
         author_round_record(&lifecycle5, &mut engine5);
-        let item_count = engine5
+        let completion5 = engine5
             .complete_single_candidate_work_item_plan_author(
                 clean_candidate(),
                 "repo_fixture".to_string(),
@@ -1392,7 +1420,12 @@ mod sg3a1_structure_gate {
             )
             .await
             .expect("clean candidate must pass the structure gate");
-        assert_eq!(item_count, 3);
+        assert_eq!(
+            completion5,
+            crate::product::workspace_engine::SingleCandidateAuthorCompletion::Candidate {
+                item_count: 3,
+            }
+        );
         let report_ref = engine5
             .session()
             .mechanical_report_ref
@@ -1500,6 +1533,7 @@ mod sg3a1_structure_gate {
 }
 
 // A1（REQ-WG-01/REQ-WG-02）：候选门与终编译依赖图奇偶性（大文件守卫拆分）。
+include!("single_candidate/author_structure_gate_typed.rs");
 include!("single_candidate/structure_parity.rs");
 // F5 契约机械校验前移（contract_prerevision）用例按大文件守卫(>1200 行)拆分至子文件内联。
 include!("single_candidate/contract_prerevision.rs");

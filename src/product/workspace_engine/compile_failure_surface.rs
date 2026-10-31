@@ -438,6 +438,9 @@ fn operational_code_label(stable_code: &str) -> &'static str {
         "final_compile_finalize_failed" => "最终编译已执行，但定稿落盘失败",
         "single_candidate_structure_context_failed" => "候选结构上下文装载失败",
         "single_candidate_structure_operational" => "候选结构校验无法判定",
+        // SG3a.1（作者阶段与结构复验同码）：结构门拒收——不是「最终编译」，
+        // 用能对上的措辞（owner 侧不指向没跑过的步骤）。
+        "final_compile_structure_rejected" => "候选没有通过结构校验",
         "persistence_failure" => "durable 落盘失败",
         _ => "最终编译失败",
     }
@@ -676,7 +679,7 @@ impl crate::product::workspace_engine::WorkspaceEngine {
     /// 时，durable `auto_rewrite.phase=running` 会永远谎报「正在自动重写」
     /// （现场 2adc5e41 即此形态）——此处对账为 `Stopped`（保留剩余/重复计数），
     /// 并以 Error 事件留下可观测痕迹。
-    async fn reconcile_auto_rewrite_not_delegated(&mut self) {
+    pub(crate) async fn reconcile_auto_rewrite_not_delegated(&mut self) {
         use crate::product::models::CandidateAutoRewritePhase;
         let Some(lifecycle) = self.lifecycle_store.clone() else {
             return;

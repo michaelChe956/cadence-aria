@@ -387,4 +387,186 @@ mod structure_parity {
             "多命中的既有失败语义必须保留：{error}",
         );
     }
+
+    /// SG3a.1（作者阶段 typed 失败，REQ-WSC-18/21/25）：同一 LC 多仓环在作者
+    /// 阶段产出的 durable 事实必须能被 owner 面解析出**逆仓序那一跳**的两位次，
+    /// 并给出恰好两个带后果的修法——否则 owner 还是只能看到「生成失败」。
+    #[test]
+    fn author_stage_cycle_failure_carries_witness_facts_and_two_owner_options() {
+        use crate::product::workspace_engine::compile_failure_surface::{
+            cycle_witness_facts, owner_hint, owner_message, rewrite_guidance,
+            cycle_owner_options,
+        };
+        use crate::product::workspace_engine::single_candidate_structure_failure::{
+            STRUCTURE_STABLE_CODE, author_gate_summary, author_structure_gate_failure,
+        };
+
+        let repos = Repos::new();
+        let table = repos.table();
+        let change_order = repos.change_order();
+        let ir = ir_of(vec![
+            item("WI-001", "repository_a", None),
+            item("WI-002", "repository_b", Some("WI-001")),
+            item("WI-003", "repository_c", Some("WI-002")),
+            // 现场形态：托管仓序第 2（repository_b），却消费仓序第 3 的产出。
+            item("WI-004", "repository_b", Some("WI-003")),
+        ]);
+        let context = structure_context(table.clone(), change_order.clone());
+        let assessment = assess_single_candidate_structure(String::new(), &ir, &context);
+        let StructuralAssessment::Rejected(failures, _) = assessment else {
+            panic!("逆仓序的跨仓消费必须在候选门被拦下");
+        };
+
+        let typed =
+            author_structure_gate_failure(&ir, &context, &failures);
+        assert_eq!(
+            typed.stable_code(),
+            STRUCTURE_STABLE_CODE,
+            "作者阶段拒收一律用结构拒收码（owner 文案不得指向没跑过的终编译；\
+             失败码统计要能区分阶段；不虚记自动重写预算）"
+        );
+
+        // durable 投影（只投影、不落盘）：message 必须能被既有解析面还原事实。
+        let failure = crate::product::workspace_engine::compile_failure_surface::
+            candidate_compile_status(None, &typed, "2026-10-31T00:00:00Z".to_string())
+            .0
+            .failure
+            .expect("durable failure projection");
+        let facts = cycle_witness_facts(&failure.message)
+            .unwrap_or_else(|| panic!("环事实必须可解析：{}", failure.message));
+        assert_eq!(facts.provider, "WI-003", "provider 是仓序在后的那个 WI");
+        assert_eq!(facts.consumer, "WI-004", "consumer 是仓序在前的那个 WI");
+        assert_eq!(facts.provider_order, 3, "provider 所在仓是仓序第 3 个");
+        assert_eq!(facts.consumer_order, 2, "consumer 所在仓是仓序第 2 个");
+
+        // owner 面：一句人话问题 + 恰好两个带后果的修法（不是「生成失败」）。
+        let options = cycle_owner_options(&facts);
+        assert_eq!(options.len(), 2, "必须给出恰好两个合法修法：{options:?}");
+        assert!(
+            options
+                .iter()
+                .all(|option| !option.label.trim().is_empty() && !option.consequence.trim().is_empty()),
+            "每个修法都必须带后果（owner 才能取舍）：{options:?}"
+        );
+        // 平台合成 finding（owner 面真正的载体）：一句人话问题 + 恰好两个修法，
+        // 且带单源前缀（策略层据此识别平台轮，红线：不按 kind/轮次豁免）。
+        let verdict = crate::product::workspace_engine::compile_failure_surface::
+            auto_rewrite_verdict(&failure);
+        let finding = verdict.findings.first().expect("platform finding");
+        assert!(
+            finding.message.starts_with(
+                crate::product::workspace_engine::compile_failure_surface::
+                    PLATFORM_COMPILE_FAILURE_FINDING_PREFIX
+            ),
+            "平台 finding 必须带单源前缀：{}",
+            finding.message
+        );
+        assert!(
+            finding.owner_question.as_deref().is_some_and(|question| {
+                question.contains("WI-004") && question.contains("WI-003")
+            }),
+            "平台 finding 必须带 owner 能答的一句话问题：{:?}",
+            finding.owner_question
+        );
+        assert_eq!(
+            finding.owner_options.as_ref().map(Vec::len),
+            Some(2),
+            "平台 finding 必须带恰好两个 owner 选项：{:?}",
+            finding.owner_options
+        );
+        let hint = owner_hint(&failure);
+        assert!(
+            hint.contains("两个合法修法"),
+            "owner 提示必须列出两个修法：{hint}"
+        );
+        assert!(
+            rewrite_guidance(&failure).len() >= 3,
+            "给 author 的要点必须含那一跳事实 + 两个消环方向 + 保护项"
+        );
+        assert!(
+            !owner_message(&typed).contains(STRUCTURE_STABLE_CODE),
+            "人话段不得把稳定码甩给 owner"
+        );
+        let summary = author_gate_summary(&typed);
+        assert!(
+            summary.contains("WI-003") && summary.contains("WI-004") && summary.contains("仓序第"),
+            "人工门摘要必须带真实位次与两个修法：{summary}"
+        );
+
+        // 结构指纹跨「改标题」稳定（同环同指纹），且 detail 里逐字可见。
+        let mut retitled = ir.clone();
+        for item in &mut retitled.items {
+            item.contract.identity.title = format!("{}（作者改写版）", item.contract.identity.title);
+        }
+        let retitled_assessment =
+            assess_single_candidate_structure(String::new(), &retitled, &context);
+        let StructuralAssessment::Rejected(retitled_failures, _) = retitled_assessment else {
+            panic!("改标题不改变依赖结构，仍必须被拦下");
+        };
+        let retitled_typed =
+            author_structure_gate_failure(&retitled, &context, &retitled_failures);
+        let fingerprint = |failure: &crate::product::workspace_engine::types::PlanningCompileFailure| {
+            failure
+                .render()
+                .split(crate::product::workspace_engine::compile_failure_surface::
+                    CYCLE_FINGERPRINT_MARKER)
+                .nth(1)
+                .and_then(|rest| rest.lines().next())
+                .map(str::to_string)
+                .expect("fingerprint segment")
+        };
+        assert_eq!(
+            fingerprint(&typed),
+            fingerprint(&retitled_typed),
+            "同一依赖环必须得到同一结构指纹（不靠文案/标题）"
+        );
+        assert_ne!(
+            typed.render(),
+            retitled_typed.render(),
+            "人话段可以随标题变化——指纹稳定性不靠文案一致"
+        );
+    }
+
+    /// 环存在但**没有**逆仓序一跳（同仓互等）时：只给真实环链，不给位次与
+    /// 选项（不虚构环形状 / 不编造修法）。
+    #[test]
+    fn same_repo_cycle_never_fabricates_orders_or_options() {
+        use crate::product::workspace_engine::compile_failure_surface::cycle_witness_facts;
+        use crate::product::workspace_engine::single_candidate_structure_failure::
+            author_structure_gate_failure;
+
+        let repos = Repos::new();
+        let table = repos.table();
+        let change_order = repos.change_order();
+        // 同仓（repository_a）内互相依赖：有效图成环，但没有仓序逆序那一跳。
+        let mut first = item("WI-001", "repository_a", None);
+        let mut second = item("WI-002", "repository_a", Some("WI-001"));
+        first.contract.input_contracts = second.contract.input_contracts.clone();
+        first.contract.input_contracts[0].provider_logical_work_item_id =
+            "WI-002".to_string();
+        second.contract.input_contracts[0].provider_logical_work_item_id =
+            "WI-001".to_string();
+        let ir = ir_of(vec![first, second]);
+        let context = structure_context(table, change_order);
+        let assessment = assess_single_candidate_structure(String::new(), &ir, &context);
+        let StructuralAssessment::Rejected(failures, _) = assessment else {
+            panic!("同仓互等必须成环");
+        };
+        let typed = author_structure_gate_failure(&ir, &context, &failures);
+        let failure = crate::product::workspace_engine::compile_failure_surface::
+            candidate_compile_status(None, &typed, "2026-10-31T00:00:00Z".to_string())
+            .0
+            .failure
+            .expect("durable failure projection");
+        assert!(
+            cycle_witness_facts(&failure.message).is_none(),
+            "没有逆仓序一跳时不得编造位次与选项：{}",
+            failure.message
+        );
+        assert!(
+            failure.message.contains("构成依赖环"),
+            "仍必须说清真实环链与消环方向：{}",
+            failure.message
+        );
+    }
 }

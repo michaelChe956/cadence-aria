@@ -219,7 +219,7 @@ impl WorkspaceEngine {
     /// 改写既有失败语义。
     /// REQ-WSC-25：同时向 append-only 尝试流水追加一行（历史序列，与上面的
     /// 「当前状态」分工）。
-    fn record_candidate_compile_failure(
+    pub(crate) fn record_candidate_compile_failure(
         &mut self,
         failure: &crate::product::workspace_engine::types::PlanningCompileFailure,
     ) -> crate::product::workspace_engine::compile_failure_surface::CandidateCompileRoute {

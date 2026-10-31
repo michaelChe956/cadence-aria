@@ -118,6 +118,7 @@ mod review;
 mod run_boundary;
 mod session_state;
 mod single_candidate;
+pub(crate) mod single_candidate_structure_failure;
 mod types;
 
 #[cfg(test)]
@@ -212,7 +213,8 @@ pub(crate) use review::trusted_review_comments;
 pub(crate) use review::{ReviewCompletionError, fallback_review_verdict};
 pub(crate) use session_state::*;
 pub(crate) use single_candidate::{
-    SingleCandidateGenerationDecisionInput, select_internal_generation_mode,
+    SingleCandidateAuthorCompletion, SingleCandidateGenerationDecisionInput,
+    select_internal_generation_mode,
 };
 pub(crate) use types::WorkItemDraftAuthorOutcome;
 pub(crate) use types::{

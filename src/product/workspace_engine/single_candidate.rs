@@ -18,6 +18,19 @@ use crate::product::workspace_engine::draft_batch::member_checkout_prefixes;
 use crate::web::workspace_ws_types::WorkItemGenerationModeDto;
 use crate::web::workspace_ws_types::{ReviewGate, ReviewVerdict, ReviewVerdictType};
 
+/// 作者阶段候选落盘的两种收尾形态（REQ-SG-02/REQ-WSC-18）：
+///
+/// - [`Self::Candidate`]：候选合法并通过结构门，已提升 current refs 并进入
+///   既有评审/确认链（`item_count` 为编译出的候选 item 数）；
+/// - [`Self::Routed`]：候选被 SG3a.1 系统门按 **typed 失败** 拒收（durable
+///   诊断 + 尝试流水已落盘），平台已在自动重写或人工门态——调用方**不得**
+///   再把它当硬失败（现场缺口：owner 只看到「生成失败」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SingleCandidateAuthorCompletion {
+    Candidate { item_count: usize },
+    Routed,
+}
+
 /// 仅由已编译 IR 的 item 数与服务端 provider profile 驱动的内部诊断输入。
 ///
 /// 该输入不通过 WebSocket 反序列化；客户端不能提交候选数或 mode。
@@ -405,7 +418,7 @@ impl WorkspaceEngine {
         source: String,
         target_repository_id: String,
         member_targets: Option<crate::product::work_item_plan_compiler::PlanMemberTargets>,
-    ) -> Result<usize, String> {
+    ) -> Result<SingleCandidateAuthorCompletion, String> {
         if self.session.workspace_type != WorkspaceType::WorkItemPlan
             || self.session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
         {
@@ -517,6 +530,25 @@ impl WorkspaceEngine {
                     )
                     .map_err(|error| format!("freeze structure report failed: {error}"))?,
                 )
+            }
+            // SG3a.1 拒收**不再硬失败**（现场 2026-10-31：owner 只看到「生成
+            // 失败」）：与 Final Compile 同一条 typed 失败路——durable 诊断 +
+            // 尝试流水 + 自动重写/人工门（REQ-WSC-18/21/25）。候选仍零提升、
+            // 零评审、零确认（current refs 语义零变化）。
+            crate::product::workspace_engine::types::StructuralAssessment::Rejected(
+                failures,
+                _,
+            ) => {
+                let failure =
+                    crate::product::workspace_engine::single_candidate_structure_failure::
+                        author_structure_gate_failure(
+                            &ir_record.ir,
+                            &structure_context,
+                            failures,
+                        );
+                return Ok(self
+                    .route_author_structure_gate_failure(&lifecycle, failure, &source_ref, &ir_ref)
+                    .await);
             }
             _ => {
                 return Err(
@@ -680,7 +712,9 @@ impl WorkspaceEngine {
                 self.request_provider_run(ProviderRunKind::ReviewOnly).await;
             }
         }
-        Ok(ir_record.ir.items.len())
+        Ok(SingleCandidateAuthorCompletion::Candidate {
+            item_count: ir_record.ir.items.len(),
+        })
     }
 
     /// 机械 canonical 契约缺口（Error 级）的返修路由：与 reviewer verdict 完全

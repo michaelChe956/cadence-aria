@@ -2,7 +2,7 @@ use super::*;
 
 mod authoring;
 pub(crate) mod compile_support;
-mod cycle_diagnostic;
+pub(crate) mod cycle_diagnostic;
 mod decisions;
 pub(crate) mod member_checkout_prefixes;
 mod runs;

@@ -978,13 +978,14 @@ impl WorkspaceEngine {
     }
 }
 
-/// SG3a.1 系统门的纯评估：SG1 有效图投影 + typed 失败分流。零 store/网络
-/// I/O——live 事实由外层 `build_single_candidate_structure_context` 一次装载。
-pub(crate) fn assess_single_candidate_structure(
-    source: String,
+/// SG3a.1 系统门的有效图装配（纯函数，零 I/O）：IR 投影 → 归属唯一反查 →
+/// SG1 有效图。`assess_single_candidate_structure` 与作者阶段 typed 失败的
+/// 事实提取（`single_candidate_structure_failure`）共用本函数——同一次装配、
+/// 同一份边集合，两处不会给出不同的仓序位次。
+pub(crate) fn project_single_candidate_structure(
     ir: &crate::product::work_item_plan_compiler::PlanCandidateIr,
     context: &PlanningStructureContext,
-) -> StructuralAssessment {
+) -> PlanningStructureReport {
     let mut items = planning_structure_items_from_ir(ir);
     // REQ-WG-01/REQ-WG-02：归属解析走唯一反查（与 Final Compile 同一函数）。
     // 成员表在场时 single_repository 与「未声明 intent」的 WI 不再落
@@ -1000,7 +1001,17 @@ pub(crate) fn assess_single_candidate_structure(
             item.logical_target = None;
         }
     }
-    let report = project_effective_planning_graph(&items, context);
+    project_effective_planning_graph(&items, context)
+}
+
+/// SG3a.1 系统门的纯评估：SG1 有效图投影 + typed 失败分流。零 store/网络
+/// I/O——live 事实由外层 `build_single_candidate_structure_context` 一次装载。
+pub(crate) fn assess_single_candidate_structure(
+    source: String,
+    ir: &crate::product::work_item_plan_compiler::PlanCandidateIr,
+    context: &PlanningStructureContext,
+) -> StructuralAssessment {
+    let report = project_single_candidate_structure(ir, context);
     let source_hash = report.source_hash.clone();
     let context_digest = report.context_digest.clone();
     if report.failures.is_empty() {
