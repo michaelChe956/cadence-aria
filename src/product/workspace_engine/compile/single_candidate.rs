@@ -217,44 +217,84 @@ impl WorkspaceEngine {
     /// REQ-WSC-18/21/22：把 typed 失败完整落成 durable 候选编译事实（不截断），
     /// 并返回自动重写路由裁定。写失败只降级为可观测静默——不得因诊断落盘失败
     /// 改写既有失败语义。
+    /// REQ-WSC-25：同时向 append-only 尝试流水追加一行（历史序列，与上面的
+    /// 「当前状态」分工）。
     fn record_candidate_compile_failure(
-        &self,
+        &mut self,
         failure: &crate::product::workspace_engine::types::PlanningCompileFailure,
     ) -> crate::product::workspace_engine::compile_failure_surface::CandidateCompileRoute {
         use crate::product::workspace_engine::compile_failure_surface::CandidateCompileRoute;
-        let Some(lifecycle) = self.lifecycle_store.as_ref() else {
+        let Some(lifecycle) = self.lifecycle_store.clone() else {
             return CandidateCompileRoute::Gate;
         };
         let previous = lifecycle
             .load_candidate_compile_status(&self.session.session_id)
             .ok()
             .flatten();
+        let now = chrono::Utc::now().to_rfc3339();
         let (status, route) =
             crate::product::workspace_engine::compile_failure_surface::candidate_compile_status(
                 previous.as_ref(),
                 failure,
-                chrono::Utc::now().to_rfc3339(),
+                now.clone(),
             );
         let _ = lifecycle.save_candidate_compile_status(&self.session.session_id, &status);
+        // REQ-WSC-25：追加写尝试流水（历史序列；与上面的「当前状态」分工）。
+        let attempt = crate::product::lifecycle_store::candidate_attempts::
+            candidate_attempt_record_from_failure(failure, &status, now);
+        self.append_candidate_attempt(&lifecycle, attempt);
         route
     }
 
     /// REQ-WSC-18：编译成功 → 以「无失败」覆盖同一会话的候选编译事实，避免
     /// 过期失败把确认动作永久挡死。
-    fn record_candidate_compile_success(&self) {
-        let Some(lifecycle) = self.lifecycle_store.as_ref() else {
+    /// REQ-WSC-25：同时向 append-only 尝试流水追加一行（成功也进历史序列，
+    /// 否则首次通过率无从计算）。
+    fn record_candidate_compile_success(&mut self) {
+        let Some(lifecycle) = self.lifecycle_store.clone() else {
             return;
         };
         let Ok(record) = lifecycle.get_workspace_session(&self.session.session_id) else {
             return;
         };
+        let now = chrono::Utc::now().to_rfc3339();
         let status =
             crate::product::workspace_engine::compile_failure_surface::cleared_candidate_compile_status(
                 record.work_item_plan_source_revision_ref.clone(),
                 record.plan_candidate_ir_ref.clone(),
-                chrono::Utc::now().to_rfc3339(),
+                now.clone(),
             );
         let _ = lifecycle.save_candidate_compile_status(&self.session.session_id, &status);
+        // REQ-WSC-25：成功尝试也进历史序列（否则首次通过率无从计算）。
+        let attempt = crate::product::lifecycle_store::candidate_attempts::
+            candidate_attempt_record_from_success(
+                &status,
+                record
+                    .compile_reservation
+                    .as_ref()
+                    .map(|reservation| reservation.compile_id.as_str()),
+                now,
+            );
+        self.append_candidate_attempt(&lifecycle, attempt);
+    }
+
+    /// REQ-WSC-25：把本次尝试追加进 append-only 流水
+    /// （`workspace-sessions/{session}/candidate-attempts.jsonl`）。
+    ///
+    /// 写失败只降级为静默：错误记入运行日志（policy diagnostics），**不得**因
+    /// 此使候选生成或确认失败（REQ-WSC-25 场景 2）。
+    fn append_candidate_attempt(
+        &mut self,
+        lifecycle: &LifecycleStore,
+        attempt: crate::product::lifecycle_store::candidate_attempts::CandidateAttemptRecord,
+    ) {
+        if let Err(error) = lifecycle.append_candidate_attempt(&self.session.session_id, &attempt) {
+            self.record_single_candidate_compile_failure(
+                lifecycle,
+                "candidate_attempt_log_write_failed",
+                &format!("append candidate attempt log failed: {error}"),
+            );
+        }
     }
 
     /// SG3b typed 失败站点：构造（携 run/digest 身份）→ seal → durable

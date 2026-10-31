@@ -31,7 +31,13 @@ struct HumanDispositionLedger {
 }
 
 impl LifecycleStore {
-    fn workspace_session_root(&self, session: &WorkspaceSessionRecord) -> std::path::PathBuf {
+    /// 该会话的 durable 事实目录（`workspace-sessions/{session}/`）——门卡同族
+    /// 落点的唯一入口（`human-dispositions.json` / `candidate-compile-status.json`
+    /// / `candidate-attempts.jsonl` 都在其下）。
+    pub(super) fn workspace_session_root(
+        &self,
+        session: &WorkspaceSessionRecord,
+    ) -> std::path::PathBuf {
         self.paths
             .issue_lifecycle_root(&session.project_id, &session.issue_id)
             .join("workspace-sessions")

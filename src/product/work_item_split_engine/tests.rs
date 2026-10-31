@@ -26,6 +26,11 @@ mod prompt_contract_plan_options {
 
     include!("tests/prompt_contract_plan_options.rs");
 }
+mod prompt_contract_plan_intent_target {
+    use super::*;
+
+    include!("tests/prompt_contract_plan_intent_target.rs");
+}
 include!("tests/part_02.rs");
 include!("tests/routing_reference_contract.rs");
 include!("tests/part_03.rs");

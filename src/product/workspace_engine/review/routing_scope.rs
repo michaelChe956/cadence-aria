@@ -2,7 +2,6 @@ use super::policy_routing::{GateSnapshotContext, policy_route_record_values, rou
 use super::*;
 use std::collections::BTreeSet;
 
-use crate::product::lifecycle_store::PolicyRoutePersist;
 use crate::product::work_item_plan_policy::classify::classify_finding;
 use crate::product::work_item_plan_policy::{
     FatalReason, FindingClass, FindingFingerprint, PolicyDiagnostic, ReviewFindingCategory,

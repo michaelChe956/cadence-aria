@@ -5,10 +5,16 @@ use super::policy_routing::{RoutingAction, carry_forward_open_gate_budget};
 use super::*;
 use crate::product::lifecycle_store::PolicyRoutePersist;
 use crate::product::work_item_plan_policy::{
-    ClassificationError, ClassifiedFinding, EvaluationDecision, FatalReason, FindingClass,
-    FindingFingerprint, HumanReason, PlanOutcome, PolicyDiagnostic, ReviewCycleState,
-    ReviewEvaluationInput, ReviewFindingCategory, ReviewInvocationScope, ReviewPhase, RunBudgets,
-    RunHistory, RunHistoryDelta, RunPolicy, WorkItemPlanFlowKind, classify_review, evaluate,
+    ClassifiedFinding, EvaluationDecision, FatalReason, FindingClass, HumanReason, PlanOutcome,
+    PolicyDiagnostic, ReviewCycleState, ReviewEvaluationInput, ReviewInvocationScope, ReviewPhase,
+    RunBudgets, RunHistory, RunHistoryDelta, RunPolicy, WorkItemPlanFlowKind, classify_review,
+    evaluate,
+};
+#[path = "routing_platform_rescue.rs"]
+mod routing_platform_rescue;
+use routing_platform_rescue::{
+    classification_error_action, legacy_work_item_plan_repair_finding,
+    merge_platform_compile_failure_origin, rescue_platform_compile_failure_repair,
 };
 use routing_scope::{route_outcome_from_decision, single_candidate_review_cycle};
 impl WorkspaceEngine {
@@ -384,7 +390,9 @@ impl WorkspaceEngine {
             },
         );
         let invocation = match self.policy_invocation(phase, &cycle_key) {
-            Ok(scope) => scope,
+            // A3/REQ-WSC-25：平台编译失败轮的指纹并入本轮 origin（详见
+            // merge_platform_compile_failure_origin 的红线注释）。
+            Ok(scope) => merge_platform_compile_failure_origin(scope, phase, verdict),
             Err(action) => {
                 let scope = self
                     .session
@@ -501,16 +509,23 @@ impl WorkspaceEngine {
                 history_delta: Default::default(),
             }
         } else {
-            evaluate(
-                &ReviewEvaluationInput {
-                    mechanical: &mechanical,
-                    review: &findings,
-                    cycle_key: &cycle_key,
-                    phase,
-                    invocation: &invocation,
-                },
-                &self.session.run_history,
-                &RunBudgets::default(),
+            // A3/REQ-WSC-25：纯平台编译失败轮的返修资格复原（详见
+            // rescue_platform_compile_failure_repair 的注释与红线）。
+            rescue_platform_compile_failure_repair(
+                evaluate(
+                    &ReviewEvaluationInput {
+                        mechanical: &mechanical,
+                        review: &findings,
+                        cycle_key: &cycle_key,
+                        phase,
+                        invocation: &invocation,
+                    },
+                    &self.session.run_history,
+                    &RunBudgets::default(),
+                ),
+                phase,
+                &cycle,
+                verdict,
             )
         };
         if raw_verdict == ReviewVerdictType::NeedsHuman
@@ -1318,73 +1333,5 @@ fn provider_run_kind_for_batch_outcome(
         }
         WorkItemBatchDecisionOutcome::StartReview => Some(ProviderRunKind::ReviewOnly),
         WorkItemBatchDecisionOutcome::HumanConfirm => None,
-    }
-}
-
-fn legacy_work_item_plan_repair_finding(verdict: &ReviewVerdict) -> Option<ClassifiedFinding> {
-    let review = verdict.work_item_plan_review.as_ref()?;
-    let (kind, contract_field, required_action) = match review.verdict {
-        WorkItemPlanReviewVerdict::ReviseBatch => (
-            "revise_batch",
-            "work_item_plan.batch",
-            "rewrite the reviewed Work Item batch",
-        ),
-        WorkItemPlanReviewVerdict::PlanReopenRequired => (
-            "plan_reopen_required",
-            "work_item_plan.outline",
-            "regenerate the Work Item plan outline",
-        ),
-        _ => return None,
-    };
-    let message = format!("{kind}: {}", verdict.summary);
-    let (fingerprint, identity_unstable) = FindingFingerprint::identity_for_finding(
-        Some(ReviewFindingCategory::Other),
-        FindingClass::Repairable,
-        &message,
-        Some(contract_field),
-    );
-    Some(ClassifiedFinding {
-        class: FindingClass::Repairable,
-        fingerprint,
-        identity_unstable,
-        category: Some(ReviewFindingCategory::Other),
-        severity: "must_fix".to_string(),
-        message,
-        evidence: (!verdict.comments.trim().is_empty()).then(|| verdict.comments.clone()),
-        required_action: Some(required_action.to_string()),
-        contract_field: Some(contract_field.to_string()),
-    })
-}
-
-fn classification_error_action(error: ClassificationError) -> RoutingAction {
-    let (reason, code, message) = match error {
-        ClassificationError::UnknownCategory(raw) => (
-            FatalReason::UnknownCategory,
-            "unknown_finding_category",
-            format!("unknown finding category: {raw}"),
-        ),
-        ClassificationError::UnknownClassHint(raw) => (
-            FatalReason::UnknownClassHint,
-            "unknown_class_hint",
-            format!("unknown finding class hint: {raw}"),
-        ),
-        ClassificationError::InvalidFinding(details) => (
-            FatalReason::InvalidStructuredOutput,
-            "invalid_finding_field",
-            details,
-        ),
-        ClassificationError::VerificationScopeViolation(details) => (
-            FatalReason::ProtocolViolation,
-            "verification_scope_violation",
-            details,
-        ),
-    };
-    RoutingAction::AbortFatal {
-        reason,
-        diagnostics: vec![PolicyDiagnostic {
-            code: code.to_string(),
-            message,
-            field: Some("findings".to_string()),
-        }],
     }
 }

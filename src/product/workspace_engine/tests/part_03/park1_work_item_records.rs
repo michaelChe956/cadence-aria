@@ -460,3 +460,29 @@ fn attribution_legacy_keeps_story_repository_without_logical_target() {
     assert_eq!(physical, "story_repository");
     assert_eq!(target, None);
 }
+
+/// REQ-WG-02：物理仓 → 逻辑成员是三态反查，多命中**绝不猜**——报错文案与
+/// 反查单一来源化之前逐字一致（候选结构门对同一输入不造归属）。
+#[test]
+fn attribution_ambiguous_physical_member_fails_closed_with_existing_wording() {
+    let logical_a = LogicalRepositoryId(stable_uuid(1));
+    let logical_b = LogicalRepositoryId(stable_uuid(2));
+    let ambiguous = PlanMemberTargets {
+        physical_by_logical: BTreeMap::from([
+            (logical_a, "repository_phys_shared".to_string()),
+            (logical_b, "repository_phys_shared".to_string()),
+        ]),
+        fallback_physical_id: Some("repository_phys_shared".to_string()),
+    };
+    let intent = EnrollmentTarget::SingleRepository {
+        repository_id: "repository_phys_shared".to_string(),
+    };
+    let error = work_item_record_attribution(Some(&ambiguous), "legacy_repo", Some(&intent), "WI-008")
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "work_item_target_missing: physical repository `repository_phys_shared` for `WI-008` \
+         maps to multiple logical repositories",
+        "多命中文案必须逐字保持既有语义（不任选一个成员）",
+    );
+}

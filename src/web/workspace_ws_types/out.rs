@@ -169,14 +169,10 @@ impl From<&crate::product::models::CandidateCompileFailure> for CandidateCompile
             message: failure.message.clone(),
             detail: Some(failure.detail.clone()),
             owner_hint: Some(
-                crate::product::workspace_engine::compile_failure_surface::owner_hint(
-                    &failure.code,
-                ),
+                crate::product::workspace_engine::compile_failure_surface::owner_hint(failure),
             ),
             rewrite_guidance:
-                crate::product::workspace_engine::compile_failure_surface::rewrite_guidance(
-                    &failure.code,
-                ),
+                crate::product::workspace_engine::compile_failure_surface::rewrite_guidance(failure),
             auto_rewrite: None,
         }
     }

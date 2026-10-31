@@ -17,7 +17,10 @@
 //! 未出现过的原因；无法推导时退化为「稳定码 + 原文」，绝不吞掉原因。
 
 use crate::product::models::{CandidateCompileFailure, CandidateCompileStatus};
-use crate::product::workspace_engine::types::{PlanningCompileFailure, PlanningCompileFailureKind};
+use crate::product::workspace_engine::types::{
+    EngineEvent, PlanningCompileFailure, PlanningCompileFailureKind,
+};
+use crate::web::workspace_ws_types::OwnerOption;
 
 /// 编译失败 cause 里「环上 Work Item id」行的起点标记。producer
 /// （`draft_batch::compile_support` 的 change_order 环检测）与本模块共用，
@@ -27,6 +30,84 @@ pub(crate) const CYCLE_IDS_MARKER: &str = "\n环上 Work Item id: ";
 /// 编译失败 cause 里「环结构指纹」行的起点标记（producer 与本模块共用，
 /// REQ-WSC-22：同一环的重复判定只看结构摘要，不看文案）。
 pub(crate) const CYCLE_FINGERPRINT_MARKER: &str = "\n环结构指纹: ";
+
+/// A3 / REQ-WSC-25：**平台合成**的编译失败 finding 的单源标识。
+///
+/// 由 [`auto_rewrite_verdict`] 单点生产（finding `message` 前缀）；策略层
+///（`review/routing.rs` / `review/routing_scope.rs`）据此且仅据此前缀识别
+/// 「平台编译失败轮」——模型自己产出的 finding 不带此前缀，照常受
+/// Verification 相位 new-findings 守卫约束（controller 2026-10-31 批复的
+/// 红线：不得按 kind/severity/轮次豁免）。
+pub(crate) const PLATFORM_COMPILE_FAILURE_FINDING_PREFIX: &str = "candidate_compile_failure:";
+
+/// REQ-WG-05：依赖环 owner 面呈现所需的 typed 事实——逆仓序的那一跳。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CycleWitnessFacts {
+    /// 消费方（把 provider 写进 Inputs 的那个 Work Item，展示名：标题优先）。
+    pub consumer: String,
+    /// 被写成 provider 的 Work Item（展示名）。
+    pub provider: String,
+    /// provider 所在仓在 change_order 的位次（1 起）。
+    pub provider_order: usize,
+    /// consumer 所在仓在 change_order 的位次（1 起）。
+    pub consumer_order: usize,
+}
+
+/// REQ-WG-05：从 durable `message`（producer `cycle_diagnostic::cycle_reason`
+/// offending 分支的固定模板）提取逆仓序一跳的 typed 事实。
+///
+/// 锚点与 producer 模板逐字对应（该模板由 `cycle_diagnostic` 的测试钉住）；
+/// **任何**一跳解析失败或位次不构成逆序 → `None`（witness 不完整，不猜，
+/// 也不虚构环形状/原因）。标题本身包含锚点子串时同样安全落 `None`。
+pub(crate) fn cycle_witness_facts(message: &str) -> Option<CycleWitnessFacts> {
+    let rest = message.split_once("其中「")?.1;
+    let (consumer, rest) = rest.split_once("」把「")?;
+    let (provider, rest) = rest.split_once("」写成 provider，但「")?;
+    let rest = rest.strip_prefix(format!("{provider}」所在仓是 change_order 第 ").as_str())?;
+    let (provider_order, rest) = rest.split_once(" 个仓、「")?;
+    let rest = rest.strip_prefix(format!("{consumer}」所在仓是第 ").as_str())?;
+    let (consumer_order, _) = rest.split_once(" 个仓")?;
+    let provider_order: usize = provider_order.parse().ok()?;
+    let consumer_order: usize = consumer_order.parse().ok()?;
+    (provider_order > consumer_order).then_some(CycleWitnessFacts {
+        consumer: consumer.to_string(),
+        provider: provider.to_string(),
+        provider_order,
+        consumer_order,
+    })
+}
+
+/// REQ-WG-05 / REQ-CG-09：由 witness 事实生成的 owner 互斥选项（两个合法
+/// 修法各带后果）。不声称唯一合法托管仓（写范围约束可能使多解并存），
+/// 不含「改 design」选项（仓序本身可能完全正常，不得归因 design）。
+pub(crate) fn cycle_owner_options(facts: &CycleWitnessFacts) -> Vec<OwnerOption> {
+    vec![
+        OwnerOption {
+            label: format!(
+                "去掉「{}」对「{}」的跨仓消费",
+                facts.consumer, facts.provider
+            ),
+            consequence: format!(
+                "环立即消除；「{consumer}」不再消费第 {provider_order} 个仓「{provider}」的产出，\
+                 它的验收/集成范围相应收窄（不再覆盖「{provider}」负责的那部分改动）",
+                consumer = facts.consumer,
+                provider = facts.provider,
+                provider_order = facts.provider_order,
+            ),
+        },
+        OwnerOption {
+            label: format!(
+                "把「{}」连同写范围与测试整体迁到第 {} 个仓或仓序更后",
+                facts.consumer, facts.provider_order
+            ),
+            consequence: format!(
+                "环同样消除，跨仓验收保持在后仓执行；代价是「{consumer}」的写范围路径与\
+                 执行命令都要改写，重写量最大（两个方向都合法，平台不预设唯一解）",
+                consumer = facts.consumer,
+            ),
+        },
+    ]
+}
 
 /// REQ-WSC-21/22：自动重写的路由裁定（纯函数结果，便于逐条钉钉）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,9 +187,14 @@ pub(crate) fn decide_route(
 /// `ContractGap`/`Repairable` finding，策略路由据此走
 /// `TriggerAggregateRepair` → 真正重驱 SC author（不新造通道）。
 ///
-/// finding `message` 只由**结构**事实构成（稳定码 + 环结构指纹），作者换措辞
-/// 不会让同一环被当成新事实（REQ-WSC-22）；`required_action` 才是给人看的
-/// 具体重写要点，且**不要求 author 去改 design**（owner 2026-10-31 第 4 条）。
+/// finding `message` 只由**结构**事实构成（稳定码 + 环结构指纹，且带
+/// [`PLATFORM_COMPILE_FAILURE_FINDING_PREFIX`] 前缀——策略层据此识别平台
+/// 编译失败轮），作者换措辞不会让同一环被当成新事实（REQ-WSC-22）；
+/// `required_action` 是给 author 的重写要点（**不要求改 design**）。
+///
+/// REQ-WG-05 / REQ-CG-09：witness 完整时，finding 同时携带由 typed 事实
+/// 生成的 `owner_question` 与 2 个带后果的 `owner_options`（一个 owner 能
+/// 懂的问题 + 互斥选项）；witness 不完整时两者保持 `None`（不虚构）。
 pub(crate) fn auto_rewrite_verdict(
     failure: &CandidateCompileFailure,
 ) -> crate::web::workspace_ws_types::ReviewVerdict {
@@ -119,7 +205,8 @@ pub(crate) fn auto_rewrite_verdict(
 
     let structural_identity = cycle_fingerprint_from_detail(&failure.detail)
         .unwrap_or_else(|| failure.failure_id.clone());
-    let guidance = rewrite_guidance(&failure.code);
+    let guidance = rewrite_guidance(failure);
+    let witness = cycle_witness_facts(&failure.message);
     let finding = ReviewFinding {
         severity: ReviewFindingSeverity::MustFix,
         // 结构身份进 message：同环同文本 → 同指纹 → 复用既有重复指纹闸门。
@@ -140,8 +227,18 @@ pub(crate) fn auto_rewrite_verdict(
         class_hint: Some(FindingClassHint::Repairable),
         contract_field: None,
         machine_repair: None,
-        owner_question: None,
-        owner_options: None,
+        owner_question: witness.as_ref().map(|facts| {
+            format!(
+                "「{consumer}」托管在仓序第 {consumer_order} 个仓，却要消费第 {provider_order} \
+                 个仓「{provider}」的产出（与仓序自动边成环，在仓序规则下不可能成立）。\
+                 两个修法选哪个？",
+                consumer = facts.consumer,
+                consumer_order = facts.consumer_order,
+                provider = facts.provider,
+                provider_order = facts.provider_order,
+            )
+        }),
+        owner_options: witness.as_ref().map(cycle_owner_options),
         disposition: None,
         target_work_item_id: None,
         finding_key: None,
@@ -359,45 +456,98 @@ pub(crate) fn approve_rejected_message(failure: &CandidateCompileFailure) -> Str
         code = failure.code,
         message = failure.message,
         failure_id = failure.failure_id,
-        hint = owner_hint(&failure.code),
+        hint = owner_hint(failure),
     )
 }
 
-/// REQ-WSC-20：给 owner 的醒目提示（owner 2026-10-31 第 4 条裁定：**不要**写成
-/// 「系统会自动去改 design」，要讲清 design 的什么原因导致成环，并明确**需要
-/// owner 改 design**）。同时说明平台已/将继续自动让 author 重写几次，避免 owner
-/// 误以为必须自己手动推。
-pub(crate) fn owner_hint(stable_code: &str) -> String {
-    if is_candidate_invalid_code(stable_code) {
-        return "这个候选无效：它没有通过最终编译，不是「待你确认」的版本。\n\
-                根因指向 design：候选里的依赖顺序与 design 声明的仓序（change_order）互相矛盾——\
-                design 把仓序定成「后仓先于前仓」，plan 里就必然出现「后仓 Work Item 当前仓 Work Item 的 \
-                provider」这类逆仓序依赖，一旦合成环，plan 层面无论怎么换序都无法推进。\
-                要根治需要**修改 design 的依赖顺序/仓序**；平台不会自动去改 design。\n\
-                平台已经/将继续按剩余预算自动让 author 重写候选：若同一依赖环重复出现，平台会提前停下并回到这里，\
-                此时只能由你修改 design 后重新发起。\n\
-                重写时着重注意：provider 只能指向仓序在前的成员仓 Work Item；同一成员仓内的顺序只能靠 depends_on 显式声明；依赖图必须无环；\
-                根因很可能在 design 的依赖顺序，需要你决定是否修改 design。"
-            .to_string();
+/// REQ-WG-05（REMOVED REQ-WSC-20）：给 owner 的醒目提示——**只**由 witness
+/// 事实构成，不断言根因在 design（现场 2adc5e41 的 design 仓序本身无矛盾，
+/// 错在 plan 把集成验收项托管在仓序更靠前的仓；旧文案把 owner 引向无效
+/// 操作）。witness 完整时给出两个仓序位次与两个可执行修法及后果；不完整
+/// 时只陈述稳定码与已知事实，不给位次、不给选项、不归因。
+pub(crate) fn owner_hint(failure: &CandidateCompileFailure) -> String {
+    if !is_candidate_invalid_code(&failure.code) {
+        return format!(
+            "这个候选无效：它没有通过最终编译（{}），不是「待你确认」的版本。请让 author 重新生成。",
+            failure.code
+        );
     }
-    format!(
-        "这个候选无效：它没有通过最终编译（{stable_code}），不是「待你确认」的版本。请让 author 重新生成。"
-    )
+    let mut hint = format!(
+        "这个候选无效：它没有通过最终编译（{}），不是「待你确认」的版本。",
+        failure.code
+    );
+    match cycle_witness_facts(&failure.message) {
+        Some(facts) => {
+            hint.push_str(&format!(
+                "\n事实（由环 witness 计算）：「{consumer}」托管在仓序第 {consumer_order} 个仓，\
+                 却要消费仓序第 {provider_order} 个仓「{provider}」的产出——跨仓依赖只允许\
+                 后仓消费前仓，这条依赖在仓序规则下不可能成立，与仓序自动边合成环。",
+                consumer = facts.consumer,
+                consumer_order = facts.consumer_order,
+                provider = facts.provider,
+                provider_order = facts.provider_order,
+            ));
+            hint.push_str("\n两个合法修法（业务取舍，平台不能替你选，也不存在唯一正确解）：");
+            for (index, option) in cycle_owner_options(&facts).iter().enumerate() {
+                hint.push_str(&format!(
+                    "\n{}. {}——后果：{}",
+                    index + 1,
+                    option.label,
+                    option.consequence
+                ));
+            }
+        }
+        None => {
+            hint.push_str(
+                "\n环 witness 不完整：平台没有足够事实指出具体哪条依赖逆了仓序\
+                 （完整诊断原文见上），因此不给出位次与选项，也不做任何归因断言。",
+            );
+        }
+    }
+    hint.push_str(
+        "\n编译类失败会先按剩余预算自动让 author 重写候选；若同一依赖环重复出现或预算用尽，\
+         平台会提前停下并回到这里。",
+    );
+    hint
 }
 
-/// REQ-WSC-20：重写要点（给 owner 的摘要段与给 author 的逐条指令各自取用；
-/// 两者的措辞分开发布——owner 面允许提「改 design」，author 面**不得**要求
-/// author 去改 design（owner 2026-10-31 第 4 条裁定））。
-pub(crate) fn rewrite_guidance(stable_code: &str) -> Vec<String> {
-    if is_candidate_invalid_code(stable_code) {
-        return vec![
-            "provider 只能指向仓序在前的成员仓 Work Item（依赖按仓序从前往后声明），不得把后仓 Work Item 写成前仓 Work Item 的 provider".to_string(),
-            "同一成员仓内的 Work Item 之间没有仓序自动边，同仓顺序只能由 depends_on 显式声明".to_string(),
-            "依赖图必须无环（dependency_cycle 的判据）：环上任一条依赖反向都会让整条链无法执行，需整体检查依赖方向".to_string(),
-            "根因可能在 design 的依赖顺序/仓序：plan 内换序解决不了环，需要由 owner 决定是否修改 design".to_string(),
-        ];
+/// REQ-WG-05/06（REMOVED REQ-WSC-20）：重写要点（给 owner 的摘要段与给
+/// author 的逐条指令各自取用）。witness 完整时携带算出的位次与两个消环
+/// 方向 + 保护项；不完整时退化为无归因的通用消环要点。任何情况下都
+/// **不含**「根因可能在 design / 需要修改 design」条目。
+pub(crate) fn rewrite_guidance(failure: &CandidateCompileFailure) -> Vec<String> {
+    if !is_candidate_invalid_code(&failure.code) {
+        return Vec::new();
     }
-    Vec::new()
+    match cycle_witness_facts(&failure.message) {
+        Some(facts) => vec![
+            format!(
+                "「{consumer}」托管在仓序第 {consumer_order} 个仓，却把仓序第 {provider_order} \
+                 个仓的「{provider}」写成 provider：这条跨仓依赖与仓序自动边互逆，是本次成环的那一跳",
+                consumer = facts.consumer,
+                consumer_order = facts.consumer_order,
+                provider = facts.provider,
+                provider_order = facts.provider_order,
+            ),
+            format!(
+                "消环方向二选一：去掉「{consumer}」对「{provider}」的消费（其验收范围相应收窄）；\
+                 或把「{consumer}」连同写范围与测试整体迁到第 {provider_order} 个仓或更后\
+                 （写范围路径与执行命令同步修改）",
+                consumer = facts.consumer,
+                provider = facts.provider,
+                provider_order = facts.provider_order,
+            ),
+            "保护项：不得为消环删除真实的业务数据流；不得改动仓序本身（仓序由 owner 在 \
+             design 侧决定，plan 内只能调整归属与依赖）"
+                .to_string(),
+        ],
+        None => vec![
+            "依赖图必须无环：环上任一条依赖反向都会让整条链无法执行，需整体检查依赖方向"
+                .to_string(),
+            "同一成员仓内的 Work Item 之间没有仓序自动边，同仓顺序只能由 depends_on 显式声明"
+                .to_string(),
+        ],
+    }
 }
 
 /// REQ-WSC-21：**允许自动重写**的稳定码族——只收 owner 2026-10-31 点名的
@@ -421,10 +571,11 @@ pub(crate) fn is_candidate_invalid_code(stable_code: &str) -> bool {
     )
 }
 
-/// REQ-WSC-20：给 author 的教学块（进入 SC 门内修订提示词）。措辞与真实
-/// 判定同源：稳定码 + 人话原因 + 逐条技术要点，明确「再犯同样的错仍会失败」。
-/// **不要求 author 去改 design**——design 的问题只告知 owner（第 4 条裁定），
-/// 这里只要求 author 在 plan 内把依赖方向改成合法形状。
+/// REQ-WG-06（REMOVED REQ-WSC-20）：给 author 的教学块（进入 SC 门内修订
+/// 提示词）。措辞与真实判定同源：稳定码 + 人话原因 + **算出的位次**与两个
+/// 消环方向 + 保护项；witness 不完整时退化为无归因的通用消环要点。
+/// **不要求 author 去改 design**，也不复述仓序规则教条（REQ-WG-04：任何
+/// 教学面不得要求 author 理解或复述 change_order 规则）。
 pub(crate) fn author_teaching_block(failure: &CandidateCompileFailure) -> String {
     let mut block = format!(
         "[candidate_compile_failure]\n\
@@ -433,13 +584,30 @@ pub(crate) fn author_teaching_block(failure: &CandidateCompileFailure) -> String
         message = failure.message,
     );
     if is_candidate_invalid_code(&failure.code) {
-        block.push_str(
-            "必须按以下要点修正 plan 的依赖声明，否则再次编译仍会失败：\n\
-             - provider 只能指向仓序在前的成员仓 Work Item（依赖按仓序从前往后声明），不得把后仓 Work Item 写成前仓 Work Item 的 provider\n\
-             - 同一成员仓内的 Work Item 之间没有仓序自动边，同仓顺序只能由 depends_on 显式声明\n\
-             - 依赖图必须无环：环上任一条依赖反向都会让整条链无法执行，需整体检查依赖方向并消环\n\
-             - 若按上述规则在 plan 内确实无法消环（根因在 design 的仓序），不要绕过规则硬写：保持依赖合法并说明冲突位置\n",
-        );
+        match cycle_witness_facts(&failure.message) {
+            Some(facts) => {
+                block.push_str(&format!(
+                    "必须按以下算出的事实修正 plan 的依赖声明，否则再次编译仍会失败：\n\
+                     - 「{consumer}」当前托管在第 {consumer_order} 个仓，而它消费的「{provider}」\
+                     在第 {provider_order} 个仓——在这两个位置下这条依赖无法成立\n\
+                     - 消环方向二选一（都是合法修法）：① 去掉「{consumer}」对「{provider}」的消费\
+                     （其验收范围相应收窄）；② 把「{consumer}」连同写范围与测试整体迁到\
+                     第 {provider_order} 个仓或更后（写范围路径与执行命令同步修改）\n\
+                     - 保护项：不得为消环删除真实的业务数据流；不得改动仓序本身\
+                     （仓序由 owner 在 design 侧决定，plan 内只能调整归属与依赖）\n",
+                    consumer = facts.consumer,
+                    consumer_order = facts.consumer_order,
+                    provider = facts.provider,
+                    provider_order = facts.provider_order,
+                ));
+            }
+            None => {
+                block.push_str(
+                    "必须消依赖环后重新输出完整候选：环上任一条依赖反向都会让整条链无法\
+                     执行，需整体检查依赖方向；同仓内顺序只能由 depends_on 显式声明。\n",
+                );
+            }
+        }
     } else {
         block.push_str(
             "请按上面的失败原因修正候选；若原因指向平台外的既有事实，先补齐事实再重新输出完整候选。\n",
@@ -450,17 +618,22 @@ pub(crate) fn author_teaching_block(failure: &CandidateCompileFailure) -> String
 }
 
 impl crate::product::workspace_engine::WorkspaceEngine {
-    /// REQ-WSC-21：候选编译类失败的**自动重写执行**（不是只发布决策）。
+    /// REQ-WSC-21/25：候选编译类失败的**自动重写执行**（不是只发布决策）。
     ///
     /// 判据与动作全部来自 durable 事实与既有通道：
     /// - durable `candidate_compile_status.auto_rewrite.phase == Running` 才执行
     ///   （`Stopped`＝同一环重复或自动池用尽 → 交人工门，见 REQ-WSC-22）；
     /// - 动作是 `route_single_candidate_contract_prerevision`：与 F5-A 机械返修
-    ///   完全同一条 ingestion（Reviserun 节点 + `complete_review` + 策略路由
+    ///   完全同一条 ingestion（Reviewerrun 节点 + `complete_review` + 策略路由
     ///   `TriggerAggregateRepair` → `request_provider_run(SC author)`），不新造
-    ///   通道、不改状态机。
+    ///   通道、不改状态机。平台编译失败 finding 在策略层按
+    ///   [`PLATFORM_COMPILE_FAILURE_FINDING_PREFIX`] 识别（见 review/routing.rs）。
     ///
-    /// 返回 `true` 表示已把失败转成返修轮（调用方不得再开人工确认门）。
+    /// 返回 `true` 表示本次失败已被通道消费——**要么**已委托 author 重写
+    /// （phase=Generate），**要么**策略路由已开好人工门；两种情况调用方都
+    /// 不得再开第二扇门（现场 2adc5e41 曾双门：「需要人工接管」+「人工确认」）。
+    /// 委托未发生但门已开时，durable `auto_rewrite` 立即对账为 `Stopped`
+    /// （REQ-WSC-25：不得对 owner 谎报 running）。
     pub(crate) async fn route_compile_failure_to_rewrite(&mut self) -> bool {
         use crate::product::models::CandidateAutoRewritePhase;
         let Some(status) = self.current_candidate_compile_status() else {
@@ -479,14 +652,63 @@ impl crate::product::workspace_engine::WorkspaceEngine {
             crate::product::workspace_engine::compile_failure_surface::auto_rewrite_verdict(
                 failure,
             );
+        let gate_open_before = self.session.human_gate_snapshot.is_some();
         // E0733（类型级递归）：apply_policy_route 的 ContinueToCompleted 臂会回到
         // enter_policy_valid_work_item_plan_compile，与本方法同处一条 async 递归
         // 路径——Box::pin 打断无限大 future 的类型推导。
         Box::pin(self.route_single_candidate_contract_prerevision(verdict)).await;
-        // 路由是否真的开出评审轮由 stage 判据兜底：`start_review` 成功即
-        // CrossReview（后续 ingestion 会重驱 author）；否则当场回落人工门，
-        // 绝不静默停在一个既无门也无跑的状态。
-        self.session.stage == super::WorkspaceStage::CrossReview
+        let delegated = self.sc_author_rerun_delegated();
+        let gate_opened_by_route = !gate_open_before && self.session.human_gate_snapshot.is_some();
+        if !delegated && !gate_opened_by_route {
+            // 评审轮没开成（如 reviewer 配置缺失/Fake 快速路径直落人工确认但
+            // 不带门快照）：维持既有回落语义，由调用方落门。
+            return false;
+        }
+        if !delegated {
+            self.reconcile_auto_rewrite_not_delegated().await;
+        }
+        true
+    }
+
+    /// REQ-WSC-25（尝试可序列观测）：自动重写承诺与真实委托的对账。
+    ///
+    /// 策略路由把合成 verdict 改道人工门（复评预算已耗尽 / 结构授权窗口等）
+    /// 时，durable `auto_rewrite.phase=running` 会永远谎报「正在自动重写」
+    /// （现场 2adc5e41 即此形态）——此处对账为 `Stopped`（保留剩余/重复计数），
+    /// 并以 Error 事件留下可观测痕迹。
+    async fn reconcile_auto_rewrite_not_delegated(&mut self) {
+        use crate::product::models::CandidateAutoRewritePhase;
+        let Some(lifecycle) = self.lifecycle_store.clone() else {
+            return;
+        };
+        let Ok(Some(mut status)) =
+            lifecycle.load_candidate_compile_status(&self.session.session_id)
+        else {
+            return;
+        };
+        let Some(auto_rewrite) = status.auto_rewrite.as_mut() else {
+            return;
+        };
+        if auto_rewrite.phase != CandidateAutoRewritePhase::Running {
+            return;
+        }
+        auto_rewrite.phase = CandidateAutoRewritePhase::Stopped;
+        if lifecycle
+            .save_candidate_compile_status(&self.session.session_id, &status)
+            .is_err()
+        {
+            return;
+        }
+        let _ = self
+            .event_tx
+            .send(EngineEvent::Error {
+                message: format!(
+                    "candidate compile auto rewrite was routed to the human gate instead of an \
+                     author rerun; durable auto_rewrite reconciled to stopped (session {})",
+                    self.session.session_id
+                ),
+            })
+            .await;
     }
 }
 
@@ -785,11 +1007,10 @@ mod tests {
             auto_rewrite_verdict(&next_attempt).findings[0].message,
             finding.message
         );
-        // 重写要点给 author，但**不得**要求它去改 design（owner 第 4 条）。
+        // witness 不完整（非 offending 模板）：required_action 走通用消环要点，
+        // **不得**要求改 design、不得含任何归因断言。
         assert!(
-            finding
-                .required_action
-                .contains("仓序在前的成员仓 Work Item"),
+            finding.required_action.contains("依赖图必须无环"),
             "{}",
             finding.required_action
         );
@@ -802,6 +1023,74 @@ mod tests {
             !verdict.comments.contains("必须同步修订 Design"),
             "{}",
             verdict.comments
+        );
+        // REQ-WG-05：witness 不完整 → 不虚构 owner 问句与选项。
+        assert!(finding.owner_question.is_none());
+        assert!(finding.owner_options.is_none());
+    }
+
+    #[test]
+    fn cycle_witness_facts_parse_offending_template_or_stay_none() {
+        let offending = "「A」 → 「B」 → 「A」 构成依赖环（箭头为产出流向）。其中「B」把「A」写成 provider，但「A」所在仓是 change_order 第 3 个仓、「B」所在仓是第 2 个仓——跨仓依赖只允许后仓消费前仓。";
+        let facts = cycle_witness_facts(offending).expect("offending template parses");
+        assert_eq!(facts.consumer, "B");
+        assert_eq!(facts.provider, "A");
+        assert_eq!(facts.provider_order, 3);
+        assert_eq!(facts.consumer_order, 2);
+
+        // 无 offending 句（如同仓环 / 兜底文案）→ None，不猜。
+        assert!(cycle_witness_facts("「A」 → 「B」 构成依赖环：谁都无法先执行。").is_none());
+        // 位次不构成逆序（模板错乱）→ None。
+        let not_reversed = "其中「B」把「A」写成 provider，但「A」所在仓是 change_order 第 1 个仓、「B」所在仓是第 2 个仓——";
+        assert!(cycle_witness_facts(not_reversed).is_none());
+        // 标题含锚点子串 → 解析失败安全落 None（fail-closed）。
+        let poisoned = "其中「B」把「A」写成 provider，但「A」所在仓是 change_order 第 3 个仓、「B 所在仓是第 2 个仓——";
+        assert!(cycle_witness_facts(poisoned).is_none());
+    }
+
+    #[test]
+    fn auto_rewrite_verdict_carries_owner_question_and_options_from_witness() {
+        let fingerprint = "9".repeat(64);
+        let failure = CandidateCompileFailure {
+            failure_id: "planning_compile_failure_witness".to_string(),
+            code: "final_compile_prepare_failed".to_string(),
+            message: "「公告列表行删除交互与中文确认」 → 「删除链路端到端验收」 → 「公告列表行删除交互与中文确认」 构成依赖环。其中「删除链路端到端验收」把「公告列表行删除交互与中文确认」写成 provider，但「公告列表行删除交互与中文确认」所在仓是 change_order 第 3 个仓、「删除链路端到端验收」所在仓是第 2 个仓——跨仓依赖只允许后仓消费前仓。"
+                .to_string(),
+            detail: format!("failure_id: x\ncode: y{CYCLE_FINGERPRINT_MARKER}{fingerprint}"),
+            recorded_at: "2026-10-31T00:00:00Z".to_string(),
+        };
+        let verdict = auto_rewrite_verdict(&failure);
+        let finding = verdict.findings.first().expect("finding");
+        // REQ-CG-09：一个 owner 能懂的问题 + 2 个带后果的选项，全部由
+        // typed 事实（位次/端点）生成。
+        let question = finding.owner_question.as_deref().expect("owner question");
+        assert!(question.contains("托管在仓序第 2 个仓"), "{question}");
+        assert!(question.contains("第 3 个仓"), "{question}");
+        assert!(question.contains("两个修法选哪个"), "{question}");
+        let options = finding.owner_options.as_ref().expect("owner options");
+        assert_eq!(options.len(), 2, "两个合法修法（REQ-WG-05）");
+        assert!(options[0].label.contains("跨仓消费"), "{:?}", options[0]);
+        assert!(
+            options[1].label.contains("迁到第 3 个仓或仓序更后"),
+            "{:?}",
+            options[1]
+        );
+        for option in options {
+            assert!(
+                option.consequence.contains("代价") || option.consequence.contains("收窄"),
+                "选项必须说明后果：{option:?}"
+            );
+        }
+        // required_action 携带算出的位次（REQ-WG-06），且不要求改 design。
+        assert!(
+            finding.required_action.contains("托管在仓序第 2 个仓"),
+            "{}",
+            finding.required_action
+        );
+        assert!(
+            !finding.required_action.contains("design 依赖顺序"),
+            "{}",
+            finding.required_action
         );
     }
 

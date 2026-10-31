@@ -909,6 +909,9 @@ pub(crate) fn work_item_record_attribution(
     String,
 > {
     use crate::product::logical_codebase::{EnrollmentTarget, LogicalRepositoryId};
+    use crate::product::workspace_engine::member_attribution::{
+        MemberReverse, reverse_member_logical,
+    };
 
     let Some(targets) = member_targets else {
         // 批 2 R1（REQ-WIGA-01）：无成员表时集合 intent 同样拒绝——集合
@@ -921,19 +924,15 @@ pub(crate) fn work_item_record_attribution(
         }
         return Ok((legacy_repository_id.to_string(), None));
     };
+    // REQ-WG-02：物理仓 → 逻辑成员的唯一反查来源（候选结构门共用同一
+    // 函数）；错误文案与三态判定逐字保持既有语义。
     let reverse_logical = |physical: &str| -> Result<LogicalRepositoryId, String> {
-        let matches = targets
-            .physical_by_logical
-            .iter()
-            .filter(|(_, value)| value.as_str() == physical)
-            .map(|(logical, _)| *logical)
-            .collect::<Vec<_>>();
-        match matches.as_slice() {
-            [logical] => Ok(*logical),
-            [] => Err(format!(
+        match reverse_member_logical(physical, &targets.physical_by_logical) {
+            MemberReverse::Unique(logical) => Ok(logical),
+            MemberReverse::Absent => Err(format!(
                 "work_item_target_missing: physical repository `{physical}` for `{logical_work_item_id}` is not an effective logical member"
             )),
-            _ => Err(format!(
+            MemberReverse::Ambiguous => Err(format!(
                 "work_item_target_missing: physical repository `{physical}` for `{logical_work_item_id}` maps to multiple logical repositories"
             )),
         }

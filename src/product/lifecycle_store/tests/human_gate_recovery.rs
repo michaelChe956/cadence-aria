@@ -1122,3 +1122,6 @@ fn rejection_guidance_is_readable_and_actionable_per_stable_code() {
 
 // REQ-WSC-18：候选编译失败事实的 durable 回归（拆文件满足 1200 行红线，不压缩空行）。
 include!("candidate_compile_status.rs");
+
+// REQ-WSC-25：候选生成/编译尝试的 append-only 流水回归（拆文件满足 1200 行红线）。
+include!("candidate_attempts.rs");

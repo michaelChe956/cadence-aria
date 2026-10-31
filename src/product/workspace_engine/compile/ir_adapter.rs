@@ -8,6 +8,7 @@ use crate::product::models::{
 use crate::product::work_item_plan_compiler::{
     PlanCandidateIr, PlanCandidateMechanicalReport, PlanCandidatePublicationProvenance,
 };
+use crate::product::workspace_engine::member_attribution::{MemberReverse, reverse_member_logical};
 use crate::web::workspace_ws_types::WorkItemPlanOutlineCandidateDto;
 
 use super::{InitialPlanCompileDurableContext, InitialPlanCompileInput};
@@ -227,18 +228,15 @@ fn logical_target_for_ir_item(
     let Some(logical_targets) = &context.logical_targets else {
         return Ok(None);
     };
-    let matches = logical_targets
-        .iter()
-        .filter_map(|(logical_id, physical_id)| {
-            (physical_id == physical_repository_id).then_some(*logical_id)
-        })
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [logical_id] => Ok(Some(*logical_id)),
-        [] => Err(format!(
+    // REQ-WG-02：反查唯一来源——与候选结构门的归属解析、Final Compile 的
+    // `work_item_record_attribution` 共用同一函数。下面两条文案逐字保留
+    // 既有语义（含 Ambiguous 分支不带稳定码前缀的现状），行为零变化。
+    match reverse_member_logical(physical_repository_id, logical_targets) {
+        MemberReverse::Unique(logical_id) => Ok(Some(logical_id)),
+        MemberReverse::Absent => Err(format!(
             "work_item_target_missing: IR target `{physical_repository_id}` is not effective"
         )),
-        _ => Err(format!(
+        MemberReverse::Ambiguous => Err(format!(
             "IR target `{physical_repository_id}` maps to multiple logical repositories"
         )),
     }

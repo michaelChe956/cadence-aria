@@ -1,0 +1,60 @@
+# Tasks: mechanicalize-plan-compile-repair
+
+> 纪律：每个工作包先改/加测试再改实现（TDD）。波次 1 可在 1 天内并行落地；波次 3 需拆文件，单独立项。
+
+## 1. 止血：计划意图分支等价解析（REQ-CRP-03）
+
+- [ ] 1.1 先红：`kind=single_repository` + 值在 `intent_target_logical_repo`（唯一可映射到成员物理仓）→ 编译通过且产 `equivalence_canonicalization` 审计；值不在成员表 → typed 诊断且**不采用**；值同时命中逻辑键与物理值 → **不采用**（双命中 fail-closed）；legacy（`member_targets=None`）→ 取会话 target
+- [ ] 1.2 实现：`lower_plan_intent`（`src/product/work_item_plan_compiler/lower.rs:443-480`）等价解析；复用 `resolve_item_target_repository_id`（`lower.rs:262`）与 member targets
+- [ ] 1.3 回归：`kind=logical_codebase` 缺 codebase id 仍 typed 报错；单仓/多仓既有 lowering 测试全绿
+
+## 2. 止血：lowering typed fault + 教学资格（REQ-CRP-02、MODIFIED REQ-WSC-09）
+
+- [ ] 2.1 先红（三处钉死旧语义的测试，必须先改）：`src/web/workspace_ws_handler/run/single_candidate.rs:1525-1534`、`src/web/workspace_ws_handler/tests/single_candidate_provider_run.rs:1003`（`single_candidate_batched_traceability_lowering_error_fails_terminal_without_reredrive`）、`single_candidate_provider_run/ears_reredrive.rs:8,32-34,293-297`
+- [ ] 2.2 实现：`CompilerDiagnostic` 加 `lowering_fault: Option<LoweringFault>`（`types.rs:61-80`，无 serde，零 wire 污染）；`lower.rs:1121 diagnostic()` 工厂赋 fault，禁止从 code/message 派生
+- [ ] 2.3 实现：教学资格判据由 `TEACHABLE_PARSE_FAILURE_CODES`（`run/single_candidate.rs:84-100`）改为「fault 在场且 field+行+期望形态齐全」；重驱 prompt 直接渲染 typed payload
+- [ ] 2.4 不变量：同一 candidate 总重驱次数恒 ≤1（既有单槽不变），加断言
+- [ ] 2.5 回归：无 fault 的 lowering 仍按既有终态；既有 parse 教学重驱用例全绿
+
+## 3. 止血：可观测性最小版（REQ-WSC-25）
+
+- [x] 3.1 先红：同一 issue 连续 3 次失败后能读出 3 条记录（阶段/稳定码/fault/指纹/已应用修复/处置）——`src/product/lifecycle_store/tests/candidate_attempts.rs`：3 次失败 + 1 次通过共 4 行，逐条断言阶段/稳定码/typed 种类/结构指纹/自动重写阶段；同一 `attempt_key` 重复落盘零膨胀（幂等）
+- [x] 3.2 实现：追加写 `candidate-attempts.jsonl`（与 `candidate-compile-status.json` 同目录）——新 store `src/product/lifecycle_store/candidate_attempts.rs`（追加写 + 读取 + 度量读数：首次通过率 / 同 issue 连续失败次数 P50/P90 / 失败码 Top N / lowering 类终态失败计数）；写入点 `src/product/workspace_engine/compile/single_candidate.rs`（SC Final Compile 边界，失败与成功两侧各追加一行；写失败只降级为静默并记入 policy diagnostics，不影响主流程）
+- [ ] 3.3 实现：`equivalence_canonicalization` 审计事件（kind/原 key/值/映射依据）落同一序列——**流水侧已就位**（`EquivalenceCanonicalization` 类型 + 记录字段 + 单测覆盖），但**生产者未落地**：该审计由 1.2 `lower_plan_intent` 等价解析产出，1.1/1.2 实施前无事件可写，故本项**不勾**（待 1.x 落地后由生产者写入同一序列即可）
+
+## 4. 图奇偶性（REQ-WSC-23）
+
+- [ ] 4.1 先红：把现场 #1 形态固化成脱敏 fixture（多仓、gateway 消费 frontend 产出、`change_order` 为 gateway→frontend）
+- [ ] 4.2 断言：同一 fixture 在 Stage1 typed 图与 Final Compile 图的「有效边集合 / 成环结论 / witness 首跳」三者一致；不一致者登记缺陷单（ignored + 说明），修复后转绿
+- [ ] 4.3 cleanup：清掉 `compile_support.rs:395`、`:425` 失真的「尚未接线」注释与失效的 `#[allow(dead_code)]`
+
+## 5. 环的结构化教学（REQ-WSC-24、REQ-CG-08）
+
+- [ ] 5.1 先红：环失败时 durable detail 携带逐跳 `from/to/sources`；教学指令含「逆了 `change_order` 哪两个位次」+「保留全部 Inputs/AC、不得改仓序」三条保护项
+- [ ] 5.2 先红（负向）：任何自动删边路径都不存在——构造 `canonical_input` 参与的环，断言平台不产出删边修复
+- [ ] 5.3 实现：`compile/single_candidate.rs:770` 透传 `PlanningCompileFailureKind::Structure`；`compile_support.rs:783-826` 判据改 typed witness（需先拆文件）
+- [ ] 5.4 回归：同环重复停判定仍按结构指纹，不按文案
+
+## 6. 一次答完（REQ-CG-09）
+
+- [ ] 6.1 先红：需要 owner 决定的失败 verdict 必须含 `owner_question` + ≥2 `owner_options`，每个选项带后果
+- [ ] 6.2 实现：`compile_failure_surface.rs:143-144` 由 typed 事实生成问句与选项（不交模型自由发挥）
+- [ ] 6.3 先红：已处置事实不再作为 `owner_question` 呈现（复用既有已处置清单）
+- [ ] 6.4 D4 裁决落地：已处置清单 `HumanFindingDispositionKind` 现只有 `Excluded`（`src/product/models/human_gate.rs:143-145`），`deny_unknown_fields`，且 key 必须是 16 位 hex（`human_gate.rs:162`）。因此「不再重复问」可复用清单（key 取 typed 事实的结构指纹，不取措辞），但 owner 的**具体选择**无处存放：新增 `Decided{option_id}` 变体须带 `serde(default)` 兼容并单列测试；若不愿改枚举，则本 change 只承诺「同一未变事实不重复提问」，不承诺「持久化选项内容」
+
+## 7. prompt 分层瘦身（≈15.5K → ≤8K）
+
+- [ ] 7.1 先加计量测试（REQ-CRP-05）：固定教学块字符数 + 硬措辞计数断言（当前基线 15.5K / 63，目标 ≤8K / ≤25），**先锁目标再裁剪**；每删一条机械条款须在变更说明中指向覆盖它的校验或自修测试
+- [ ] 7.2 按清单删/压：重复 trusted command 段、未知 key 白名单、Plan Intent 分支复述与 `lowering_error` 引文、模板枚举展开、few-shot 11 条 → 3 条、成环预防段各留 1 处
+- [ ] 7.3 回归：既有 prompt 契约测试按新契约更新（不许删测试）；本包**单独提交**
+
+## 8. 收口
+
+- [ ] 8.1 `openspec validate mechanicalize-plan-compile-repair --strict` exit 0
+- [ ] 8.2 全量门禁（fmt / clippy -D / check / test）绿；预存基线按名对照
+- [ ] 8.3 把 `REQ-SG-02A`×`contract_autorepair` 撞线的 A/B 裁决提交 owner
+
+## 9. 待验证假设（不改契约，取证后再决定是否追加 requirement）
+
+- [ ] 9.1 现场 #3「reviewer 连报三轮」归因：①`single_candidate_consecutive_repeated_finding_count`（`src/product/workspace_engine/review/routing_scope.rs:815-849`）要求相邻两轮非 advisory 指纹集合**完全相等**，任一增减 finding 即不触发，且仅比较相邻两轮；②指纹由 category/class/message/contract_field 组成（定义 `work_item_plan_policy/fingerprint.rs:73 identity_for_finding`，调用点 `classify.rs:141-146`），无 category 时措辞敏感；③owner 排除 key=`sha256(severity+message)`（REQ-WSC-13，`web/workspace_ws_types/review.rs:157-159`），换措辞即新 key。用现场三轮 verdict 回放核对哪个生效，结论写入 designs 文档后再决定是否新增「finding 身份稳定性」requirement
+- [ ] 9.2 `outbound_queue_full`：另开工单（不在本 change），工单引用 `src/web/workspace_session/manager/degraded_diagnostics.rs:101`

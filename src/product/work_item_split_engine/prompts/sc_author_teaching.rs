@@ -2,6 +2,25 @@
 //! 教学、最小合法源、options 镜像/AC 基线纪律与已确认成员/仓序教学
 //! （SG5.1）。自 prompts.rs 拆出以守 1200 行文件守护（先例：
 //! prompts/sc_revision.rs、conversational_gate 拆 story_terminate.rs）。
+//!
+//! A+（2026-10-31，openspec change `unify-work-item-group-structure`
+//! tasks.md 5.0/5.4，REQ-WG-07）：`Plan Intent` 的 `intent_target_repo`
+//! 取值来源改为**按会话类型唯一**——旧形态 grammar 段无条件要求「逐字取
+//! [issue] 头 repo=」，本文件 LC 成员段又改口「不取 [issue] 头 repo=、改为
+//! 取成员表物理成员仓 ID》，同一字段两个来源并存（形态一在 prompt 侧的
+//! 唯一成因）。
+//!
+//! 现形态：grammar 段一条权威句按会话类型分支（单仓会话取
+//! `[issue]` 头 `repo=`；LC 多仓会话取成员仓清单里的物理成员仓 ID，会话
+//! 类型以「本 prompt 有/无成员仓清单」判定——不点段名，避免 legacy 单仓
+//! prompt 出现成员段标记），LC 成员段只复述「取上列物理成员仓 ID」并保留
+//! 否定式提醒，不再改口、也不再引用 grammar 段的旧措辞。
+//!
+//! A+ 同时删除 grammar 段逐字印着 lowering_error 原文
+//! 「Plan Intent 声明在场时该字段必填。」的那句噪声（让模型以为要背错误
+//! 原文）；**保留**「模型自己填归属」的分支必填规则——A1（平台接管归属
+//! 填写）未落地前不得删，删了规则而平台也不接管比矛盾更糟。契约见
+//! `tests/prompt_contract_plan_intent_target.rs`。
 
 use super::IssueWorkItemPlanOptions;
 use crate::product::logical_codebase::LogicalRepositoryId;
@@ -38,7 +57,7 @@ pub(crate) fn work_item_plan_markdown_grammar() -> String {
          正例：合并为一条 `- command: npm test` 的 check；或第二条写 `- command: null` 并配 `- manual_instruction: <人工步骤>`。\n\
          key 白名单：{structured_keys}。\n\
          值域：kind={item_kinds}；compatibility_policy={compatibility_policies}；required_evidence={evidence_kinds}；route={blocker_routes}；intent={intents}（本计划新建的 Work Item 一律填 create；existing 仅用于引用已登记的既有 work item；禁止 modify/update 等自造值——lowering_error「intent 必须是 create 或 existing。」拒绝）。\n\
-         Plan Intent 分支必填：intent_target_kind=single_repository 时必写 intent_target_repo（逐字取 [issue] 头 repo= 的 repository id，不得填成员仓 UUID）；=logical_codebase 时必写 intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）。另一分支的 key 不顶替——kind=single_repository 却只写 intent_target_logical_repo → lowering_error「Plan Intent 声明在场时该字段必填。」拒绝。\n\
+         Plan Intent 分支必填：intent_target_kind=single_repository 时必写 intent_target_repo；intent_target_kind=logical_codebase 时必写 intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）。两分支 key 不顶替。intent_target_repo 取值来源按会话类型唯一、不得混填：单仓会话（本 prompt 无成员仓清单）逐字取 [issue] 头 repo= 的 repository id；LC 多仓会话（有成员仓清单）逐字取该清单的物理成员仓 ID。\n\
          未知结构化 key 必须拒绝（{unknown_key_policy}）；未知 section、非法 ID、除空 Blockers 外的缺 section/field、EARS 非法均失败关闭；诊断：{diagnostic_codes}。\n\n",
         document_heading = grammar::DOCUMENT_HEADING,
         structured_sections = grammar::STRUCTURED_SECTIONS.join("、"),
@@ -210,6 +229,12 @@ pub(crate) fn work_item_plan_option_mirror_teaching(options: &IssueWorkItemPlanO
 /// 规则源。`member_targets=None`（legacy 单仓）返回空串：首轮 prompt
 /// 逐字节不变，`WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES`
 /// 预算不扩大。Plan Intent 保持可选 section，本段不新增任何创建/入站授权。
+///
+/// A+（2026-10-31，REQ-WG-07）：本段的成员归属纪律**不再**改口「改为取
+/// 本段物理成员仓 ID、不取 [issue] 头 repo=」并回指 grammar 段旧措辞——
+/// 那正是同一字段两个互斥来源并存的形态。本段只复述「取上列物理成员仓
+/// ID」并保留否定式提醒「不取 [issue] 头 repo=」；取值来源的唯一权威句在
+/// grammar 段（按会话类型分支），本段在场即 LC 多仓会话。
 pub(crate) fn work_item_plan_confirmed_member_order_teaching(
     member_targets: Option<&PlanMemberTargets>,
     change_order: &[LogicalRepositoryId],
@@ -250,7 +275,7 @@ pub(crate) fn work_item_plan_confirmed_member_order_teaching(
         "仓序自动边规则（与编译器仓序规则同源）：仓序在前的成员仓 Work Item 是仓序在后成员仓 Work Item 的依赖前置——后仓 WI 消费前仓产出时，Inputs 的 provider_logical_work_item_id 逐字填前仓 WI 在本计划 `## Work Item` 标题中的 `WI-<数字>`；同一成员仓内的 WI 之间无仓序自动边，同仓顺序仅由 depends_on 显式声明；跨仓依赖逆写仓序（后仓 WI 作为前仓 WI 的 provider）会构成 dependency_cycle，整份计划拒绝。\n",
     );
     lines.push_str(
-        "成员归属纪律：intent_target_kind=logical_codebase 时 intent_target_logical_repo 只能逐字取上列成员 logical UUID；intent_target_kind=single_repository 时 intent_target_repo 只能逐字取上列物理成员仓 ID；会话根仓/聚合根视图 ID 不得替代业务成员 target（→ work_item_target_missing 拒绝）。LC 多仓限定（本段在场即生效）：intent_target_repo 改为逐字取本段上列物理成员仓 ID，不取 [issue] 头 repo=——grammar 段「逐字取 [issue] 头 repo= 的 repository id」仅是单仓默认取值。Plan Intent 仍为可选 section——本段不改变其可选性，也不新增任何创建/入站授权。\n\n",
+        "成员归属纪律（LC 多仓会话，本段在场即生效）：intent_target_kind=logical_codebase 时 intent_target_logical_repo 只能逐字取上列成员 logical UUID；intent_target_kind=single_repository 时 intent_target_repo 只能逐字取上列物理成员仓 ID（不取 [issue] 头 repo=）；会话根仓/聚合根视图 ID 不得替代业务成员 target（→ work_item_target_missing 拒绝）。Plan Intent 仍为可选 section——本段不改变其可选性，也不新增任何创建/入站授权。\n\n",
     );
     lines.push_str(
         "写范围路径基准（LC 多仓限定，本段在场即生效）：Write Policy 的 exclusive_scopes/forbidden_scopes 必须写成「<成员目录>/<仓内路径>」的聚合根相对形式（成员目录=该成员仓 checkout 在聚合根下的目录，如 busi/src/**）；裸仓内相对写法（如 src/**）仅被执行期兼容，plan 期归属校验会按越界拒收（write_scope_outside_bound_repository）；聚合根本地文件区（不属于任何成员仓的路径，如 scripts/dev.sh）任何 Work Item 都不可写，不得写入写范围。\n\n",

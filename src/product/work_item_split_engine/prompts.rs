@@ -146,6 +146,18 @@ pub(crate) const WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES: usize = 23
 // 1.2-2KB 远超红线,且 grammar 面其余条件字段(Verification command/
 // manual_instruction、Inputs 条件、Blockers 空段)均已有教学,Plan Intent
 // 是唯一缺席的条件面——段级补齐即条件面教学的全集。
+// A+ 第 1 次(非静默,批注,2026-10-31;REQ-WG-07/tasks.md 5.0/5.4):Plan Intent
+// 归属取值来源改为**按会话类型唯一**——旧形态 grammar 段无条件要求「逐字取
+// [issue] 头 repo=」,同文件 LC 成员段又改口「不取 [issue] 头 repo=、改为取
+// 成员表物理成员仓 ID」,同一字段两个来源并存(形态一在 prompt 侧的唯一成因)。
+// 现形态:grammar 段一条权威句按会话类型分支(单仓=本 prompt 无成员仓清单→
+// [issue] 头 repo=;LC 多仓=有成员仓清单→该清单的物理成员仓 ID),LC 成员段
+// 只复述「取上列物理成员仓 ID」+否定式提醒,不再改口;同批删除 grammar 段
+// 逐字印着 lowering_error 原文的噪声句。「模型自己填归属」的分支必填规则
+// 保留(A1 平台接管未落地前不得删)。体量:grammar 段 472→512B(+40),
+// LC 成员段 679→523B(-156,仅 LC 会话在场);红线维持 23,500(不提额),
+// 最大 fixture 实测 23,456B/余 44B;计量锁见
+// tests/prompt_contract_plan_intent_target.rs(规则句字节+硬性措辞数上限)。
 
 /// SC markdown author prompt 的尾部输出指令。首轮与修订轮共享同一段字节；
 /// 修订轮（F5-A findings 回灌）仅在其之前插入 [review_revision] 返修段，

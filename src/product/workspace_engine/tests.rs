@@ -53,6 +53,7 @@ mod author_revision_loop;
 mod author_revision_review_routing;
 mod b2_p3_trust_compile_facts;
 mod candidate_compile_failure_surface;
+mod compile_failure_auto_rewrite;
 mod conversational_gate;
 mod conversational_gate_amendment_real_chain;
 mod conversational_gate_close;

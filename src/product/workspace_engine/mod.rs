@@ -99,6 +99,8 @@ mod lifecycle_recovery;
 mod linked_workspace_amendment;
 mod mappings;
 pub(crate) use mappings::permission_mode_for_provider_type;
+/// 成员归属唯一来源（REQ-WG-02）：候选结构门与 Final Compile 共用反查。
+pub(crate) mod member_attribution;
 mod parsers;
 mod plan_outline;
 pub(crate) mod plan_preflight;
@@ -216,9 +218,10 @@ pub(crate) use types::WorkItemDraftAuthorOutcome;
 pub(crate) use types::{
     ArtifactRetryContext, AuthorPromptMode, HttpConfirmDisposition, OutlineRevisionCrashPoint,
     OutlineRevisionPersistencePolicy, PendingAuthorChoice, PlanAuthorOutputContract,
-    PlanRepairCrashPoint, ProviderRunKind, ProviderSessionDriveInput, ReviewProviderRunResult,
-    RevisionResumeFallbackContext, StructuredOutputDisplayFilter, TimelineNodeDraft,
-    WorkItemPlanCompileProjectionContext, WorkItemPlanOutlineRevisionSource,
+    PlanRepairCrashPoint, PlanningCompileFailure, PlanningCompileFailureKind, ProviderRunKind,
+    ProviderSessionDriveInput, ReviewProviderRunResult, RevisionResumeFallbackContext,
+    StructuredOutputDisplayFilter, TimelineNodeDraft, WorkItemPlanCompileProjectionContext,
+    WorkItemPlanOutlineRevisionSource,
 };
 
 const SUMMARY_PREVIEW_CHARS: usize = 2048;

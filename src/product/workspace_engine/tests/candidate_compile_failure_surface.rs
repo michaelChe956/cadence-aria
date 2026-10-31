@@ -22,12 +22,26 @@ const SOURCE_REF: &str = "source-current-candidate";
 const IR_REF: &str = "ir-current-candidate";
 
 fn failure_record(detail: &str) -> CandidateCompileFailure {
+    // witness 不完整形态：不是 producer 的 offending 模板（无位次句）。
     CandidateCompileFailure {
         failure_id: "planning_compile_failure_gate".to_string(),
         code: "final_compile_prepare_failed".to_string(),
         message:
             "「gateway 删除转发」把「frontend 行删除入口」写成 provider：依赖逆了仓序，构成依赖环"
                 .to_string(),
+        detail: detail.to_string(),
+        recorded_at: "2026-10-31T00:00:00Z".to_string(),
+    }
+}
+
+/// 现场 2adc5e41 形态：producer `cycle_diagnostic::cycle_reason` offending
+/// 分支的完整模板（含位次句），witness 可解析。
+fn witness_failure_record(detail: &str) -> CandidateCompileFailure {
+    CandidateCompileFailure {
+        failure_id: "planning_compile_failure_gate".to_string(),
+        code: "final_compile_prepare_failed".to_string(),
+        message: "「公告列表行删除交互与中文确认」 → 「删除链路端到端验收」 → 「公告列表行删除交互与中文确认」 构成依赖环（箭头为产出流向：左边 Work Item 的产出被右边消费，即右边依赖左边）。其中「删除链路端到端验收」把「公告列表行删除交互与中文确认」写成 provider，但「公告列表行删除交互与中文确认」所在仓是 change_order 第 3 个仓、「删除链路端到端验收」所在仓是第 2 个仓——跨仓依赖只允许后仓 Work Item 消费前仓 Work Item 的产出，这条依赖逆了仓序，因此与仓序自动边合成环。请让「删除链路端到端验收」改由仓序在前的 Work Item 提供产出，或删掉这条 depends_on。"
+            .to_string(),
         detail: detail.to_string(),
         recorded_at: "2026-10-31T00:00:00Z".to_string(),
     }
@@ -136,7 +150,7 @@ async fn session_state_projects_current_candidate_compile_failure_with_full_deta
     let detail = long_detail();
     let (_root, _lifecycle, engine) = gate_fixture(status_for(
         (Some(SOURCE_REF), Some(IR_REF)),
-        Some(failure_record(&detail)),
+        Some(witness_failure_record(&detail)),
     ));
 
     match engine.build_session_state() {
@@ -157,20 +171,37 @@ async fn session_state_projects_current_candidate_compile_failure_with_full_deta
             );
             let hint = failure.owner_hint.expect("owner hint present");
             assert!(hint.contains("这个候选无效"), "{hint}");
-            // owner 2026-10-31 第 4 条裁定：讲清 design 根因 + 明确需要 owner 改
-            // design；不得写成「系统会自动去改 design」。
-            assert!(hint.contains("根因指向 design"), "{hint}");
-            assert!(hint.contains("需要你决定是否修改 design"), "{hint}");
+            // REQ-WG-05（REMOVED REQ-WSC-20）：witness 完整 → 只讲算出的
+            // 事实（两个位次 + 逆序那一跳）+ 两个修法各带后果；
+            // **不得**再出现任何 design 归因断言。
+            assert!(hint.contains("托管在仓序第 2 个仓"), "{hint}");
+            assert!(hint.contains("第 3 个仓"), "{hint}");
+            assert!(hint.contains("两个合法修法"), "{hint}");
             assert!(
-                !hint.contains("系统会自动去改"),
-                "不得声称平台自动改 design：{hint}"
+                hint.contains(
+                    "去掉「删除链路端到端验收」对「公告列表行删除交互与中文确认」的跨仓消费"
+                ),
+                "{hint}"
             );
-            // 首次失败即告知平台已/将继续自动重写，避免 owner 以为要自己推。
+            assert!(hint.contains("后果："), "{hint}");
+            assert!(
+                !hint.contains("design"),
+                "REQ-WG-05：owner 面不得断言根因在 design：{hint}"
+            );
+            // 首次失败即告知平台会自动重写，避免 owner 以为要自己推。
             assert!(hint.contains("自动让 author 重写"), "{hint}");
             assert_eq!(
                 failure.rewrite_guidance.len(),
-                4,
-                "依赖环类必须给出四条重写要点：{:?}",
+                3,
+                "witness 完整时给出位次事实 + 消环方向 + 保护项：{:?}",
+                failure.rewrite_guidance
+            );
+            assert!(
+                failure
+                    .rewrite_guidance
+                    .iter()
+                    .all(|point| !point.contains("修改 design")),
+                "重写要点不得包含 design 归因条目：{:?}",
                 failure.rewrite_guidance
             );
             let auto_rewrite = failure.auto_rewrite.expect("auto_rewrite projected");
@@ -180,6 +211,29 @@ async fn session_state_projects_current_candidate_compile_failure_with_full_deta
             );
             assert_eq!(auto_rewrite.remaining, Some(2));
             assert_eq!(auto_rewrite.repeated, Some(1));
+        }
+        other => panic!("expected candidate_compile_failure in session_state, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn session_state_incomplete_witness_keeps_facts_only_without_attribution() {
+    // REQ-WG-05：witness 不完整 → 只有稳定码与已知事实，无位次、无选项、
+    // 无任何归因断言。
+    let (_root, _lifecycle, engine) = gate_fixture(status_for(
+        (Some(SOURCE_REF), Some(IR_REF)),
+        Some(failure_record("witness-incomplete")),
+    ));
+    match engine.build_session_state() {
+        crate::web::workspace_ws_types::WsOutMessage::SessionState {
+            candidate_compile_failure: Some(failure),
+            ..
+        } => {
+            let hint = failure.owner_hint.expect("owner hint present");
+            assert!(hint.contains("环 witness 不完整"), "{hint}");
+            assert!(!hint.contains("第 2 个仓"), "不得给位次：{hint}");
+            assert!(!hint.contains("两个合法修法"), "不得给选项：{hint}");
+            assert!(!hint.contains("design"), "不得归因：{hint}");
         }
         other => panic!("expected candidate_compile_failure in session_state, got {other:?}"),
     }
@@ -236,25 +290,57 @@ async fn approve_is_fail_closed_when_current_candidate_compile_failed() {
 async fn revision_prompt_carries_rewrite_guidance_for_failed_candidate() {
     let (_root, _lifecycle, engine) = gate_fixture(status_for(
         (Some(SOURCE_REF), Some(IR_REF)),
+        Some(witness_failure_record("detail")),
+    ));
+    let prompt = engine
+        .build_sc_manual_revision_prompt_for_turn("请修正依赖方向")
+        .expect("revision prompt");
+    assert!(prompt.contains("[candidate_compile_failure]"), "{prompt}");
+    // REQ-WG-06：教学块携带**算出的位次**与两个消环方向 + 保护项，不再是
+    // 四条通用规则教条（REQ-WG-04：也不得要求 author 理解仓序规则本身）。
+    assert!(
+        prompt.contains("「删除链路端到端验收」当前托管在第 2 个仓"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("在第 3 个仓"), "{prompt}");
+    assert!(prompt.contains("消环方向二选一"), "{prompt}");
+    assert!(
+        prompt.contains("保护项：不得为消环删除真实的业务数据流"),
+        "{prompt}"
+    );
+    // design 只由 owner 决定，author 提示里**不得**要求它去改 design。
+    assert!(
+        !prompt.contains("必须同步修订 Design"),
+        "author 提示不得要求改 design：{prompt}"
+    );
+    assert!(
+        !prompt.contains("根因在 design"),
+        "author 提示不得包含 design 归因：{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn revision_prompt_incomplete_witness_stays_generic_without_attribution() {
+    let (_root, _lifecycle, engine) = gate_fixture(status_for(
+        (Some(SOURCE_REF), Some(IR_REF)),
         Some(failure_record("detail")),
     ));
     let prompt = engine
         .build_sc_manual_revision_prompt_for_turn("请修正依赖方向")
         .expect("revision prompt");
     assert!(prompt.contains("[candidate_compile_failure]"), "{prompt}");
-    assert!(prompt.contains("仓序在前的成员仓 Work Item"), "{prompt}");
     assert!(
-        prompt.contains("同仓顺序只能由 depends_on 显式声明"),
+        prompt.contains("必须消依赖环后重新输出完整候选"),
         "{prompt}"
     );
-    assert!(prompt.contains("依赖图必须无环"), "{prompt}");
-    // owner 2026-10-31 第 4 条裁定：design 只由 owner 决定，author 提示里**不得**
-    // 要求它去改 design（只允许「保持依赖合法 + 说明冲突位置」）。
     assert!(
-        !prompt.contains("必须同步修订 Design"),
-        "author 提示不得要求改 design：{prompt}"
+        !prompt.contains("当前托管在第"),
+        "witness 不完整时不得给位次：{prompt}"
     );
-    assert!(prompt.contains("不要绕过规则硬写"), "{prompt}");
+    assert!(
+        !prompt.contains("根因在 design"),
+        "不得包含 design 归因：{prompt}"
+    );
 }
 
 #[tokio::test]

@@ -872,7 +872,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "未知结构化 key 必须拒绝（fail_closed）",
         "值域：kind=backend、frontend、integration、e2e、docs、infra、other",
         "；intent=create、existing（本计划新建的 Work Item 一律填 create；existing 仅用于引用已登记的既有 work item；禁止 modify/update 等自造值——lowering_error「intent 必须是 create 或 existing。」拒绝）",
-        "Plan Intent 分支必填：intent_target_kind=single_repository 时必写 intent_target_repo（逐字取 [issue] 头 repo= 的 repository id，不得填成员仓 UUID）；=logical_codebase 时必写 intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）。另一分支的 key 不顶替——kind=single_repository 却只写 intent_target_logical_repo → lowering_error「Plan Intent 声明在场时该字段必填。」拒绝。",
+        "Plan Intent 分支必填：intent_target_kind=single_repository 时必写 intent_target_repo；intent_target_kind=logical_codebase 时必写 intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）。两分支 key 不顶替。intent_target_repo 取值来源按会话类型唯一、不得混填：单仓会话（本 prompt 无成员仓清单）逐字取 [issue] 头 repo= 的 repository id；LC 多仓会话（有成员仓清单）逐字取该清单的物理成员仓 ID。",
         "intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）",
         "[design_requirements] REQ-002、NFR-001",
         "[cross_reference_discipline]",

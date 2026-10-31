@@ -26,6 +26,10 @@ use crate::product::work_item_revision_store::{
 
 use super::WorkspaceEngine;
 
+// SG1 纯图输入的 IR 投影与其归属解析同址（`member_attribution`，REQ-WG-02
+// 唯一反查来源）；本模块保留同名 re-export，调用点路径不变。
+pub(crate) use crate::product::workspace_engine::member_attribution::planning_structure_items_from_ir;
+
 mod recovery;
 
 const PROJECTION_SCHEMA_VERSION: u32 = 1;
@@ -864,8 +868,7 @@ use crate::product::planning_failure::{
     PersistedPlanningStructureSpan, PlanningFailureKind,
 };
 use crate::product::workspace_engine::draft_batch::compile_support::{
-    PlanningStructureCanonicalInput, PlanningStructureContext, PlanningStructureItem,
-    PlanningStructureReport, PlanningStructureSpan, project_effective_planning_graph,
+    PlanningStructureContext, PlanningStructureReport, project_effective_planning_graph,
 };
 use crate::product::workspace_engine::types::{PreparedStructuralCandidate, StructuralAssessment};
 use sha2::{Digest, Sha256};
@@ -975,65 +978,6 @@ impl WorkspaceEngine {
     }
 }
 
-/// 将候选 IR 投影为 SG1 纯图输入。lowering 后的 IR 不保留 source 行号——
-/// canonical input 的 span 只携带逻辑字段路径（line=0=无行事实，缺事实不
-/// 伪行，与 F1.2 validator 投影同口径）；item 级 source_spans 为空。
-pub(crate) fn planning_structure_items_from_ir(
-    ir: &crate::product::work_item_plan_compiler::PlanCandidateIr,
-) -> Vec<PlanningStructureItem> {
-    ir.items
-        .iter()
-        .map(|item| {
-            let (declared_member, logical_target) = match item
-                .contract
-                .intent_contract
-                .as_ref()
-                .map(|intent| &intent.target)
-            {
-                Some(crate::product::logical_codebase::EnrollmentTarget::LogicalCodebase {
-                    logical_repository_id,
-                    ..
-                }) => (
-                    Some(logical_repository_id.0.to_string()),
-                    Some(*logical_repository_id),
-                ),
-                // 批 2 R1（REQ-WIGA-01）：集合 intent 显式分支不造归属
-                //（门前 lower/validator 已拒集合 WI；此处签名不变、不取首
-                // 成员、不展开）。
-                Some(
-                    crate::product::logical_codebase::EnrollmentTarget::LogicalCodebaseMembers {
-                        ..
-                    },
-                ) => (None, None),
-                _ => (None, None),
-            };
-            PlanningStructureItem {
-                logical_work_item_id: item.contract.identity.logical_work_item_id.clone(),
-                short_id: item.contract.identity.logical_work_item_id.clone(),
-                title: item.contract.identity.title.clone(),
-                declared_member,
-                logical_target,
-                physical_target: Some(item.target_repository_id.clone()),
-                canonical_inputs: item
-                    .contract
-                    .input_contracts
-                    .iter()
-                    .enumerate()
-                    .map(|(index, contract)| PlanningStructureCanonicalInput {
-                        contract: contract.clone(),
-                        span: PlanningStructureSpan {
-                            field: format!("input_contracts[{index}]"),
-                            line: 0,
-                        },
-                    })
-                    .collect(),
-                declared_depends_on: item.contract.depends_on.clone(),
-                source_spans: Vec::new(),
-            }
-        })
-        .collect()
-}
-
 /// SG3a.1 系统门的纯评估：SG1 有效图投影 + typed 失败分流。零 store/网络
 /// I/O——live 事实由外层 `build_single_candidate_structure_context` 一次装载。
 pub(crate) fn assess_single_candidate_structure(
@@ -1042,6 +986,11 @@ pub(crate) fn assess_single_candidate_structure(
     context: &PlanningStructureContext,
 ) -> StructuralAssessment {
     let mut items = planning_structure_items_from_ir(ir);
+    // REQ-WG-01/REQ-WG-02：归属解析走唯一反查（与 Final Compile 同一函数）。
+    // 成员表在场时 single_repository 与「未声明 intent」的 WI 不再落
+    // (None, None)——否则仓序自动边在本门不生效，同一份 source 会在此判
+    // 无环、在终编译判成环。
+    super::member_attribution::resolve_member_targets(&mut items, ir, &context.physical_by_logical);
     // legacy 单仓（无授权成员表）与 Final Compile lowering 同口径：
     // member_targets=None 时 Plan Intent 归属不参与物理 target 解析，
     // 结构门不重裁其授权——归属核验只在 LC 多仓（成员表非空）生效。
