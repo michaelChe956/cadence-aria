@@ -19,6 +19,7 @@ use crate::cross_cutting::provider_availability_gate::{
 };
 use crate::cross_cutting::provider_health::{ProviderHealthEntry, ProviderHealthSnapshot};
 use crate::cross_cutting::provider_registry::ProviderRegistry;
+use crate::cross_cutting::real_provider_e2e::skip_when_ci_lacks_provider as skip_ci;
 use crate::cross_cutting::streaming_provider::{
     ProviderCompletion, ProviderEvent, ProviderSession, StreamingProviderAdapter,
     StreamingProviderInput,
@@ -682,6 +683,9 @@ async fn run_stage_end_to_end(
 /// anchored` 事件、无 `plan_review_window_*` 错误码。
 #[tokio::test]
 async fn logical_codebase_review_runs_story_design_workitem_end_to_end() {
+    if skip_ci("logical_codebase_review_runs_story_design_workitem_end_to_end") {
+        return;
+    }
     let fixture = two_repo_lc_fixture();
 
     let story = run_stage_end_to_end(&fixture, WorkspaceType::Story).await;

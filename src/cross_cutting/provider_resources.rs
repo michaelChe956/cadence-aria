@@ -2715,6 +2715,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn leader_exited_with_group_residual_is_not_quiescent() {
+        if crate::cross_cutting::real_provider_e2e::skip_when_ci_lacks_provider(
+            "leader_exited_with_group_residual_is_not_quiescent",
+        ) {
+            return;
+        }
         let env = scope_env();
         let execution = frozen_contract(
             TrustedProviderRole::Coder,

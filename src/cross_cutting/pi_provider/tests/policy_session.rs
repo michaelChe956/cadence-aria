@@ -1,6 +1,7 @@
 // Task 3.2（REQ-ENV-09/D7）：pi 策略会话的有界握手（id 预生成/传入）、
 // provider_start durable 写入、append 失败 kill 链与缺 sink fail-closed 测试。
 
+use crate::cross_cutting::real_provider_e2e::skip_when_ci_lacks_provider as skip_ci;
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
@@ -805,6 +806,9 @@ fn t09a_expected_lc_projection(
 #[cfg(unix)]
 #[tokio::test]
 async fn lcg_t09a_pi_lc_resume_audit_gate_zero_child_on_legacy_or_drift() {
+    if skip_ci("lcg_t09a_pi_lc_resume_audit_gate_zero_child_on_legacy_or_drift") {
+        return;
+    }
     let fixture = LcLaunchFixture::new();
     let expected = t09a_expected_lc_projection(&fixture);
     let matching_lc_projection = LcProjectionAudit {
@@ -1058,6 +1062,9 @@ async fn t09c_recv_pi_completed_text(
 #[cfg(unix)]
 #[tokio::test]
 async fn lcg_t09_pi_missing_or_wrong_native_id_never_fresh() {
+    if skip_ci("lcg_t09_pi_missing_or_wrong_native_id_never_fresh") {
+        return;
+    }
     let fixture = LcLaunchFixture::new();
     let requested_native_id = "pi-session-resume-t09c".to_string();
 
@@ -1453,6 +1460,9 @@ impl StreamingProviderAdapter for T35CountingAdapter {
 #[cfg(unix)]
 #[tokio::test]
 async fn anchor_t35_provider_prepare_and_audit_share_full_fingerprint() {
+    if skip_ci("anchor_t35_provider_prepare_and_audit_share_full_fingerprint") {
+        return;
+    }
     let fixture = LcLaunchFixture::new();
     let cli_dir = tempfile::tempdir().expect("t35 cli dir");
     let counter = cli_dir.path().join("version-probe.count");
@@ -1604,6 +1614,9 @@ async fn anchor_t35_provider_prepare_and_audit_share_full_fingerprint() {
 #[cfg(unix)]
 #[tokio::test]
 async fn anchor_t35_real_drift_zero_session_child() {
+    if skip_ci("anchor_t35_real_drift_zero_session_child") {
+        return;
+    }
     // ---- leg A:漂移 mismatch 判定(三口径分列) ----
     let fixture = LcLaunchFixture::new();
     let cli_dir = tempfile::tempdir().expect("t35 drift cli dir");

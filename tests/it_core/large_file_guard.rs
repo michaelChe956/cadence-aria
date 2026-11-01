@@ -53,11 +53,15 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         1264,
     ),
     ("src/cross_cutting/pi_provider/mod.rs", 1617),
+    // 2026-11-01：+13 / +4 行 —— 真机 provider e2e 与 unix 进程组用例加
+    // 「CI 环境门」（`cross_cutting::real_provider_e2e`）：CI runner 无交互式
+    // provider CLI（实测 60s 硬超时）与本地 shell exec 语义，用例在 CI 显式
+    // 跳过并打印（不是静默通过），本地照常真跑。仅环境门占用行数，无新逻辑。
     (
         "src/cross_cutting/pi_provider/tests/policy_session.rs",
-        1773,
+        1786,
     ),
-    ("src/cross_cutting/provider_resources.rs", 3341),
+    ("src/cross_cutting/provider_resources.rs", 3346),
     ("src/cross_cutting/streaming_provider/mod.rs", 2062),
     ("src/cross_cutting/streaming_provider/tests.rs", 2388),
     ("src/product/advance_store.rs", 1369),

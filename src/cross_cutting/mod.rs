@@ -43,6 +43,8 @@ pub mod provider_registry;
 pub mod provider_resources;
 pub mod provider_router;
 pub mod provider_run;
+#[cfg(test)]
+pub(crate) mod real_provider_e2e;
 pub mod runtime_event_log;
 pub mod session_launch;
 pub mod streaming_provider;
